@@ -1,0 +1,503 @@
+# §5 Template system
+
+## 5.1 Why templates
+
+The §7 policy surface is rich. A complete policy for a kennel can reach several hundred lines across all the resource classes. Asking users to author such policies from scratch produces, predictably, subtly broken policies — the AppArmor experience writ small.
+
+Templates are Project Kennel's answer to this. They are first-class artefacts: signed, versioned, threat-tagged, tested, documented. Users compose their policy as a *delta* from a chosen template. The delta is short (typically 5–15 lines for a leaf user policy), explicit, and reviewable.
+
+A template carries:
+
+- A complete policy for a recognisable workflow.
+- Documentation describing the threats it defends against and its known limitations.
+- A test suite verifying it enforces what it claims (`tests/allow.sh`, `tests/deny.sh`).
+- Threat tags linking each rule to entries in `THREATS.md`.
+- A version, advanced on every change, signed by the template maintainer.
+
+The user's policy file is mostly metadata plus deltas. Adding a capability requires a `reason` field. Project Kennel's diff tool surfaces what each addition costs in terms of threat exposure.
+
+This shifts Project Kennel's centre of gravity. The policy primitives in §7 are how templates are *expressed*. Templates are how users *consume* Project Kennel. The tool is the smaller part. The template set and the social contract around it are the larger part.
+
+A complete, annotated example of a real template (`ai-coding-strict`) is provided in the companion document `TEMPLATE-ai-coding-strict.md`. This chapter introduces the concepts; that document shows them in concrete TOML. Readers who prefer concrete first should read the worked template before continuing here.
+
+## 5.2 Template structure on disk
+
+A template lives under `templates/<name>/` in Project Kennel repository:
+
+```
+templates/ai-coding-strict/
+├── policy.toml          ← the template's policy
+├── README.md            ← human-facing documentation
+├── THREATS.md           ← threat tags and impact analysis
+├── CHANGELOG.md         ← version history
+├── tests/
+│   ├── allow.sh         ← scripts verifying expected operations succeed
+│   ├── deny.sh          ← scripts verifying expected denials happen
+│   └── fixtures/        ← test data
+└── meta.toml            ← name, version, author, signing key reference
+```
+
+The template's `policy.toml` declares its inheritance and identity at the top:
+
+```toml
+template_base = "base-confined"
+template_version = "4"
+template_name = "ai-coding-strict"
+```
+
+`template_version` is a quoted string by convention even though its values are integers; this allows future use of non-integer suffixes (e.g. `"4-rc1"`) without breaking the schema.
+
+The remainder of `policy.toml` is the template's full policy, expressed as direct rules and as deltas from the base template (§5.3). Project Kennel's compiler resolves the inheritance chain at policy load time and produces a single flat effective policy.
+
+A user's leaf policy lives outside the template directory, typically in `~/.config/kennel/kennels/<name>.toml`:
+
+```toml
+template = "ai-coding-strict"
+template_version = "4"
+name = "myproj-ai"
+
+[[fs.read.add]]
+path = "~/projects/myproj/**"
+reason = "the project I am working on"
+
+[[net.allow.add]]
+name = "api.anthropic.com"
+ports = [443]
+tls.required = true
+reason = "Claude API"
+threats.exposed = ["T8"]
+```
+
+The user policy is approximately 10 lines. Everything else — the credential denylist, the constructed view, the per-kennel loopback, the seccomp filter — is inherited from the template.
+
+## 5.3 Delta syntax
+
+Templates and user policies compose by deltas. There are four delta operations, applied at policy-resolution time to the effective policy of the parent template:
+
+- `[[<section>.add]]` — add a new entry to a list-valued section. The brackets are double, indicating TOML array-of-tables; each delta block is one entry.
+- `[[<section>.remove]]` — remove a matching entry from a list-valued section. Matching is by the unique-key field for that section (typically `path` for filesystem, `name` for network, `real` for unix sockets).
+- `[<section>.override]` — replace a scalar or single-key value. Single brackets, since this is one table.
+- `[[<section>.deny.invariant]]` and similar — mark a rule in the parent as not removable by further downstream deltas (template invariants, §5.5).
+
+Every delta block requires a `reason` field. The schema validator rejects deltas without one. Reasons appear in audit logs, diff output, and policy review tooling. The intent is to ensure deviations from defaults carry institutional knowledge — six months later, the developer (or a colleague) reading the policy can see *why* a specific allow exists.
+
+Worked example, showing all four operations:
+
+```toml
+# Add a filesystem read grant — typical user delta.
+[[fs.read.add]]
+path = "~/projects/myproj/**"
+reason = "the project I am working on"
+
+# Add a network allow — typical user delta.
+[[net.allow.add]]
+name = "api.anthropic.com"
+ports = [443]
+tls.required = true
+reason = "Claude API"
+threats.exposed = ["T8"]
+
+# Remove a default deny — rare; surfaces strongly in the diff.
+[[fs.deny.remove]]
+path = "~/.config/git/**"
+reason = "this workflow needs the user's git config; accepted T1 exposure"
+threats.exposed = ["T1"]
+
+# Override a scalar — moderately common, e.g., raising audit verbosity.
+[net.audit.override]
+level = "full"
+reason = "this kennel handles sensitive data; full audit required"
+
+# Mark a rule as a template invariant — only valid in templates,
+# not in user policies. Downstream user deltas cannot remove it.
+[[net.deny.invariant]]
+cidr = "169.254.169.254/32"
+reason = "cloud metadata; never permitted from kennels"
+```
+
+The `*.invariant` form is distinct from the others: it does not add or remove a rule, it *annotates* the rule with the property that further downstream policies cannot remove it. Invariants are template-author tools, not user-author tools (§5.5).
+
+Some sections in §7 use single-bracket TOML tables rather than arrays (`[fs.tmp]`, `[fs.home]`, `[cap]`). These accept the `override` delta form only, not `add`/`remove`. The schema describes which sections accept which delta forms.
+
+## 5.4 Template substitution variables
+
+Template policies may reference variables that are expanded at kennel-spawn time. Project Kennel substitutes these before applying the policy:
+
+| Variable | Expands to |
+|---|---|
+| `<kennel>` | The kennel name (`name` field from the user policy) |
+| `<uid>` | The user's real uid as a decimal integer |
+| `<user>` | The user's login name |
+| `<tag>` | Project Kennel's IPv4 loopback tag (default `42`, configurable per-install) |
+| `<ctx>` | A small integer derived from the kennel's name hash, unique per concurrent kennel |
+| `<home>` | The user's real `$HOME` |
+| `<gid>` | Project Kennel's IPv6 ULA Global ID for loopback isolation |
+
+Example usages from the worked template:
+
+```toml
+shim_root = "/run/kennel/<kennel>/home"
+proxy_listen_v4 = "127.<tag>.<ctx>.1:1080"
+log_path = "~/.local/state/kennel/<kennel>/network.jsonl"
+SSH_AUTH_SOCK = "/run/kennel/<kennel>/home/.ssh/agent.sock"
+```
+
+The substitution is purely lexical and happens before validation. Project Kennel refuses to spawn a kennel if any unsubstituted variable remains in the effective policy. User policies typically do not need to use these substitution variables directly; they appear in template-level rules where the template author knows that kennel-specific values are needed.
+
+## 5.5 Framework invariants and template invariants
+
+Project Kennel distinguishes two kinds of invariants. They have different scope and different enforcement.
+
+### Framework invariants
+
+Properties that hold across every policy, regardless of which template it derives from. Listed in `schema/invariants.toml` and enforced by the validator at policy-load time. The current set:
+
+- `cap.no_new_privs = true` — non-negotiable. `PR_SET_NO_NEW_PRIVS` is always set.
+- `exec.deny_setuid = true` — non-negotiable. Setuid binaries are always refused at execve.
+- `exec.deny_setgid = true` — non-negotiable. Same logic for setgid.
+- Granting `unix.allow` for `/tmp/.X11-unix/*` — forbidden. X11 must be isolated via `xwayland_isolated` or `xephyr_isolated`; direct grant of the host X server socket is rejected.
+- Granting `unix.allow` for `/var/run/docker.sock` or `/run/containerd/containerd.sock` at the *framework* level — permitted (some templates need it), but invariant-marked by templates that include it, so deltas in user policies can never silently grant it.
+- `unix.default = "allow"` — forbidden. Default-deny on AF_UNIX sockets is structural to the constructed-view design.
+- `dbus.session.enabled = true` without a corresponding `dbus.session.allow` block — forbidden. Enabling D-Bus session-bus access requires explicitly specifying what is allowed; the validator rejects "enable but allow nothing" because it is almost always a policy bug.
+- Removing the cloud-metadata `[[net.deny]]` entries (169.254.169.254, fd00:ec2::254) — forbidden across all policies, regardless of template.
+- The constructed-view shim for `$HOME` — present in every kennel; cannot be disabled by policy.
+- The SOCKS5 proxy as the only network egress — cannot be disabled by policy when `net.mode != "open"`.
+- The PID namespace for kennels — cannot be disabled by policy.
+
+The list grows over time as Project Kennel matures. Adding a new Project Kennel invariant is a breaking change; existing policies that conflict must be updated. Removing an invariant is treated as a weakening of Project Kennel's guarantees and is rare.
+
+Templates that genuinely need a property Project Kennel invariants prohibit are not confined; they should be honest about that and the workflow should run unconfined (`kennel run --bare cmd`), not under a contrived template that claims to confine without Project Kennel's structural guarantees.
+
+### Template invariants
+
+Properties that hold within policies derived from a specific template. A template marks a rule as an invariant; downstream user policies cannot remove the rule via a delta. The schema validator rejects the delta with a clear error message.
+
+The syntax is `[[<section>.<form>.invariant]]`, typically `[[net.deny.invariant]]`, `[[net.allow.invariant]]`, `[[unix.deny.invariant]]`. The rule has the same fields as the non-invariant form; the `invariant` suffix is purely an annotation that propagates the rule's non-removability.
+
+A template author uses invariants for rules that are *central to the template's threat model*. Removing them would mean the policy no longer corresponds to the template's documented properties. The `ai-coding-strict` template marks its cloud-metadata denies as invariant; the credential-path denies are not marked invariant (a user might legitimately need to grant access to a specific credential path for a corp workflow).
+
+Different templates set different invariants. The `ai-coding-permissive` template has fewer invariants than `ai-coding-strict`, by design — it accepts that users will need to weaken more defaults. The `untrusted-build` template has more invariants than either, because its purpose is strong constraint regardless of user preference.
+
+Templates that derive from a parent template inherit the parent's invariants. Adding more invariants is permitted; removing inherited invariants is permitted only if the deriving template documents the difference and bumps its version accordingly.
+
+## 5.6 Threat tags
+
+Every rule that grants a capability carries threat metadata:
+
+```toml
+[[net.allow]]
+name = "api.anthropic.com"
+ports = [443]
+tls.required = true
+reason = "Claude API"
+threats.exposed = ["T8"]
+```
+
+The tag values reference entries in `THREATS.md`. Tags are bare T-numbers (`"T8"`) or T-numbers with informative slugs (`"T8:exfil-via-allowed-host"`). The slug is purely for readability; the T-number is canonical.
+
+Two threat-tag fields are defined:
+
+- `threats.exposed` — threats this rule weakens defence against, or fails to defend against. Recommended for any rule that grants a capability the baseline template would have denied.
+- `threats.mitigated` — threats this rule actively mitigates. Rare on individual rules; more commonly, the template documents mitigations at the template level (in its `THREATS.md` companion file). Use on individual rules only when the rule is the *primary* mitigation for a specific threat.
+
+The diff command, audit reports, and `--explain` output all reference these tags. A user reviewing their policy can ask "for T2 (malicious post-install), what rules mitigate it and what rules expose it?" Project Kennel answers mechanically by scanning the effective policy.
+
+When a user delta adds a rule with `threats.exposed`, the diff tool surfaces this:
+
+```
++ unix.allow: /run/corp/vpn-agent.sock
+    reason: corp-vpn-agent
+    threats.exposed: T6 (privileged service surface)
+    WARNING: granting access to a privileged service socket.
+             Consider whether the kennel truly needs this.
+```
+
+The user sees not just "you added a grant" but "you added a grant that exposes you to T6". This is what makes the diff actionable.
+
+## 5.7 The template set
+
+The minimum viable set of templates, each maintained as a first-class artefact:
+
+| Template | Purpose | Defends | Notable residuals |
+|---|---|---|---|
+| `base-confined` | The root of all confined templates. Minimal: `no_new_privs`, deny setuid, deny sudo, no display, no dbus, no abstract unix sockets, deny RFC1918 and cloud metadata, empty `fs.read`/`fs.write`. | T19, T18, baseline against T6 | Cannot be used directly (no fs scope) |
+| `ai-coding-strict` | AI agent on a single project. Worked example in `TEMPLATE-ai-coding-strict.md`. | T1, T2, T3, T6, T12, T14, T25 | T8 (exfil via API); T13 (semantic regressions in code) |
+| `ai-coding-permissive` | Same shape, broader fs scope and open-net audit mode. | T1 partial | T8; weaker T12; documented as weaker |
+| `untrusted-build` | Build script from untrusted source. `net.mode = "none"` during install. | T2 strong, T5 strong | Needs offline mirrors for legitimate dependencies |
+| `inspect-only` | Read-only fs on a directory; no exec beyond inspection tools. | T2, T4, T5 strong | Cannot build, run, or test |
+| `package-install` | Install from specific registries. Time-bounded. | T2 partial, T9 partial | TTL is the primary defence against T10 |
+| `dev-server` | Run a local dev server. Grants specific host loopback services. | T1, T3 | Explicit T6 exposures for granted services |
+| `docs-and-research` | AI agent doing web research. `net.mode = "open"` with heavy audit. | T1 | T9, T8; weaker than strict |
+| `containerised-service` | Long-lived containerised service (Postgres, Redis, etc). Per-kennel loopback for published ports. | T21, T22, T1 partial | T20 (container escape) is in-scope but cannot be fully mitigated; T23 requires `userns-remap` |
+| `containerised-tool` | Short-lived containers running build tools, linters, formatters. | T2, T21, T22 | Strict outbound; no published ports by default |
+| `ml-coding` | ML workflow with GPU. | T1 with GPU caveat | GPU driver surface in scope; documented |
+| `x11-isolated-dev` | Workflow needing X11. Xwayland-isolated on Wayland hosts, Xephyr-isolated on X11. | T17, T18 | Clipboard bridging off by default |
+| `mcp-server` | MCP server invoked by an agent in another kennel. | T24, T1 | Inherits parent kennel's policy by default |
+
+Each ships in the Project Kennel repository, versioned. The repository is the canonical source; users typically reference templates by name and Project Kennel resolves to the local installed copy.
+
+The set is not closed. Organisations write their own templates (§5.15). New templates are added when a workflow is sufficiently common to warrant a standard variant; templates are deprecated when they no longer have maintainers or are superseded by better alternatives.
+
+## 5.8 Template inheritance
+
+Templates can extend other templates. `ai-coding-strict` is defined as deltas from `base-confined`:
+
+```
+base-confined          ← minimal: no_new_privs, deny setuid, deny sudo,
+                         deny X11, deny dbus, deny abstract unix sockets,
+                         deny RFC1918 and cloud metadata, fs scope to nothing.
+                         (Every confined template inherits from this.)
+  ↓
+ai-coding-strict       ← adds: project-tree fs scope (in user delta),
+                         exec.allow for python/node/git/build tools,
+                         net.allow for registries and LLM API (latter in user delta),
+                         per-kennel ssh-agent shim,
+                         fs.scrub for .env-like patterns.
+  ↓
+your-ai-coding         ← user policy: the specific project path,
+                         the specific LLM API endpoint, corp deltas if any.
+```
+
+The schema enforces single-line inheritance: a template extends one template, no diamonds. Composition is by override of named rules; the parent's effective policy is computed first, then the child's deltas are applied. Invariants from the parent propagate; the child can add invariants but not remove them.
+
+User policies are leaf nodes in the inheritance tree. A user policy extends one template; the user policy is not itself a template that other user policies can extend. This restriction is deliberate — it prevents the failure mode where users accumulate ad-hoc "team templates" that nobody maintains and that drift from the official set.
+
+If a team needs a shared baseline beyond what the official templates provide, the right answer is an organisation-managed template (§5.15) with its own signing, versioning, and review process, not a user policy that other developers extend.
+
+## 5.9 Template-level constructs
+
+Three template-author tools deserve specific mention because they appear in the worked template but are not policy primitives in the §7 sense — they are template-level mechanisms that map onto multiple policy elements.
+
+### `fs.home.sanitise`
+
+Some host configuration files are needed inside the kennel but the host version contains sensitive content. A common case is `~/.gitconfig`: the agent needs git to know the user's email and signing preferences, but the host's `~/.gitconfig` often contains credential-helper URLs, embedded tokens, or `url.*.insteadOf` rewrites that point at internal hosts.
+
+`fs.home.sanitise` constructs a sanitised copy at kennel-spawn time:
+
+```toml
+[[fs.home.sanitise]]
+real = "~/.gitconfig"
+shim = "~/.gitconfig"
+strip = ["credential.*", "github.user", "github.token", "url.*.insteadof"]
+```
+
+Project Kennel reads the real file, strips the matching keys, writes the sanitised result to a tmpfs location, and bind-mounts that location into the agent's view at the shim path. The agent sees a gitconfig that lets git operate but reveals nothing about the host's credential setup.
+
+The pattern generalises to other config files (`~/.npmrc` minus `_authToken`, `~/.cargo/config.toml` minus `[registries.*]` credentials, etc.), but `.gitconfig` is the canonical example.
+
+### `fs.scrub`
+
+Some files within the project tree should not be visible to the agent even though the project tree is granted writable. `.env`, `terraform.tfstate`, and similar credential-shaped files are the typical examples.
+
+```toml
+[fs.scrub]
+patterns = [".env", ".env.*", "*.pem", "*.key", "terraform.tfstate"]
+mode = "empty"
+```
+
+For each pattern, Project Kennel overlays a tmpfs at any matching path during shim construction. The agent reading the file sees the `mode` content:
+
+- `mode = "empty"` — the file appears as an empty file (zero bytes). Most tools tolerate this; build systems that read the file but use empty defaults proceed cleanly.
+- `mode = "enoent"` — the file appears not to exist (open returns ENOENT). Stricter, but breaks tools that test for the file's existence before reading.
+
+The default is `"empty"` for compatibility; templates that prioritise strictness over compatibility can override to `"enoent"`.
+
+`fs.scrub` is a defence against T14 (introduction or preservation of secrets in unintended locations). It is a partial defence: the agent can recover scrubbed file contents through indirect paths (`git show HEAD:.env`, reading from the index, reading from build artefacts). Project Kennel cannot prevent semantic-level recovery without breaking legitimate tooling; `fs.scrub` is best-effort for direct reads, documented as such.
+
+### Per-kennel service instances
+
+Some services are inappropriate to share with the user's main session but are needed by the agent. The canonical example is ssh-agent: granting the user's real `~/.ssh/agent.sock` to the agent exposes every key the user has loaded; running no ssh-agent at all breaks git-over-SSH.
+
+Templates declare per-kennel service instances:
+
+```toml
+[[unix.allow]]
+name = "ssh-agent"
+real = "/run/kennel/<kennel>/ssh-agent.sock"
+shim = "~/.ssh/agent.sock"
+env = "SSH_AUTH_SOCK"
+reason = "git-over-SSH operations via per-kennel agent"
+```
+
+Project Kennel's spawn flow recognises the per-kennel service pattern and launches a dedicated ssh-agent at kennel start, with its socket at the `real` path. The shim bind-mounts the socket into the workload's `$HOME/.ssh/agent.sock`. The environment variable `SSH_AUTH_SOCK` is set in the spawned process's environment to the shim path. When the kennel exits, the agent process is reaped and its in-memory keys are lost.
+
+The same pattern applies to per-kennel gpg-agent, per-kennel keyring daemons, and similar. Templates declare the service; Project Kennel handles the lifecycle.
+
+## 5.10 Signing and trust
+
+Templates in Project Kennel repo are signed. The signing mechanism is one of:
+
+- **Git tag with verified signature.** Maintainers tag template versions; users verify the signature on update.
+- **Sigstore.** Per-version artefact signature, transparency log.
+- **In-tree signature blob.** Each template version carries a signature file verifiable against the maintainers' published keys.
+
+Whichever mechanism, the validator warns when a user policy references an unsigned template. CI verifies that every committed template version has a valid signature.
+
+For organisation-specific templates, the same mechanism applies with the organisation's signing key. Users in that organisation install the org's public key into Project Kennel's trust store at `~/.config/kennel/trust/`. Organisations can also require, via system-wide configuration, that policies derive only from templates signed by specific keys.
+
+Project Kennel refuses to load templates with invalid signatures. Project Kennel warns but does not refuse on *missing* signatures (the development workflow needs to support unsigned local templates); production deployments configure Project Kennel to require signatures, via a settings flag that organisations push to managed workstations.
+
+## 5.11 Versioning and upgrade
+
+Template versions are integers (encoded as quoted strings, see §5.2), incremented on every change to the template's policy or threat tags. The `template_version` field in a user policy references the version the policy was authored against.
+
+When a user runs `kennel` with a policy referencing an old template version:
+
+```
+$ kennel run my-ai-coding bash
+
+WARNING: template ai-coding-strict has a newer version (v5; you have v4).
+Run `kennel upgrade my-ai-coding` to review changes and upgrade.
+
+[kennel starts with the user's pinned v4 baseline]
+```
+
+Project Kennel does not silently auto-upgrade. The user reviews changes and consents:
+
+```
+$ kennel upgrade my-ai-coding
+
+ai-coding-strict v4 → v5 changes:
+
+  + Added [[net.deny.invariant]] for 100.64.0.0/10 (CGNAT)
+    threats.mitigated: T6 (lateral via CGNAT)
+    impact: small; almost no workflows hit this
+
+  ~ Changed fs.scrub.patterns to include "*.p12" and "*.pfx"
+    threats.mitigated: T14 (cert-key exfiltration)
+    impact: workloads reading PKCS#12 files now see empty content
+
+  - Removed [[exec.allow]] /usr/bin/python3.10 (EOL upstream)
+    impact: kennels using python3.10 will fail; use python3.12
+
+Your deltas:
+  - Still apply: project path, Claude API allow
+  - Conflict: your `fs.read.add: ~/projects/myproj/**/*.pem` overlaps with
+    v5's new `fs.scrub` pattern. Review and decide.
+
+Migrate? [y/N]
+```
+
+Conflicts are surfaced. The user resolves them deliberately. Migration is not automatic.
+
+## 5.12 User workflow
+
+```
+$ kennel init my-ai-coding --template ai-coding-strict
+Created ~/.config/kennel/kennels/my-ai-coding.toml
+Based on: ai-coding-strict (v4)
+
+This template defends against: T1, T2, T3, T6, T12, T14, T25
+Known residuals: T8 (exfil via API), T13 (semantic code regressions)
+See ai-coding-strict/README.md for the full threat-model summary.
+
+Customize by editing the file. Run `kennel diff my-ai-coding` to review.
+
+$ vim ~/.config/kennel/kennels/my-ai-coding.toml
+# user adds rules with reasons
+
+$ kennel diff my-ai-coding
+# shows the diff, threat impact, warnings
+
+$ kennel validate my-ai-coding
+# schema check, invariant check, template version check
+
+$ kennel run my-ai-coding bash
+# starts the kennel
+```
+
+The `diff` and `validate` commands are run frequently. They are fast (no network, no kernel ops, just parse and compare).
+
+## 5.13 What `kennel diff` produces
+
+```
+$ kennel diff ~/.config/kennel/kennels/my-ai-coding.toml
+
+Template: ai-coding-strict (v4, last modified upstream 2026-04-10)
+Inherited from: base-confined (v2)
+
+Your deltas (3):
+
+  + fs.read.add: ~/projects/myproj/**
+      reason: the project I am working on
+      threats.exposed: none catalogued
+      threat impact: read access to one project tree
+
+  + fs.write.add: ~/projects/myproj/**
+      reason: the project I am working on
+      threats.exposed: T13, T14, T15, T16
+      threat impact: workload can write to the project tree. Output review
+                     tooling (kennel review) flags security-degrading
+                     diffs at commit time.
+
+  + net.allow.add: api.anthropic.com:443 (TLS required)
+      reason: Claude API
+      threats.exposed: T8
+      threat impact: outbound to one additional host. Audited via proxy.
+                     T8 (in-band exfiltration via the API) is the
+                     primary residual; documented and accepted.
+
+Effective policy summary:
+  Threats defended: T1, T2, T3, T7, T12, T14, T19
+  Threats exposed: T8 (by Claude API grant); T13 (semantic regressions
+                   in produced code)
+  Threats unchanged from template: T18 (TIOCSTI prevented by kernel sysctl)
+
+Audit-log location: ~/.local/state/kennel/my-ai-coding/
+```
+
+The user can read this and reason about the changes. The output is also useful in code review when an organisation reviews user policies against an organisational baseline.
+
+## 5.14 Template invariants in practice
+
+Section 5.5 introduced template invariants. Here is the concrete pattern, as used by `ai-coding-strict`:
+
+```toml
+# In ai-coding-strict/policy.toml
+
+[[net.deny.invariant]]
+cidr = "169.254.169.254/32"
+reason = "cloud metadata IPv4 — never permitted from kennels"
+
+[[net.deny.invariant]]
+cidr = "fd00:ec2::254/128"
+reason = "AWS IPv6 metadata — never permitted"
+```
+
+A user policy attempting to remove these via `[[net.deny.remove]]` is rejected at validation:
+
+```
+$ kennel validate ~/.config/kennel/kennels/my-ai-coding.toml
+ERROR: cannot remove template invariant
+  rule:     [[net.deny]] cidr = "169.254.169.254/32"
+  declared: ai-coding-strict/policy.toml (template invariant)
+  reason:   "cloud metadata IPv4 — never permitted from kennels"
+
+Template invariants are rules central to the template's threat model.
+Removing them would mean the policy no longer corresponds to the template's
+documented properties. To override, switch to a different template or
+write an organisation-specific template that does not declare this
+invariant.
+```
+
+Templates that allow significant user override (`ai-coding-permissive`) have fewer invariants. Templates that defend strictly (`untrusted-build`, `inspect-only`) have more. The level of invariant-ness is itself a template-design decision and is documented in each template's README.
+
+## 5.15 Out-of-tree templates
+
+Users and organisations can write their own templates not committed to Project Kennel repo. Such templates live under `~/.config/kennel/templates/<name>/` (user-local) or `/etc/kennel/templates/<name>/` (system-wide, managed by IT) and are referenced the same way as in-tree templates.
+
+Project Kennel's tools (validate, diff, upgrade) work identically on out-of-tree templates. The threat tags reference the same `THREATS.md` catalogue (or an org-specific extension thereof; the catalogue itself is versioned and can be forked).
+
+CI for organisation templates is the organisation's responsibility. Project Kennel provides the testing primitives (`kennel test-template <name>`) that exercise the template's `tests/allow.sh` and `tests/deny.sh` against a configured kernel. Organisations integrate this into their template-repository CI to gate template publication.
+
+Project Kennel supports a system-wide configuration that requires policies to derive from a specific organisation-controlled template. This is the mechanism by which an enterprise can mandate a corporate baseline: every developer's leaf policy must derive from `corp-confined`, which itself derives from one of the official templates and adds organisation-specific invariants (corp registry, corp VPN socket, etc.). User policies cannot derive directly from the official templates; they must go through `corp-confined`, which means the corporate invariants are non-removable.
+
+## 5.16 Centre of gravity
+
+Templates and their maintenance are Project Kennel's primary deliverable. The code is in service of the templates. A framework with great primitives and weak templates has weak security in practice; a framework with strong templates compensates substantially for primitives that have gaps.
+
+This implies a maintenance commitment: the template set is not a one-time deliverable. Templates need to evolve as the kernel evolves (new Landlock features, new BPF hooks), as the threat landscape evolves (new AI agent behaviour patterns, new package-manager attack vectors), and as the user base provides feedback ("this template is unusable for workflow X"). Project Kennel needs a process for template maintenance, version-bump, deprecation, and replacement.
+
+The threat catalogue (THREATS.md) is the foundation for all of that. Templates derive their security claims from the catalogue's threat IDs. The catalogue is versioned. Templates reference specific catalogue versions in their `meta.toml`. A change in the catalogue's threat definitions may require template updates.
+
+This is the social contract Project Kennel needs to sustain to remain useful: keep the templates honest, keep the catalogue current, keep the diff tool's output meaningful. The technical work is well-defined; the sustained-attention work is harder, and Project Kennel's design should not pretend otherwise. See §9 (policy lifecycle) for the operational story of how templates evolve in deployed environments.

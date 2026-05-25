@@ -1,0 +1,304 @@
+# §4.3 Policy surface: network
+
+A confined context has its own piece of `127.0.0.0/8` *and* its own IPv6 ULA `/64`. Inbound and outbound, the context behaves as if it were on its own loopback interface — for both address families, symmetrically. The user reaches it from outside via either family; the context reaches the outside only via its proxy; siblings cannot reach each other on either family. Cross-family ambiguities (dual-stack sockets, IPv4-mapped IPv6) are resolved by forcing `IPV6_V6ONLY=1` inside confined contexts, surfacing each family at the application layer where policy can reason about it.
+
+## 4.3.1 The three modes
+
+A confined context's relationship to the network is one of:
+
+| Mode | Outbound | Use case |
+|---|---|---|
+| `none` | No `connect()`, no `bind()` to inet families, no inet socket creation at all | Untrusted post-install scripts, untrusted-code inspection |
+| `constrained` | Specific allowlist of destinations, via per-context proxy | AI agents, package installs from known registries |
+| `open` | Public internet via proxy; specific denylist (cloud metadata, RFC1918, host loopback) | Build-from-source contexts that genuinely need open egress |
+
+The default in defensible templates is `constrained`. `open` is documented as weaker and used only where the workflow truly requires it. `none` is the strongest and appropriate for several common cases (npm post-install, repo inspection).
+
+## 4.3.2 The proxy-as-gateway model
+
+Every outbound connection from a confined context terminates at a context-local proxy that the framework controls. Direct `connect()` to anything else is blocked at the kernel level via cgroup BPF.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                       CONFINED CONTEXT                             │
+│                                                                    │
+│   process ──connect()──► 127.42.7.1:1080  ── SOCKS5 ─►  proxy ─────┼──► internet
+│                          (context proxy)               (host ns)   │
+│                                                                    │
+│   cgroup BPF: deny all connect() except to 127.42.7.1:1080         │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+Why this is the right primitive:
+
+- **Policy lives in user-space** where it can be expressive: per-destination TLS pinning, per-host rate limits, structured audit, name resolution control. The kernel just enforces "you may only talk to the proxy".
+- **DNS is the proxy's problem.** The context cannot resolve names itself; the proxy resolves on its behalf or refuses unknown names. DNS rebinding is structurally impossible — the context never holds an address, only a name, and the proxy resolves under policy.
+- **Audit is free.** The proxy logs every request with the requesting context, destination, byte counts, duration. No need to correlate kernel events with policy decisions; the proxy is the policy decision.
+- **TLS inspection is optional but available.** If the proxy is MITM-capable (own CA installed in the context's trust store), certificate pinning and request logging become possible. Costs: complexity, breaks TLS-pinning apps, requires CA management. Optional layer, off by default.
+- **Composes with loopback isolation** (§4.3.6). The context's `127.42.x.1` is where the proxy lives. The context cannot reach the user's `127.0.0.1` services except through the proxy.
+
+The kernel-level rules become trivially expressible:
+
+- `cgroup BPF inet4_connect`: allow `127.42.<ctx>.1:1080`, deny everything else.
+- `cgroup BPF inet6_connect`: allow `[fd<gid>:<tag>:<ctx>::1]:1080`, deny everything else.
+- `cgroup BPF inet_sock_create`: deny `AF_PACKET`, `AF_NETLINK`, raw socket families.
+- `cgroup BPF bind`: allow loopback in the context's assigned range, deny elsewhere.
+
+The proxy is where the interesting policy lives, and that policy is in user-space code the framework controls.
+
+## 4.3.3 The proxy implementation
+
+A small, single-purpose daemon launched per context:
+
+- Approximately 1000 lines of Go or Rust.
+- Reads its policy from the same TOML file the rest of the context config lives in.
+- Listens on the context's loopback address, port 1080 (or assigned).
+- Speaks SOCKS5 (well-defined, every HTTP client and most others speak it via `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`).
+- Optionally speaks HTTP CONNECT (some clients prefer it).
+- Resolves DNS itself, against a configured resolver, with the policy's name allowlist applied.
+- Logs JSONL audit events.
+- Refuses gracefully on policy violation, with a useful error the requesting process can read.
+
+SOCKS5 specifically because:
+
+- Transport-agnostic (TCP, optionally UDP via SOCKS5 UDP ASSOCIATE).
+- Authenticates if needed (per-context proxy credentials enable further sub-context discrimination).
+- Universally supported. `curl`, `wget`, `git`, `pip`, `npm`, `cargo`, `ssh` (via `ProxyCommand`), every browser.
+- Crucially: `socks5h://` (with the `h`) means "let the proxy resolve the name". The context never resolves DNS itself.
+
+What SOCKS5 doesn't natively cover, the proxy adds: TLS inspection (optional), per-destination policy beyond allow/deny (rate limits, byte caps, time windows), structured audit.
+
+## 4.3.4 Policy primitives
+
+```toml
+[net]
+mode = "constrained"        # "none" | "constrained" | "open"
+proxy_listen_v4 = "127.42.7.1:1080"     # auto-assigned per context if absent
+proxy_listen_v6 = "[fd24:8a7c:91e3:4207::1]:1080"
+
+[net.dns]
+resolver = "1.1.1.1:53"     # context's DNS resolver, used by the proxy
+mode = "allowlist"          # "allowlist" | "passthrough" | "system"
+                            # allowlist: only names in net.allow are resolvable
+                            # passthrough: any name resolves, but connect still gated
+                            # system: use system resolver
+cache_ttl = "5m"            # how long resolved IPs are pinned
+on_resolve_change = "deny"  # "deny" | "warn" | "allow" — see §4.3.5
+
+# Outbound allow rules
+[[net.allow]]
+name = "api.openai.com"
+ports = [443]
+protocol = "tcp"
+tls.required = true         # refuse plaintext
+tls.pin_sha256 = ["abc123..."]   # optional cert pinning
+
+[[net.allow]]
+name = "github.com"
+ports = [22, 443]
+protocol = "tcp"
+
+[[net.allow]]
+cidr = "10.0.0.0/24"        # raw CIDR (rare; internal network exceptions)
+ports = [443]
+
+# Categorical denies. Evaluated before allow.
+[[net.deny]]
+cidr = "169.254.169.254/32"     # IPv4 cloud metadata
+[[net.deny]]
+cidr = "fd00:ec2::254/128"      # AWS IMDSv6
+[[net.deny]]
+cidr = "fe80::/10"              # IPv6 link-local
+[[net.deny]]
+cidr = "fc00::/7"               # other ULAs (context's own /64 is allowed by allow)
+[[net.deny]]
+cidr = "10.0.0.0/8"
+[[net.deny]]
+cidr = "172.16.0.0/12"
+[[net.deny]]
+cidr = "192.168.0.0/16"
+
+# Loopback handling — see §4.3.6
+[net.loopback]
+private_subnet_v4 = "127.42.7.0/24"
+private_subnet_v6 = "fd24:8a7c:91e3:4207::/64"
+
+[[net.loopback.host_services]]
+name = "host-postgres"
+addr_v4 = "127.0.0.1:5432"
+addr_v6 = "[::1]:5432"
+proxy.required = false       # direct connect allowed (or set true to force-through-proxy)
+
+# Bind handling — see §4.3.7
+[net.bind]
+private_addr_v4 = "127.42.7.1"
+private_addr_v6 = "fd24:8a7c:91e3:4207::1"
+inaddr_any_policy = "rewrite"        # 0.0.0.0 -> private_addr_v4
+in6addr_any_policy = "rewrite"       # :: -> private_addr_v6
+allow_host_loopback_v4 = false
+allow_host_loopback_v6 = false
+families = ["v4", "v6"]
+allowed_ports = []                   # empty = any ephemeral
+min_port = 1024
+
+# Rate limits and audit
+[net.rate_limit]
+bytes_per_second = "10MB"
+bursts_allowed = 5
+
+[net.audit]
+log_path = "~/.local/state/agent-run/<context>/network.jsonl"
+level = "summary"           # "off" | "summary" | "full"
+
+# Socket family allowlist (defence in depth)
+[net.families]
+allow = ["AF_INET", "AF_INET6", "AF_UNIX"]
+deny = ["AF_NETLINK", "AF_PACKET", "AF_BLUETOOTH", "AF_VSOCK"]
+```
+
+## 4.3.5 DNS handling
+
+DNS is where naive proxy designs leak. The full story:
+
+**The context cannot do its own DNS.** Cgroup BPF rules deny `connect()` to anything except the proxy. UDP/53 and TCP/53 to external resolvers are blocked. `/etc/resolv.conf` pointing at `127.0.0.53` (systemd-resolved) is broken inside the context unless that AF_UNIX socket is also denied.
+
+Best practice: shadow `/etc/resolv.conf` in the context to point at the proxy's address, run a stub DNS resolver inside the proxy daemon that serves only the allowlisted names.
+
+Alternative: don't run DNS in the context at all. Clients use `socks5h://` which doesn't require local DNS. Set the context's `/etc/resolv.conf` to an invalid IP so failing-to-go-through-the-proxy is immediately obvious.
+
+**Name resolution happens in the proxy.** The proxy maintains a name → IP cache. On first request to `github.com`, the proxy resolves via its configured upstream resolver, caches the result, and dials the resulting IP. On subsequent requests, the cached IP is used until `cache_ttl` expires.
+
+**Re-resolution policy is explicit.** When the TTL expires and the proxy re-resolves, what happens if the IP has changed?
+
+- `on_resolve_change = "allow"`: accept the new IP, log a notice. Lowest friction. Vulnerable to TTL-driven DNS rebinding.
+- `on_resolve_change = "warn"`: accept the new IP but log a warning. Default for most workflows.
+- `on_resolve_change = "deny"`: refuse the new IP, require explicit policy reload. Highest friction, strongest. For high-value contexts.
+
+**The allowlist is by name, not IP.** The user writes `github.com`; the proxy enforces against whatever IP resolves to. This is the right level of abstraction — IPs change, names are stable — but the resolver itself is a trust point. Pin the resolver: use a known DoH endpoint if the threat model demands it.
+
+**No DNS leakage.** The proxy is the only thing in the context that does DNS. Verifying this is part of the test plan: tcpdump on the host's external interface during context operation should show zero DNS queries originating from the context.
+
+## 4.3.6 Loopback isolation
+
+The framework assigns each context a unique IPv4 subnet in `127.0.0.0/8` and an IPv6 ULA `/64`. Linux routes the entire `127/8` to `lo`; IPv6 ULA requires explicit interface configuration.
+
+**IPv4 allocation:**
+
+```
+127.0.0.0/16        ← never assigned (user's normal loopback)
+127.<tag>.0.0/24    ← framework-internal (shared services if any)
+127.<tag>.<ctx>.0/24  ← per-context
+127.<tag>.<ctx>.1   ← context's primary address; proxy listens here
+```
+
+Default `<tag>` is 42, configurable.
+
+**IPv6 allocation:**
+
+The framework picks a ULA `/48` at install time per RFC 4193 §3.2.2 (timestamp + EUI-64 hash, low 40 bits of SHA-1):
+
+```
+fd<Global ID>::/48
+fd<Global ID>:<tag>::/48        ← reserved for framework
+fd<Global ID>:<tag>:<ctx>::/64  ← per-context
+fd<Global ID>:<tag>:<ctx>::1    ← context's primary IPv6 address
+```
+
+**Configuration requires privilege.** Adding addresses to `lo` (or a per-context dummy interface) requires `CAP_NET_ADMIN`. The framework uses a privileged helper (setuid or with file capability `CAP_NET_ADMIN=ep`) invoked at context start. The helper is approximately 100 lines, accepts requests only from the framework's UID, and operates only on the framework's reserved address space.
+
+For users unwilling to grant `CAP_NET_ADMIN` to any helper: IPv4 still works fully (`127/8` is pre-configured by the kernel). IPv6 falls back to "deny all IPv6 binds, force IPv6 traffic through the proxy". Document both modes; default to privileged setup if available, degrade gracefully otherwise.
+
+**Isolation properties.** With a context bound to `127.42.7.1` and `fd...:4207::1`:
+
+- Other contexts on the same host cannot reach it. Their cgroup BPF rules deny connect() to addresses outside their own private subnet and their proxy.
+- The user's normal shell (default context) can reach it — the default context has no `connect()` restrictions. This is correct: the user is in control.
+- Other users on the system cannot reach it. Loopback is per-namespace and address-routed locally.
+- Same-uid processes outside the context can reach it. This is the limitation worth being honest about: IP-level isolation is between *contexts*, not between *processes within a uid*.
+
+The cleaner story for same-uid isolation: cgroup-aware connect-side policy. A connection from outside the context to `127.42.7.1:3000` fires a cgroup BPF hook on the *connecting* side; the framework's policy decides "the default context may always reach confined contexts' loopback" (typical), or "only the context that spawned this one may reach it" (stricter), or "no other context may reach it" (strictest, breaks browser-tab-to-dev-server workflows).
+
+## 4.3.7 Bind semantics
+
+A confined context legitimately needs to `bind()`: AI agent runs `npm run dev` spinning up a webpack dev server, build tool starts a local service for testing, language server opens a socket for the editor.
+
+What we don't want:
+
+- Context binds to `0.0.0.0:8080` and its dev server is reachable from the LAN.
+- Context binds to `127.0.0.1:5432` and conflicts with the user's real Postgres, or worse, makes itself silently substitutable.
+- Context binds to a port and same-uid processes outside the context reach it inadvertently.
+- Context binds to a privileged port.
+- Context binds to a non-loopback address it shouldn't have access to (VPN interface, Tailscale, Docker bridge).
+
+**INADDR_ANY rewriting.** Webpack, Vite, Flask, Django dev server, Jupyter, `http.server`, half the JavaScript ecosystem default to binding `0.0.0.0`. Denying this breaks every dev server. The framework rewrites instead, via cgroup BPF on `bind4`:
+
+```c
+SEC("cgroup/bind4")
+int bind_rewrite(struct bpf_sock_addr *ctx) {
+    if (ctx->user_ip4 == 0) {  // INADDR_ANY
+        ctx->user_ip4 = bpf_htonl(PRIVATE_ADDR_V4);
+    }
+    // additional allowed-range/denied-address checks
+    return 1;
+}
+```
+
+The userspace process believes it bound to `0.0.0.0`; the kernel actually bound to the context's private address. `getsockname()` reflects the rewritten address, which most tools handle correctly (they print "Listening on 127.42.7.1:3000" rather than "0.0.0.0:3000").
+
+**IPv6 dual-stack.** A socket created `AF_INET6` and bound to `::` with `IPV6_V6ONLY` unset accepts both IPv4 and IPv6 connections. If we rewrite only the IPv6 side, the IPv4 fallback escapes our isolation. The framework forces `IPV6_V6ONLY=1` for confined contexts: cgroup BPF intercepts `setsockopt(IPV6_V6ONLY, 0)` and either denies or rewrites to 1. The context's IPv6 socket only handles IPv6; if the context wants IPv4 it must explicitly create an `AF_INET` socket. This surfaces dual-stack ambiguity at the application layer.
+
+**IPv4-mapped IPv6 (`::ffff:0.0.0.0`).** Treat as the IPv4 case: rewrite to `::ffff:<private_addr_v4>` and apply IPv4 policy.
+
+**Port allocation.** Two contexts can both bind `:3000` without conflict — they're really binding `127.42.7.1:3000` and `127.42.11.1:3000`. Tools that hardcode `localhost:3000` for status checks within the context work, because the context's `/etc/hosts` shadows `localhost` → `127.42.<ctx>.1`.
+
+## 4.3.8 What gets you, threat-model-wise
+
+Re-stating against threats from §2.3:
+
+- **T1 (AI coding agent):** cannot exfiltrate code to `attacker.example.com` because the proxy refuses. Cannot reach the user's other dev services on loopback. Cannot bypass via raw socket. Audit log records every destination attempted.
+- **T2 (malicious post-install script):** with `net.mode = "none"`, the script can't reach anything. With `constrained` to the registry only, can't exfiltrate stolen data.
+- **T9 (supply chain in legitimately-allowed dependency):** the audit log surfaces unexpected destinations the dependency tries to reach.
+- **T10 (DNS exfiltration):** structurally impossible — context cannot make raw DNS queries.
+- **T13 (lateral movement to local services):** if dockerd socket denied, no escape. Postgres on host loopback unreachable unless explicitly granted.
+
+## 4.3.9 What this doesn't get you
+
+- **TLS exfiltration via allowed destinations (T11).** Context can reach `api.openai.com`, so it can exfiltrate by putting data in API requests. Proxy can't see inside TLS without MITM. Optional TLS inspection layer mitigates if user accepts CA management; otherwise this is a known residual.
+- **Covert channels.** Timing, DNS query patterns to allowed resolvers, TLS SNI to allowed hosts can carry exfiltration bandwidth. Out of scope for a non-paranoid threat model.
+- **Pre-existing trust.** If the user pasted `OPENAI_API_KEY` into the context's env, the context can use it. Limiting which env vars cross the boundary (§4.7) is the mitigation, not the proxy.
+
+## 4.3.10 Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| Proxy daemon crashes | All outbound traffic blocked (cgroup BPF is independent). Framework detects, optionally restarts. |
+| Proxy denies a connection | Client gets SOCKS5 reply 0x02. Audit logs the deny. |
+| Cgroup BPF unavailable | Refuse to start context if `net.mode != "open"`. No silent degradation. |
+| Privileged helper unavailable | IPv6 disabled, IPv4 still works. Warn at startup. |
+| Context tries raw socket | `inet_sock_create` BPF denies, returns EPERM. |
+| Client doesn't honour `*_PROXY` env | Direct `connect()` fails at kernel level. Audit logs the BPF-level deny. |
+| Proxy resolver upstream fails | Per `on_resolve_change`: deny (don't fall back to direct), warn, or cache extension. |
+
+## 4.3.11 Test plan additions
+
+For each invariant, a regression test in `tests/net/`:
+
+1. Context with `mode=none` attempts any `connect()`; expect EPERM.
+2. Context with constrained mode and `api.openai.com` allowlisted connects there; expect success via proxy.
+3. Context attempts direct `connect()` to `1.1.1.1:443`; expect EPERM at cgroup BPF level.
+4. Context attempts UDP/53 to external resolver; expect EPERM.
+5. Context binds `127.0.0.1:3000` with `allow_host_loopback_v4=false`; expect EACCES.
+6. Context binds `0.0.0.0:3000` with `inaddr_any_policy=rewrite`; expect success, `getsockname` returns `127.42.<ctx>.1:3000`.
+7. Two contexts both bind `:3000`; expect both succeed on their respective private_addr.
+8. From default context, connect to context's `127.42.<ctx>.1:3000`; expect success.
+9. From sibling context, connect to first context's address; expect ECONNREFUSED or EACCES.
+10. Context attempts `setsockopt(IPV6_V6ONLY, 0)`; expect denied or rewritten to 1.
+11. Context binds `[::1]:3000` with `allow_host_loopback_v6=false`; expect EACCES.
+12. Context connects to `[fc00::1]:80` (other ULA outside framework's prefix); expect EACCES.
+13. Context connects to `[fe80::1]:80` (link-local); expect EACCES.
+14. tcpdump on host external interface during context operation; expect zero DNS queries originating from the context's cgroup.
+15. Context attempts `AF_NETLINK` socket creation; expect EACCES.
+16. Context exceeds `bytes_per_second` rate limit; expect proxy throttles.
+17. Context attempts to bind privileged port (`80`); expect EACCES (min_port).
+18. DNS rebinding test: resolver returns a different IP on second query with `on_resolve_change=deny`; expect connection refused.
+
+The full network test corpus is approximately 50 cases. The list above is the core invariants.

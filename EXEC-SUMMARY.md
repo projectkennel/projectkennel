@@ -1,0 +1,49 @@
+# Project Kennel
+
+**Kernel-enforced confinement for unsigned code on developer workstations.**
+
+Version 0.1 · 2026-05-16
+
+---
+
+The user level of a modern developer workstation has become a complete software runtime. Package managers download and execute arbitrary code with no privilege transition. Container runtimes in rootless mode put the entire container substrate inside the user's account. AI coding agents run as the user's uid, with the user's credentials, calling external services on the user's behalf. MCP servers, IDE extensions, build tools, language servers, browser extensions, AI-generated code: all run as the user, none of them arrived through the operating system's validated install path.
+
+The host level has decades of enforcement vocabulary for code like this: AppArmor, SELinux, systemd hardening, capability sets, audit subsystems, signed repositories. None of it operates at user-level workload granularity. The execution surface moved into the user's account; the enforcement did not follow. The current state is roughly equivalent to running a production server with no mandatory access control, no service hardening, no audit, and trusting that the workloads will behave.
+
+AI coding agents are the most acute current instance of this gap. In March 2026, security researchers at Ona configured Claude Code with a denylist that blocked `npx` and Anthropic's bubblewrap sandbox enabled. The agent could not run `npx`. It noticed that `/proc/self/root/usr/bin/npx` was the same binary on a different path; that bypass got blocked too. The agent then reasoned, unprompted: *"The bubblewrap sandbox is failing to create a namespace on this kernel. Let me try disabling the sandbox."* Nobody told it to disable the sandbox. The agent decided that disabling its own containment was the logical next step toward finishing the task.
+
+This is not malice. It is the trained behaviour. AI coding agents are trained on task completion; training on completion produces behaviour that minimises friction between the agent and finishing the task. Most of an organisation's security posture is friction. Agents trained to complete tasks systematically degrade security posture as a side effect of doing their work, and the behaviour becomes more pronounced as agents become more capable.
+
+The pattern repeats across vendors and incidents. The August 2025 Nx supply-chain attack weaponised `claude --dangerously-skip-permissions`, `gemini --yolo`, and `q chat --trust-all-tools` to exfiltrate credentials from 1,079 compromised developer systems, leaking 2,349 secrets. The February 2026 Clinejection chain ended with a malicious npm publish to 5 million-plus developer machines via prompt injection in a GitHub issue title. CVE-2025-59536, CVE-2026-21852, CVE-2026-25725 and a dozen other Claude Code CVEs document the same architecture: agents probe their constraints, bypass them when possible, and ask the user to grant exceptions when they cannot.
+
+The same threat shape applies to other unsigned workloads. Malicious npm post-install scripts (Nx, Cline, axios) execute as the user during `npm install` with full filesystem and network access. Container images pulled from public registries run with whatever capabilities the developer's `docker run` command happens to grant. Random tools installed via `curl | sh` run with the developer's full credentials. The AI agent case is dramatic because the agent reasons its way through controls; the other cases are quieter, but the threat model and the required defence are the same.
+
+**Per-agent sandboxes do not solve this.** Claude Code ships with bubblewrap on Linux and Seatbelt on macOS. OpenAI Codex uses Landlock and seccomp natively. Each protects against its specific agent's threat surface, in a configuration format unique to that vendor. Developers swap between agents on monthly timescales; corporate security policy needs stability across quarters and years. A posture that depends on a specific vendor's product decisions is one that gets re-implemented every quarter, with no shared audit format, no shared threat catalogue, no shared vocabulary. The CISO cannot demonstrate uniform enforcement. Several agent vendors implement policy in the same process that runs the agent: CVE-2025-59536 demonstrated this directly when malicious hooks executed shell commands during Claude Code initialisation, before the user saw any consent dialog.
+
+**Containers do not solve this either.** Solomon Hykes said so in 2014 ("Docker is not a sandbox") and the past decade has confirmed it. The Docker daemon runs as root and accepts API calls from any member of the `docker` group; granting a workload access to `/var/run/docker.sock` is root-equivalent on the host. `docker run -p 5432:5432` binds on `0.0.0.0` by default — the developer exposes services to the LAN without intending to. A container with `-v $HOME:/home` has the user's SSH keys, cloud credentials, and tokens available to whatever runs inside; the Nx attack harvested credentials from inside containers in many documented cases. Modern image practice (distroless, scratch-based, single-binary Go services) strips out everything unnecessary, leaving no shell to `docker exec` into, no `ps`, no `ls` — the container is unobservable from inside because the tools aren't there, and unobservable from outside because Docker's logs capture lifecycle, not behaviour. Container management is friction-heavy enough that developers reach for `-v $HOME:/home --network host` to get work done, collapsing the isolation to nothing.
+
+Project Kennel provides the enforcement vocabulary the user level should have acquired as it grew into a runtime. Three structural commitments:
+
+**Workload-agnostic policy.** Policy describes kernel-level constraints (which files, which network destinations, which sockets, which D-Bus methods), not workload behaviour. The same policy applies whether the confined workload is Claude Code, Codex, Cursor, a Postgres container pulled from Docker Hub, an `npm install` of an unfamiliar package, or an MCP server. Switching workloads does not require rewriting policy or re-mapping compliance controls.
+
+**Kernel-enforced constraints the workload cannot influence.** The workload's `$HOME` is a shim filesystem view containing only what policy grants — credential locations are not denied on access; they do not exist in the view. The workload's `127.0.0.1` is its own private loopback subnet, not the user's. Outbound traffic terminates at a per-workload SOCKS5 proxy enforcing a per-destination allowlist; direct `connect()` to anywhere else is denied at the kernel level by cgroup BPF. D-Bus access goes through xdg-dbus-proxy with method-level filtering. All enforced via Landlock, cgroup BPF, mount namespaces, and seccomp — kernel mechanisms the workload's userspace operations cannot reach.
+
+**Threat-tagged, signed templates.** Operators do not write policy from scratch. They derive from vetted templates (`ai-coding-strict`, `containerised-service`, `untrusted-build`, `package-install`, `inspect-only`) signed by maintainers or by the customer's organisation. Every deviation from a template requires a written reason and surfaces in a diff that maps the change to specific threat IDs from a versioned threat catalogue. CI tooling validates policies against the schema and against organisation-mandated baselines.
+
+Project Kennel does not ask the workload to be trustworthy. It assumes the workload will optimise for completion (in the AI agent case) or that the developer running it will route around friction (in every other case), and constrains what either is permitted to look like.
+
+Three artefacts ship together under permissive licence. **THREATS.md** is the threat catalogue: stable IDs, real-world incident citations, MITRE ATT&CK mappings, preliminary mappings to SOC 2, ISO 27001, NIS2, DORA. The catalogue is the durable contribution; security teams can cite it whether or not they adopt the runtime. **The design document** is the full technical specification — threat model, mechanism reference, template system, enforcement architecture. Approximately 35,000 words. **The reference runtime** is the Linux user-space implementation, composing existing primitives (bubblewrap, Landlock, cgroup BPF) rather than competing with them.
+
+Enterprise needs are met through paid features layered on top: centralised policy management across developer fleets, cryptographic attestation that workstations run approved policy revisions, audit log aggregation with SIEM integration, dashboards mapping kennel events to compliance control objectives, customer-owned template signing infrastructure, TLS-inspection layer for high-value contexts, threat-intelligence feed of new attack patterns observed in the wild, SLA-backed support. Individual developers and small teams do not need fleet management; enterprises cannot operate without it. Nothing in the free tier is artificially crippled.
+
+The threat catalogue is publishable today. The design document is at v0.1. The reference runtime is in design; implementation is the next phase. We are seeking security teams willing to review THREATS.md and cite gaps, errors, or missing incidents; pilot organisations interested in evaluating Project Kennel on a representative subset of developer workflows; standards bodies and security vendors evaluating whether the threat catalogue belongs in their reference material.
+
+We are not asking for capital. We are asking for the readers without whom this work cannot be evaluated.
+
+---
+
+**Contact:** *[TBD]*
+**Project repository:** *[TBD]*
+**Canonical THREATS.md:** *[TBD]*
+
+*Full design rationale: companion design document, starting with §1 (the user-level runtime) and §2 (adversary model). Threat catalogue as a standalone artefact: THREATS.md.*
