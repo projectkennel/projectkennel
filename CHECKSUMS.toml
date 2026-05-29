@@ -1,0 +1,35 @@
+# Project Kennel — dependency checksum manifest
+#
+# The human-verified, content-hash manifest of every direct and transitive
+# dependency. This file — NOT Cargo.lock — is the integrity ground truth
+# (CODING-STANDARDS.md §5.5).
+#
+# Cargo.lock records hashes lifted from the registry at `cargo update` time;
+# if the registry was compromised at that moment, the lockfile faithfully
+# reproduces the compromise. The hashes below are ones WE computed, against
+# the .crate WE audited, after cross-verifying against independent sources.
+# `tools/verify-checksums` (Rust) and `tools/verify-checksums.sh` (shell,
+# system sha256sum) both check this manifest against crates-archive/ and
+# Cargo.lock on every PR; the two verifiers must agree.
+#
+# STATUS: no dependencies yet — the reference runtime is not implemented.
+# This manifest is structured and empty. Entries are added with the PR that
+# introduces each dependency, following the procedure in §5.5.
+#
+# Entry format:
+#
+# [crate."<name>"]
+# version          = "=X.Y.Z"
+# crate-sha256     = "<full hex of the .crate we audited>"
+# audited-by       = "<maintainer>"
+# audited-on       = "<ISO date>"
+# verified-against = [
+#     "crates.io published .crate (independent download)",
+#     "github.com/<org>/<repo> tag vX.Y.Z (signed by <fingerprint>)",
+#     "docs.rs source archive",
+# ]
+# notes            = "optional"
+#
+# Two maintainer approvals are required for any addition or change here.
+
+# (no entries yet)

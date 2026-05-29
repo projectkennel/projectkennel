@@ -569,7 +569,7 @@ There are two distinct log streams. Confusing them is a security bug.
 Audit events are structured records of security-relevant decisions: a policy load, a denied connect(), a template signature failure, a kennel start/stop, a privhelper request. This stream:
 
 - Goes to the audit log path declared by the policy (typically JSONL under `~/.local/state/kennel/<kennel>/`).
-- Has a stable schema documented in `AUDIT-SCHEMA.md` (to be written).
+- Has a stable schema documented in `architecture/02-3-audit-schema.md`.
 - Is append-only from the writer's perspective; rotation is the supervisor's responsibility.
 - Is the SIEM-integration artefact.
 

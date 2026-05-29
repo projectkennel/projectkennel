@@ -1,0 +1,35 @@
+# Project Kennel — upstream release monitoring
+#
+# Covers the gap left by `cargo audit` and the RustSec feed: legitimate
+# upstream bug fixes and maintenance changes that do NOT trigger a CVE or
+# advisory but may still matter to Kennel's stability or correctness
+# (CODING-STANDARDS.md §5.7).
+#
+# A weekly CI job polls each upstream feed and opens a single tracking
+# issue summarising any direct dependency with an unreviewed release. The
+# maintainer on rotation reads the release notes and either acts (follow
+# §5.5 to update the checksum manifest) or marks the release seen-and-
+# skipped by updating `last-reviewed` here with a one-line note.
+#
+# Principle: SEEING an upstream release is automated; DECIDING about it is
+# not.
+#
+# STATUS: no direct dependencies yet — the reference runtime is not
+# implemented. This file is structured and empty.
+#
+# Entry format (one per DIRECT dependency):
+#
+# [[watch]]
+# name          = "<crate>"
+# repo          = "https://github.com/<org>/<repo>"
+# release-feed  = "https://github.com/<org>/<repo>/releases.atom"
+# last-reviewed = "vX.Y.Z"
+# reviewed-by   = "<maintainer>"
+# note          = "optional — e.g. why a release was deliberately skipped"
+#
+# Maintenance-signal note (§5.7): a change of upstream maintainer is itself
+# a supply-chain signal (the xz-utils precedent). Record an ownership change
+# here and trigger a fresh `cargo vet` audit at that dependency's next
+# release.
+
+# (no entries yet)
