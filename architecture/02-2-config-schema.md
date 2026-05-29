@@ -36,12 +36,13 @@ Every policy file has the following top-level fields:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `template_base` | string | Yes for templates and leaf policies; No for the root template (`base-confined`) | Names the parent template. Resolution walks the chain to the root. |
-| `template_version` | string | Yes | The specific version of `template_base` being inherited from. Semver-shaped. |
+| `template_base` | versioned reference | Yes for templates and leaf policies; No for the root template (`base-confined`) | Names the parent template as `<name>@<version>`. Resolution walks the chain to the root. See §Versioned references. |
+| `template_version` | string | Legacy; optional | The two-field form. Accepted for backward compatibility when `template_base` carries no `@version`; the combined form is canonical. |
 | `template_name` | string | Yes for templates; No for leaf policies | The template's own name. Leaf policies use the kennel name from `name`. |
 | `name` | string | Yes for leaf policies; No for templates | The kennel name. Matches the leaf policy's filename without `.toml`. |
+| `include` | array of versioned references | No | Additional signed fragments composed additively. See §Includes. |
 | `threat_catalogue_version` | string | Yes | The version of `THREATS.md` the template was authored against. Used to detect catalogue drift. |
-| `signature` | object | Yes for templates; optional for leaf policies | Signature envelope; see §Signatures. |
+| `signature` | object | Yes for templates and fragments; optional for leaf policies | Signature envelope over the artefact's content; see §Signatures. |
 
 The parser produces a structurally typed value before any field is read; raw `toml::Value` is not retained past parse (`10.5` in CODING-STANDARDS.md).
 
@@ -89,18 +90,96 @@ Paths in `fs.read`, `fs.write`, `fs.deny`, `unix.allow[].real`, and `unix.allow[
 
 ---
 
+## Versioned references
+
+A *versioned reference* names a template or fragment together with the exact version to resolve: `<name>@<version>`. It appears in `template_base` and in each element of `include`.
+
+Grammar:
+
+- `<name>` matches `[a-z0-9][a-z0-9-]{0,63}`.
+- The separator is a literal `@`.
+- `<version>` is `v` followed by a semver core: `v4`, `v4.2`, `v2.33.2`. The leading `v` is required.
+
+Examples: `ai-coding-strict@v4`, `corp-egress-allowlist@v2.33.2`.
+
+The parser rejects a `template_base` or `include` element that:
+
+- omits the `@version` (production mode); development mode resolves to the highest installed version and warns.
+- carries a malformed name or version.
+- appears more than once in `include` (duplicate references are an error).
+
+The legacy two-field form (`template_base = "ai-coding-strict"` with a separate `template_version = "4"`) is accepted when `template_base` carries no `@`. The two forms are mutually exclusive on a single reference; a `template_base` that carries `@v4` *and* a `template_version` field is a conflict error.
+
+### Resolution and verification of a reference
+
+Resolving one versioned reference:
+
+1. Locate the artefact for the exact `(name, version)` in the search path (§File location).
+2. Parse it (the same parse/validate discipline as any policy file).
+3. Verify its `[signature]` envelope against the trust store (§Signatures). A reference whose artefact fails signature verification is refused; the content is not composed.
+4. Compute the SHA-256 of the artefact's canonical-form content.
+5. Check the hash against the lockfile (§The lockfile). On first resolution, record it; on subsequent resolution, a mismatch is a hard error.
+
+Steps 3–5 are what make a reference a supply-chain control rather than a name lookup. Version pinning alone constrains *which* artefact is named; the signature and the lockfile constrain *what bytes* are composed. This is the same reasoning the dependency policy applies to Rust crates (CODING-STANDARDS.md §5.5).
+
+### The lockfile
+
+`kennel.lock` sits beside the leaf policy. It records, for every reference resolved while loading that policy (the inheritance chain and every include, transitively), one entry:
+
+```toml
+[[locked]]
+name = "ai-coding-strict"
+version = "v4"
+content_sha256 = "e8d3...<full hex>"
+signing_key_id = "kennel-maint-2026-01"
+
+[[locked]]
+name = "corp-egress-allowlist"
+version = "v2.33.2"
+content_sha256 = "91af...<full hex>"
+signing_key_id = "corp-policy-2026"
+```
+
+On load, the resolver recomputes each artefact's `content_sha256` and compares against the lockfile. A mismatch — same `(name, version)`, different bytes — is `PolicyError::LockMismatch`, naming the reference. The only sanctioned way to change a locked entry is `kennel upgrade`, which surfaces the content change for review before rewriting the lockfile.
+
+A policy committed to source control alongside its `kennel.lock` is a reproducible specification: resolving it against the same trust store yields byte-identical effective policy or a hard failure. A missing lockfile triggers first-resolution recording (trust-on-first-use); production deployments may require a present, matching lockfile via system configuration.
+
+---
+
+## Includes
+
+`include` is an array of versioned references to *fragments* — signed, version-pinned policy pieces composed additively into the effective policy. Fragments let cross-cutting policy (a corporate egress allowlist, a mandated audit baseline) be reused across templates that do not share an inheritance line.
+
+```toml
+template_base = "ai-coding-strict@v4"
+include = [
+    "corp-egress-allowlist@v2.33.2",
+    "corp-audit-baseline@v1.4.0",
+]
+```
+
+A fragment is structurally a template: same schema, same `[signature]` requirement, same parse/validate/verify/lock discipline. The difference is in what it may contain and how it composes:
+
+- **Additive-only.** A fragment may use `[[<section>.add]]` and `[[<section>.*.invariant]]`. It may *not* use `.remove`, `.replace`, or scalar `.override`. The validator rejects a fragment that does. Additive-only composition is order-independent and free of diamond-resolution ambiguity.
+- **No inheritance of its own resolution into the parent's chain.** A fragment may itself declare `template_base` only as `base-confined` (or none); it does not splice a competing inheritance line into the including policy. A fragment that names a non-base `template_base` is rejected.
+- **Conflict is an error, not last-wins.** If two includes contribute entries with the same unique key (e.g., two `[[net.allow]]` for the same host with different ports), resolution fails with `PolicyError::IncludeConflict` naming both fragments. The author reconciles deliberately.
+
+---
+
 ## Template inheritance
 
-A leaf policy and the template chain compose into an *effective* policy by the following rules.
+A leaf policy, its inheritance chain, and its includes compose into an *effective* policy by the following rules.
 
 ### Resolution order
 
-1. Start from the leaf policy.
-2. Read `template_base` and `template_version`. Locate that template; verify its signature.
-3. Recurse: that template may itself have a `template_base`. Resolve up to the root template (`base-confined`), which has no `template_base`.
-4. The chain is a linear list, root-first.
+1. Start from the leaf policy. Parse, validate, verify signature (if present), lock-check.
+2. Read `template_base` (a versioned reference). Resolve and verify it (§Resolution and verification of a reference).
+3. Recurse on that template's `template_base`. Resolve up to the root template (`base-confined`), which has no `template_base`. This yields the linear inheritance chain, root-first.
+4. Fold the inheritance chain into a base effective policy (root first, each child's deltas applied in turn).
+5. Resolve every `include` reference (of the leaf policy and of each template in the chain), verify and lock-check each, and apply them additively in listed order.
+6. Apply the leaf policy's own deltas last.
 
-The chain depth is bounded at 16 (see `INVARIANTS` below). A circular chain is rejected at parse time.
+The inheritance chain depth is bounded at 16 (see `INVARIANTS` below). The total number of resolved references (chain plus includes, transitively) is bounded at 64. A circular reference — in inheritance or in includes — is rejected at parse time, before any signature is verified.
 
 ### Composition
 
@@ -148,26 +227,26 @@ Framework invariants are declared in `schema/invariants.toml` and surfaced in `k
 
 ## Signatures
 
-Templates are signed. The signature envelope:
+Templates and fragments are signed. The signature covers the artefact's *content* — the substantive policy, not merely a filename or a version label — so that resolving a versioned reference (§Versioned references) yields exactly the bytes a trusted key signed for that version. The signature envelope:
 
 ```toml
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026-01"
 signature = "BASE64..."
-signed_fields = ["template_base", "template_version", ..., "lifecycle"]
+signed_fields = ["template_base", "include", ..., "lifecycle"]
 ```
 
-The signature is over the canonical-form serialisation of `signed_fields`, computed by the procedure documented in `02-6-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself.
+The signature is over the canonical-form serialisation of `signed_fields`, computed by the procedure documented in `02-6-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
 
 Signature verification rules:
 
-- The signing key must be in the configured key set (the project's maintainer keys, or the customer's organisation keys for self-signed templates).
+- The signing key must be in the configured key set (the project's maintainer keys, or the customer's organisation keys for self-signed templates and fragments). The key store is under `~/.config/kennel/keys/` and `/etc/kennel/keys/` (`07-paths.md`).
 - The `algorithm` must be in the supported algorithm set (currently: `ed25519`). Cryptographic minimums are enforced at validation; negotiation below the current floor is a categorical error.
-- The `signed_fields` list must cover every top-level field of the policy *except* `[signature]` itself; a template that signs only a subset of its fields is rejected.
-- A template whose signature does not verify is rejected even if the unverified fields are not consulted.
+- The `signed_fields` list must cover every top-level field of the artefact *except* `[signature]` itself — including `template_base` and `include`, so the reference's own dependency declarations are signed. An artefact that signs only a subset of its fields is rejected.
+- An artefact whose signature does not verify is rejected even if the unverified fields are not consulted.
 
-Leaf policies may be unsigned. The user wrote them; they are loaded under the user's authority. An organisation may require leaf-policy signing via a configured policy enforcer, but the schema does not mandate it.
+Leaf policies may be unsigned. The user wrote them; they are loaded under the user's authority. An organisation may require leaf-policy signing via a configured policy enforcer, but the schema does not mandate it. A leaf policy's `kennel.lock` still pins the signed artefacts it references, so an unsigned leaf composing signed templates and fragments is still byte-reproducible.
 
 ---
 
@@ -194,10 +273,11 @@ Substitution does not perform shell expansion: `$HOME` in a policy field is not 
 Policies live under `~/.config/kennel/`:
 
 - `~/.config/kennel/kennels/<name>.toml` — leaf policies.
-- `~/.config/kennel/templates/<name>-v<version>.toml` — local templates (cached or hand-installed).
-- `~/.config/kennel/keys/` — installed signing keys.
+- `~/.config/kennel/kennels/<name>.lock` — the lockfile beside each leaf policy.
+- `~/.config/kennel/templates/<name>@<version>.toml` — local templates and fragments (cached or hand-installed). The filename encodes the versioned reference, so multiple versions of one name coexist.
+- `~/.config/kennel/keys/` — installed signing keys (public only).
 
-System-installed templates live under `/etc/kennel/templates/`. The search order is leaf policy → user templates → system templates → built-in templates. A template at a higher-priority location shadows the same name at lower priority.
+System-installed templates and fragments live under `/etc/kennel/templates/`. The search order for resolving a `<name>@<version>` reference is: user templates → system templates → built-in templates. The exact version must be found; the resolver does not fall back to a different version of the same name (that would defeat the pin). A template at a higher-priority location shadows the *same `name@version`* at lower priority, and the shadowing is logged at load time.
 
 `07-paths.md` is authoritative for path locations.
 
@@ -224,8 +304,9 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 ## What this chapter does not cover
 
 - The field-by-field semantics of each section: see the corresponding design-document chapter (§7.x) or the worked example in [TEMPLATE-ai-coding-strict.md](../TEMPLATE-ai-coding-strict.md).
+- The design-level treatment of signing, versioned references, and includes: design doc §5.10.
 - The canonical-form serialisation procedure: `02-6-internal-api.md` (`kennel-policy::canonical`).
-- The signing-key store on disk: `07-paths.md`.
-- The mechanism by which template signatures are verified at runtime: `04-trust-boundaries.md`.
-- How `kennel diff` and `kennel upgrade` compute and present deltas: `02-1-cli.md`.
+- The signing-key store and lockfile locations on disk: `07-paths.md`.
+- The mechanism by which template and fragment signatures are verified at runtime, and how the lockfile is checked: `04-trust-boundaries.md`.
+- How `kennel diff` and `kennel upgrade` compute and present deltas, and how `upgrade` rewrites the lockfile: `02-1-cli.md`.
 - The `[audit]` schema in detail — sink selection, per-class levels, sink-specific parameters: `02-3-audit-schema.md`.

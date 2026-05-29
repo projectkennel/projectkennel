@@ -70,24 +70,25 @@ The validator rejects out-of-scope requests with the `out-of-scope` error code; 
 
 ---
 
-## 3. Untrusted template → signature verifier
+## 3. Untrusted template/fragment → signature verifier and lockfile
 
-**What crosses.** A claimed-template structure (already parsed, structurally valid TOML) and its signature envelope.
+**What crosses.** A versioned reference (`<name>@<version>`) from a `template_base` or an `include`, resolving to a claimed-template or claimed-fragment artefact (already parsed, structurally valid TOML) and its signature envelope.
 
-**Trusted side.** The signing-key set is trusted (it is installed under `~/.config/kennel/keys/` or `/etc/kennel/keys/`, owned by the user or root, mode 0644). Nothing else.
+**Trusted side.** The signing-key set is trusted (installed under `~/.config/kennel/keys/` or `/etc/kennel/keys/`, owned by the user or root, mode 0644). The lockfile (`kennel.lock`, beside the leaf policy, under the user's control) is trusted as the operator's recorded intent. Nothing else — not the artefact named by the reference, not its claimed version.
 
-**Validator.** `kennel-policy::signature`. The procedure:
+**Validator.** `kennel-policy::signature` and `kennel-policy::lock`. The procedure, for each resolved reference:
 
 - Algorithm must be in the supported set (`ed25519`). Cryptographic minimums are enforced at validation; negotiation below the current floor is a categorical error.
-- The `signed_fields` list must cover every top-level field of the template except `[signature]` itself. A template that signs only a subset of its fields is rejected, even if the unsigned subset is empty in this template — the rule is about the schema, not the instance.
-- The canonical-form serialisation of `signed_fields` is computed deterministically (procedure documented in `kennel-policy::canonical`); the signature is verified against that.
+- The `signed_fields` list must cover every top-level field of the artefact except `[signature]` itself — including `template_base` and `include`, so the artefact's own dependency declarations are signed. An artefact that signs only a subset of its fields is rejected; the rule is about the schema, not the instance.
+- The canonical-form serialisation of `signed_fields` is computed deterministically (`kennel-policy::canonical`); the signature is verified against it.
 - The signing key must be in the configured key set, identified by `key_id`.
+- The SHA-256 of the canonical-form content is checked against the lockfile entry for this `(name, version)`. On first resolution the entry is recorded; on subsequent resolution a mismatch is rejected. This is the byte-pin: version pinning alone constrains *which* artefact is named, the lockfile constrains *what bytes* are composed (the same reasoning as CODING-STANDARDS.md §5.5 for Rust crates).
 
-A template that fails signature verification is rejected; its content is not consulted further, regardless of which fields the unverified portion contains.
+An artefact that fails signature verification, or whose content hash does not match a present lockfile entry, is rejected; its content is not composed, regardless of which fields the unverified portion contains.
 
-**Failure mode.** `PolicyError::SignatureFailure` with the `key_id` (if recognised) and the reason. The template is not loaded; any policy that depends on it cannot be resolved.
+**Failure mode.** `PolicyError::SignatureFailure` (with `key_id` if recognised) or `PolicyError::LockMismatch` (naming the reference and both hashes). The artefact is not loaded; any policy that depends on it cannot be resolved. The only sanctioned way to change a locked entry is `kennel upgrade`, which surfaces the content change for review.
 
-**Threat IDs addressed.** T16 (template tampering).
+**Threat IDs addressed.** T16 (template tampering: a re-signed or re-tagged artefact under the same version is caught by the lockfile byte-pin; an artefact signed by an untrusted key is refused), and the supply-chain class generally — a versioned reference is a pin to signed bytes, not a name lookup against whatever sits at that name today.
 
 ---
 

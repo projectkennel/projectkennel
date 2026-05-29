@@ -24,12 +24,15 @@ User configuration. Created by the CLI on first use if absent.
 ~/.config/kennel/
 ├── kennels/                         leaf policy files (one per kennel)
 │   ├── ai-coding.toml
+│   ├── ai-coding.lock               lockfile beside each leaf policy
 │   ├── web-dev.toml
+│   ├── web-dev.lock
 │   └── ...
-├── templates/                       user-installed templates (cached or hand-installed)
-│   ├── ai-coding-strict-v4.toml
+├── templates/                       user-installed templates and fragments
+│   ├── ai-coding-strict@v4.toml     filename encodes the versioned reference
+│   ├── corp-egress-allowlist@v2.33.2.toml
 │   └── ...
-├── keys/                            installed signing keys
+├── keys/                            installed signing keys (public only)
 │   ├── kennel-maint-2026-01.pub
 │   ├── customer-org-key.pub
 │   └── ...
@@ -38,7 +41,7 @@ User configuration. Created by the CLI on first use if absent.
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-The `kennels/<name>.toml` filename and the policy's `name = "<name>"` field must match; the loader rejects on mismatch.
+The `kennels/<name>.toml` filename and the policy's `name = "<name>"` field must match; the loader rejects on mismatch. The `kennels/<name>.lock` lockfile sits beside its policy and records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
 
 ### `~/.local/state/kennel/<kennel>/`
 
@@ -184,14 +187,13 @@ Distributions may relocate by setting `KENNEL_LIBEXEC_DIR` at build time. The de
 
 ## Templates and template search
 
-Template search order (highest priority first):
+A versioned reference (`<name>@<version>`, `02-2-config-schema.md`) resolves against this search order (highest priority first):
 
-1. Per-kennel leaf policy's own `template_base` resolution path, if it is absolute.
-2. `~/.config/kennel/templates/<name>-v<version>.toml` (user-installed).
-3. `/etc/kennel/templates/<name>-v<version>.toml` (system-installed).
-4. Built-in templates compiled into the `kennel` binary (`base-confined` only, at present).
+1. `~/.config/kennel/templates/<name>@<version>.toml` (user-installed).
+2. `/etc/kennel/templates/<name>@<version>.toml` (system-installed).
+3. Built-in templates compiled into the `kennel` binary (`base-confined` only, at present).
 
-A template at a higher-priority location shadows the same name at lower priority. The shadowing is logged at policy-load time so the operator can detect surprises.
+The resolver requires the *exact* `<name>@<version>`; it does not fall back to a different version of the same name, since that would defeat the pin. A given `<name>@<version>` at a higher-priority location shadows the identical reference at lower priority; the shadowing is logged at policy-load time so the operator can detect surprises. The resolved artefact's signature is verified and its content hash checked against the leaf policy's lockfile before composition (`04-trust-boundaries.md` boundary 3).
 
 ---
 

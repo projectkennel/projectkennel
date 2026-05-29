@@ -47,6 +47,8 @@ template_name = "ai-coding-strict"
 
 `template_version` is a quoted string by convention even though its values are integers; this allows future use of non-integer suffixes (e.g. `"4-rc1"`) without breaking the schema.
 
+The two-field form shown here (a `template_base`/`template` name plus a separate version field) is the original form and remains accepted. The canonical form, and what `kennel` emits, is the combined version-pinned reference `template_base = "ai-coding-strict@v4"`; references carry their version inline and bind to signed content. See §5.10.
+
 The remainder of `policy.toml` is the template's full policy, expressed as direct rules and as deltas from the base template (§5.3). Project Kennel's compiler resolves the inheritance chain at policy load time and produces a single flat effective policy.
 
 A user's leaf policy lives outside the template directory, typically in `~/.config/kennel/kennels/<name>.toml`:
@@ -264,6 +266,8 @@ User policies are leaf nodes in the inheritance tree. A user policy extends one 
 
 If a team needs a shared baseline beyond what the official templates provide, the right answer is an organisation-managed template (§5.15) with its own signing, versioning, and review process, not a user policy that other developers extend.
 
+Inheritance is the single-parent backbone. Cross-cutting policy fragments that several unrelated templates need to share (a corporate egress allowlist, a mandated audit configuration) are composed through *includes* rather than through a contrived inheritance hierarchy. Includes are version-pinned, signed, and additive-only; they are described in §5.10.
+
 ## 5.9 Template-level constructs
 
 Three template-author tools deserve specific mention because they appear in the worked template but are not policy primitives in the §7 sense — they are template-level mechanisms that map onto multiple policy elements.
@@ -323,19 +327,80 @@ Project Kennel's spawn flow recognises the per-kennel service pattern and launch
 
 The same pattern applies to per-kennel gpg-agent, per-kennel keyring daemons, and similar. Templates declare the service; Project Kennel handles the lifecycle.
 
-## 5.10 Signing and trust
+## 5.10 Signing, versioned references, and includes
 
-Templates in Project Kennel repo are signed. The signing mechanism is one of:
+Templates are signed, and references to them are version-pinned. These two properties are inseparable: a reference names a *specific signed version*, and resolving the reference verifies that the bytes about to be composed into the effective policy are exactly the bytes a trusted key signed for that version. A reference that names a version without binding to its signed content is not a supply-chain control — it is trust-on-first-use against whatever happens to sit at that name today.
 
-- **Git tag with verified signature.** Maintainers tag template versions; users verify the signature on update.
-- **Sigstore.** Per-version artefact signature, transparency log.
-- **In-tree signature blob.** Each template version carries a signature file verifiable against the maintainers' published keys.
+### Versioned reference syntax
 
-Whichever mechanism, the validator warns when a user policy references an unsigned template. CI verifies that every committed template version has a valid signature.
+Every reference to a template or fragment carries its version inline, as `<name>@<version>`:
 
-For organisation-specific templates, the same mechanism applies with the organisation's signing key. Users in that organisation install the org's public key into Project Kennel's trust store at `~/.config/kennel/trust/`. Organisations can also require, via system-wide configuration, that policies derive only from templates signed by specific keys.
+```toml
+template_base = "ai-coding-strict@v4"
+```
 
-Project Kennel refuses to load templates with invalid signatures. Project Kennel warns but does not refuse on *missing* signatures (the development workflow needs to support unsigned local templates); production deployments configure Project Kennel to require signatures, via a settings flag that organisations push to managed workstations.
+The `@v4` is part of the reference, not a separate field. A reference without a version is rejected by the validator (production mode) or resolved to the highest locally-installed version with a warning (development mode). The earlier two-field form (`template = "ai-coding-strict"` with a separate `template_version = "4"`, §5.2) remains accepted for backward compatibility, but the combined form is canonical and is what `kennel` emits when it writes policies.
+
+Versions are semver-shaped: `v4`, `v4.2`, `v2.33.2`. The leading `v` is required. Ordering follows semver; `kennel upgrade` (§5.11) uses it to detect newer versions.
+
+### The signature covers the content
+
+A template version is a *signed artefact*. The signature envelope (the `[signature]` block, detailed in the architecture's config-schema chapter) covers the canonical-form serialisation of the template's substantive content — the policy rules, the invariants, the threat tags, the inheritance and include references. The "meat" is signed, not merely a filename or a version label.
+
+This means a reference `ai-coding-strict@v4` resolves successfully only if:
+
+1. An artefact named `ai-coding-strict` at version `v4` is found in the search path.
+2. Its embedded signature verifies against a key in the trust store.
+3. The signed content covers every substantive field (a template that signs only a subset of its fields is rejected — the rule is about the schema, not the instance).
+
+A template whose signature does not verify is refused, regardless of whether the unverified fields are consulted.
+
+### Byte-pinning: the lockfile
+
+Version pinning constrains *which* version is referenced. It does not, on its own, constrain *what bytes* live under that version — a maintainer could re-tag `v4` to different content, or a compromised distribution channel could serve different bytes under the same version signed by a different still-trusted key. This is the same gap the project's dependency policy addresses for Rust crates (CODING-STANDARDS.md §5.5: "pinning a version constrains which crate Cargo resolves to; it does not constrain what bytes live under that name"). Templates get the same treatment.
+
+Project Kennel maintains a lockfile, `kennel.lock`, recording for each resolved reference:
+
+- The name and version.
+- The SHA-256 of the resolved artefact's signed content.
+- The signing key ID that the signature verified against.
+
+On every subsequent load, the resolver recomputes the artefact's content hash and checks it against the lockfile. A mismatch — same version, different bytes — is a hard error, not a warning. The lockfile is the transition from trust-on-first-use (the first time a reference is resolved and recorded) to trust-pinned (every load thereafter). `kennel upgrade` is the only sanctioned way to change a locked entry, and it surfaces the content change for review.
+
+The lockfile lives beside the leaf policy and is committed to source control by teams who keep their kennel policies in a repository. A policy plus its lockfile is a reproducible specification: anyone resolving the same policy against the same trust store gets byte-identical effective policy, or a hard failure.
+
+### Includes
+
+Inheritance (§5.8) is single-line: one parent, no diamonds. It is the backbone for "this template is a stricter/looser variant of that one." But organisations frequently have *cross-cutting* policy fragments they want to reuse across unrelated templates — a corporate egress allowlist, a mandated audit configuration, a set of denied credential paths specific to the organisation. Expressing these through single-line inheritance would force an artificial hierarchy.
+
+Includes are the mechanism. A template (or a leaf policy) may pull in additional signed, version-pinned fragments:
+
+```toml
+template_base = "ai-coding-strict@v4"
+include = [
+    "corp-egress-allowlist@v2.33.2",
+    "corp-audit-baseline@v1.4.0",
+]
+```
+
+Each include is a versioned reference resolved and signature-verified exactly as `template_base` is, and byte-pinned in the lockfile exactly the same way. Included fragments are *additive*: they may add rules (`[[<section>.add]]`) and mark invariants (`[[<section>.*.invariant]]`), but they may not remove or override rules. This restriction is deliberate — additive-only composition is order-independent and free of diamond-resolution ambiguity. A fragment that needs to remove or override belongs in the inheritance chain, not in an include.
+
+Resolution order is defined and strict:
+
+1. Resolve the inheritance chain (single parent line) to a base effective policy.
+2. Apply each include in listed order, additively.
+3. Apply the including template's (or leaf policy's) own deltas.
+
+If two includes contribute conflicting entries for the same unique key (e.g., two different `[[net.allow]]` blocks for the same host with different ports), resolution fails with an explicit conflict error. Conflicts are not resolved by last-wins; the policy author must reconcile them deliberately, by editing one fragment's scope or by moving the rule into the leaf policy where the intent is explicit.
+
+### Trust store and enforcement
+
+Signing keys live in the trust store: `~/.config/kennel/keys/` for user-installed keys, `/etc/kennel/keys/` for system-installed (organisation) keys. Public keys only; private signing keys are never in these trees.
+
+- The project's maintainer keys ship with the package and verify the official template set.
+- Organisations install their own keys and sign their own templates and fragments. Organisations can require, via system-wide configuration, that policies derive only from templates and includes signed by specific keys — an attacker who installs a malicious template signed by an untrusted key cannot have it loaded.
+
+Project Kennel refuses to load any template or include whose signature is invalid. It warns but does not refuse on *missing* signatures in development mode (local unsigned templates are part of the authoring workflow); production deployments set a settings flag, pushed to managed workstations, that turns missing-signature into a hard refusal. CI verifies that every committed template and fragment version carries a valid signature and that its lockfile entry matches.
 
 ## 5.11 Versioning and upgrade
 
