@@ -25,8 +25,10 @@ User configuration. Created by the CLI on first use if absent.
 ├── kennels/                         leaf policy files (one per kennel)
 │   ├── ai-coding.toml
 │   ├── ai-coding.lock               lockfile beside each leaf policy
+│   ├── ai-coding.settled.json       compiled settled policy (dev mode)
 │   ├── web-dev.toml
 │   ├── web-dev.lock
+│   ├── web-dev.settled.json
 │   └── ...
 ├── templates/                       user-installed templates and fragments
 │   ├── ai-coding-strict@v4.toml     filename encodes the versioned reference
@@ -41,7 +43,7 @@ User configuration. Created by the CLI on first use if absent.
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-The `kennels/<name>.toml` filename and the policy's `name = "<name>"` field must match; the loader rejects on mismatch. The `kennels/<name>.lock` lockfile sits beside its policy and records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
+The `kennels/<name>.toml` filename and the policy's `name = "<name>"` field must match; the loader rejects on mismatch. The `kennels/<name>.lock` lockfile sits beside its policy and records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). The `kennels/<name>.settled.json` is the compiled settled policy in development mode — what `kennel run` actually enforces (`02-2-config-schema.md` §The settled policy); it is regenerated when the source or lockfile changes. Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
 
 ### `~/.local/state/kennel/<kennel>/`
 
@@ -114,18 +116,24 @@ System configuration. Installed by the package; managed by the administrator.
 
 ```
 /etc/kennel/
-├── templates/                       system-installed templates
-│   ├── base-confined-v3.toml
-│   ├── ai-coding-strict-v4.toml
+├── templates/                       system-installed templates and fragments
+│   ├── base-confined@v3.toml
+│   ├── ai-coding-strict@v4.toml
 │   └── ...
-├── keys/                            project signing keys (shipped with the package)
+├── settled/                         fleet-pushed signed settled policies (attested mode)
+│   ├── ai-coding.settled.json
+│   └── ...
+├── keys/                            project + org signing keys (shipped or pushed)
 │   ├── kennel-maint-2026-01.pub
+│   ├── corp-policy-2026.pub
 │   └── ...
 ├── audit.toml                       installation-wide audit-sink defaults
 └── kennel.conf                      project-wide configuration (tag byte, ULA prefix, kernel-feature overrides)
 ```
 
 Owner: root. Mode: directory `0755`, files `0644`. The `keys/` directory holds public keys only; private keys are not in this tree.
+
+In an attested deployment, `settled/` holds the signed settled policies pushed by the organisation's central compile infrastructure. The workstation enforces these directly (`02-2-config-schema.md` §The settled policy); it need not hold the `templates/`, the lockfiles, or exercise the resolver. `kennel run` verifies the settled policy's signature against a key in `keys/` and spawns.
 
 The `kennel.conf` file pins per-installation settings that are stable for the life of the installation: the `<tag>` byte for IPv4 loopback allocation, the IPv6 ULA `/48` prefix, the path to the privhelper binary, optional overrides for kernel-feature detection (used when an environment under-reports its capabilities).
 

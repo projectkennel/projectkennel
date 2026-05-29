@@ -92,7 +92,7 @@ A confined adversary may probe for misconfigurations. Probes Project Kennel shou
 - **Filesystem path enumeration.** A kennel that `stat()`s many denied paths in sequence (probing for what's accessible) is suspicious. Landlock denies; Project Kennel records.
 - **Capability probing.** A kennel that calls `capget()` is observing the dropped capability set. Allowed but noted.
 
-Project Kennel does not actively respond to probes (no automatic kennel termination, no escalation). Detection and logging is Project Kennel's role; response is the user's decision. Templates may set thresholds in monitoring config that, when exceeded, trigger user-facing alerts via the audit log shipping mechanism (§9.10).
+Project Kennel does not actively respond to probes (no automatic kennel termination, no escalation). Detection and logging is Project Kennel's role; response is the user's decision. Templates may set thresholds in monitoring config that, when exceeded, trigger user-facing alerts via the audit log shipping mechanism (§9.11).
 
 ## 10.7 The user as failure mode
 

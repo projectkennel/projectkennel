@@ -162,7 +162,70 @@ Project Kennel does not provide an SDK for this; the policy file format is strai
 
 This is also how organisations can centrally manage policies: a CI job in the org's policy repo generates per-developer per-project policies from a template plus a manifest of projects, signs them, and pushes them to developer workstations.
 
-## 9.10 Audit log uses
+## 9.10 Compilation and the settled policy
+
+Everything described so far — template inheritance, includes, deltas, signature verification, lockfile byte-pinning, invariant checks, variable substitution — is *resolution* work. A naive implementation does all of it every time a kennel starts: parse the leaf policy, walk the inheritance chain, verify each template's and fragment's signature, check the lockfile, merge includes, apply deltas, validate invariants, substitute variables, and only then have an effective policy to enforce. That is a great deal of complex code (TOML parsing of arbitrary templates, chain-walking, glob handling, include conflict resolution, cryptographic verification) running on the hot path of every `kennel run`.
+
+Project Kennel does not work this way. It compiles.
+
+The systems Project Kennel is measured against already do this. AppArmor authors a text profile and `apparmor_parser` compiles it into a binary policy loaded into the kernel; the text is never consulted at enforcement time. SELinux compiles a monolithic binary policy from source modules. The authored artefact and the enforced artefact are different things, and the compile step is where the expensive, fallible, security-critical work happens — once, deliberately — rather than on every enforcement.
+
+### The settled policy
+
+`kennel compile` takes a leaf policy and produces a **settled policy**: a flat, fully-resolved document in which the inheritance chain has been folded, includes have been merged, deltas have been applied, and every source signature and lockfile pin has been verified. The settled policy contains no `template_base`, no `include`, no delta operators — only the final effective rules. It is signed as a unit by the compiling authority.
+
+The division of labour:
+
+**Compile time (`kennel compile`, run once per policy revision):**
+
+- Parse the leaf policy and resolve the full inheritance chain.
+- Resolve and merge all includes; detect and reject conflicts.
+- Apply all deltas.
+- Verify the signature of every source template and fragment against the trust store.
+- Check every resolved artefact's content hash against the lockfile.
+- Validate framework and template invariants.
+- Validate threat tags against the catalogue.
+- Substitute the *installation-constant* variables (`<tag>`, `<gid>`).
+- Emit the settled policy and sign it.
+
+**Run time (`kennel run`, every spawn):**
+
+- Verify *one* signature, over the settled policy, against the trust store.
+- Re-assert framework invariants (see below).
+- Substitute the *per-instance* variables (`<ctx>`, `<uid>`, `<kennel>`, `<home>`).
+- Build the kernel objects (Landlock ruleset, BPF maps, mount plan) and spawn.
+
+The spawn path links none of the template machinery. It does not parse templates, walk chains, resolve includes, or apply deltas. The complex code runs at compile time, in a context where the operator can review the output; the runtime consumes a settled artefact whose shape is fixed and simple.
+
+### What stays deferred
+
+Not every variable can be baked in at compile time. Some are intrinsically per-kennel-instance:
+
+- `<ctx>` is assigned by kenneld when the kennel starts, and differs between concurrent kennels deriving from the same settled policy.
+- `<uid>`, `<home>` are per-user; a settled policy distributed to a fleet is the same for every recipient.
+- `<kennel>` for ad-hoc kennels is generated at start.
+
+These are recorded in the settled policy as an explicit `deferred_substitutions` list. The runtime substitutes exactly those, and refuses to spawn if any *other* unsubstituted placeholder remains — a settled policy that somehow carries an un-deferred, un-substituted variable is a compile bug, caught at spawn rather than enforced wrong.
+
+### Framework invariants are re-asserted at runtime
+
+A valid signature on a settled policy means a trusted key vouched for it. It does not, on its own, mean the policy upholds Project Kennel's structural guarantees — those guarantees are Project Kennel's, not the signer's. So the runtime re-asserts the framework invariants (§5.5) on the settled policy as a final gate: `no_new_privs`, the setuid/setgid/setcap denials, the mandatory `$HOME` shim, the cloud-metadata denies, the PID namespace, the SOCKS5-proxy-only egress. These checks are cheap (a handful of structural assertions) and they hold regardless of who signed the artefact or how it arrived. A validly-signed settled policy that violates a framework invariant is refused.
+
+This is the one place runtime deliberately repeats compile-time work. It is worth it: it means no policy — however it was produced, whatever key signed it, whether it arrived by compile or by fleet push — can disable the protections that define what a kennel *is*.
+
+### Two operating modes
+
+**Local development.** A developer iterating on a policy does not want a manual compile step in the edit-run loop. `kennel run` of a source policy auto-compiles in memory when no fresh settled artefact exists, seals the result by content hash (and the lockfile), marks it a development build, and runs it. Staleness is detected by comparing the settled policy's provenance (the hashes of its inputs) against the current source; a changed input triggers recompilation. The loop stays tight; the developer rarely types `kennel compile` explicitly.
+
+**Fleet / attested deployment.** An organisation compiles policies centrally — in CI, on infrastructure that holds the templates, the fragments, the lockfiles, and the signing key — and pushes *only the signed settled policies* to developer workstations. The workstation need not have the templates, the lockfile, or even the resolution code paths exercised. `kennel run` verifies the organisation's signature on the settled policy, re-asserts framework invariants, and spawns. The runtime trust surface on the workstation is reduced to a single signature verification against a pinned key.
+
+This is the foundation for the attestation capability described in the executive summary: a workstation can demonstrate that it is running an approved, signed policy revision, because the settled policy it enforces is exactly the artefact the organisation signed, identified by content hash, with no live resolution that could diverge.
+
+### Provenance
+
+The settled policy carries a provenance block recording the hashes of every input that produced it: the leaf policy, each resolved template and fragment (by `name@version` and content hash, lifted from the lockfile), the schema version, the invariant set, the threat-catalogue version, the installation constants baked in, and the compiler version. The settled policy is therefore self-describing — anyone can read exactly which signed source artefacts, at which versions and bytes, were composed to produce it, without needing those sources present. `kennel diff` can diff two settled policies directly, and can show the provenance delta between revisions.
+
+## 9.11 Audit log uses
 
 The structured audit log per kennel (§8.6) supports several downstream uses beyond debugging:
 
@@ -173,7 +236,7 @@ The structured audit log per kennel (§8.6) supports several downstream uses bey
 
 The log format is stable across Project Kennel versions (schema_version field). Tools that parse it can rely on the structure.
 
-## 9.11 Compliance and regulatory considerations
+## 9.12 Compliance and regulatory considerations
 
 For regulated industries (finance, healthcare, government), Project Kennel's audit infrastructure can support compliance demonstrations:
 

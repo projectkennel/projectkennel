@@ -19,31 +19,35 @@ The full workspace layout — directory structure, dependency graph, build featu
 **Purpose.** Parsing, template inheritance, signature verification, invariant validation for the policy TOML schema.
 
 **Public surface.**
-- `Policy` — the resolved policy (post template-chain, post invariant checks).
+- `Policy` — the resolved (in-memory) policy (post template-chain, post invariant checks). An intermediate produced during compilation, not the runtime artefact.
+- `SettledPolicy` — the flat, signed, runtime artefact (`02-2-config-schema.md` §The settled policy). What `kennel-spawn` consumes.
 - `RawPolicy` — the parsed-but-unresolved single file. Used by tooling that wants to inspect one file without resolution.
 - `TemplateChain` — the ordered set of templates a leaf policy inherits from.
-- `PolicyError` — every failure mode (parse, missing template, signature failure, invariant violation, …).
-- `resolve(leaf: &Path, search_paths: &[PathBuf]) -> Result<Policy, PolicyError>`.
+- `PolicyError` — every failure mode (parse, missing template, signature failure, lockfile mismatch, include conflict, invariant violation, …).
+- `resolve(leaf: &Path, search_paths: &[PathBuf]) -> Result<Policy, PolicyError>` — chain-walk, include-merge, delta-apply, source-signature and lockfile verification.
+- `compile(leaf: &Path, search_paths: &[PathBuf], install_constants: &InstallConstants) -> Result<SettledPolicy, PolicyError>` — resolve, validate invariants, substitute installation constants, produce the unsigned settled document.
+- `sign_settled(settled: &SettledPolicy, key: &SigningKey) -> SignedSettledPolicy`.
+- `verify_settled(bytes: &[u8], key_set: &KeySet) -> Result<SettledPolicy, PolicyError>` — the runtime entry point: one signature verification, schema-version check. (Framework-invariant re-assertion lives in `kennel-spawn`, which owns the spawn-refusal path.)
 - `validate(policy: &Policy) -> Result<(), Vec<InvariantViolation>>`.
 - `verify_signature(envelope: &SignatureEnvelope, key_set: &KeySet) -> Result<(), SignatureError>`.
 
-**Depends on.** `kennel-text` (sanitisation), `kennel-syscall` (canonical-path resolution), `serde`, `toml`, `ed25519-dalek` (or equivalent vetted cryptography crate).
+**Depends on.** `kennel-text` (sanitisation), `kennel-syscall` (canonical-path resolution), `serde`, `toml`, `serde_json` (settled-policy canonical JSON), `ed25519-dalek` (or equivalent vetted cryptography crate).
 
-**Depended on by.** Every other crate that reads policy: `kennel-spawn`, `kennel-cli`, `kenneld`, `kennel-bpf` (loader side).
+**Depended on by.** Every other crate that reads policy: `kennel-spawn` (consumes `SettledPolicy`), `kennel-cli` (`kennel compile` calls `compile`/`sign_settled`), `kenneld`, `kennel-bpf` (loader side).
 
-**Notes.** This crate's public surface is the largest and most-consumed in the workspace. Changes here propagate widely.
+**Notes.** This crate's public surface is the largest and most-consumed in the workspace. Changes here propagate widely. The `resolve`/`compile` path (heavy: parsing arbitrary templates, chain-walking, crypto) is exercised at compile time; the `verify_settled` path (light: one signature) is what runs on every spawn.
 
 ### `kennel-spawn`
 
-**Purpose.** Translates a resolved `Policy` into the actual setup sequence: namespaces, mounts, Landlock ruleset, seccomp BPF, capability drop, `PR_SET_NO_NEW_PRIVS`, environment construction, `execve`.
+**Purpose.** Translates a verified `SettledPolicy` into the actual setup sequence: framework-invariant re-assertion, per-instance substitution, namespaces, mounts, Landlock ruleset, seccomp BPF, capability drop, `PR_SET_NO_NEW_PRIVS`, environment construction, `execve`. It consumes settled policies, not source policies — it does not link the template/resolution machinery.
 
 **Public surface.**
 - `Spawn` — builder for the spawn sequence.
 - `Workload` — handle to a spawned workload (PID, control handle).
-- `spawn(policy: &Policy, command: &Command, env: Env, ...) -> Result<Workload, SpawnError>`.
-- `SpawnError` variants for every failure point in the sequence.
+- `spawn(settled: &SettledPolicy, runtime_subst: &RuntimeSubstitutions, command: &Command, env: Env, ...) -> Result<Workload, SpawnError>`.
+- `SpawnError` variants for every failure point, including `SettledSignatureFailure`, `FrameworkInvariantViolated`, `UnsubstitutedPlaceholder` (boundary 13 in `04-trust-boundaries.md`).
 
-**Depends on.** `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-audit`, optionally `bubblewrap-sys` (build-time feature flag — see `03-crate-decomposition.md`).
+**Depends on.** `kennel-policy` (for `SettledPolicy` and `verify_settled`), `kennel-syscall`, `kennel-bpf`, `kennel-audit`, optionally `bubblewrap-sys` (build-time feature flag — see `03-crate-decomposition.md`).
 
 **Depended on by.** `kennel-cli` (CLI's spawn path), `kenneld` (when kenneld performs the spawn on the CLI's behalf — currently the CLI does it itself, but the option exists).
 

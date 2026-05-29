@@ -22,8 +22,11 @@ The discipline itself — *what* sanitisation looks like — is in CODING-STANDA
 | 10 | Kernel-side string → audit log | bytes from `task->comm`, paths → sanitised text | `kennel-audit` (sanitiser) |
 | 11 | Network bytes → DNS resolver | resolver response → allowlist decision | `kennel-netproxy` |
 | 12 | Workload → audit log files | file system access to its own audit dir | constructed shim (no access by default) |
+| 13 | Settled policy → runtime | signed settled artefact → enforced policy | `kennel-spawn` (settled verifier) |
 
 Each boundary is described in its own section below. The descriptions follow a common shape: what crosses, what is trusted on each side, what the validator does, what the failure mode is.
+
+**Compile-time vs runtime.** Boundaries 2 and 3 (policy parsing, template/fragment signature and lockfile verification) are *compile-time* boundaries — they are crossed when `kennel compile` resolves a source policy into a settled policy (`02-2-config-schema.md` §The settled policy). Boundary 13 is the *runtime* boundary: what the spawn path trusts when it enforces a settled policy. In an attested fleet deployment, the workstation crosses only boundary 13 (plus the operational ones, 4–12); boundaries 2 and 3 were crossed earlier, centrally, at compile time. This is the point of compilation — the complex, fallible parsing-and-verification surface is exercised once at compile time, not on every spawn.
 
 ---
 
@@ -50,6 +53,8 @@ The validator rejects out-of-scope requests with the `out-of-scope` error code; 
 
 ## 2. Disk → policy parser
 
+*Compile-time boundary: crossed by `kennel compile` when resolving a source policy, not on the spawn path. In attested deployments this is crossed centrally, not on the workstation.*
+
 **What crosses.** TOML bytes from a policy file, a template, or a leaf delta.
 
 **Trusted side.** The parser does not trust the file contents. The file may have been written by an attacker-influenced AI agent, may have been tampered with on disk, may have been sync'd from a compromised source.
@@ -71,6 +76,8 @@ The validator rejects out-of-scope requests with the `out-of-scope` error code; 
 ---
 
 ## 3. Untrusted template/fragment → signature verifier and lockfile
+
+*Compile-time boundary: crossed by `kennel compile`, not on the spawn path. The resolved artefacts' hashes are recorded in the settled policy's provenance block; the runtime does not re-verify source signatures.*
 
 **What crosses.** A versioned reference (`<name>@<version>`) from a `template_base` or an `include`, resolving to a claimed-template or claimed-fragment artefact (already parsed, structurally valid TOML) and its signature envelope.
 
@@ -255,6 +262,27 @@ If an operator's policy explicitly grants the workload read access to its audit 
 **Failure mode.** Attempted access from inside the kennel resolves to `ENOENT` (path not in view).
 
 **Threat IDs addressed.** T1 (recon: workload cannot learn what is being audited), T13 (anti-forensics: workload cannot tamper with audit data).
+
+---
+
+## 13. Settled policy → runtime
+
+**What crosses.** A signed settled policy (`02-2-config-schema.md` §The settled policy) into the spawn path that enforces it.
+
+**Trusted side.** The trust store (the signing keys). Nothing else — not the settled artefact's claim to be valid, not its provenance block, not the `framework_invariants_asserted` list it carries.
+
+**Validator.** `kennel-spawn`'s settled-policy verifier:
+
+1. Verify the settled policy's `signature` against the trust store. One verification. In attested deployments this is the *only* signature check at runtime; the source-artefact signatures (boundary 3) were verified at compile time and are recorded in the provenance block, not re-verified here.
+2. Check `settled_schema_version` is in the supported range.
+3. **Re-assert framework invariants** against `effective_policy`, regardless of the signature and regardless of `framework_invariants_asserted`. Framework invariants are Project Kennel's structural guarantees, not the signer's; a validly-signed settled policy that violates one is refused. The checks are a handful of structural assertions (`no_new_privs`, deny-setuid/setgid/setcap, mandatory shim, cloud-metadata denies, PID namespace, proxy-only egress) and are cheap.
+4. Substitute the `deferred_substitutions` with per-instance values; refuse if any other unsubstituted placeholder remains in `effective_policy`.
+
+**Trust reduction.** This boundary is deliberately narrow. The spawn path links none of the template machinery — no TOML template parsing, no chain-walking, no include resolution, no delta application, no source-signature verification. Those crossed boundary 3 at compile time. The runtime trusts one signature and re-checks the structural invariants. On a fleet workstation that holds only settled policies, this is the entire policy-trust surface.
+
+**Failure mode.** `SpawnError::SettledSignatureFailure`, `SpawnError::SettledSchemaUnsupported`, `SpawnError::FrameworkInvariantViolated` (naming the invariant), or `SpawnError::UnsubstitutedPlaceholder` (naming the placeholder). The spawn is refused; no workload runs.
+
+**Threat IDs addressed.** T16 and T17 at runtime (a tampered or invariant-weakening settled policy is refused by signature check and invariant re-assertion respectively); supports the attestation capability (the workstation enforces exactly the signed artefact, identified by content hash, with no live resolution that could diverge).
 
 ---
 

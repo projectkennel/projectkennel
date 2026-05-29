@@ -301,6 +301,83 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 
 ---
 
+## The settled policy (compilation)
+
+The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
+
+The split: all resolution (chain-walking, include merging, delta application, source-signature verification, lockfile byte-checks, invariant and threat-tag validation, installation-constant substitution) happens at compile time. The spawn path verifies one signature, re-asserts framework invariants, fills per-instance substitution slots, and builds kernel objects. It links none of the template machinery.
+
+### Stability
+
+The settled policy is an **internal-stable** surface per `02-0-overview.md`, with one external consumer: fleet/attestation tooling that distributes and verifies settled policies. It carries an explicit `settled_schema_version` integer. The compiler and the runtime within one release agree; across releases, the runtime accepts settled-policy schema versions back to the start of the current major version. Fleet tooling reads `settled_schema_version` and the `provenance` block; those two are treated as stable for the major version.
+
+### Format
+
+The settled policy is a canonical JSON document (not TOML — it is machine-produced and machine-consumed, never hand-edited). Canonical JSON is deterministic (sorted keys, normalised numbers, no insignificant whitespace) so the document hashes and signs reproducibly.
+
+Top-level structure:
+
+```json
+{
+  "settled_schema_version": 1,
+  "name": "ai-coding",
+  "effective_policy": { ...flat resolved policy, every section, final values... },
+  "deferred_substitutions": ["<ctx>", "<uid>", "<kennel>", "<home>"],
+  "framework_invariants_asserted": [ ...invariant ids the compiler checked... ],
+  "provenance": {
+    "leaf_policy_sha256": "...",
+    "resolved_artifacts": [
+      { "name": "base-confined", "version": "v3", "content_sha256": "...", "signing_key_id": "kennel-maint-2026-01" },
+      { "name": "ai-coding-strict", "version": "v4", "content_sha256": "...", "signing_key_id": "kennel-maint-2026-01" },
+      { "name": "corp-egress-allowlist", "version": "v2.33.2", "content_sha256": "...", "signing_key_id": "corp-policy-2026" }
+    ],
+    "schema_version": 1,
+    "invariant_set_sha256": "...",
+    "threat_catalogue_version": "0.1",
+    "install_constants": { "tag": 42, "ula_gid": "..." },
+    "compiler_version": "0.4.2"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "corp-policy-2026",
+    "signature": "BASE64..."
+  }
+}
+```
+
+- `effective_policy` is the resolved policy: no `template_base`, no `include`, no delta operators (`.add`/`.remove`/`.override`/`.invariant`), only final rule sets. Installation-constant variables (`<tag>`, `<gid>`) are already substituted.
+- `deferred_substitutions` lists the per-instance placeholders the runtime must fill. The runtime substitutes exactly these and refuses to spawn if any *other* unsubstituted placeholder is found in `effective_policy`.
+- `framework_invariants_asserted` records which framework invariants the compiler validated. The runtime re-asserts them regardless (defence in depth, §below); the list is for audit, not for the runtime to trust.
+- `provenance` makes the artefact self-describing: every input that produced it, by hash. `resolved_artifacts` embeds the relevant lockfile entries, so the settled policy records exactly which signed source bytes were composed, without those sources needing to be present at runtime.
+- `signature` is over the canonical-form serialisation of every field except `signature` itself, by the compiling authority's key (`kennel-policy::canonical`, the same procedure as source signatures).
+
+### Runtime consumption
+
+`kennel run` against a settled policy:
+
+1. Verify `signature` against the trust store. One verification; failure refuses the spawn.
+2. Check `settled_schema_version` is in the supported range.
+3. Re-assert framework invariants against `effective_policy` (see below). Failure refuses the spawn.
+4. Substitute the `deferred_substitutions` with per-instance values; refuse if any other placeholder remains.
+5. Build the Landlock ruleset, BPF maps, and mount plan from `effective_policy`; spawn.
+
+### Framework invariants re-asserted at runtime
+
+A valid signature means a trusted key vouched for the artefact; it does not mean the artefact upholds Project Kennel's structural guarantees, which are Project Kennel's and not the signer's. The runtime re-asserts the framework invariants (the same set in §Framework invariants above) on `effective_policy` as step 3, regardless of the signature. The checks are a handful of structural assertions and are cheap. A validly-signed settled policy that violates a framework invariant is refused.
+
+This is the one place the runtime deliberately repeats compile-time work, and it is the property that lets the project state: no policy, however produced and whatever key signed it, can disable the protections that define a kennel.
+
+### Two modes
+
+- **Local development.** `kennel run` of a source policy auto-compiles in memory when no fresh settled artefact exists, seals the result by content hash plus lockfile, marks it a dev build, and runs it. Staleness is detected by comparing the settled policy's `provenance` hashes against the current source inputs; a mismatch triggers recompilation. `kennel compile` may also be run explicitly.
+- **Fleet / attested.** The organisation compiles centrally and pushes only signed settled policies. The workstation need not hold the templates, fragments, lockfile, or exercise the resolver. The runtime trust surface is one signature verification plus the framework-invariant re-assertion.
+
+### On-disk
+
+Settled policies live beside their source under `~/.config/kennel/kennels/<name>.settled.json` in development mode, or are pushed to `/etc/kennel/settled/<name>.settled.json` (or a fleet-tool-chosen path) in attested deployments. `07-paths.md` is authoritative.
+
+---
+
 ## What this chapter does not cover
 
 - The field-by-field semantics of each section: see the corresponding design-document chapter (§7.x) or the worked example in [TEMPLATE-ai-coding-strict.md](../TEMPLATE-ai-coding-strict.md).
@@ -310,3 +387,6 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 - The mechanism by which template and fragment signatures are verified at runtime, and how the lockfile is checked: `04-trust-boundaries.md`.
 - How `kennel diff` and `kennel upgrade` compute and present deltas, and how `upgrade` rewrites the lockfile: `02-1-cli.md`.
 - The `[audit]` schema in detail — sink selection, per-class levels, sink-specific parameters: `02-3-audit-schema.md`.
+- The design-level rationale for compilation and the settled policy: design doc §9.10.
+- How `kennel compile` is invoked and its flags: `02-1-cli.md`.
+- How the runtime trust surface differs between source and settled policies: `04-trust-boundaries.md`.
