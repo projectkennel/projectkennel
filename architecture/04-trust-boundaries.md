@@ -1,0 +1,283 @@
+# Trust boundaries
+
+Project Kennel's implementation crosses several trust boundaries: between processes at different privilege levels, between trusted code and untrusted input, between userspace and the kernel. This chapter enumerates the boundaries, names the sanitisation and validation discipline that applies at each, and points at the code that owns the enforcement.
+
+The discipline itself — *what* sanitisation looks like — is in CODING-STANDARDS.md §10 (Input handling) and §4 (`unsafe` code). This chapter is the catalogue: *which* boundaries exist, *who* enforces them, *what* the threat model is at each.
+
+---
+
+## Boundary inventory
+
+| # | Boundary | Direction | Enforced by |
+|---|---|---|---|
+| 1 | User → privhelper | command → privileged action | `kennel-privhelper` |
+| 2 | Disk → policy parser | untrusted bytes → typed `Policy` | `kennel-policy` |
+| 3 | Untrusted template → signature verifier | bytes + claimed signature → verified bytes | `kennel-policy` (signature module) |
+| 4 | Workload → BPF programs | syscall args → kernel verdict | BPF programs in `bpf/` |
+| 5 | BPF → userspace audit reader | ringbuf bytes → typed `AuditEvent` | `kennel-bpf` (ringbuf parser) |
+| 6 | CLI → kenneld | wire-format bytes → typed request | `kennel-ipc-server` |
+| 7 | Untrusted client → kenneld socket | connecting process → authenticated user | kenneld (SO_PEERCRED check) |
+| 8 | Workload → ssh-agent / dbus-proxy | socket data → daemon | external (`xdg-dbus-proxy`, ssh-agent) |
+| 9 | Workload → netproxy | SOCKS5 bytes → resolved destination | `kennel-netproxy` |
+| 10 | Kernel-side string → audit log | bytes from `task->comm`, paths → sanitised text | `kennel-audit` (sanitiser) |
+| 11 | Network bytes → DNS resolver | resolver response → allowlist decision | `kennel-netproxy` |
+| 12 | Workload → audit log files | file system access to its own audit dir | constructed shim (no access by default) |
+
+Each boundary is described in its own section below. The descriptions follow a common shape: what crosses, what is trusted on each side, what the validator does, what the failure mode is.
+
+---
+
+## 1. User → privhelper
+
+**What crosses.** A request from kenneld (or, in degraded mode, the CLI) to the privhelper: operation, parameters (interface name, address, prefix, cgroup path).
+
+**Trusted side.** Nothing on either side. The privhelper does not trust the caller's claim that the parameters are within Project Kennel's reserved range; it validates every field. The caller does not trust the privhelper's response semantics beyond what the wire protocol declares.
+
+**Validator.** `kennel-privhelper`'s `validate` module. For each operation:
+
+- `addr-add` / `addr-remove`: the `addr` must fall within `127.<tag>.<ctx>.0/24` for IPv4 or `fd<gid>:<tag>:<ctx>::/64` for IPv6, where `<tag>` is the installation's fixed byte and `<ctx>` is the value in the request. The `interface` must be `lo` or a per-kennel dummy interface named `kennel-<id>`. The `prefix` is fixed at 24 (IPv4) or 64 (IPv6); any other value is refused.
+- `cgroup-create` / `cgroup-delete`: the `path` must start with `/sys/fs/cgroup/kennel/` and contain no `..` components or symlinks. The cgroup must be empty before delete.
+
+The validator rejects out-of-scope requests with the `out-of-scope` error code; nothing happens at the privileged syscall level.
+
+**Failure mode.** A compromised kenneld asking the privhelper to add `169.254.169.254` to loopback would be refused. The privhelper logs the refusal to its own audit channel (the `priv.jsonl` file or journald, per the configured sink) and exits non-zero. kenneld observes the refusal and surfaces it.
+
+**Threat IDs addressed.** T6 (lateral movement: a hostile caller cannot direct the privhelper to do anything outside the reserved scope), T19 (setuid escalation: the privhelper is small and refuses out-of-scope requests; even on subversion of the calling process, the privileged syscall surface is bounded).
+
+**Bounded duration of privilege.** The privhelper is short-lived per operation. The privileged process exists only for the milliseconds of one validated syscall sequence. There is no long-running daemon with continuous `CAP_NET_ADMIN`. A future revision may revisit this trade; see `01-process-model.md`.
+
+---
+
+## 2. Disk → policy parser
+
+**What crosses.** TOML bytes from a policy file, a template, or a leaf delta.
+
+**Trusted side.** The parser does not trust the file contents. The file may have been written by an attacker-influenced AI agent, may have been tampered with on disk, may have been sync'd from a compromised source.
+
+**Validator.** `kennel-policy::parse` and `kennel-policy::resolve`. Per CODING-STANDARDS.md §10.2:
+
+- `#[serde(deny_unknown_fields)]` on every config type. Unknown fields are categorical errors.
+- Bounded reads at the call site (`take(N).read_to_string`); the policy file size cap is 256 KiB.
+- Bounded template-chain recursion: depth limit 16, checked before descent.
+- Duplicate keys rejected (the project's TOML parser is configured to reject; the default `toml` crate behaviour).
+- Path-syntax validation: relative-path fields reject `..` and absolute paths; absolute-path fields reject `~/` and relative paths.
+- Tilde expansion deferred until *after* signature verification (boundary 3).
+- Numeric range checks at parse time.
+
+**Failure mode.** Categorical reject. The parser returns a `PolicyError` variant naming the offending field; the policy is not loaded. No partial state is constructed.
+
+**Threat IDs addressed.** T16 (template tampering), T17 (invariant weakening by user delta), T18 (template-chain depth-DoS).
+
+---
+
+## 3. Untrusted template → signature verifier
+
+**What crosses.** A claimed-template structure (already parsed, structurally valid TOML) and its signature envelope.
+
+**Trusted side.** The signing-key set is trusted (it is installed under `~/.config/kennel/keys/` or `/etc/kennel/keys/`, owned by the user or root, mode 0644). Nothing else.
+
+**Validator.** `kennel-policy::signature`. The procedure:
+
+- Algorithm must be in the supported set (`ed25519`). Cryptographic minimums are enforced at validation; negotiation below the current floor is a categorical error.
+- The `signed_fields` list must cover every top-level field of the template except `[signature]` itself. A template that signs only a subset of its fields is rejected, even if the unsigned subset is empty in this template — the rule is about the schema, not the instance.
+- The canonical-form serialisation of `signed_fields` is computed deterministically (procedure documented in `kennel-policy::canonical`); the signature is verified against that.
+- The signing key must be in the configured key set, identified by `key_id`.
+
+A template that fails signature verification is rejected; its content is not consulted further, regardless of which fields the unverified portion contains.
+
+**Failure mode.** `PolicyError::SignatureFailure` with the `key_id` (if recognised) and the reason. The template is not loaded; any policy that depends on it cannot be resolved.
+
+**Threat IDs addressed.** T16 (template tampering).
+
+---
+
+## 4. Workload → BPF programs
+
+**What crosses.** The arguments of a syscall the workload invokes (connect, bind, setsockopt, sock_create, sendmsg).
+
+**Trusted side.** Nothing on the workload's side. The kernel's BPF subsystem invokes our programs with the syscall arguments; our programs decide allow/deny.
+
+**Validator.** BPF programs in `bpf/`. Per CODING-STANDARDS.md §4.1:
+
+- Every pointer dereference is preceded by an explicit bounds check against the bearing structure's declared end.
+- Loops are bounded with `#pragma unroll` and constant iteration counts, or use `bpf_loop`.
+- Helper-function usage is restricted to the whitelist in `bpf/HELPERS.md`.
+- The lookup order is deny-first: invariant-deny CIDRs are checked before allow-list match; an allow rule cannot accidentally cover an invariant-denied range.
+
+Map data is populated by the loader at kennel start and marked read-only (`BPF_F_RDONLY_PROG`) where the kernel supports it. The workload cannot modify maps; the bpf() syscall is denied by seccomp.
+
+**Failure mode.** Verdict is allow or deny. Deny returns 0 from the BPF program, which causes the kernel to fail the syscall with `EPERM` (or with `ECONNREFUSED` for connect). The deny event is emitted via the ringbuf for audit.
+
+**Threat IDs addressed.** T1 (recon: workload cannot enumerate sockets we have not bound), T6 (lateral movement: workload cannot connect to host loopback services), T7 (DNS exfiltration: workload cannot issue DNS directly), T9 (supply-chain: unexpected destinations show up in audit).
+
+---
+
+## 5. BPF → userspace audit reader
+
+**What crosses.** Packed structs from the BPF ringbuf, declared in `bpf/audit_events.h`.
+
+**Trusted side.** The events come from our own BPF programs, attached to cgroups we created, populated by code we wrote. The trust is high — but the ringbuf reader still validates because the audit subsystem must never panic on a malformed event (the kennel must keep running even if a BPF event arrives that does not match the declared layout, which could happen across version skew).
+
+**Validator.** `kennel-bpf::ringbuf::parse`:
+
+- Reads the fixed-size `audit_hdr` first, verifies `magic` is `0x4145564E`, verifies `version` is supported.
+- Computes the expected payload size for the event kind from a static table; verifies it equals `header.length - sizeof(audit_hdr)`. A mismatch is reported as a structured error and the event is skipped.
+- Reads the payload as a typed struct via `from_bytes` (safe; no `unsafe` cast).
+- Resolves `ctx_byte` to a kennel name through kenneld's in-memory registry. An unknown `ctx_byte` is logged and the event is dropped (a stale BPF program attached to a defunct kennel, e.g., during the recovery procedure).
+
+**Failure mode.** Malformed event → drop with a counter increment and a self-diagnostic via the other audit sinks. The reader does not panic.
+
+**Threat IDs addressed.** Operational: the audit subsystem's availability under version skew.
+
+---
+
+## 6. CLI → kenneld
+
+**What crosses.** Length-prefixed JSON requests on the kenneld Unix socket.
+
+**Trusted side.** The wire format is internal. Both sides come from the same release. But kenneld still validates every field because protocol drift is a possibility (a CLI compiled against a different kenneld) and because the same socket handler is the path for any future external integration.
+
+**Validator.** `kennel-ipc-server`. Per CODING-STANDARDS.md §10.2 and `02-4-ipc.md`:
+
+- Frame length is bounded at 1 MiB; longer frames are a protocol violation, connection dropped.
+- Body must be UTF-8 JSON.
+- Parsing is to typed `Request` structs with `#[serde(deny_unknown_fields)]`.
+- Per-method param validation (e.g., kennel names follow `[a-z0-9-]{1,64}`).
+- The version handshake is the first exchange; mismatched protocol versions cause a structured `version-mismatch` error followed by connection close.
+
+**Failure mode.** Structured error response (with code from the catalogue in `02-4-ipc.md`); the connection remains open for the client to issue the next request or close. Protocol-framing violations close the connection.
+
+---
+
+## 7. Untrusted client → kenneld socket
+
+**What crosses.** A `connect()` to `/run/user/<uid>/kennel/kenneld.sock` from any process on the system.
+
+**Trusted side.** The socket file's owner-and-mode (user-owned, mode 0600) limits who can connect at the filesystem layer. kenneld additionally checks `SO_PEERCRED` to verify the connecting process's UID matches kenneld's own.
+
+**Validator.** kenneld's accept-loop handshake check:
+
+- Accept the connection.
+- `getsockopt(SO_PEERCRED)` to retrieve the peer UID, GID, PID.
+- Reject (close connection without any wire-format exchange) if UID != kenneld's UID.
+- Otherwise proceed with the protocol handshake (boundary 6).
+
+The PID from `SO_PEERCRED` is recorded in audit events but not used for authorisation; PIDs can be reused, the UID is what matters.
+
+**Failure mode.** Connection closed without any response; an audit event records the rejected attempt with the peer UID/PID. This is rare: only a misconfigured filesystem or a same-UID-but-distinct-program would trigger it.
+
+**Threat IDs addressed.** T6 (lateral movement: another user on the same machine cannot ask kenneld to start a kennel as us, even if the socket file were inadvertently world-readable).
+
+---
+
+## 8. Workload → ssh-agent / dbus-proxy
+
+**What crosses.** SSH agent protocol bytes on `~/.ssh/agent.sock`; D-Bus method-call wire format on `/run/user/<uid>/bus`.
+
+**Trusted side.** The agent and the dbus-proxy are external programs (or stock OS components) reviewed under their own discipline. Project Kennel does not parse SSH-agent or D-Bus protocols. Our scope is:
+
+- *Which* socket the workload connects to. The shim view bind-mounts only the per-kennel agent and the per-kennel dbus-proxy; the workload cannot reach the user's main ssh-agent or the host's dbus.
+- *Which* methods the dbus-proxy allows. The `xdg-dbus-proxy` filter file is generated by kenneld from the policy's `[dbus]` section. Methods not in the allow list are rejected by the proxy.
+
+**Validator.** The respective external programs. We rely on their own input validation.
+
+**Failure mode.** Out-of-scope D-Bus calls are denied by `xdg-dbus-proxy` and surface as `dbus.call-deny` audit events. SSH-agent malformed messages are handled by the agent; if the agent crashes, the workload loses git-over-SSH capability for the kennel's remaining lifetime (or until kenneld restarts the agent).
+
+**Threat IDs addressed.** T1 (recon of host SSH keys: the user's ssh-agent is not in the workload's view), T6 (lateral movement to D-Bus services: the host dbus is not reachable, only the filtered proxy).
+
+---
+
+## 9. Workload → netproxy
+
+**What crosses.** SOCKS5 request bytes on the kennel's loopback proxy address.
+
+**Trusted side.** The proxy does not trust the SOCKS5 client's claims. Hostname resolution happens server-side (the proxy resolves; the workload cannot bypass DNS). Allow/deny is on the resolved destination, not on the client's claim.
+
+**Validator.** `kennel-netproxy::server`. Per the SOCKS5 spec plus our additions:
+
+- SOCKS5 method negotiation: only `NoAuth` accepted; other methods rejected.
+- CONNECT request: destination must be hostname-with-port (resolved by proxy against allowlist) or IPv4/IPv6 numeric. Numeric addresses are checked directly against the allowlist; the cgroup BPF rules also deny the underlying connect() to addresses outside the allowlist (defence in depth).
+- Bounded read on the request bytes (SOCKS5 messages are small; cap at 1 KiB).
+
+**Failure mode.** Unallowed destination → SOCKS5 reply 0x02 (connection not allowed by ruleset). Audit event emitted.
+
+**Threat IDs addressed.** T1 (exfiltration: arbitrary destinations refused), T7 (DNS exfiltration: workload cannot ask DNS for unallowed names, even via SOCKS5 — the proxy refuses), T9 (supply-chain).
+
+---
+
+## 10. Kernel-side string → audit log
+
+**What crosses.** Strings originating from kernel structures (`task->comm`, resolved paths, dbus member names) flowing into audit-log strings that humans and SIEMs read.
+
+**Trusted side.** Nothing. `task->comm` can be set by a workload via `prctl(PR_SET_NAME, ...)` to attacker-controlled bytes. Paths may contain control characters or non-UTF-8 bytes.
+
+**Validator.** `kennel-text::sanitise_for_audit`, called by the audit writer for every event-field that may carry kernel-side strings. Per CODING-STANDARDS.md §10.3 and §10.4:
+
+- Control characters escaped (`\x1b`, `\b`, `\r`, ...).
+- Non-UTF-8 replaced with U+FFFD; the event carries `sanitised: true` if any replacement occurred.
+- Length cap (128 bytes for comm, 4096 for paths); truncation marked.
+
+**Failure mode.** Sanitisation is total — every string passes through. There is no fallback to raw output. If sanitisation itself errors (rare, but a bug in the helper would be one), the event is emitted with `sanitisation_error: true` and the affected field absent. The other fields are still emitted; the event is not dropped.
+
+**Threat IDs addressed.** Terminal injection (an attacker writes terminal escape sequences in their process's comm, hoping to manipulate the operator's terminal when reading the audit log).
+
+---
+
+## 11. Network bytes → DNS resolver
+
+**What crosses.** DNS response bytes from the upstream resolver to the netproxy.
+
+**Trusted side.** Not the response. DNS responses can be forged on-path (if the upstream resolver is not over DoT/DoH) or returned by a malicious recursor. The netproxy treats DNS responses as untrusted.
+
+**Validator.** `kennel-netproxy::dns`:
+
+- Standard DNS-format validation (well-formed RR types, lengths consistent with the message).
+- The resolved name is checked against the allowlist. The set of returned A/AAAA records is what the netproxy uses for the actual `connect()`; if multiple records, the proxy tries them in order.
+- `on_resolve_change = "warn"` (per the template) logs when a name resolves to a different IP than previously cached for the same kennel lifetime. Useful for detecting late-stage rebinding-style attacks.
+
+**Failure mode.** A name not in the allowlist returns SOCKS5 `host unreachable` to the workload. A malformed DNS response is treated as resolution failure.
+
+**Threat IDs addressed.** T7 (DNS exfiltration), T9 (supply-chain: unexpected resolver-rewrites are visible in audit).
+
+---
+
+## 12. Workload → audit log files
+
+**What crosses.** A workload's attempts to read or write its own audit log directory.
+
+**Trusted side.** Not the workload. The workload could try to read its own audit log to learn what kenneld has observed, or write to it to inject misleading events.
+
+**Validator.** The shim. By default, `~/.local/state/kennel/<kennel>/` is *not* bind-mounted into the workload's view. The audit log path is invisible from inside the kennel.
+
+If an operator's policy explicitly grants the workload read access to its audit log (rare; only useful for self-monitoring tools running inside the kennel), the grant is read-only and audit events from that read attempt are themselves recorded.
+
+**Failure mode.** Attempted access from inside the kennel resolves to `ENOENT` (path not in view).
+
+**Threat IDs addressed.** T1 (recon: workload cannot learn what is being audited), T13 (anti-forensics: workload cannot tamper with audit data).
+
+---
+
+## Privilege transitions
+
+Beyond the boundary inventory, two specific privilege transitions deserve naming because they are where most of the design's safety properties land:
+
+### `PR_SET_NO_NEW_PRIVS`
+
+Set unconditionally before `execve()` by `kennel-spawn`. This is a framework invariant per CODING-STANDARDS.md §11.2 — the policy cannot disable it. It blocks setuid binaries from gaining privilege via execve, blocks file capabilities from being granted via execve, blocks AT_SECURE-clearing.
+
+### Landlock sealing
+
+The Landlock ruleset is constructed by `kennel-spawn` from the resolved policy, then sealed via `landlock_restrict_self`. After sealing, the ruleset cannot be widened — by the kernel's design — for the lifetime of the process and its descendants. The seal happens after all setup operations (mount construction, BPF attach, capability drop) so the setup itself has the access it needs, and before execve so the workload starts under the restriction.
+
+Both transitions are owned by `kennel-spawn`; both are tested with positive (the setup works) and negative (a workload cannot bypass them) integration tests under `tests/`.
+
+---
+
+## What this chapter does not cover
+
+- The mechanism details of each kernel feature (Landlock semantics, cgroup BPF attach types, seccomp filter format): design doc §7 and §8.
+- The wire formats themselves: `02-4-ipc.md`.
+- The audit event schema: `02-3-audit-schema.md`.
+- The locking matrix that protects shared state inside kenneld: `05-state-and-supervision.md`.
+- The recovery procedure when kenneld restarts: `05-state-and-supervision.md`.
+- The CODING-STANDARDS rules these enforcers must follow: CODING-STANDARDS.md §4, §10.
