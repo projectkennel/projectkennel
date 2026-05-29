@@ -139,7 +139,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |        |                     |                                       |
    |        |                     +-->  /run/kennel/<id>/proxy.ctl        |
    |        |                     +-->  /run/kennel/<id>/dbus.ctl         |
-   |        |                     +-->  /run/kennel/<id>/ssh.sock         |
+   |        |                     +-->  /run/kennel/<id>/ssh-agent.sock   |
    |        |                     +-->  writes ~/.local/state/            |
    |        |                                  kennel/<id>/*.jsonl        |
    |        |                                                             |
@@ -147,7 +147,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |   Workload (in cgroup, Landlock sealed)                              |
    |        |                                                             |
    |        +-->  127.<tag>.<ctx>.1:1080  (SOCKS5 to netproxy)            |
-   |        +-->  /run/kennel/<id>/ssh.sock  (ssh-agent, shim-mounted)    |
+   |        +-->  /run/kennel/<id>/ssh-agent.sock  (shim-mounted)         |
    |        +-->  /run/user/<uid>/bus  (D-Bus, via dbus-proxy)            |
    |                                                                      |
    |   BPF programs (attached to workload's cgroup)                       |
@@ -170,7 +170,7 @@ Notes on the diagram:
 
 - The "control protocol" between CLI and kenneld handles kennel start, kennel stop, status query, audit query, and policy reload. Wire format in `02-4-ipc.md`.
 - The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is `127.<tag>.<ctx>.1:1080`, never the control socket.
-- The ssh-agent socket is bind-mounted from `/run/kennel/<id>/ssh.sock` into the workload's `$HOME/.ssh/agent.sock` via the shim. The workload sees only the shim path.
+- The ssh-agent socket is bind-mounted from `/run/kennel/<id>/ssh-agent.sock` into the workload's `$HOME/.ssh/agent.sock` via the shim. The workload sees only the shim path.
 - BPF programs do not push events to userspace; they write into a ringbuf. A reader task in kenneld drains the ringbuf and writes JSONL events to the audit directory.
 - The privhelper is invoked by kenneld in the standard configuration, not by the CLI directly. Without kenneld, the CLI invokes the privhelper itself.
 

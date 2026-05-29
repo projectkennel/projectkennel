@@ -114,7 +114,9 @@ The catalogue below names every event the project currently emits. Field lists a
 - **`lifecycle.kennel-start`** — Adds `policy_path`, `template_chain` (array), `policy_hash`, `workload_argv0`, `started_pid`.
 - **`lifecycle.kennel-exit`** — Adds `uptime_seconds`, `workloads_run`, `reason`.
 - **`lifecycle.daemon-spawn`** / **`lifecycle.daemon-exit`** — Adds `daemon` (name), `pid`, daemon-specific listening addresses.
+- **`lifecycle.daemon-giveup`** — A daemon exceeded the crash-loop restart limit and is no longer being respawned (`05-state-and-supervision.md`). Adds `daemon` (name), `restarts`, `window_seconds`.
 - **`lifecycle.workload-exit`** — Adds `pid`, `exit_code`, `signal`, `uptime_seconds`, `rss_max_bytes`.
+- **`lifecycle.kenneld-state-dump`** — Emitted on `SIGUSR1`: one event per registered kennel with its state, reference count, drain-timer remaining, and daemon PIDs. A debugging aid.
 
 ---
 

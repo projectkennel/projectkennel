@@ -48,11 +48,14 @@ Recommended minimum: kernel 6.10. Project Kennel refuses to apply policies that 
 
 Starting a kennel with `kennel run ai-coding bash`:
 
+The flow consumes a *settled policy* — the flat, signed artefact produced by the compile step (§9.10), not a source policy. Resolution (template inheritance, includes, deltas, source-signature verification, lockfile checks) happened earlier, at compile time. In local development the compile may run implicitly just before this flow when the source has changed; in attested deployments the settled policy was compiled and signed centrally and pushed to the workstation. Either way, by the time the spawn flow runs, the policy is settled.
+
 ```
-1. Load policy file, validate against schema
-   - Check template inheritance, resolve to flat effective policy
-   - Verify Project Kennel invariants
-   - Check kernel feature availability against required features
+1. Load the settled policy
+   - Verify its single signature against the trust store
+   - Re-assert Project Kennel framework invariants (cheap; structural)
+   - Substitute per-instance variables (<ctx>, <uid>, <kennel>, <home>)
+   - Check kernel feature availability against the features the policy requires
 
 2. Resolve DNS names in net.* allowlist; pin to IPs
 
@@ -131,7 +134,7 @@ Project Kennel runs primarily as the user's uid. Two components have elevated pr
 
 Trust boundary: this helper accepts requests only via a Unix socket owned by Project Kennel's UID with mode 0600. It validates that every requested operation falls within Project Kennel's reserved address space (e.g., the configured ULA `/48`, the `127.<tag>.0.0/16` subnet). It refuses any request outside that space.
 
-The helper is approximately 100 lines and is Project Kennel's primary attack surface for privilege escalation. It is reviewed carefully, fuzzed, and kept narrow. A future revision could replace it with a long-running daemon owning `CAP_NET_ADMIN`, accessed via a privileged socket; this trades fewer setuid invocations for a continuously-privileged daemon.
+The helper is a few hundred lines and is Project Kennel's primary attack surface for privilege escalation. It is reviewed carefully, fuzzed, and kept narrow. A future revision could replace it with a long-running daemon owning `CAP_NET_ADMIN`, accessed via a privileged socket; this trades fewer setuid invocations for a continuously-privileged daemon.
 
 **The cgroup-creation helper** (optional). On systems where cgroup v2 delegation is not pre-configured, a privileged helper creates Project Kennel's cgroup hierarchy at install time. After that, the user's cgroups can be manipulated unprivileged within the delegated subtree.
 
