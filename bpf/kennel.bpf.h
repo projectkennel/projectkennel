@@ -6,7 +6,7 @@
  * decision logic lives in one reviewed place. Not an ABI surface — an
  * implementation detail of the programs in this directory.
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  *
  * Assumes (in this order, from the including .bpf.c):
  *     #include "vmlinux.h"
@@ -44,6 +44,40 @@ static __always_inline struct kennel_meta *kennel_meta_get(void)
 {
 	__u32 zero = 0;
 	return bpf_map_lookup_elem(&kennel_meta_map, &zero);
+}
+
+/*
+ * Copy the 16-byte IPv6 daddr out of a bpf_sock_addr. The fields user_ip6[0..3]
+ * are read individually: each is a direct context access the verifier rewrites,
+ * whereas a memcpy through &ctx->user_ip6 is rejected as a "dereference of
+ * modified ctx ptr" (the verifier disallows reading through an offset-adjusted
+ * context pointer). Confirmed against the 6.8 verifier.
+ */
+static __always_inline void
+kennel_ctx_load_ip6(const struct bpf_sock_addr *ctx, __u8 out[16])
+{
+	__u32 w[4];
+	w[0] = ctx->user_ip6[0];
+	w[1] = ctx->user_ip6[1];
+	w[2] = ctx->user_ip6[2];
+	w[3] = ctx->user_ip6[3];
+	__builtin_memcpy(out, w, 16);
+}
+
+/*
+ * Store a 16-byte IPv6 address back into a bpf_sock_addr (the bind6 rewrite
+ * path), writing each word as a direct context access for the same reason as
+ * the load above.
+ */
+static __always_inline void
+kennel_ctx_store_ip6(struct bpf_sock_addr *ctx, const __u8 in[16])
+{
+	__u32 w[4];
+	__builtin_memcpy(w, in, 16);
+	ctx->user_ip6[0] = w[0];
+	ctx->user_ip6[1] = w[1];
+	ctx->user_ip6[2] = w[2];
+	ctx->user_ip6[3] = w[3];
 }
 
 /* Populate the common audit header. */

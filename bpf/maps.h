@@ -5,7 +5,9 @@
  * compiled objects, so these definitions are authoritative for both sides
  * (architecture/02-5-bpf-abi.md).
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md. Not known to compile.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30); the map layouts were
+ * validated by bpftool's BTF-driven decode of live map contents (the LPM key,
+ * allow_entry, and kennel_meta layouts round-trip). See bpf/README.md.
  *
  * Include order in every .bpf.c:
  *     #include "vmlinux.h"

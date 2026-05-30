@@ -5,9 +5,11 @@ documented rationale per helper. Adding a helper to this list requires the same
 two-maintainer review as adding an `unsafe` block. A program calling a helper
 not on this list is rejected at review.
 
-This list is the *intended* set for the current programs. It has not yet been
-checked against a real build (see `README.md`: the programs are UNBUILT); a
-helper may prove unavailable on the kernel floor and need substitution.
+This list is the set for the current programs. As of 2026-05-30 every helper
+below was accepted by the kernel verifier when all eight programs were loaded on
+Linux 6.8.0 (`README.md`): none proved unavailable. (6.8 is below the 6.10
+project floor, so availability on the floor-and-up matrix is only strengthened
+by this; CI confirms it across the matrix.)
 
 ## Whitelist
 

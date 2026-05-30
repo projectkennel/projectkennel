@@ -10,7 +10,7 @@
  * Failure mode: rewrite + allow / allow / deny, as bind4. Fails closed.
  * Threat bearing: T6 (confines wildcard dev-server binds to the kennel).
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -54,13 +54,13 @@ int kennel_bind6(struct bpf_sock_addr *ctx)
 		return KENNEL_DENY;
 
 	__u8 addr[16];
-	__builtin_memcpy(addr, &ctx->user_ip6, sizeof(addr));
-	__u16 port_be = (__u16)ctx->user_port; /* see BYTE ORDER VERIFY in connect4 */
+	kennel_ctx_load_ip6(ctx, addr);
+	__u16 port_be = (__u16)ctx->user_port; /* be16 port in low 16 bits; see connect4 */
 
 	__u8 rewritten[16] = {};
 
 	if (kennel_is_any6(addr)) {
-		__builtin_memcpy(&ctx->user_ip6, bs->v6_addr, 16);
+		kennel_ctx_store_ip6(ctx, bs->v6_addr);
 		__builtin_memcpy(rewritten, bs->v6_addr, 16);
 		kennel_audit_bind(AUDIT_NET_BIND_REWRITE, AF_INET6, port_be, addr, rewritten,
 				  meta);

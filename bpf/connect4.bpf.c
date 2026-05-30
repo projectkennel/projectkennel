@@ -17,7 +17,9 @@
  *          movement to RFC1918/loopback), T9 (unexpected destination surfaced
  *          in the audit log).
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean + runtime-verified end-to-end on Linux 6.8.0
+ *          (2026-05-30): allow/deny, port byte order, deny-first, and the audit
+ *          ABI all confirmed via a live cgroup attach. See bpf/README.md.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -36,9 +38,10 @@ int kennel_connect4(struct bpf_sock_addr *ctx)
 		return KENNEL_DENY; /* fail closed */
 
 	__u32 daddr = ctx->user_ip4;	    /* network byte order */
-	/* BYTE ORDER VERIFY: bpf_sock_addr.user_port packing must be confirmed
-	 * against the kernel before this is trusted; treated here as the be16
-	 * port in the low 16 bits. */
+	/* bpf_sock_addr.user_port is a __u32 holding the be16 port in its low 16
+	 * bits; (__u16) truncates to those bits and kennel_decide_v4 applies
+	 * bpf_ntohs. Verified end-to-end on Linux 6.8: an allow entry for port
+	 * 9999 matches a connect to :9999 and rejects :8888 (bpf/README.md). */
 	__u16 port_be = (__u16)ctx->user_port;
 	__u8 proto = (__u8)ctx->protocol;
 

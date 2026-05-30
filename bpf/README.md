@@ -6,17 +6,39 @@ constraints, plus the map/event ABI shared with the Rust loader
 [architecture/02-5-bpf-abi.md](../architecture/02-5-bpf-abi.md); the C-code
 discipline is [CODING-STANDARDS.md](../CODING-STANDARDS.md) §4.1.
 
-## Build status: UNBUILT / UNVERIFIED
+## Build status: compiled + verifier-clean on Linux 6.8.0
 
-**These C files have not been compiled or verified.** They were authored on a
-host with no BPF toolchain (no `clang -target bpf`, no `vmlinux.h`, no
-`libbpf`, no kernel). They are reviewable design source written to the §4.1
-discipline; they are **not** known to compile, and crucially they have **not**
-been through the kernel verifier — the one check §4.1 cares about most.
+First compile-and-verify pass done on **2026-05-30**, Linux 6.8.0-110-generic
+(x86_64, Ubuntu 24.04.4), clang 18.1.3, bpftool v7.4.0, libbpf 1.3.0 headers.
+The originally blind-authored draft has now seen a real compiler and the kernel
+verifier.
 
-Treat every program here as a draft pending a first compile-and-verify pass on
-Linux. Do not assume any of it loads until CI's `bpftool prog load` matrix
-(BUILD-ENV.md) has run against it.
+| Check | Result |
+|---|---|
+| `clang -O2 -g -Wall -Wextra -Werror -target bpf` (all 8 programs) | clean |
+| `bpftool prog load` (kernel verifier, all 8) | all load; program/attach and map types match the `SEC()` names |
+| connect4 runtime (live cgroup attach) | allow-match, default-deny, deny-first override, and `EPERM`-on-deny all confirmed |
+| `user_port` byte order (the flagged unknown) | **confirmed**: an allow entry for port 9999 matches a connect to :9999 and rejects :8888 |
+| map ABI (`maps.h`) | validated via bpftool BTF decode of live map contents |
+| audit ABI (`audit_events.h`) | validated by draining live ringbuf events (magic `AEVN`, kind, connect payload) |
+
+One verifier fix was needed versus the blind draft: the IPv6 programs
+(connect6, bind6, sendmsg6) read/wrote `ctx->user_ip6` via
+`__builtin_memcpy(&ctx->user_ip6, …)`, which the verifier rejects as a
+"dereference of modified ctx ptr". They now go through `kennel_ctx_load_ip6` /
+`kennel_ctx_store_ip6` (word-by-word direct context accesses) in `kennel.bpf.h`.
+
+### Still pending (not yet done here)
+
+- **Runtime exercise of the other seven programs.** Only connect4 was driven
+  end-to-end through a live cgroup. connect6/sendmsg4/sendmsg6 share the same
+  `kennel_decide_*` paths and bind4/bind6/setsockopt/sock_create are
+  verifier-clean, but their runtime behaviour (the bind rewrite, the V6ONLY
+  force, the family allowlist, the v6 decision) has not been individually
+  exercised. That belongs with the `kennel-bpf` loader's integration tests.
+- **The full kernel matrix.** Verified only on the local 6.8.0 kernel, which is
+  *below* the project floor of 6.10 (BUILD-ENV.md) — a useful lower bound, but
+  CI's ≥6.10 LTS/stable/mainline `bpftool prog load` matrix is still owed.
 
 ## Contents
 
@@ -30,7 +52,7 @@ Linux. Do not assume any of it loads until CI's `bpftool prog load` matrix
 | `setsockopt.bpf.c` | Force `IPV6_V6ONLY=1` to close the dual-stack escape. |
 | `sock_create.bpf.c` | Socket-family allowlist. |
 | `sendmsg4.bpf.c`, `sendmsg6.bpf.c` | Connectionless (UDP) destination check; DNS only via the proxy. |
-| `vmlinux.h` | **Not committed here.** Must be generated on the target kernel (see below). |
+| `vmlinux.h` | CO-RE BTF type dump, generated from the build kernel (see below). Committed per BUILD-ENV.md. |
 | `HELPERS.md` | The whitelist of permitted BPF helper functions (§4.1). |
 
 ## vmlinux.h
@@ -43,8 +65,11 @@ it on a Linux host with a BTF-enabled kernel:
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
 ```
 
-The committed `vmlinux.h` and the source kernel are recorded per BUILD-ENV.md.
-Until it is generated, none of the `.bpf.c` files compile.
+The committed `vmlinux.h` and its source kernel are recorded in BUILD-ENV.md.
+The current copy was generated from Linux 6.8.0-110-generic (Ubuntu 24.04.4).
+CO-RE relocations make the programs portable across kernels regardless of which
+kernel's types `vmlinux.h` was dumped from, so this is a build-time type source,
+not a runtime pin; per BUILD-ENV.md, regenerating it is a maintainer operation.
 
 ## Building (on Linux, once vmlinux.h exists)
 

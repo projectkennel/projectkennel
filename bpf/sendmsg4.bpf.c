@@ -12,7 +12,7 @@
  * Threat bearing: T7 (DNS exfiltration — the workload cannot make direct DNS
  *          queries), T1, T6.
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -31,7 +31,7 @@ int kennel_sendmsg4(struct bpf_sock_addr *ctx)
 		return KENNEL_DENY; /* fail closed */
 
 	__u32 daddr = ctx->user_ip4;
-	__u16 port_be = (__u16)ctx->user_port; /* see BYTE ORDER VERIFY in connect4 */
+	__u16 port_be = (__u16)ctx->user_port; /* be16 port in low 16 bits; see connect4 */
 
 	return kennel_decide_v4(daddr, port_be, IPPROTO_UDP, AUDIT_NET_SENDMSG_DENY,
 				AUDIT_NET_CONNECT_ALLOW, meta);

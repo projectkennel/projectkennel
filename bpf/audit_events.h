@@ -5,7 +5,9 @@
  * drains them, resolves the kennel from ctx_byte, sanitises any strings, and
  * writes the JSONL audit events of architecture/02-3-audit-schema.md.
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30); the event layout was
+ * validated by draining live connect events off the ringbuf and decoding the
+ * header (magic/version/kind/ctx_byte) and connect payload. See bpf/README.md.
  *
  * Assumes vmlinux.h is already included (for the __uN types).
  */

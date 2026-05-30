@@ -9,7 +9,7 @@
  * Threat bearing: T1, T6, T9 (as connect4); also the IPv6 metadata address
  *          fd00:ec2::254 case via the deny trie.
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -28,10 +28,11 @@ int kennel_connect6(struct bpf_sock_addr *ctx)
 		return KENNEL_DENY; /* fail closed */
 
 	__u8 daddr[16];
-	/* user_ip6 is __u32[4] in network byte order; copy the 16 bytes out. */
-	__builtin_memcpy(daddr, &ctx->user_ip6, sizeof(daddr));
+	/* user_ip6 is __u32[4] in network byte order; read word-by-word as
+	 * direct ctx accesses (see kennel_ctx_load_ip6). */
+	kennel_ctx_load_ip6(ctx, daddr);
 
-	__u16 port_be = (__u16)ctx->user_port; /* see BYTE ORDER VERIFY in connect4 */
+	__u16 port_be = (__u16)ctx->user_port; /* be16 port in low 16 bits; see connect4 */
 	__u8 proto = (__u8)ctx->protocol;
 
 	return kennel_decide_v6(daddr, port_be, proto, AUDIT_NET_CONNECT_DENY,

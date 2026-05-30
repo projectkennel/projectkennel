@@ -15,7 +15,7 @@
  * Threat bearing: T6 (a dev server bound to 0.0.0.0 would otherwise be exposed
  *          to the LAN/host; rewriting confines it to the kennel).
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -42,7 +42,7 @@ int kennel_bind4(struct bpf_sock_addr *ctx)
 		return KENNEL_DENY;
 
 	__u32 addr = ctx->user_ip4;	       /* network byte order */
-	__u16 port_be = (__u16)ctx->user_port; /* see BYTE ORDER VERIFY in connect4 */
+	__u16 port_be = (__u16)ctx->user_port; /* be16 port in low 16 bits; see connect4 */
 
 	__u8 requested[16] = {};
 	__u8 rewritten[16] = {};

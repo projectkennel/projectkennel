@@ -14,7 +14,7 @@
  *          within bounds, the call proceeds unmodified.
  * Threat bearing: T6 (dual-stack escape of loopback isolation).
  *
- * STATUS: UNBUILT / UNVERIFIED. See bpf/README.md.
+ * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>

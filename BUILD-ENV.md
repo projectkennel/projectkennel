@@ -15,10 +15,12 @@ The reference runtime is not yet implemented; exact version pins below are marke
 
 ## C / BPF toolchain
 
-- **clang:** pinned version, used to compile `bpf/*.bpf.c` with CO-RE relocations. *[TBD]*
-- **bpftool:** pinned version, used for skeleton generation and the verifier matrix. *[TBD]*
-- **libbpf:** vendored as `crates-archive/libbpf-<version>.tar.gz`, hash in `CHECKSUMS.toml`. Not linked from the system. *[TBD: version]*
-- **vmlinux.h:** committed at `bpf/vmlinux.h`, generated once from a specific kernel via `bpftool btf dump`. Regenerating it is a maintainer-only operation with a PR documenting the source kernel. *[TBD: source kernel]*
+- **clang:** pinned version, used to compile `bpf/*.bpf.c` with CO-RE relocations. *[TBD final pin]* — first verify pass (2026-05-30) used clang 18.1.3 (Ubuntu).
+- **bpftool:** pinned version, used for skeleton generation and the verifier matrix. *[TBD final pin]* — first verify pass used bpftool v7.4.0 (libbpf 1.4).
+- **libbpf:** vendored as `crates-archive/libbpf-<version>.tar.gz`, hash in `CHECKSUMS.toml`. Not linked from the system. *[TBD: version]* — first verify pass used the system libbpf 1.3.0 headers; vendoring is owed when `kennel-bpf` lands.
+- **vmlinux.h:** committed at `bpf/vmlinux.h`, generated once from a specific kernel via `bpftool btf dump`. Regenerating it is a maintainer-only operation with a PR documenting the source kernel.
+  - **Source kernel (current copy):** Linux 6.8.0-110-generic, x86_64, Ubuntu 24.04.4 LTS. Generated 2026-05-30 from `/sys/kernel/btf/vmlinux` (BTF 6094376 bytes). `sha256(bpf/vmlinux.h) = 9f1fafdf44f1da0bee79c6357c9eea4c3958f0e3a38e02e65703ead58a5104ea`.
+  - Note: this kernel is *below* the 6.10 project floor (see Kernel matrix). CO-RE makes the dumped types portable, so it is an acceptable build-time type source, but the canonical committed copy should be regenerated from a ≥6.10 kernel when the CI matrix is stood up.
 
 ## Kernel matrix (BPF verifier tests)
 
