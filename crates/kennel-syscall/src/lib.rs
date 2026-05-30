@@ -20,13 +20,19 @@
 //! and `seccompiler` for the seccomp-BPF filter (hand-rolling BPF bytecode is
 //! the dangerous case).
 //!
-//! The one deliberate exception is [`landlock`]: the `landlock` crate would pull
-//! `syn` and the first proc-macros into the privileged dependency tree, whereas
-//! the Landlock ABI is three syscalls and a few packed structs from the kernel
-//! UAPI — small enough to own. So this crate carries `#![allow(unsafe_code)]`,
-//! with the `unsafe` confined to [`landlock`]'s three raw syscall wrappers, each
-//! carrying the §4 `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment.
-//! Dependencies are vendored under §5.5.
+//! Two sites carry our own `unsafe`, each with the §4 `SAFETY:` /
+//! `INVARIANTS UPHELD:` / `FAILURE MODE:` comment:
+//!
+//! - [`landlock`]'s three raw syscall wrappers. The `landlock` crate would pull
+//!   `syn` and the first proc-macros into the privileged dependency tree,
+//!   whereas the Landlock ABI is three syscalls and a few packed structs from
+//!   the kernel UAPI — small enough to own.
+//! - [`spawn`]'s one `CommandExt::pre_exec` call, which registers the
+//!   post-`fork`/pre-`execve` seal hook the spawn sequence installs confinement
+//!   in. Wrapping it here keeps `kennel-spawn` `#![forbid(unsafe_code)]`.
+//!
+//! So this crate carries `#![allow(unsafe_code)]`. Dependencies are vendored
+//! under §5.5.
 //!
 //! # Invariants
 //!
@@ -52,4 +58,5 @@ pub mod namespace;
 pub mod path;
 pub mod process;
 pub mod seccomp;
+pub mod spawn;
 pub mod unistd;
