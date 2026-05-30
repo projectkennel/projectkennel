@@ -40,18 +40,18 @@ Bumping MSRV requires:
 
 ### 2.2 C / BPF toolchain
 
-The BPF programs in `bpf/` are compiled by clang. The Rust loader (libbpf-rs or aya, per the architecture decision) consumes the resulting `.o` files.
+The BPF programs in `bpf/` are compiled by clang against the kernel UAPI (no CO-RE). The Rust loader (`kennel-bpf`, a hand-rolled `bpf(2)` loader using `object` for ELF parsing — **not** libbpf-rs/libbpf-sys or aya) consumes the resulting `.o` files.
 
 - **Compiler:** clang, version pinned by the build environment. CI uses a container image with a specific clang version recorded in `BUILD-ENV.md`. Release builds use the same image; reproducibility requires the same compiler.
-- **libbpf:** when used, vendored. The headers and source are committed under `crates-archive/libbpf-<version>.tar.gz` and recorded in `CHECKSUMS.toml` (§5.5). We do not link against the system libbpf, even if one is installed.
-- **Kernel headers:** we do not depend on the build host's `/usr/include/linux`. A pinned `vmlinux.h` (generated once from a specific kernel via `bpftool btf dump`) is committed to `bpf/vmlinux.h`. Regenerating it is a maintainer-only operation with a PR documenting which kernel was used and why.
-- **bpftool:** if invoked at build time (e.g., to verify program load or to generate skeletons), the version is pinned in the same container as clang.
+- **No libbpf, no aya.** We do not vendor or link libbpf, and we do not use libbpf-rs/libbpf-sys or aya (their cost — ~1435 vendored C files / a 19-crate tree — outweighed what they save; see `DEPENDENCIES.md`). The loader is a small, reviewed `bpf(2)` FFI over `libc` with `object` for ELF parsing.
+- **Kernel headers:** the programs compile against the kernel UAPI (`<linux/bpf.h>` from `linux-libc-dev`, plus the multiarch `<asm/types.h>` path), pinned in `BUILD-ENV.md`. There is **no** committed `vmlinux.h` and no BTF/CO-RE step — the programs touch only stable hook-context structs and our own maps.
+- **bpftool:** optional, for inspection and the verifier-load matrix only; never on the build/load path. When invoked, its version is pinned in the same container as clang.
 
 ### 2.3 Build properties
 
 **Offline:** `cargo build --offline --frozen --locked` must succeed against `crates-archive/` for every crate (§5.4). Clang invocations must not fetch anything. CI fails if any network traffic is observed during build.
 
-**Reproducibility:** release builds are reproducible. `SOURCE_DATE_EPOCH` is honoured, no build timestamps are embedded, no host paths leak into binaries, no kernel version leaks into BPF object files beyond what `vmlinux.h` declares. CI builds every release twice on two different runners and compares both the Rust binaries and the BPF `.o` files hash-for-hash.
+**Reproducibility:** release builds are reproducible. `SOURCE_DATE_EPOCH` is honoured, no build timestamps are embedded, no host paths leak into binaries, no kernel version leaks into BPF object files (they compile against the pinned UAPI headers, not a kernel-specific BTF dump). CI builds every release twice on two different runners and compares both the Rust binaries and the BPF `.o` files hash-for-hash.
 
 ---
 
@@ -114,9 +114,9 @@ C is `unsafe` by construction. The BPF programs in `bpf/` are the only C in this
 
 **Style:**
 
-- POSIX C11 with libbpf and BPF CO-RE idioms. No GCC-isms beyond what clang accepts. `-Wall -Wextra -Werror` in the build.
+- POSIX C11 with the standard BPF map/helper macro idioms, compiled against the kernel UAPI (`<linux/bpf.h>`) — **no** CO-RE/`vmlinux.h`. No GCC-isms beyond what clang accepts. `-Wall -Wextra -Werror` in the build.
 - `static` everything that isn't a BPF section symbol. No global mutable state beyond BPF maps.
-- Map definitions are declared with the `__type` macros that libbpf-rs/aya derive Rust types from; the Rust side and the BPF side share a layout via a generated header committed to `bpf/maps.h`.
+- Map definitions are declared in `bpf/maps.h`; the Rust loader mirrors them by hand in `kennel-bpf`'s `KENNEL_MAPS` (there is no skeleton-derived type generation), and the loader resolves map references by symbol name. The two sides share a layout via the committed `bpf/maps.h`.
 
 **Bounds and safety idioms required:**
 
@@ -143,7 +143,7 @@ C is `unsafe` by construction. The BPF programs in `bpf/` are the only C in this
 
 **Review requirement:** identical to `unsafe` review (two maintainer approvals, one not the author). Adding a new BPF program is reviewed by all current maintainers, the same as introducing a new `unsafe`-bearing crate.
 
-**Verifier failures are not warnings.** A BPF program that loads under one kernel and is rejected by another is a regression, and is treated the same as a compilation failure. CI runs the BPF programs through `bpftool prog load` (or the libbpf-rs equivalent) on a matrix of supported kernel versions; any rejection blocks merge. The matrix is declared in `BUILD-ENV.md`.
+**Verifier failures are not warnings.** A BPF program that loads under one kernel and is rejected by another is a regression, and is treated the same as a compilation failure. CI runs the BPF programs through `bpftool prog load` (and/or `kennel-bpf`'s own loader) on a matrix of supported kernel versions; any rejection blocks merge. The matrix is declared in `BUILD-ENV.md`.
 
 **Testing:**
 

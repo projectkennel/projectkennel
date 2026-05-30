@@ -65,7 +65,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 ### `kennel-bpf`
 
-**Purpose.** BPF program loader. Owns the embedded `.bpf.o` files, the map definitions (via libbpf-cargo skeleton generation), and the safe Rust API over libbpf-rs.
+**Purpose.** BPF program loader. Owns the `.bpf.o` files and a hand-rolled `bpf(2)` loader over `libc`, using `object` only for ELF parsing — **not** libbpf-rs/libbpf-sys or aya (which would pull in a large C-vendoring or crate tree). The map definitions live in Rust (`KENNEL_MAPS`), mirroring `bpf/maps.h`; the programs compile against the kernel UAPI (no CO-RE), so the loader only resolves map relocations by symbol name.
 
 **Public surface.**
 - `BpfRuntime` — the runtime handle for one kennel's BPF state (maps, attached programs).
@@ -74,11 +74,11 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `BpfRuntime::attach_to_cgroup(&self, cgroup_path: &Path) -> Result<(), BpfError>`.
 - `next_audit_event(&mut self) -> Option<BpfAuditEvent>` — drains the shared ringbuf.
 
-**Depends on.** `libbpf-rs` (FFI; see `kennel-syscall`'s `unsafe` policy), `kennel-policy` (for `AllowEntry` and friends).
+**Depends on.** `object` (ELF parsing) and `libc` (the `bpf(2)` FFI; see `kennel-syscall`'s `unsafe` policy — `kennel-bpf` is the second `unsafe` crate), `kennel-policy` (for `AllowEntry` and friends).
 
 **Depended on by.** `kennel-spawn` (attaches BPF before exec), `kenneld` (owns the ringbuf reader).
 
-**Notes.** Crate-level `#![allow(unsafe_code)]` for the libbpf FFI boundary; reviewed under §4.
+**Notes.** Crate-level `#![allow(unsafe_code)]` for the `bpf(2)` FFI boundary (confined to `sys.rs`); reviewed under §4. ELF parsing is delegated to `object`.
 
 ### `kennel-privhelper`
 
@@ -96,11 +96,11 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 ### `kennel-syscall`
 
-**Purpose.** The single crate in the workspace permitted to contain `unsafe` blocks. Wraps raw Linux syscalls, namespace operations, Landlock primitives, seccomp installation, capability manipulation, and the libbpf FFI.
+**Purpose.** One of the two crates permitted to contain `unsafe` blocks (the other is `kennel-bpf`). Wraps raw Linux syscalls, namespace operations, Landlock primitives, seccomp installation, and capability manipulation. (The `bpf(2)` FFI lives in `kennel-bpf`, not here.)
 
 **Public surface.** Safe wrappers exposing the operations needed by other crates. Examples: `unshare_mount_namespace()`, `landlock_ruleset_create_and_seal()`, `seccomp_filter_install()`, `prctl_no_new_privs()`, `canonicalise_path(p: &Path, prefix: &Path) -> Result<PathBuf, _>` (the helper from `10.3`/`11.3`).
 
-**Depends on.** `nix`, `libc`, `libbpf-sys` (for the FFI underlying `kennel-bpf`'s safe API).
+**Depends on.** `nix`, `libc`. (`kennel-bpf` builds its `bpf(2)` FFI on `libc` + `object` directly, not on a `-sys` crate.)
 
 **Depended on by.** Everything.
 
@@ -187,7 +187,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 Per CODING-STANDARDS.md §3:
 
-- Every crate has `#![forbid(unsafe_code)]` at the top of `lib.rs` or `main.rs` *except* `kennel-syscall` (and `kennel-bpf` for its libbpf FFI surface), which carry `#![allow(unsafe_code)]` and are listed in `UNSAFE-CRATES.md`.
+- Every crate has `#![forbid(unsafe_code)]` at the top of `lib.rs` or `main.rs` *except* `kennel-syscall` (and `kennel-bpf` for its hand-rolled `bpf(2)` FFI surface), which carry `#![allow(unsafe_code)]` and are listed in `UNSAFE-CRATES.md`.
 - Every `pub` item carries a doc comment per §6.2.
 - Every crate's `lib.rs` carries the module-level doc comment per §6.1 — Purpose, Invariants, Threat bearing, Non-goals.
 

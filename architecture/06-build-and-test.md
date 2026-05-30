@@ -9,18 +9,16 @@ This chapter describes how the workspace is built, what the dependency graph loo
 A build needs:
 
 - Rust toolchain pinned by `rust-toolchain.toml` (installed via `rustup`).
-- Clang at the version pinned in `BUILD-ENV.md` (for BPF compilation).
-- `bpftool` at the version pinned in `BUILD-ENV.md` (for skeleton generation).
-- `libbpf` source, vendored under `crates-archive/libbpf-<version>.tar.gz`, hash in `CHECKSUMS.toml`.
-- `vmlinux.h` committed at `bpf/vmlinux.h`.
+- Clang at the version pinned in `BUILD-ENV.md` (for BPF compilation against the kernel UAPI, no CO-RE).
+- The kernel UAPI headers (`linux-libc-dev`: `<linux/bpf.h>` plus the multiarch `<asm/types.h>` path) at the version pinned in `BUILD-ENV.md`.
+- `bpftool` is **optional** (inspection and the verifier-load matrix only); the loader does not depend on it.
 - Vendored Rust crates in `crates-archive/`, each in `CHECKSUMS.toml`.
 - The system `sha256sum` binary (coreutils) for the shell-script checksum verifier.
 
 A build does not need:
 
 - Network access. `cargo build --offline --frozen --locked` is the only build command. CI fails if any network traffic is observed during build.
-- The build host's kernel headers (we use the vendored `vmlinux.h`).
-- The build host's `libbpf` (we use the vendored copy).
+- `libbpf`, `vmlinux.h`, or any CO-RE machinery (the programs compile against the UAPI and are loaded by `kennel-bpf`'s own `bpf(2)` loader; ELF parsing uses the `object` crate).
 - Any system Rust (we use rustup-managed Rust).
 
 The release-build environment is a container image whose exact contents are pinned by digest in `BUILD-ENV.md`. The image's recipe lives in the repository; rebuilding the image from scratch is reproducible.
@@ -32,13 +30,12 @@ The release-build environment is a container image whose exact contents are pinn
 For a full workspace build:
 
 1. **Vendor verification.** `tools/verify-checksums` (and its shell twin) confirm `crates-archive/` matches `CHECKSUMS.toml` and `Cargo.lock`.
-2. **BPF compilation.** `kennel-bpf`'s `build.rs` invokes clang against `bpf/*.bpf.c`, producing `*.bpf.o` files in `OUT_DIR`. Each `.bpf.c` includes `bpf/vmlinux.h` and `bpf/maps.h`; CO-RE relocations are emitted by clang.
-3. **BPF skeleton generation.** `build.rs` then invokes `bpftool gen skeleton` on each `.o`, producing Rust binding sources. The skeleton declares map types, attach helpers, and pinning paths.
-4. **Rust compilation.** `cargo build --workspace` builds every crate. Order is computed by Cargo from `[workspace.dependencies]`; the lower-layer crates (`kennel-syscall`, `kennel-text`, `kennel-audit`) are built before higher layers (`kennel-spawn`, `kenneld`, `kennel-cli`).
-5. **Binary stripping** (release only). `strip = "symbols"` in the release profile; separately, debug-info binaries are produced under `target/release-with-debuginfo/` for distributions that want a parallel `.debug` package.
-6. **Reproducibility check** (release-build CI only). The release builds twice on two different runners; output hashes must match.
+2. **BPF compilation.** `kennel-bpf`'s `build.rs` invokes clang against `bpf/*.bpf.c`, producing `*.bpf.o` files in `OUT_DIR`. Each `.bpf.c` includes `<linux/bpf.h>` (kernel UAPI) and `bpf/maps.h`; **no** `vmlinux.h`, no CO-RE relocations. The `.o` is embedded into the crate; map references are left as ELF relocations the loader resolves at load time.
+3. **Rust compilation.** `cargo build --workspace` builds every crate. Order is computed by Cargo from `[workspace.dependencies]`; the lower-layer crates (`kennel-syscall`, `kennel-text`, `kennel-audit`) are built before higher layers (`kennel-spawn`, `kenneld`, `kennel-cli`).
+4. **Binary stripping** (release only). `strip = "symbols"` in the release profile; separately, debug-info binaries are produced under `target/release-with-debuginfo/` for distributions that want a parallel `.debug` package.
+5. **Reproducibility check** (release-build CI only). The release builds twice on two different runners; output hashes must match.
 
-A typical incremental dev build (no BPF source changes, no skeleton regeneration) takes 5-10 seconds on a modern workstation. A full release build (clean target, BPF compilation, all features) takes 2-4 minutes.
+A typical incremental dev build (no BPF source changes) takes 5-10 seconds on a modern workstation. A full release build (clean target, BPF compilation, all features) takes 2-4 minutes.
 
 ---
 
@@ -194,7 +191,7 @@ A mismatch blocks the release. Causes typically traced to:
 
 - A path embedded in the binary (rustc may embed `CARGO_MANIFEST_DIR`). Fixed via `--remap-path-prefix`.
 - A non-deterministic dependency (a build script that uses the wall clock or process ID). Each such dependency is patched or replaced.
-- A kernel-version leak in the BPF output. Fixed by using the same `vmlinux.h` and the same clang on both runners.
+- A kernel-version leak in the BPF output. Avoided by compiling against the pinned UAPI headers (not a kernel-specific BTF dump) with the same clang on both runners.
 
 The reproducible-build job is not in the per-PR CI gate (it would be too slow); it runs on release tags and on `main` nightly.
 

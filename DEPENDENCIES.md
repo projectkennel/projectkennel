@@ -34,7 +34,7 @@ The short list of things we use a dependency for rather than writing ourselves (
 
 - Cryptography (e.g. `ring`, `ed25519-dalek`, `rustls`).
 - TOML and JSON (`serde`, `toml`, `serde_json`).
-- Landlock, seccomp, and eBPF bindings where the kernel ABI is non-trivial (`landlock`, `seccompiler`, `libbpf-rs`/`libbpf-sys`).
+- Security-ABI helpers where the kernel ABI is genuinely non-trivial: `seccompiler` (seccomp-BPF bytecode). Landlock and the BPF loader were instead hand-rolled (their vetted crates' cost — proc-macros/TCB for `landlock`; ~1435 vendored C files for `libbpf-sys`, 19 crates for `aya` — outweighed the small `unsafe` they save); the BPF loader uses `object` for ELF parsing only.
 - One async runtime, in the proxy and server crates only — never in the privhelper.
 - Hashing for the checksum verifier (`sha2`), itself bootstrapped per §5.5.1.
 
@@ -45,7 +45,7 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 ### libc
 
 - **Version:** =0.2.186 (exact pin)
-- **Justification:** The Rust bindings to the system C library — the foundation the syscall layer rests on (nix builds on it). `kennel-syscall` retains it as a direct dependency (the architecture lists `nix, libc, libbpf-sys`) for the raw constants and types the higher-level crates do not expose, used directly as the namespace/mount/seccomp wrappers land. The safe wrappers themselves go through nix where possible (§4 — prefer a vetted crate to our own `unsafe`).
+- **Justification:** The Rust bindings to the system C library — the foundation the syscall layer rests on (nix builds on it). `kennel-syscall` retains it as a direct dependency (the architecture lists `nix, libc`) for the raw constants and types the higher-level crates do not expose, used directly as the namespace/mount/seccomp wrappers land. The safe wrappers themselves go through nix where possible (§4 — prefer a vetted crate to our own `unsafe`).
 - **Licence:** MIT OR Apache-2.0 (we take Apache-2.0; compatible with the project licence).
 - **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: the `.crate` source is byte-identical to `github.com/rust-lang/libc` at the published commit, which is tag 0.2.186.
 - **Transitive deps added:** none. libc's only dependency (`rustc-std-workspace-core`) is optional and used solely when libc is built as part of the standard library; it is not in our dependency graph.

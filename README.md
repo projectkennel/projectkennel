@@ -34,7 +34,7 @@ See [SECURITY.md](SECURITY.md). Do not file a public issue for a specific exploi
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The threat catalogue, design document, and reference runtime are all Apache-2.0.
 
-One exception: the BPF programs under [bpf/](bpf/) (the `*.bpf.c` sources, their shared headers, and the generated `vmlinux.h`) are GPL-2.0, declared by the SPDX headers in those files and required by the Linux kernel for programs that declare a "GPL" license section. That applies to the in-kernel BPF object code; the user-space loader and everything else are Apache-2.0.
+One exception: the BPF programs under [bpf/](bpf/) (the `*.bpf.c` sources and their shared headers) are GPL-2.0, declared by the SPDX headers in those files and required by the Linux kernel for programs that declare a "GPL" license section. That applies to the in-kernel BPF object code; the user-space loader and everything else are Apache-2.0.
 
 ## Contact and links
 

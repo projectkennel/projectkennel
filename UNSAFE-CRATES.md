@@ -8,9 +8,15 @@ Every `unsafe` block in a listed crate follows the `SAFETY:` / `INVARIANTS UPHEL
 
 "Don't roll your own crypto" extends to `unsafe`. Where a well-audited crate
 already wraps a syscall or ABI soundly, we use it rather than writing the
-`unsafe` ourselves — `nix` for the general syscalls, `landlock` and
-`seccompiler` for the non-trivial security ABIs, `libbpf-rs` for the BPF FFI.
-This moves the `unsafe` into purpose-built, widely-reviewed code and out of
+`unsafe` ourselves — `nix` for the general syscalls, `seccompiler` for the
+seccomp-BPF filter (hand-rolling BPF bytecode is the genuinely dangerous case),
+and `object` for ELF parsing. The converse also applies: where the vetted
+crate's *cost* outweighs the `unsafe` it saves, we hand-roll the narrow ABI
+instead. Two deliberate exceptions: **Landlock** (the `landlock` crate would
+pull `syn`/proc-macros into the privileged TCB; its ABI is three syscalls) and
+the **`bpf(2)` loader** (libbpf-sys vendors ~1435 C files, aya pulls 19 crates;
+we use `object` for ELF and hand-roll the small, security-bearing loader).
+This keeps the `unsafe` in purpose-built code or in small, reviewed blocks of
 ours. The crates below are *permitted* `unsafe`; the goal is for them to own as
 little of it as possible.
 

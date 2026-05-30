@@ -24,14 +24,15 @@ kennel/
 │   ├── sendmsg6.bpf.c
 │   ├── maps.h                       single source of truth for map layouts
 │   ├── audit_events.h               ringbuf event struct declarations
-│   ├── vmlinux.h                    pinned, regenerated only by maintainer PR
+│   ├── kennel.bpf.h                 shared helpers (UAPI-based; no vmlinux.h/CO-RE)
+│   ├── README.md                    why no CO-RE; build/inspect instructions
 │   └── HELPERS.md                   whitelist of permitted BPF helper functions
 ├── crates/                          Rust workspace members
 │   ├── kennel-syscall/              the only unsafe-bearing crate (besides BPF FFI)
 │   ├── kennel-text/                 sanitisation helpers
 │   ├── kennel-policy/               TOML parsing, template resolution, signature verification
 │   ├── kennel-audit/                event types, writer, sink implementations
-│   ├── kennel-bpf/                  libbpf-rs wrapper, embedded .o, ringbuf reader
+│   ├── kennel-bpf/                  hand-rolled bpf(2) loader (object for ELF), .o, ringbuf reader
 │   ├── kennel-ipc-shared/           wire-format types, framing
 │   ├── kennel-ipc-client/           client-side connection, request, subscribe
 │   ├── kennel-ipc-server/           server-side accept loop, dispatcher trait
@@ -79,14 +80,14 @@ The workspace is acyclic and layered. Lower-level crates do not depend on higher
                           |
                     kennel-syscall
                           |
-                 (libc, nix, libbpf-sys)
+                 (libc, nix; kennel-bpf adds object)
 ```
 
 Rules:
 
 - **No cycles.** Enforced by Cargo (a cycle is a build error).
 - **No depth skipping in spirit.** A crate may depend on any layer below it, but a binary depending directly on `kennel-syscall` to bypass the safe wrappers in `kennel-spawn` is a smell that warrants a review note.
-- **`kennel-syscall` is the only `unsafe`-bearing crate** (besides `kennel-bpf` for its libbpf FFI surface). Every other crate carries `#![forbid(unsafe_code)]` per CODING-STANDARDS.md §4.
+- **`kennel-syscall` is the only `unsafe`-bearing crate** (besides `kennel-bpf` for its hand-rolled `bpf(2)` FFI surface). Every other crate carries `#![forbid(unsafe_code)]` per CODING-STANDARDS.md §4.
 - **`kennel-text` and `kennel-audit` are leaf-side utility crates** consumed by everything that emits text or events. They have no Project Kennel deps (only stdlib and minimal external crates).
 - **`kennel-policy`** does not depend on `kennel-spawn`, `kennel-bpf`, or any binary crate. The policy module is purely functional: same input, same output, no runtime side-effects.
 
@@ -126,9 +127,9 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 
 ### `kennel-bpf`
 
-- Carries `#![allow(unsafe_code)]` for the libbpf-rs FFI surface; same review discipline as `kennel-syscall`.
-- `build.rs` invokes clang and `bpftool gen skeleton` (see `06-build-and-test.md`).
-- The generated skeletons land in `OUT_DIR` and are `include!`d into `src/lib.rs`.
+- Carries `#![allow(unsafe_code)]` for the hand-rolled `bpf(2)` FFI surface (confined to `sys.rs`); same review discipline as `kennel-syscall`. ELF parsing is delegated to `object`; we do **not** use libbpf-rs/libbpf-sys or aya.
+- The `bpf/` programs compile against the kernel UAPI (no CO-RE/`vmlinux.h`); `object` parses the `.o` and the loader resolves map relocations by symbol name (see `06-build-and-test.md`, `bpf/README.md`).
+- The compiled `.bpf.o` files are embedded into the crate (no skeleton generation); `KENNEL_MAPS`/`KENNEL_PROGRAMS` describe the maps and programs in Rust, mirroring `bpf/maps.h`.
 
 ### `kennel-ipc-shared`, `-client`, `-server`
 

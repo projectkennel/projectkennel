@@ -27,7 +27,7 @@ Project Kennel ships the following BPF programs. Each is in `bpf/<name>.bpf.c` a
 
 All programs attach to per-kennel cgroups (one cgroup per kennel under `/sys/fs/cgroup/kennel/<id>/`). The same compiled `.o` is attached to every kennel's cgroup; per-kennel configuration is in maps, not in the program text.
 
-Programs are written in C against `vmlinux.h` and `bpf_helpers.h`, with CO-RE relocations. The build environment is pinned per `CODING-STANDARDS.md §2.2`.
+Programs are written in C against the kernel UAPI (`<linux/bpf.h>` plus our own `bpf/kennel.bpf.h` helpers) — **no** `vmlinux.h`, no CO-RE relocations (see `bpf/README.md` for why). The build environment is pinned per `CODING-STANDARDS.md §2.2`.
 
 ---
 
@@ -48,7 +48,7 @@ Project Kennel's overall kernel floor is 6.10 (per design doc §8.2; required fo
 Required BPF features beyond the attach points:
 
 - **BPF ringbuf** (kernel 5.8+). Used for audit-event delivery; replaces perfbuf.
-- **CO-RE** (kernel 5.5+; libbpf supports back-compat). Allows the same `.o` to run on any kernel ≥ the minimum.
+- **No CO-RE.** The programs touch only stable hook-context structs and our own maps, so they compile against the kernel UAPI (`<linux/bpf.h>`) rather than a `vmlinux.h` BTF dump. `kennel-bpf`'s `bpf(2)` loader resolves map relocations by symbol name; there is no BTF/CO-RE relocation step.
 - **LPM trie maps** (kernel 4.11+). Used for CIDR-based allowlists.
 - **`bpf_loop`** (kernel 5.17+, optional). Replaces some `#pragma unroll` loops; programs fall back to unrolling when unavailable.
 
@@ -236,7 +236,7 @@ The workload's view never includes `/sys/fs/bpf` — the constructed shim does n
 ## What this chapter does not cover
 
 - The C source patterns required of BPF programs (bounds checks, helper whitelist, `#pragma unroll` discipline): CODING-STANDARDS.md §4.1.
-- The Rust loader's interface to libbpf and the generated skeleton crate: `02-6-internal-api.md`.
+- The Rust loader's `bpf(2)` interface (`object` for ELF, hand-rolled syscalls): `02-6-internal-api.md`.
 - How the cgroup is created and the workload moved into it: design doc §8.3 and `01-process-model.md`.
 - The audit JSONL events produced from these ringbuf events: `02-3-audit-schema.md`.
 - The kernel-feature checks at startup: design doc §8.2 and `05-state-and-supervision.md`.
