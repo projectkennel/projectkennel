@@ -109,19 +109,39 @@ impl std::error::Error for CanonicaliseError {
 ///   cannot be resolved.
 /// - [`CanonicaliseError::Escapes`] if `p` resolves outside `prefix`.
 pub fn canonicalise_path(p: &Path, prefix: &Path) -> Result<PathBuf, CanonicaliseError> {
-    // Scaffold: the resolving implementation lands in the feat: commit. Until
-    // then the contract is unmet — every input is reported as escaping, so the
-    // positive tests below fail red while the crate already compiles and the
-    // error/type surface is fixed.
-    Err(CanonicaliseError::Escapes {
-        resolved: prefix.join(p),
-    })
+    // 1. Reject `..` before touching the filesystem (§10.2). We refuse rather
+    //    than normalise, so a `..` is a categorical error even where it would
+    //    have resolved back inside the prefix.
+    if has_parent_component(p) {
+        return Err(CanonicaliseError::Traversal);
+    }
+
+    // 2. Resolve the trusted allowed root. This is the value every result is
+    //    measured against, so it must itself be real and symlink-free.
+    let canonical_prefix = std::fs::canonicalize(prefix).map_err(CanonicaliseError::Prefix)?;
+
+    // 3. A relative input is interpreted against the canonical prefix; an
+    //    absolute input is taken as given. Either way the join target is then
+    //    realpath-resolved against the live filesystem.
+    let target = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        canonical_prefix.join(p)
+    };
+    let resolved = std::fs::canonicalize(&target).map_err(CanonicaliseError::Input)?;
+
+    // 4. Component-aware containment: `starts_with` compares whole path
+    //    components, so `/srv/kennel` does not admit `/srv/kennel-evil`, and a
+    //    symlink that resolved outside the prefix is caught here.
+    if resolved.starts_with(&canonical_prefix) {
+        Ok(resolved)
+    } else {
+        Err(CanonicaliseError::Escapes { resolved })
+    }
 }
 
-/// Reject a path that carries a `..` component. Pulled out so the rejection is
-/// a single named check shared by the doc comment and the implementation.
-#[allow(dead_code)] // used by the feat: implementation
-fn rejects_traversal(p: &Path) -> bool {
+/// True if `p` carries a `..` component (a path-traversal attempt).
+fn has_parent_component(p: &Path) -> bool {
     p.components().any(|c| matches!(c, Component::ParentDir))
 }
 
