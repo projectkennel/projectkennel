@@ -327,3 +327,14 @@ verified-against = [
     "github.com/gimli-rs/object @ 5b66b69298f6198f9d5b5bb2a0b284b4d920a92c (tag 0.36.7) — 102 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "Direct dep of kennel-bpf (ELF parsing for the BPF loader). default-features = false, features = [\"read_core\", \"elf\"] — only new transitive is none (memchr already vendored). The bpf() syscalls, map creation, relocation patching and cgroup attach are hand-rolled over libc (object is used only for the generic, error-prone ELF mechanics, as seccompiler is for BPF bytecode)."
+
+[crate."ed25519-compact"]
+version = "=2.3.0"
+crate-sha256 = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical)",
+    "github.com/jedisct1/rust-ed25519-compact @ bbbb92975251bff440109513eb95a68471d398de (tag 2.3.0) — 15 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep of kennel-policy (Ed25519 verify on the spawn path; sign+verify in the compiler). default-features = false, features = [\"std\"] — zero transitive deps (getrandom/ct-codecs/ed25519 all optional, not enabled; x25519.rs/pem.rs not compiled). Field arithmetic is fiat-crypto formally-verified code; single unsafe is volatile secret-wipe; verify rejects non-canonical S and weak keys."

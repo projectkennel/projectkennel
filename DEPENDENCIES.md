@@ -86,3 +86,12 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/rust-vmm/seccompiler` at tag v0.5.0.
 - **Transitive deps added:** none new. seccompiler's only dependency is `libc`, already a direct dependency above.
 - **Proc-macros / build.rs:** none.
+
+### ed25519-compact
+
+- **Version:** =2.3.0 (exact pin), `default-features = false`, `features = ["std"]`.
+- **Justification:** Ed25519 signature verification for `kennel-policy` — the runtime spawn path verifies one signature over the settled policy against a pinned key (`architecture/02-2-config-schema.md` §Signatures); the compiler signs settled policies. "Don't roll your own crypto" (§4) — a vetted Ed25519 is mandatory. Chosen over `ed25519-dalek` (≈9× the code, a ~6–9-crate tree) and `ring` (bundles BoringSSL C/asm): a self-contained pure-Rust implementation whose Curve25519 field arithmetic is fiat-crypto formally-verified code, with zero transitive deps under our feature set. Base64 of the signature envelope is decoded in our own code (encoding, not crypto; the bytes are public), so `pem`/`ct-codecs` stays off.
+- **Licence:** MIT.
+- **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: 15 source files byte-identical to `github.com/jedisct1/rust-ed25519-compact` at tag 2.3.0. Source read for backdoors: no FFI/asm/process/net/fs/env; the single `unsafe` is the volatile secret-wipe; verification rejects non-canonical `S` (malleability) and weak/identity keys.
+- **Transitive deps added:** none. `getrandom`, `ct-codecs`, and `ed25519` are optional dependencies, gated behind the `random`/`pem`/`traits` features, none of which we enable. `x25519.rs` and `pem.rs` are not compiled.
+- **Proc-macros / build.rs:** none.
