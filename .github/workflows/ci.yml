@@ -1,0 +1,101 @@
+# Project Kennel CI gate (CODING-STANDARDS.md §14).
+#
+# What runs here today is the subset of §14 that is meaningful while the
+# workspace is std-only: formatting, clippy, tests, an offline/locked build,
+# docs, the BPF compile check, and the shell tooling tests. The remaining §14
+# checks activate when their inputs exist and are tracked as owed (see the
+# `supply-chain` job and the notes below); CI must not claim to run a check it
+# does not.
+#
+# Owed (land with the first vendored dependency / release infra):
+#   - tools/verify-checksums (Rust) — needs sha2 (§5.5.1 bootstrap).
+#   - cargo deny / cargo audit / cargo vet — need a dependency graph + config.
+#   - fuzz smoke tests — need the fuzz harness crate.
+#   - reproducible-build double-build — needs the release-image (§BUILD-ENV).
+#   - BPF verifier-load matrix (bpftool prog load on kernels >= 6.10) — needs
+#     custom-kernel runners; the compile check below is the hosted-runner part.
+#
+# Third-party actions are kept to actions/checkout. Pinning it by full commit
+# SHA (rather than the @v4 tag) is the recommended hardening once a maintainer
+# records the audited SHA.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (fmt, clippy, test, build, doc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup honours rust-toolchain.toml (1.95.0 + rustfmt + clippy); the
+      # first cargo invocation installs the pinned toolchain and components.
+      - name: Toolchain
+        run: rustup show && cargo --version && rustc --version
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test (all features)
+        run: cargo test --all-features
+      - name: Test (no default features)
+        run: cargo test --no-default-features
+      - name: Build (offline, frozen, locked)
+        run: cargo build --offline --frozen --locked
+      - name: Doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+
+  bpf-compile:
+    name: bpf (compile, -Werror)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang + libbpf headers
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev
+      # Compile every program against the committed bpf/vmlinux.h (the audited
+      # build input; CO-RE relocates field offsets at load time, so the dump's
+      # source kernel need not match the runner). The verifier-load matrix is
+      # owed (custom-kernel runners); this catches compile regressions.
+      - name: Compile all programs
+        working-directory: bpf
+        run: |
+          set -euo pipefail
+          test -f vmlinux.h || { echo "bpf/vmlinux.h missing"; exit 1; }
+          fail=0
+          for f in connect4 connect6 bind4 bind6 setsockopt sock_create sendmsg4 sendmsg6; do
+            echo "::group::$f"
+            clang -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86 \
+              -I. -I/usr/include -c "$f.bpf.c" -o "/tmp/$f.bpf.o"
+            echo "::endgroup::"
+          done
+          echo "all 8 programs compiled clean"
+
+  tooling:
+    name: tooling (shell tests + checksum witness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checksum witness (shell, §5.5.1)
+        run: tools/verify-checksums.sh
+      - name: Hook + tool tests
+        run: |
+          set -euo pipefail
+          tools/git-hooks/tests/commit-msg.sh
+          tools/tests/verify-checksums.sh
+          tools/tests/audit-helper.sh
