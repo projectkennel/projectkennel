@@ -11,7 +11,7 @@ This ledger pairs with:
 
 ## Status
 
-No dependencies yet — the reference runtime is not yet implemented. This ledger is structured and ready; entries are added with the PR that introduces each dependency, following the procedure in §5.2.
+Six direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins 27 `.crate` artefacts. Further entries are added with the PR that introduces each dependency.
 
 ## Entry format
 
