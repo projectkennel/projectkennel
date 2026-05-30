@@ -9,3 +9,7 @@ version = "0.0.0"
 [[package]]
 name = "kennel-syscall"
 version = "0.0.0"
+
+[[package]]
+name = "kennel-text"
+version = "0.0.0"
