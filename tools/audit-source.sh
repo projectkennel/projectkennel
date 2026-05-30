@@ -68,9 +68,10 @@ PATH_IN_VCS="$(python3 -c "import json; print(json.load(open('$VCS')).get('path_
 if [ -n "$REPO_OVERRIDE" ]; then
 	SLUG="$REPO_OVERRIDE"
 else
-	ORIG="$CRATE_DIR/Cargo.toml.orig"
-	[ -f "$ORIG" ] || ORIG="$CRATE_DIR/Cargo.toml"
-	URL="$(grep -m1 -E '^repository' "$ORIG" | sed -E 's/.*"(.*)".*/\1/' || true)"
+	# Read the repository from the NORMALISED Cargo.toml: cargo resolves
+	# workspace inheritance (`repository.workspace = true`) there at publish
+	# time, whereas Cargo.toml.orig keeps the unresolved form.
+	URL="$(grep -m1 -E '^repository[[:space:]]*=[[:space:]]*"' "$CRATE_DIR/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/' || true)"
 	case "$URL" in
 	*github.com/*) SLUG="$(echo "$URL" | sed -E 's#.*github.com/##; s#\.git$##; s#/+$##' | cut -d/ -f1,2)" ;;
 	*)
@@ -109,12 +110,17 @@ while IFS= read -r -d '' f; do
 		continue
 	fi
 	up="$REPO_BASE/$rel"
-	if [ ! -f "$up" ]; then
-		missing+=("$rel")
-	elif cmp -s "$f" "$up"; then
+	root="$TOP/$rel"
+	if [ -f "$up" ] && cmp -s "$f" "$up"; then
 		matched=$((matched + 1))
-	else
+	elif [ "$REPO_BASE" != "$TOP" ] && [ -f "$root" ] && cmp -s "$f" "$root"; then
+		# A repo-root file (README, LICENSE-*) that cargo pulls into a
+		# sub-crate's package from the workspace root.
+		matched=$((matched + 1))
+	elif [ -f "$up" ]; then
 		mismatched+=("$rel")
+	else
+		missing+=("$rel")
 	fi
 done < <(find "$CRATE_DIR" -type f -print0)
 
