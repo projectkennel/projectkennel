@@ -14,14 +14,19 @@
 //! # `unsafe`
 //!
 //! This crate is the workspace's *designated* `unsafe` crate (`UNSAFE-CRATES.md`)
-//! — but it owns as little `unsafe` as possible. Following "don't roll your own
-//! `unsafe`" (CODING-STANDARDS.md §4), it prefers vetted crates that already
-//! wrap each syscall soundly: nix for the general syscalls ([`unistd`], and the
-//! namespace/mount wrappers to follow), and `landlock` / `seccompiler` for the
-//! non-trivial security ABIs as those land. While a safe wrapper exists for
-//! everything we need, the crate stays `#![forbid(unsafe_code)]` below; it flips
-//! to `#![allow(unsafe_code)]` (with the §4 all-maintainers review) only for a
-//! primitive no vetted crate covers. Dependencies are vendored under §5.5.
+//! and owns as little `unsafe` as possible. Following "don't roll your own
+//! `unsafe`" (CODING-STANDARDS.md §4) it prefers vetted crates: nix for the
+//! general syscalls ([`unistd`], and the namespace/mount wrappers to follow),
+//! and `seccompiler` for the seccomp-BPF filter (hand-rolling BPF bytecode is
+//! the dangerous case).
+//!
+//! The one deliberate exception is [`landlock`]: the `landlock` crate would pull
+//! `syn` and the first proc-macros into the privileged dependency tree, whereas
+//! the Landlock ABI is three syscalls and a few packed structs from the kernel
+//! UAPI — small enough to own. So this crate carries `#![allow(unsafe_code)]`,
+//! with the `unsafe` confined to [`landlock`]'s three raw syscall wrappers, each
+//! carrying the §4 `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment.
+//! Dependencies are vendored under §5.5.
 //!
 //! # Invariants
 //!
@@ -39,7 +44,8 @@
 //! allowed prefix — directly, via `..`, or via a symlink — is refused rather
 //! than silently accepted.
 
-#![forbid(unsafe_code)]
+#![allow(unsafe_code)]
 
+pub mod landlock;
 pub mod path;
 pub mod unistd;

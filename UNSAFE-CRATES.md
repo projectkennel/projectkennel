@@ -16,18 +16,21 @@ little of it as possible.
 
 ## Status
 
-`kennel-syscall` currently owns **no** `unsafe`: it composes nix's safe
-wrappers (e.g. `unistd::{effective_uid, real_uid}` over `nix::unistd`) and
-carries `#![forbid(unsafe_code)]`. It flips to `#![allow(unsafe_code)]` (with
-the all-maintainers review below) only when a primitive lands that no vetted
-crate covers. `kennel-bpf` is still planned. Every other crate is
-`#![forbid(unsafe_code)]`.
+`kennel-syscall` carries `#![allow(unsafe_code)]` for exactly one deliberate
+reason: the hand-rolled **Landlock** bindings (`src/landlock.rs`). The
+`landlock` crate would pull `syn` and the first proc-macros into the privileged
+dependency tree, while the Landlock ABI is three syscalls and a few packed
+structs — small enough to own. Everything else in the crate is safe: the
+credential wrappers go through `nix::unistd`, and seccomp will go through
+`seccompiler` (hand-rolling BPF bytecode is the genuinely dangerous case).
+The `unsafe` is confined to `landlock.rs`'s raw syscall wrappers. `kennel-bpf`
+is still planned. Every other crate is `#![forbid(unsafe_code)]`.
 
 ## Permitted crates
 
 | Crate | Why it may need `unsafe` | Size ceiling |
 |---|---|---|
-| `kennel-syscall` *(forbid; owns none yet)* | The single point for namespaces, mounts, Landlock/seccomp, capabilities, and credentials. Delegates the `unsafe` to vetted crates (nix / landlock / seccompiler); owns `unsafe` only for a primitive none of them cover. | ~1500 lines (reviewable in one sitting) |
+| `kennel-syscall` *(allow; owns the Landlock bindings)* | The single point for namespaces, mounts, Landlock/seccomp, capabilities, and credentials. Delegates `unsafe` to vetted crates (nix, seccompiler) and owns only the Landlock syscall wrappers (`src/landlock.rs`), a deliberate exception to keep `syn`/proc-macros out of the privileged TCB. | ~1500 lines (reviewable in one sitting) |
 | `kennel-bpf` *(planned)* | The libbpf-rs / `libbpf-sys` FFI surface for loading and attaching BPF programs. `unsafe` confined to the FFI boundary. | — |
 
 The C in `bpf/` is governed separately by §4.1 (BPF C code) — C is `unsafe` by construction and reviewed under matching rules, but it is not Rust `unsafe` and is not listed here.

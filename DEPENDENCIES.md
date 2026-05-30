@@ -53,9 +53,18 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 
 ### nix
 
-- **Version:** =0.31.3 (exact pin), `default-features = false`, `features = ["user"]`.
-- **Justification:** Safe, typed wrappers over the syscalls `kennel-syscall` would otherwise hand-roll `unsafe` — namespaces, mounts, `pivot_root`, credentials, and the rest of the spawn sequence (`docs/08`). Per §4 ("don't roll your own `unsafe`"), a vetted, widely-used crate is preferable to our own FFI for these. Features are enabled pay-as-you-go as each wrapper lands, to keep the compiled surface (and transitive set) minimal.
+- **Version:** =0.31.3 (exact pin), `default-features = false`, `features = ["user", "process"]`.
+- **Justification:** Safe, typed wrappers over the syscalls `kennel-syscall` would otherwise hand-roll `unsafe` — namespaces, mounts, `pivot_root`, credentials, `no_new_privs`, and the rest of the spawn sequence (`docs/08`). Per §4 ("don't roll your own `unsafe`"), a vetted, widely-used crate is preferable to our own FFI for these. Features are enabled pay-as-you-go as each wrapper lands, to keep the compiled surface (and transitive set) minimal; `process` (added for `set_no_new_privs`, `fork`/`waitpid` in tests) pulls no new crate.
 - **Licence:** MIT.
 - **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/nix-rust/nix` at the published commit, tag v0.31.3. Transitives likewise (bitflags, cfg-if, cfg_aliases).
 - **Transitive deps added:** `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal); `cfg_aliases` =0.2.1 (build-dependency of nix's `build.rs`). `libc` is shared with the direct dependency above. Each is vendored and recorded in `CHECKSUMS.toml` with its own GitHub-provenance check.
 - **Proc-macros / build.rs:** nix has a `build.rs` that uses `cfg_aliases` to define `cfg` aliases from the target; `cfg_aliases` is a small macro crate (no proc-macro). No proc-macros in this set. The reviewer should confirm nix's `build.rs` does only cfg-alias setup.
+
+### bitflags
+
+- **Version:** =2.11.1 (exact pin).
+- **Justification:** Typed access-right sets for the hand-rolled Landlock bindings (`AccessFs` / `AccessNet` in `kennel-syscall::landlock`). Already in the graph as a transitive of nix; promoted to a direct dependency because `landlock.rs` uses it directly. A flag-set macro avoids a hand-written, error-prone set of `u64` bit operations.
+- **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
+- **Reviewer:** remco (2026-05-30) — audited as part of the nix adoption. Provenance verified via `tools/audit-source.sh`: byte-identical to `github.com/bitflags/bitflags` at tag 2.11.1.
+- **Transitive deps added:** none new (already present via nix).
+- **Proc-macros / build.rs:** none. (The optional `derive` proc-macro feature is **not** enabled.)

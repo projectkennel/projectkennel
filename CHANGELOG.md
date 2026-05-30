@@ -20,8 +20,13 @@ The project is in its documentation and design stage. No releases yet; no runtim
 ### Dependencies
 
 - **First dependency adopted: `libc` =0.2.186** (§5.5-approved; reviewer remco). Vendored to `crates-archive/` as a cargo local registry (`.cargo/config.toml` replaces crates.io); recorded in `CHECKSUMS.toml`, `DEPENDENCIES.md`, `RELEASE-WATCH.toml`. Provenance verified independent of crates.io against the GitHub source at tag 0.2.186 (`tools/audit-source.sh`). No transitive deps.
-- **`nix` =0.31.3** adopted (§5.5-approved; reviewer remco), `default-features = false, features = ["user"]`. Safe, typed syscall wrappers preferred over hand-rolled `unsafe` (§4, "don't roll your own `unsafe`"). Transitive: `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal), `cfg_aliases` =0.2.1 (build). Each vendored and GitHub-provenance-checked (`tools/audit-source.sh`).
-- `kennel-syscall` owns **no `unsafe`**: the `unistd` credential wrappers now go through `nix::unistd`, and the crate is back to `#![forbid(unsafe_code)]`. It is still the designated `unsafe` crate but delegates to vetted crates and flips to `allow` only for a primitive none cover (`UNSAFE-CRATES.md`).
+- **`nix` =0.31.3** adopted (§5.5-approved; reviewer remco), `default-features = false, features = ["user", "process"]`. Safe, typed syscall wrappers preferred over hand-rolled `unsafe` (§4, "don't roll your own `unsafe`"). Transitive: `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal), `cfg_aliases` =0.2.1 (build). Each vendored and GitHub-provenance-checked (`tools/audit-source.sh`).
+- **`bitflags` =2.11.1** promoted to a direct dependency of `kennel-syscall` (typed Landlock access-right sets); already approved as a nix transitive.
+
+### Enforcement (kennel-syscall)
+
+- **`unistd` credential wrappers** (`effective_uid`, `real_uid`) over `nix::unistd` — no `unsafe` of ours.
+- **Hand-rolled Landlock** (`landlock` module): `AccessFs`/`AccessNet`, `abi_version`, ABI-support masking, and a `Ruleset` builder that seals the current process (`set_no_new_privs` via nix, then `restrict_self`). Chosen over the `landlock` crate to keep `syn`/proc-macros out of the privileged dependency tree; the ABI is taken from the kernel UAPI. `kennel-syscall` carries `#![allow(unsafe_code)]` with the `unsafe` confined to Landlock's six raw syscall wrappers (each §4-commented). A fork-based test confirms the seal denies an un-allowed path while permitting an allowed one.
 
 ### Licensing
 
