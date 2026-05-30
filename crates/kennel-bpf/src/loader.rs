@@ -195,6 +195,21 @@ impl Loaded {
     pub fn attach(&self, cgroup: BorrowedFd<'_>, attach_type: u32) -> io::Result<()> {
         sys::prog_attach_cgroup(cgroup, self.program.as_fd(), attach_type)
     }
+
+    /// Insert or overwrite an element of the named map (`BPF_MAP_UPDATE_ELEM`).
+    /// `key`/`value` must match the map's declared key/value sizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the program did not reference a map of that name, or
+    /// the OS error if the kernel rejects the update.
+    pub fn update_map(&self, name: &str, key: &[u8], value: &[u8], flags: u64) -> io::Result<()> {
+        let map = self
+            .maps
+            .get(name)
+            .ok_or_else(|| other(format!("no map `{name}` in this program")))?;
+        sys::map_update(map.as_fd(), key, value, flags)
+    }
 }
 
 fn other(msg: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
@@ -350,49 +365,102 @@ mod root_tests {
         );
     }
 
-    #[test]
-    fn load_attach_and_enforce_connect4() {
+    /// Build the `(key, value)` byte pair for an `allow_v4` entry: a /32 LPM key
+    /// for `addr` (network-order bytes) and an `allow_entry` permitting any
+    /// protocol on `[port_min, port_max]`. Layouts match `bpf/maps.h`.
+    fn allow_v4_entry(addr: [u8; 4], port_min: u16, port_max: u16) -> ([u8; 8], [u8; 8]) {
+        let mut key = [0u8; 8];
+        key[0..4].copy_from_slice(&32u32.to_ne_bytes()); // prefixlen
+        key[4..8].copy_from_slice(&addr); // addr, already network order
+        let mut val = [0u8; 8]; // allow_entry: port_min, port_max, protocol, flags, _pad[2]
+        val[0..2].copy_from_slice(&port_min.to_ne_bytes());
+        val[2..4].copy_from_slice(&port_max.to_ne_bytes());
+        // val[4] protocol = 0 (KENNEL_PROTO_ANY); val[5] flags = 0; val[6..8] pad.
+        (key, val)
+    }
+
+    /// Fork a child that joins `cg`, attempts one connect to 127.0.0.1:9, and
+    /// `_exit`s with the verdict. Returns true iff the BPF verdict *denied* the
+    /// connect (EPERM/EACCES); an allowed connect reaches the stack and is
+    /// refused (ECONNREFUSED), which reads here as not-denied.
+    fn connect_denied_in_cgroup(cg: &Path) -> bool {
+        // SAFETY: fork(); the child only writes its pid, attempts one connect, and
+        // _exit()s — never returning to the harness.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            let pid = std::process::id().to_string();
+            let _ = std::fs::write(cg.join("cgroup.procs"), &pid);
+            let denied = connect_denied();
+            // SAFETY: _exit without unwinding/atexit after fork.
+            unsafe { libc::_exit(i32::from(denied)) };
+        }
+        let mut status = 0;
+        // SAFETY: waitpid on our child with a valid status pointer.
+        unsafe { libc::waitpid(child, std::ptr::from_mut(&mut status), 0) };
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1
+    }
+
+    /// Attach `loaded` (a connect4 program) to a fresh cgroup at `cg`, run `body`
+    /// while it is attached, then remove the cgroup on the happy path. A panic in
+    /// `body` leaks the test cgroup, which is harmless and visible.
+    fn with_attached_connect4(cg: &Path, loaded: &Loaded, body: impl FnOnce()) {
+        let _ = std::fs::create_dir(cg);
+        let cgfd = std::fs::File::open(cg).expect("open cgroup");
+        let spec = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "connect4")
+            .expect("connect4 spec");
+        loaded
+            .attach(cgfd.as_fd(), spec.attach_type)
+            .expect("attach connect4");
+        body();
+        let _ = std::fs::remove_dir(cg);
+    }
+
+    fn load_connect4() -> Loaded {
         let elf = compile_uapi("connect4");
         let spec = KENNEL_PROGRAMS
             .iter()
             .find(|p| p.name == "connect4")
             .expect("connect4 spec");
-        let loaded = load_program(&elf, spec, KENNEL_MAPS).expect("load connect4");
+        load_program(&elf, spec, KENNEL_MAPS).expect("load connect4")
+    }
+
+    #[test]
+    fn load_attach_and_enforce_connect4() {
+        let loaded = load_connect4();
         // It referenced real maps.
         assert!(loaded.maps.contains_key("kennel_meta_map"));
         assert!(loaded.maps.contains_key("allow_v4"));
 
-        // Fresh cgroup, attach the program.
+        // Empty maps => fail closed: a connect from inside the cgroup is denied.
         let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test");
-        let _ = std::fs::create_dir(cg);
-        let cgfd = std::fs::File::open(cg).expect("open cgroup");
-        loaded
-            .attach(cgfd.as_fd(), spec.attach_type)
-            .expect("attach connect4");
-
-        // A child joins the cgroup and tries to connect; empty maps => fail closed.
-        // SAFETY: fork(); the child only writes its pid, attempts one connect, and
-        // _exit()s — never returning to the harness.
-        let child = unsafe { libc::fork() };
-        assert!(child >= 0, "fork failed");
-        let verdict = if child == 0 {
-            let pid = std::process::id().to_string();
-            let _ = std::fs::write(cg.join("cgroup.procs"), &pid);
-            let denied = connect_denied();
-            // SAFETY: _exit without unwinding/atexit after fork.
-            unsafe { libc::_exit(i32::from(!denied)) };
-        } else {
-            let mut status = 0;
-            // SAFETY: waitpid on our child with a valid status pointer.
-            unsafe { libc::waitpid(child, std::ptr::from_mut(&mut status), 0) };
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
-        };
-
-        // Cleanup before asserting so a failure does not leak the attach/cgroup.
-        let _ = std::fs::remove_dir(cg);
+        let mut denied = false;
+        with_attached_connect4(cg, &loaded, || denied = connect_denied_in_cgroup(cg));
         assert!(
-            verdict,
+            denied,
             "connect4 with empty maps should deny the connect (fail closed)"
+        );
+    }
+
+    #[test]
+    fn connect_allowed_when_map_populated() {
+        let loaded = load_connect4();
+        // Allow 127.0.0.1/32 on any port via BPF_MAP_UPDATE_ELEM.
+        let (key, val) = allow_v4_entry([127, 0, 0, 1], 0, u16::MAX);
+        loaded
+            .update_map("allow_v4", &key, &val, sys::BPF_ANY)
+            .expect("populate allow_v4");
+
+        // With a matching allow entry the BPF verdict permits the connect; the
+        // stack then refuses :9 (no listener), which is *not* a BPF denial.
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-allow");
+        let mut denied = true;
+        with_attached_connect4(cg, &loaded, || denied = connect_denied_in_cgroup(cg));
+        assert!(
+            !denied,
+            "connect4 with a matching allow_v4 entry should permit the connect"
         );
     }
 

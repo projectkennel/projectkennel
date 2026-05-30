@@ -1,9 +1,9 @@
 /*
  * Project Kennel BPF map ABI — single source of truth for map layouts.
  *
- * The Rust loader (kennel-bpf) derives its map types from the BTF of the
- * compiled objects, so these definitions are authoritative for both sides
- * (architecture/02-5-bpf-abi.md).
+ * The Rust loader (kennel-bpf) mirrors these layouts by hand in its KENNEL_MAPS
+ * table (it does not read BTF); these definitions are authoritative for both
+ * sides and the two must be kept in lockstep (architecture/02-5-bpf-abi.md).
  *
  * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30); the map layouts were
  * validated by bpftool's BTF-driven decode of live map contents (the LPM key,

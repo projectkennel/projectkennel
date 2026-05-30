@@ -11,8 +11,12 @@ use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 // bpf commands (enum bpf_cmd).
 const BPF_MAP_CREATE: libc::c_int = 0;
+const BPF_MAP_UPDATE_ELEM: libc::c_int = 2;
 const BPF_PROG_LOAD: libc::c_int = 5;
 const BPF_PROG_ATTACH: libc::c_int = 8;
+
+/// `map_update` flag: create or overwrite the element (`BPF_ANY`).
+pub const BPF_ANY: u64 = 0;
 
 /// `BPF_PSEUDO_MAP_FD`: the `src_reg` value marking an `ld_imm64` whose immediate
 /// is a map file descriptor (set during relocation patching).
@@ -45,6 +49,18 @@ struct ProgLoadAttr {
     prog_name: [u8; 16],
     prog_ifindex: u32,
     expected_attach_type: u32,
+}
+
+// The anonymous BPF_MAP_*_ELEM struct. `__aligned_u64` forces 8-byte alignment,
+// which repr(C) reproduces by padding after `map_fd` — so `size_of` is 32, the
+// size the kernel reads.
+#[repr(C)]
+#[derive(Default)]
+struct MapElemAttr {
+    map_fd: u32,
+    key: u64,
+    value: u64,
+    flags: u64,
 }
 
 #[repr(C)]
@@ -112,6 +128,46 @@ pub fn map_create(
         )
     };
     owned_fd(ret)
+}
+
+/// Insert or overwrite one element of a map (`BPF_MAP_UPDATE_ELEM`).
+///
+/// `key` must be at least the map's `key_size` bytes and `value` at least its
+/// `value_size` bytes — the kernel reads exactly those many from each pointer.
+///
+/// # Errors
+///
+/// Returns the OS error if the fd is out of range or the kernel rejects the
+/// update (e.g. the map is read-only, or `key`/`value` are too short to read).
+pub fn map_update(
+    map: BorrowedFd<'_>,
+    key: &[u8],
+    value: &[u8],
+    flags: u64,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let attr = MapElemAttr {
+        map_fd: u32::try_from(map.as_raw_fd())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "fd out of range"))?,
+        key: key.as_ptr() as u64,
+        value: value.as_ptr() as u64,
+        flags,
+    };
+    // SAFETY: `attr` is fully initialised; `key`/`value` outlive the call and are
+    // valid for reads of the map's key_size/value_size bytes (the caller passes
+    // slices at least that long — see the doc contract). The kernel only reads.
+    let ret = unsafe {
+        bpf(
+            BPF_MAP_UPDATE_ELEM,
+            std::ptr::from_ref(&attr).cast(),
+            std::mem::size_of::<MapElemAttr>(),
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// Load a program (`BPF_PROG_LOAD`). `insns` is the (already relocation-patched)
