@@ -15,6 +15,7 @@ members = [
     "crates/kennel-privhelper",
     "crates/kennel-bpf",
     "crates/kennel-policy",
+    "crates/kennel-spawn",
     "crates/kennel-syscall",
     "crates/kennel-text",
 ]
