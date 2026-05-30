@@ -125,8 +125,8 @@ pub fn sanitise_for_log(s: &str) -> String {
 /// Per §10.4, rendering escapes control/spoofing characters, escapes the `"`
 /// delimiter, marks the value's provenance, delimits its boundaries, and
 /// truncates absurdly long values with an explicit marker. The wrapper borrows;
-/// rendering is lazy and allocates at most [`DISPLAY_MAX_CHARS`] characters'
-/// worth of escaped text regardless of input size.
+/// rendering is lazy and allocates at most `DISPLAY_MAX_CHARS` characters' worth
+/// of escaped text regardless of input size.
 #[must_use]
 pub const fn display_untrusted(s: &str) -> Untrusted<'_> {
     Untrusted { inner: s }
