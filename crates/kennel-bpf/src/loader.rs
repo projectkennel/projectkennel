@@ -17,13 +17,17 @@ const MAP_TYPE_RINGBUF: u32 = 27;
 const F_NO_PREALLOC: u32 = 1;
 
 // Program type / attach types (enum bpf_prog_type / bpf_attach_type).
+const PROG_TYPE_CGROUP_SOCK: u32 = 9;
 const PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
+const PROG_TYPE_CGROUP_SOCKOPT: u32 = 25;
+const CGROUP_INET_SOCK_CREATE: u32 = 2;
 const CGROUP_INET4_BIND: u32 = 8;
 const CGROUP_INET6_BIND: u32 = 9;
 const CGROUP_INET4_CONNECT: u32 = 10;
 const CGROUP_INET6_CONNECT: u32 = 11;
 const CGROUP_UDP4_SENDMSG: u32 = 14;
 const CGROUP_UDP6_SENDMSG: u32 = 15;
+const CGROUP_SETSOCKOPT: u32 = 22;
 
 /// One BPF map, as declared in `bpf/maps.h`. Keyed by the symbol name the
 /// programs reference it by.
@@ -117,9 +121,11 @@ pub struct ProgramSpec {
     pub attach_type: u32,
 }
 
-/// The `cgroup/sock_addr` family of `bpf/*.bpf.c` (connect/bind/sendmsg, v4/v6).
-/// `sock_create` and `setsockopt` use other program types and are added with
-/// their loaders.
+/// Every program in `bpf/*.bpf.c`.
+///
+/// The `cgroup/sock_addr` family (connect/bind/sendmsg, v4/v6), plus
+/// `sock_create` (`cgroup/sock`) and `setsockopt` (`cgroup/sockopt`), which use
+/// distinct program and attach types.
 pub const KENNEL_PROGRAMS: &[ProgramSpec] = &[
     ProgramSpec {
         name: "connect4",
@@ -156,6 +162,18 @@ pub const KENNEL_PROGRAMS: &[ProgramSpec] = &[
         section: "cgroup/sendmsg6",
         prog_type: PROG_TYPE_CGROUP_SOCK_ADDR,
         attach_type: CGROUP_UDP6_SENDMSG,
+    },
+    ProgramSpec {
+        name: "sock_create",
+        section: "cgroup/sock_create",
+        prog_type: PROG_TYPE_CGROUP_SOCK,
+        attach_type: CGROUP_INET_SOCK_CREATE,
+    },
+    ProgramSpec {
+        name: "setsockopt",
+        section: "cgroup/setsockopt",
+        prog_type: PROG_TYPE_CGROUP_SOCKOPT,
+        attach_type: CGROUP_SETSOCKOPT,
     },
 ];
 
@@ -276,16 +294,20 @@ mod root_tests {
     use std::path::Path;
     use std::process::Command;
 
-    fn compile_connect4_uapi() -> Vec<u8> {
+    /// Compile `bpf/<name>.bpf.c` against the kernel UAPI (no CO-RE) and return
+    /// the resulting object bytes. The three shared headers are copied alongside.
+    fn compile_uapi(name: &str) -> Vec<u8> {
         let bpf = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bpf");
         let tmp = std::env::temp_dir().join("kennel-bpf-test");
         std::fs::create_dir_all(&tmp).expect("mkdir");
-        for f in ["maps.h", "audit_events.h", "kennel.bpf.h", "connect4.bpf.c"] {
-            std::fs::copy(format!("{bpf}/{f}"), tmp.join(f)).expect("copy bpf src");
+        for f in ["maps.h", "audit_events.h", "kennel.bpf.h"] {
+            std::fs::copy(format!("{bpf}/{f}"), tmp.join(f)).expect("copy bpf header");
         }
-        // connect4.bpf.c already includes <linux/bpf.h> (UAPI, no CO-RE).
-        let c = tmp.join("connect4.bpf.c");
-        let obj = tmp.join("connect4.o");
+        let src = format!("{name}.bpf.c");
+        std::fs::copy(format!("{bpf}/{src}"), tmp.join(&src)).expect("copy bpf src");
+        // The sources already include <linux/bpf.h> (UAPI, no CO-RE).
+        let c = tmp.join(&src);
+        let obj = tmp.join(format!("{name}.o"));
         let status = Command::new("clang")
             .args(["-O2", "-Wall", "-target", "bpf", "-D__TARGET_ARCH_x86"])
             .arg("-I")
@@ -297,13 +319,40 @@ mod root_tests {
             .arg(&obj)
             .status()
             .expect("run clang");
-        assert!(status.success(), "clang failed to compile connect4 (UAPI)");
+        assert!(status.success(), "clang failed to compile {name} (UAPI)");
         std::fs::read(&obj).expect("read object")
+    }
+
+    /// Every program in `KENNEL_PROGRAMS` compiles, parses, and loads/verifies
+    /// through this loader (with its maps created and relocated). This is the
+    /// load-and-verify matrix; `load_attach_and_enforce_connect4` covers the
+    /// attach-and-enforce behaviour for one representative program.
+    #[test]
+    fn all_programs_load() {
+        let mut failures = Vec::new();
+        for spec in KENNEL_PROGRAMS {
+            let elf = compile_uapi(spec.name);
+            match load_program(&elf, spec, KENNEL_MAPS) {
+                // The program FD is live; dropping `loaded` closes it (and the maps).
+                Ok(loaded) => {
+                    let fd = std::os::fd::AsRawFd::as_raw_fd(&loaded.program.as_fd());
+                    if fd < 0 {
+                        failures.push(format!("{}: invalid program fd", spec.name));
+                    }
+                }
+                Err(e) => failures.push(format!("{}: {e}", spec.name)),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "programs failed to load:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]
     fn load_attach_and_enforce_connect4() {
-        let elf = compile_connect4_uapi();
+        let elf = compile_uapi("connect4");
         let spec = KENNEL_PROGRAMS
             .iter()
             .find(|p| p.name == "connect4")
