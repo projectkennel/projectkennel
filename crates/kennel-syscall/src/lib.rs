@@ -51,4 +51,5 @@ pub mod mount;
 pub mod namespace;
 pub mod path;
 pub mod process;
+pub mod seccomp;
 pub mod unistd;
