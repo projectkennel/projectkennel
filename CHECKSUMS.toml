@@ -313,3 +313,17 @@ verified-against = [
 ]
 notes = "Transitive via syn. NOTE licence: (MIT OR Apache-2.0) AND Unicode-3.0."
 
+
+# ---- BPF loader (§5.5-approved; reviewer remco). object provides the ELF
+# parsing; the bpf() syscalls/map-creation/attach are hand-rolled over libc in
+# kennel-bpf (no libbpf-rs/libbpf-sys, no aya).
+[crate."object"]
+version = "=0.36.7"
+crate-sha256 = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/gimli-rs/object @ 5b66b69298f6198f9d5b5bb2a0b284b4d920a92c (tag 0.36.7) — 102 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep of kennel-bpf (ELF parsing for the BPF loader). default-features = false, features = [\"read_core\", \"elf\"] — only new transitive is none (memchr already vendored). The bpf() syscalls, map creation, relocation patching and cgroup attach are hand-rolled over libc (object is used only for the generic, error-prone ELF mechanics, as seccompiler is for BPF bytecode)."

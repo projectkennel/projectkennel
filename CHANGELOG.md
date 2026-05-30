@@ -25,6 +25,12 @@ The project is in its documentation and design stage. No releases yet; no runtim
 - **data/cli/caps dependency batch** (§5.5-approved; reviewer remco) vendored ahead of use, all provenance-proven against GitHub via `tools/audit-source.sh`: direct `caps`, `serde`, `serde_json`, `basic-toml`, `time`, `lexopt`; transitive serde proc-macro stack (`serde_core`/`serde_derive`/`proc-macro2`/`quote`/`syn`/`unicode-ident`), `serde_json` (`itoa`/`memchr`), `time` (`time-core`/`time-macros`/`deranged`/`powerfmt`/`num-conv`). Chose `lexopt` over clap and `basic-toml` over toml to avoid their large trees.
 - **`seccompiler` =0.5.0** adopted (§5.5-approved; reviewer remco), default features (no `json`/serde). The vetted `rust-vmm` seccomp-BPF filter compiler — hand-rolling BPF bytecode is the dangerous case (§4). No new transitives (only `libc`). Provenance proven against `github.com/rust-vmm/seccompiler` at tag v0.5.0 (`tools/audit-source.sh`).
 
+### BPF loader (kennel-bpf)
+
+- **Hand-rolled `bpf(2)` loader** over `libc`, using `object` (one crate) for ELF parsing — chosen over `libbpf-rs`/`libbpf-sys` (which vendor zlib+libelf+libbpf C, ~1435 files) and `aya` (19 crates). `kennel-bpf` is the workspace's second `unsafe` crate; the `unsafe` is five blocks in `sys.rs` (the `bpf()` syscall + `OwnedFd` wrap), each §4-commented. ELF parsing and relocation patching are safe.
+- **`object` =0.36.7** adopted (§5.5-approved; reviewer remco), `default-features = false, features = ["read_core", "elf"]`; no new transitive (memchr already vendored). Provenance proven against `github.com/gimli-rs/object` at tag 0.36.7.
+- A root-test compiles `connect4` against UAPI headers (no CO-RE), loads it through the loader, attaches it to a cgroup, and confirms it enforces (fail-closed on empty maps). Proves the approach: the programs need no CO-RE/BTF, so the loader resolves only `R_BPF_64_64` map relocations by symbol name against the `bpf/maps.h` ABI.
+
 ### Enforcement (kennel-syscall)
 
 - **`unistd` credential wrappers** (`effective_uid`, `real_uid`) over `nix::unistd` — no `unsafe` of ours.

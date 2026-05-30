@@ -55,3 +55,11 @@ release-feed  = "https://github.com/rust-vmm/seccompiler/releases.atom"
 last-reviewed = "0.5.0"
 reviewed-by   = "remco"
 note          = "Direct dep of kennel-syscall (seccomp-BPF filter compiler). Pinned =0.5.0, default features (no json/serde). bitflags is now also a direct dep but already watched implicitly via nix; not separately listed."
+
+[[watch]]
+name          = "object"
+repo          = "https://github.com/gimli-rs/object"
+release-feed  = "https://github.com/gimli-rs/object/releases.atom"
+last-reviewed = "0.36.7"
+reviewed-by   = "remco"
+note          = "Direct dep of kennel-bpf (ELF parsing). Pinned =0.36.7, features = [read_core, elf]."

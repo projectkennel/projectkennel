@@ -24,14 +24,15 @@ structs — small enough to own. Everything else in the crate is safe: the
 credential wrappers go through `nix::unistd`, and seccomp will go through
 `seccompiler` (hand-rolling BPF bytecode is the genuinely dangerous case).
 The `unsafe` is confined to `landlock.rs`'s raw syscall wrappers. `kennel-bpf`
-is still planned. Every other crate is `#![forbid(unsafe_code)]`.
+is now also active (the `bpf(2)` FFI). Every other crate is
+`#![forbid(unsafe_code)]`.
 
 ## Permitted crates
 
 | Crate | Why it may need `unsafe` | Size ceiling |
 |---|---|---|
 | `kennel-syscall` *(allow; owns the Landlock bindings)* | The single point for namespaces, mounts, Landlock/seccomp, capabilities, and credentials. Delegates `unsafe` to vetted crates (nix, seccompiler) and owns only the Landlock syscall wrappers (`src/landlock.rs`), a deliberate exception to keep `syn`/proc-macros out of the privileged TCB. | ~1500 lines (reviewable in one sitting) |
-| `kennel-bpf` *(planned)* | The libbpf-rs / `libbpf-sys` FFI surface for loading and attaching BPF programs. `unsafe` confined to the FFI boundary. | — |
+| `kennel-bpf` *(active)* | The `bpf(2)` FFI for loading/attaching the cgroup BPF programs. ELF parsing is delegated to `object`; the `unsafe` is confined to `src/sys.rs` (five blocks: the `bpf()` syscall plus the `OwnedFd` wrap), each §4-commented. We do **not** use libbpf-rs/libbpf-sys (which would vendor zlib+libelf+libbpf C, ~1435 files); `object` (one crate) does the generic ELF parsing and we hand-roll the narrow, security-bearing loader. | — |
 
 The C in `bpf/` is governed separately by §4.1 (BPF C code) — C is `unsafe` by construction and reviewed under matching rules, but it is not Rust `unsafe` and is not listed here.
 

@@ -69,6 +69,15 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Transitive deps added:** none new (already present via nix).
 - **Proc-macros / build.rs:** none. (The optional `derive` proc-macro feature is **not** enabled.)
 
+### object
+
+- **Version:** =0.36.7 (exact pin), `default-features = false`, `features = ["read_core", "elf"]`.
+- **Justification:** ELF parsing for the BPF loader (`kennel-bpf`) — sections, symbols, relocations. The generic, error-prone-but-not-security-specific part, delegated to a vetted crate (gimli-rs/object) exactly as `seccompiler` handles BPF bytecode. The security-bearing loader (the `bpf(2)` syscalls, map creation, relocation patching, cgroup attach) is hand-rolled over `libc`. This replaces `libbpf-rs`/`libbpf-sys` (which would vendor zlib+libelf+libbpf C, ~1435 files) and `aya` (19 crates) with a single dependency.
+- **Licence:** Apache-2.0 OR MIT (we take Apache-2.0).
+- **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/gimli-rs/object` at tag 0.36.7.
+- **Transitive deps added:** none new — with `read_core, elf` only, its sole dependency `memchr` is already vendored (via serde_json).
+- **Proc-macros / build.rs:** none.
+
 ### seccompiler
 
 - **Version:** =0.5.0 (exact pin), default features (the `json` feature, which would pull `serde`/`serde_json`, is **not** enabled).
