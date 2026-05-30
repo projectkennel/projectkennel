@@ -97,6 +97,10 @@ cmd_draft() {
 	local sha
 	sha="$(sha256_of "$dest")"
 	cat <<-EOF
+		# Run tools/audit-source.sh $name $ver first: it confirms this .crate
+		# matches the public GitHub source at the release tag (provenance
+		# independent of crates.io) and prints a verified-against line to paste.
+		#
 		# ---- draft CHECKSUMS.toml entry (fill audited-by / verified-against, then commit) ----
 		[crate."$name"]
 		version = "=$ver"

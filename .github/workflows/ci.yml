@@ -99,3 +99,4 @@ jobs:
           tools/git-hooks/tests/commit-msg.sh
           tools/tests/verify-checksums.sh
           tools/tests/audit-helper.sh
+          tools/tests/audit-source.sh

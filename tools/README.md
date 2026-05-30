@@ -10,6 +10,7 @@ checkout without bootstrapping anything.
 |---|---|
 | `verify-checksums.sh` | The independent **shell witness** (§5.5.1): checks `CHECKSUMS.toml` against `crates-archive/*.crate` (every artefact recorded, every entry present, every SHA-256 matches) and cross-checks `Cargo.lock` (every registry crate pinned, every checksum agrees). Uses only system `sha256sum`. Runs in CI (§14) and `pre-push` (§15). Passes vacuously while there are no dependencies. |
 | `audit-helper.sh` | The mechanical half of *adding* a dependency: `fetch` a `.crate` from `static.crates.io` (refuses overwrite), `confirm` byte-equality on an independent re-download, and `draft` the `CHECKSUMS.toml` + `DEPENDENCIES.md` entries with the computed hash. It does **not** perform the human cross-source verification, fill `verified-against`, or commit — that is the reviewer's job (§5.5). |
+| `audit-source.sh` | The **independent-of-crates.io** provenance check. A `.crate`'s sha256 only proves "this is what crates.io served"; this proves the `.crate`'s *code* matches the public upstream **GitHub source at the release tag**. It reads the commit cargo embedded at publish (`.cargo_vcs_info.json`), downloads GitHub's tree for that commit, confirms every source file is byte-identical and `Cargo.toml.orig` matches upstream, and resolves the version's git tag (via the GitHub API, dereferencing annotated tags) to confirm it equals the published commit. PASS ⇒ the bytes you compile are the public source at `github.com/<repo>@<tag>`. Network; auto-detects the repo from the crate's `repository` field (override with a 3rd arg). |
 
 The Rust counterparts — `tools/verify-checksums` (from `kennel-checksum-verify`)
 and the Rust `tools/audit-helper` — land once their `sha2` dependency is itself
@@ -22,13 +23,18 @@ agree once both exist.
 1. `cargo update -p <crate>`; inspect the `Cargo.lock` diff.
 2. `tools/audit-helper.sh fetch <crate> <version>` — vendors the `.crate`.
 3. `tools/audit-helper.sh confirm <crate> <version>` — byte-check vs the registry.
-4. **Read the source.** Independently cross-check the upstream git tag (and its
-   signature against `KEYS.md`) and docs.rs.
-5. `tools/audit-helper.sh draft <crate> <version>` — paste the drafts into
-   `CHECKSUMS.toml` and `DEPENDENCIES.md`, fill `audited-by` / `audited-on` /
-   `verified-against`.
-6. `tools/verify-checksums.sh` — must pass.
-7. Commit `CHECKSUMS.toml`, `crates-archive/<crate>-<version>.crate`, and
+4. `tools/audit-source.sh <crate> <version>` — confirm the `.crate` matches the
+   public GitHub source at the release tag (provenance independent of crates.io).
+   It prints a ready-made `verified-against` line on PASS.
+5. **Read the source.** Step 4 proves the code is the public upstream source; a
+   human still reads it for backdoors (a pre-compromised upstream publishes the
+   same bytes everywhere — §5.5 "what this does not defend against"). Confirm the
+   tag signature against `KEYS.md` where the upstream signs.
+6. `tools/audit-helper.sh draft <crate> <version>` — paste the drafts into
+   `CHECKSUMS.toml` and `DEPENDENCIES.md`; fill `audited-by` / `audited-on`, and
+   the `verified-against` line from step 4.
+7. `tools/verify-checksums.sh` — must pass.
+8. Commit `CHECKSUMS.toml`, `crates-archive/<crate>-<version>.crate`, and
    `Cargo.lock` together; two maintainer approvals (§5.5).
 
 ## Git hooks (CODING-STANDARDS.md §15)
