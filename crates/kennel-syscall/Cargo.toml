@@ -16,7 +16,7 @@ libc = "=0.2.186"
 # nix: safe, typed wrappers over the syscalls we would otherwise hand-roll
 # `unsafe` (CODING-STANDARDS.md §4 — prefer a vetted crate to our own unsafe).
 # default-features off; features added pay-as-you-go as each wrapper lands.
-nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "sched"] }
+nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "sched", "mount", "fs"] }
 # bitflags: typed access-right sets for the hand-rolled Landlock bindings.
 # Already vendored/approved (it is also a transitive of nix); promoted to a
 # direct dependency here because landlock.rs uses it directly.
