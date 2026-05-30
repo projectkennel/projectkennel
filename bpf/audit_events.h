@@ -9,7 +9,7 @@
  * validated by draining live connect events off the ringbuf and decoding the
  * header (magic/version/kind/ctx_byte) and connect payload. See bpf/README.md.
  *
- * Assumes vmlinux.h is already included (for the __uN types).
+ * Assumes <linux/bpf.h> is already included (for the __uN types via <linux/types.h>).
  */
 #ifndef KENNEL_AUDIT_EVENTS_H
 #define KENNEL_AUDIT_EVENTS_H

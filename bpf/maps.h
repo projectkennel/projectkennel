@@ -10,12 +10,12 @@
  * allow_entry, and kennel_meta layouts round-trip). See bpf/README.md.
  *
  * Include order in every .bpf.c:
- *     #include "vmlinux.h"
+ *     #include <linux/bpf.h>
  *     #include <bpf/bpf_helpers.h>
  *     #include "maps.h"
  *     #include "audit_events.h"
  *     #include "kennel.bpf.h"
- * This header assumes vmlinux.h and bpf_helpers.h are already included.
+ * This header assumes <linux/bpf.h> and bpf_helpers.h are already included.
  */
 #ifndef KENNEL_MAPS_H
 #define KENNEL_MAPS_H

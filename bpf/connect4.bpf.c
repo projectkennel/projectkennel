@@ -21,7 +21,7 @@
  *          (2026-05-30): allow/deny, port byte order, deny-first, and the audit
  *          ABI all confirmed via a live cgroup attach. See bpf/README.md.
  */
-#include "vmlinux.h"
+#include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include "maps.h"

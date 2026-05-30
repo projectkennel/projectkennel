@@ -9,7 +9,7 @@
  * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  *
  * Assumes (in this order, from the including .bpf.c):
- *     #include "vmlinux.h"
+ *     #include <linux/bpf.h>
  *     #include <bpf/bpf_helpers.h>
  *     #include <bpf/bpf_endian.h>
  *     #include "maps.h"
@@ -20,7 +20,7 @@
 
 /*
  * Address-family and protocol constants. Defined here rather than relied upon
- * from vmlinux.h, whose exported symbol set varies by kernel.
+ * from the kernel UAPI, whose exported symbol set varies by kernel.
  */
 #ifndef AF_INET
 #define AF_INET 2

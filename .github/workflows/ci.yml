@@ -66,25 +66,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang + libbpf headers
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev
-      # Compile every program against the committed bpf/vmlinux.h (the audited
-      # build input; CO-RE relocates field offsets at load time, so the dump's
-      # source kernel need not match the runner). The verifier-load matrix is
-      # owed (custom-kernel runners); this catches compile regressions.
+      - name: Install clang + headers
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev
+      # Compile every program against the kernel UAPI (<linux/bpf.h>), not a
+      # vmlinux.h CO-RE dump: the programs touch only stable hook-context structs
+      # and our own maps, so they need no CO-RE. -g keeps BTF (bpftool- and
+      # kennel-bpf-loadable). The verifier-load matrix is owed (custom-kernel
+      # runners); this catches compile regressions.
       - name: Compile all programs
         working-directory: bpf
         run: |
           set -euo pipefail
-          test -f vmlinux.h || { echo "bpf/vmlinux.h missing"; exit 1; }
-          fail=0
           for f in connect4 connect6 bind4 bind6 setsockopt sock_create sendmsg4 sendmsg6; do
             echo "::group::$f"
             clang -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86 \
-              -I. -I/usr/include -c "$f.bpf.c" -o "/tmp/$f.bpf.o"
+              -I. -I/usr/include -I/usr/include/x86_64-linux-gnu -c "$f.bpf.c" -o "/tmp/$f.bpf.o"
             echo "::endgroup::"
           done
-          echo "all 8 programs compiled clean"
+          echo "all 8 programs compiled clean (UAPI, no CO-RE)"
 
   tooling:
     name: tooling (shell tests + checksum witness)

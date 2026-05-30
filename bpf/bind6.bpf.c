@@ -12,7 +12,7 @@
  *
  * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
  */
-#include "vmlinux.h"
+#include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include "maps.h"

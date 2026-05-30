@@ -283,14 +283,8 @@ mod root_tests {
         for f in ["maps.h", "audit_events.h", "kennel.bpf.h", "connect4.bpf.c"] {
             std::fs::copy(format!("{bpf}/{f}"), tmp.join(f)).expect("copy bpf src");
         }
-        // Swap the CO-RE vmlinux.h include for the UAPI header.
+        // connect4.bpf.c already includes <linux/bpf.h> (UAPI, no CO-RE).
         let c = tmp.join("connect4.bpf.c");
-        let src = std::fs::read_to_string(&c).expect("read");
-        std::fs::write(
-            &c,
-            src.replace("#include \"vmlinux.h\"", "#include <linux/bpf.h>"),
-        )
-        .expect("write");
         let obj = tmp.join("connect4.o");
         let status = Command::new("clang")
             .args(["-O2", "-Wall", "-target", "bpf", "-D__TARGET_ARCH_x86"])

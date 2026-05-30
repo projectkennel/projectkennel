@@ -52,40 +52,38 @@ One verifier fix was needed versus the blind draft: the IPv6 programs
 | `setsockopt.bpf.c` | Force `IPV6_V6ONLY=1` to close the dual-stack escape. |
 | `sock_create.bpf.c` | Socket-family allowlist. |
 | `sendmsg4.bpf.c`, `sendmsg6.bpf.c` | Connectionless (UDP) destination check; DNS only via the proxy. |
-| `vmlinux.h` | CO-RE BTF type dump, generated from the build kernel (see below). Committed per BUILD-ENV.md. |
 | `HELPERS.md` | The whitelist of permitted BPF helper functions (§4.1). |
 
-## vmlinux.h
+## No CO-RE / no vmlinux.h
 
-`vmlinux.h` is a CO-RE BTF dump of the target kernel's types. It is generated,
-not hand-written, and is too large and kernel-specific to author blind. Generate
-it on a Linux host with a BTF-enabled kernel:
+These programs are compiled against the kernel **UAPI** (`<linux/bpf.h>`), not a
+`vmlinux.h` CO-RE dump. They touch only the *stable* hook-context structs
+(`bpf_sock_addr`, `bpf_sock`, `bpf_sockopt`) and our own maps — nothing whose
+layout drifts across kernels — so CO-RE buys nothing here. Dropping it means no
+BTF/CO-RE relocation to resolve at load: the only relocations are `R_BPF_64_64`
+references from instructions to map symbols, which the loader (`kennel-bpf`)
+resolves by symbol name against `maps.h`. (`-g` still emits BTF, so the objects
+remain `bpftool`-loadable too.) The previously-committed 3 MB `vmlinux.h` is
+gone.
 
-```sh
-bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
-```
+## Building (on Linux)
 
-The committed `vmlinux.h` and its source kernel are recorded in BUILD-ENV.md.
-The current copy was generated from Linux 6.8.0-110-generic (Ubuntu 24.04.4).
-CO-RE relocations make the programs portable across kernels regardless of which
-kernel's types `vmlinux.h` was dumped from, so this is a build-time type source,
-not a runtime pin; per BUILD-ENV.md, regenerating it is a maintainer operation.
-
-## Building (on Linux, once vmlinux.h exists)
-
-The Rust loader crate `kennel-bpf` drives the build (its `build.rs` invokes the
-pinned `clang` and `bpftool gen skeleton`; see architecture/02-5 and
-03-crate-decomposition.md). Rough manual form for reference:
+The Rust loader crate `kennel-bpf` loads these via a hand-rolled `bpf(2)` loader
+over `libc`, using `object` only for ELF parsing — **not** libbpf-rs/libbpf-sys
+(see `architecture/02-5`, `03-crate-decomposition.md`). Manual compile:
 
 ```sh
-clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
+clang -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86 \
+      -I. -I/usr/include -I/usr/include/x86_64-linux-gnu \
       -c connect4.bpf.c -o connect4.bpf.o
-bpftool gen skeleton connect4.bpf.o > connect4.skel.h   # (Rust skeleton via libbpf-cargo)
 ```
+
+The multiarch include path (`/usr/include/x86_64-linux-gnu`) is where
+`<asm/types.h>` lives; `<linux/bpf.h>` comes from `linux-libc-dev`.
 
 ## Conventions
 
-- C11, libbpf + CO-RE idioms, `-Wall -Wextra -Werror` (§4.1).
+- C11, libbpf map/helper idioms (no CO-RE), `-Wall -Wextra -Werror` (§4.1).
 - cgroup hook return convention: `1` allows the operation, `0` denies it
   (the kernel fails the syscall, typically `EPERM`/`ECONNREFUSED`).
 - Lookup order in the connect/sendmsg programs is **deny-first**: the invariant

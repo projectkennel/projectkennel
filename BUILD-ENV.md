@@ -15,12 +15,9 @@ The reference runtime is not yet implemented; exact version pins below are marke
 
 ## C / BPF toolchain
 
-- **clang:** pinned version, used to compile `bpf/*.bpf.c` with CO-RE relocations. *[TBD final pin]* — first verify pass (2026-05-30) used clang 18.1.3 (Ubuntu).
-- **bpftool:** pinned version, used for skeleton generation and the verifier matrix. *[TBD final pin]* — first verify pass used bpftool v7.4.0 (libbpf 1.4).
-- **libbpf:** vendored as `crates-archive/libbpf-<version>.tar.gz`, hash in `CHECKSUMS.toml`. Not linked from the system. *[TBD: version]* — first verify pass used the system libbpf 1.3.0 headers; vendoring is owed when `kennel-bpf` lands.
-- **vmlinux.h:** committed at `bpf/vmlinux.h`, generated once from a specific kernel via `bpftool btf dump`. Regenerating it is a maintainer-only operation with a PR documenting the source kernel.
-  - **Source kernel (current copy):** Linux 6.8.0-110-generic, x86_64, Ubuntu 24.04.4 LTS. Generated 2026-05-30 from `/sys/kernel/btf/vmlinux` (BTF 6094376 bytes). `sha256(bpf/vmlinux.h) = 9f1fafdf44f1da0bee79c6357c9eea4c3958f0e3a38e02e65703ead58a5104ea`.
-  - Note: this kernel is *below* the 6.10 project floor (see Kernel matrix). CO-RE makes the dumped types portable, so it is an acceptable build-time type source, but the canonical committed copy should be regenerated from a ≥6.10 kernel when the CI matrix is stood up.
+- **clang:** pinned version, used to compile `bpf/*.bpf.c` against the kernel UAPI (`<linux/bpf.h>`), **no CO-RE**. *[TBD final pin]* — first verify pass (2026-05-30) used clang 18.1.3 (Ubuntu). Requires the multiarch include path (`/usr/include/x86_64-linux-gnu`, for `<asm/types.h>`); `<linux/bpf.h>` comes from `linux-libc-dev`.
+- **bpftool:** optional, for inspection and the (owed) verifier-load matrix. *[TBD final pin]* — first verify pass used bpftool v7.4.0 (libbpf 1.4). The programs load via `kennel-bpf`'s own `bpf(2)` loader, not bpftool.
+- **No `vmlinux.h`, no libbpf, no aya.** The programs need no CO-RE (they touch only stable hook-context structs and our own maps), so there is no committed `vmlinux.h`. `kennel-bpf` loads them with a hand-rolled `bpf(2)` loader over `libc`, using only `object` (one §5.5-approved crate) for ELF parsing — see `bpf/README.md` and `DEPENDENCIES.md`. This deliberately avoids libbpf-rs/libbpf-sys (which vendor zlib+libelf+libbpf C, ~1435 files) and aya (19 crates).
 
 ## Kernel matrix (BPF verifier tests)
 
@@ -42,5 +39,5 @@ Release builds run in a container image pinned by digest, whose recipe lives in 
 
 - `SOURCE_DATE_EPOCH` honoured; no build timestamps embedded.
 - No host paths in binaries (`--remap-path-prefix`).
-- No kernel-version leak in BPF objects beyond what `vmlinux.h` declares.
-- The same clang and the same `vmlinux.h` on both release runners.
+- No kernel-version leak in BPF objects: they compile against the UAPI headers, not a kernel-specific CO-RE dump.
+- The same clang and the same UAPI headers on both release runners.
