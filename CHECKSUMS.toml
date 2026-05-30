@@ -98,3 +98,218 @@ verified-against = [
     "github.com/rust-vmm/seccompiler @ c3cf77d65815037931ae5bc2fca010713defdc8c (tag v0.5.0) — 32 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "Direct dependency of kennel-syscall: compiles and installs seccomp-BPF filters (rust-vmm). Hand-rolling BPF bytecode is the genuinely dangerous case (§4), so a vetted crate is used. Default features only (no `json`, so no serde/serde_json). Its sole dependency, libc, is already in the manifest."
+# ---- data/cli/caps batch (§5.5-approved; reviewer remco). Provenance proven
+# independent of crates.io via tools/audit-source.sh (verified-against below).
+# Vendored ahead of use; wired into each consumer as that crate is built
+# (caps -> kennel-syscall; serde/basic-toml -> kennel-policy; serde_json/time ->
+# kennel-audit; lexopt -> kennel-cli). The BPF loader deps are decided separately.
+
+[crate."basic-toml"]
+version = "=0.1.10"
+crate-sha256 = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/dtolnay/basic-toml @ c54c9bd3ade1a609f5da6e31cf6ee72d6c7552fb (tag 0.1.10) — 176 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep (parse policy TOML into typed structs). serde-only; chosen over the toml crate to avoid its ~10-crate winnow tree."
+
+[crate."caps"]
+version = "=0.5.6"
+crate-sha256 = "fd1ddba47aba30b6a889298ad0109c3b8dcb0e8fc993b459daa7067d46f865e0"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/lucab/caps-rs @ d5dcf952ada01445b8eacb25fc5a2e37f9941da6 (tag v0.5.6) — 24 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep of kennel-syscall (capability bounding-set drop)."
+
+[crate."deranged"]
+version = "=0.5.8"
+crate-sha256 = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/jhpratt/deranged @ 7d0c671e8c806b96d582af197df3c620e09cb33b — 6 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via time (ranged integers). Monorepo sub-crate; tag not auto-confirmed."
+
+[crate."itoa"]
+version = "=1.0.18"
+crate-sha256 = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/dtolnay/itoa @ af77385d0daf4d0e949e81f2588be2e44f69f086 (tag 1.0.18) — 10 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via serde_json (integer formatting)."
+
+[crate."lexopt"]
+version = "=0.3.2"
+crate-sha256 = "803ec87c9cfb29b9d2633f20cba1f488db3fd53f2158b1024cbefb47ba05d413"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/blyxxyz/lexopt @ f52c6a620b59dcadb01701c039cd4b270e2d5966 (tag v0.3.2) — 11 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep (CLI argument parsing). Zero dependencies; chosen over clap to avoid its ~17-crate colour/windows tree."
+
+[crate."memchr"]
+version = "=2.8.1"
+crate-sha256 = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/BurntSushi/memchr @ ff7dca72388ade97ec536f550271fe5acab0a05f (tag 2.8.1) — 55 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via serde_json (byte search)."
+
+[crate."num-conv"]
+version = "=0.2.2"
+crate-sha256 = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/jhpratt/num-conv @ b022fe87ac3ad5b0d7606ea7465549eaa92efe97 (tag v0.2.2) — 4 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via time (lossless int conversions)."
+
+[crate."powerfmt"]
+version = "=0.2.0"
+crate-sha256 = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/jhpratt/powerfmt @ 5889a2a65c99836fd718340726f6b4379bc5028f (tag v0.2.0) — 8 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via time/deranged (formatting helper)."
+
+[crate."proc-macro2"]
+version = "=1.0.106"
+crate-sha256 = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/dtolnay/proc-macro2 @ 58ab776b95a4c2865554badbb6629c50971a9118 (tag 1.0.106) — 29 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via the proc-macro stack (serde_derive/time-macros)."
+
+[crate."quote"]
+version = "=1.0.45"
+crate-sha256 = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/dtolnay/quote @ 842ffde933fdd76cd1681a288bed136d8b95a97a (tag 1.0.45) — 31 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via the proc-macro stack."
+
+[crate."serde"]
+version = "=1.0.228"
+crate-sha256 = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/serde-rs/serde @ a866b336f14aa57a07f0d0be9f8762746e64ecb4 (tag v1.0.228) — 29 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep (policy/audit/ipc data model). features=["derive"]."
+
+[crate."serde_core"]
+version = "=1.0.228"
+crate-sha256 = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/serde-rs/serde @ a866b336f14aa57a07f0d0be9f8762746e64ecb4 (tag v1.0.228) — 23 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via serde (the core, split out in 1.x)."
+
+[crate."serde_derive"]
+version = "=1.0.228"
+crate-sha256 = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/serde-rs/serde @ a866b336f14aa57a07f0d0be9f8762746e64ecb4 (tag v1.0.228) — 32 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via serde feature "derive" — proc-macro."
+
+[crate."serde_json"]
+version = "=1.0.150"
+crate-sha256 = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/serde-rs/json @ a1ae73ac6a6940a4a57c673aebaa13ed4dfe3e8c (tag v1.0.150) — 85 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep (settled-policy canonical JSON, IPC, audit JSONL)."
+
+[crate."syn"]
+version = "=2.0.117"
+crate-sha256 = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/dtolnay/syn @ 7bcb37cdb3399977658c8b52d2441d37e42e48f2 (tag 2.0.117) — 101 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via the proc-macro stack (the big one; serde_derive/time-macros)."
+
+[crate."time"]
+version = "=0.3.47"
+crate-sha256 = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/time-rs/time @ d5144cd2874862d46466c900910cd8577d066019 (tag v0.3.47) — 157 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep (audit timestamps). features=["formatting","parsing","macros"]."
+
+[crate."time-core"]
+version = "=0.1.8"
+crate-sha256 = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/time-rs/time @ 14da652cc731cbe86afbc5b99442f3a0cd747e60 — 6 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via time. Monorepo sub-crate: tag not auto-confirmed; shares the published commit with time v0.3.47."
+
+[crate."time-macros"]
+version = "=0.2.27"
+crate-sha256 = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/time-rs/time @ d5144cd2874862d46466c900910cd8577d066019 — 21 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via time feature "macros" — proc-macro. Monorepo sub-crate (tag shared)."
+
+[crate."unicode-ident"]
+version = "=1.0.24"
+crate-sha256 = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+audited-by = "remco"
+audited-on = "2026-05-31"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/dtolnay/unicode-ident @ 5b54a632702b5744a1c40ea01c127c0ac0498172 (tag 1.0.24) — 22 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via syn. NOTE licence: (MIT OR Apache-2.0) AND Unicode-3.0."
+
