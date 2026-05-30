@@ -17,8 +17,11 @@ The project is in its documentation and design stage. No releases yet; no runtim
 - Compilation model: a `kennel compile` step produces a signed *settled policy* the runtime enforces, replacing live per-spawn resolution (design §9.10).
 - Governance scaffolding: this file, `README.md`, `SECURITY.md`, `MAINTAINERS.md`, `CONTRIBUTORS.md`, `CODE_OF_CONDUCT.md`, and the dependency ledgers (`DEPENDENCIES.md`, `CHECKSUMS.toml`, `RELEASE-WATCH.toml`, `KEYS.md`, `UNSAFE-CRATES.md`, `BUILD-ENV.md`).
 
+### Licensing
+
+- Adopted **Apache License 2.0** for the project (Rust crates, threat catalogue, design document, reference runtime). The BPF programs under `bpf/` remain GPL-2.0 (SPDX headers; required by the kernel for "GPL"-declaring programs). See `LICENSE` and `NOTICE`.
+
 ### Pending
 
 - Reference runtime implementation (the Cargo workspace and crates described in `architecture/03-crate-decomposition.md`).
-- CI pipeline (`CODING-STANDARDS.md` §14), git hooks (§15), and the supply-chain tooling (`tools/`).
-- A chosen licence.
+- The remaining §14 CI checks (Rust checksum verifier, `cargo deny`/`audit`/`vet`, fuzz, reproducible build, the BPF verifier-load matrix) that activate with their inputs.

@@ -1,0 +1,12 @@
+Project Kennel
+Copyright 2026 Project Kennel maintainers
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+with one exception:
+
+  * The BPF programs under bpf/ (the *.bpf.c sources, the shared *.h headers,
+    and the generated vmlinux.h) are licensed GPL-2.0, as declared by the
+    SPDX-License-Identifier headers in those files and required by the Linux
+    kernel for BPF programs that declare a "GPL" license section. This GPL-2.0
+    licensing applies to the in-kernel BPF object code; the user-space loader
+    and everything else in this repository are Apache-2.0.

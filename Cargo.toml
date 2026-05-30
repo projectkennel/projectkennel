@@ -24,7 +24,7 @@ edition = "2021"
 # until we can test against older toolchains (BUILD-ENV.md), rather than
 # claiming a floor we have not verified.
 rust-version = "1.95"
-license = "TBD"
+license = "Apache-2.0"
 authors = ["Project Kennel maintainers"]
 repository = "TBD"
 
