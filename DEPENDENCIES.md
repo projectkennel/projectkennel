@@ -68,3 +68,12 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Reviewer:** remco (2026-05-30) — audited as part of the nix adoption. Provenance verified via `tools/audit-source.sh`: byte-identical to `github.com/bitflags/bitflags` at tag 2.11.1.
 - **Transitive deps added:** none new (already present via nix).
 - **Proc-macros / build.rs:** none. (The optional `derive` proc-macro feature is **not** enabled.)
+
+### seccompiler
+
+- **Version:** =0.5.0 (exact pin), default features (the `json` feature, which would pull `serde`/`serde_json`, is **not** enabled).
+- **Justification:** Compiles a programmatic filter description into a seccomp-BPF program and installs it (`seccomp(2)`). Hand-rolling the BPF bytecode is exactly the "don't roll your own `unsafe`" case (§4) — a subtly-wrong filter is a silent hole — so the vetted `rust-vmm` crate is used. (Contrast Landlock, whose tiny ABI we own.)
+- **Licence:** Apache-2.0 OR BSD-3-Clause (we take Apache-2.0; both permissive).
+- **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/rust-vmm/seccompiler` at tag v0.5.0.
+- **Transitive deps added:** none new. seccompiler's only dependency is `libc`, already a direct dependency above.
+- **Proc-macros / build.rs:** none.

@@ -21,6 +21,10 @@ nix = { version = "=0.31.3", default-features = false, features = ["user", "proc
 # Already vendored/approved (it is also a transitive of nix); promoted to a
 # direct dependency here because landlock.rs uses it directly.
 bitflags = "=2.11.1"
+# seccompiler: compile/install seccomp-BPF filters. Hand-rolling BPF
+# bytecode is the dangerous case (§4), so we use the vetted rust-vmm crate.
+# Default features only (no json/serde). Unused until the seccomp wrapper lands.
+seccompiler = "=0.5.0"
 
 [lints]
 workspace = true

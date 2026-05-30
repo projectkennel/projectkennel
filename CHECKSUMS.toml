@@ -87,3 +87,14 @@ verified-against = [
     "github.com/katharostech/cfg_aliases @ 3d55ba79872b61265a7176110a5200df0c9d9e54 (tag v0.2.1) — 6 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "Transitive BUILD dependency of nix (cfg-alias macro used in nix's build.rs). Smallest crate in the set; read in full."
+
+[crate."seccompiler"]
+version = "=0.5.0"
+crate-sha256 = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+audited-by = "remco"
+audited-on = "2026-05-30"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/rust-vmm/seccompiler @ c3cf77d65815037931ae5bc2fca010713defdc8c (tag v0.5.0) — 32 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dependency of kennel-syscall: compiles and installs seccomp-BPF filters (rust-vmm). Hand-rolling BPF bytecode is the genuinely dangerous case (§4), so a vetted crate is used. Default features only (no `json`, so no serde/serde_json). Its sole dependency, libc, is already in the manifest."

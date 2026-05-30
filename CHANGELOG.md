@@ -22,6 +22,7 @@ The project is in its documentation and design stage. No releases yet; no runtim
 - **First dependency adopted: `libc` =0.2.186** (§5.5-approved; reviewer remco). Vendored to `crates-archive/` as a cargo local registry (`.cargo/config.toml` replaces crates.io); recorded in `CHECKSUMS.toml`, `DEPENDENCIES.md`, `RELEASE-WATCH.toml`. Provenance verified independent of crates.io against the GitHub source at tag 0.2.186 (`tools/audit-source.sh`). No transitive deps.
 - **`nix` =0.31.3** adopted (§5.5-approved; reviewer remco), `default-features = false, features = ["user", "process"]`. Safe, typed syscall wrappers preferred over hand-rolled `unsafe` (§4, "don't roll your own `unsafe`"). Transitive: `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal), `cfg_aliases` =0.2.1 (build). Each vendored and GitHub-provenance-checked (`tools/audit-source.sh`).
 - **`bitflags` =2.11.1** promoted to a direct dependency of `kennel-syscall` (typed Landlock access-right sets); already approved as a nix transitive.
+- **`seccompiler` =0.5.0** adopted (§5.5-approved; reviewer remco), default features (no `json`/serde). The vetted `rust-vmm` seccomp-BPF filter compiler — hand-rolling BPF bytecode is the dangerous case (§4). No new transitives (only `libc`). Provenance proven against `github.com/rust-vmm/seccompiler` at tag v0.5.0 (`tools/audit-source.sh`).
 
 ### Enforcement (kennel-syscall)
 
