@@ -42,9 +42,10 @@ const V4_PREFIX: u8 = 24;
 /// The fixed prefix length for a per-kennel IPv6 ULA subnet.
 const V6_PREFIX: u8 = 64;
 
-/// The installation-constant reserved address scope the helper validates
-/// against. `tag` is the per-installation byte; `ula_gid` is the 40-bit ULA
-/// global ID. The full IPv6 ULA prefix is `0xfd` followed by `ula_gid`.
+/// The installation-constant reserved address scope to validate against.
+///
+/// `tag` is the per-installation byte; `ula_gid` is the 40-bit ULA global ID.
+/// The full IPv6 ULA prefix is `0xfd` followed by `ula_gid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReservedScope {
     tag: u8,
@@ -112,20 +113,32 @@ impl std::fmt::Display for Refusal {
                 write!(f, "prefix length must be {expected}, got {got}")
             }
             Self::AddrOutOfScope => {
-                write!(f, "address is outside Project Kennel's reserved per-kennel subnet")
+                write!(
+                    f,
+                    "address is outside Project Kennel's reserved per-kennel subnet"
+                )
             }
             Self::InterfaceNotAllowed => {
-                write!(f, "interface must be `lo` or a `kennel-<id>` dummy interface")
+                write!(
+                    f,
+                    "interface must be `lo` or a `kennel-<id>` dummy interface"
+                )
             }
             Self::InterfaceNameTooLong => {
-                write!(f, "interface name exceeds the {IFNAME_MAX}-character kernel limit")
+                write!(
+                    f,
+                    "interface name exceeds the {IFNAME_MAX}-character kernel limit"
+                )
             }
             Self::CgroupPathNotAbsolute => write!(f, "cgroup path must be absolute"),
             Self::CgroupPathTraversal => {
                 write!(f, "cgroup path must not contain `..` components")
             }
             Self::CgroupPathOutsidePrefix => {
-                write!(f, "cgroup path must be strictly beneath /sys/fs/cgroup/kennel/")
+                write!(
+                    f,
+                    "cgroup path must be strictly beneath /sys/fs/cgroup/kennel/"
+                )
             }
         }
     }
@@ -142,8 +155,43 @@ impl std::error::Error for Refusal {}
 /// `fd<gid>:<tag>:<ctx>::/64` (IPv6) subnet, or the interface name is not
 /// permitted.
 pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Refusal> {
-    let _ = (req, scope);
-    todo!("implemented in the feat: phase")
+    validate_interface(&req.interface)?;
+    match req.addr {
+        IpAddr::V4(v4) => {
+            if req.prefix != V4_PREFIX {
+                return Err(Refusal::BadPrefix {
+                    expected: V4_PREFIX,
+                    got: req.prefix,
+                });
+            }
+            // Per-kennel subnet 127.<tag>.<ctx>.0/24; the host octet is free.
+            let [a, b, c, _host] = v4.octets();
+            if a == 127 && b == scope.tag && c == req.ctx {
+                Ok(())
+            } else {
+                Err(Refusal::AddrOutOfScope)
+            }
+        }
+        IpAddr::V6(v6) => {
+            if req.prefix != V6_PREFIX {
+                return Err(Refusal::BadPrefix {
+                    expected: V6_PREFIX,
+                    got: req.prefix,
+                });
+            }
+            // Per-kennel /64: 0xfd | gid(40) | tag(8) | ctx(8) | host(64).
+            let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = v6.octets();
+            if b0 == 0xfd
+                && [b1, b2, b3, b4, b5] == scope.ula_gid
+                && b6 == scope.tag
+                && b7 == req.ctx
+            {
+                Ok(())
+            } else {
+                Err(Refusal::AddrOutOfScope)
+            }
+        }
+    }
 }
 
 /// Validate a cgroup request: absolute, traversal-free, strictly beneath
@@ -154,21 +202,65 @@ pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Ref
 /// Returns a [`Refusal`] if the path is relative, contains a `..` component,
 /// or does not name a location strictly beneath the kennel cgroup root.
 pub fn validate_cgroup(req: &CgroupRequest) -> Result<(), Refusal> {
-    let _ = req;
-    todo!("implemented in the feat: phase")
+    cgroup_path_ok(&req.path)
 }
 
 /// Check that an interface name is `lo` or a well-formed `kennel-<id>` dummy.
 fn validate_interface(interface: &str) -> Result<(), Refusal> {
-    let _ = interface;
-    todo!("implemented in the feat: phase")
+    if interface == "lo" {
+        return Ok(());
+    }
+    if let Some(id) = interface.strip_prefix("kennel-") {
+        if interface.len() > IFNAME_MAX {
+            return Err(Refusal::InterfaceNameTooLong);
+        }
+        if id.is_empty() {
+            return Err(Refusal::InterfaceNotAllowed);
+        }
+        if id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Ok(());
+        }
+        return Err(Refusal::InterfaceNotAllowed);
+    }
+    Err(Refusal::InterfaceNotAllowed)
 }
 
 /// Check that a path's components begin exactly with the cgroup prefix and
-/// name at least one location beneath it. Component-aware, not string-prefix.
+/// name at least one location beneath it. Component-aware, not string-prefix,
+/// so `/sys/fs/cgroup/kennel-evil/...` is refused.
 fn cgroup_path_ok(path: &Path) -> Result<(), Refusal> {
-    let _ = path;
-    todo!("implemented in the feat: phase")
+    let mut components = path.components();
+    if components.next() != Some(Component::RootDir) {
+        return Err(Refusal::CgroupPathNotAbsolute);
+    }
+    let mut normals: Vec<&str> = Vec::new();
+    for component in components {
+        match component {
+            Component::ParentDir => return Err(Refusal::CgroupPathTraversal),
+            Component::CurDir => {}
+            Component::Normal(part) => match part.to_str() {
+                Some(part) => normals.push(part),
+                // Non-UTF-8 cannot match our ASCII prefix; out of scope.
+                None => return Err(Refusal::CgroupPathOutsidePrefix),
+            },
+            // A second root or a Windows prefix mid-path is not ours.
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(Refusal::CgroupPathOutsidePrefix);
+            }
+        }
+    }
+    let begins_with_prefix = normals
+        .iter()
+        .take(CGROUP_PREFIX.len())
+        .eq(CGROUP_PREFIX.iter());
+    if normals.len() > CGROUP_PREFIX.len() && begins_with_prefix {
+        Ok(())
+    } else {
+        Err(Refusal::CgroupPathOutsidePrefix)
+    }
 }
 
 #[cfg(test)]
@@ -195,11 +287,18 @@ mod tests {
     }
 
     fn addr_req(ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> AddrRequest {
-        AddrRequest { ctx, interface: interface.to_owned(), addr, prefix }
+        AddrRequest {
+            ctx,
+            interface: interface.to_owned(),
+            addr,
+            prefix,
+        }
     }
 
     fn cg(path: &str) -> CgroupRequest {
-        CgroupRequest { path: PathBuf::from(path) }
+        CgroupRequest {
+            path: PathBuf::from(path),
+        }
     }
 
     // ---- validate_addr: success ----
@@ -235,7 +334,10 @@ mod tests {
         let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 1));
         assert_eq!(
             validate_addr(&addr_req(5, "lo", a, 25), &scope()),
-            Err(Refusal::BadPrefix { expected: 24, got: 25 })
+            Err(Refusal::BadPrefix {
+                expected: 24,
+                got: 25
+            })
         );
     }
 
@@ -244,7 +346,10 @@ mod tests {
         let a = IpAddr::V6(v6_in_scope(5, 1));
         assert_eq!(
             validate_addr(&addr_req(5, "lo", a, 128), &scope()),
-            Err(Refusal::BadPrefix { expected: 64, got: 128 })
+            Err(Refusal::BadPrefix {
+                expected: 64,
+                got: 128
+            })
         );
     }
 
@@ -253,27 +358,39 @@ mod tests {
     #[test]
     fn v4_wrong_tag_is_out_of_scope() {
         let a = IpAddr::V4(Ipv4Addr::new(127, 99, 5, 1));
-        assert_eq!(validate_addr(&addr_req(5, "lo", a, 24), &scope()), Err(Refusal::AddrOutOfScope));
+        assert_eq!(
+            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
     }
 
     #[test]
     fn v4_ctx_mismatch_is_out_of_scope() {
         // addr says ctx 6, request says ctx 5
         let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 6, 1));
-        assert_eq!(validate_addr(&addr_req(5, "lo", a, 24), &scope()), Err(Refusal::AddrOutOfScope));
+        assert_eq!(
+            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
     }
 
     #[test]
     fn v4_non_loopback_is_out_of_scope() {
         let a = IpAddr::V4(Ipv4Addr::new(10, TAG, 5, 1));
-        assert_eq!(validate_addr(&addr_req(5, "lo", a, 24), &scope()), Err(Refusal::AddrOutOfScope));
+        assert_eq!(
+            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
     }
 
     #[test]
     fn cloud_metadata_addr_is_out_of_scope() {
         // The headline threat: a hostile caller must not get 169.254.169.254 added.
         let a = IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254));
-        assert_eq!(validate_addr(&addr_req(5, "lo", a, 24), &scope()), Err(Refusal::AddrOutOfScope));
+        assert_eq!(
+            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
     }
 
     #[test]
@@ -281,19 +398,28 @@ mod tests {
         let mut o = v6_in_scope(5, 1).octets();
         o[3] = 0xff; // corrupt a gid byte
         let a = IpAddr::V6(Ipv6Addr::from(o));
-        assert_eq!(validate_addr(&addr_req(5, "lo", a, 64), &scope()), Err(Refusal::AddrOutOfScope));
+        assert_eq!(
+            validate_addr(&addr_req(5, "lo", a, 64), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
     }
 
     #[test]
     fn v6_ctx_mismatch_is_out_of_scope() {
         let a = IpAddr::V6(v6_in_scope(6, 1)); // ctx 6 in addr, request ctx 5
-        assert_eq!(validate_addr(&addr_req(5, "lo", a, 64), &scope()), Err(Refusal::AddrOutOfScope));
+        assert_eq!(
+            validate_addr(&addr_req(5, "lo", a, 64), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
     }
 
     #[test]
     fn v6_non_ula_is_out_of_scope() {
         let a = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
-        assert_eq!(validate_addr(&addr_req(5, "lo", a, 64), &scope()), Err(Refusal::AddrOutOfScope));
+        assert_eq!(
+            validate_addr(&addr_req(5, "lo", a, 64), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
     }
 
     // ---- validate_addr: interface ----
@@ -350,7 +476,10 @@ mod tests {
 
     #[test]
     fn cgroup_outside_prefix_is_refused() {
-        assert_eq!(validate_cgroup(&cg("/etc/passwd")), Err(Refusal::CgroupPathOutsidePrefix));
+        assert_eq!(
+            validate_cgroup(&cg("/etc/passwd")),
+            Err(Refusal::CgroupPathOutsidePrefix)
+        );
     }
 
     #[test]
