@@ -47,6 +47,7 @@
 #![allow(unsafe_code)]
 
 pub mod landlock;
+pub mod namespace;
 pub mod path;
 pub mod process;
 pub mod unistd;

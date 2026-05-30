@@ -16,7 +16,7 @@ libc = "=0.2.186"
 # nix: safe, typed wrappers over the syscalls we would otherwise hand-roll
 # `unsafe` (CODING-STANDARDS.md §4 — prefer a vetted crate to our own unsafe).
 # default-features off; features added pay-as-you-go as each wrapper lands.
-nix = { version = "=0.31.3", default-features = false, features = ["user", "process"] }
+nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "sched"] }
 # bitflags: typed access-right sets for the hand-rolled Landlock bindings.
 # Already vendored/approved (it is also a transitive of nix); promoted to a
 # direct dependency here because landlock.rs uses it directly.
@@ -25,6 +25,12 @@ bitflags = "=2.11.1"
 # bytecode is the dangerous case (§4), so we use the vetted rust-vmm crate.
 # Default features only (no json/serde). Unused until the seccomp wrapper lands.
 seccompiler = "=0.5.0"
+
+[features]
+# Tests that need privilege (namespace/mount ops). Off by default so the normal
+# `cargo test` runs unprivileged; CI/maintainers run `sudo -E cargo test
+# --features root-tests` (CODING-STANDARDS.md / 03-crate-decomposition.md).
+root-tests = []
 
 [lints]
 workspace = true
