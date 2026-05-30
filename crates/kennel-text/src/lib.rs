@@ -40,13 +40,63 @@
 
 #![forbid(unsafe_code)]
 
-use std::fmt;
+use std::fmt::{self, Write as _};
+
+/// The prefix that marks rendered untrusted content as such (§10.4: "Marks the
+/// value as untrusted in the rendered output").
+const UNTRUSTED_MARKER: &str = "untrusted";
 
 /// How many characters of an untrusted value [`Untrusted`] renders before
 /// truncating. Bounds the size an error message can reach (§10.4: "Truncates
 /// absurdly long values … so the error message itself does not become a
 /// denial-of-service vector").
 const DISPLAY_MAX_CHARS: usize = 256;
+
+/// Escape one character into `out`, neutralising control, bidi/zero-width, and
+/// (when `escape_quote`) the `"` delimiter. Ordinary printable characters pass
+/// through unchanged.
+fn push_escaped(out: &mut String, c: char, escape_quote: bool) {
+    match c {
+        '\\' => out.push_str("\\\\"),
+        '"' if escape_quote => out.push_str("\\\""),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        '\0' => out.push_str("\\0"),
+        c if c.is_control() || is_spoofing_format(c) => {
+            let cp = c as u32;
+            // write! into a String is infallible; discard the formatter Result.
+            if cp <= 0xFF {
+                let _ = write!(out, "\\x{cp:02x}");
+            } else {
+                let _ = write!(out, "\\u{{{cp:04x}}}");
+            }
+        }
+        c => out.push(c),
+    }
+}
+
+/// Bidi and zero-width formatting characters that are not C0/C1 controls but are
+/// terminal/source spoofing vectors (the "Trojan Source" set). Not exhaustive
+/// of the Unicode `Cf` category — the known dangerous ranges.
+const fn is_spoofing_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}'   // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
+            | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+            | '\u{FEFF}'              // ZWNBSP / BOM
+    )
+}
+
+/// Escape every character of `s`, neutralising control and spoofing characters.
+fn escape_all(s: &str, escape_quote: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        push_escaped(&mut out, c, escape_quote);
+    }
+    out
+}
 
 /// Sanitise a string destined for an audit JSONL field.
 ///
@@ -57,8 +107,7 @@ const DISPLAY_MAX_CHARS: usize = 256;
 /// the serialiser cannot substitute (§10.3, `02-3-audit-schema.md`).
 #[must_use]
 pub fn sanitise_for_audit(s: &str) -> String {
-    let _ = s;
-    todo!("implemented in the feat: phase")
+    escape_all(s, false)
 }
 
 /// Sanitise a string destined for a terminal-attached log (stdout, stderr).
@@ -68,8 +117,7 @@ pub fn sanitise_for_audit(s: &str) -> String {
 /// the line.
 #[must_use]
 pub fn sanitise_for_log(s: &str) -> String {
-    let _ = s;
-    todo!("implemented in the feat: phase")
+    escape_all(s, false)
 }
 
 /// Wrap an untrusted string for safe `Display` in an error or diagnostic.
@@ -93,8 +141,23 @@ pub struct Untrusted<'a> {
 
 impl fmt::Display for Untrusted<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!("implemented in the feat: phase")
+        // Escape at most DISPLAY_MAX_CHARS characters, then probe for a tail so
+        // truncation is detected without walking an arbitrarily long input.
+        let mut chars = self.inner.chars();
+        let mut body = String::new();
+        for c in chars.by_ref().take(DISPLAY_MAX_CHARS) {
+            push_escaped(&mut body, c, true);
+        }
+        let truncated = chars.next().is_some();
+
+        f.write_str(UNTRUSTED_MARKER)?;
+        f.write_str("\"")?;
+        f.write_str(&body)?;
+        f.write_str("\"")?;
+        if truncated {
+            f.write_str("...(truncated)")?;
+        }
+        Ok(())
     }
 }
 
