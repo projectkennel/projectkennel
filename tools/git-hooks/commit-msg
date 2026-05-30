@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Project Kennel commit-msg hook (CODING-STANDARDS.md §15.2).
+#
+# Validates the commit message format and runs the staged-content secret scan
+# (placed here, not in pre-commit, because its false-positive waiver is a
+# message footer — see pre-commit's header note).
+#
+# bash: regex matching with [[ =~ ]] and arrays (§15.4).
+set -euo pipefail
+
+MSG_FILE="$1"
+SUMMARY_MAX=72
+BODY_MAX=100
+TYPES='feat|fix|test|scaffold|docs|refactor|chore|build|ci' # §13.1
+
+fail() {
+	echo "commit-msg: $1" >&2
+	exit 1
+}
+
+# Strip comment lines (git's `#` scissors/template) and any verbose diff body.
+mapfile -t lines < <(grep -v '^#' "$MSG_FILE")
+
+# Locate the first non-blank line: the summary.
+summary=""
+summary_idx=-1
+for i in "${!lines[@]}"; do
+	if [ -n "${lines[$i]// /}" ]; then
+		summary="${lines[$i]}"
+		summary_idx="$i"
+		break
+	fi
+done
+[ -n "$summary" ] || fail "empty commit message"
+
+# Conventional Commits: type(scope)!: subject — scope optional, ! optional.
+if [[ ! "$summary" =~ ^($TYPES)(\([a-z0-9.-]+\))?!?:\ .+ ]]; then
+	fail "summary must be Conventional Commits '<type>(scope): subject'; type one of: ${TYPES//|/, }"
+fi
+
+# Summary length.
+if [ "${#summary}" -gt "$SUMMARY_MAX" ]; then
+	fail "summary is ${#summary} chars, over the ${SUMMARY_MAX}-char limit"
+fi
+
+# Commit type, for the body-required rule below.
+commit_type="${summary%%[(:!]*}"
+
+# Body line lengths, and whether any non-blank body line exists. The body is
+# everything after the summary line.
+has_body=0
+for i in "${!lines[@]}"; do
+	[ "$i" -le "$summary_idx" ] && continue
+	line="${lines[$i]}"
+	if [ -n "${line// /}" ]; then
+		has_body=1
+	fi
+	if [ "${#line}" -gt "$BODY_MAX" ]; then
+		fail "body line $((i + 1)) is ${#line} chars, over the ${BODY_MAX}-char limit"
+	fi
+done
+
+# feat/fix change behaviour: the why belongs in a non-empty body (§15.2).
+case "$commit_type" in
+feat | fix)
+	if [ "$has_body" -eq 0 ]; then
+		fail "$commit_type: commits require a non-empty body explaining the why"
+	fi
+	;;
+esac
+
+# ---- staged-content secret scan (§15.2) ----
+
+PATTERNS_FILE="$(dirname "$0")/secret-patterns"
+if [ -f "$PATTERNS_FILE" ]; then
+	# Waiver footer bypasses the scan for accepted false positives.
+	if grep -qiE '^kennel-secret-waiver:[[:space:]]*\S' "$MSG_FILE"; then
+		exit 0
+	fi
+	# Scan only added lines of staged content.
+	added="$(git diff --cached --no-color -U0 | grep '^+' | grep -v '^+++' || true)"
+	if [ -n "$added" ]; then
+		while IFS= read -r pat; do
+			case "$pat" in '' | '#'*) continue ;; esac
+			# -e: patterns may begin with '-' (e.g. PEM headers).
+			if printf '%s\n' "$added" | grep -qiE -e "$pat"; then
+				fail "possible secret in staged content (pattern: $pat). If a false positive, add a footer: kennel-secret-waiver: <reason>"
+			fi
+		done <"$PATTERNS_FILE"
+	fi
+fi
+
+exit 0
