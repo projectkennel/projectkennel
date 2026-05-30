@@ -96,9 +96,11 @@ pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
     /// Allowlisted destinations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<NetRule>,
     /// Invariant deny CIDRs (cloud metadata, link-local, RFC1918). Must be
     /// present; cannot be removed by any delta.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_invariant: Vec<NetRule>,
 }
 
@@ -233,6 +235,7 @@ pub struct Provenance {
     /// Installation constants baked in.
     pub install_constants: InstallConstants,
     /// The resolved templates/fragments, from the lockfile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_artifacts: Vec<ResolvedArtifact>,
 }
 
