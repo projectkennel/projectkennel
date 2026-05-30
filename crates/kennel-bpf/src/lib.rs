@@ -18,13 +18,16 @@
 //! # `unsafe`
 //!
 //! This is the workspace's second `unsafe` crate (`UNSAFE-CRATES.md`): the
-//! `unsafe` is the `bpf(2)` FFI in [`sys`], each block carrying the §4
-//! `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment. ELF parsing
-//! (`object`) and relocation patching are safe.
+//! `unsafe` is the `bpf(2)` FFI in [`sys`] and the ringbuf `mmap`/lock-free
+//! drain in [`ringbuf`], each block carrying the §4 `SAFETY:` /
+//! `INVARIANTS UPHELD:` / `FAILURE MODE:` comment. ELF parsing (`object`) and
+//! relocation patching are safe.
 
 #![allow(unsafe_code)]
 
 pub mod loader;
+pub mod ringbuf;
 pub mod sys;
 
 pub use loader::{load_program, Loaded, MapSpec, ProgramSpec, KENNEL_MAPS, KENNEL_PROGRAMS};
+pub use ringbuf::RingBuffer;

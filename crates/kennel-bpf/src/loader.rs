@@ -210,6 +210,30 @@ impl Loaded {
             .ok_or_else(|| other(format!("no map `{name}` in this program")))?;
         sys::map_update(map.as_fd(), key, value, flags)
     }
+
+    /// Map the named ringbuf for reading. `map_specs` supplies the map's byte
+    /// capacity (its `max_entries`); pass the same slice used to load.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the program did not reference a ringbuf of that name,
+    /// the spec is missing, or the `mmap` fails.
+    pub fn ringbuf<'a>(
+        &'a self,
+        name: &str,
+        map_specs: &[MapSpec],
+    ) -> io::Result<crate::ringbuf::RingBuffer<'a>> {
+        let map = self
+            .maps
+            .get(name)
+            .ok_or_else(|| other(format!("no map `{name}` in this program")))?;
+        let spec = map_specs
+            .iter()
+            .find(|m| m.name == name)
+            .ok_or_else(|| other(format!("no spec for map `{name}`")))?;
+        let size = usize::try_from(spec.max_entries).map_err(|_| other("ringbuf size overflow"))?;
+        crate::ringbuf::RingBuffer::new(map.as_fd(), size)
+    }
 }
 
 fn other(msg: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
@@ -462,6 +486,57 @@ mod root_tests {
             !denied,
             "connect4 with a matching allow_v4 entry should permit the connect"
         );
+    }
+
+    #[test]
+    fn drains_audit_event_on_connect() {
+        let loaded = load_connect4();
+        // Map the audit ringbuf before triggering traffic.
+        let mut rb = loaded
+            .ringbuf("audit_ringbuf", KENNEL_MAPS)
+            .expect("map audit ringbuf");
+
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-audit");
+        let _ = std::fs::create_dir(cg);
+        let cgfd = std::fs::File::open(cg).expect("open cgroup");
+        let spec = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "connect4")
+            .expect("connect4 spec");
+        loaded
+            .attach(cgfd.as_fd(), spec.attach_type)
+            .expect("attach connect4");
+
+        // One connect from inside the cgroup; empty maps => denied, which emits an
+        // AUDIT_NET_CONNECT_DENY event to the ringbuf.
+        let denied = connect_denied_in_cgroup(cg);
+
+        let mut samples: Vec<Vec<u8>> = Vec::new();
+        let _ = rb.poll(1000);
+        rb.consume(|s| samples.push(s.to_vec())).expect("consume ringbuf");
+
+        let _ = std::fs::remove_dir(cg);
+
+        assert!(denied, "precondition: the connect should have been denied");
+        let ev = samples.first().expect("expected an audit event after connect");
+        assert!(ev.len() >= 48, "event too short: {} bytes", ev.len());
+        // audit_hdr: magic @0 (LE u32), kind @6 (LE u16). See bpf/audit_events.h.
+        let magic = u32::from_le_bytes(
+            ev.get(0..4)
+                .and_then(|b| b.try_into().ok())
+                .expect("magic bytes"),
+        );
+        assert_eq!(magic, 0x4145_564E, "KENNEL_AUDIT_MAGIC (\"AEVN\")");
+        let kind = u16::from_le_bytes(
+            ev.get(6..8)
+                .and_then(|b| b.try_into().ok())
+                .expect("kind bytes"),
+        );
+        assert_eq!(kind, 1, "AUDIT_NET_CONNECT_DENY");
+        // audit_payload_connect starts at offset 40 (hdr is 40 bytes).
+        assert_eq!(ev.get(40), Some(&2u8), "family AF_INET");
+        assert_eq!(ev.get(42..44), Some(&[0x00, 0x09][..]), "port 9, network order");
+        assert_eq!(ev.get(44..48), Some(&[127u8, 0, 0, 1][..]), "addr 127.0.0.1");
     }
 
     /// Try to connect to 127.0.0.1:9; return true iff the connect was denied with
