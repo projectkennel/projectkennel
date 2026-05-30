@@ -20,7 +20,8 @@ The project is in its documentation and design stage. No releases yet; no runtim
 ### Dependencies
 
 - **First dependency adopted: `libc` =0.2.186** (§5.5-approved; reviewer remco). Vendored to `crates-archive/` as a cargo local registry (`.cargo/config.toml` replaces crates.io); recorded in `CHECKSUMS.toml`, `DEPENDENCIES.md`, `RELEASE-WATCH.toml`. Provenance verified independent of crates.io against the GitHub source at tag 0.2.186 (`tools/audit-source.sh`). No transitive deps.
-- `kennel-syscall` is now the workspace's active `unsafe` crate (`#![allow(unsafe_code)]`); its first `unsafe` is the `unistd` credential wrappers over libc (`UNSAFE-CRATES.md`).
+- **`nix` =0.31.3** adopted (§5.5-approved; reviewer remco), `default-features = false, features = ["user"]`. Safe, typed syscall wrappers preferred over hand-rolled `unsafe` (§4, "don't roll your own `unsafe`"). Transitive: `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal), `cfg_aliases` =0.2.1 (build). Each vendored and GitHub-provenance-checked (`tools/audit-source.sh`).
+- `kennel-syscall` owns **no `unsafe`**: the `unistd` credential wrappers now go through `nix::unistd`, and the crate is back to `#![forbid(unsafe_code)]`. It is still the designated `unsafe` crate but delegates to vetted crates and flips to `allow` only for a primitive none cover (`UNSAFE-CRATES.md`).
 
 ### Licensing
 

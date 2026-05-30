@@ -45,8 +45,17 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 ### libc
 
 - **Version:** =0.2.186 (exact pin)
-- **Justification:** The Rust bindings to the system C library and raw syscalls. `kennel-syscall` is the one crate permitted `unsafe` (§4); it wraps libc behind safe APIs (`unistd::effective_uid`, and the namespace/Landlock/seccomp/prctl wrappers to follow). Writing our own FFI declarations for the full syscall surface we need would be a larger, less-reviewed `unsafe` surface than depending on the canonical, widely-audited bindings.
+- **Justification:** The Rust bindings to the system C library — the foundation the syscall layer rests on (nix builds on it). `kennel-syscall` retains it as a direct dependency (the architecture lists `nix, libc, libbpf-sys`) for the raw constants and types the higher-level crates do not expose, used directly as the namespace/mount/seccomp wrappers land. The safe wrappers themselves go through nix where possible (§4 — prefer a vetted crate to our own `unsafe`).
 - **Licence:** MIT OR Apache-2.0 (we take Apache-2.0; compatible with the project licence).
 - **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: the `.crate` source is byte-identical to `github.com/rust-lang/libc` at the published commit, which is tag 0.2.186.
 - **Transitive deps added:** none. libc's only dependency (`rustc-std-workspace-core`) is optional and used solely when libc is built as part of the standard library; it is not in our dependency graph.
 - **Proc-macros / build.rs:** libc ships a `build.rs` (it probes the target/toolchain to set `cfg` flags). No proc-macros. The reviewer should confirm the build script does only target detection as part of the §5.5 read.
+
+### nix
+
+- **Version:** =0.31.3 (exact pin), `default-features = false`, `features = ["user"]`.
+- **Justification:** Safe, typed wrappers over the syscalls `kennel-syscall` would otherwise hand-roll `unsafe` — namespaces, mounts, `pivot_root`, credentials, and the rest of the spawn sequence (`docs/08`). Per §4 ("don't roll your own `unsafe`"), a vetted, widely-used crate is preferable to our own FFI for these. Features are enabled pay-as-you-go as each wrapper lands, to keep the compiled surface (and transitive set) minimal.
+- **Licence:** MIT.
+- **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/nix-rust/nix` at the published commit, tag v0.31.3. Transitives likewise (bitflags, cfg-if, cfg_aliases).
+- **Transitive deps added:** `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal); `cfg_aliases` =0.2.1 (build-dependency of nix's `build.rs`). `libc` is shared with the direct dependency above. Each is vendored and recorded in `CHECKSUMS.toml` with its own GitHub-provenance check.
+- **Proc-macros / build.rs:** nix has a `build.rs` that uses `cfg_aliases` to define `cfg` aliases from the target; `cfg_aliases` is a small macro crate (no proc-macro). No proc-macros in this set. The reviewer should confirm nix's `build.rs` does only cfg-alias setup.

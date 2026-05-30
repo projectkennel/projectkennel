@@ -13,6 +13,10 @@ repository.workspace = true
 # vendored in crates-archive/ and recorded in CHECKSUMS.toml / DEPENDENCIES.md
 # per §5.5. libc itself has no (non-optional) dependencies.
 libc = "=0.2.186"
+# nix: safe, typed wrappers over the syscalls we would otherwise hand-roll
+# `unsafe` (CODING-STANDARDS.md §4 — prefer a vetted crate to our own unsafe).
+# default-features off; features added pay-as-you-go as each wrapper lands.
+nix = { version = "=0.31.3", default-features = false, features = ["user"] }
 
 [lints]
 workspace = true

@@ -2,23 +2,26 @@
 //!
 //! # Purpose
 //!
-//! `kennel-syscall` is, by architecture (`architecture/02-6-internal-api.md`,
-//! `03-crate-decomposition.md`), the *single* crate in the workspace permitted
-//! to contain `unsafe`: it will wrap raw Linux syscalls, namespace operations,
-//! Landlock and seccomp primitives, capability manipulation, and the libbpf
-//! FFI behind safe APIs. Everything else in the workspace links it and stays
-//! `#![forbid(unsafe_code)]`.
+//! `kennel-syscall` is the workspace's single point for low-level system
+//! operations (`architecture/02-6-internal-api.md`, `03-crate-decomposition.md`):
+//! namespaces, mounts, Landlock and seccomp, capability manipulation, path
+//! resolution, and the credential calls. It presents one curated, safe API so
+//! the rest of the workspace does not depend on the underlying syscall crates
+//! directly. It is also the *designated* place for `unsafe` should any be
+//! unavoidable — but it prefers vetted crates over owning `unsafe` (see below).
+//! Everything else in the workspace stays `#![forbid(unsafe_code)]`.
 //!
 //! # `unsafe`
 //!
-//! The crate carries `#![allow(unsafe_code)]` (the workspace default is
-//! `#![forbid(unsafe_code)]`; this crate is the documented exception in
-//! `UNSAFE-CRATES.md`). The pure-`std` part — the path-canonicalisation helper
-//! of CODING-STANDARDS.md §10.3 / §11.3 ([`path::canonicalise_path`]) — uses no
-//! `unsafe`; the FFI part ([`unistd`] and the syscall wrappers to follow) wraps
-//! raw libc calls, every block carrying the §4 `SAFETY:` / `INVARIANTS UPHELD:`
-//! / `FAILURE MODE:` comment. `libc` is vendored under §5.5; `nix` /
-//! `libbpf-sys` arrive the same way as their wrappers land.
+//! This crate is the workspace's *designated* `unsafe` crate (`UNSAFE-CRATES.md`)
+//! — but it owns as little `unsafe` as possible. Following "don't roll your own
+//! `unsafe`" (CODING-STANDARDS.md §4), it prefers vetted crates that already
+//! wrap each syscall soundly: nix for the general syscalls ([`unistd`], and the
+//! namespace/mount wrappers to follow), and `landlock` / `seccompiler` for the
+//! non-trivial security ABIs as those land. While a safe wrapper exists for
+//! everything we need, the crate stays `#![forbid(unsafe_code)]` below; it flips
+//! to `#![allow(unsafe_code)]` (with the §4 all-maintainers review) only for a
+//! primitive no vetted crate covers. Dependencies are vendored under §5.5.
 //!
 //! # Invariants
 //!
@@ -36,7 +39,7 @@
 //! allowed prefix — directly, via `..`, or via a symlink — is refused rather
 //! than silently accepted.
 
-#![allow(unsafe_code)]
+#![forbid(unsafe_code)]
 
 pub mod path;
 pub mod unistd;

@@ -43,3 +43,47 @@ verified-against = [
     "github.com/rust-lang/libc @ 42620ffc4109dc32e02f1cae9e63a3f4311b4b71 (tag 0.2.186) — 356 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "First dependency of the project; underlies kennel-syscall's FFI. Provenance verified independent of crates.io: the .crate's source is byte-identical to github.com/rust-lang/libc at the published commit, which is tag 0.2.186 (tools/audit-source.sh). No non-optional dependencies (the optional rustc-std-workspace-core is std-build-only)."
+
+[crate."nix"]
+version = "=0.31.3"
+crate-sha256 = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+audited-by = "remco"
+audited-on = "2026-05-30"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/nix-rust/nix @ b5933ca178802b558a667514f717a86b3a1cedcc (tag v0.31.3) — 122 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dependency of kennel-syscall: safe, typed syscall wrappers used instead of hand-rolled unsafe (§4). default-features off; features = [\"user\"] for now. Transitive: bitflags, cfg-if, libc (normal); cfg_aliases (build)."
+
+[crate."bitflags"]
+version = "=2.11.1"
+crate-sha256 = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+audited-by = "remco"
+audited-on = "2026-05-30"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/bitflags/bitflags @ 4ed9ffa949970239cd2d87c775e9fdcf9c438fb5 (tag 2.11.1) — 57 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via nix (typed flag sets)."
+
+[crate."cfg-if"]
+version = "=1.0.4"
+crate-sha256 = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+audited-by = "remco"
+audited-on = "2026-05-30"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/rust-lang/cfg-if @ 3510ca6abea34cbbc702509a4e50ea9709925eda (tag v1.0.4) — 10 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive via nix (cfg! convenience macro)."
+
+[crate."cfg_aliases"]
+version = "=0.2.1"
+crate-sha256 = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+audited-by = "remco"
+audited-on = "2026-05-30"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/katharostech/cfg_aliases @ 3d55ba79872b61265a7176110a5200df0c9d9e54 (tag v0.2.1) — 6 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive BUILD dependency of nix (cfg-alias macro used in nix's build.rs). Smallest crate in the set; read in full."

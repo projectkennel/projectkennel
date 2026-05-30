@@ -4,18 +4,30 @@ By default every crate in the workspace carries `#![forbid(unsafe_code)]` ([CODI
 
 Every `unsafe` block in a listed crate follows the `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment template of §4, and every PR touching `unsafe` needs two maintainer approvals.
 
+## Principle: prefer a vetted crate to our own `unsafe`
+
+"Don't roll your own crypto" extends to `unsafe`. Where a well-audited crate
+already wraps a syscall or ABI soundly, we use it rather than writing the
+`unsafe` ourselves — `nix` for the general syscalls, `landlock` and
+`seccompiler` for the non-trivial security ABIs, `libbpf-rs` for the BPF FFI.
+This moves the `unsafe` into purpose-built, widely-reviewed code and out of
+ours. The crates below are *permitted* `unsafe`; the goal is for them to own as
+little of it as possible.
+
 ## Status
 
-`kennel-syscall` is **active**: as of the libc adoption it carries
-`#![allow(unsafe_code)]` and contains its first `unsafe` blocks (the
-`unistd` credential wrappers over libc). `kennel-bpf` is still planned. Every
-other crate carries `#![forbid(unsafe_code)]`.
+`kennel-syscall` currently owns **no** `unsafe`: it composes nix's safe
+wrappers (e.g. `unistd::{effective_uid, real_uid}` over `nix::unistd`) and
+carries `#![forbid(unsafe_code)]`. It flips to `#![allow(unsafe_code)]` (with
+the all-maintainers review below) only when a primitive lands that no vetted
+crate covers. `kennel-bpf` is still planned. Every other crate is
+`#![forbid(unsafe_code)]`.
 
 ## Permitted crates
 
-| Crate | Why it needs `unsafe` | Size ceiling |
+| Crate | Why it may need `unsafe` | Size ceiling |
 |---|---|---|
-| `kennel-syscall` *(active)* | Raw Linux syscalls, namespace operations, Landlock/seccomp primitives, capability manipulation, and FFI. The single crate that wraps everything unsafe behind safe APIs. First `unsafe`: `unistd::{effective_uid, real_uid}` over libc. | ~1500 lines (reviewable in one sitting) |
+| `kennel-syscall` *(forbid; owns none yet)* | The single point for namespaces, mounts, Landlock/seccomp, capabilities, and credentials. Delegates the `unsafe` to vetted crates (nix / landlock / seccompiler); owns `unsafe` only for a primitive none of them cover. | ~1500 lines (reviewable in one sitting) |
 | `kennel-bpf` *(planned)* | The libbpf-rs / `libbpf-sys` FFI surface for loading and attaching BPF programs. `unsafe` confined to the FFI boundary. | — |
 
 The C in `bpf/` is governed separately by §4.1 (BPF C code) — C is `unsafe` by construction and reviewed under matching rules, but it is not Rust `unsafe` and is not listed here.

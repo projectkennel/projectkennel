@@ -2,43 +2,31 @@
 //!
 //! # Purpose
 //!
-//! Thin safe wrappers over the libc credential calls that `std` does not expose.
-//! Each wraps a single syscall whose safety is unconditional — no pointers, no
-//! buffers, no caller preconditions — so the `unsafe` is minimal and local, and
-//! the wrapper is total (it cannot fail).
+//! Thin wrappers exposing the credential calls `std` does not — via nix's safe
+//! bindings, so this module (and the crate) needs no `unsafe` of its own. This
+//! is the "don't roll your own `unsafe`" principle (CODING-STANDARDS.md §4):
+//! where a vetted crate already wraps a syscall soundly, we use it rather than
+//! writing the `unsafe` ourselves.
 //!
 //! # Why it exists
 //!
 //! Components that must know whether they hold privilege — the privhelper
 //! (boundary 1) and the spawn path — need the effective uid, which `std` has no
-//! API for. Routing it through one reviewed place keeps the raw FFI confined to
-//! this crate (CODING-STANDARDS.md §4).
+//! API for. Routing it through one reviewed place keeps the dependency on nix
+//! confined to this crate, so the rest of the workspace calls a small safe API.
+
+use nix::unistd::{geteuid, getuid};
 
 /// The effective user ID of the calling process (`geteuid(2)`).
 #[must_use]
 pub fn effective_uid() -> u32 {
-    // SAFETY: geteuid() takes no arguments and reads only the calling process's
-    // effective uid from the kernel; there are no preconditions a caller could
-    // violate and no memory is accessed.
-    //
-    // INVARIANTS UPHELD: none required — the call touches no memory we own and
-    // yields a plain integer by value.
-    //
-    // FAILURE MODE: cannot fail. POSIX specifies geteuid() always succeeds, so
-    // there is no errno path to check or propagate.
-    unsafe { libc::geteuid() }
+    geteuid().as_raw()
 }
 
 /// The real user ID of the calling process (`getuid(2)`).
 #[must_use]
 pub fn real_uid() -> u32 {
-    // SAFETY: getuid() takes no arguments and reads only the calling process's
-    // real uid; no preconditions, no memory accessed.
-    //
-    // INVARIANTS UPHELD: none required — integer returned by value.
-    //
-    // FAILURE MODE: cannot fail (POSIX specifies getuid() always succeeds).
-    unsafe { libc::getuid() }
+    getuid().as_raw()
 }
 
 #[cfg(test)]
@@ -46,8 +34,8 @@ mod tests {
     use super::*;
 
     /// The effective uid parsed from `/proc/self/status` (`Uid: real eff saved
-    /// fs`) — an independent witness, via the kernel rather than libc, that the
-    /// vendored libc bindings return the correct value.
+    /// fs`) — an independent witness, via the kernel rather than nix/libc, that
+    /// the wrappers return the correct value.
     fn proc_effective_uid() -> u32 {
         let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
         status
