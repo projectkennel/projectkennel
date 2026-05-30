@@ -13,7 +13,10 @@ use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd, RawFd};
 const BPF_MAP_CREATE: libc::c_int = 0;
 const BPF_MAP_UPDATE_ELEM: libc::c_int = 2;
 const BPF_PROG_LOAD: libc::c_int = 5;
+const BPF_OBJ_PIN: libc::c_int = 6;
+const BPF_OBJ_GET: libc::c_int = 7;
 const BPF_PROG_ATTACH: libc::c_int = 8;
+const BPF_PROG_DETACH: libc::c_int = 9;
 
 /// `map_update` flag: create or overwrite the element (`BPF_ANY`).
 pub const BPF_ANY: u64 = 0;
@@ -71,6 +74,16 @@ struct ProgAttachAttr {
     attach_type: u32,
     attach_flags: u32,
     replace_bpf_fd: u32,
+}
+
+// The anonymous BPF_OBJ_* struct (pin/get). `pathname` is first (`__aligned_u64`)
+// so there is no leading pad; size_of == 16.
+#[repr(C)]
+#[derive(Default)]
+struct ObjAttr {
+    pathname: u64,
+    bpf_fd: u32,
+    file_flags: u32,
 }
 
 /// `bpf(cmd, attr, size)`. `attr` must point at `size` initialised bytes laid out
@@ -248,4 +261,90 @@ pub fn prog_attach_cgroup(
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Detach the program of `attach_type` from a cgroup (`BPF_PROG_DETACH`). For an
+/// exclusively-attached program the cgroup and attach type identify it.
+///
+/// # Errors
+///
+/// Returns the OS error if nothing is attached or the fd is out of range.
+pub fn prog_detach_cgroup(cgroup: BorrowedFd<'_>, attach_type: u32) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let attr = ProgAttachAttr {
+        target_fd: u32::try_from(cgroup.as_raw_fd())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "fd out of range"))?,
+        attach_bpf_fd: 0,
+        attach_type,
+        attach_flags: 0,
+        replace_bpf_fd: 0,
+    };
+    // SAFETY: `attr` is fully initialised with a valid cgroup fd and the attach
+    // type; we pass its address and size. See `bpf`.
+    let ret = unsafe {
+        bpf(
+            BPF_PROG_DETACH,
+            std::ptr::from_ref(&attr).cast(),
+            std::mem::size_of::<ProgAttachAttr>(),
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Pin a program or map fd to a bpffs `path` (`BPF_OBJ_PIN`), so it outlives the
+/// process. `path` must be NUL-terminated and on a mounted bpffs.
+///
+/// # Errors
+///
+/// Returns the OS error if the fd is out of range or the kernel rejects the pin
+/// (e.g. the path exists, or its directory is not bpffs).
+pub fn obj_pin(fd: BorrowedFd<'_>, path: &CStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let attr = ObjAttr {
+        pathname: path.as_ptr() as u64,
+        bpf_fd: u32::try_from(fd.as_raw_fd())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "fd out of range"))?,
+        file_flags: 0,
+    };
+    // SAFETY: `attr` is fully initialised; `path` outlives the call and is
+    // NUL-terminated, so the kernel reads a valid C string. See `bpf`.
+    let ret = unsafe {
+        bpf(
+            BPF_OBJ_PIN,
+            std::ptr::from_ref(&attr).cast(),
+            std::mem::size_of::<ObjAttr>(),
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Open a pinned object by bpffs `path` (`BPF_OBJ_GET`), returning a fresh fd.
+///
+/// # Errors
+///
+/// Returns the OS error if the path does not exist or is not a pinned object.
+pub fn obj_get(path: &CStr) -> io::Result<OwnedFd> {
+    let attr = ObjAttr {
+        pathname: path.as_ptr() as u64,
+        bpf_fd: 0,
+        file_flags: 0,
+    };
+    // SAFETY: `attr` is fully initialised; `path` outlives the call and is
+    // NUL-terminated. The kernel returns a fresh fd we own, or -1. See `bpf`.
+    let ret = unsafe {
+        bpf(
+            BPF_OBJ_GET,
+            std::ptr::from_ref(&attr).cast(),
+            std::mem::size_of::<ObjAttr>(),
+        )
+    };
+    owned_fd(ret)
 }

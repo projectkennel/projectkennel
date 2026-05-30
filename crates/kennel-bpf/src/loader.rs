@@ -211,6 +211,26 @@ impl Loaded {
         sys::map_update(map.as_fd(), key, value, flags)
     }
 
+    /// Detach this program's `attach_type` from `cgroup` (`BPF_PROG_DETACH`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if nothing of that type is attached to the cgroup.
+    pub fn detach(&self, cgroup: BorrowedFd<'_>, attach_type: u32) -> io::Result<()> {
+        sys::prog_detach_cgroup(cgroup, attach_type)
+    }
+
+    /// Pin the loaded program to a bpffs `path` so it outlives the process
+    /// (`BPF_OBJ_PIN`). Reopen it later with [`sys::obj_get`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the path exists, is not on bpffs, or the pin is
+    /// rejected.
+    pub fn pin_program(&self, path: &std::ffi::CStr) -> io::Result<()> {
+        sys::obj_pin(self.program.as_fd(), path)
+    }
+
     /// Map the named ringbuf for reading. `map_specs` supplies the map's byte
     /// capacity (its `max_entries`); pass the same slice used to load.
     ///
@@ -537,6 +557,55 @@ mod root_tests {
         assert_eq!(ev.get(40), Some(&2u8), "family AF_INET");
         assert_eq!(ev.get(42..44), Some(&[0x00, 0x09][..]), "port 9, network order");
         assert_eq!(ev.get(44..48), Some(&[127u8, 0, 0, 1][..]), "addr 127.0.0.1");
+    }
+
+    #[test]
+    fn detach_restores_connectivity() {
+        let loaded = load_connect4();
+        let spec = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "connect4")
+            .expect("connect4 spec");
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-detach");
+        let _ = std::fs::create_dir(cg);
+        let cgfd = std::fs::File::open(cg).expect("open cgroup");
+        loaded
+            .attach(cgfd.as_fd(), spec.attach_type)
+            .expect("attach connect4");
+
+        let denied_before = connect_denied_in_cgroup(cg);
+        loaded
+            .detach(cgfd.as_fd(), spec.attach_type)
+            .expect("detach connect4");
+        let denied_after = connect_denied_in_cgroup(cg);
+
+        let _ = std::fs::remove_dir(cg);
+        assert!(
+            denied_before,
+            "attached connect4 with empty maps should deny the connect"
+        );
+        assert!(
+            !denied_after,
+            "after detach the connect should no longer be BPF-denied"
+        );
+    }
+
+    #[test]
+    fn pin_and_get_program() {
+        let loaded = load_connect4();
+        let pin = c"/sys/fs/bpf/kennel-bpf-test-pin";
+        let pin_path = Path::new("/sys/fs/bpf/kennel-bpf-test-pin");
+        // Clear any stale pin from an interrupted prior run.
+        let _ = std::fs::remove_file(pin_path);
+
+        loaded.pin_program(pin).expect("pin program to bpffs");
+        let got = sys::obj_get(pin).expect("get pinned program back");
+        assert!(
+            std::os::fd::AsRawFd::as_raw_fd(&got.as_fd()) >= 0,
+            "reopened pinned program fd should be valid"
+        );
+
+        let _ = std::fs::remove_file(pin_path);
     }
 
     /// Try to connect to 127.0.0.1:9; return true iff the connect was denied with
