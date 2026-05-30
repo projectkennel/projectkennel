@@ -36,3 +36,5 @@
 //! transient: one validated operation per invocation.
 
 #![forbid(unsafe_code)]
+
+pub mod validate;
