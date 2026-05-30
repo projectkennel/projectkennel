@@ -8,5 +8,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[dependencies]
+# The libc bindings underlying the safe syscall wrappers. Exact pin per §5.4;
+# vendored in crates-archive/ and recorded in CHECKSUMS.toml / DEPENDENCIES.md
+# per §5.5. libc itself has no (non-optional) dependencies.
+libc = "=0.2.186"
+
 [lints]
 workspace = true

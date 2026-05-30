@@ -32,4 +32,14 @@
 #
 # Two maintainer approvals are required for any addition or change here.
 
-# (no entries yet)
+[crate."libc"]
+version = "=0.2.186"
+crate-sha256 = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+audited-by = "remco"
+audited-on = "2026-05-30"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (audit-helper confirm)",
+    "crates.io sparse index line for 0.2.186 — cksum matches the .crate",
+    "github.com/rust-lang/libc @ 42620ffc4109dc32e02f1cae9e63a3f4311b4b71 (tag 0.2.186) — 356 source files byte-identical via tools/audit-source.sh",
+]
+notes = "First dependency of the project; underlies kennel-syscall's FFI. Provenance verified independent of crates.io: the .crate's source is byte-identical to github.com/rust-lang/libc at the published commit, which is tag 0.2.186 (tools/audit-source.sh). No non-optional dependencies (the optional rustc-std-workspace-core is std-build-only)."

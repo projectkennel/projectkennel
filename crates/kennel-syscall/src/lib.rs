@@ -9,17 +9,16 @@
 //! FFI behind safe APIs. Everything else in the workspace links it and stays
 //! `#![forbid(unsafe_code)]`.
 //!
-//! # Staging
+//! # `unsafe`
 //!
-//! The portable, dependency-free part lands first: the path-canonicalisation
-//! helper of CODING-STANDARDS.md §10.3 / §11.3 ([`path::canonicalise_path`]),
-//! which is pure `std` and fully testable on any host. While only that part
-//! exists the crate carries `#![forbid(unsafe_code)]` below — there is no
-//! `unsafe` yet, so we take the stronger guarantee. The forbid flips to
-//! `#![allow(unsafe_code)]` when the first syscall wrapper lands (with its
-//! `UNSAFE-CRATES.md` and `CHANGELOG.md` entries and the §4 `SAFETY:` comment
-//! discipline), and the `nix` / `libc` / `libbpf-sys` dependencies arrive then
-//! through the §5.5 supply-chain procedure.
+//! The crate carries `#![allow(unsafe_code)]` (the workspace default is
+//! `#![forbid(unsafe_code)]`; this crate is the documented exception in
+//! `UNSAFE-CRATES.md`). The pure-`std` part — the path-canonicalisation helper
+//! of CODING-STANDARDS.md §10.3 / §11.3 ([`path::canonicalise_path`]) — uses no
+//! `unsafe`; the FFI part ([`unistd`] and the syscall wrappers to follow) wraps
+//! raw libc calls, every block carrying the §4 `SAFETY:` / `INVARIANTS UPHELD:`
+//! / `FAILURE MODE:` comment. `libc` is vendored under §5.5; `nix` /
+//! `libbpf-sys` arrive the same way as their wrappers land.
 //!
 //! # Invariants
 //!
@@ -37,6 +36,7 @@
 //! allowed prefix — directly, via `..`, or via a symlink — is refused rather
 //! than silently accepted.
 
-#![forbid(unsafe_code)]
+#![allow(unsafe_code)]
 
 pub mod path;
+pub mod unistd;

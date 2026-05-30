@@ -17,6 +17,11 @@ The project is in its documentation and design stage. No releases yet; no runtim
 - Compilation model: a `kennel compile` step produces a signed *settled policy* the runtime enforces, replacing live per-spawn resolution (design §9.10).
 - Governance scaffolding: this file, `README.md`, `SECURITY.md`, `MAINTAINERS.md`, `CONTRIBUTORS.md`, `CODE_OF_CONDUCT.md`, and the dependency ledgers (`DEPENDENCIES.md`, `CHECKSUMS.toml`, `RELEASE-WATCH.toml`, `KEYS.md`, `UNSAFE-CRATES.md`, `BUILD-ENV.md`).
 
+### Dependencies
+
+- **First dependency adopted: `libc` =0.2.186** (§5.5-approved; reviewer remco). Vendored to `crates-archive/` as a cargo local registry (`.cargo/config.toml` replaces crates.io); recorded in `CHECKSUMS.toml`, `DEPENDENCIES.md`, `RELEASE-WATCH.toml`. Provenance verified independent of crates.io against the GitHub source at tag 0.2.186 (`tools/audit-source.sh`). No transitive deps.
+- `kennel-syscall` is now the workspace's active `unsafe` crate (`#![allow(unsafe_code)]`); its first `unsafe` is the `unistd` credential wrappers over libc (`UNSAFE-CRATES.md`).
+
 ### Licensing
 
 - Adopted **Apache License 2.0** for the project (Rust crates, threat catalogue, design document, reference runtime). The BPF programs under `bpf/` remain GPL-2.0 (SPDX headers; required by the kernel for "GPL"-declaring programs). See `LICENSE` and `NOTICE`.

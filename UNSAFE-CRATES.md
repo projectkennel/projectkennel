@@ -6,13 +6,16 @@ Every `unsafe` block in a listed crate follows the `SAFETY:` / `INVARIANTS UPHEL
 
 ## Status
 
-No crates exist yet — the reference runtime is not implemented. This file is the policy and the (currently empty) list; entries are added when the crates are created.
+`kennel-syscall` is **active**: as of the libc adoption it carries
+`#![allow(unsafe_code)]` and contains its first `unsafe` blocks (the
+`unistd` credential wrappers over libc). `kennel-bpf` is still planned. Every
+other crate carries `#![forbid(unsafe_code)]`.
 
 ## Permitted crates
 
 | Crate | Why it needs `unsafe` | Size ceiling |
 |---|---|---|
-| `kennel-syscall` *(planned)* | Raw Linux syscalls, namespace operations, Landlock/seccomp primitives, capability manipulation, and FFI. The single crate that wraps everything unsafe behind safe APIs. | ~1500 lines (reviewable in one sitting) |
+| `kennel-syscall` *(active)* | Raw Linux syscalls, namespace operations, Landlock/seccomp primitives, capability manipulation, and FFI. The single crate that wraps everything unsafe behind safe APIs. First `unsafe`: `unistd::{effective_uid, real_uid}` over libc. | ~1500 lines (reviewable in one sitting) |
 | `kennel-bpf` *(planned)* | The libbpf-rs / `libbpf-sys` FFI surface for loading and attaching BPF programs. `unsafe` confined to the FFI boundary. | — |
 
 The C in `bpf/` is governed separately by §4.1 (BPF C code) — C is `unsafe` by construction and reviewed under matching rules, but it is not Rust `unsafe` and is not listed here.

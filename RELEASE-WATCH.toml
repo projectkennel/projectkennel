@@ -32,4 +32,10 @@
 # here and trigger a fresh `cargo vet` audit at that dependency's next
 # release.
 
-# (no entries yet)
+[[watch]]
+name          = "libc"
+repo          = "https://github.com/rust-lang/libc"
+release-feed  = "https://github.com/rust-lang/libc/releases.atom"
+last-reviewed = "0.2.186"
+reviewed-by   = "remco"
+note          = "First dependency. Pinned =0.2.186; underlies kennel-syscall FFI."

@@ -42,4 +42,11 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 
 ## Direct dependencies
 
-*(none yet)*
+### libc
+
+- **Version:** =0.2.186 (exact pin)
+- **Justification:** The Rust bindings to the system C library and raw syscalls. `kennel-syscall` is the one crate permitted `unsafe` (§4); it wraps libc behind safe APIs (`unistd::effective_uid`, and the namespace/Landlock/seccomp/prctl wrappers to follow). Writing our own FFI declarations for the full syscall surface we need would be a larger, less-reviewed `unsafe` surface than depending on the canonical, widely-audited bindings.
+- **Licence:** MIT OR Apache-2.0 (we take Apache-2.0; compatible with the project licence).
+- **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: the `.crate` source is byte-identical to `github.com/rust-lang/libc` at the published commit, which is tag 0.2.186.
+- **Transitive deps added:** none. libc's only dependency (`rustc-std-workspace-core`) is optional and used solely when libc is built as part of the standard library; it is not in our dependency graph.
+- **Proc-macros / build.rs:** libc ships a `build.rs` (it probes the target/toolchain to set `cfg` flags). No proc-macros. The reviewer should confirm the build script does only target detection as part of the §5.5 read.
