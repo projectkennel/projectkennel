@@ -26,9 +26,12 @@
 
 pub mod plan;
 
+use std::io;
 use std::path::PathBuf;
+use std::process::{Child, Command};
 
 use kennel_policy::{KeySet, PolicyError, SettledPolicy};
+use kennel_syscall::landlock::Ruleset;
 
 pub use plan::Plan;
 
@@ -59,6 +62,8 @@ pub enum SpawnError {
         /// The offending value.
         value: String,
     },
+    /// A syscall during confinement setup or the spawn itself failed.
+    Syscall(io::Error),
 }
 
 impl core::fmt::Display for SpawnError {
@@ -68,6 +73,7 @@ impl core::fmt::Display for SpawnError {
             Self::UnsubstitutedPlaceholder { field, value } => {
                 write!(f, "unsubstituted placeholder in {field}: `{value}`")
             }
+            Self::Syscall(e) => write!(f, "confinement/spawn syscall failed: {e}"),
         }
     }
 }
@@ -76,6 +82,7 @@ impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Policy(e) => Some(e),
+            Self::Syscall(e) => Some(e),
             Self::UnsubstitutedPlaceholder { .. } => None,
         }
     }
@@ -147,6 +154,65 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
     let verified = kennel_policy::verify_settled(bytes, keys)?;
     let substituted = substitute(&verified, subst)?;
     Ok(Plan::from_policy(&substituted, subst.ctx))
+}
+
+/// Spawn `command` confined by `plan`.
+///
+/// Applies the irreversible seal (`no_new_privs`, the seccomp filter, the
+/// Landlock ruleset) in the forked child immediately before `execve`, via
+/// [`kennel_syscall::spawn::spawn_sealed`].
+///
+/// The confinement objects are built in the parent (so opens and allocations
+/// happen pre-`fork`); the child only issues the sealing syscalls. An empty
+/// seccomp allowlist means "no seccomp filter" (rely on Landlock); otherwise the
+/// allowlist is enforced with the plan's default action.
+///
+/// # Scope
+///
+/// This applies the **process-local, unprivileged** layers only:
+/// `no_new_privs` + seccomp + Landlock. The plan's namespace, mount-shim,
+/// cgroup-join, and BPF-attach layers are **not** applied here — they require
+/// privilege (the privhelper) and careful PID-namespace ordering, and are a
+/// separate increment. The returned child is therefore confined by Landlock and
+/// seccomp but is **not** yet network- or namespace-isolated.
+///
+/// # Errors
+///
+/// Returns [`SpawnError::Syscall`] if building the ruleset, the seal, or the
+/// spawn fails. A seal failure aborts the spawn fail-closed (no program runs).
+pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
+    // Build in the parent: opening the Landlock path fds and allocating the
+    // filter here keeps the post-fork seal to syscalls only.
+    let filter = if plan.seccomp_allow.is_empty() {
+        None
+    } else {
+        Some(plan.seccomp_filter())
+    };
+
+    let mut ruleset = Ruleset::new().map_err(SpawnError::Syscall)?;
+    for (path, access) in &plan.landlock_fs {
+        ruleset.allow_path(path, *access).map_err(SpawnError::Syscall)?;
+    }
+    for (port, access) in &plan.landlock_net {
+        ruleset.allow_port(*port, *access);
+    }
+
+    // `restrict_current_process` consumes the ruleset; an Option lets the FnMut
+    // seal move it out on its single call.
+    let mut ruleset = Some(ruleset);
+    let seal = move || -> io::Result<()> {
+        // no_new_privs first: seccomp requires it (Landlock sets it again, idempotently).
+        kennel_syscall::process::set_no_new_privs()?;
+        if let Some(f) = filter.as_ref() {
+            f.install()?;
+        }
+        let rs = ruleset
+            .take()
+            .ok_or_else(|| io::Error::other("landlock ruleset already consumed"))?;
+        rs.restrict_current_process()
+    };
+
+    kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall)
 }
 
 #[cfg(test)]
@@ -273,5 +339,74 @@ mod tests {
         let empty = KeySet::new(); // no trusted keys
         let err = prepare(&bytes, &empty, &subst()).expect_err("must reject");
         assert!(matches!(err, SpawnError::Policy(_)), "got {err:?}");
+    }
+
+    /// A Landlock-only plan granting read+exec under `read_dirs` and no seccomp.
+    fn fs_only_plan(read_dirs: &[&str]) -> Plan {
+        let access = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        Plan {
+            namespaces: Namespaces::empty(),
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            bind_read: Vec::new(),
+            bind_write: Vec::new(),
+            landlock_fs: read_dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
+            landlock_net: Vec::new(),
+            seccomp_allow: Vec::new(), // empty => no seccomp, isolating the Landlock check
+            seccomp_default: Action::KillProcess,
+        }
+    }
+
+    /// Paths a dynamically-linked `/bin/sh` + `/bin/cat` need to start.
+    const RUNTIME_DIRS: &[&str] = &["/usr", "/bin", "/lib", "/lib64", "/etc"];
+
+    fn landlock_available() -> bool {
+        kennel_syscall::landlock::abi_version().is_ok()
+    }
+
+    #[test]
+    fn landlock_seal_blocks_an_unlisted_path() {
+        if !landlock_available() {
+            return; // kernel without Landlock; the seal cannot be exercised here.
+        }
+        // A readable file whose directory is deliberately NOT in the allowlist.
+        let secret = std::env::temp_dir().join("kennel-spawn-landlock-secret");
+        std::fs::write(&secret, b"top secret").expect("write secret");
+
+        let plan = fs_only_plan(RUNTIME_DIRS);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("exec cat {}", secret.display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = spawn(&plan, &mut cmd).expect("spawn");
+        let status = child.wait().expect("wait");
+        let _ = std::fs::remove_file(&secret);
+
+        assert!(
+            !status.success(),
+            "Landlock should have blocked reading the unlisted path (got {status:?})"
+        );
+    }
+
+    #[test]
+    fn landlock_seal_allows_a_listed_path() {
+        if !landlock_available() {
+            return;
+        }
+        // /etc/hostname is under /etc, which is in the allowlist.
+        let plan = fs_only_plan(RUNTIME_DIRS);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("exec cat /etc/hostname")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = spawn(&plan, &mut cmd).expect("spawn");
+        let status = child.wait().expect("wait");
+        assert!(
+            status.success(),
+            "reading an allowed path under the confinement should succeed (got {status:?})"
+        );
     }
 }
