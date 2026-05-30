@@ -48,4 +48,5 @@
 
 pub mod landlock;
 pub mod path;
+pub mod process;
 pub mod unistd;

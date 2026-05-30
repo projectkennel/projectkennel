@@ -400,7 +400,7 @@ impl Ruleset {
     /// `restrict_self` fails.
     pub fn restrict_current_process(self) -> io::Result<()> {
         let ruleset = self.build_fd()?;
-        nix::sys::prctl::set_no_new_privs().map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        crate::process::set_no_new_privs()?;
         restrict_self(ruleset.as_fd())
     }
 }
