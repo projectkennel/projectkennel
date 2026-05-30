@@ -1,0 +1,60 @@
+# Project Kennel — Cargo workspace root.
+#
+# One crate per architectural module (architecture/03-crate-decomposition.md),
+# each prefixed `kennel-`. Crates are added as they are implemented; this is
+# not yet the full set described in the architecture.
+#
+# Dependency policy is strict (CODING-STANDARDS.md §5): exact version pins,
+# vendored artefacts, the CHECKSUMS.toml manifest. The crates implemented so
+# far are deliberately dependency-free (std only), so no external dependency
+# machinery is engaged yet.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/kennel-privhelper",
+]
+
+[workspace.package]
+edition = "2021"
+# Set to the toolchain we actually build and test against. The standards
+# (§2.1) call for an MSRV lagging the dev toolchain; lowering it is deferred
+# until we can test against older toolchains (BUILD-ENV.md), rather than
+# claiming a floor we have not verified.
+rust-version = "1.95"
+license = "TBD"
+authors = ["Project Kennel maintainers"]
+repository = "TBD"
+
+# Shared lint configuration, applied to every member via `[lints] workspace =
+# true`. Encodes CODING-STANDARDS.md §12.2. `#![forbid(unsafe_code)]` is a
+# per-crate attribute (§3, §4), not set here, so the kennel-syscall and
+# kennel-bpf exception crates can omit it without fighting a workspace forbid.
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+missing_docs = "warn"
+
+# Lint groups carry priority -1 so the individual lints below (priority 0)
+# take precedence when they overlap (Cargo requires this ordering).
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+
+# The release profile aborts on panic (CODING-STANDARDS.md §8.5: a panic in
+# the privhelper must terminate, not unwind through cleanup). The test profile
+# is dev-based and unwinds by default, so #[should_panic] and catch_unwind work
+# without an explicit override (cargo ignores `panic` on the test profile).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

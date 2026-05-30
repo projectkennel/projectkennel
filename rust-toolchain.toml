@@ -1,0 +1,7 @@
+# Pinned development toolchain (CODING-STANDARDS.md §2.1).
+# Contributors install via rustup, which honours this file automatically.
+# Stable channel only; no nightly, no #![feature(...)].
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
