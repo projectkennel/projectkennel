@@ -83,6 +83,18 @@ impl ReservedScope {
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
+
+    /// The user's 12-bit tag (selects their IPv4 loopback `/20`).
+    #[must_use]
+    pub const fn tag(&self) -> u16 {
+        self.tag
+    }
+
+    /// The user's 40-bit IPv6 ULA global ID (the five bytes after `0xfd`).
+    #[must_use]
+    pub const fn ula_gid(&self) -> [u8; 5] {
+        self.ula_gid
+    }
 }
 
 /// A request to add or remove a per-kennel loopback address.
