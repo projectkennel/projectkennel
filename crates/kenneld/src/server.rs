@@ -68,6 +68,8 @@ pub struct Identity {
     pub scope: ReservedScope,
     /// kenneld's own cgroup; kennel cgroups are created as children of it.
     pub cgroup_base: PathBuf,
+    /// How to launch each kennel's egress proxy, or `None` to run none.
+    pub proxy: Option<crate::ProxySetup>,
 }
 
 /// Registry metadata for one kennel (the workload itself is owned by the
@@ -240,6 +242,7 @@ where
         scope: shared.identity.scope.clone(),
         plan: loaded.plan,
         net: loaded.net,
+        proxy: shared.identity.proxy.clone(),
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
@@ -365,6 +368,7 @@ mod tests {
                 home: PathBuf::from("/home/dev"),
                 scope: ReservedScope::new(9, [0, 0, 0, 0, 1], "kennel-test"),
                 cgroup_base: base,
+                proxy: None,
             },
             OkPriv,
             FakeLoader,

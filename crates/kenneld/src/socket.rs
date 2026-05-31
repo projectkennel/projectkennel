@@ -11,15 +11,22 @@ use std::io;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
-/// The control socket's path: `$XDG_RUNTIME_DIR/kennel/control.sock`, falling
-/// back to `/run/user/<uid>/kennel/control.sock`.
+/// kenneld's per-user runtime directory: `$XDG_RUNTIME_DIR/kennel`, falling back
+/// to `/run/user/<uid>/kennel`. Holds the control socket and per-kennel proxy
+/// configs.
 #[must_use]
-pub fn socket_path() -> PathBuf {
+pub fn runtime_dir() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
         || PathBuf::from(format!("/run/user/{}", kennel_syscall::unistd::real_uid())),
         PathBuf::from,
     );
-    runtime.join("kennel").join("control.sock")
+    runtime.join("kennel")
+}
+
+/// The control socket's path: `<runtime_dir>/control.sock`.
+#[must_use]
+pub fn socket_path() -> PathBuf {
+    runtime_dir().join("control.sock")
 }
 
 /// Obtain the control listener: the socket-activation fd if present, else a

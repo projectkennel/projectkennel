@@ -14,8 +14,10 @@
 
 #![cfg(feature = "root-tests")]
 
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use kennel_policy::{
     CapPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy, NetMode, NetPolicy, NetRule,
@@ -25,17 +27,41 @@ use kennel_policy::{
 use kennel_privhelper::validate::ReservedScope;
 use kennel_spawn::{prepare, RuntimeSubstitutions};
 use kennel_syscall::namespace::Namespaces;
-use kenneld::{start, HelperClient, Spec};
+use kenneld::{start, HelperClient, ProxySetup, Spec};
 
-/// Locate the privhelper binary built alongside this test (`target/<profile>/
-/// kennel-privhelper`). It must have been built with `--features bpf-egress`.
-fn privhelper_path() -> PathBuf {
-    // The test executable lives in target/<profile>/deps/; the binary is one up.
+/// Locate a binary built alongside this test (`target/<profile>/<name>`).
+fn sibling_binary(name: &str) -> PathBuf {
+    // The test executable lives in target/<profile>/deps/; binaries are one up.
     let exe = std::env::current_exe().expect("current exe");
     let profile_dir = exe.parent().and_then(Path::parent).expect("profile dir");
-    let path = profile_dir.join("kennel-privhelper");
+    profile_dir.join(name)
+}
+
+/// The privhelper binary; must have been built with `--features bpf-egress`.
+fn privhelper_path() -> PathBuf {
+    let path = sibling_binary("kennel-privhelper");
     assert!(path.exists(), "privhelper not found at {} — build it with --features bpf-egress", path.display());
     path
+}
+
+/// The netproxy binary; build it with `cargo build -p kennel-netproxy`.
+fn netproxy_path() -> PathBuf {
+    let path = sibling_binary("kennel-netproxy");
+    assert!(path.exists(), "netproxy not found at {} — build it with `cargo build -p kennel-netproxy`", path.display());
+    path
+}
+
+/// Whether something accepts TCP connections at `addr`, retried briefly to let
+/// the just-spawned proxy finish binding.
+fn listening(addr: &str) -> bool {
+    let target: std::net::SocketAddr = addr.parse().expect("addr");
+    for _ in 0..40 {
+        if TcpStream::connect_timeout(&target, Duration::from_millis(100)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 /// A minimal settled policy that satisfies the framework invariants and lets a
@@ -128,24 +154,47 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     cleanup(&base, "127.0.144.17/28", "fd00:0:1:1::1/64");
     std::fs::create_dir_all(&base).expect("create cgroup base");
 
+    // Launch the real netproxy as the kennel's egress proxy, with a temp config
+    // dir. The workload runs a brief sleep so the proxy is observably up while it
+    // runs (rather than racing /bin/true's immediate exit).
+    let proxy_cfg = std::env::temp_dir().join(format!("kenneld-e2e-proxy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&proxy_cfg);
     let helper = HelperClient::new(privhelper_path());
-    let spec = Spec { cgroup: cgroup.clone(), ctx, scope, plan, net: minimal_policy().effective_policy.net };
+    let spec = Spec {
+        cgroup: cgroup.clone(),
+        ctx,
+        scope,
+        plan,
+        net: minimal_policy().effective_policy.net,
+        proxy: Some(ProxySetup { binary: netproxy_path(), config_dir: proxy_cfg.clone() }),
+    };
 
-    // Bring the kennel up: cgroup + v4/v6 loopback addresses + egress BPF + spawn.
-    let kennel = start(&helper, spec, &mut Command::new("/bin/true")).expect("start kennel");
+    // Bring the kennel up: cgroup + addresses + egress BPF + proxy + workload.
+    let mut workload = Command::new("/bin/sleep");
+    workload.arg("2");
+    let kennel = start(&helper, spec, &mut workload).expect("start kennel");
     assert!(cgroup.is_dir(), "the kennel cgroup should exist while running");
 
     // The loopback v4 address (127 | tag 9 | ctx 1 | host 1) should be present.
     let v4 = "127.0.144.17";
     assert!(lo_has(v4), "the kennel's loopback address {v4} should be added");
 
-    // Wait for /bin/true to finish and tear everything down.
+    // The netproxy should be listening on the kennel's address:1080.
+    let proxy_addr = format!("{v4}:1080");
+    assert!(listening(&proxy_addr), "the egress proxy should be listening on {proxy_addr}");
+    // And kenneld wrote its config.
+    assert!(proxy_cfg.join(format!("proxy-{ctx}.toml")).exists(), "the proxy config should be written");
+
+    // Wait for the workload to finish and tear everything down (incl. the proxy).
     let status = kennel.stop(&helper).expect("stop");
     assert!(status.success(), "the workload should exit 0 (got {status:?})");
 
     assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
     assert!(!lo_has(v4), "the loopback address should be removed on teardown");
+    // The proxy is gone: nothing answers on its address now.
+    assert!(!quick_connect(&proxy_addr), "the proxy should be killed on teardown");
 
+    let _ = std::fs::remove_dir_all(&proxy_cfg);
     let _ = std::fs::remove_dir(&base);
 }
 
@@ -155,8 +204,17 @@ fn lo_has(addr: &str) -> bool {
     String::from_utf8_lossy(&out.stdout).contains(addr)
 }
 
+/// A single connection attempt — for asserting the proxy is *gone* without the
+/// retry budget of [`listening`].
+fn quick_connect(addr: &str) -> bool {
+    let target: std::net::SocketAddr = addr.parse().expect("addr");
+    TcpStream::connect_timeout(&target, Duration::from_millis(100)).is_ok()
+}
+
 /// Best-effort removal of state a prior interrupted run may have leaked.
 fn cleanup(base: &Path, v4: &str, v6: &str) {
+    // A prior run's proxy could linger and hold the loopback address.
+    let _ = Command::new("pkill").args(["-x", "kennel-netproxy"]).output();
     let _ = Command::new("ip").args(["addr", "del", v4, "dev", "lo"]).output();
     let _ = Command::new("ip").args(["-6", "addr", "del", v6, "dev", "lo"]).output();
     let _ = std::fs::remove_dir(base.join("kennel-1"));

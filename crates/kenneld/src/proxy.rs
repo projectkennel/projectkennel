@@ -23,6 +23,10 @@ use std::process::{Child, Command, Stdio};
 use kennel_policy::{NameRule, NetMode, NetPolicy, NetRule, Protocol};
 use serde::Serialize;
 
+/// The installed `kennel-netproxy` binary (companion to kenneld under
+/// `/opt/kennel/bin`, per the packaging plan).
+pub const DEFAULT_NETPROXY_BIN: &str = "/opt/kennel/bin/kennel-netproxy";
+
 /// The proxy's TOML config shape — the on-disk schema the netproxy parses
 /// (`kennel_netproxy::config`). Mirrored here, on the writer side, because the
 /// netproxy is read-only by design. Field order matches TOML's requirement that

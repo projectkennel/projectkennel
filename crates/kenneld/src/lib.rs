@@ -31,7 +31,7 @@ pub mod server;
 pub mod socket;
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
@@ -69,6 +69,10 @@ pub enum Error {
     },
     /// The workload could not be spawned.
     Spawn(SpawnError),
+    /// The egress proxy's config could not be derived from the policy.
+    ProxyConfig(String),
+    /// The egress proxy process could not be launched.
+    Proxy(io::Error),
 }
 
 impl core::fmt::Display for Error {
@@ -79,6 +83,8 @@ impl core::fmt::Display for Error {
                 write!(f, "privileged operation `{op}` failed: {response:?}")
             }
             Self::Spawn(e) => write!(f, "workload spawn failed: {e}"),
+            Self::ProxyConfig(m) => write!(f, "egress proxy config could not be derived: {m}"),
+            Self::Proxy(e) => write!(f, "egress proxy could not be launched: {e}"),
         }
     }
 }
@@ -86,9 +92,9 @@ impl core::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(e) => Some(e),
+            Self::Io(e) | Self::Proxy(e) => Some(e),
             Self::Spawn(e) => Some(e),
-            Self::Privileged { .. } => None,
+            Self::Privileged { .. } | Self::ProxyConfig(_) => None,
         }
     }
 }
@@ -157,6 +163,19 @@ impl Privileged for HelperClient {
     }
 }
 
+/// How to launch a kennel's egress proxy.
+///
+/// The `kennel-netproxy` binary plus the directory its per-kennel config is
+/// written to. `None` in [`Spec::proxy`] skips the proxy entirely (unit tests, or
+/// a setup that does not run one).
+#[derive(Debug, Clone)]
+pub struct ProxySetup {
+    /// The `kennel-netproxy` binary to launch.
+    pub binary: PathBuf,
+    /// Directory the per-kennel `proxy-<ctx>.toml` config is written to.
+    pub config_dir: PathBuf,
+}
+
 /// Everything needed to bring one kennel up.
 pub struct Spec {
     /// The kennel's cgroup, under kenneld's delegated subtree. kenneld creates it
@@ -171,6 +190,8 @@ pub struct Spec {
     pub plan: Plan,
     /// The network policy the per-kennel egress proxy is configured from.
     pub net: NetPolicy,
+    /// How to launch the egress proxy, or `None` to skip it.
+    pub proxy: Option<ProxySetup>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -181,6 +202,8 @@ pub struct Kennel {
     ctx: u16,
     v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
+    /// The egress-proxy child, if one was launched. Killed and reaped on teardown.
+    proxy: Option<Child>,
 }
 
 impl Kennel {
@@ -233,8 +256,17 @@ impl Kennel {
     /// An OS error if waiting on the workload fails.
     pub fn stop<P: Privileged>(mut self, privileged: &P) -> io::Result<ExitStatus> {
         let status = self.child.wait()?;
-        teardown(privileged, self.ctx, Some(self.cgroup.as_path()), self.v4, self.v6);
+        teardown(privileged, self.ctx, Some(self.cgroup.as_path()), self.v4, self.v6, self.proxy.take());
         Ok(status)
+    }
+}
+
+/// Kill and reap an egress-proxy child (best-effort; an already-exited proxy is
+/// fine). `kill` on a gone process returns `InvalidInput`, which we ignore.
+fn reap_proxy(proxy: Option<Child>) {
+    if let Some(mut child) = proxy {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -244,6 +276,7 @@ struct Provision {
     made_cgroup: bool,
     v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
+    proxy: Option<Child>,
 }
 
 /// Bring a kennel up. On any error the partial bring-up is unwound, so no
@@ -255,27 +288,28 @@ struct Provision {
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
 pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    // `net` is consumed by the proxy-launch step (next increment); accepted here
-    // so the loader plumbing and the proxy config writer can land first.
-    let Spec { cgroup, ctx, scope, mut plan, net: _net } = spec;
+    let Spec { cgroup, ctx, scope, mut plan, net, proxy } = spec;
     let mut state = Provision::default();
 
-    match bring_up(privileged, &cgroup, ctx, &scope, &mut plan, command, &mut state) {
-        Ok(child) => Ok(Kennel { child, cgroup, ctx, v4: state.v4, v6: state.v6 }),
+    match bring_up(privileged, &cgroup, ctx, &scope, &mut plan, &net, proxy.as_ref(), command, &mut state) {
+        Ok(child) => Ok(Kennel { child, cgroup, ctx, v4: state.v4, v6: state.v6, proxy: state.proxy }),
         Err(e) => {
-            teardown(privileged, ctx, state.made_cgroup.then_some(cgroup.as_path()), state.v4, state.v6);
+            teardown(privileged, ctx, state.made_cgroup.then_some(cgroup.as_path()), state.v4, state.v6, state.proxy);
             Err(e)
         }
     }
 }
 
 /// The bring-up steps, recording provisioning into `state` as it goes.
+#[allow(clippy::too_many_arguments)]
 fn bring_up<P: Privileged>(
     privileged: &P,
     cgroup: &Path,
     ctx: u16,
     scope: &ReservedScope,
     plan: &mut Plan,
+    net: &NetPolicy,
+    proxy: Option<&ProxySetup>,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<Child, Error> {
@@ -312,6 +346,20 @@ fn bring_up<P: Privileged>(
     };
     expect_ok("setup_egress", privileged.setup_egress(cgroup, &payload))?;
 
+    // 3b. launch the per-kennel egress proxy, before the workload, so it is
+    //     listening on the kennel's address when the first connect() lands. The
+    //     proxy is unprivileged (kenneld's child, in the host net namespace); the
+    //     BPF already permits the workload to reach it. Skipped when no proxy is
+    //     configured (unit tests).
+    if let Some(setup) = proxy {
+        let listen = proxy_listen(state.v4, addr6);
+        let config = crate::proxy::config_toml(net, listen, None).map_err(Error::ProxyConfig)?;
+        std::fs::create_dir_all(&setup.config_dir)?;
+        let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
+        std::fs::write(&config_path, config)?;
+        state.proxy = Some(crate::proxy::spawn(&setup.binary, &config_path).map_err(Error::Proxy)?);
+    }
+
     // 4. spawn the workload into this cgroup (it joins itself in the seal).
     plan.cgroup = cgroup.to_path_buf();
     kennel_spawn::spawn(plan, command).map_err(Error::Spawn)
@@ -328,10 +376,29 @@ fn expect_ok(op: &'static str, response: io::Result<Response>) -> Result<(), Err
     }
 }
 
-/// Best-effort reverse of bring-up: remove the addresses, then the cgroup (which
-/// detaches the egress BPF). Each step is independent so a failure does not skip
-/// the rest.
-fn teardown<P: Privileged>(privileged: &P, ctx: u16, cgroup: Option<&Path>, v4: Option<Ipv4Addr>, v6: Option<Ipv6Addr>) {
+/// The socket address the egress proxy listens on: the kennel's primary v4
+/// loopback address when it has one, else its v6, at [`PROXY_PORT`]. (The current
+/// netproxy binds a single listener; a dual-stack kennel funnels through the v4
+/// one. Both proxy addresses are BPF-allowed regardless.)
+fn proxy_listen(v4: Option<Ipv4Addr>, v6: Ipv6Addr) -> SocketAddr {
+    v4.map_or_else(
+        || SocketAddr::new(v6.into(), PROXY_PORT),
+        |addr| SocketAddr::new(addr.into(), PROXY_PORT),
+    )
+}
+
+/// Best-effort reverse of bring-up: kill the proxy, remove the addresses, then the
+/// cgroup (which detaches the egress BPF). Each step is independent so a failure
+/// does not skip the rest.
+fn teardown<P: Privileged>(
+    privileged: &P,
+    ctx: u16,
+    cgroup: Option<&Path>,
+    v4: Option<Ipv4Addr>,
+    v6: Option<Ipv6Addr>,
+    proxy: Option<Child>,
+) {
+    reap_proxy(proxy);
     if let Some(addr) = v6 {
         let _ = privileged.del_address(ctx, LOOPBACK, addr.into(), V6_PREFIX);
     }
@@ -434,6 +501,7 @@ mod tests {
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
             },
+            proxy: None,
         }
     }
 
@@ -504,6 +572,46 @@ mod tests {
         // The meta carries the proxy port (network order, offset 12) and v6 (16).
         assert_eq!(payload.meta.get(12..14), Some(&PROXY_PORT.to_be_bytes()[..]), "meta proxy_port");
         assert_eq!(payload.meta.get(16..32), Some(&want_v6.octets()[..]), "meta proxy_addr_v6");
+    }
+
+    #[test]
+    fn proxy_is_launched_with_a_written_config() {
+        let cgroup = temp_cgroup("proxy-launch");
+        let _ = std::fs::remove_dir(&cgroup);
+        let dir = std::env::temp_dir().join(format!("kenneld-proxycfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fake = FakePriv::new(None);
+
+        let mut s = spec(cgroup, 5);
+        // `/bin/true` stands in for the netproxy: it exits at once, which is fine
+        // for asserting the config is written and the launch/teardown plumbing
+        // works (a real proxy is exercised by the root e2e).
+        s.proxy = Some(ProxySetup { binary: PathBuf::from("/bin/true"), config_dir: dir.clone() });
+        s.net.allow_names = vec![kennel_policy::NameRule {
+            name: "api.example.com".to_owned(),
+            ports: vec![443],
+            protocol: kennel_policy::Protocol::Tcp,
+        }];
+
+        let kennel = start(&fake, s, &mut Command::new("/bin/true")).expect("start");
+        // The per-kennel config was written and carries the policy's name rule.
+        let cfg = std::fs::read_to_string(dir.join("proxy-5.toml")).expect("config written");
+        assert!(cfg.contains("listen"), "config has a listen address");
+        assert!(cfg.contains("api.example.com"), "config carries the by-name allow rule");
+
+        kennel.stop(&fake).expect("stop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_proxy_setup_skips_the_proxy() {
+        // The default spec has `proxy: None`; bring-up must not write a config or
+        // launch anything, and still succeed.
+        let cgroup = temp_cgroup("no-proxy");
+        let _ = std::fs::remove_dir(&cgroup);
+        let fake = FakePriv::new(None);
+        let kennel = start(&fake, spec(cgroup, 6), &mut Command::new("/bin/true")).expect("start");
+        kennel.stop(&fake).expect("stop");
     }
 
     #[test]

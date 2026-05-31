@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kenneld::server::{serve, Identity, Shared};
-use kenneld::{policy, socket, HelperClient};
+use kenneld::{policy, proxy, socket, HelperClient, ProxySetup};
 
 fn main() -> ExitCode {
     match run() {
@@ -42,5 +42,9 @@ fn build_identity() -> Result<Identity, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
     let scope = kennel_privhelper::alloc::load(uid).ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
     let cgroup_base = kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
-    Ok(Identity { uid, home, scope, cgroup_base })
+    let proxy = Some(ProxySetup {
+        binary: PathBuf::from(proxy::DEFAULT_NETPROXY_BIN),
+        config_dir: socket::runtime_dir().join("proxy"),
+    });
+    Ok(Identity { uid, home, scope, cgroup_base, proxy })
 }
