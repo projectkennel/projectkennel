@@ -37,22 +37,25 @@ fn errno_of(e: &std::io::Error) -> i32 {
 /// not. Returns the [`Response`] to send back.
 #[must_use]
 pub fn perform(req: &Request, scope: Option<&ReservedScope>) -> Response {
+    // Every operation is confined to the caller's allocation now (cgroup ops use
+    // the namespace too), so a user with no allocation can do nothing.
+    let Some(scope) = scope else {
+        return Response::refused(REFUSAL_NO_SCOPE);
+    };
     match req.op {
-        Op::AddAddr | Op::DelAddr => {
-            scope.map_or_else(|| Response::refused(REFUSAL_NO_SCOPE), |s| perform_addr(req, *s))
-        }
-        Op::CreateCgroup | Op::DeleteCgroup => perform_cgroup(req),
+        Op::AddAddr | Op::DelAddr => perform_addr(req, scope),
+        Op::CreateCgroup | Op::DeleteCgroup => perform_cgroup(req, scope),
     }
 }
 
-fn perform_addr(req: &Request, scope: ReservedScope) -> Response {
+fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     let areq = AddrRequest {
         ctx: req.ctx,
         interface: req.interface.clone(),
         addr: req.addr,
         prefix: req.prefix,
     };
-    if let Err(r) = validate_addr(&areq, &scope) {
+    if let Err(r) = validate_addr(&areq, scope) {
         return Response::refused(refusal_code(&r));
     }
     // Validation passed; resolve the interface and perform the netlink op.
@@ -73,9 +76,9 @@ fn perform_addr(req: &Request, scope: ReservedScope) -> Response {
     }
 }
 
-fn perform_cgroup(req: &Request) -> Response {
+fn perform_cgroup(req: &Request, scope: &ReservedScope) -> Response {
     let creq = CgroupRequest { path: req.cgroup_path.clone() };
-    if let Err(r) = validate_cgroup(&creq) {
+    if let Err(r) = validate_cgroup(&creq, scope) {
         return Response::refused(refusal_code(&r));
     }
     // Create the leaf (and any missing ancestors, all under the validated

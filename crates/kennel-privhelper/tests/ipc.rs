@@ -1,5 +1,6 @@
 //! Integration tests that drive the privhelper binary over stdin/stdout, the
-//! way the spawner invokes it.
+//! way the spawner invokes it. The reserved scope is per-user (the
+//! `/etc/kennel/subkennel` allocation file, keyed by the caller's real UID).
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -36,19 +37,22 @@ fn cgroup_request(op: Op, path: &str) -> Request {
 }
 
 #[test]
-fn refuses_a_cgroup_outside_the_reserved_prefix() {
-    // No privilege needed: the helper validates and refuses before any syscall.
-    let resp = run(&cgroup_request(Op::CreateCgroup, "/etc/evil"));
-    assert_eq!(resp.status, Status::Refused, "out-of-scope cgroup must be refused");
+fn an_unallocated_user_is_refused() {
+    // The test user has no /etc/kennel/subkennel allocation, so every operation
+    // is refused before any privileged syscall — no privilege needed to verify.
+    let resp = run(&cgroup_request(Op::CreateCgroup, "/sys/fs/cgroup/kennel/x"));
+    assert_eq!(resp.status, Status::Refused, "an unallocated user must be refused");
 }
 
-#[test]
-fn refuses_a_traversal_path() {
-    let resp = run(&cgroup_request(
-        Op::CreateCgroup,
-        "/sys/fs/cgroup/kennel/../../../etc",
-    ));
-    assert_eq!(resp.status, Status::Refused, "a `..` path must be refused");
+// --- Privileged tests. Run as root (uid 0); they provision uid 0's allocation. ---
+
+#[cfg(feature = "root-tests")]
+const ROOT_ALLOCATION: &str = "0:9:0000000001:kennel-root\n";
+
+#[cfg(feature = "root-tests")]
+fn provision_root_allocation() {
+    std::fs::create_dir_all("/etc/kennel").expect("mkdir /etc/kennel");
+    std::fs::write("/etc/kennel/subkennel", ROOT_ALLOCATION).expect("write allocation");
 }
 
 #[cfg(feature = "root-tests")]
@@ -62,11 +66,26 @@ fn lo_has(addr: &str) -> bool {
 
 #[cfg(feature = "root-tests")]
 #[test]
-fn adds_and_removes_an_in_scope_loopback_address() {
-    // Provision the trusted scope file: tag = 9, ULA GID = 00:00:00:00:01.
-    std::fs::create_dir_all("/etc/kennel").expect("mkdir /etc/kennel");
-    std::fs::write("/etc/kennel/scope", [9u8, 0, 0, 0, 0, 1]).expect("write scope");
+fn creates_and_deletes_a_cgroup_in_the_users_namespace() {
+    provision_root_allocation();
+    // Under the allocated namespace `kennel-root`.
+    let path = "/sys/fs/cgroup/kennel-root/ipc-test";
 
+    assert_eq!(run(&cgroup_request(Op::CreateCgroup, path)).status, Status::Ok);
+    assert!(std::path::Path::new(path).is_dir(), "cgroup directory should exist");
+
+    assert_eq!(run(&cgroup_request(Op::DeleteCgroup, path)).status, Status::Ok);
+    assert!(!std::path::Path::new(path).exists(), "cgroup directory should be gone");
+
+    // A cgroup outside the user's namespace is refused.
+    let other = run(&cgroup_request(Op::CreateCgroup, "/sys/fs/cgroup/kennel-other/x"));
+    assert_eq!(other.status, Status::Refused, "another namespace must be refused");
+}
+
+#[cfg(feature = "root-tests")]
+#[test]
+fn adds_and_removes_an_in_scope_loopback_address() {
+    provision_root_allocation();
     // In scope for tag=9, ctx=5: 127.9.5.0/24.
     let addr = "127.9.5.1";
     let mut req = cgroup_request(Op::AddAddr, "");
@@ -86,20 +105,4 @@ fn adds_and_removes_an_in_scope_loopback_address() {
     req.op = Op::AddAddr;
     req.addr = "127.1.5.1".parse().expect("v4"); // tag 1 != 9
     assert_eq!(run(&req).status, Status::Refused, "out-of-scope address must be refused");
-
-    let _ = std::fs::remove_file("/etc/kennel/scope");
-}
-
-#[cfg(feature = "root-tests")]
-#[test]
-fn creates_and_deletes_an_in_scope_cgroup() {
-    let path = "/sys/fs/cgroup/kennel/privhelper-ipc-test";
-
-    let created = run(&cgroup_request(Op::CreateCgroup, path));
-    assert_eq!(created.status, Status::Ok, "in-scope create should succeed");
-    assert!(std::path::Path::new(path).is_dir(), "cgroup directory should exist");
-
-    let deleted = run(&cgroup_request(Op::DeleteCgroup, path));
-    assert_eq!(deleted.status, Status::Ok, "in-scope delete should succeed");
-    assert!(!std::path::Path::new(path).exists(), "cgroup directory should be gone");
 }

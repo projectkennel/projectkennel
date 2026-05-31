@@ -37,6 +37,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod alloc;
 pub mod exec;
 pub mod validate;
 pub mod wire;

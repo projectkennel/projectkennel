@@ -5,23 +5,20 @@
 //! [`Response`](kennel_privhelper::wire::Response) to stdout, and exits. The
 //! helper is invoked per operation and never persists privilege.
 //!
-//! Address operations need the installation's reserved scope (the `tag` and
-//! 40-bit ULA GID). These are read from a **root-owned** file at
-//! `/etc/kennel/scope` (6 bytes: `tag` then 5 GID bytes) — a trusted source
-//! independent of the (unprivileged) caller, never from the request or the
-//! caller-controlled environment. Cgroup operations do not need it.
+//! The reserved scope (tag, ULA GID, resource namespace) is **per user**, the
+//! way `/etc/subuid` allocates subordinate ranges. The helper looks up the
+//! caller's **real UID** (kernel-trusted; setuid leaves it as the invoking user)
+//! in the root-owned `/etc/kennel/subkennel` allocation file — never trusting the
+//! request or the caller-controlled environment. A user with no allocation can
+//! perform no operation.
 
 #![forbid(unsafe_code)]
 
 use std::io::{Read as _, Write as _};
 use std::process::ExitCode;
 
-use kennel_privhelper::exec;
-use kennel_privhelper::validate::ReservedScope;
+use kennel_privhelper::{alloc, exec};
 use kennel_privhelper::wire::{Request, Response, Status};
-
-/// The trusted file the installation's reserved scope is read from.
-const SCOPE_PATH: &str = "/etc/kennel/scope";
 
 fn main() -> ExitCode {
     let mut buf = Vec::new();
@@ -31,19 +28,9 @@ fn main() -> ExitCode {
     let Ok(request) = Request::decode(&buf) else {
         return respond(Response::protocol());
     };
-    let scope = load_scope();
+    // The caller's real UID is the trusted identity; look up its allocation.
+    let scope = alloc::load(kennel_syscall::unistd::real_uid());
     respond(exec::perform(&request, scope.as_ref()))
-}
-
-/// Load the reserved scope from the trusted file, if present and well-formed.
-fn load_scope() -> Option<ReservedScope> {
-    let bytes = std::fs::read(SCOPE_PATH).ok()?;
-    if bytes.len() != 6 {
-        return None;
-    }
-    let tag = bytes.first().copied()?;
-    let gid: [u8; 5] = bytes.get(1..6).and_then(|s| s.try_into().ok())?;
-    Some(ReservedScope::new(tag, gid))
 }
 
 /// Write the response and map its status to the process exit code (matching the
