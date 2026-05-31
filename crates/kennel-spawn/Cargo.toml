@@ -12,5 +12,10 @@ repository.workspace = true
 kennel-policy = { path = "../kennel-policy" }
 kennel-syscall = { path = "../kennel-syscall" }
 
+[features]
+# Tests that need privilege (namespace unshare). Run via:
+#   sudo -E env PATH=$PATH cargo test -p kennel-spawn --features root-tests
+root-tests = []
+
 [lints]
 workspace = true

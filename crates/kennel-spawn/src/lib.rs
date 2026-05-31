@@ -32,6 +32,7 @@ use std::process::{Child, Command};
 
 use kennel_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_syscall::landlock::Ruleset;
+use kennel_syscall::namespace::Namespaces;
 
 pub use plan::Plan;
 
@@ -167,19 +168,29 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 /// seccomp allowlist means "no seccomp filter" (rely on Landlock); otherwise the
 /// allowlist is enforced with the plan's default action.
 ///
+/// # Namespaces
+///
+/// `CLONE_NEWPID` is unshared in the **parent** before the `Command` fork, so the
+/// workload becomes PID 1 of a fresh PID namespace (the flag only affects future
+/// children, not the caller). The caller must therefore treat `spawn` as having
+/// fork semantics for its own subsequent children. The remaining namespaces
+/// (mount, IPC) are unshared in the **child seal** — doing them in the parent
+/// would isolate the caller itself. Unsharing any namespace needs privilege
+/// (`CAP_SYS_ADMIN`); an unprivileged caller should pass a plan with no
+/// namespaces (the Landlock + seccomp seal is still unprivileged).
+///
 /// # Scope
 ///
-/// This applies the **process-local, unprivileged** layers only:
-/// `no_new_privs` + seccomp + Landlock. The plan's namespace, mount-shim,
-/// cgroup-join, and BPF-attach layers are **not** applied here — they require
-/// privilege (the privhelper) and careful PID-namespace ordering, and are a
-/// separate increment. The returned child is therefore confined by Landlock and
-/// seccomp but is **not** yet network- or namespace-isolated.
+/// This applies namespaces + `no_new_privs` + seccomp + Landlock. The plan's
+/// **mount-shim, cgroup-join, and BPF-attach** layers are **not** applied here —
+/// they require the privhelper (loopback address, cgroup creation) and are a
+/// separate increment. The returned child is namespace/Landlock/seccomp confined
+/// but **not** yet network-isolated.
 ///
 /// # Errors
 ///
-/// Returns [`SpawnError::Syscall`] if building the ruleset, the seal, or the
-/// spawn fails. A seal failure aborts the spawn fail-closed (no program runs).
+/// Returns [`SpawnError::Syscall`] if a namespace unshare, building the ruleset,
+/// the seal, or the spawn fails. A seal failure aborts the spawn fail-closed.
 pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     // Build in the parent: opening the Landlock path fds and allocating the
     // filter here keeps the post-fork seal to syscalls only.
@@ -197,11 +208,22 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
         ruleset.allow_port(*port, *access);
     }
 
+    // PID namespace: unshare in the parent so the next fork lands the workload as
+    // PID 1 of a new namespace. Mount/IPC are deferred to the seal.
+    if plan.namespaces.contains(Namespaces::PID) {
+        kennel_syscall::namespace::unshare(Namespaces::PID).map_err(SpawnError::Syscall)?;
+    }
+    let seal_ns = plan.namespaces & !Namespaces::PID;
+
     // `restrict_current_process` consumes the ruleset; an Option lets the FnMut
     // seal move it out on its single call.
     let mut ruleset = Some(ruleset);
     let seal = move || -> io::Result<()> {
-        // no_new_privs first: seccomp requires it (Landlock sets it again, idempotently).
+        // Namespaces first (mounts, when added, need the mount ns).
+        if !seal_ns.is_empty() {
+            kennel_syscall::namespace::unshare(seal_ns)?;
+        }
+        // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
         kennel_syscall::process::set_no_new_privs()?;
         if let Some(f) = filter.as_ref() {
             f.install()?;
@@ -407,6 +429,63 @@ mod tests {
         assert!(
             status.success(),
             "reading an allowed path under the confinement should succeed (got {status:?})"
+        );
+    }
+}
+
+/// Privileged tests (namespace unshare needs `CAP_SYS_ADMIN`). Run with
+/// `sudo -E env PATH=$PATH cargo test -p kennel-spawn --features root-tests`.
+/// Kept to a single test so its parent-side `CLONE_NEWPID` unshare (which moves
+/// the *caller's* future children into a new PID namespace) cannot perturb other
+/// tests in the same process.
+#[cfg(all(test, feature = "root-tests"))]
+mod root_tests {
+    use super::*;
+    use kennel_syscall::landlock::AccessFs;
+    use kennel_syscall::namespace::Namespaces;
+    use kennel_syscall::seccomp::Action;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn pid_namespace_makes_the_workload_pid_1() {
+        // mount/pid/ipc isolation, with Landlock allowing just enough to run a
+        // shell, and no seccomp. A new PID namespace makes the execed shell PID 1.
+        let access = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let dirs = ["/usr", "/bin", "/lib", "/lib64", "/etc"];
+        let plan = Plan {
+            namespaces: Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC,
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            bind_read: Vec::new(),
+            bind_write: Vec::new(),
+            landlock_fs: dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
+            landlock_net: Vec::new(),
+            seccomp_allow: Vec::new(),
+            seccomp_default: Action::KillProcess,
+        };
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("echo $$")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+
+        let mut child = spawn(&plan, &mut cmd).expect("spawn");
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
+        let status = child.wait().expect("wait");
+
+        assert!(status.success(), "the shell should have run (got {status:?})");
+        assert_eq!(
+            out.trim(),
+            "1",
+            "in a new PID namespace the workload is PID 1 (got {:?})",
+            out.trim()
         );
     }
 }
