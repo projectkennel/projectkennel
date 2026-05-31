@@ -279,31 +279,92 @@ impl Ruleset {
     /// [`RequestDecision::Resolve`] means "the name is authorised; resolve it,
     /// then call [`Self::decide_resolved`] on each address".
     #[must_use]
-    // allow: structure-phase stub; the trivial body is const-eligible but the
-    // implementing (feat:) commit's body iterates the rule vecs and is not.
-    #[allow(clippy::missing_const_for_fn)]
     pub fn decide_request(
         &self,
         dest: &Destination,
         port: u16,
         transport: Transport,
     ) -> RequestDecision {
-        // Stub (structure phase): fail closed until the algorithm lands.
-        let _ = (dest, port, transport, &self.allow, &self.deny, self.mode);
-        RequestDecision::Deny(DenyReason::NotAllowed)
+        if self.mode == NetMode::None {
+            return RequestDecision::Deny(DenyReason::ModeNone);
+        }
+        match dest {
+            // A literal address is decided in full now: deny rules first, then
+            // (in constrained mode) the allow CIDRs; open mode allows anything
+            // the deny rules did not catch.
+            Destination::Addr(addr) => {
+                if self.denied(*addr, port) {
+                    return RequestDecision::Deny(DenyReason::DeniedByRule);
+                }
+                match self.mode {
+                    NetMode::Open => RequestDecision::Allow,
+                    NetMode::Constrained if self.allow_addr_match(*addr, port, transport) => {
+                        RequestDecision::Allow
+                    }
+                    _ => RequestDecision::Deny(DenyReason::NotAllowed),
+                }
+            }
+            // A name cannot be deny-checked until it resolves (deny rules are
+            // CIDR-only). Authorise by name here; decide_resolved re-checks each
+            // resolved address against the deny rules before connecting.
+            Destination::Name(name) => match self.mode {
+                NetMode::Open => RequestDecision::Resolve,
+                NetMode::Constrained if self.allow_name_match(name, port, transport) => {
+                    RequestDecision::Resolve
+                }
+                _ => RequestDecision::Deny(DenyReason::NotAllowed),
+            },
+        }
     }
 
     /// Decide a single resolved address for a name that already cleared
     /// [`Self::decide_request`]. The categorical deny rules always apply here;
-    /// this is the rebinding defence.
+    /// this is the rebinding defence. The name already authorised the
+    /// connection, so a resolved address that clears the deny rules is allowed.
     #[must_use]
-    // allow: structure-phase stub; see decide_request.
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn decide_resolved(&self, addr: IpAddr, port: u16, transport: Transport) -> Decision {
-        // Stub (structure phase): fail closed until the algorithm lands.
-        let _ = (addr, port, transport, &self.allow, &self.deny, self.mode);
-        Decision::Deny(DenyReason::NotAllowed)
+    pub fn decide_resolved(&self, addr: IpAddr, port: u16, _transport: Transport) -> Decision {
+        // Transport is accepted for API symmetry with decide_request; deny rules
+        // are CIDR+port only (§7.3.4), so it does not affect the decision today.
+        if self.denied(addr, port) {
+            Decision::Deny(DenyReason::DeniedByRule)
+        } else {
+            Decision::Allow
+        }
     }
+
+    /// Whether any categorical deny rule covers `(addr, port)`. A deny rule with
+    /// an empty port set applies to every port.
+    fn denied(&self, addr: IpAddr, port: u16) -> bool {
+        self.deny
+            .iter()
+            .any(|rule| rule.cidr.contains(addr) && port_matches(&rule.ports, port))
+    }
+
+    /// Whether any allow rule admits a literal `(addr, port, transport)`. Only
+    /// CIDR matchers apply to a literal address; name matchers never do.
+    fn allow_addr_match(&self, addr: IpAddr, port: u16, transport: Transport) -> bool {
+        self.allow.iter().any(|rule| {
+            matches!(&rule.matcher, Matcher::Cidr(cidr) if cidr.contains(addr))
+                && rule.protocol.admits(transport)
+                && port_matches(&rule.ports, port)
+        })
+    }
+
+    /// Whether any allow rule admits a `(name, port, transport)`. Only name
+    /// matchers apply; the comparison is ASCII case-insensitive.
+    fn allow_name_match(&self, name: &str, port: u16, transport: Transport) -> bool {
+        self.allow.iter().any(|rule| {
+            matches!(&rule.matcher, Matcher::Name(n) if n.eq_ignore_ascii_case(name))
+                && rule.protocol.admits(transport)
+                && port_matches(&rule.ports, port)
+        })
+    }
+}
+
+/// Whether `port` is permitted by a rule's port set. An empty set means "any
+/// port" (`docs/07-3-network.md` §7.3.4 omits `ports` for portless rules).
+fn port_matches(ports: &[u16], port: u16) -> bool {
+    ports.is_empty() || ports.contains(&port)
 }
 
 #[cfg(test)]
