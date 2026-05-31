@@ -14,6 +14,9 @@ object = { version = "=0.36.7", default-features = false, features = ["read_core
 
 [features]
 root-tests = []
+# Compile bpf/*.bpf.c with clang at build time and embed the objects (build.rs).
+# Off by default so a plain `cargo build` needs no clang.
+embed-programs = []
 
 [lints]
 workspace = true

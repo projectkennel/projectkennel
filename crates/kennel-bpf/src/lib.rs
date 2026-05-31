@@ -31,3 +31,22 @@ pub mod sys;
 
 pub use loader::{load_program, Loaded, MapSpec, ProgramSpec, KENNEL_MAPS, KENNEL_PROGRAMS};
 pub use ringbuf::RingBuffer;
+
+/// Compiled BPF program objects, embedded at build time.
+///
+/// Available only under the `embed-programs` feature (which runs clang in
+/// `build.rs`). The runtime loads these via [`load_program`] rather than
+/// compiling at run time.
+#[cfg(feature = "embed-programs")]
+pub mod programs {
+    include!(concat!(env!("OUT_DIR"), "/programs.rs"));
+
+    /// The compiled object bytes for the program named `name`, if present.
+    #[must_use]
+    pub fn object(name: &str) -> Option<&'static [u8]> {
+        PROGRAM_OBJECTS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, bytes)| *bytes)
+    }
+}
