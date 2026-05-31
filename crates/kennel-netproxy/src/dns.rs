@@ -34,7 +34,9 @@
 //! A `fuzz/dns_parse` target (§10.6) once the fuzzing harness crosses the §5.5
 //! gate; the adversarial unit tests hold the contract until then.
 
-use std::net::IpAddr;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 /// The DNS record types the proxy queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,10 +241,46 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Result<usize, DnsError> {
     }
 }
 
+/// Resolve `name` to addresses by querying `resolver` over UDP for each of
+/// `types` (typically `A` and `AAAA`).
+///
+/// The socket is `connect()`ed to the resolver so the kernel drops datagrams
+/// from any other source (basic spoof resistance), and the query id is the
+/// ephemeral local port. A type that yields no answer (timeout, empty, or a
+/// server failure) contributes nothing rather than failing the whole call; the
+/// returned vector is the union across `types` and may be empty (the caller
+/// treats an empty result as "host unreachable"). The resolved addresses are
+/// still untrusted — the caller re-checks each against the deny rules.
+///
+/// # Errors
+///
+/// An [`io::Error`] if the socket cannot be created, connected, or written, or
+/// if a name is invalid. A per-type read timeout is not an error; it simply
+/// contributes no addresses for that type.
+pub fn resolve(
+    resolver: SocketAddr,
+    name: &str,
+    types: &[RecordType],
+    timeout: Duration,
+) -> io::Result<Vec<IpAddr>> {
+    // allow: structure-phase stub; the implementing commit performs real I/O.
+    #[allow(clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
+    fn stub(
+        resolver: SocketAddr,
+        name: &str,
+        types: &[RecordType],
+        timeout: Duration,
+    ) -> io::Result<Vec<IpAddr>> {
+        let _ = (resolver, name, types, timeout);
+        Ok(Vec::new())
+    }
+    stub(resolver, name, types, timeout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 
     // ---- query encoding ----
 
@@ -412,5 +450,59 @@ mod tests {
         assert_eq!(parse_response(1, short), Err(DnsError::Truncated));
         // A header-only buffer.
         assert_eq!(parse_response(1, &[0, 1]), Err(DnsError::Truncated));
+    }
+
+    // ---- resolve (UDP round-trip against a loopback fake resolver) ----
+
+    #[test]
+    fn resolves_over_loopback_udp() {
+        // A fake resolver on loopback: read one query, reply with a canned A
+        // record for whatever id the query carried. No external network.
+        let server = UdpSocket::bind("127.0.0.1:0").expect("bind fake resolver");
+        // Bound the server's wait so the thread (and join below) cannot block
+        // forever if no query arrives — e.g. against an unimplemented resolve.
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("server timeout");
+        let resolver = server.local_addr().expect("resolver addr");
+        let want = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let Ok((n, from)) = server.recv_from(&mut buf) else {
+                return; // no query arrived within the timeout
+            };
+            assert!(n >= 12, "query has a header");
+            let id_bytes: [u8; 2] = buf.get(..2).expect("id").try_into().expect("2 bytes");
+            let id = u16::from_be_bytes(id_bytes);
+            let reply = response(id, 0, true, RecordType::A, &[want]);
+            server.send_to(&reply, from).expect("send reply");
+        });
+
+        let got = resolve(
+            resolver,
+            "example.com",
+            &[RecordType::A],
+            Duration::from_secs(2),
+        )
+        .expect("resolve");
+        handle.join().expect("resolver thread");
+        assert_eq!(got, vec![want]);
+    }
+
+    #[test]
+    fn resolve_timeout_yields_no_addresses() {
+        // A resolver socket that never replies: resolve times out per type and
+        // returns an empty vector, not an error.
+        let server = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let resolver = server.local_addr().expect("addr");
+        let got = resolve(
+            resolver,
+            "example.com",
+            &[RecordType::A],
+            Duration::from_millis(150),
+        )
+        .expect("resolve ok");
+        assert!(got.is_empty(), "no reply -> no addresses, got {got:?}");
     }
 }
