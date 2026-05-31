@@ -82,13 +82,49 @@ pub enum DnsError {
 /// [`DnsError::InvalidName`] if `name` is not a valid DNS name (empty, an empty
 /// label, a label over 63 bytes, or over 255 bytes encoded).
 pub fn encode_query(id: u16, name: &str, rtype: RecordType) -> Result<Vec<u8>, DnsError> {
-    // allow: structure-phase stub; the implementing commit's body is not const.
-    #[allow(clippy::missing_const_for_fn)]
-    fn stub(id: u16, name: &str, rtype: RecordType) -> Result<Vec<u8>, DnsError> {
-        let _ = (id, name, rtype);
-        Err(DnsError::InvalidName)
+    let mut out = Vec::with_capacity(32);
+    out.extend_from_slice(&id.to_be_bytes());
+    out.extend_from_slice(&0x0100u16.to_be_bytes()); // flags: RD=1 (recursion desired)
+    out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // ANCOUNT, NSCOUNT, ARCOUNT
+    encode_name(name, &mut out)?;
+    out.extend_from_slice(&rtype.qtype().to_be_bytes()); // QTYPE
+    out.extend_from_slice(&1u16.to_be_bytes()); // QCLASS = IN
+    Ok(out)
+}
+
+/// The largest legal encoded DNS name (RFC 1035 §3.1).
+const MAX_NAME_LEN: usize = 255;
+/// The largest legal label (the length is a 6-bit count; the top two bits are
+/// the compression-pointer marker).
+const MAX_LABEL_LEN: usize = 63;
+
+/// Append `name` as a sequence of length-prefixed labels terminated by a zero
+/// byte. A single trailing dot (the fully-qualified form) is accepted.
+fn encode_name(name: &str, out: &mut Vec<u8>) -> Result<(), DnsError> {
+    let name = name.strip_suffix('.').unwrap_or(name);
+    if name.is_empty() {
+        return Err(DnsError::InvalidName);
     }
-    stub(id, name, rtype)
+    // Encoded length is the running total of (1 length byte + label) plus the
+    // final zero byte; reject before it can exceed the wire maximum.
+    let mut encoded_len = 1usize;
+    for label in name.split('.') {
+        let label_len = label.len();
+        if label_len == 0 || label_len > MAX_LABEL_LEN {
+            return Err(DnsError::InvalidName);
+        }
+        encoded_len = encoded_len
+            .checked_add(label_len)
+            .and_then(|n| n.checked_add(1))
+            .filter(|&n| n <= MAX_NAME_LEN)
+            .ok_or(DnsError::InvalidName)?;
+        // label_len <= 63, so the cast is exact; try_from keeps it lint-clean.
+        out.push(u8::try_from(label_len).map_err(|_| DnsError::InvalidName)?);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    Ok(())
 }
 
 /// Parse a DNS response, returning the `A`/`AAAA` addresses it carries.
@@ -100,13 +136,107 @@ pub fn encode_query(id: u16, name: &str, rtype: RecordType) -> Result<Vec<u8>, D
 /// [`DnsError::ServerFailure`] for a non-zero RCODE; [`DnsError::NoAddresses`]
 /// if RCODE is zero but no address records are present.
 pub fn parse_response(query_id: u16, buf: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
-    // allow: structure-phase stub; the implementing commit's body is not const.
-    #[allow(clippy::missing_const_for_fn)]
-    fn stub(query_id: u16, buf: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
-        let _ = (query_id, buf);
-        Err(DnsError::Truncated)
+    let (id, _) = read_u16(buf, 0)?;
+    if id != query_id {
+        return Err(DnsError::BadId);
     }
-    stub(query_id, buf)
+    let (flags, _) = read_u16(buf, 2)?;
+    if flags & 0x8000 == 0 {
+        return Err(DnsError::NotResponse);
+    }
+    // The low four bits of the flags word are the RCODE.
+    let rcode = u8::try_from(flags & 0x000F).map_err(|_| DnsError::Truncated)?;
+    if rcode != 0 {
+        return Err(DnsError::ServerFailure(rcode));
+    }
+    let (qdcount, _) = read_u16(buf, 4)?;
+    let (ancount, _) = read_u16(buf, 6)?;
+
+    // Skip the question section: each is a name then QTYPE+QCLASS (4 bytes).
+    let mut pos = 12usize;
+    for _ in 0..qdcount {
+        pos = skip_name(buf, pos)?;
+        pos = advance(pos, 4, buf)?;
+    }
+
+    let mut addrs = Vec::new();
+    for _ in 0..ancount {
+        pos = skip_name(buf, pos)?;
+        let (rtype, after_type) = read_u16(buf, pos)?;
+        let (_class, after_class) = read_u16(buf, after_type)?;
+        // Skip the 4-byte TTL, then read RDLENGTH.
+        let after_ttl = advance(after_class, 4, buf)?;
+        let (rdlength, rdata_start) = read_u16(buf, after_ttl)?;
+        let rdlen = usize::from(rdlength);
+        let rdata = buf
+            .get(rdata_start..)
+            .and_then(|s| s.get(..rdlen))
+            .ok_or(DnsError::Truncated)?;
+        match rtype {
+            t if t == RecordType::A.qtype() && rdlen == 4 => {
+                let octets: [u8; 4] = rdata.try_into().map_err(|_| DnsError::Truncated)?;
+                addrs.push(IpAddr::from(octets));
+            }
+            t if t == RecordType::Aaaa.qtype() && rdlen == 16 => {
+                let octets: [u8; 16] = rdata.try_into().map_err(|_| DnsError::Truncated)?;
+                addrs.push(IpAddr::from(octets));
+            }
+            // Some other record type (CNAME, etc.) or a mismatched length: skip it.
+            _ => {}
+        }
+        pos = advance(rdata_start, rdlen, buf)?;
+    }
+
+    if addrs.is_empty() {
+        Err(DnsError::NoAddresses)
+    } else {
+        Ok(addrs)
+    }
+}
+
+/// Read a big-endian `u16` at `pos`, returning it and the offset just past it.
+fn read_u16(buf: &[u8], pos: usize) -> Result<(u16, usize), DnsError> {
+    let end = pos.checked_add(2).ok_or(DnsError::Truncated)?;
+    let bytes: [u8; 2] = buf
+        .get(pos..end)
+        .ok_or(DnsError::Truncated)?
+        .try_into()
+        .map_err(|_| DnsError::Truncated)?;
+    Ok((u16::from_be_bytes(bytes), end))
+}
+
+/// Advance `pos` by `n`, checking the result stays within `buf`.
+fn advance(pos: usize, n: usize, buf: &[u8]) -> Result<usize, DnsError> {
+    let next = pos.checked_add(n).ok_or(DnsError::Truncated)?;
+    if next > buf.len() {
+        return Err(DnsError::Truncated);
+    }
+    Ok(next)
+}
+
+/// Skip a name field at `pos`, returning the offset just past it. Labels are
+/// skipped by length; a compression pointer (top two bits set) ends the name in
+/// two bytes and is *not* followed — we only need to reach the fields after the
+/// name, and refusing to follow pointers makes a crafted pointer unable to loop
+/// the parser.
+fn skip_name(buf: &[u8], mut pos: usize) -> Result<usize, DnsError> {
+    loop {
+        let &len = buf.get(pos).ok_or(DnsError::Truncated)?;
+        if len == 0 {
+            return advance(pos, 1, buf);
+        }
+        if len & 0xC0 == 0xC0 {
+            // Two-byte pointer; the second byte must be present.
+            return advance(pos, 2, buf);
+        }
+        if len & 0xC0 != 0 {
+            // Reserved label-type bits: malformed.
+            return Err(DnsError::Truncated);
+        }
+        // A normal label: one length byte plus `len` bytes.
+        pos = advance(pos, 1, buf)?;
+        pos = advance(pos, usize::from(len), buf)?;
+    }
 }
 
 #[cfg(test)]
