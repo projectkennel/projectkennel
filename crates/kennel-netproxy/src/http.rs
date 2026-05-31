@@ -37,7 +37,12 @@
 //! A `fuzz/http_parse` target (§10.6) once the fuzzing harness crosses the §5.5
 //! gate; the adversarial unit tests hold the contract until then.
 
+use std::net::IpAddr;
+
 use crate::allow::Destination;
+
+/// The default port for an absolute-form request whose authority omits one.
+const DEFAULT_HTTP_PORT: u16 = 80;
 
 /// Maximum request-head size the proxy buffers before the terminating
 /// `CRLF CRLF`.
@@ -104,13 +109,149 @@ pub enum HttpError {
 /// [`HttpError::HeadTooLarge`] if it exceeds [`MAX_HEAD`] without terminating;
 /// otherwise the specific malformed-input variant.
 pub fn parse_request(buf: &[u8]) -> Result<HttpRequest, HttpError> {
-    // allow: structure-phase stub; the implementing commit's body is not const.
-    #[allow(clippy::missing_const_for_fn)]
-    fn stub(buf: &[u8]) -> Result<HttpRequest, HttpError> {
-        let _ = buf;
-        Err(HttpError::Incomplete)
+    let head_len = head_end(buf)?;
+    // The request line is everything up to the first CRLF; the bytes from that
+    // CRLF through the head end (the headers, with their CRLFs and the final
+    // blank line) are preserved verbatim for forwarding.
+    let first_crlf = buf
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .ok_or(HttpError::Incomplete)?;
+    let line_bytes = buf.get(..first_crlf).ok_or(HttpError::Incomplete)?;
+    let line = std::str::from_utf8(line_bytes).map_err(|_| HttpError::RequestLineNotUtf8)?;
+
+    let mut tokens = line.split(' ');
+    let (Some(method), Some(target), Some(version), None) =
+        (tokens.next(), tokens.next(), tokens.next(), tokens.next())
+    else {
+        return Err(HttpError::MalformedRequestLine);
+    };
+
+    if method == "CONNECT" {
+        let (dest, port) = parse_authority(target, None)?;
+        return Ok(HttpRequest {
+            kind: Kind::Connect,
+            dest,
+            port,
+            head_len,
+            upstream_head: Vec::new(),
+        });
     }
-    stub(buf)
+
+    // Any other method is a forward-proxy request; its target must be absolute.
+    let (dest, port, path) = parse_absolute_uri(target)?;
+    // Rewrite the request line to origin-form, then append the original bytes
+    // from the first CRLF onward (headers + terminating blank line), verbatim.
+    let tail = buf.get(first_crlf..head_len).ok_or(HttpError::Incomplete)?;
+    let mut upstream_head = format!("{method} {path} {version}").into_bytes();
+    upstream_head.extend_from_slice(tail);
+    Ok(HttpRequest {
+        kind: Kind::Forward,
+        dest,
+        port,
+        head_len,
+        upstream_head,
+    })
+}
+
+/// The byte offset just past the terminating `CRLF CRLF`.
+///
+/// # Errors
+///
+/// [`HttpError::Incomplete`] if no terminator is present yet and the buffer is
+/// still under [`MAX_HEAD`]; [`HttpError::HeadTooLarge`] once it reaches the cap
+/// without terminating.
+fn head_end(buf: &[u8]) -> Result<usize, HttpError> {
+    match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(idx) => idx.checked_add(4).ok_or(HttpError::HeadTooLarge),
+        None if buf.len() >= MAX_HEAD => Err(HttpError::HeadTooLarge),
+        None => Err(HttpError::Incomplete),
+    }
+}
+
+/// Parse a `host:port` authority (the `CONNECT` target, or an absolute URI's
+/// authority). `default_port` supplies the port when the authority omits one;
+/// `None` makes the port mandatory (the `CONNECT` case).
+fn parse_authority(
+    authority: &str,
+    default_port: Option<u16>,
+) -> Result<(Destination, u16), HttpError> {
+    // IPv6 literals are bracketed: [addr] or [addr]:port.
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (inner, after) = rest.split_once(']').ok_or(HttpError::BadAuthority)?;
+        let addr = inner
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| HttpError::BadAuthority)?;
+        let port = match after.strip_prefix(':') {
+            Some(p) => parse_port(p)?,
+            None if after.is_empty() => default_port.ok_or(HttpError::BadAuthority)?,
+            None => return Err(HttpError::BadAuthority),
+        };
+        return Ok((Destination::Addr(IpAddr::V6(addr)), port));
+    }
+    // Otherwise split host from an optional :port on the last colon.
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() {
+            return Err(HttpError::BadAuthority);
+        }
+        Ok((host_to_dest(host), parse_port(port)?))
+    } else {
+        if authority.is_empty() {
+            return Err(HttpError::BadAuthority);
+        }
+        let port = default_port.ok_or(HttpError::BadAuthority)?;
+        Ok((host_to_dest(authority), port))
+    }
+}
+
+/// Parse an absolute-form target `http://authority/path...` into a destination,
+/// port, and the origin-form path (`/path...`, defaulting to `/`).
+fn parse_absolute_uri(target: &str) -> Result<(Destination, u16, &str), HttpError> {
+    // Scheme is case-insensitive; only http:// is a forward-proxy target (https
+    // arrives as CONNECT, never absolute-form).
+    let rest = strip_scheme(target)?;
+    // The authority runs to the first '/', '?', or '#'; the rest is the path.
+    let (authority, path) = match rest.find(['/', '?', '#']) {
+        Some(idx) => {
+            let authority = rest.get(..idx).ok_or(HttpError::NotAbsoluteForm)?;
+            let path = rest.get(idx..).ok_or(HttpError::NotAbsoluteForm)?;
+            (authority, path)
+        }
+        None => (rest, "/"),
+    };
+    let path = if path.is_empty() { "/" } else { path };
+    let (dest, port) = parse_authority(authority, Some(DEFAULT_HTTP_PORT))?;
+    Ok((dest, port, path))
+}
+
+/// Strip a case-insensitive `http://` scheme prefix. A bare path (origin-form)
+/// is [`HttpError::NotAbsoluteForm`]; any other scheme is
+/// [`HttpError::UnsupportedScheme`].
+fn strip_scheme(target: &str) -> Result<&str, HttpError> {
+    let lower = target.to_ascii_lowercase();
+    if let Some(idx) = lower.find("://") {
+        if lower.get(..idx) == Some("http") {
+            // Strip the same number of bytes from the original (ASCII scheme).
+            let after = idx.checked_add(3).ok_or(HttpError::UnsupportedScheme)?;
+            return target.get(after..).ok_or(HttpError::UnsupportedScheme);
+        }
+        return Err(HttpError::UnsupportedScheme);
+    }
+    Err(HttpError::NotAbsoluteForm)
+}
+
+/// Parse a port string into a non-zero `u16`.
+fn parse_port(s: &str) -> Result<u16, HttpError> {
+    match s.parse::<u16>() {
+        Ok(0) | Err(_) => Err(HttpError::BadPort),
+        Ok(port) => Ok(port),
+    }
+}
+
+/// Interpret an authority host as a literal IP if it parses as one, else a name.
+fn host_to_dest(host: &str) -> Destination {
+    host.parse::<IpAddr>()
+        .map_or_else(|_| Destination::Name(host.to_owned()), Destination::Addr)
 }
 
 #[cfg(test)]
