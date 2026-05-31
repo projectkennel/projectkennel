@@ -31,8 +31,12 @@ const KENNEL_ABI_VERSION: u16 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 
-/// One BPF LPM map entry: an `(lpm_v4_key, allow_entry)` byte pair, both 8 bytes.
+/// One BPF IPv4 LPM map entry: an `(lpm_v4_key, allow_entry)` byte pair.
 pub type LpmV4Entry = ([u8; 8], [u8; 8]);
+
+/// One BPF IPv6 LPM map entry: a 20-byte `lpm_v6_key { __u32 prefixlen;
+/// __u8 addr[16] }` and the same 8-byte `allow_entry`.
+pub type LpmV6Entry = ([u8; 20], [u8; 8]);
 
 /// Encode an `lpm_v4_key { __u32 prefixlen; __u32 addr }` (8 bytes). `addr` is in
 /// network byte order — i.e. the raw octets. (Built by destructuring rather than
@@ -70,22 +74,32 @@ fn meta_bytes(ctx: u8) -> [u8; 64] {
     m
 }
 
-/// Encode the IPv4 rules of `rules` into `(lpm_v4_key, allow_entry)` byte pairs.
-/// IPv6 rules are skipped for now (the v6 maps are a later increment); a CIDR
-/// that is neither a valid v4 nor v6 address is an error.
-fn encode_v4(rules: &[NetRule]) -> Result<Vec<LpmV4Entry>, SpawnError> {
-    let mut out = Vec::new();
+/// Encode an `lpm_v6_key { __u32 prefixlen; __u8 addr[16] }` (20 bytes). `addr`
+/// is the network-order octets.
+fn lpm_v6_key(addr: [u8; 16], prefix_len: u8) -> [u8; 20] {
+    let [p0, p1, p2, p3] = u32::from(prefix_len).to_ne_bytes();
+    let [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15] = addr;
+    [
+        p0, p1, p2, p3, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15,
+    ]
+}
+
+/// Partition `rules` into encoded IPv4 and IPv6 LPM entries. A CIDR that is
+/// neither a valid v4 nor v6 address is an error.
+fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), SpawnError> {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
     for r in rules {
+        let value = allow_entry(r.port_min, r.port_max, r.protocol);
         if let Ok(addr) = r.cidr.parse::<Ipv4Addr>() {
-            out.push((
-                lpm_v4_key(addr.octets(), r.prefix_len),
-                allow_entry(r.port_min, r.port_max, r.protocol),
-            ));
-        } else if r.cidr.parse::<Ipv6Addr>().is_err() {
+            v4.push((lpm_v4_key(addr.octets(), r.prefix_len), value));
+        } else if let Ok(addr) = r.cidr.parse::<Ipv6Addr>() {
+            v6.push((lpm_v6_key(addr.octets(), r.prefix_len), value));
+        } else {
             return Err(SpawnError::InvalidPolicy(format!("invalid CIDR address `{}`", r.cidr)));
         }
     }
-    Ok(out)
+    Ok((v4, v6))
 }
 
 /// The Landlock access a read-granted path subtree receives: read files and
@@ -129,11 +143,14 @@ pub struct Plan {
     pub seccomp_allow: Vec<i64>,
     /// The seccomp action for syscalls not on the allowlist.
     pub seccomp_default: Action,
-    /// BPF `allow_v4` LPM entries for the egress allowlist. IPv6 entries are a
-    /// later increment.
+    /// BPF `allow_v4` LPM entries for the egress allowlist.
     pub bpf_allow_v4: Vec<LpmV4Entry>,
     /// BPF `deny_v4` LPM entries (invariant deny CIDRs), consulted deny-first.
     pub bpf_deny_v4: Vec<LpmV4Entry>,
+    /// BPF `allow_v6` LPM entries for the egress allowlist.
+    pub bpf_allow_v6: Vec<LpmV6Entry>,
+    /// BPF `deny_v6` LPM entries (invariant deny CIDRs), consulted deny-first.
+    pub bpf_deny_v6: Vec<LpmV6Entry>,
     /// The `kennel_meta` map value (64 bytes) for `kennel_meta_map[0]`.
     pub bpf_meta: [u8; 64],
 }
@@ -185,6 +202,9 @@ impl Plan {
             SeccompAction::KillProcess => Action::KillProcess,
         };
 
+        let (bpf_allow_v4, bpf_allow_v6) = encode(&ep.net.allow)?;
+        let (bpf_deny_v4, bpf_deny_v6) = encode(&ep.net.deny_invariant)?;
+
         Ok(Self {
             namespaces,
             cgroup,
@@ -194,8 +214,10 @@ impl Plan {
             landlock_net,
             seccomp_allow: ep.seccomp.allow.clone(),
             seccomp_default,
-            bpf_allow_v4: encode_v4(&ep.net.allow)?,
-            bpf_deny_v4: encode_v4(&ep.net.deny_invariant)?,
+            bpf_allow_v4,
+            bpf_deny_v4,
+            bpf_allow_v6,
+            bpf_deny_v6,
             bpf_meta: meta_bytes(ctx),
         })
     }

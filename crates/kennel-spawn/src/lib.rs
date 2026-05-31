@@ -303,6 +303,16 @@ fn populate_egress_maps(loaded: &kennel_bpf::Loaded, plan: &Plan) -> Result<(), 
             loaded.update_map("deny_v4", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
         }
     }
+    if loaded.maps.contains_key("allow_v6") {
+        for (key, value) in &plan.bpf_allow_v6 {
+            loaded.update_map("allow_v6", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+        }
+    }
+    if loaded.maps.contains_key("deny_v6") {
+        for (key, value) in &plan.bpf_deny_v6 {
+            loaded.update_map("deny_v6", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+        }
+    }
     Ok(())
 }
 
@@ -431,6 +441,33 @@ mod tests {
     }
 
     #[test]
+    fn v6_rules_encode_to_lpm_v6() {
+        let mut p = policy_with_placeholders();
+        p.effective_policy.net.allow.push(NetRule {
+            cidr: "2606:2800:220::".to_owned(),
+            prefix_len: 48,
+            port_min: 443,
+            port_max: 443,
+            protocol: Protocol::Tcp,
+        });
+        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7).expect("plan");
+
+        // The two original rules stay v4; the new one lands in v6.
+        assert_eq!(plan.bpf_allow_v4.len(), 2);
+        assert_eq!(plan.bpf_allow_v6.len(), 1);
+        let (key, value) = plan.bpf_allow_v6.first().expect("v6 entry");
+        // lpm_v6_key: prefixlen (4 bytes) then the 16 address octets.
+        assert_eq!(key.get(0..4), Some(&48u32.to_ne_bytes()[..]));
+        let octets = "2606:2800:220::".parse::<std::net::Ipv6Addr>().expect("v6").octets();
+        assert_eq!(key.get(4..20), Some(&octets[..]));
+        let want_val = {
+            let [a, b] = 443u16.to_ne_bytes();
+            [a, b, a, b, 6, 0, 0, 0]
+        };
+        assert_eq!(value, &want_val);
+    }
+
+    #[test]
     fn prepare_end_to_end_from_signed_bytes() {
         // Sign the policy, then run the full runtime entry point over its bytes.
         let key = SigningKey::from_seed("k", &[3u8; 32]).expect("seed");
@@ -468,6 +505,8 @@ mod tests {
             seccomp_default: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
             bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
         }
     }
@@ -559,6 +598,8 @@ mod root_tests {
             seccomp_default: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
             bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
         };
 
@@ -621,6 +662,8 @@ mod root_tests {
             seccomp_default: Action::KillProcess,
             bpf_allow_v4: allow,
             bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
         }
     }
