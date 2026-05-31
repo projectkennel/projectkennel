@@ -219,9 +219,19 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     // seal move it out on its single call.
     let mut ruleset = Some(ruleset);
     let seal = move || -> io::Result<()> {
-        // Namespaces first (mounts, when added, need the mount ns).
+        // Namespaces first; mounts need the mount ns.
         if !seal_ns.is_empty() {
             kennel_syscall::namespace::unshare(seal_ns)?;
+        }
+        if seal_ns.contains(Namespaces::MOUNT) {
+            // Detach propagation from the host, then give the workload a fresh
+            // /proc (reflecting its PID namespace) and a private /tmp. The full
+            // pivot_root shim ($HOME shadowing, hiding non-granted paths) is a
+            // later increment; Landlock already denies access to non-granted
+            // paths in the meantime.
+            kennel_syscall::mount::make_root_private()?;
+            kennel_syscall::mount::mount_special("proc", std::path::Path::new("/proc"))?;
+            kennel_syscall::mount::mount_special("tmpfs", std::path::Path::new("/tmp"))?;
         }
         // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
         kennel_syscall::process::set_no_new_privs()?;
@@ -448,11 +458,12 @@ mod root_tests {
     use std::process::{Command, Stdio};
 
     #[test]
-    fn pid_namespace_makes_the_workload_pid_1() {
-        // mount/pid/ipc isolation, with Landlock allowing just enough to run a
-        // shell, and no seccomp. A new PID namespace makes the execed shell PID 1.
+    fn pid_and_mount_namespace_isolate_the_workload() {
+        // mount/pid/ipc isolation, Landlock allowing just enough to run a shell
+        // and read /proc, no seccomp. A new PID namespace makes the shell PID 1;
+        // the freshly-mounted /proc shows only the namespace's own processes.
         let access = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
-        let dirs = ["/usr", "/bin", "/lib", "/lib64", "/etc"];
+        let dirs = ["/usr", "/bin", "/lib", "/lib64", "/etc", "/proc"];
         let plan = Plan {
             namespaces: Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC,
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
@@ -464,9 +475,10 @@ mod root_tests {
             seccomp_default: Action::KillProcess,
         };
 
+        // Report "<pid>:<number of visible /proc PID dirs>".
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
-            .arg("echo $$")
+            .arg("echo \"$$:$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)\"")
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
@@ -479,13 +491,13 @@ mod root_tests {
             .read_to_string(&mut out)
             .expect("read stdout");
         let status = child.wait().expect("wait");
-
         assert!(status.success(), "the shell should have run (got {status:?})");
-        assert_eq!(
-            out.trim(),
-            "1",
-            "in a new PID namespace the workload is PID 1 (got {:?})",
-            out.trim()
-        );
+
+        let out = out.trim();
+        let (pid, nproc) = out.split_once(':').unwrap_or(("", ""));
+        assert_eq!(pid, "1", "in a new PID namespace the workload is PID 1 (got {out:?})");
+        let nproc: usize = nproc.parse().unwrap_or(usize::MAX);
+        // Host /proc would show hundreds; the isolated namespace shows a handful.
+        assert!(nproc < 20, "fresh /proc should show only the namespace's processes (saw {nproc})");
     }
 }
