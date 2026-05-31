@@ -37,7 +37,7 @@
 //! §5.5 supply-chain gate. Until then the contract is held by the adversarial
 //! unit tests below.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::allow::Destination;
 
@@ -150,13 +150,25 @@ pub enum Socks5Error {
 /// [`Socks5Error::Incomplete`] if the slice is a truncated greeting;
 /// [`Socks5Error::BadVersion`] if the version byte is not `0x05`.
 pub fn parse_greeting(buf: &[u8]) -> Result<Greeting, Socks5Error> {
-    // allow: structure-phase stub; the implementing commit's body is not const.
-    #[allow(clippy::missing_const_for_fn)]
-    fn stub(buf: &[u8]) -> Result<Greeting, Socks5Error> {
-        let _ = buf;
-        Err(Socks5Error::Incomplete)
+    let &ver = buf.first().ok_or(Socks5Error::Incomplete)?;
+    if ver != VERSION {
+        return Err(Socks5Error::BadVersion(ver));
     }
-    stub(buf)
+    let &nmethods = buf.get(1).ok_or(Socks5Error::Incomplete)?;
+    // Methods are the `nmethods` bytes after the 2-byte header. Slicing from the
+    // header offset, then to the count, avoids any index arithmetic.
+    let after_header = buf.get(2..).ok_or(Socks5Error::Incomplete)?;
+    let methods = after_header
+        .get(..usize::from(nmethods))
+        .ok_or(Socks5Error::Incomplete)?;
+    let offers_no_auth = methods.contains(&METHOD_NO_AUTH);
+    let rest = after_header
+        .get(usize::from(nmethods)..)
+        .ok_or(Socks5Error::Incomplete)?;
+    Ok(Greeting {
+        offers_no_auth,
+        consumed: buf.len().saturating_sub(rest.len()),
+    })
 }
 
 /// Encode the method-selection reply: `VER METHOD`, choosing no-auth (`0x00`) if
@@ -174,13 +186,86 @@ pub const fn method_reply(no_auth: bool) -> [u8; 2] {
 /// protocol-violation variant (bad version, reserved byte, command, address
 /// type, or domain name).
 pub fn parse_request(buf: &[u8]) -> Result<ParsedRequest, Socks5Error> {
-    // allow: structure-phase stub; the implementing commit's body is not const.
-    #[allow(clippy::missing_const_for_fn)]
-    fn stub(buf: &[u8]) -> Result<ParsedRequest, Socks5Error> {
-        let _ = buf;
-        Err(Socks5Error::Incomplete)
+    let &ver = buf.first().ok_or(Socks5Error::Incomplete)?;
+    if ver != VERSION {
+        return Err(Socks5Error::BadVersion(ver));
     }
-    stub(buf)
+    let &cmd = buf.get(1).ok_or(Socks5Error::Incomplete)?;
+    let command = match cmd {
+        0x01 => Command::Connect,
+        0x02 => Command::Bind,
+        0x03 => Command::UdpAssociate,
+        other => return Err(Socks5Error::BadCommand(other)),
+    };
+    let &rsv = buf.get(2).ok_or(Socks5Error::Incomplete)?;
+    if rsv != 0x00 {
+        return Err(Socks5Error::BadReserved(rsv));
+    }
+    let &atyp = buf.get(3).ok_or(Socks5Error::Incomplete)?;
+    // The address (and the bytes after it) start at offset 4.
+    let body = buf.get(4..).ok_or(Socks5Error::Incomplete)?;
+    let (dest, after_addr) = parse_addr(atyp, body)?;
+    // Two-byte port in network order follows the address.
+    let port_bytes: [u8; 2] = after_addr
+        .get(..2)
+        .ok_or(Socks5Error::Incomplete)?
+        .try_into()
+        .map_err(|_| Socks5Error::Incomplete)?;
+    let port = u16::from_be_bytes(port_bytes);
+    let rest = after_addr.get(2..).ok_or(Socks5Error::Incomplete)?;
+    Ok(ParsedRequest {
+        request: Request {
+            command,
+            dest,
+            port,
+        },
+        consumed: buf.len().saturating_sub(rest.len()),
+    })
+}
+
+/// Parse the `ATYP`-tagged destination address out of `body` (the bytes after
+/// the 4-byte request header). Returns the destination and the bytes following
+/// the address (where the port begins).
+fn parse_addr(atyp: u8, body: &[u8]) -> Result<(Destination, &[u8]), Socks5Error> {
+    match atyp {
+        // IPv4: four octets.
+        0x01 => {
+            let octets: [u8; 4] = body
+                .get(..4)
+                .ok_or(Socks5Error::Incomplete)?
+                .try_into()
+                .map_err(|_| Socks5Error::Incomplete)?;
+            let rest = body.get(4..).ok_or(Socks5Error::Incomplete)?;
+            Ok((Destination::Addr(IpAddr::from(octets)), rest))
+        }
+        // Domain name: one length byte, then that many bytes.
+        0x03 => {
+            let &len = body.first().ok_or(Socks5Error::Incomplete)?;
+            if len == 0 {
+                return Err(Socks5Error::DomainEmpty);
+            }
+            let after_len = body.get(1..).ok_or(Socks5Error::Incomplete)?;
+            let name_bytes = after_len
+                .get(..usize::from(len))
+                .ok_or(Socks5Error::Incomplete)?;
+            let name = std::str::from_utf8(name_bytes).map_err(|_| Socks5Error::DomainNotUtf8)?;
+            let rest = after_len
+                .get(usize::from(len)..)
+                .ok_or(Socks5Error::Incomplete)?;
+            Ok((Destination::Name(name.to_owned()), rest))
+        }
+        // IPv6: sixteen octets.
+        0x04 => {
+            let octets: [u8; 16] = body
+                .get(..16)
+                .ok_or(Socks5Error::Incomplete)?
+                .try_into()
+                .map_err(|_| Socks5Error::Incomplete)?;
+            let rest = body.get(16..).ok_or(Socks5Error::Incomplete)?;
+            Ok((Destination::Addr(IpAddr::from(octets)), rest))
+        }
+        other => Err(Socks5Error::BadAddrType(other)),
+    }
 }
 
 /// Encode a request reply: `VER REP RSV ATYP BND.ADDR BND.PORT`, where the bound
@@ -188,19 +273,26 @@ pub fn parse_request(buf: &[u8]) -> Result<ParsedRequest, Socks5Error> {
 /// zero address on failure).
 #[must_use]
 pub fn encode_reply(reply: Reply, bound: SocketAddr) -> Vec<u8> {
-    // allow: structure-phase stub; the implementing commit's body is not const.
-    #[allow(clippy::missing_const_for_fn)]
-    fn stub(reply: Reply, bound: SocketAddr) -> Vec<u8> {
-        let _ = (reply, bound);
-        Vec::new()
+    let mut out = vec![VERSION, reply.code(), 0x00];
+    match bound {
+        SocketAddr::V4(a) => {
+            out.push(0x01);
+            out.extend_from_slice(&a.ip().octets());
+            out.extend_from_slice(&a.port().to_be_bytes());
+        }
+        SocketAddr::V6(a) => {
+            out.push(0x04);
+            out.extend_from_slice(&a.ip().octets());
+            out.extend_from_slice(&a.port().to_be_bytes());
+        }
     }
-    stub(reply, bound)
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
     // ---- greeting ----
 
