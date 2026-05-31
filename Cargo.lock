@@ -46,6 +46,10 @@ dependencies = [
 [[package]]
 name = "kennel-netproxy"
 version = "0.0.0"
+dependencies = [
+ "basic-toml",
+ "serde",
+]
 
 [[package]]
 name = "kennel-policy"

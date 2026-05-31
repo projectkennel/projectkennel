@@ -9,6 +9,12 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+basic-toml = "=0.1.10"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "kennel-netproxy"
+path = "src/main.rs"
