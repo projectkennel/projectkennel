@@ -37,11 +37,18 @@ use std::process::{Child, Command, ExitStatus};
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response, Status};
-use kennel_spawn::{Plan, SpawnError};
+use kennel_spawn::{Plan, ProxyEndpoint, SpawnError};
 
 /// Host offset of the kennel's proxy within its subnet (`…|0001` in v4, `::1` in
 /// v6). The proxy is where confined egress is funnelled once it lands.
 pub const PROXY_HOST: u8 = 1;
+
+/// The TCP port the per-kennel egress proxy listens on.
+///
+/// A fixed default for now; a later signed-`SettledPolicy` field can make it
+/// policy-controlled (the netproxy already takes its listen port from its
+/// derived TOML config).
+pub const PROXY_PORT: u16 = 1080;
 
 /// The loopback interface the per-kennel addresses live on.
 const LOOPBACK: &str = "lo";
@@ -271,7 +278,8 @@ fn bring_up<P: Privileged>(
     state.made_cgroup = true;
 
     // 2. loopback addresses. v4 only when ctx fits the 8-bit field it carries;
-    //    a higher ctx is a v6-only kennel.
+    //    a higher ctx is a v6-only kennel. The proxy listens on the host-offset-1
+    //    address in each family (PROXY_HOST), so these are the proxy's addresses.
     if let Ok(c) = u8::try_from(ctx) {
         let addr = loopback_v4(scope.tag(), c, PROXY_HOST);
         expect_ok("add_address v4", privileged.add_address(ctx, LOOPBACK, addr.into(), V4_PREFIX))?;
@@ -280,6 +288,13 @@ fn bring_up<P: Privileged>(
     let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(PROXY_HOST));
     expect_ok("add_address v6", privileged.add_address(ctx, LOOPBACK, addr6.into(), V6_PREFIX))?;
     state.v6 = Some(addr6);
+
+    // Stamp the egress proxy into the plan before deriving the BPF payload: this
+    // adds the flagged allow-entry that lets the workload reach its proxy (and
+    // records the proxy in kennel_meta). Without it the BPF would deny every
+    // connect, the proxy included, so no egress could flow. `state.v4` is the
+    // proxy's v4 address (absent for a v6-only kennel); `addr6` its v6.
+    plan.stamp_proxy(&ProxyEndpoint { v4: state.v4, v6: addr6, port: PROXY_PORT });
 
     // 3. egress BPF (privileged: load + attach in the helper).
     let payload = EgressPayload {
@@ -336,11 +351,12 @@ mod tests {
     struct FakePriv {
         calls: RefCell<Vec<String>>,
         fail_on: Option<&'static str>,
+        egress: RefCell<Option<EgressPayload>>,
     }
 
     impl FakePriv {
         fn new(fail_on: Option<&'static str>) -> Self {
-            Self { calls: RefCell::new(Vec::new()), fail_on }
+            Self { calls: RefCell::new(Vec::new()), fail_on, egress: RefCell::new(None) }
         }
         fn answer(&self, op: &'static str) -> Response {
             self.calls.borrow_mut().push(op.to_owned());
@@ -353,6 +369,10 @@ mod tests {
         fn log(&self) -> Vec<String> {
             self.calls.borrow().clone()
         }
+        /// The egress payload captured at the last `setup_egress` call.
+        fn egress(&self) -> EgressPayload {
+            self.egress.borrow().clone().expect("setup_egress was called")
+        }
     }
 
     impl Privileged for FakePriv {
@@ -362,7 +382,8 @@ mod tests {
         fn del_address(&self, _ctx: u16, _iface: &str, addr: IpAddr, _prefix: u8) -> io::Result<Response> {
             Ok(self.answer(if addr.is_ipv4() { "del v4" } else { "del v6" }))
         }
-        fn setup_egress(&self, _cgroup: &Path, _payload: &EgressPayload) -> io::Result<Response> {
+        fn setup_egress(&self, _cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
+            *self.egress.borrow_mut() = Some(payload.clone());
             Ok(self.answer("setup_egress"))
         }
     }
@@ -440,6 +461,37 @@ mod tests {
             "a mid-sequence failure unwinds the addresses"
         );
         assert!(!cgroup.exists(), "the cgroup directory should have been removed on unwind");
+    }
+
+    #[test]
+    fn bring_up_stamps_the_proxy_into_the_egress_payload() {
+        let cgroup = temp_cgroup("proxy");
+        let _ = std::fs::remove_dir(&cgroup);
+        let fake = FakePriv::new(None);
+
+        // scope tag 9, ctx 5 → the proxy is at loopback offset PROXY_HOST.
+        let kennel = start(&fake, spec(cgroup, 5), &mut Command::new("/bin/true")).expect("start");
+        let payload = fake.egress();
+        kennel.stop(&fake).expect("stop");
+
+        // The trivial plan had no allow rules; after stamping, the only v4/v6
+        // allow entries are the flagged proxy entries for the addresses kenneld
+        // added.
+        let want_v4 = loopback_v4(9, 5, PROXY_HOST);
+        let want_v6 = loopback_v6([0, 0, 0, 0, 1], 5, u64::from(PROXY_HOST));
+
+        let (key_v4, val_v4) = payload.allow_v4.first().expect("a v4 proxy entry");
+        assert_eq!(key_v4.get(4..8), Some(&want_v4.octets()[..]), "proxy v4 host key");
+        assert_eq!(val_v4.get(5), Some(&0x01u8), "KENNEL_ALLOW_FLAG_PROXY set");
+        assert_eq!(val_v4.get(0..2), Some(&PROXY_PORT.to_ne_bytes()[..]), "proxy port (host order)");
+
+        let (key_v6, val_v6) = payload.allow_v6.first().expect("a v6 proxy entry");
+        assert_eq!(key_v6.get(4..20), Some(&want_v6.octets()[..]), "proxy v6 host key");
+        assert_eq!(val_v6.get(5), Some(&0x01u8), "KENNEL_ALLOW_FLAG_PROXY set");
+
+        // The meta carries the proxy port (network order, offset 12) and v6 (16).
+        assert_eq!(payload.meta.get(12..14), Some(&PROXY_PORT.to_be_bytes()[..]), "meta proxy_port");
+        assert_eq!(payload.meta.get(16..32), Some(&want_v6.octets()[..]), "meta proxy_addr_v6");
     }
 
     #[test]
