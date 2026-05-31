@@ -22,6 +22,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cgroup;
+
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
