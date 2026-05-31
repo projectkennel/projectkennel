@@ -28,6 +28,14 @@ const fn refusal_code(r: &Refusal) -> u8 {
 /// cannot service an address request". Distinct from the validation refusals.
 pub const REFUSAL_NO_SCOPE: u8 = 100;
 
+/// A refusal code for "the target cgroup directory is not owned by the caller".
+///
+/// Under the delegated-subtree model (`08-enforcement-architecture.md` §8.5),
+/// kenneld creates kennel cgroups inside the user's systemd-delegated subtree,
+/// so a legitimate kennel cgroup is owned by the caller's uid. This rejects
+/// attaching BPF to another user's or a system cgroup.
+pub const REFUSAL_CGROUP_NOT_OWNED: u8 = 101;
+
 /// `ENOSYS` on Linux — returned when a [`Op::SetupEgress`] request reaches a
 /// helper built without the `bpf-egress` feature.
 const ENOSYS: i32 = 38;
@@ -51,19 +59,19 @@ pub fn perform(req: &Request, egress: Option<&EgressPayload>, scope: Option<&Res
         Op::AddAddr | Op::DelAddr => perform_addr(req, scope),
         Op::CreateCgroup | Op::DeleteCgroup => perform_cgroup(req, scope),
         // SetupEgress needs the variable payload; without it the request is malformed.
-        Op::SetupEgress => egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload, scope)),
+        // The scope still gates *whether* the caller may act (the None check above);
+        // the cgroup itself is gated by directory ownership inside perform_egress.
+        Op::SetupEgress => egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload)),
     }
 }
 
-/// Validate the target cgroup against the caller's scope, then load, populate,
-/// and attach the egress BPF programs. The map contents are not scope-checked
-/// (they only shape the kennel's own egress, which the user already controls);
-/// the cgroup path is the cross-user boundary and is validated like a cgroup op.
-fn perform_egress(req: &Request, payload: &EgressPayload, scope: &ReservedScope) -> Response {
-    let creq = CgroupRequest { path: req.cgroup_path.clone() };
-    if let Err(r) = validate_cgroup(&creq, scope) {
-        return Response::refused(refusal_code(&r));
-    }
+/// Load, populate, and attach the egress BPF programs to the target cgroup.
+///
+/// The cross-user boundary is **directory ownership**: the caller must own the
+/// cgroup directory (`attach_egress_programs` checks `st_uid`). The map contents
+/// are not checked — they only shape the kennel's own egress, which the user
+/// already controls.
+fn perform_egress(req: &Request, payload: &EgressPayload) -> Response {
     attach_egress_programs(&req.cgroup_path, payload)
 }
 
@@ -71,14 +79,26 @@ fn perform_egress(req: &Request, payload: &EgressPayload, scope: &ReservedScope)
 /// the cgroup at `path`. `BPF_PROG_ATTACH` outlives this process, so the
 /// programs stay attached after the helper exits even though the program/map fds
 /// close when each `Loaded` drops.
+///
+/// The caller must own the cgroup directory (the delegation boundary): the fd is
+/// opened once and `fstat`ed, so the ownership check and the attach use the same
+/// inode (no TOCTOU).
 #[cfg(feature = "bpf-egress")]
 fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Response {
     use std::os::fd::AsFd as _;
+    use std::os::unix::fs::MetadataExt as _;
 
     let dir = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => return Response::internal(errno_of(&e)),
     };
+    let owner = match dir.metadata() {
+        Ok(m) => m.uid(),
+        Err(e) => return Response::internal(errno_of(&e)),
+    };
+    if owner != kennel_syscall::unistd::real_uid() {
+        return Response::refused(REFUSAL_CGROUP_NOT_OWNED);
+    }
     let cgroup_fd = dir.as_fd();
 
     for spec in kennel_bpf::KENNEL_PROGRAMS {

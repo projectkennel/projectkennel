@@ -117,17 +117,29 @@ fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
     (key, value)
 }
 
+/// An empty `EgressPayload` (no map entries) — enough to exercise load + attach.
+#[cfg(feature = "root-tests")]
+fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
+    kennel_privhelper::wire::EgressPayload {
+        meta: [0u8; kennel_privhelper::wire::META_LEN],
+        allow_v4: Vec::new(),
+        deny_v4: Vec::new(),
+        allow_v6: Vec::new(),
+        deny_v6: Vec::new(),
+    }
+}
+
 #[cfg(feature = "root-tests")]
 #[test]
-fn loads_and_attaches_egress_to_a_users_cgroup() {
+fn loads_and_attaches_egress_to_an_owned_cgroup() {
     use kennel_privhelper::wire::{EgressPayload, META_LEN};
 
-    provision_root_allocation();
     let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
-    let cgroup = std::path::PathBuf::from("/sys/fs/cgroup/kennel-root/egress-test");
-
-    // The cgroup must exist before BPF can attach to it.
-    assert_eq!(run(&cgroup_request(Op::CreateCgroup, cgroup.to_str().expect("utf8"))).status, Status::Ok);
+    // Model the delegated-subtree flow: kenneld (here, the test running as the
+    // caller) creates the cgroup itself; it is owned by the caller's uid.
+    let cgroup = std::path::PathBuf::from("/sys/fs/cgroup/kennel-egress-test");
+    let _ = std::fs::remove_dir(&cgroup);
+    std::fs::create_dir(&cgroup).expect("create cgroup");
 
     let payload = EgressPayload {
         meta: [0u8; META_LEN],
@@ -139,27 +151,26 @@ fn loads_and_attaches_egress_to_a_users_cgroup() {
     let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
     assert_eq!(resp.status, Status::Ok, "egress setup should load+attach all programs (errno {})", resp.errno);
 
-    // Cleanup detaches by removing the cgroup.
-    assert_eq!(run(&cgroup_request(Op::DeleteCgroup, cgroup.to_str().expect("utf8"))).status, Status::Ok);
+    // Removing the cgroup detaches the programs.
+    std::fs::remove_dir(&cgroup).expect("remove cgroup");
 }
 
 #[cfg(feature = "root-tests")]
 #[test]
-fn egress_to_a_foreign_namespace_is_refused() {
-    use kennel_privhelper::wire::EgressPayload;
+fn egress_to_a_cgroup_not_owned_by_caller_is_refused() {
+    use kennel_privhelper::exec::REFUSAL_CGROUP_NOT_OWNED;
 
-    provision_root_allocation();
     let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
-    // A cgroup outside the caller's `kennel-root` namespace must be refused before
-    // any BPF syscall — the map contents are never even consulted.
-    let payload = EgressPayload {
-        meta: [0u8; kennel_privhelper::wire::META_LEN],
-        allow_v4: Vec::new(),
-        deny_v4: Vec::new(),
-        allow_v6: Vec::new(),
-        deny_v6: Vec::new(),
-    };
-    let resp = client::setup_egress(helper, std::path::PathBuf::from("/sys/fs/cgroup/kennel-other/x"), &payload)
-        .expect("invoke setup_egress");
-    assert_eq!(resp.status, Status::Refused, "egress to a foreign namespace must be refused");
+    // A cgroup owned by a *different* uid must be refused before any BPF syscall —
+    // the delegation boundary. (Run as root, so chowning to a foreign uid is possible.)
+    let cgroup = std::path::PathBuf::from("/sys/fs/cgroup/kennel-foreign-test");
+    let _ = std::fs::remove_dir(&cgroup);
+    std::fs::create_dir(&cgroup).expect("create cgroup");
+    std::os::unix::fs::chown(&cgroup, Some(12345), None).expect("chown to foreign uid");
+
+    let resp = client::setup_egress(helper, cgroup.clone(), &empty_payload()).expect("invoke setup_egress");
+    assert_eq!(resp.status, Status::Refused, "a cgroup not owned by the caller must be refused");
+    assert_eq!(resp.refusal, REFUSAL_CGROUP_NOT_OWNED, "refusal should name the ownership boundary");
+
+    std::fs::remove_dir(&cgroup).expect("remove cgroup");
 }
