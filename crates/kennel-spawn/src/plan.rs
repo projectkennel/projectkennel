@@ -204,6 +204,13 @@ pub struct Plan {
     pub bpf_deny_v6: Vec<LpmV6Entry>,
     /// The `kennel_meta` map value (64 bytes) for `kennel_meta_map[0]`.
     pub bpf_meta: [u8; 64],
+    /// Single-file bind mounts `(source, target)` applied read-only in the mount
+    /// seal, after the root is made private and `/proc`/`/tmp` are mounted. Used to
+    /// shadow individual files (the synthetic `/etc` set) over their host
+    /// counterparts in the kennel's view; a target that does not exist is skipped.
+    /// Not derived from policy — kenneld populates it at bring-up with the
+    /// per-kennel staged files.
+    pub file_binds: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Plan {
@@ -275,6 +282,7 @@ impl Plan {
             bpf_allow_v6,
             bpf_deny_v6,
             bpf_meta: meta_bytes(ctx),
+            file_binds: Vec::new(),
         })
     }
 

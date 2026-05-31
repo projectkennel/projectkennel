@@ -189,11 +189,13 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 ///
 /// # Scope
 ///
-/// This applies namespaces + `no_new_privs` + seccomp + Landlock. The plan's
-/// **mount-shim, cgroup-join, and BPF-attach** layers are **not** applied here —
-/// they require the privhelper (loopback address, cgroup creation) and are a
-/// separate increment. The returned child is namespace/Landlock/seccomp confined
-/// but **not** yet network-isolated.
+/// This applies, in the seal: cgroup-join, namespaces, a fresh `/proc` + private
+/// `/tmp`, the plan's single-file shadow binds (the synthetic `/etc`),
+/// `no_new_privs`, seccomp, and Landlock. **Not** applied here: the full
+/// `pivot_root` view (`$HOME` shadow, hiding non-granted path *names*) and the
+/// BPF egress attach (which the privhelper does on the cgroup). The returned child
+/// is namespace/Landlock/seccomp/cgroup confined; egress BPF is attached
+/// separately by the orchestrator before the workload connects.
 ///
 /// # Errors
 ///
@@ -227,6 +229,9 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     // namespace/seal), or None if this plan does not enter a cgroup.
     let cgroup_join = plan.cgroup_join.then(|| plan.cgroup.clone());
 
+    // The per-file shadow binds (synthetic /etc), applied in the mount seal.
+    let file_binds = plan.file_binds.clone();
+
     // `restrict_current_process` consumes the ruleset; an Option lets the FnMut
     // seal move it out on its single call.
     let mut ruleset = Some(ruleset);
@@ -252,6 +257,10 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
             kennel_syscall::mount::make_root_private()?;
             kennel_syscall::mount::mount_special("proc", std::path::Path::new("/proc"))?;
             kennel_syscall::mount::mount_special("tmpfs", std::path::Path::new("/tmp"))?;
+            // Shadow individual files (the synthetic /etc set) over their host
+            // counterparts. Read-only so the workload cannot tamper the staged
+            // copies. A target that does not exist on the host is skipped.
+            apply_file_binds(&file_binds)?;
         }
         // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
         kennel_syscall::process::set_no_new_privs()?;
@@ -265,6 +274,25 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     };
 
     kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall)
+}
+
+/// Apply the plan's single-file shadow binds, read-only, in the workload's mount
+/// namespace. Each `(source, target)` replaces the kennel's view of `target` with
+/// `source` (a bind mount, then a read-only remount). A `target` that does not
+/// exist on the host is skipped — there is nothing to bind over, and creating it
+/// under a system directory is neither possible (unprivileged) nor wanted.
+///
+/// Called in the forked child's seal, after the root is made private (so the bind
+/// does not propagate to the host) and before Landlock.
+fn apply_file_binds(binds: &[(PathBuf, PathBuf)]) -> io::Result<()> {
+    for (source, target) in binds {
+        if !target.exists() {
+            continue;
+        }
+        kennel_syscall::mount::bind(source, target, false)?;
+        kennel_syscall::mount::remount_readonly(target)?;
+    }
+    Ok(())
 }
 
 /// Join the current process into `cgroup` by writing its own pid to
@@ -619,6 +647,7 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
         }
     }
 
@@ -713,6 +742,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -739,6 +769,54 @@ mod root_tests {
         let nproc: usize = nproc.parse().unwrap_or(usize::MAX);
         // Host /proc would show hundreds; the isolated namespace shows a handful.
         assert!(nproc < 20, "fresh /proc should show only the namespace's processes (saw {nproc})");
+    }
+
+    #[test]
+    fn file_binds_shadow_targets_in_the_kennel() {
+        // Stage a synthetic file and bind it over a target (the /etc-shadow idiom).
+        // Outside /tmp, which spawn covers with a fresh tmpfs. A non-existent target
+        // is included to prove it is skipped rather than failing the spawn.
+        let dir = PathBuf::from(format!("/run/kennel-spawn-binds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir staging");
+        let src = dir.join("synthetic");
+        let target = dir.join("target");
+        std::fs::write(&src, "SYNTHETIC\n").expect("write src");
+        std::fs::write(&target, "ORIGINAL\n").expect("write target");
+        let missing = dir.join("does-not-exist");
+
+        let access = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> =
+            ["/usr", "/bin", "/lib", "/lib64"].iter().map(|d| (PathBuf::from(*d), access)).collect();
+        landlock_fs.push((dir.clone(), access));
+        let plan = Plan {
+            namespaces: Namespaces::MOUNT, // mount ns only: no parent PID unshare
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false,
+            bind_read: Vec::new(),
+            bind_write: Vec::new(),
+            landlock_fs,
+            landlock_net: Vec::new(),
+            seccomp_allow: Vec::new(),
+            seccomp_default: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+            file_binds: vec![(src.clone(), target.clone()), (src, missing)],
+        };
+
+        let mut cmd = Command::new("/bin/cat");
+        cmd.arg(&target).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = spawn(&plan, &mut cmd).expect("spawn");
+        let mut out = String::new();
+        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        let status = child.wait().expect("wait");
+        assert!(status.success(), "cat should run (got {status:?}); the missing target must be skipped");
+        assert_eq!(out.trim(), "SYNTHETIC", "the bound synthetic file shadows the target");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     use std::net::TcpListener;
@@ -778,6 +856,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
         }
     }
 
@@ -865,6 +944,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/cat");
