@@ -30,6 +30,11 @@
 //! - [`spawn`]'s one `CommandExt::pre_exec` call, which registers the
 //!   post-`fork`/pre-`execve` seal hook the spawn sequence installs confinement
 //!   in. Wrapping it here keeps `kennel-spawn` `#![forbid(unsafe_code)]`.
+//! - [`netlink`]'s three socket syscalls (`socket`/`sendto`/`recv`) for
+//!   interface-address management. The `rtnetlink` crate is a large async tree
+//!   (MIT-only) and `ioctl` cannot add a secondary/IPv6 address; the message is
+//!   built as a plain byte buffer (no `transmute`), so only the syscalls are
+//!   `unsafe`.
 //!
 //! So this crate carries `#![allow(unsafe_code)]`. Dependencies are vendored
 //! under §5.5.
@@ -55,6 +60,7 @@
 pub mod landlock;
 pub mod mount;
 pub mod namespace;
+pub mod netlink;
 pub mod path;
 pub mod process;
 pub mod seccomp;
