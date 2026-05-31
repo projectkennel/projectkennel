@@ -65,6 +65,9 @@ pub enum SpawnError {
     },
     /// A syscall during confinement setup or the spawn itself failed.
     Syscall(io::Error),
+    /// The settled policy could not be translated into an enforcement plan
+    /// (e.g. a malformed CIDR).
+    InvalidPolicy(String),
 }
 
 impl core::fmt::Display for SpawnError {
@@ -75,6 +78,7 @@ impl core::fmt::Display for SpawnError {
                 write!(f, "unsubstituted placeholder in {field}: `{value}`")
             }
             Self::Syscall(e) => write!(f, "confinement/spawn syscall failed: {e}"),
+            Self::InvalidPolicy(m) => write!(f, "policy could not be translated: {m}"),
         }
     }
 }
@@ -84,7 +88,7 @@ impl std::error::Error for SpawnError {
         match self {
             Self::Policy(e) => Some(e),
             Self::Syscall(e) => Some(e),
-            Self::UnsubstitutedPlaceholder { .. } => None,
+            Self::UnsubstitutedPlaceholder { .. } | Self::InvalidPolicy(_) => None,
         }
     }
 }
@@ -154,7 +158,7 @@ pub fn substitute(policy: &SettledPolicy, subst: &RuntimeSubstitutions) -> Resul
 pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Result<Plan, SpawnError> {
     let verified = kennel_policy::verify_settled(bytes, keys)?;
     let substituted = substitute(&verified, subst)?;
-    Ok(Plan::from_policy(&substituted, subst.ctx))
+    Plan::from_policy(&substituted, subst.ctx)
 }
 
 /// Spawn `command` confined by `plan`.
@@ -247,6 +251,61 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall)
 }
 
+/// Load the given BPF programs, populate their egress maps, and attach to a cgroup.
+///
+/// Populates each program's maps from `plan` and attaches it to `cgroup`. Returns
+/// the loaded handles, which the caller must keep alive: dropping them closes the
+/// map/program fds (and, with the program, the attachment).
+///
+/// `objects` pairs each program spec with its compiled object bytes (from
+/// [`kennel_bpf::programs`] in production, or compiled in tests). Each program
+/// currently gets its own maps; sharing one map set across all programs is a
+/// later increment, so for now pass the program(s) whose maps you populate
+/// (e.g. `connect4` for the v4 egress allowlist). IPv6 maps and the bind/proxy
+/// maps are not yet populated here.
+///
+/// # Errors
+///
+/// Returns [`SpawnError::Syscall`] if loading, map population, or attach fails.
+pub fn attach_egress(
+    cgroup: std::os::fd::BorrowedFd<'_>,
+    plan: &Plan,
+    objects: &[(&'static kennel_bpf::ProgramSpec, &[u8])],
+) -> Result<Vec<kennel_bpf::Loaded>, SpawnError> {
+    let mut loaded = Vec::new();
+    for (spec, elf) in objects {
+        let l = kennel_bpf::load_program(elf, spec, kennel_bpf::KENNEL_MAPS)
+            .map_err(SpawnError::Syscall)?;
+        populate_egress_maps(&l, plan)?;
+        l.attach(cgroup, spec.attach_type).map_err(SpawnError::Syscall)?;
+        loaded.push(l);
+    }
+    Ok(loaded)
+}
+
+/// Write the plan's egress entries into whichever of a loaded program's maps it
+/// references (`kennel_meta_map`, `allow_v4`, `deny_v4`).
+fn populate_egress_maps(loaded: &kennel_bpf::Loaded, plan: &Plan) -> Result<(), SpawnError> {
+    use kennel_bpf::sys::BPF_ANY;
+
+    if loaded.maps.contains_key("kennel_meta_map") {
+        loaded
+            .update_map("kennel_meta_map", &0u32.to_ne_bytes(), &plan.bpf_meta, BPF_ANY)
+            .map_err(SpawnError::Syscall)?;
+    }
+    if loaded.maps.contains_key("allow_v4") {
+        for (key, value) in &plan.bpf_allow_v4 {
+            loaded.update_map("allow_v4", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+        }
+    }
+    if loaded.maps.contains_key("deny_v4") {
+        for (key, value) in &plan.bpf_deny_v4 {
+            loaded.update_map("deny_v4", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,7 +383,7 @@ mod tests {
     #[test]
     fn plan_translates_policy() {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7);
+        let plan = Plan::from_policy(&p, 7).expect("plan");
 
         // Namespaces: mount/pid/ipc, never net.
         assert_eq!(plan.namespaces, Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC);
@@ -347,6 +406,28 @@ mod tests {
 
         // The filter builds without panicking.
         let _filter = plan.seccomp_filter();
+
+        // BPF egress: both v4 allow rules encode as (lpm_v4_key, allow_entry).
+        // 93.184.216.0/24 :443 TCP -> prefixlen 24, octets, port 443 twice, proto 6.
+        assert_eq!(plan.bpf_allow_v4.len(), 2);
+        let want_key = {
+            let [p0, p1, p2, p3] = 24u32.to_ne_bytes();
+            [p0, p1, p2, p3, 93, 184, 216, 0]
+        };
+        let want_val = {
+            let [a, b] = 443u16.to_ne_bytes();
+            [a, b, a, b, 6, 0, 0, 0]
+        };
+        assert_eq!(plan.bpf_allow_v4.first(), Some(&(want_key, want_val)));
+        // deny_invariant 169.254.169.254/32 any-proto.
+        assert_eq!(plan.bpf_deny_v4.len(), 1);
+        // meta: magic "KNEL", abi 1, ctx 7.
+        let magic = {
+            let [m0, m1, m2, m3] = 0x4B4E_454Cu32.to_ne_bytes();
+            [m0, m1, m2, m3]
+        };
+        assert_eq!(plan.bpf_meta.get(0..4), Some(&magic[..]));
+        assert_eq!(plan.bpf_meta.get(6), Some(&7u8), "ctx byte");
     }
 
     #[test]
@@ -385,6 +466,9 @@ mod tests {
             landlock_net: Vec::new(),
             seccomp_allow: Vec::new(), // empty => no seccomp, isolating the Landlock check
             seccomp_default: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_meta: [0u8; 64],
         }
     }
 
@@ -473,6 +557,9 @@ mod root_tests {
             landlock_net: Vec::new(),
             seccomp_allow: Vec::new(),
             seccomp_default: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_meta: [0u8; 64],
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -499,5 +586,99 @@ mod root_tests {
         let nproc: usize = nproc.parse().unwrap_or(usize::MAX);
         // Host /proc would show hundreds; the isolated namespace shows a handful.
         assert!(nproc < 20, "fresh /proc should show only the namespace's processes (saw {nproc})");
+    }
+
+    use std::net::TcpListener;
+    use std::os::fd::AsFd;
+    use std::path::Path;
+
+    /// A Landlock/seccomp-free plan that only carries BPF egress data: allow
+    /// 127.0.0.1/32 on any protocol/port when `allow_loopback`, else nothing.
+    fn egress_plan(allow_loopback: bool) -> Plan {
+        let allow = if allow_loopback {
+            // 127.0.0.1/32, ports 0..=65535, any protocol.
+            vec![(
+                {
+                    let [p0, p1, p2, p3] = 32u32.to_ne_bytes();
+                    [p0, p1, p2, p3, 127, 0, 0, 1]
+                },
+                {
+                    let [hi0, hi1] = u16::MAX.to_ne_bytes();
+                    [0, 0, hi0, hi1, 0, 0, 0, 0]
+                },
+            )]
+        } else {
+            Vec::new()
+        };
+        Plan {
+            namespaces: Namespaces::empty(),
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            bind_read: Vec::new(),
+            bind_write: Vec::new(),
+            landlock_fs: Vec::new(),
+            landlock_net: Vec::new(),
+            seccomp_allow: Vec::new(),
+            seccomp_default: Action::KillProcess,
+            bpf_allow_v4: allow,
+            bpf_deny_v4: Vec::new(),
+            bpf_meta: [0u8; 64],
+        }
+    }
+
+    /// Connect to `127.0.0.1:port` from inside `cgroup_dir` via a child process
+    /// (no `unsafe` here): the child joins the cgroup, then opens a TCP
+    /// connection with bash's `/dev/tcp`. Returns whether the connect succeeded.
+    fn connect_from_cgroup(cgroup_dir: &Path, port: u16) -> bool {
+        let script = format!(
+            "echo $$ > {}/cgroup.procs && exec 3<>/dev/tcp/127.0.0.1/{port}",
+            cgroup_dir.display()
+        );
+        Command::new("/bin/bash")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run bash")
+            .success()
+    }
+
+    /// Attach connect4 to a fresh cgroup with `plan`'s egress maps, run `body`
+    /// while attached, then remove the cgroup (which also detaches the program).
+    fn with_egress_cgroup(name: &str, plan: &Plan, body: impl FnOnce(&Path)) {
+        let cg_path = PathBuf::from(format!("/sys/fs/cgroup/{name}"));
+        let _ = std::fs::create_dir(&cg_path);
+        let cgfd = std::fs::File::open(&cg_path).expect("open cgroup");
+        let elf = kennel_bpf::programs::object("connect4").expect("embedded connect4 object");
+        let spec = kennel_bpf::KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "connect4")
+            .expect("connect4 spec");
+        let _loaded = attach_egress(cgfd.as_fd(), plan, &[(spec, elf)]).expect("attach_egress");
+        body(&cg_path);
+        // The child has exited, so the cgroup is empty; removing it detaches.
+        let _ = std::fs::remove_dir(&cg_path);
+    }
+
+    #[test]
+    fn bpf_egress_enforces_the_allowlist() {
+        // A listener so a permitted connect *succeeds* (vs. a denied one failing
+        // with EPERM) — success/failure cleanly distinguishes allow from deny.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("addr").port();
+
+        let mut allowed = false;
+        with_egress_cgroup("kennel-spawn-egress-allow", &egress_plan(true), |cg| {
+            allowed = connect_from_cgroup(cg, port);
+        });
+
+        let mut denied = false;
+        with_egress_cgroup("kennel-spawn-egress-deny", &egress_plan(false), |cg| {
+            denied = !connect_from_cgroup(cg, port);
+        });
+
+        assert!(allowed, "connect to an allowlisted destination should be permitted");
+        assert!(denied, "connect with an empty allowlist should be denied (fail closed)");
     }
 }

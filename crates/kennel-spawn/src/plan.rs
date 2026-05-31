@@ -7,17 +7,86 @@
 //! attach, exec) consumes a `Plan`; that step is a separate increment because it
 //! needs a fork/exec primitive in `kennel-syscall` (no `unsafe` lives here).
 
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use kennel_syscall::landlock::{AccessFs, AccessNet};
 use kennel_syscall::namespace::Namespaces;
 use kennel_syscall::seccomp::{Action, Filter};
 
-use kennel_policy::{NetMode, Protocol, SeccompAction, SettledPolicy};
+use kennel_policy::{NetMode, NetRule, Protocol, SeccompAction, SettledPolicy};
+
+use crate::SpawnError;
 
 /// `EPERM` — the errno a seccomp `Errno` default returns. (1 on Linux; named
 /// here to avoid a libc dependency in this pure crate.)
 const EPERM: u16 = 1;
+
+/// `KENNEL_META_MAGIC` ("KNEL") from `bpf/maps.h`.
+const KENNEL_META_MAGIC: u32 = 0x4B4E_454C;
+/// `KENNEL_ABI_VERSION` from `bpf/maps.h`.
+const KENNEL_ABI_VERSION: u16 = 1;
+/// `IPPROTO_TCP` / `IPPROTO_UDP` as the BPF `allow_entry.protocol` byte
+/// (`KENNEL_PROTO_ANY` is 0).
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+
+/// One BPF LPM map entry: an `(lpm_v4_key, allow_entry)` byte pair, both 8 bytes.
+pub type LpmV4Entry = ([u8; 8], [u8; 8]);
+
+/// Encode an `lpm_v4_key { __u32 prefixlen; __u32 addr }` (8 bytes). `addr` is in
+/// network byte order — i.e. the raw octets. (Built by destructuring rather than
+/// slice-indexing, per the workspace's `indexing_slicing` lint.)
+fn lpm_v4_key(addr: [u8; 4], prefix_len: u8) -> [u8; 8] {
+    let [p0, p1, p2, p3] = u32::from(prefix_len).to_ne_bytes();
+    let [a0, a1, a2, a3] = addr;
+    [p0, p1, p2, p3, a0, a1, a2, a3]
+}
+
+/// Encode an `allow_entry { __u16 port_min; __u16 port_max; __u8 protocol;
+/// __u8 flags; __u8 _pad[2] }` (8 bytes). Ports are host order; flags 0.
+const fn allow_entry(port_min: u16, port_max: u16, protocol: Protocol) -> [u8; 8] {
+    let [lo0, lo1] = port_min.to_ne_bytes();
+    let [hi0, hi1] = port_max.to_ne_bytes();
+    let proto = match protocol {
+        Protocol::Any => 0,
+        Protocol::Tcp => IPPROTO_TCP,
+        Protocol::Udp => IPPROTO_UDP,
+    };
+    [lo0, lo1, hi0, hi1, proto, 0, 0, 0]
+}
+
+/// Encode `bpf/maps.h`'s `kennel_meta` (64 bytes); only magic/abi/ctx are set,
+/// the proxy and policy-hash fields are left zero until those land.
+fn meta_bytes(ctx: u8) -> [u8; 64] {
+    let [m0, m1, m2, m3] = KENNEL_META_MAGIC.to_ne_bytes();
+    let [a0, a1] = KENNEL_ABI_VERSION.to_ne_bytes();
+    let [c0, c1] = u16::from(ctx).to_ne_bytes();
+    let head = [m0, m1, m2, m3, a0, a1, c0, c1];
+    let mut m = [0u8; 64];
+    for (dst, src) in m.iter_mut().zip(head.iter()) {
+        *dst = *src;
+    }
+    m
+}
+
+/// Encode the IPv4 rules of `rules` into `(lpm_v4_key, allow_entry)` byte pairs.
+/// IPv6 rules are skipped for now (the v6 maps are a later increment); a CIDR
+/// that is neither a valid v4 nor v6 address is an error.
+fn encode_v4(rules: &[NetRule]) -> Result<Vec<LpmV4Entry>, SpawnError> {
+    let mut out = Vec::new();
+    for r in rules {
+        if let Ok(addr) = r.cidr.parse::<Ipv4Addr>() {
+            out.push((
+                lpm_v4_key(addr.octets(), r.prefix_len),
+                allow_entry(r.port_min, r.port_max, r.protocol),
+            ));
+        } else if r.cidr.parse::<Ipv6Addr>().is_err() {
+            return Err(SpawnError::InvalidPolicy(format!("invalid CIDR address `{}`", r.cidr)));
+        }
+    }
+    Ok(out)
+}
 
 /// The Landlock access a read-granted path subtree receives: read files and
 /// directories, and execute.
@@ -60,14 +129,25 @@ pub struct Plan {
     pub seccomp_allow: Vec<i64>,
     /// The seccomp action for syscalls not on the allowlist.
     pub seccomp_default: Action,
+    /// BPF `allow_v4` LPM entries for the egress allowlist. IPv6 entries are a
+    /// later increment.
+    pub bpf_allow_v4: Vec<LpmV4Entry>,
+    /// BPF `deny_v4` LPM entries (invariant deny CIDRs), consulted deny-first.
+    pub bpf_deny_v4: Vec<LpmV4Entry>,
+    /// The `kennel_meta` map value (64 bytes) for `kennel_meta_map[0]`.
+    pub bpf_meta: [u8; 64],
 }
 
 impl Plan {
     /// Build the plan from a settled policy whose deferred placeholders have
     /// already been substituted. `ctx` is the kennel's context byte, used to
-    /// locate its cgroup.
-    #[must_use]
-    pub fn from_policy(policy: &SettledPolicy, ctx: u8) -> Self {
+    /// locate its cgroup and stamp the BPF metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::InvalidPolicy`] if a network rule's CIDR is not a
+    /// valid IPv4 or IPv6 address.
+    pub fn from_policy(policy: &SettledPolicy, ctx: u8) -> Result<Self, SpawnError> {
         let ep = &policy.effective_policy;
 
         // Mount/PID/IPC isolation; never NET (see field docs).
@@ -105,7 +185,7 @@ impl Plan {
             SeccompAction::KillProcess => Action::KillProcess,
         };
 
-        Self {
+        Ok(Self {
             namespaces,
             cgroup,
             bind_read,
@@ -114,7 +194,10 @@ impl Plan {
             landlock_net,
             seccomp_allow: ep.seccomp.allow.clone(),
             seccomp_default,
-        }
+            bpf_allow_v4: encode_v4(&ep.net.allow)?,
+            bpf_deny_v4: encode_v4(&ep.net.deny_invariant)?,
+            bpf_meta: meta_bytes(ctx),
+        })
     }
 
     /// Build the seccomp filter this plan describes. Pure — the filter is not

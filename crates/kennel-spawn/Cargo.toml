@@ -9,13 +9,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+kennel-bpf = { path = "../kennel-bpf" }
 kennel-policy = { path = "../kennel-policy" }
 kennel-syscall = { path = "../kennel-syscall" }
 
 [features]
-# Tests that need privilege (namespace unshare). Run via:
+# Tests that need privilege (namespace unshare, cgroup BPF attach). Pulls the
+# embedded BPF programs (clang at build time). Run via:
 #   sudo -E env PATH=$PATH cargo test -p kennel-spawn --features root-tests
-root-tests = []
+root-tests = ["kennel-bpf/embed-programs"]
 
 [lints]
 workspace = true
