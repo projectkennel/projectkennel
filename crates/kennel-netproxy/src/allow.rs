@@ -1,0 +1,699 @@
+//! The egress allowlist evaluator (`docs/07-3-network.md` §7.3.4).
+//!
+//! Pure, network-free policy logic: given a destination the client asked for,
+//! decide whether the proxy may connect to it. The evaluator is split from the
+//! server (`src/server.rs`) so it can be exhaustively unit-tested without a
+//! socket, and so the one place egress decisions are made is small and
+//! auditable.
+//!
+//! # Two-phase evaluation
+//!
+//! A client presents either a literal address (SOCKS5 `ATYP` v4/v6) or a name
+//! (SOCKS5 `socks5h`, HTTP `CONNECT`/absolute-form host). A literal address is
+//! decided in one step. A name is decided in two:
+//!
+//! 1. [`Ruleset::decide_request`] checks the name against the allow rules. If it
+//!    clears, the result is [`RequestDecision::Resolve`] — resolve the name under
+//!    DNS policy, *then*
+//! 2. [`Ruleset::decide_resolved`] re-checks each resolved address against the
+//!    categorical deny rules before the proxy connects.
+//!
+//! The second step is the rebinding defence: a permitted name that resolves to a
+//! denied address (cloud metadata, link-local, host loopback) is still refused.
+//!
+//! # Threat bearing
+//!
+//! T8 (exfiltration via an allowed destination): the per-destination allowlist is
+//! the surface that constrains where an allowed workload may reach. The
+//! deny-before-allow ordering and the resolved-address re-check are what stop a
+//! permissive allow rule, or a hostile resolver, from reaching an
+//! infrastructure-sensitive address.
+
+use std::net::IpAddr;
+
+/// Transport of an actual proxied request. A live request is always concrete TCP
+/// or UDP; the `any` wildcard exists only on rules (see [`RuleProtocol`]), never
+/// on a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// TCP.
+    Tcp,
+    /// UDP (SOCKS5 `UDP ASSOCIATE`).
+    Udp,
+}
+
+/// The protocol selector on a rule: a specific transport, or `any`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleProtocol {
+    /// Matches any transport.
+    Any,
+    /// Matches TCP only.
+    Tcp,
+    /// Matches UDP only.
+    Udp,
+}
+
+impl RuleProtocol {
+    /// Whether this selector admits `transport`.
+    #[must_use]
+    pub fn admits(self, transport: Transport) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Tcp => transport == Transport::Tcp,
+            Self::Udp => transport == Transport::Udp,
+        }
+    }
+}
+
+/// The destination as the client presented it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Destination {
+    /// A DNS name (`socks5h`, HTTP host). Resolved by the proxy under DNS policy
+    /// after it clears the name allowlist; the resolved address is re-checked.
+    Name(String),
+    /// A literal address the client connected to directly (SOCKS5 `ATYP` v4/v6).
+    Addr(IpAddr),
+}
+
+/// An IP network: a base address and a prefix length.
+///
+/// Matching is byte-wise and shares no arithmetic with the BPF LPM encoder in
+/// `kennel-spawn`; the two are independent implementations of the same notion,
+/// which is deliberate (the BPF rules and the proxy rules are enforced by
+/// different mechanisms and must each be correct on their own).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cidr {
+    base: IpAddr,
+    prefix_len: u8,
+}
+
+/// Error constructing a [`Cidr`]: the prefix length exceeds the address family's
+/// maximum (32 for IPv4, 128 for IPv6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrefixTooLong {
+    /// The maximum prefix length for the address family.
+    pub max: u8,
+    /// The prefix length that was supplied.
+    pub got: u8,
+}
+
+impl std::fmt::Display for PrefixTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "prefix length {} exceeds the maximum {} for the address family",
+            self.got, self.max
+        )
+    }
+}
+
+impl std::error::Error for PrefixTooLong {}
+
+impl Cidr {
+    /// Construct a CIDR from a base address and prefix length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PrefixTooLong`] if `prefix_len` exceeds 32 for an IPv4 base or
+    /// 128 for an IPv6 base.
+    pub const fn new(base: IpAddr, prefix_len: u8) -> Result<Self, PrefixTooLong> {
+        let max = match base {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix_len > max {
+            return Err(PrefixTooLong {
+                max,
+                got: prefix_len,
+            });
+        }
+        Ok(Self { base, prefix_len })
+    }
+
+    /// Whether `addr` falls within this network. A family mismatch (v4 address
+    /// against a v6 network, or vice versa) is never a match.
+    #[must_use]
+    pub fn contains(&self, addr: IpAddr) -> bool {
+        match (self.base, addr) {
+            (IpAddr::V4(base), IpAddr::V4(other)) => {
+                octets_match(&base.octets(), &other.octets(), self.prefix_len)
+            }
+            (IpAddr::V6(base), IpAddr::V6(other)) => {
+                octets_match(&base.octets(), &other.octets(), self.prefix_len)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether the top `prefix_len` bits of `base` and `addr` are equal. The two
+/// slices must be the same length (both 4 or both 16 octets); a length mismatch
+/// compares only the shared prefix and is never reached for real addresses.
+fn octets_match(base: &[u8], addr: &[u8], prefix_len: u8) -> bool {
+    let mut bits_remaining = u32::from(prefix_len);
+    for (b, a) in base.iter().zip(addr.iter()) {
+        if bits_remaining == 0 {
+            return true;
+        }
+        if bits_remaining >= 8 {
+            if b != a {
+                return false;
+            }
+            bits_remaining = bits_remaining.saturating_sub(8);
+        } else {
+            let mask = top_bits_mask(bits_remaining);
+            return (b & mask) == (a & mask);
+        }
+    }
+    true
+}
+
+/// A byte mask selecting the top `n` bits, for `n` in `1..=7`. Built by lookup
+/// rather than by shifting, so the function shares no arithmetic that the
+/// `arithmetic_side_effects` lint would flag.
+const fn top_bits_mask(n: u32) -> u8 {
+    match n {
+        1 => 0b1000_0000,
+        2 => 0b1100_0000,
+        3 => 0b1110_0000,
+        4 => 0b1111_0000,
+        5 => 0b1111_1000,
+        6 => 0b1111_1100,
+        7 => 0b1111_1110,
+        _ => 0b0000_0000,
+    }
+}
+
+/// The destination clause of an allow rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Matcher {
+    /// Match a DNS name, compared case-insensitively (ASCII). A name request
+    /// matches; a literal-address request does not.
+    Name(String),
+    /// Match any address within a network. A literal-address request matches if
+    /// the address is inside; a name request is matched only after resolution.
+    Cidr(Cidr),
+}
+
+/// One allow rule (`[[net.allow]]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rule {
+    /// What destinations this rule covers.
+    pub matcher: Matcher,
+    /// Permitted ports. Empty means "any port".
+    pub ports: Vec<u16>,
+    /// Permitted transport.
+    pub protocol: RuleProtocol,
+}
+
+/// One categorical deny rule (`[[net.deny]]`), evaluated before any allow rule.
+/// CIDR-only, with an optional port set (empty means "all ports").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DenyRule {
+    /// The network this rule forbids.
+    pub cidr: Cidr,
+    /// Ports the rule applies to. Empty means all ports.
+    pub ports: Vec<u16>,
+}
+
+/// The kennel's relationship to the network (`docs/07-3-network.md` §7.3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetMode {
+    /// No egress at all.
+    None,
+    /// Egress only to allowlisted destinations.
+    Constrained,
+    /// Egress to anywhere not categorically denied.
+    Open,
+}
+
+/// The resolved egress allowlist the proxy enforces: a mode plus the allow and
+/// deny rules. This is what `src/server.rs` consults for every request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ruleset {
+    /// The network mode.
+    pub mode: NetMode,
+    /// Allow rules (consulted only after the deny rules in `Constrained`).
+    pub allow: Vec<Rule>,
+    /// Categorical deny rules (consulted first, in every mode but `None`).
+    pub deny: Vec<DenyRule>,
+}
+
+/// Why a request was denied. Carried into the audit record and the client-facing
+/// error so a refusal is actionable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenyReason {
+    /// Network mode is `none`: no egress at all.
+    ModeNone,
+    /// The destination matched a categorical deny rule.
+    DeniedByRule,
+    /// No allow rule matched (`Constrained` mode).
+    NotAllowed,
+}
+
+/// The outcome of evaluating a request the proxy may connect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// Permitted; connect.
+    Allow,
+    /// Denied, with the reason.
+    Deny(DenyReason),
+}
+
+/// The outcome of evaluating a client request, before any DNS resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestDecision {
+    /// A literal-address (or otherwise fully decided) request is permitted.
+    Allow,
+    /// A named request is authorised by name. Resolve it under DNS policy, then
+    /// re-check each resolved address with [`Ruleset::decide_resolved`].
+    Resolve,
+    /// Denied, with the reason.
+    Deny(DenyReason),
+}
+
+impl Ruleset {
+    /// Decide a request as the client presented it.
+    ///
+    /// For a literal address this is the final decision. For a name, a
+    /// [`RequestDecision::Resolve`] means "the name is authorised; resolve it,
+    /// then call [`Self::decide_resolved`] on each address".
+    #[must_use]
+    // allow: structure-phase stub; the trivial body is const-eligible but the
+    // implementing (feat:) commit's body iterates the rule vecs and is not.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn decide_request(
+        &self,
+        dest: &Destination,
+        port: u16,
+        transport: Transport,
+    ) -> RequestDecision {
+        // Stub (structure phase): fail closed until the algorithm lands.
+        let _ = (dest, port, transport, &self.allow, &self.deny, self.mode);
+        RequestDecision::Deny(DenyReason::NotAllowed)
+    }
+
+    /// Decide a single resolved address for a name that already cleared
+    /// [`Self::decide_request`]. The categorical deny rules always apply here;
+    /// this is the rebinding defence.
+    #[must_use]
+    // allow: structure-phase stub; see decide_request.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn decide_resolved(&self, addr: IpAddr, port: u16, transport: Transport) -> Decision {
+        // Stub (structure phase): fail closed until the algorithm lands.
+        let _ = (addr, port, transport, &self.allow, &self.deny, self.mode);
+        Decision::Deny(DenyReason::NotAllowed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn v4(s: &str) -> IpAddr {
+        IpAddr::V4(s.parse::<Ipv4Addr>().expect("v4 literal"))
+    }
+
+    fn v6(s: &str) -> IpAddr {
+        IpAddr::V6(s.parse::<Ipv6Addr>().expect("v6 literal"))
+    }
+
+    fn cidr(addr: &str, prefix: u8) -> Cidr {
+        Cidr::new(addr.parse::<IpAddr>().expect("addr literal"), prefix).expect("valid cidr")
+    }
+
+    // ---- Cidr (structure) ----
+
+    #[test]
+    fn cidr_rejects_overlong_prefix() {
+        assert_eq!(
+            Cidr::new(v4("10.0.0.0"), 33),
+            Err(PrefixTooLong { max: 32, got: 33 })
+        );
+        assert_eq!(
+            Cidr::new(v6("fd00::"), 129),
+            Err(PrefixTooLong { max: 128, got: 129 })
+        );
+    }
+
+    #[test]
+    fn cidr_accepts_boundary_prefixes() {
+        assert!(Cidr::new(v4("10.0.0.0"), 32).is_ok());
+        assert!(Cidr::new(v4("0.0.0.0"), 0).is_ok());
+        assert!(Cidr::new(v6("fd00::"), 128).is_ok());
+    }
+
+    #[test]
+    fn cidr_v4_contains_within_and_excludes_outside() {
+        let net = cidr("10.1.2.0", 24);
+        assert!(net.contains(v4("10.1.2.0")));
+        assert!(net.contains(v4("10.1.2.255")));
+        assert!(!net.contains(v4("10.1.3.0")));
+        assert!(!net.contains(v4("10.1.1.255")));
+    }
+
+    #[test]
+    fn cidr_host_route_matches_only_itself() {
+        let net = cidr("169.254.169.254", 32);
+        assert!(net.contains(v4("169.254.169.254")));
+        assert!(!net.contains(v4("169.254.169.253")));
+    }
+
+    #[test]
+    fn cidr_default_route_matches_everything_in_family() {
+        let net = cidr("0.0.0.0", 0);
+        assert!(net.contains(v4("8.8.8.8")));
+        assert!(net.contains(v4("192.168.0.1")));
+        // ...but not the other family.
+        assert!(!net.contains(v6("fd00::1")));
+    }
+
+    #[test]
+    fn cidr_v6_prefix_matches() {
+        let net = cidr("fd00:ec2::", 32);
+        assert!(net.contains(v6("fd00:ec2::254")));
+        assert!(!net.contains(v6("fd00:ec3::1")));
+    }
+
+    #[test]
+    fn cidr_family_mismatch_never_matches() {
+        assert!(!cidr("10.0.0.0", 8).contains(v6("fd00::1")));
+        assert!(!cidr("fd00::", 8).contains(v4("10.0.0.1")));
+    }
+
+    // ---- helpers to build a ruleset ----
+
+    fn name_rule(name: &str, ports: &[u16]) -> Rule {
+        Rule {
+            matcher: Matcher::Name(name.to_owned()),
+            ports: ports.to_vec(),
+            protocol: RuleProtocol::Tcp,
+        }
+    }
+
+    fn cidr_rule(addr: &str, prefix: u8, ports: &[u16]) -> Rule {
+        Rule {
+            matcher: Matcher::Cidr(cidr(addr, prefix)),
+            ports: ports.to_vec(),
+            protocol: RuleProtocol::Tcp,
+        }
+    }
+
+    fn deny(addr: &str, prefix: u8) -> DenyRule {
+        DenyRule {
+            cidr: cidr(addr, prefix),
+            ports: Vec::new(),
+        }
+    }
+
+    const METADATA: &str = "169.254.169.254";
+
+    // ---- mode none ----
+
+    #[test]
+    fn mode_none_denies_a_name() {
+        let rs = Ruleset {
+            mode: NetMode::None,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("api.openai.com".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Deny(DenyReason::ModeNone)
+        );
+    }
+
+    #[test]
+    fn mode_none_denies_a_literal_address() {
+        let rs = Ruleset {
+            mode: NetMode::None,
+            allow: vec![],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("8.8.8.8")), 443, Transport::Tcp),
+            RequestDecision::Deny(DenyReason::ModeNone)
+        );
+    }
+
+    // ---- constrained ----
+
+    #[test]
+    fn constrained_allowlisted_name_resolves() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("api.openai.com".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Resolve
+        );
+    }
+
+    #[test]
+    fn constrained_name_match_is_case_insensitive() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("API.OpenAI.COM".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Resolve
+        );
+    }
+
+    #[test]
+    fn constrained_unlisted_name_denied() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("evil.example".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Deny(DenyReason::NotAllowed)
+        );
+    }
+
+    #[test]
+    fn constrained_name_wrong_port_denied() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("api.openai.com".to_owned()),
+                8080,
+                Transport::Tcp
+            ),
+            RequestDecision::Deny(DenyReason::NotAllowed)
+        );
+    }
+
+    #[test]
+    fn constrained_name_wrong_protocol_denied() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("api.openai.com".to_owned()),
+                443,
+                Transport::Udp
+            ),
+            RequestDecision::Deny(DenyReason::NotAllowed)
+        );
+    }
+
+    #[test]
+    fn constrained_empty_ports_means_any_port() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("git.example", &[])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("git.example".to_owned()),
+                22,
+                Transport::Tcp
+            ),
+            RequestDecision::Resolve
+        );
+    }
+
+    #[test]
+    fn constrained_literal_in_allow_cidr_is_allowed() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![cidr_rule("10.0.0.0", 24, &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("10.0.0.5")), 443, Transport::Tcp),
+            RequestDecision::Allow
+        );
+    }
+
+    #[test]
+    fn constrained_literal_outside_allow_cidr_denied() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![cidr_rule("10.0.0.0", 24, &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("10.0.1.5")), 443, Transport::Tcp),
+            RequestDecision::Deny(DenyReason::NotAllowed)
+        );
+    }
+
+    #[test]
+    fn constrained_literal_name_rule_does_not_match_an_address() {
+        // A name rule must not authorise a literal-address request.
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("8.8.8.8")), 443, Transport::Tcp),
+            RequestDecision::Deny(DenyReason::NotAllowed)
+        );
+    }
+
+    // ---- deny-before-allow ----
+
+    #[test]
+    fn deny_overrides_allow_for_a_literal_address() {
+        // The same /24 is both allowed and (more specifically) denied.
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![cidr_rule("10.0.0.0", 24, &[443])],
+            deny: vec![deny("10.0.0.254", 32)],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("10.0.0.254")), 443, Transport::Tcp),
+            RequestDecision::Deny(DenyReason::DeniedByRule)
+        );
+        // a sibling address in the allow range, not denied, still allowed.
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("10.0.0.5")), 443, Transport::Tcp),
+            RequestDecision::Allow
+        );
+    }
+
+    // ---- open ----
+
+    #[test]
+    fn open_allows_an_undenied_literal() {
+        let rs = Ruleset {
+            mode: NetMode::Open,
+            allow: vec![],
+            deny: vec![deny(METADATA, 32)],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("8.8.8.8")), 443, Transport::Tcp),
+            RequestDecision::Allow
+        );
+    }
+
+    #[test]
+    fn open_denies_a_denied_literal() {
+        let rs = Ruleset {
+            mode: NetMode::Open,
+            allow: vec![],
+            deny: vec![deny(METADATA, 32)],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4(METADATA)), 80, Transport::Tcp),
+            RequestDecision::Deny(DenyReason::DeniedByRule)
+        );
+    }
+
+    #[test]
+    fn open_name_resolves() {
+        let rs = Ruleset {
+            mode: NetMode::Open,
+            allow: vec![],
+            deny: vec![deny(METADATA, 32)],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("anything.example".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Resolve
+        );
+    }
+
+    // ---- decide_resolved (the rebinding defence) ----
+
+    #[test]
+    fn resolved_address_passing_deny_is_allowed() {
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![deny(METADATA, 32)],
+        };
+        assert_eq!(
+            rs.decide_resolved(v4("203.0.113.5"), 443, Transport::Tcp),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn resolved_metadata_address_is_denied_even_for_an_allowed_name() {
+        // The name cleared decide_request, but it resolved to a denied address.
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.openai.com", &[443])],
+            deny: vec![deny(METADATA, 32)],
+        };
+        assert_eq!(
+            rs.decide_resolved(v4(METADATA), 443, Transport::Tcp),
+            Decision::Deny(DenyReason::DeniedByRule)
+        );
+    }
+
+    #[test]
+    fn resolved_address_in_open_mode_only_checks_deny() {
+        let rs = Ruleset {
+            mode: NetMode::Open,
+            allow: vec![],
+            deny: vec![deny(METADATA, 32)],
+        };
+        assert_eq!(
+            rs.decide_resolved(v4("8.8.8.8"), 443, Transport::Tcp),
+            Decision::Allow
+        );
+        assert_eq!(
+            rs.decide_resolved(v4(METADATA), 80, Transport::Tcp),
+            Decision::Deny(DenyReason::DeniedByRule)
+        );
+    }
+}

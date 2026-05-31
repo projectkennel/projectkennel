@@ -66,3 +66,5 @@
 //! `CODING-STANDARDS.md` Appendix A.
 
 #![forbid(unsafe_code)]
+
+pub mod allow;
