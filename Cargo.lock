@@ -55,6 +55,9 @@ dependencies = [
 [[package]]
 name = "kennel-privhelper"
 version = "0.0.0"
+dependencies = [
+ "kennel-syscall",
+]
 
 [[package]]
 name = "kennel-spawn"

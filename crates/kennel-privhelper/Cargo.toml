@@ -8,6 +8,14 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[dependencies]
+kennel-syscall = { path = "../kennel-syscall" }
+
+[features]
+# Tests that need privilege (real cgroup/address ops). Run via:
+#   sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features root-tests
+root-tests = []
+
 [lints]
 workspace = true
 
