@@ -1,0 +1,17 @@
+# Project Kennel control socket (systemd *user* unit).
+#
+# Install per-user:  systemctl --user enable --now kenneld.socket
+# Socket activation starts kenneld on the first `kennel run` and the daemon then
+# persists for the session. Being a user unit, it runs inside user@<uid>.service,
+# which is where the cgroup delegation kenneld relies on is available.
+[Unit]
+Description=Project Kennel control socket
+
+[Socket]
+# %t is the user's runtime directory ($XDG_RUNTIME_DIR, i.e. /run/user/<uid>).
+# Must match kenneld::socket::socket_path().
+ListenStream=%t/kennel/control.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

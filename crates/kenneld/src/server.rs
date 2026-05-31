@@ -381,6 +381,46 @@ mod tests {
     }
 
     #[test]
+    fn handle_connection_runs_a_kennel_over_a_real_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let s = shared();
+        let dir = std::env::temp_dir().join(format!("kenneld-conn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("control.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+
+        // Client: connect, send a Start (framed + no fds) via scm, read the two
+        // responses (Started, then Exited).
+        let client = std::thread::spawn(move || {
+            let mut conn = UnixStream::connect(&path).expect("connect");
+            let request = Request::Start(StartRequest {
+                policy: PathBuf::from("/dev/null"),
+                kennel: "sock".to_owned(),
+                argv: vec!["/bin/true".to_owned()],
+                cwd: PathBuf::from("/"),
+            });
+            let mut framed = Vec::new();
+            control::write_frame(&mut framed, &request.encode()).expect("frame");
+            kennel_syscall::scm::send_with_fds(conn.as_fd(), &framed, &[]).expect("send");
+            let started = control::recv_response(&mut conn).expect("started");
+            let exited = control::recv_response(&mut conn).expect("exited");
+            (started, exited)
+        });
+
+        // Server: accept one connection and handle it (this drives recv_with_fds,
+        // the framing parse, dispatch, and run_kennel end to end).
+        let (mut conn, _) = listener.accept().expect("accept");
+        handle_connection(&s, &mut conn);
+
+        let (started, exited) = client.join().expect("client thread");
+        assert!(matches!(started, Response::Started { ctx: 1, .. }), "got {started:?}");
+        assert_eq!(exited, Response::Exited { code: 0 });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn run_kennel_reports_started_then_exited() {
         let s = shared();
         let (client, mut server) = UnixStream::pair().expect("socketpair");

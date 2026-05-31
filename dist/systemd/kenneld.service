@@ -1,0 +1,18 @@
+# Project Kennel orchestrator (systemd *user* unit), socket-activated.
+#
+# Started on demand by kenneld.socket; persists for the session. Runs as the
+# user (no elevated privilege) inside user@<uid>.service so it can create and
+# join the per-kennel cgroups; privilege is borrowed transiently through the
+# setuid privhelper.
+[Unit]
+Description=Project Kennel orchestrator
+Requires=kenneld.socket
+After=kenneld.socket
+
+[Service]
+Type=simple
+ExecStart=/opt/kennel/bin/kenneld
+# Confine the daemon's own filesystem footprint; it needs the runtime dir (the
+# socket), /etc/kennel (allocation + trust store), and the privhelper.
+NoNewPrivileges=no
+Restart=on-failure

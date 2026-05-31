@@ -58,6 +58,7 @@
 #![allow(unsafe_code)]
 
 pub mod landlock;
+pub mod listenfd;
 pub mod mount;
 pub mod namespace;
 pub mod netlink;
