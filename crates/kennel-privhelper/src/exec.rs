@@ -8,7 +8,7 @@
 
 use std::ffi::CString;
 
-use crate::validate::{validate_addr, validate_cgroup, AddrRequest, CgroupRequest, Refusal, ReservedScope};
+use crate::validate::{validate_addr, AddrRequest, Refusal, ReservedScope};
 use crate::wire::{EgressPayload, Op, Request, Response};
 
 /// Stable refusal codes carried on the wire (`Response::refusal`).
@@ -18,9 +18,6 @@ const fn refusal_code(r: &Refusal) -> u8 {
         Refusal::AddrOutOfScope => 2,
         Refusal::InterfaceNotAllowed => 3,
         Refusal::InterfaceNameTooLong => 4,
-        Refusal::CgroupPathNotAbsolute => 5,
-        Refusal::CgroupPathTraversal => 6,
-        Refusal::CgroupPathOutsidePrefix => 7,
     }
 }
 
@@ -57,7 +54,6 @@ pub fn perform(req: &Request, egress: Option<&EgressPayload>, scope: Option<&Res
     };
     match req.op {
         Op::AddAddr | Op::DelAddr => perform_addr(req, scope),
-        Op::CreateCgroup | Op::DeleteCgroup => perform_cgroup(req, scope),
         // SetupEgress needs the variable payload; without it the request is malformed.
         // The scope still gates *whether* the caller may act (the None check above);
         // the cgroup itself is gated by directory ownership inside perform_egress.
@@ -186,19 +182,3 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     }
 }
 
-fn perform_cgroup(req: &Request, scope: &ReservedScope) -> Response {
-    let creq = CgroupRequest { path: req.cgroup_path.clone() };
-    if let Err(r) = validate_cgroup(&creq, scope) {
-        return Response::refused(refusal_code(&r));
-    }
-    // Create the leaf (and any missing ancestors, all under the validated
-    // prefix); delete only the leaf.
-    let result = match req.op {
-        Op::CreateCgroup => std::fs::create_dir_all(&req.cgroup_path),
-        _ => std::fs::remove_dir(&req.cgroup_path),
-    };
-    match result {
-        Ok(()) => Response::ok(),
-        Err(e) => Response::internal(errno_of(&e)),
-    }
-}

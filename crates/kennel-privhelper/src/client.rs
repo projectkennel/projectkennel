@@ -68,24 +68,6 @@ pub fn setup_egress(helper: &Path, cgroup: PathBuf, payload: &EgressPayload) -> 
     exchange(helper, &bytes)
 }
 
-/// Ask the helper to create the cgroup at `path` (in the user's namespace).
-///
-/// # Errors
-///
-/// As [`invoke`].
-pub fn create_cgroup(helper: &Path, path: PathBuf) -> io::Result<Response> {
-    invoke(helper, &cgroup_request(Op::CreateCgroup, path))
-}
-
-/// Ask the helper to delete the cgroup at `path`.
-///
-/// # Errors
-///
-/// As [`invoke`].
-pub fn delete_cgroup(helper: &Path, path: PathBuf) -> io::Result<Response> {
-    invoke(helper, &cgroup_request(Op::DeleteCgroup, path))
-}
-
 /// Ask the helper to add `addr/prefix` on `interface` for kennel `ctx`.
 ///
 /// # Errors

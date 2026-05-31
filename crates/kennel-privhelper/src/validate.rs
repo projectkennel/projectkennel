@@ -24,10 +24,11 @@
 //!   The prefix length is fixed (28 / 64); anything else is refused.
 //! - The interface is `lo` or a dummy named `<namespace>-<id>` for the calling
 //!   user, within the kernel's 15-character interface-name limit.
-//! - cgroup paths are absolute, free of `..` traversal, and strictly under the
-//!   user's `/sys/fs/cgroup/<namespace>/`. The check is path-component aware, not
-//!   a string prefix, so a sibling namespace (`/sys/fs/cgroup/<namespace>-evil/`)
-//!   is refused.
+//!
+//! cgroups are no longer validated here: kenneld creates and manages them
+//! unprivileged within its systemd-delegated subtree, and the egress op gates
+//! its target cgroup by **directory ownership** (`exec::attach_egress_programs`),
+//! not by a namespace path.
 //!
 //! # Threat bearing
 //!
@@ -37,11 +38,6 @@
 //! independent; it is exercised by the unit tests below on any host.
 
 use std::net::IpAddr;
-use std::path::{Component, Path};
-
-/// The first two path components of the cgroup v2 mount the helper manages
-/// (`/sys/fs/cgroup`). The per-user namespace component follows.
-const CGROUP_MOUNT: [&str; 3] = ["sys", "fs", "cgroup"];
 
 /// The kernel interface-name length limit (`IFNAMSIZ - 1`).
 const IFNAME_MAX: usize = 15;
@@ -111,13 +107,6 @@ pub struct AddrRequest {
     pub prefix: u8,
 }
 
-/// A request to create or delete a per-kennel cgroup.
-#[derive(Debug, Clone)]
-pub struct CgroupRequest {
-    /// The cgroup path to operate on.
-    pub path: std::path::PathBuf,
-}
-
 /// Why a request was refused. Each variant names a specific out-of-scope
 /// condition so the refusal is actionable in the audit log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,12 +124,6 @@ pub enum Refusal {
     InterfaceNotAllowed,
     /// The interface name exceeds the kernel's 15-character limit.
     InterfaceNameTooLong,
-    /// The cgroup path is not absolute.
-    CgroupPathNotAbsolute,
-    /// The cgroup path contains a `..` traversal component.
-    CgroupPathTraversal,
-    /// The cgroup path is not strictly beneath the user's `/sys/fs/cgroup/<namespace>/`.
-    CgroupPathOutsidePrefix,
 }
 
 impl std::fmt::Display for Refusal {
@@ -165,16 +148,6 @@ impl std::fmt::Display for Refusal {
                 write!(
                     f,
                     "interface name exceeds the {IFNAME_MAX}-character kernel limit"
-                )
-            }
-            Self::CgroupPathNotAbsolute => write!(f, "cgroup path must be absolute"),
-            Self::CgroupPathTraversal => {
-                write!(f, "cgroup path must not contain `..` components")
-            }
-            Self::CgroupPathOutsidePrefix => {
-                write!(
-                    f,
-                    "cgroup path must be strictly beneath the user's /sys/fs/cgroup/<namespace>/"
                 )
             }
         }
@@ -234,17 +207,6 @@ pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Ref
     }
 }
 
-/// Validate a cgroup request: absolute, traversal-free, strictly beneath the
-/// caller's `/sys/fs/cgroup/<namespace>/`.
-///
-/// # Errors
-///
-/// Returns a [`Refusal`] if the path is relative, contains a `..` component,
-/// or does not name a location strictly beneath the user's cgroup namespace.
-pub fn validate_cgroup(req: &CgroupRequest, scope: &ReservedScope) -> Result<(), Refusal> {
-    cgroup_path_ok(&req.path, &scope.namespace)
-}
-
 /// Check that an interface name is `lo` or a well-formed `<namespace>-<id>`
 /// dummy for the calling user.
 fn validate_interface(interface: &str, scope: &ReservedScope) -> Result<(), Refusal> {
@@ -270,47 +232,10 @@ fn validate_interface(interface: &str, scope: &ReservedScope) -> Result<(), Refu
     Err(Refusal::InterfaceNotAllowed)
 }
 
-/// Check that a path's components are exactly `/sys/fs/cgroup/<namespace>/…` with
-/// at least one component beneath the namespace. Component-aware, not
-/// string-prefix, so `/sys/fs/cgroup/kennel-alice-evil/...` is refused for the
-/// `kennel-alice` namespace.
-fn cgroup_path_ok(path: &Path, namespace: &str) -> Result<(), Refusal> {
-    let mut components = path.components();
-    if components.next() != Some(Component::RootDir) {
-        return Err(Refusal::CgroupPathNotAbsolute);
-    }
-    let mut normals: Vec<&str> = Vec::new();
-    for component in components {
-        match component {
-            Component::ParentDir => return Err(Refusal::CgroupPathTraversal),
-            Component::CurDir => {}
-            Component::Normal(part) => match part.to_str() {
-                Some(part) => normals.push(part),
-                // Non-UTF-8 cannot match our ASCII prefix; out of scope.
-                None => return Err(Refusal::CgroupPathOutsidePrefix),
-            },
-            // A second root or a Windows prefix mid-path is not ours.
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(Refusal::CgroupPathOutsidePrefix);
-            }
-        }
-    }
-    // The required prefix is /sys/fs/cgroup/<namespace>.
-    let [m0, m1, m2] = CGROUP_MOUNT;
-    let prefix: [&str; 4] = [m0, m1, m2, namespace];
-    let begins_with_prefix = normals.iter().take(prefix.len()).eq(prefix.iter());
-    if normals.len() > prefix.len() && begins_with_prefix {
-        Ok(())
-    } else {
-        Err(Refusal::CgroupPathOutsidePrefix)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
-    use std::path::PathBuf;
 
     const TAG: u16 = 42;
     const GID: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x01];
@@ -344,12 +269,6 @@ mod tests {
             interface: interface.to_owned(),
             addr,
             prefix,
-        }
-    }
-
-    fn cg(path: &str) -> CgroupRequest {
-        CgroupRequest {
-            path: PathBuf::from(path),
         }
     }
 
@@ -505,59 +424,4 @@ mod tests {
         );
     }
 
-    // ---- validate_cgroup: success ----
-
-    #[test]
-    fn cgroup_under_prefix_is_ok() {
-        assert!(validate_cgroup(&cg("/sys/fs/cgroup/kennel/ai-coding"), &scope()).is_ok());
-    }
-
-    #[test]
-    fn nested_cgroup_is_ok() {
-        assert!(validate_cgroup(&cg("/sys/fs/cgroup/kennel/ai-coding/npm"), &scope()).is_ok());
-    }
-
-    // ---- validate_cgroup: refusals ----
-
-    #[test]
-    fn relative_cgroup_is_refused() {
-        assert_eq!(
-            validate_cgroup(&cg("sys/fs/cgroup/kennel/x"), &scope()),
-            Err(Refusal::CgroupPathNotAbsolute)
-        );
-    }
-
-    #[test]
-    fn cgroup_outside_prefix_is_refused() {
-        assert_eq!(
-            validate_cgroup(&cg("/etc/passwd"), &scope()),
-            Err(Refusal::CgroupPathOutsidePrefix)
-        );
-    }
-
-    #[test]
-    fn cgroup_prefix_confusion_is_refused() {
-        // String-prefix bug bait: starts with the prefix string but is a
-        // different directory.
-        assert_eq!(
-            validate_cgroup(&cg("/sys/fs/cgroup/kennel-evil/x"), &scope()),
-            Err(Refusal::CgroupPathOutsidePrefix)
-        );
-    }
-
-    #[test]
-    fn bare_prefix_with_no_child_is_refused() {
-        assert_eq!(
-            validate_cgroup(&cg("/sys/fs/cgroup/kennel"), &scope()),
-            Err(Refusal::CgroupPathOutsidePrefix)
-        );
-    }
-
-    #[test]
-    fn cgroup_traversal_is_refused() {
-        assert_eq!(
-            validate_cgroup(&cg("/sys/fs/cgroup/kennel/../../../etc"), &scope()),
-            Err(Refusal::CgroupPathTraversal)
-        );
-    }
 }

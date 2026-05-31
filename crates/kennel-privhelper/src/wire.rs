@@ -13,14 +13,14 @@
 //!
 //! ```text
 //! Request (294 bytes):
-//!   0      op           u8     (1 add-addr, 2 del-addr, 3 create-cg, 4 delete-cg)
-//!   1      family       u8     (4 or 6; 0 for cgroup ops)
+//!   0      op           u8     (1 add-addr, 2 del-addr, 5 setup-egress)
+//!   1      family       u8     (4 or 6; 0 for the egress op)
 //!   2      prefix       u8
 //!   3      _reserved    u8     (0)
 //!   4..6   ctx          u16    (16-bit kennel context; v4 uses ctx <= 255)
 //!   6..22  addr         [u8;16] (v4 in the first 4 bytes)
 //!   22..38 interface    [u8;16] (NUL-padded; kernel IFNAMSIZ)
-//!   38..294 cgroup_path [u8;256] (NUL-padded)
+//!   38..294 cgroup_path [u8;256] (NUL-padded; the egress op's target cgroup)
 //!
 //! Response (6 bytes):
 //!   0      status       u8     (0 ok, 1 refused, 2 protocol, 3 internal)
@@ -59,13 +59,11 @@ pub enum Op {
     AddAddr,
     /// Remove a per-kennel loopback address.
     DelAddr,
-    /// Create a per-kennel cgroup.
-    CreateCgroup,
-    /// Delete a per-kennel cgroup.
-    DeleteCgroup,
     /// Load, populate, and attach the egress BPF programs to a kennel's cgroup.
-    /// The fixed [`Request`] carries the (scope-validated) cgroup path; a
-    /// variable-length [`EgressPayload`] tail carries the map contents.
+    /// The fixed [`Request`] carries the cgroup path (the helper validates the
+    /// caller owns it); a variable-length [`EgressPayload`] tail carries the map
+    /// contents. (Op byte 5; bytes 3 and 4 were the retired cgroup create/delete
+    /// ops — kenneld now manages cgroups unprivileged in its delegated subtree.)
     SetupEgress,
 }
 
@@ -74,8 +72,6 @@ impl Op {
         match self {
             Self::AddAddr => 1,
             Self::DelAddr => 2,
-            Self::CreateCgroup => 3,
-            Self::DeleteCgroup => 4,
             Self::SetupEgress => 5,
         }
     }
@@ -84,8 +80,6 @@ impl Op {
         match b {
             1 => Some(Self::AddAddr),
             2 => Some(Self::DelAddr),
-            3 => Some(Self::CreateCgroup),
-            4 => Some(Self::DeleteCgroup),
             5 => Some(Self::SetupEgress),
             _ => None,
         }
@@ -445,9 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn request_round_trips_v6_and_cgroup() {
+    fn request_round_trips_v6_and_egress() {
         let req = Request {
-            op: Op::CreateCgroup,
+            op: Op::SetupEgress,
             ctx: 3,
             addr: "fd00:1:2::1".parse().expect("v6"),
             prefix: 64,

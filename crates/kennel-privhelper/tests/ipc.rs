@@ -28,7 +28,7 @@ fn cgroup_request(op: Op, path: &str) -> Request {
 fn an_unallocated_user_is_refused() {
     // The test user has no /etc/kennel/subkennel allocation, so every operation
     // is refused before any privileged syscall — no privilege needed to verify.
-    let resp = run(&cgroup_request(Op::CreateCgroup, "/sys/fs/cgroup/kennel/x"));
+    let resp = run(&cgroup_request(Op::AddAddr, ""));
     assert_eq!(resp.status, Status::Refused, "an unallocated user must be refused");
 }
 
@@ -59,23 +59,6 @@ fn v4(tag: u16, ctx: u16, host: u8) -> std::net::Ipv4Addr {
     std::net::Ipv4Addr::from(0x7F00_0000 | suffix)
 }
 
-#[cfg(feature = "root-tests")]
-#[test]
-fn creates_and_deletes_a_cgroup_in_the_users_namespace() {
-    provision_root_allocation();
-    // Under the allocated namespace `kennel-root`.
-    let path = "/sys/fs/cgroup/kennel-root/ipc-test";
-
-    assert_eq!(run(&cgroup_request(Op::CreateCgroup, path)).status, Status::Ok);
-    assert!(std::path::Path::new(path).is_dir(), "cgroup directory should exist");
-
-    assert_eq!(run(&cgroup_request(Op::DeleteCgroup, path)).status, Status::Ok);
-    assert!(!std::path::Path::new(path).exists(), "cgroup directory should be gone");
-
-    // A cgroup outside the user's namespace is refused.
-    let other = run(&cgroup_request(Op::CreateCgroup, "/sys/fs/cgroup/kennel-other/x"));
-    assert_eq!(other.status, Status::Refused, "another namespace must be refused");
-}
 
 #[cfg(feature = "root-tests")]
 #[test]
