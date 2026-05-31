@@ -35,7 +35,7 @@
 //! gate; the adversarial unit tests hold the contract until then.
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
 /// The DNS record types the proxy queries.
@@ -263,19 +263,55 @@ pub fn resolve(
     types: &[RecordType],
     timeout: Duration,
 ) -> io::Result<Vec<IpAddr>> {
-    // allow: structure-phase stub; the implementing commit performs real I/O.
-    #[allow(clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
-    fn stub(
-        resolver: SocketAddr,
-        name: &str,
-        types: &[RecordType],
-        timeout: Duration,
-    ) -> io::Result<Vec<IpAddr>> {
-        let _ = (resolver, name, types, timeout);
-        Ok(Vec::new())
+    // Bind in the resolver's address family, then connect so the kernel drops
+    // datagrams from any source other than the resolver (basic spoof defence).
+    let bind: SocketAddr = match resolver {
+        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let sock = UdpSocket::bind(bind)?;
+    sock.connect(resolver)?;
+    sock.set_read_timeout(Some(timeout))?;
+    // The query id is the ephemeral local port: OS-assigned, varies per call,
+    // and matched against on the response.
+    let id = sock.local_addr()?.port();
+
+    let mut addrs = Vec::new();
+    for &rtype in types {
+        let query = encode_query(id, name, rtype).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid DNS name: {e:?}"),
+            )
+        })?;
+        sock.send(&query)?;
+        let mut buf = [0u8; UDP_BUF];
+        let datagram = match sock.recv(&mut buf) {
+            Ok(n) => buf.get(..n).unwrap_or(&[]),
+            // A per-type timeout is not fatal: this type simply has no answer.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(e),
+        };
+        // No addresses of this type (empty, NXDOMAIN/SERVFAIL), or a malformed
+        // answer: contribute nothing rather than failing the whole call.
+        if let Ok(found) = parse_response(id, datagram) {
+            addrs.extend(found);
+        }
     }
-    stub(resolver, name, types, timeout)
+    Ok(addrs)
 }
+
+/// The receive buffer for a DNS-over-UDP response. 1500 bytes is one Ethernet
+/// MTU; the proxy asks for small `A`/`AAAA` answers and does not set EDNS0, so a
+/// response that does not fit is one we would refuse anyway.
+const UDP_BUF: usize = 1500;
 
 #[cfg(test)]
 mod tests {
