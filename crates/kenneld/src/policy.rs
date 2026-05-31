@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use kennel_policy::KeySet;
 use kennel_spawn::{Plan, RuntimeSubstitutions};
 
-use crate::server::PolicyLoader;
+use crate::server::{Loaded, PolicyLoader};
 
 /// The default trust-store directory.
 pub const DEFAULT_TRUST_DIR: &str = "/etc/kennel/trust";
@@ -71,9 +71,16 @@ impl TrustStoreLoader {
 }
 
 impl PolicyLoader for TrustStoreLoader {
-    fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Plan, String> {
+    fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("cannot read policy {}: {e}", path.display()))?;
-        kennel_spawn::prepare(&bytes, &self.keys, subst).map_err(|e| e.to_string())
+        // Verify + substitute once; derive both artefacts from the one policy
+        // (the same steps `kennel_spawn::prepare` runs, kept open here so the net
+        // section is available to configure the egress proxy).
+        let verified = kennel_policy::verify_settled(&bytes, &self.keys).map_err(|e| e.to_string())?;
+        let substituted = kennel_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
+        let plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace).map_err(|e| e.to_string())?;
+        let net = substituted.effective_policy.net;
+        Ok(Loaded { plan, net })
     }
 }
 

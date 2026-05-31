@@ -23,7 +23,7 @@ Every outbound connection from a kennel terminates at a kennel-local proxy that 
 │                       CONFINED CONTEXT                             │
 │                                                                    │
 │   process ──connect()──► 127.42.7.1:1080  ── SOCKS5 ─►  proxy ─────┼──► internet
-│                          (kennel proxy)               (host ns)   │
+│                          (kennel proxy)               (host ns)    │
 │                                                                    │
 │   cgroup BPF: deny all connect() except to 127.42.7.1:1080         │
 └────────────────────────────────────────────────────────────────────┘

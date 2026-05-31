@@ -26,6 +26,7 @@ pub mod cgroup;
 pub mod control;
 pub mod ctx;
 pub mod policy;
+pub mod proxy;
 pub mod server;
 pub mod socket;
 
@@ -34,6 +35,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
+use kennel_policy::NetPolicy;
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response, Status};
@@ -167,6 +169,8 @@ pub struct Spec {
     /// The verified, substituted enforcement plan. Its `cgroup` is overridden
     /// with [`cgroup`](Self::cgroup) (the runtime path) before spawn.
     pub plan: Plan,
+    /// The network policy the per-kennel egress proxy is configured from.
+    pub net: NetPolicy,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -251,7 +255,9 @@ struct Provision {
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
 pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    let Spec { cgroup, ctx, scope, mut plan } = spec;
+    // `net` is consumed by the proxy-launch step (next increment); accepted here
+    // so the loader plumbing and the proxy config writer can land first.
+    let Spec { cgroup, ctx, scope, mut plan, net: _net } = spec;
     let mut state = Provision::default();
 
     match bring_up(privileged, &cgroup, ctx, &scope, &mut plan, command, &mut state) {
@@ -422,6 +428,12 @@ mod tests {
             ctx,
             scope: ReservedScope::new(9, [0, 0, 0, 0, 1], "kennel-test"),
             cgroup,
+            net: NetPolicy {
+                mode: kennel_policy::NetMode::Constrained,
+                allow: Vec::new(),
+                allow_names: Vec::new(),
+                deny_invariant: Vec::new(),
+            },
         }
     }
 

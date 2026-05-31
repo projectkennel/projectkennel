@@ -13,6 +13,15 @@ kennel-spawn = { path = "../kennel-spawn" }
 kennel-privhelper = { path = "../kennel-privhelper" }
 kennel-policy = { path = "../kennel-policy" }
 kennel-syscall = { path = "../kennel-syscall" }
+# Writing the per-kennel egress-proxy TOML config (kenneld writes, the netproxy
+# reads). Both already vendored (kennel-policy/kennel-netproxy use them).
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+basic-toml = "=0.1.10"
+
+[dev-dependencies]
+# Round-trip the config we write back through the netproxy's own parser, so the
+# writer cannot drift from the reader.
+kennel-netproxy = { path = "../kennel-netproxy" }
 
 [features]
 # End-to-end orchestration test that drives the real setuid privhelper and

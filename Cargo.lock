@@ -95,10 +95,13 @@ version = "0.0.0"
 name = "kenneld"
 version = "0.0.0"
 dependencies = [
+ "basic-toml",
+ "kennel-netproxy",
  "kennel-policy",
  "kennel-privhelper",
  "kennel-spawn",
  "kennel-syscall",
+ "serde",
 ]
 
 [[package]]

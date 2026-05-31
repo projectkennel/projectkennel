@@ -129,7 +129,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     std::fs::create_dir_all(&base).expect("create cgroup base");
 
     let helper = HelperClient::new(privhelper_path());
-    let spec = Spec { cgroup: cgroup.clone(), ctx, scope, plan };
+    let spec = Spec { cgroup: cgroup.clone(), ctx, scope, plan, net: minimal_policy().effective_policy.net };
 
     // Bring the kennel up: cgroup + v4/v6 loopback addresses + egress BPF + spawn.
     let kennel = start(&helper, spec, &mut Command::new("/bin/true")).expect("start kennel");

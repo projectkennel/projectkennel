@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 
+use kennel_policy::NetPolicy;
 use kennel_privhelper::validate::ReservedScope;
 use kennel_spawn::{Plan, RuntimeSubstitutions};
 
@@ -28,18 +29,33 @@ use crate::control::{self, KennelInfo, Request, Response, StartRequest};
 use crate::ctx::CtxAllocator;
 use crate::{cgroup, start, Privileged};
 
-/// Translate a policy file into an enforcement [`Plan`].
+/// A loaded, verified policy, split into the two artefacts kenneld applies.
+///
+/// The kernel-enforcement [`Plan`] (seal + BPF) and the [`NetPolicy`] the
+/// per-kennel egress proxy is configured from both derive from the same signed
+/// settled policy — the BPF funnels traffic to the proxy, the proxy enforces the
+/// per-destination allowlist (`docs/07-3-network.md` §7.3.2), two distinct rule
+/// sets from one source.
+#[derive(Debug)]
+pub struct Loaded {
+    /// The kernel-enforcement plan.
+    pub plan: Plan,
+    /// The network policy the egress proxy enforces.
+    pub net: NetPolicy,
+}
+
+/// Translate a policy file into the artefacts kenneld applies.
 ///
 /// Abstracted so the dispatch is testable without signed-policy fixtures; the
 /// production implementation ([`crate::policy::TrustStoreLoader`]) verifies the
 /// signature and substitutes placeholders.
 pub trait PolicyLoader {
-    /// Load, verify, and substitute the policy at `path` into a [`Plan`].
+    /// Load, verify, and substitute the policy at `path` into a [`Loaded`].
     ///
     /// # Errors
     /// A human-readable reason if the policy cannot be loaded, fails
     /// verification, or leaves a placeholder unresolved.
-    fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Plan, String>;
+    fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String>;
 }
 
 /// The identity and resources of the user this daemon serves.
@@ -210,8 +226,8 @@ where
         namespace: shared.identity.scope.namespace().to_owned(),
     };
 
-    let plan = match shared.loader.load(&req.policy, &subst) {
-        Ok(plan) => plan,
+    let loaded = match shared.loader.load(&req.policy, &subst) {
+        Ok(loaded) => loaded,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
     };
     let mut command = match command_for(&req.argv, &req.cwd, fds) {
@@ -222,7 +238,8 @@ where
         cgroup: cgroup::kennel_cgroup(&shared.identity.cgroup_base, ctx),
         ctx,
         scope: shared.identity.scope.clone(),
-        plan,
+        plan: loaded.plan,
+        net: loaded.net,
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
@@ -311,8 +328,8 @@ mod tests {
 
     struct FakeLoader;
     impl PolicyLoader for FakeLoader {
-        fn load(&self, _: &Path, _: &RuntimeSubstitutions) -> Result<Plan, String> {
-            Ok(Plan {
+        fn load(&self, _: &Path, _: &RuntimeSubstitutions) -> Result<Loaded, String> {
+            let plan = Plan {
                 namespaces: Namespaces::empty(),
                 cgroup: PathBuf::new(),
                 cgroup_join: false,
@@ -327,7 +344,14 @@ mod tests {
                 bpf_allow_v6: Vec::new(),
                 bpf_deny_v6: Vec::new(),
                 bpf_meta: [0u8; 64],
-            })
+            };
+            let net = NetPolicy {
+                mode: kennel_policy::NetMode::Constrained,
+                allow: Vec::new(),
+                allow_names: Vec::new(),
+                deny_invariant: Vec::new(),
+            };
+            Ok(Loaded { plan, net })
         }
     }
 
