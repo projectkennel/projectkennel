@@ -25,6 +25,7 @@
 pub mod cgroup;
 pub mod control;
 pub mod ctx;
+pub mod policy;
 pub mod server;
 
 use std::io;

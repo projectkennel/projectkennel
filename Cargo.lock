@@ -87,6 +87,7 @@ version = "0.0.0"
 name = "kenneld"
 version = "0.0.0"
 dependencies = [
+ "kennel-policy",
  "kennel-privhelper",
  "kennel-spawn",
  "kennel-syscall",

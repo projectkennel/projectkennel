@@ -11,9 +11,7 @@ repository.workspace = true
 [dependencies]
 kennel-spawn = { path = "../kennel-spawn" }
 kennel-privhelper = { path = "../kennel-privhelper" }
-
-[dev-dependencies]
-# Tests construct a Plan directly, which uses the syscall-layer enums.
+kennel-policy = { path = "../kennel-policy" }
 kennel-syscall = { path = "../kennel-syscall" }
 
 [features]
