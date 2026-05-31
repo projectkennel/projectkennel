@@ -84,6 +84,15 @@ name = "kennel-text"
 version = "0.0.0"
 
 [[package]]
+name = "kenneld"
+version = "0.0.0"
+dependencies = [
+ "kennel-privhelper",
+ "kennel-spawn",
+ "kennel-syscall",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,26 @@
+[package]
+name = "kenneld"
+version = "0.0.0"
+description = "Project Kennel orchestrator: brings up a kennel (cgroup, loopback addresses, BPF egress via the privhelper) and spawns the confined workload, tearing the whole lot down on exit. Runs unprivileged as a systemd user service; privilege is borrowed transiently through the setuid privhelper."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-spawn = { path = "../kennel-spawn" }
+kennel-privhelper = { path = "../kennel-privhelper" }
+
+[dev-dependencies]
+# Tests construct a Plan directly, which uses the syscall-layer enums.
+kennel-syscall = { path = "../kennel-syscall" }
+
+[features]
+# End-to-end orchestration test that drives the real setuid privhelper and
+# performs real privileged operations (addresses, BPF attach). Requires root and
+# the privhelper built with its bpf-egress feature.
+root-tests = ["kennel-spawn/root-tests"]
+
+[lints]
+workspace = true
