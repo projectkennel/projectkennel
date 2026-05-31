@@ -69,3 +69,4 @@
 
 pub mod allow;
 pub mod protocol;
+pub mod socks5;
