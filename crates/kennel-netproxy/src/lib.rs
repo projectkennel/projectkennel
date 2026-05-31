@@ -68,5 +68,6 @@
 #![forbid(unsafe_code)]
 
 pub mod allow;
+pub mod http;
 pub mod protocol;
 pub mod socks5;
