@@ -9,10 +9,19 @@
 //!
 //! # Invariants
 //!
-//! - Address requests are confined to the per-kennel allocation: IPv4
-//!   `127.<tag>.<ctx>.0/24` and IPv6 `fd<gid>:<tag>:<ctx>::/64`, where `<tag>`
-//!   and `<gid>` are installation constants and `<ctx>` is supplied by the
-//!   request. The prefix length is fixed (24 / 64); anything else is refused.
+//! - Address requests are confined to the per-kennel allocation. The bit layout
+//!   packs more users into the cramped IPv4 loopback space and gives each kennel
+//!   only the addresses it needs (a /28 — 16 — rather than a wasteful /24):
+//!   - **IPv4**: `127 | tag(12) | ctx(8) | host(4)` → a **/28** per kennel. A
+//!     user owns the /20 selected by their 12-bit `tag` (4096 users, 256
+//!     v4-enabled kennels each).
+//!   - **IPv6**: `fd | gid(40) | ctx(16) | host(64)` → a **/64** per kennel. The
+//!     user is isolated by their 40-bit random ULA `gid` (no `tag` needed in v6);
+//!     `ctx` is 16-bit, and its low 8 bits coincide with the v4 `ctx` so a
+//!     dual-stack kennel shares one context number.
+//!
+//!   `tag`/`gid` are per-user (the allocation); `ctx` is supplied by the request.
+//!   The prefix length is fixed (28 / 64); anything else is refused.
 //! - The interface is `lo` or a dummy named `<namespace>-<id>` for the calling
 //!   user, within the kernel's 15-character interface-name limit.
 //! - cgroup paths are absolute, free of `..` traversal, and strictly under the
@@ -37,8 +46,11 @@ const CGROUP_MOUNT: [&str; 3] = ["sys", "fs", "cgroup"];
 /// The kernel interface-name length limit (`IFNAMSIZ - 1`).
 const IFNAME_MAX: usize = 15;
 
-/// The fixed prefix length for a per-kennel IPv4 loopback subnet.
-const V4_PREFIX: u8 = 24;
+/// The fixed prefix length for a per-kennel IPv4 loopback subnet (16 addresses).
+const V4_PREFIX: u8 = 28;
+
+/// The largest `tag` value (12 bits).
+pub const TAG_MAX: u16 = 0x0FFF;
 
 /// The fixed prefix length for a per-kennel IPv6 ULA subnet.
 const V6_PREFIX: u8 = 64;
@@ -52,17 +64,18 @@ const V6_PREFIX: u8 = 64;
 /// ([`crate::alloc`]), never from the (untrusted) request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservedScope {
-    tag: u8,
+    tag: u16,
     ula_gid: [u8; 5],
     namespace: String,
 }
 
 impl ReservedScope {
-    /// Construct a reserved scope from a user's tag byte, 40-bit ULA global ID,
-    /// and resource namespace.
+    /// Construct a reserved scope from a user's 12-bit tag, 40-bit ULA global ID,
+    /// and resource namespace. `tag` above [`TAG_MAX`] is clamped (the allocation
+    /// loader validates it).
     #[must_use]
-    pub fn new(tag: u8, ula_gid: [u8; 5], namespace: impl Into<String>) -> Self {
-        Self { tag, ula_gid, namespace: namespace.into() }
+    pub fn new(tag: u16, ula_gid: [u8; 5], namespace: impl Into<String>) -> Self {
+        Self { tag: tag & TAG_MAX, ula_gid, namespace: namespace.into() }
     }
 
     /// The user's resource namespace (the cgroup/interface name prefix).
@@ -75,8 +88,9 @@ impl ReservedScope {
 /// A request to add or remove a per-kennel loopback address.
 #[derive(Debug, Clone)]
 pub struct AddrRequest {
-    /// The per-kennel context byte assigned by `kenneld`.
-    pub ctx: u8,
+    /// The per-kennel context assigned by `kenneld` (16-bit; a v4-enabled kennel
+    /// uses `ctx <= 255`, the low 8 bits that the IPv4 layout can carry).
+    pub ctx: u16,
     /// The interface to operate on (`lo` or `kennel-<id>`).
     pub interface: String,
     /// The address to add or remove.
@@ -175,9 +189,15 @@ pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Ref
                     got: req.prefix,
                 });
             }
-            // Per-kennel subnet 127.<tag>.<ctx>.0/24; the host octet is free.
-            let [a, b, c, _host] = v4.octets();
-            if a == 127 && b == scope.tag && c == req.ctx {
+            // 127 | tag(12) | ctx(8) | host(4); the 4-bit host is free.
+            let full = u32::from_be_bytes(v4.octets());
+            let in_loopback = full.wrapping_shr(24) == 127;
+            let suffix = full & 0x00FF_FFFF;
+            let addr_tag = u16::try_from(suffix.wrapping_shr(12) & 0x0FFF).unwrap_or(u16::MAX);
+            let addr_ctx = suffix.wrapping_shr(4) & 0xFF; // 0..=255
+            // A v4-enabled kennel has ctx <= 255; a larger ctx can have no v4
+            // address, so the comparison against the 8-bit field fails it.
+            if in_loopback && addr_tag == scope.tag && u32::from(req.ctx) == addr_ctx {
                 Ok(())
             } else {
                 Err(Refusal::AddrOutOfScope)
@@ -190,13 +210,10 @@ pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Ref
                     got: req.prefix,
                 });
             }
-            // Per-kennel /64: 0xfd | gid(40) | tag(8) | ctx(8) | host(64).
+            // 0xfd | gid(40) | ctx(16) | host(64). The user is isolated by gid.
             let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = v6.octets();
-            if b0 == 0xfd
-                && [b1, b2, b3, b4, b5] == scope.ula_gid
-                && b6 == scope.tag
-                && b7 == req.ctx
-            {
+            let addr_ctx = u16::from(b6).wrapping_shl(8) | u16::from(b7);
+            if b0 == 0xfd && [b1, b2, b3, b4, b5] == scope.ula_gid && addr_ctx == req.ctx {
                 Ok(())
             } else {
                 Err(Refusal::AddrOutOfScope)
@@ -283,26 +300,33 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
 
-    // tag = 42, gid = 00:00:00:00:01 → ULA prefix fd00:0000:0001 ... ; the
-    // per-kennel /64 base is fd00:0:1:<tag><ctx>:: with tag=0x2a.
-    const TAG: u8 = 42;
+    const TAG: u16 = 42;
     const GID: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x01];
 
     fn scope() -> ReservedScope {
         // Namespace "kennel" keeps the historical /sys/fs/cgroup/kennel/ and
-        // kennel-<id> conventions, so these tests exercise the same behaviour.
+        // kennel-<id> conventions, so the cgroup/interface tests are unchanged.
         ReservedScope::new(TAG, GID, "kennel")
     }
 
-    fn v6_in_scope(ctx: u8, host_low: u16) -> Ipv6Addr {
-        // [0xfd, gid(5), tag, ctx, 0,0,0,0,0,0, host_hi, host_lo]
-        let h = host_low.to_be_bytes();
-        Ipv6Addr::from([
-            0xfd, GID[0], GID[1], GID[2], GID[3], GID[4], TAG, ctx, 0, 0, 0, 0, 0, 0, h[0], h[1],
-        ])
+    /// Build a v4 loopback address: `127 | tag(12) | ctx(8) | host(4)`.
+    fn v4(tag: u16, ctx: u16, host: u8) -> IpAddr {
+        let suffix =
+            u32::from(tag).wrapping_shl(12) | u32::from(ctx).wrapping_shl(4) | u32::from(host);
+        IpAddr::V4(Ipv4Addr::from(0x7F00_0000 | suffix))
     }
 
-    fn addr_req(ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> AddrRequest {
+    /// Build a v6 ULA address: `fd | gid(40) | ctx(16) | host(64)`.
+    fn v6(gid: [u8; 5], ctx: u16, host_lo: u16) -> IpAddr {
+        let [g0, g1, g2, g3, g4] = gid;
+        let [c0, c1] = ctx.to_be_bytes();
+        let [h0, h1] = host_lo.to_be_bytes();
+        IpAddr::V6(Ipv6Addr::from([
+            0xfd, g0, g1, g2, g3, g4, c0, c1, 0, 0, 0, 0, 0, 0, h0, h1,
+        ]))
+    }
+
+    fn addr_req(ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> AddrRequest {
         AddrRequest {
             ctx,
             interface: interface.to_owned(),
@@ -321,51 +345,46 @@ mod tests {
 
     #[test]
     fn v4_in_scope_on_lo_is_ok() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 1));
-        assert!(validate_addr(&addr_req(5, "lo", a, 24), &scope()).is_ok());
+        assert!(validate_addr(&addr_req(5, "lo", v4(TAG, 5, 1), 28), &scope()).is_ok());
     }
 
     #[test]
     fn v4_in_scope_on_kennel_dummy_is_ok() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 1));
-        assert!(validate_addr(&addr_req(5, "kennel-ai", a, 24), &scope()).is_ok());
+        assert!(validate_addr(&addr_req(5, "kennel-ai", v4(TAG, 5, 1), 28), &scope()).is_ok());
     }
 
     #[test]
-    fn v4_any_host_in_the_slash24_is_ok() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 200));
-        assert!(validate_addr(&addr_req(5, "lo", a, 24), &scope()).is_ok());
+    fn v4_any_host_in_the_slash28_is_ok() {
+        // host 15 is the top of the /28; still in the kennel's subnet.
+        assert!(validate_addr(&addr_req(5, "lo", v4(TAG, 5, 15), 28), &scope()).is_ok());
     }
 
     #[test]
     fn v6_in_scope_is_ok() {
-        let a = IpAddr::V6(v6_in_scope(5, 1));
-        assert!(validate_addr(&addr_req(5, "lo", a, 64), &scope()).is_ok());
+        assert!(validate_addr(&addr_req(5, "lo", v6(GID, 5, 1), 64), &scope()).is_ok());
+    }
+
+    #[test]
+    fn v6_high_ctx_beyond_v4_range_is_ok() {
+        // ctx 300 has no v4 address but is a valid 16-bit v6 context.
+        assert!(validate_addr(&addr_req(300, "lo", v6(GID, 300, 1), 64), &scope()).is_ok());
     }
 
     // ---- validate_addr: prefix ----
 
     #[test]
     fn v4_wrong_prefix_is_refused() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 1));
         assert_eq!(
-            validate_addr(&addr_req(5, "lo", a, 25), &scope()),
-            Err(Refusal::BadPrefix {
-                expected: 24,
-                got: 25
-            })
+            validate_addr(&addr_req(5, "lo", v4(TAG, 5, 1), 24), &scope()),
+            Err(Refusal::BadPrefix { expected: 28, got: 24 })
         );
     }
 
     #[test]
     fn v6_wrong_prefix_is_refused() {
-        let a = IpAddr::V6(v6_in_scope(5, 1));
         assert_eq!(
-            validate_addr(&addr_req(5, "lo", a, 128), &scope()),
-            Err(Refusal::BadPrefix {
-                expected: 64,
-                got: 128
-            })
+            validate_addr(&addr_req(5, "lo", v6(GID, 5, 1), 128), &scope()),
+            Err(Refusal::BadPrefix { expected: 64, got: 128 })
         );
     }
 
@@ -373,28 +392,36 @@ mod tests {
 
     #[test]
     fn v4_wrong_tag_is_out_of_scope() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, 99, 5, 1));
         assert_eq!(
-            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            validate_addr(&addr_req(5, "lo", v4(99, 5, 1), 28), &scope()),
             Err(Refusal::AddrOutOfScope)
         );
     }
 
     #[test]
     fn v4_ctx_mismatch_is_out_of_scope() {
-        // addr says ctx 6, request says ctx 5
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 6, 1));
+        // addr encodes ctx 6, request says ctx 5
         assert_eq!(
-            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            validate_addr(&addr_req(5, "lo", v4(TAG, 6, 1), 28), &scope()),
+            Err(Refusal::AddrOutOfScope)
+        );
+    }
+
+    #[test]
+    fn v4_high_ctx_has_no_v4_address() {
+        // A v4-enabled kennel is capped at ctx 255; a request for ctx 300 cannot
+        // match any v4 address (the 8-bit field tops out at 255).
+        assert_eq!(
+            validate_addr(&addr_req(300, "lo", v4(TAG, 44, 1), 28), &scope()),
             Err(Refusal::AddrOutOfScope)
         );
     }
 
     #[test]
     fn v4_non_loopback_is_out_of_scope() {
-        let a = IpAddr::V4(Ipv4Addr::new(10, TAG, 5, 1));
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         assert_eq!(
-            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            validate_addr(&addr_req(5, "lo", a, 28), &scope()),
             Err(Refusal::AddrOutOfScope)
         );
     }
@@ -404,14 +431,15 @@ mod tests {
         // The headline threat: a hostile caller must not get 169.254.169.254 added.
         let a = IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254));
         assert_eq!(
-            validate_addr(&addr_req(5, "lo", a, 24), &scope()),
+            validate_addr(&addr_req(5, "lo", a, 28), &scope()),
             Err(Refusal::AddrOutOfScope)
         );
     }
 
     #[test]
     fn v6_wrong_gid_is_out_of_scope() {
-        let mut o = v6_in_scope(5, 1).octets();
+        let IpAddr::V6(v6addr) = v6(GID, 5, 1) else { unreachable!() };
+        let mut o = v6addr.octets();
         o[3] = 0xff; // corrupt a gid byte
         let a = IpAddr::V6(Ipv6Addr::from(o));
         assert_eq!(
@@ -422,9 +450,9 @@ mod tests {
 
     #[test]
     fn v6_ctx_mismatch_is_out_of_scope() {
-        let a = IpAddr::V6(v6_in_scope(6, 1)); // ctx 6 in addr, request ctx 5
+        // ctx 6 in addr, request ctx 5
         assert_eq!(
-            validate_addr(&addr_req(5, "lo", a, 64), &scope()),
+            validate_addr(&addr_req(5, "lo", v6(GID, 6, 1), 64), &scope()),
             Err(Refusal::AddrOutOfScope)
         );
     }
@@ -442,28 +470,25 @@ mod tests {
 
     #[test]
     fn arbitrary_interface_is_refused() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 1));
         assert_eq!(
-            validate_addr(&addr_req(5, "eth0", a, 24), &scope()),
+            validate_addr(&addr_req(5, "eth0", v4(TAG, 5, 1), 28), &scope()),
             Err(Refusal::InterfaceNotAllowed)
         );
     }
 
     #[test]
     fn empty_kennel_interface_id_is_refused() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 1));
         assert_eq!(
-            validate_addr(&addr_req(5, "kennel-", a, 24), &scope()),
+            validate_addr(&addr_req(5, "kennel-", v4(TAG, 5, 1), 28), &scope()),
             Err(Refusal::InterfaceNotAllowed)
         );
     }
 
     #[test]
     fn overlong_interface_is_refused() {
-        let a = IpAddr::V4(Ipv4Addr::new(127, TAG, 5, 1));
         // "kennel-" (7) + 9 chars = 16 > 15
         assert_eq!(
-            validate_addr(&addr_req(5, "kennel-toolongid", a, 24), &scope()),
+            validate_addr(&addr_req(5, "kennel-toolongid", v4(TAG, 5, 1), 28), &scope()),
             Err(Refusal::InterfaceNameTooLong)
         );
     }

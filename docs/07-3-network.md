@@ -180,28 +180,28 @@ Alternative: don't run DNS in the kennel at all. Clients use `socks5h://` which 
 
 ## 7.3.6 Loopback isolation
 
-Project Kennel assigns each kennel a unique IPv4 subnet in `127.0.0.0/8` and an IPv6 ULA `/64`. Linux routes the entire `127/8` to `lo`; IPv6 ULA requires explicit interface configuration.
+Project Kennel assigns each kennel a small IPv4 subnet in `127.0.0.0/8` and an IPv6 ULA `/64`. Linux routes the entire `127/8` to `lo`; IPv6 ULA requires explicit interface configuration. The allocation is **per user** (the `/etc/kennel/subkennel` file, the analogue of `/etc/subuid`): each user gets a 12-bit `tag` (IPv4) and a 40-bit random ULA global ID (IPv6); `ctx` is the per-kennel context.
 
-**IPv4 allocation:**
+**IPv4 allocation** — the 24 bits below `127/8` are bit-packed (a kennel needs a handful of addresses, not a /24), giving 4096 users × 256 v4-enabled kennels each:
 
 ```
-127.0.0.0/16        ← never assigned (user's normal loopback)
-127.<tag>.0.0/24    ← framework-internal (shared services if any)
-127.<tag>.<ctx>.0/24  ← per-kennel
-127.<tag>.<ctx>.1   ← kennel's primary address; proxy listens here
+127 | tag(12 bits) | ctx(8 bits) | host(4 bits)
+127.<user's /20>                 ← the user's space (12-bit tag)
+<the kennel's /28>               ← per-kennel (16 addresses)
+host 1 within the /28            ← kennel's primary address; proxy listens here
 ```
 
-Default `<tag>` is 42, configurable.
+Because the fields straddle octet boundaries, the addresses are not octet-readable (e.g. tag 9 / ctx 5 / host 1 → `127.0.144.81`); they are computed, not written by hand.
 
 **IPv6 allocation:**
 
-Project Kennel picks a ULA `/48` at install time per RFC 4193 §3.2.2 (timestamp + EUI-64 hash, low 40 bits of SHA-1):
+Project Kennel picks a ULA `/48` per user at allocation time per RFC 4193 §3.2.2 (random 40-bit global ID). `ctx` is 16-bit in IPv6 (its low 8 bits coincide with the v4 `ctx`, so a dual-stack kennel shares one context number; v6-only kennels may use the full 16-bit range). No `tag` is needed in IPv6 — the random per-user `gid` already isolates users:
 
 ```
-fd<Global ID>::/48
-fd<Global ID>:<tag>::/48        ← reserved for framework
-fd<Global ID>:<tag>:<ctx>::/64  ← per-kennel
-fd<Global ID>:<tag>:<ctx>::1    ← kennel's primary IPv6 address
+fd | gid(40 bits) | ctx(16 bits) | host(64 bits)
+fd<gid>::/48                     ← the user's space
+fd<gid>:<ctx high:ctx low>::/64  ← per-kennel
+…::1                             ← kennel's primary IPv6 address
 ```
 
 **Configuration requires privilege.** Adding addresses to `lo` (or a per-kennel dummy interface) requires `CAP_NET_ADMIN`. Project Kennel uses a privileged helper (setuid or with file capability `CAP_NET_ADMIN=ep`) invoked at kennel start. The helper is approximately 100 lines, accepts requests only from Project Kennel's UID, and operates only on Project Kennel's reserved address space.

@@ -40,7 +40,10 @@ fn parse(text: &str, uid: u32) -> Option<ReservedScope> {
         if fields.next()?.parse::<u32>().ok()? != uid {
             continue;
         }
-        let tag = fields.next()?.parse::<u8>().ok()?;
+        let tag = fields.next()?.parse::<u16>().ok()?;
+        if tag > crate::validate::TAG_MAX {
+            return None; // a tag outside the 12-bit range is a malformed allocation
+        }
         let gid = parse_gid(fields.next()?)?;
         let namespace = fields.next()?;
         if namespace.is_empty() {
@@ -96,6 +99,8 @@ mod tests {
         // Wrong field count / bad hex length must not yield a scope.
         assert!(parse("1000:42:01:kennel-alice", 1000).is_none());
         assert!(parse("1000:notanumber:0000000001:ns", 1000).is_none());
+        // A tag beyond the 12-bit range (4095) is a malformed allocation.
+        assert!(parse("1000:5000:0000000001:ns", 1000).is_none());
     }
 
     #[test]

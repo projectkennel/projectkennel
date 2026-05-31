@@ -12,14 +12,15 @@
 //! helper and its caller are the same machine.
 //!
 //! ```text
-//! Request (292 bytes):
+//! Request (294 bytes):
 //!   0      op           u8     (1 add-addr, 2 del-addr, 3 create-cg, 4 delete-cg)
 //!   1      family       u8     (4 or 6; 0 for cgroup ops)
 //!   2      prefix       u8
-//!   3      ctx          u8
-//!   4..20  addr         [u8;16] (v4 in the first 4 bytes)
-//!   20..36 interface    [u8;16] (NUL-padded; kernel IFNAMSIZ)
-//!   36..292 cgroup_path [u8;256] (NUL-padded)
+//!   3      _reserved    u8     (0)
+//!   4..6   ctx          u16    (16-bit kennel context; v4 uses ctx <= 255)
+//!   6..22  addr         [u8;16] (v4 in the first 4 bytes)
+//!   22..38 interface    [u8;16] (NUL-padded; kernel IFNAMSIZ)
+//!   38..294 cgroup_path [u8;256] (NUL-padded)
 //!
 //! Response (6 bytes):
 //!   0      status       u8     (0 ok, 1 refused, 2 protocol, 3 internal)
@@ -31,7 +32,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 /// The on-wire length of a [`Request`].
-pub const REQUEST_LEN: usize = 292;
+pub const REQUEST_LEN: usize = 294;
 /// The on-wire length of a [`Response`].
 pub const RESPONSE_LEN: usize = 6;
 
@@ -111,8 +112,8 @@ impl Status {
 pub struct Request {
     /// The operation.
     pub op: Op,
-    /// The per-kennel context byte.
-    pub ctx: u8,
+    /// The per-kennel context (16-bit; a v4-enabled kennel uses `ctx <= 255`).
+    pub ctx: u16,
     /// The address (for address ops; `0.0.0.0` is the placeholder for cgroup ops).
     pub addr: IpAddr,
     /// The subnet prefix length (for address ops).
@@ -168,7 +169,8 @@ impl Request {
         };
         b.push(family);
         b.push(self.prefix);
-        b.push(self.ctx);
+        b.push(0u8); // reserved
+        b.extend_from_slice(&self.ctx.to_ne_bytes());
         b.extend_from_slice(&addr16);
         b.extend_from_slice(&pad_field::<INTERFACE_FIELD>(self.interface.as_bytes()));
         b.extend_from_slice(&pad_field::<PATH_FIELD>(
@@ -190,9 +192,14 @@ impl Request {
         let op = buf.first().copied().and_then(Op::from_byte).ok_or(WireError::BadOp)?;
         let family = buf.get(1).copied().ok_or(WireError::BadLength)?;
         let prefix = buf.get(2).copied().ok_or(WireError::BadLength)?;
-        let ctx = buf.get(3).copied().ok_or(WireError::BadLength)?;
+        // buf[3] is reserved (0).
+        let ctx = buf
+            .get(4..6)
+            .and_then(|s| s.try_into().ok())
+            .map(u16::from_ne_bytes)
+            .ok_or(WireError::BadLength)?;
         let addr16: [u8; 16] = buf
-            .get(4..20)
+            .get(6..22)
             .and_then(|s| s.try_into().ok())
             .ok_or(WireError::BadLength)?;
         let addr = match family {
@@ -203,8 +210,8 @@ impl Request {
             6 => IpAddr::V6(Ipv6Addr::from(addr16)),
             _ => return Err(WireError::BadFamily),
         };
-        let interface = read_string(buf.get(20..36).ok_or(WireError::BadLength)?)?;
-        let cgroup_path = PathBuf::from(read_string(buf.get(36..292).ok_or(WireError::BadLength)?)?);
+        let interface = read_string(buf.get(22..38).ok_or(WireError::BadLength)?)?;
+        let cgroup_path = PathBuf::from(read_string(buf.get(38..294).ok_or(WireError::BadLength)?)?);
         Ok(Self { op, ctx, addr, prefix, interface, cgroup_path })
     }
 }

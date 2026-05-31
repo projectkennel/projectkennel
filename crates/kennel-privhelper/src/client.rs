@@ -67,7 +67,7 @@ pub fn delete_cgroup(helper: &Path, path: PathBuf) -> io::Result<Response> {
 /// # Errors
 ///
 /// As [`invoke`].
-pub fn add_address(helper: &Path, ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
+pub fn add_address(helper: &Path, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
     invoke(helper, &addr_request(Op::AddAddr, ctx, interface, addr, prefix))
 }
 
@@ -76,7 +76,7 @@ pub fn add_address(helper: &Path, ctx: u8, interface: &str, addr: IpAddr, prefix
 /// # Errors
 ///
 /// As [`invoke`].
-pub fn del_address(helper: &Path, ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
+pub fn del_address(helper: &Path, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
     invoke(helper, &addr_request(Op::DelAddr, ctx, interface, addr, prefix))
 }
 
@@ -91,7 +91,7 @@ const fn cgroup_request(op: Op, path: PathBuf) -> Request {
     }
 }
 
-fn addr_request(op: Op, ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> Request {
+fn addr_request(op: Op, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Request {
     Request {
         op,
         ctx,

@@ -52,6 +52,13 @@ fn lo_has(addr: &str) -> bool {
     String::from_utf8_lossy(&out.stdout).contains(addr)
 }
 
+/// Build a v4 loopback address: 127 | tag(12) | ctx(8) | host(4).
+#[cfg(feature = "root-tests")]
+fn v4(tag: u16, ctx: u16, host: u8) -> std::net::Ipv4Addr {
+    let suffix = u32::from(tag).wrapping_shl(12) | u32::from(ctx).wrapping_shl(4) | u32::from(host);
+    std::net::Ipv4Addr::from(0x7F00_0000 | suffix)
+}
+
 #[cfg(feature = "root-tests")]
 #[test]
 fn creates_and_deletes_a_cgroup_in_the_users_namespace() {
@@ -74,23 +81,24 @@ fn creates_and_deletes_a_cgroup_in_the_users_namespace() {
 #[test]
 fn adds_and_removes_an_in_scope_loopback_address() {
     provision_root_allocation();
-    // In scope for tag=9, ctx=5: 127.9.5.0/24.
-    let addr = "127.9.5.1";
+    // In scope for tag=9, ctx=5, /28.
+    let addr = v4(9, 5, 1);
+    let addr_str = addr.to_string();
     let mut req = cgroup_request(Op::AddAddr, "");
     req.ctx = 5;
-    req.addr = addr.parse().expect("v4");
-    req.prefix = 24;
+    req.addr = addr.into();
+    req.prefix = 28;
     req.interface = "lo".to_owned();
 
     assert_eq!(run(&req).status, Status::Ok, "in-scope address add should succeed");
-    assert!(lo_has(addr), "the loopback alias should be present");
+    assert!(lo_has(&addr_str), "the loopback alias {addr_str} should be present");
 
     req.op = Op::DelAddr;
     assert_eq!(run(&req).status, Status::Ok, "address removal should succeed");
-    assert!(!lo_has(addr), "the loopback alias should be gone");
+    assert!(!lo_has(&addr_str), "the loopback alias should be gone");
 
     // An out-of-scope address (wrong tag) must be refused, no syscall.
     req.op = Op::AddAddr;
-    req.addr = "127.1.5.1".parse().expect("v4"); // tag 1 != 9
+    req.addr = v4(1, 5, 1).into(); // tag 1 != 9
     assert_eq!(run(&req).status, Status::Refused, "out-of-scope address must be refused");
 }
