@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cgroup;
+pub mod control;
 pub mod ctx;
 
 use std::io;
