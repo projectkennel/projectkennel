@@ -68,6 +68,7 @@
 #![forbid(unsafe_code)]
 
 pub mod allow;
+pub mod audit;
 pub mod dns;
 pub mod http;
 pub mod protocol;
