@@ -35,7 +35,7 @@ pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
     CapPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ResolvedArtifact,
+    NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ResolvedArtifact,
     SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, TtlAction,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
@@ -121,6 +121,7 @@ mod tests {
                         port_max: 443,
                         protocol: Protocol::Tcp,
                     }],
+                    allow_names: Vec::new(),
                     deny_invariant: vec![NetRule {
                         cidr: "169.254.169.254".to_owned(),
                         prefix_len: 32,
@@ -190,6 +191,42 @@ mod tests {
         let bytes = to_bytes(&doc).expect("serialise");
         let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
         assert_eq!(verified, sample_policy());
+    }
+
+    #[test]
+    fn by_name_allow_rules_round_trip_and_are_signature_bound() {
+        let key = signing_key();
+        let mut policy = sample_policy();
+        policy.effective_policy.net.allow_names = vec![
+            NameRule { name: "api.example.com".to_owned(), ports: vec![443], protocol: Protocol::Tcp },
+            NameRule { name: ".internal.example".to_owned(), ports: Vec::new(), protocol: Protocol::Any },
+        ];
+
+        // The name rules survive a sign → serialise → verify round trip…
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert_eq!(verified.effective_policy.net.allow_names, policy.effective_policy.net.allow_names);
+
+        // …and they are inside the signed canonical form (tampering breaks it).
+        let canon = String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(canon.contains("api.example.com"), "name rule is in the canonical form");
+
+        let mut tampered = doc;
+        if let Some(rule) = tampered.policy.effective_policy.net.allow_names.first_mut() {
+            rule.name = "evil.example.com".to_owned();
+        }
+        let bytes = to_bytes(&tampered).expect("serialise");
+        let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
+        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+    }
+
+    #[test]
+    fn an_empty_allow_names_is_omitted_from_the_canonical_form() {
+        // The skip-if-empty keeps a name-free policy's bytes identical to before
+        // the field existed, so existing signatures stay valid.
+        let canon = String::from_utf8(canonical::canonical_bytes(&sample_policy()).expect("canon")).expect("utf8");
+        assert!(!canon.contains("allow_names"), "empty allow_names must not serialise");
     }
 
     #[test]

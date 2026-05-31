@@ -89,15 +89,43 @@ pub struct NetRule {
     pub protocol: Protocol,
 }
 
+/// One by-name egress allow rule, enforced by the per-kennel egress proxy.
+///
+/// Names cannot be expressed in the cgroup BPF (which matches addresses), so a
+/// by-name allow is honoured only by the proxy: the workload's request names the
+/// host, the proxy checks it here, resolves it under DNS policy, re-checks the
+/// resolved address against the deny rules, and connects. `name` follows the
+/// proxy's dot-convention: `example.com` is an exact match; `.example.com` is the
+/// apex plus any subdomain on a label boundary. Ports are a discrete set (the
+/// representation the proxy consumes), unlike the [`NetRule`] range the BPF
+/// consumes — each rule mirrors the engine that enforces it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NameRule {
+    /// The destination host, or dot-prefixed suffix, the rule permits.
+    pub name: String,
+    /// Permitted ports; empty means any port.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+    /// Protocol the rule applies to.
+    pub protocol: Protocol,
+}
+
 /// Network policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
-    /// Allowlisted destinations.
+    /// Allowlisted destinations by address. Enforced directly by the cgroup BPF
+    /// (a direct `connect()` to one of these is permitted) and also honoured by
+    /// the proxy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<NetRule>,
+    /// Allowlisted destinations by name. Enforced only by the per-kennel egress
+    /// proxy (the BPF cannot match names); consulted in `constrained` mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_names: Vec<NameRule>,
     /// Invariant deny CIDRs (cloud metadata, link-local, RFC1918). Must be
     /// present; cannot be removed by any delta.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

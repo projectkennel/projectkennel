@@ -52,6 +52,7 @@ fn minimal_policy() -> SettledPolicy {
             net: NetPolicy {
                 mode: NetMode::Constrained,
                 allow: Vec::new(),
+                allow_names: Vec::new(),
                 deny_invariant: vec![NetRule {
                     cidr: "169.254.169.254".to_owned(),
                     prefix_len: 32,

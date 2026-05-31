@@ -370,6 +370,7 @@ mod tests {
                         NetRule { cidr: "93.184.216.0".to_owned(), prefix_len: 24, port_min: 443, port_max: 443, protocol: Protocol::Tcp },
                         NetRule { cidr: "10.1.0.0".to_owned(), prefix_len: 16, port_min: 1024, port_max: 2048, protocol: Protocol::Tcp },
                     ],
+                    allow_names: Vec::new(),
                     deny_invariant: vec![NetRule { cidr: "169.254.169.254".to_owned(), prefix_len: 32, port_min: 0, port_max: 65535, protocol: Protocol::Any }],
                 },
                 fs: FsPolicy {
