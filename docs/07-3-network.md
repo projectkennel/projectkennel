@@ -73,8 +73,17 @@ What SOCKS5 doesn't natively cover, the proxy adds: TLS inspection (optional), p
 ```toml
 [net]
 mode = "constrained"        # "none" | "constrained" | "open"
-proxy_listen_v4 = "127.42.7.1:1080"     # auto-assigned per kennel if absent
-proxy_listen_v6 = "[fd24:8a7c:91e3:4207::1]:1080"
+
+# Each proxy listener is enabled by a required boolean (default false) and
+# configured by an optional address. The kennel's own subnet is computed from
+# its tag and ctx (§7.3.2), so the address only carries the parts the kennel
+# does not already own: a host offset within that subnet and a port.
+proxy_listen_v4 = true              # enable the v4 SOCKS5 listener (default false)
+proxy_listen_v4_address = "1:1080"  # optional "offset:port" within the kennel's /28
+                                    #   offset 1..=14 (0 and 15 reserved), port 1025..=32767
+                                    #   absent ⇒ "1:1080"
+proxy_listen_v6 = true              # enable the v6 listener (default false)
+proxy_listen_v6_address = "1:1080"  # optional "offset:port" within the kennel's /64
 
 [net.dns]
 resolver = "1.1.1.1:53"     # kennel's DNS resolver, used by the proxy

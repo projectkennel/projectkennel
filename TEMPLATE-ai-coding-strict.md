@@ -496,8 +496,12 @@ mode = "constrained"
 # subnets. The user's normal shell can reach the kennel's address
 # (default context has no cgroup BPF connect restrictions), but sibling
 # contexts cannot reach each other.
-proxy_listen_v4 = "auto"        # Project Kennel assigns from 127.42.0.0/16
-proxy_listen_v6 = "auto"        # Project Kennel assigns ULA from its /48
+proxy_listen_v4 = true          # enable the v4 SOCKS5 listener (default false)
+proxy_listen_v6 = true          # enable the v6 listener (default false)
+# Listener addresses are computed from the kennel's tag and ctx. To override the
+# host offset or port within the kennel's own subnet, set the optional
+# proxy_listen_v4_address / proxy_listen_v6_address as "offset:port"
+# (offset 1..=14, default "1:1080").
 
 # cgroup BPF enforcement: deny all connect() except to the proxy.
 #
