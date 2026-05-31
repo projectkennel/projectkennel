@@ -62,10 +62,10 @@ const fn allow_entry(port_min: u16, port_max: u16, protocol: Protocol) -> [u8; 8
 
 /// Encode `bpf/maps.h`'s `kennel_meta` (64 bytes); only magic/abi/ctx are set,
 /// the proxy and policy-hash fields are left zero until those land.
-fn meta_bytes(ctx: u8) -> [u8; 64] {
+fn meta_bytes(ctx: u16) -> [u8; 64] {
     let [m0, m1, m2, m3] = KENNEL_META_MAGIC.to_ne_bytes();
     let [a0, a1] = KENNEL_ABI_VERSION.to_ne_bytes();
-    let [c0, c1] = u16::from(ctx).to_ne_bytes();
+    let [c0, c1] = ctx.to_ne_bytes();
     let head = [m0, m1, m2, m3, a0, a1, c0, c1];
     let mut m = [0u8; 64];
     for (dst, src) in m.iter_mut().zip(head.iter()) {
@@ -157,20 +157,24 @@ pub struct Plan {
 
 impl Plan {
     /// Build the plan from a settled policy whose deferred placeholders have
-    /// already been substituted. `ctx` is the kennel's context byte, used to
-    /// locate its cgroup and stamp the BPF metadata.
+    /// already been substituted. `ctx` is the kennel's context number, and
+    /// `namespace` the caller's resource namespace (from their
+    /// `/etc/kennel/subkennel` allocation); together they locate the kennel's
+    /// cgroup (`/sys/fs/cgroup/<namespace>/<ctx>`), and `ctx` stamps the BPF
+    /// metadata. The cgroup path is the one the privhelper will independently
+    /// re-validate against the caller's allocation before creating it.
     ///
     /// # Errors
     ///
     /// Returns [`SpawnError::InvalidPolicy`] if a network rule's CIDR is not a
     /// valid IPv4 or IPv6 address.
-    pub fn from_policy(policy: &SettledPolicy, ctx: u8) -> Result<Self, SpawnError> {
+    pub fn from_policy(policy: &SettledPolicy, ctx: u16, namespace: &str) -> Result<Self, SpawnError> {
         let ep = &policy.effective_policy;
 
         // Mount/PID/IPC isolation; never NET (see field docs).
         let namespaces = Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
 
-        let cgroup = PathBuf::from(format!("/sys/fs/cgroup/kennel/{ctx}"));
+        let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
 
         let bind_read: Vec<PathBuf> = ep.fs.read.iter().map(PathBuf::from).collect();
         let bind_write: Vec<PathBuf> = ep.fs.write.iter().map(PathBuf::from).collect();

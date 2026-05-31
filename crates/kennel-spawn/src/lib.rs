@@ -40,14 +40,18 @@ pub use plan::Plan;
 /// placeholders.
 #[derive(Debug, Clone)]
 pub struct RuntimeSubstitutions {
-    /// The kennel's context byte (`<ctx>`), assigned at start.
-    pub ctx: u8,
+    /// The kennel's context number (`<ctx>`), assigned at start. IPv4-enabled
+    /// kennels are capped at 255; v6-only kennels may range higher.
+    pub ctx: u16,
     /// The user's UID (`<uid>`).
     pub uid: u32,
     /// The kennel's runtime ID (`<kennel>`).
     pub kennel: String,
     /// The user's home directory (`<home>`).
     pub home: PathBuf,
+    /// The caller's resource namespace (from `/etc/kennel/subkennel`), under
+    /// which this kennel's cgroup lives (`/sys/fs/cgroup/<namespace>/<ctx>`).
+    pub namespace: String,
 }
 
 /// Everything that can stop a spawn before exec.
@@ -158,7 +162,7 @@ pub fn substitute(policy: &SettledPolicy, subst: &RuntimeSubstitutions) -> Resul
 pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Result<Plan, SpawnError> {
     let verified = kennel_policy::verify_settled(bytes, keys)?;
     let substituted = substitute(&verified, subst)?;
-    Plan::from_policy(&substituted, subst.ctx)
+    Plan::from_policy(&substituted, subst.ctx, &subst.namespace)
 }
 
 /// Spawn `command` confined by `plan`.
@@ -368,7 +372,13 @@ mod tests {
     }
 
     fn subst() -> RuntimeSubstitutions {
-        RuntimeSubstitutions { ctx: 7, uid: 1000, kennel: "ai-coding".to_owned(), home: PathBuf::from("/home/dev") }
+        RuntimeSubstitutions {
+            ctx: 7,
+            uid: 1000,
+            kennel: "ai-coding".to_owned(),
+            home: PathBuf::from("/home/dev"),
+            namespace: "kennel-dev".to_owned(),
+        }
     }
 
     #[test]
@@ -393,14 +403,14 @@ mod tests {
     #[test]
     fn plan_translates_policy() {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7).expect("plan");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev").expect("plan");
 
         // Namespaces: mount/pid/ipc, never net.
         assert_eq!(plan.namespaces, Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC);
         assert!(!plan.namespaces.contains(Namespaces::NET));
 
-        // cgroup carries the context byte.
-        assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel/7"));
+        // cgroup lives under the caller's resource namespace, keyed by ctx.
+        assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));
 
         // Landlock: a read rule for each read path, a write rule for each write.
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)));
@@ -450,7 +460,7 @@ mod tests {
             port_max: 443,
             protocol: Protocol::Tcp,
         });
-        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7).expect("plan");
+        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev").expect("plan");
 
         // The two original rules stay v4; the new one lands in v6.
         assert_eq!(plan.bpf_allow_v4.len(), 2);
@@ -477,7 +487,7 @@ mod tests {
         ks.insert("k", &key.public_key_bytes()).expect("insert");
 
         let plan = prepare(&bytes, &ks, &subst()).expect("prepare");
-        assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel/7"));
+        assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));
         assert_eq!(plan.seccomp_allow, vec![0, 1, 2, 60]);
     }
 
