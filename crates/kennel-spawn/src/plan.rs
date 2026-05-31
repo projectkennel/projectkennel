@@ -30,6 +30,13 @@ const KENNEL_ABI_VERSION: u16 = 1;
 /// (`KENNEL_PROTO_ANY` is 0).
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
+/// `KENNEL_ALLOW_FLAG_PROXY` from `bpf/maps.h`: the `allow_entry.flags` bit that
+/// marks an entry as the kennel's own SOCKS5 proxy.
+const KENNEL_ALLOW_FLAG_PROXY: u8 = 0x01;
+/// LPM prefix length for a host route to the IPv4 proxy address (`/32`).
+const HOST_PREFIX_V4: u8 = 32;
+/// LPM prefix length for a host route to the IPv6 proxy address (`/128`).
+const HOST_PREFIX_V6: u8 = 128;
 
 /// One BPF IPv4 LPM map entry: an `(lpm_v4_key, allow_entry)` byte pair.
 pub type LpmV4Entry = ([u8; 8], [u8; 8]);
@@ -60,8 +67,9 @@ const fn allow_entry(port_min: u16, port_max: u16, protocol: Protocol, flags: u8
     [lo0, lo1, hi0, hi1, proto, flags, 0, 0]
 }
 
-/// Encode `bpf/maps.h`'s `kennel_meta` (64 bytes); only magic/abi/ctx are set,
-/// the proxy and policy-hash fields are left zero until those land.
+/// Encode `bpf/maps.h`'s `kennel_meta` (64 bytes); magic/abi/ctx are set here,
+/// the proxy fields are filled by [`stamp_proxy_meta`] once kenneld knows the
+/// proxy address, and the policy-hash tail stays zero until that lands.
 fn meta_bytes(ctx: u16) -> [u8; 64] {
     let [m0, m1, m2, m3] = KENNEL_META_MAGIC.to_ne_bytes();
     let [a0, a1] = KENNEL_ABI_VERSION.to_ne_bytes();
@@ -72,6 +80,23 @@ fn meta_bytes(ctx: u16) -> [u8; 64] {
         *dst = *src;
     }
     m
+}
+
+/// Fill the `kennel_meta` proxy fields in place from `endpoint`: `proxy_addr_v4`
+/// (offset 8), `proxy_port` (offset 12), and `proxy_addr_v6` (offset 16), all in
+/// network byte order per the C ABI (`bpf/maps.h`). A v6-only kennel leaves
+/// `proxy_addr_v4` zero. `_pad0` (offset 14) is untouched, staying zero.
+fn stamp_proxy_meta(meta: &mut [u8; 64], endpoint: &ProxyEndpoint) {
+    let v4 = endpoint.v4.map_or([0u8; 4], |a| a.octets());
+    if let Some(slot) = meta.get_mut(8..12) {
+        slot.copy_from_slice(&v4);
+    }
+    if let Some(slot) = meta.get_mut(12..14) {
+        slot.copy_from_slice(&endpoint.port.to_be_bytes());
+    }
+    if let Some(slot) = meta.get_mut(16..32) {
+        slot.copy_from_slice(&endpoint.v6.octets());
+    }
 }
 
 /// Encode an `lpm_v6_key { __u32 prefixlen; __u8 addr[16] }` (20 bytes). `addr`
@@ -121,10 +146,12 @@ fn write_access() -> AccessFs {
         | AccessFs::TRUNCATE
 }
 
-/// The kennel's egress proxy endpoint: the per-kennel loopback address(es) and
-/// TCP port its SOCKS5/HTTP proxy listens on. Computed by kenneld from the
-/// caller's reserved scope and the kennel's `ctx`, then [stamped into the
-/// plan](Plan::stamp_proxy) before the BPF payload is derived.
+/// The kennel's egress proxy endpoint.
+///
+/// The per-kennel loopback address(es) and TCP port its SOCKS5/HTTP proxy listens
+/// on. Computed by kenneld from the caller's reserved scope and the kennel's
+/// `ctx`, then [stamped into the plan](Plan::stamp_proxy) before the BPF payload
+/// is derived.
 ///
 /// The IPv4 address is absent for a v6-only kennel (one whose `ctx` does not fit
 /// the 8-bit field the v4 loopback address carries), matching the addressing in
@@ -263,9 +290,16 @@ impl Plan {
     /// summary). Call once, after [`from_policy`](Self::from_policy) and before
     /// deriving the BPF payload.
     pub fn stamp_proxy(&mut self, endpoint: &ProxyEndpoint) {
-        // Implemented in the following commit; no-op stub so the structure
-        // compiles and the structural tests pass while the behaviour tests fail.
-        let _ = endpoint;
+        stamp_proxy_meta(&mut self.bpf_meta, endpoint);
+
+        // The proxy speaks TCP (SOCKS5 / HTTP CONNECT). Host-order port on a
+        // single-port range; the `KENNEL_ALLOW_FLAG_PROXY` flag marks it as the
+        // proxy entry for the audit and for any program that distinguishes it.
+        let value = allow_entry(endpoint.port, endpoint.port, Protocol::Tcp, KENNEL_ALLOW_FLAG_PROXY);
+        if let Some(v4) = endpoint.v4 {
+            self.bpf_allow_v4.push((lpm_v4_key(v4.octets(), HOST_PREFIX_V4), value));
+        }
+        self.bpf_allow_v6.push((lpm_v6_key(endpoint.v6.octets(), HOST_PREFIX_V6), value));
     }
 
     /// Build the seccomp filter this plan describes. Pure — the filter is not
