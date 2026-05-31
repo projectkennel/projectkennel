@@ -63,6 +63,14 @@ pub enum Response {
     Stopped,
     /// The running kennels.
     Listing(Vec<KennelInfo>),
+    /// The workload exited (sent on a `Start` connection after [`Started`]); the
+    /// code is the exit status, or `128 + signal` if it was killed.
+    ///
+    /// [`Started`]: Self::Started
+    Exited {
+        /// The workload's exit code (or `128 + signal`).
+        code: i32,
+    },
     /// The request failed; the string is a human-readable reason.
     Error(String),
 }
@@ -152,6 +160,11 @@ impl<'a> Reader<'a> {
         Ok(u32::from_ne_bytes(bytes) as usize)
     }
 
+    fn i32(&mut self) -> Result<i32, WireError> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| WireError::Truncated)?;
+        Ok(i32::from_ne_bytes(bytes))
+    }
+
     fn string(&mut self) -> Result<String, WireError> {
         let n = self.u32_len()?;
         if n > MAX_STRING {
@@ -238,8 +251,12 @@ impl Response {
                     put_u8(&mut b, u8::from(k.running));
                 }
             }
-            Self::Error(message) => {
+            Self::Exited { code } => {
                 put_u8(&mut b, 3);
+                b.extend_from_slice(&code.to_ne_bytes());
+            }
+            Self::Error(message) => {
+                put_u8(&mut b, 4);
                 put_str(&mut b, message);
             }
         }
@@ -271,7 +288,8 @@ impl Response {
                 }
                 Ok(Self::Listing(kennels))
             }
-            3 => Ok(Self::Error(r.string()?)),
+            3 => Ok(Self::Exited { code: r.i32()? }),
+            4 => Ok(Self::Error(r.string()?)),
             _ => Err(WireError::BadTag),
         }
     }
@@ -377,6 +395,8 @@ mod tests {
     fn responses_round_trip() {
         round_trip_response(&Response::Started { ctx: 7, pid: 4242 });
         round_trip_response(&Response::Stopped);
+        round_trip_response(&Response::Exited { code: 137 });
+        round_trip_response(&Response::Exited { code: 0 });
         round_trip_response(&Response::Error("no such kennel".to_owned()));
         round_trip_response(&Response::Listing(vec![
             KennelInfo { kennel: "ai-coding".to_owned(), ctx: 7, pid: 4242, running: true },

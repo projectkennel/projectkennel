@@ -65,5 +65,6 @@ pub mod path;
 pub mod process;
 pub mod scm;
 pub mod seccomp;
+pub mod signal;
 pub mod spawn;
 pub mod unistd;
