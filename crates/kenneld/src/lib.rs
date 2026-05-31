@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cgroup;
+pub mod ctx;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
