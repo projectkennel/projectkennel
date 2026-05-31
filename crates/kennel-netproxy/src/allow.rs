@@ -206,12 +206,25 @@ pub struct Rule {
     pub protocol: RuleProtocol,
 }
 
+/// What a deny rule forbids: a network, or a domain pattern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DenyMatcher {
+    /// Any address within a network. Checked against a literal-address request
+    /// and against every resolved address (the rebinding defence).
+    Cidr(Cidr),
+    /// A domain pattern (the dot-convention of [`name_matches`]). Checked against
+    /// a *name* request before resolution — a blacklisted name is refused outright
+    /// in every mode, so it never reaches the resolver or the allow rules.
+    Name(String),
+}
+
 /// One categorical deny rule (`[[net.deny]]`), evaluated before any allow rule.
-/// CIDR-only, with an optional port set (empty means "all ports").
+/// A network or a domain pattern, with an optional port set (empty means "all
+/// ports").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DenyRule {
-    /// The network this rule forbids.
-    pub cidr: Cidr,
+    /// What this rule forbids.
+    pub matcher: DenyMatcher,
     /// Ports the rule applies to. Empty means all ports.
     pub ports: Vec<u16>,
 }
@@ -293,7 +306,7 @@ impl Ruleset {
             // (in constrained mode) the allow CIDRs; open mode allows anything
             // the deny rules did not catch.
             Destination::Addr(addr) => {
-                if self.denied(*addr, port) {
+                if self.denied_addr(*addr, port) {
                     return RequestDecision::Deny(DenyReason::DeniedByRule);
                 }
                 match self.mode {
@@ -304,16 +317,22 @@ impl Ruleset {
                     _ => RequestDecision::Deny(DenyReason::NotAllowed),
                 }
             }
-            // A name cannot be deny-checked until it resolves (deny rules are
-            // CIDR-only). Authorise by name here; decide_resolved re-checks each
-            // resolved address against the deny rules before connecting.
-            Destination::Name(name) => match self.mode {
-                NetMode::Open => RequestDecision::Resolve,
-                NetMode::Constrained if self.allow_name_match(name, port, transport) => {
-                    RequestDecision::Resolve
+            // A name is deny-checked against the domain blacklist first (so a
+            // blacklisted name never reaches the resolver), then authorised by
+            // name. Its resolved addresses are re-checked by decide_resolved
+            // against the CIDR deny rules before connecting.
+            Destination::Name(name) => {
+                if self.name_denied(name, port) {
+                    return RequestDecision::Deny(DenyReason::DeniedByRule);
                 }
-                _ => RequestDecision::Deny(DenyReason::NotAllowed),
-            },
+                match self.mode {
+                    NetMode::Open => RequestDecision::Resolve,
+                    NetMode::Constrained if self.allow_name_match(name, port, transport) => {
+                        RequestDecision::Resolve
+                    }
+                    _ => RequestDecision::Deny(DenyReason::NotAllowed),
+                }
+            }
         }
     }
 
@@ -325,19 +344,29 @@ impl Ruleset {
     pub fn decide_resolved(&self, addr: IpAddr, port: u16, _transport: Transport) -> Decision {
         // Transport is accepted for API symmetry with decide_request; deny rules
         // are CIDR+port only (§7.3.4), so it does not affect the decision today.
-        if self.denied(addr, port) {
+        if self.denied_addr(addr, port) {
             Decision::Deny(DenyReason::DeniedByRule)
         } else {
             Decision::Allow
         }
     }
 
-    /// Whether any categorical deny rule covers `(addr, port)`. A deny rule with
-    /// an empty port set applies to every port.
-    fn denied(&self, addr: IpAddr, port: u16) -> bool {
-        self.deny
-            .iter()
-            .any(|rule| rule.cidr.contains(addr) && port_matches(&rule.ports, port))
+    /// Whether any CIDR deny rule covers `(addr, port)`. A rule with an empty port
+    /// set applies to every port; name deny rules do not apply to an address.
+    fn denied_addr(&self, addr: IpAddr, port: u16) -> bool {
+        self.deny.iter().any(|rule| {
+            matches!(&rule.matcher, DenyMatcher::Cidr(cidr) if cidr.contains(addr))
+                && port_matches(&rule.ports, port)
+        })
+    }
+
+    /// Whether any domain deny rule (the blacklist) covers `(name, port)`. CIDR
+    /// deny rules do not apply to a name.
+    fn name_denied(&self, name: &str, port: u16) -> bool {
+        self.deny.iter().any(|rule| {
+            matches!(&rule.matcher, DenyMatcher::Name(pattern) if name_matches(pattern, name))
+                && port_matches(&rule.ports, port)
+        })
     }
 
     /// Whether any allow rule admits a literal `(addr, port, transport)`. Only
@@ -351,14 +380,45 @@ impl Ruleset {
     }
 
     /// Whether any allow rule admits a `(name, port, transport)`. Only name
-    /// matchers apply; the comparison is ASCII case-insensitive.
+    /// matchers apply, by the dot-convention of [`name_matches`].
     fn allow_name_match(&self, name: &str, port: u16, transport: Transport) -> bool {
         self.allow.iter().any(|rule| {
-            matches!(&rule.matcher, Matcher::Name(n) if n.eq_ignore_ascii_case(name))
+            matches!(&rule.matcher, Matcher::Name(pattern) if name_matches(pattern, name))
                 && rule.protocol.admits(transport)
                 && port_matches(&rule.ports, port)
         })
     }
+}
+
+/// Whether a domain `pattern` matches a requested `name`, case-insensitively
+/// (ASCII).
+///
+/// The convention follows the common no-proxy / cookie-domain form:
+///
+/// - A plain pattern (`example.com`) matches that name **exactly**.
+/// - A leading dot (`.example.com`) matches the apex **and** any subdomain
+///   (`example.com`, `api.example.com`), on a label boundary — so it does not
+///   match `notexample.com`.
+///
+/// Exact-by-default is the safe choice for a whitelist (an allow of
+/// `example.com` does not silently admit every subdomain); the leading dot is
+/// the explicit opt-in, and is the natural form for a blacklist entry.
+#[must_use]
+pub fn name_matches(pattern: &str, name: &str) -> bool {
+    pattern.strip_prefix('.').map_or_else(
+        || pattern.eq_ignore_ascii_case(name),
+        |apex| name.eq_ignore_ascii_case(apex) || ends_with_label(name, pattern),
+    )
+}
+
+/// Whether `name` ends with the dotted `suffix` (e.g. `.example.com`) on a label
+/// boundary, case-insensitively. `suffix` includes its leading dot, so the match
+/// is inherently label-aligned.
+fn ends_with_label(name: &str, suffix: &str) -> bool {
+    name.len() > suffix.len()
+        && name
+            .get(name.len().saturating_sub(suffix.len())..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
 /// Whether `port` is permitted by a rule's port set. An empty set means "any
@@ -569,7 +629,14 @@ mod tests {
 
     fn deny(addr: &str, prefix: u8) -> DenyRule {
         DenyRule {
-            cidr: cidr(addr, prefix),
+            matcher: DenyMatcher::Cidr(cidr(addr, prefix)),
+            ports: Vec::new(),
+        }
+    }
+
+    fn deny_name(pattern: &str) -> DenyRule {
+        DenyRule {
+            matcher: DenyMatcher::Name(pattern.to_owned()),
             ports: Vec::new(),
         }
     }
@@ -811,6 +878,124 @@ mod tests {
         assert_eq!(
             rs.decide_request(
                 &Destination::Name("anything.example".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Resolve
+        );
+    }
+
+    // ---- name_matches (the dot-convention) ----
+
+    #[test]
+    fn plain_pattern_matches_exactly_only() {
+        assert!(name_matches("example.com", "example.com"));
+        assert!(
+            name_matches("example.com", "EXAMPLE.COM"),
+            "case-insensitive"
+        );
+        assert!(
+            !name_matches("example.com", "api.example.com"),
+            "no implicit subdomain"
+        );
+        assert!(!name_matches("example.com", "notexample.com"));
+    }
+
+    #[test]
+    fn dotted_pattern_matches_apex_and_subdomains_on_a_label_boundary() {
+        assert!(name_matches(".example.com", "example.com"), "apex");
+        assert!(name_matches(".example.com", "api.example.com"), "subdomain");
+        assert!(
+            name_matches(".example.com", "a.b.example.com"),
+            "deep subdomain"
+        );
+        assert!(
+            !name_matches(".example.com", "notexample.com"),
+            "label boundary"
+        );
+        assert!(!name_matches(".example.com", "example.com.evil.net"));
+    }
+
+    // ---- domain blacklist (name deny) ----
+
+    #[test]
+    fn open_mode_blacklisted_name_is_denied() {
+        let rs = Ruleset {
+            mode: NetMode::Open,
+            allow: vec![],
+            deny: vec![deny_name(".tracker.example")],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("a.tracker.example".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Deny(DenyReason::DeniedByRule)
+        );
+        // A name outside the blacklist still resolves in open mode.
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("good.example".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Resolve
+        );
+    }
+
+    #[test]
+    fn blacklist_overrides_allowlist_in_constrained_mode() {
+        // The name is on the allowlist but also blacklisted: deny wins, and it is
+        // refused before any resolution.
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule("api.example.com", &[443])],
+            deny: vec![deny_name("api.example.com")],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("api.example.com".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Deny(DenyReason::DeniedByRule)
+        );
+    }
+
+    #[test]
+    fn name_deny_does_not_affect_a_literal_address() {
+        // A domain blacklist entry must not match a literal-address request.
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![cidr_rule("10.0.0.0", 24, &[443])],
+            deny: vec![deny_name(".example.com")],
+        };
+        assert_eq!(
+            rs.decide_request(&Destination::Addr(v4("10.0.0.5")), 443, Transport::Tcp),
+            RequestDecision::Allow
+        );
+    }
+
+    #[test]
+    fn dotted_allow_admits_subdomains() {
+        // A whitelist entry with a leading dot admits the apex and subdomains.
+        let rs = Ruleset {
+            mode: NetMode::Constrained,
+            allow: vec![name_rule(".example.com", &[443])],
+            deny: vec![],
+        };
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("api.example.com".to_owned()),
+                443,
+                Transport::Tcp
+            ),
+            RequestDecision::Resolve
+        );
+        assert_eq!(
+            rs.decide_request(
+                &Destination::Name("example.com".to_owned()),
                 443,
                 Transport::Tcp
             ),
