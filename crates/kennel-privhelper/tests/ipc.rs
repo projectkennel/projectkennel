@@ -52,6 +52,45 @@ fn refuses_a_traversal_path() {
 }
 
 #[cfg(feature = "root-tests")]
+fn lo_has(addr: &str) -> bool {
+    let out = Command::new("ip")
+        .args(["addr", "show", "dev", "lo"])
+        .output()
+        .expect("run ip");
+    String::from_utf8_lossy(&out.stdout).contains(addr)
+}
+
+#[cfg(feature = "root-tests")]
+#[test]
+fn adds_and_removes_an_in_scope_loopback_address() {
+    // Provision the trusted scope file: tag = 9, ULA GID = 00:00:00:00:01.
+    std::fs::create_dir_all("/etc/kennel").expect("mkdir /etc/kennel");
+    std::fs::write("/etc/kennel/scope", [9u8, 0, 0, 0, 0, 1]).expect("write scope");
+
+    // In scope for tag=9, ctx=5: 127.9.5.0/24.
+    let addr = "127.9.5.1";
+    let mut req = cgroup_request(Op::AddAddr, "");
+    req.ctx = 5;
+    req.addr = addr.parse().expect("v4");
+    req.prefix = 24;
+    req.interface = "lo".to_owned();
+
+    assert_eq!(run(&req).status, Status::Ok, "in-scope address add should succeed");
+    assert!(lo_has(addr), "the loopback alias should be present");
+
+    req.op = Op::DelAddr;
+    assert_eq!(run(&req).status, Status::Ok, "address removal should succeed");
+    assert!(!lo_has(addr), "the loopback alias should be gone");
+
+    // An out-of-scope address (wrong tag) must be refused, no syscall.
+    req.op = Op::AddAddr;
+    req.addr = "127.1.5.1".parse().expect("v4"); // tag 1 != 9
+    assert_eq!(run(&req).status, Status::Refused, "out-of-scope address must be refused");
+
+    let _ = std::fs::remove_file("/etc/kennel/scope");
+}
+
+#[cfg(feature = "root-tests")]
 #[test]
 fn creates_and_deletes_an_in_scope_cgroup() {
     let path = "/sys/fs/cgroup/kennel/privhelper-ipc-test";
