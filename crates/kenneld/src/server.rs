@@ -62,6 +62,10 @@ pub trait PolicyLoader {
 pub struct Identity {
     /// The user's real uid.
     pub uid: u32,
+    /// The user's real gid (for the synthetic `/etc/passwd`/`group`).
+    pub gid: u32,
+    /// The user's account name (for the synthetic `/etc/passwd`/`group`).
+    pub username: String,
     /// The user's home directory (`<home>` substitution).
     pub home: PathBuf,
     /// The user's reserved scope (tag, ULA GID, namespace).
@@ -70,6 +74,9 @@ pub struct Identity {
     pub cgroup_base: PathBuf,
     /// How to launch each kennel's egress proxy, or `None` to run none.
     pub proxy: Option<crate::ProxySetup>,
+    /// Base directory the per-kennel synthetic `/etc` is staged under, or `None`
+    /// to skip the synthetic `/etc`.
+    pub etc_base: Option<PathBuf>,
 }
 
 /// Registry metadata for one kennel (the workload itself is owned by the
@@ -236,13 +243,23 @@ where
         Ok(command) => command,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
     };
+    let id = &shared.identity;
+    let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
+        staging_dir: base.join(format!("etc-{ctx}")),
+        hostname: req.kennel.clone(),
+        username: id.username.clone(),
+        uid: id.uid,
+        gid: id.gid,
+        home: id.home.clone(),
+    });
     let spec = crate::Spec {
-        cgroup: cgroup::kennel_cgroup(&shared.identity.cgroup_base, ctx),
+        cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
         ctx,
-        scope: shared.identity.scope.clone(),
+        scope: id.scope.clone(),
         plan: loaded.plan,
         net: loaded.net,
-        proxy: shared.identity.proxy.clone(),
+        proxy: id.proxy.clone(),
+        etc,
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
@@ -347,6 +364,7 @@ mod tests {
                 bpf_allow_v6: Vec::new(),
                 bpf_deny_v6: Vec::new(),
                 bpf_meta: [0u8; 64],
+                file_binds: Vec::new(),
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,
@@ -366,10 +384,13 @@ mod tests {
         Shared::new(
             Identity {
                 uid: 1000,
+                gid: 1000,
+                username: "dev".to_owned(),
                 home: PathBuf::from("/home/dev"),
                 scope: ReservedScope::new(9, [0, 0, 0, 0, 1], "kennel-test"),
                 cgroup_base: base,
                 proxy: None,
+                etc_base: None,
             },
             OkPriv,
             FakeLoader,

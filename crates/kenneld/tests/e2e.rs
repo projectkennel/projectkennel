@@ -27,7 +27,7 @@ use kennel_policy::{
 use kennel_privhelper::validate::ReservedScope;
 use kennel_spawn::{prepare, RuntimeSubstitutions};
 use kennel_syscall::namespace::Namespaces;
-use kenneld::{start, HelperClient, ProxySetup, Spec};
+use kenneld::{start, EtcSetup, HelperClient, ProxySetup, Spec};
 
 /// Locate a binary built alongside this test (`target/<profile>/<name>`).
 fn sibling_binary(name: &str) -> PathBuf {
@@ -141,12 +141,11 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
         namespace: scope.namespace().to_owned(),
     };
     let mut plan = prepare(&bytes, &keys, &subst).expect("verify + plan");
-    // This test verifies the *privileged orchestration* (addresses, BPF, cgroup
-    // join, teardown). The namespace isolation is proven separately in
-    // kennel-spawn's root tests; we drop it here because spawn unshares the PID
-    // namespace in the parent (this test process), which would disrupt the test
-    // harness's own forks (e.g. running `ip` to inspect the result).
-    plan.namespaces = Namespaces::empty();
+    // Drop the PID namespace (spawn unshares CLONE_NEWPID in the *parent* — this
+    // test process — which would disrupt the harness's own forks). Keep MOUNT, so
+    // the synthetic /etc shadow binds actually apply and the workload can observe
+    // them; MOUNT is unshared in the child seal and does not affect the harness.
+    plan.namespaces = Namespaces::MOUNT;
 
     // A cgroup base we own; the kennel cgroup is a child of it.
     let base = PathBuf::from("/sys/fs/cgroup/kennel-e2e");
@@ -155,11 +154,15 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     cleanup(&base, "127.0.144.17/28", "fd00:0:1:1::1/64");
     std::fs::create_dir_all(&base).expect("create cgroup base");
 
-    // Launch the real netproxy as the kennel's egress proxy, with a temp config
-    // dir. The workload runs a brief sleep so the proxy is observably up while it
-    // runs (rather than racing /bin/true's immediate exit).
+    // Launch the real netproxy as the kennel's egress proxy, and stage a synthetic
+    // /etc, both in temp dirs.
     let proxy_cfg = std::env::temp_dir().join(format!("kenneld-e2e-proxy-{}", std::process::id()));
+    // Stage /etc under /run, not /tmp: the spawn mounts a fresh tmpfs over /tmp
+    // before the shadow binds, which would hide a /tmp-staged source. Production
+    // stages under $XDG_RUNTIME_DIR (/run/user/<uid>), likewise outside /tmp.
+    let etc_base = PathBuf::from(format!("/run/kenneld-e2e-etc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&proxy_cfg);
+    let _ = std::fs::remove_dir_all(&etc_base);
     let helper = HelperClient::new(privhelper_path());
     let spec = Spec {
         cgroup: cgroup.clone(),
@@ -168,11 +171,23 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
         plan,
         net: minimal_policy().effective_policy.net,
         proxy: Some(ProxySetup { binary: netproxy_path(), config_dir: proxy_cfg.clone() }),
+        etc: Some(EtcSetup {
+            staging_dir: etc_base.join("etc-1"),
+            hostname: "e2e".to_owned(),
+            username: "root".to_owned(),
+            uid: 0,
+            gid: 0,
+            home: PathBuf::from("/root"),
+        }),
     };
 
-    // Bring the kennel up: cgroup + addresses + egress BPF + proxy + workload.
-    let mut workload = Command::new("/bin/sleep");
-    workload.arg("2");
+    // The workload proves it sees the *synthetic* /etc inside the kennel: the
+    // synthetic /etc/hosts maps the kennel's own primary address to its hostname
+    // ("e2e"), which the host's /etc/hosts never does. If the shadow bind did not
+    // apply, grep fails and the shell exits non-zero. The brief sleep keeps it
+    // alive long enough to observe the proxy listening.
+    let mut workload = Command::new("/bin/sh");
+    workload.arg("-c").arg("grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts && sleep 2");
     let kennel = start(&helper, spec, &mut workload).expect("start kennel");
     assert!(cgroup.is_dir(), "the kennel cgroup should exist while running");
 
@@ -183,12 +198,15 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     // The netproxy should be listening on the kennel's address:1080.
     let proxy_addr = format!("{v4}:1080");
     assert!(listening(&proxy_addr), "the egress proxy should be listening on {proxy_addr}");
-    // And kenneld wrote its config.
+    // And kenneld wrote its config and the synthetic /etc.
     assert!(proxy_cfg.join(format!("proxy-{ctx}.toml")).exists(), "the proxy config should be written");
+    let staged_hosts = etc_base.join("etc-1").join("hosts");
+    assert!(staged_hosts.exists(), "the synthetic /etc/hosts should be staged");
 
     // Wait for the workload to finish and tear everything down (incl. the proxy).
+    // success ⇒ the grep inside the kennel found the synthetic /etc/hosts.
     let status = kennel.stop(&helper).expect("stop");
-    assert!(status.success(), "the workload should exit 0 (got {status:?})");
+    assert!(status.success(), "the workload saw the synthetic /etc/hosts and exited 0 (got {status:?})");
 
     assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
     assert!(!lo_has(v4), "the loopback address should be removed on teardown");
@@ -196,6 +214,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     assert!(!quick_connect(&proxy_addr), "the proxy should be killed on teardown");
 
     let _ = std::fs::remove_dir_all(&proxy_cfg);
+    let _ = std::fs::remove_dir_all(&etc_base);
     let _ = std::fs::remove_dir(&base);
 }
 

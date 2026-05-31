@@ -42,9 +42,12 @@ fn build_identity() -> Result<Identity, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
     let scope = kennel_privhelper::alloc::load(uid).ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
     let cgroup_base = kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
+    let gid = kennel_syscall::unistd::real_gid();
+    let username = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
     let proxy = Some(ProxySetup {
         binary: PathBuf::from(proxy::DEFAULT_NETPROXY_BIN),
         config_dir: socket::runtime_dir().join("proxy"),
     });
-    Ok(Identity { uid, home, scope, cgroup_base, proxy })
+    let etc_base = Some(socket::runtime_dir().join("etc"));
+    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base })
 }

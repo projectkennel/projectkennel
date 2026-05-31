@@ -179,6 +179,25 @@ pub struct ProxySetup {
     pub config_dir: PathBuf,
 }
 
+/// What the synthetic `/etc` is built from: where to stage it and the workload's
+/// identity (the kennel name becomes the hostname). `None` in [`Spec::etc`] skips
+/// the synthetic `/etc` (unit tests).
+#[derive(Debug, Clone)]
+pub struct EtcSetup {
+    /// Directory the per-kennel `/etc` files are written to (then bind-mounted).
+    pub staging_dir: PathBuf,
+    /// The kennel's hostname (its runtime name).
+    pub hostname: String,
+    /// The synthetic account name for the workload's uid.
+    pub username: String,
+    /// The workload's uid.
+    pub uid: u32,
+    /// The workload's gid.
+    pub gid: u32,
+    /// The workload's home directory.
+    pub home: PathBuf,
+}
+
 /// Everything needed to bring one kennel up.
 pub struct Spec {
     /// The kennel's cgroup, under kenneld's delegated subtree. kenneld creates it
@@ -195,6 +214,8 @@ pub struct Spec {
     pub net: NetPolicy,
     /// How to launch the egress proxy, or `None` to skip it.
     pub proxy: Option<ProxySetup>,
+    /// How to build the synthetic `/etc`, or `None` to skip it.
+    pub etc: Option<EtcSetup>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -291,10 +312,10 @@ struct Provision {
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
 pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    let Spec { cgroup, ctx, scope, mut plan, net, proxy } = spec;
+    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc } = spec;
     let mut state = Provision::default();
 
-    match bring_up(privileged, &cgroup, ctx, &scope, &mut plan, &net, proxy.as_ref(), command, &mut state) {
+    match bring_up(privileged, &cgroup, ctx, &scope, &mut plan, &net, proxy.as_ref(), etc.as_ref(), command, &mut state) {
         Ok(child) => Ok(Kennel { child, cgroup, ctx, v4: state.v4, v6: state.v6, proxy: state.proxy }),
         Err(e) => {
             teardown(privileged, ctx, state.made_cgroup.then_some(cgroup.as_path()), state.v4, state.v6, state.proxy);
@@ -313,6 +334,7 @@ fn bring_up<P: Privileged>(
     plan: &mut Plan,
     net: &NetPolicy,
     proxy: Option<&ProxySetup>,
+    etc: Option<&EtcSetup>,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<Child, Error> {
@@ -363,6 +385,22 @@ fn bring_up<P: Privileged>(
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
         std::fs::write(&config_path, config)?;
         state.proxy = Some(crate::proxy::spawn(&setup.binary, &config_path).map_err(Error::Proxy)?);
+    }
+
+    // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
+    //     binds that shadow them over the kennel's view. Built here because it
+    //     needs the kennel's just-computed primary addresses.
+    if let Some(etc) = etc {
+        let params = crate::etc::EtcParams {
+            hostname: &etc.hostname,
+            username: &etc.username,
+            uid: etc.uid,
+            gid: etc.gid,
+            home: &etc.home,
+            v4: state.v4,
+            v6: addr6,
+        };
+        plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
     }
 
     // 4. spawn the workload into this cgroup (it joins itself in the seal).
@@ -491,6 +529,7 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
         }
     }
 
@@ -508,6 +547,7 @@ mod tests {
                 deny_invariant: Vec::new(),
             },
             proxy: None,
+            etc: None,
         }
     }
 
