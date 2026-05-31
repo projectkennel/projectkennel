@@ -25,6 +25,7 @@
 pub mod cgroup;
 pub mod control;
 pub mod ctx;
+pub mod server;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -198,6 +199,15 @@ impl Kennel {
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    /// Check whether the workload has exited, without blocking. `Some(status)`
+    /// once it has, `None` while it is still running.
+    ///
+    /// # Errors
+    /// An OS error if the status check fails.
+    pub fn try_finished(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
     }
 
     /// Wait for the workload to exit, then tear the kennel down: remove the
