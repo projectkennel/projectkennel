@@ -1,0 +1,116 @@
+//! Client side of the privhelper IPC: invoke the helper binary and exchange one
+//! message.
+//!
+//! `kenneld` (the orchestrator) calls these to perform a privileged operation:
+//! it `exec`s the installed setuid helper, writes one [`Request`], reads one
+//! [`Response`]. The helper validates against the caller's allocation and exits
+//! (`01-process-model.md`: privilege is transient, one op per invocation).
+
+use std::io;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use crate::wire::{Op, Request, Response};
+
+/// The installed location of the setuid helper.
+pub const DEFAULT_HELPER: &str = "/opt/kennel/sbin/kennel-privhelper";
+
+/// The installed helper path.
+#[must_use]
+pub fn default_helper_path() -> &'static Path {
+    Path::new(DEFAULT_HELPER)
+}
+
+/// Invoke `helper`, send `request`, and return the decoded response.
+///
+/// # Errors
+///
+/// Returns an OS error if the helper cannot be spawned or the exchange fails, or
+/// `InvalidData` if the helper's response is malformed.
+pub fn invoke(helper: &Path, request: &Request) -> io::Result<Response> {
+    let mut child = Command::new(helper)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("privhelper stdin unavailable"))?
+        .write_request(request)?;
+    let out = child.wait_with_output()?;
+    Response::decode(&out.stdout)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("malformed privhelper response: {e:?}")))
+}
+
+/// Ask the helper to create the cgroup at `path` (in the user's namespace).
+///
+/// # Errors
+///
+/// As [`invoke`].
+pub fn create_cgroup(helper: &Path, path: PathBuf) -> io::Result<Response> {
+    invoke(helper, &cgroup_request(Op::CreateCgroup, path))
+}
+
+/// Ask the helper to delete the cgroup at `path`.
+///
+/// # Errors
+///
+/// As [`invoke`].
+pub fn delete_cgroup(helper: &Path, path: PathBuf) -> io::Result<Response> {
+    invoke(helper, &cgroup_request(Op::DeleteCgroup, path))
+}
+
+/// Ask the helper to add `addr/prefix` on `interface` for kennel `ctx`.
+///
+/// # Errors
+///
+/// As [`invoke`].
+pub fn add_address(helper: &Path, ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
+    invoke(helper, &addr_request(Op::AddAddr, ctx, interface, addr, prefix))
+}
+
+/// Ask the helper to remove `addr/prefix` on `interface` for kennel `ctx`.
+///
+/// # Errors
+///
+/// As [`invoke`].
+pub fn del_address(helper: &Path, ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
+    invoke(helper, &addr_request(Op::DelAddr, ctx, interface, addr, prefix))
+}
+
+const fn cgroup_request(op: Op, path: PathBuf) -> Request {
+    Request {
+        op,
+        ctx: 0,
+        addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        prefix: 0,
+        interface: String::new(),
+        cgroup_path: path,
+    }
+}
+
+fn addr_request(op: Op, ctx: u8, interface: &str, addr: IpAddr, prefix: u8) -> Request {
+    Request {
+        op,
+        ctx,
+        addr,
+        prefix,
+        interface: interface.to_owned(),
+        cgroup_path: PathBuf::new(),
+    }
+}
+
+/// Helper so `invoke` reads cleanly; writes the encoded request and drops the pipe.
+trait WriteRequest {
+    fn write_request(self, request: &Request) -> io::Result<()>;
+}
+
+impl WriteRequest for std::process::ChildStdin {
+    fn write_request(mut self, request: &Request) -> io::Result<()> {
+        use std::io::Write as _;
+        self.write_all(&request.encode())
+        // `self` drops here, closing the helper's stdin so it sees EOF.
+    }
+}

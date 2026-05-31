@@ -2,27 +2,15 @@
 //! way the spawner invokes it. The reserved scope is per-user (the
 //! `/etc/kennel/subkennel` allocation file, keyed by the caller's real UID).
 
-use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::path::Path;
 
+use kennel_privhelper::client;
 use kennel_privhelper::wire::{Op, Request, Response, Status};
 
-/// Send `req` to a fresh privhelper process and return its decoded response.
+/// Send `req` to a fresh privhelper process (via the client) and return its
+/// response — exercising `client::invoke` against the real binary.
 fn run(req: &Request) -> Response {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_kennel-privhelper"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn privhelper");
-    child
-        .stdin
-        .take()
-        .expect("stdin pipe")
-        .write_all(&req.encode())
-        .expect("write request");
-    let out = child.wait_with_output().expect("wait for privhelper");
-    Response::decode(&out.stdout).expect("decode response")
+    client::invoke(Path::new(env!("CARGO_BIN_EXE_kennel-privhelper")), req).expect("invoke privhelper")
 }
 
 fn cgroup_request(op: Op, path: &str) -> Request {
@@ -57,7 +45,7 @@ fn provision_root_allocation() {
 
 #[cfg(feature = "root-tests")]
 fn lo_has(addr: &str) -> bool {
-    let out = Command::new("ip")
+    let out = std::process::Command::new("ip")
         .args(["addr", "show", "dev", "lo"])
         .output()
         .expect("run ip");
