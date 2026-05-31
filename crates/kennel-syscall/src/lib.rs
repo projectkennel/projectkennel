@@ -63,6 +63,7 @@ pub mod namespace;
 pub mod netlink;
 pub mod path;
 pub mod process;
+pub mod scm;
 pub mod seccomp;
 pub mod spawn;
 pub mod unistd;
