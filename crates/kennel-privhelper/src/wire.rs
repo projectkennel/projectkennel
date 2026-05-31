@@ -39,6 +39,19 @@ pub const RESPONSE_LEN: usize = 6;
 const INTERFACE_FIELD: usize = 16;
 const PATH_FIELD: usize = 256;
 
+/// Length of the `kennel_meta` map value (`bpf/maps.h`).
+pub const META_LEN: usize = 64;
+/// Defensive cap on the number of entries in any one map array, so a malformed
+/// length prefix cannot make the helper attempt an absurd read.
+const MAX_ENTRIES: usize = 8192;
+
+/// An IPv4 egress LPM map entry: `(lpm_v4_key[8], allow_value[8])`. Matches
+/// `kennel_spawn::plan::LpmV4Entry`.
+pub type V4Entry = ([u8; 8], [u8; 8]);
+/// An IPv6 egress LPM map entry: `(lpm_v6_key[20], allow_value[8])`. Matches
+/// `kennel_spawn::plan::LpmV6Entry`.
+pub type V6Entry = ([u8; 20], [u8; 8]);
+
 /// The privileged operation a request asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -50,6 +63,10 @@ pub enum Op {
     CreateCgroup,
     /// Delete a per-kennel cgroup.
     DeleteCgroup,
+    /// Load, populate, and attach the egress BPF programs to a kennel's cgroup.
+    /// The fixed [`Request`] carries the (scope-validated) cgroup path; a
+    /// variable-length [`EgressPayload`] tail carries the map contents.
+    SetupEgress,
 }
 
 impl Op {
@@ -59,6 +76,7 @@ impl Op {
             Self::DelAddr => 2,
             Self::CreateCgroup => 3,
             Self::DeleteCgroup => 4,
+            Self::SetupEgress => 5,
         }
     }
 
@@ -68,6 +86,7 @@ impl Op {
             2 => Some(Self::DelAddr),
             3 => Some(Self::CreateCgroup),
             4 => Some(Self::DeleteCgroup),
+            5 => Some(Self::SetupEgress),
             _ => None,
         }
     }
@@ -216,6 +235,129 @@ impl Request {
     }
 }
 
+/// The variable-length tail of a [`Op::SetupEgress`] request: the BPF map
+/// contents the helper writes into the egress programs' maps before attaching.
+///
+/// Layout (appended directly after the fixed [`Request`] bytes):
+///
+/// ```text
+///   0..64    meta            [u8; 64]   kennel_meta_map[0]
+///   64..68   n_allow_v4      u32        native-endian
+///   68..72   n_deny_v4       u32
+///   72..76   n_allow_v6      u32
+///   76..80   n_deny_v6       u32
+///   80..     allow_v4 (16 B each) | deny_v4 (16) | allow_v6 (28) | deny_v6 (28)
+/// ```
+///
+/// The map contents are *not* scope-validated: they only define the kennel's
+/// own egress allowlist, which the calling user already controls. The cgroup
+/// path in the fixed [`Request`] is the cross-user boundary, and is validated
+/// like any other cgroup op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressPayload {
+    /// The 64-byte `kennel_meta` value for `kennel_meta_map[0]`.
+    pub meta: [u8; META_LEN],
+    /// `allow_v4` LPM entries.
+    pub allow_v4: Vec<V4Entry>,
+    /// `deny_v4` LPM entries.
+    pub deny_v4: Vec<V4Entry>,
+    /// `allow_v6` LPM entries.
+    pub allow_v6: Vec<V6Entry>,
+    /// `deny_v6` LPM entries.
+    pub deny_v6: Vec<V6Entry>,
+}
+
+/// Read `n` IPv4 entries (8-byte key + 8-byte value) from the front of `bytes`,
+/// returning them and the number of bytes consumed.
+fn read_v4_entries(bytes: &[u8], n: usize) -> Result<(Vec<V4Entry>, usize), WireError> {
+    let span = n.checked_mul(16).ok_or(WireError::BadLength)?;
+    let region = bytes.get(..span).ok_or(WireError::BadLength)?;
+    let mut out = Vec::with_capacity(n);
+    for chunk in region.chunks_exact(16) {
+        let key: [u8; 8] = chunk.get(..8).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        let val: [u8; 8] = chunk.get(8..16).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        out.push((key, val));
+    }
+    Ok((out, span))
+}
+
+/// Read `n` IPv6 entries (20-byte key + 8-byte value) from the front of `bytes`,
+/// returning them and the number of bytes consumed.
+fn read_v6_entries(bytes: &[u8], n: usize) -> Result<(Vec<V6Entry>, usize), WireError> {
+    let span = n.checked_mul(28).ok_or(WireError::BadLength)?;
+    let region = bytes.get(..span).ok_or(WireError::BadLength)?;
+    let mut out = Vec::with_capacity(n);
+    for chunk in region.chunks_exact(28) {
+        let key: [u8; 20] = chunk.get(..20).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        let val: [u8; 8] = chunk.get(20..28).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        out.push((key, val));
+    }
+    Ok((out, span))
+}
+
+/// Read a native-endian `u32` count at `off`, rejecting absurd values.
+fn read_count(bytes: &[u8], off: usize) -> Result<usize, WireError> {
+    let end = off.checked_add(4).ok_or(WireError::BadLength)?;
+    let raw = bytes
+        .get(off..end)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_ne_bytes)
+        .ok_or(WireError::BadLength)?;
+    let n = usize::try_from(raw).map_err(|_| WireError::BadLength)?;
+    if n > MAX_ENTRIES {
+        return Err(WireError::BadLength);
+    }
+    Ok(n)
+}
+
+impl EgressPayload {
+    /// Encode the payload tail (appended after the request bytes by the client).
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&self.meta);
+        for n in [self.allow_v4.len(), self.deny_v4.len(), self.allow_v6.len(), self.deny_v6.len()] {
+            // Counts are bounded by MAX_ENTRIES on decode; encode is local data.
+            b.extend_from_slice(&u32::try_from(n).unwrap_or(u32::MAX).to_ne_bytes());
+        }
+        for (k, v) in self.allow_v4.iter().chain(&self.deny_v4) {
+            b.extend_from_slice(k);
+            b.extend_from_slice(v);
+        }
+        for (k, v) in self.allow_v6.iter().chain(&self.deny_v6) {
+            b.extend_from_slice(k);
+            b.extend_from_slice(v);
+        }
+        b
+    }
+
+    /// Decode a payload tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireError::BadLength`] if the buffer is short, a count exceeds
+    /// the defensive cap, or the entry bytes do not match the declared counts.
+    pub fn decode(buf: &[u8]) -> Result<Self, WireError> {
+        let meta: [u8; META_LEN] = buf.get(..META_LEN).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        let n_allow_v4 = read_count(buf, META_LEN)?;
+        let n_deny_v4 = read_count(buf, META_LEN + 4)?;
+        let n_allow_v6 = read_count(buf, META_LEN + 8)?;
+        let n_deny_v6 = read_count(buf, META_LEN + 12)?;
+        let mut off = META_LEN + 16;
+        let rest = buf.get(off..).ok_or(WireError::BadLength)?;
+
+        let (allow_v4, used) = read_v4_entries(rest, n_allow_v4)?;
+        off = used;
+        let (deny_v4, used) = read_v4_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v4)?;
+        off = off.checked_add(used).ok_or(WireError::BadLength)?;
+        let (allow_v6, used) = read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_allow_v6)?;
+        off = off.checked_add(used).ok_or(WireError::BadLength)?;
+        let (deny_v6, _) = read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v6)?;
+
+        Ok(Self { meta, allow_v4, deny_v4, allow_v6, deny_v6 })
+    }
+}
+
 /// A response message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Response {
@@ -314,6 +456,43 @@ mod tests {
         };
         let bytes = req.encode();
         assert_eq!(Request::decode(&bytes), Ok(req));
+    }
+
+    #[test]
+    fn egress_payload_round_trips() {
+        let payload = EgressPayload {
+            meta: [7u8; META_LEN],
+            allow_v4: vec![([1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16])],
+            deny_v4: vec![([0xff; 8], [0; 8]), ([0x11; 8], [0x22; 8])],
+            allow_v6: vec![([3u8; 20], [4u8; 8])],
+            deny_v6: Vec::new(),
+        };
+        let bytes = payload.encode();
+        assert_eq!(EgressPayload::decode(&bytes), Ok(payload));
+    }
+
+    #[test]
+    fn egress_payload_rejects_truncated_entries() {
+        // Claim one v4 entry but provide no entry bytes.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8; META_LEN]);
+        bytes.extend_from_slice(&1u32.to_ne_bytes()); // n_allow_v4 = 1
+        bytes.extend_from_slice(&[0u8; 12]); // remaining three counts = 0
+        assert_eq!(EgressPayload::decode(&bytes), Err(WireError::BadLength));
+    }
+
+    #[test]
+    fn egress_payload_rejects_absurd_count() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8; META_LEN]);
+        bytes.extend_from_slice(&u32::MAX.to_ne_bytes()); // n_allow_v4 = 4 billion
+        bytes.extend_from_slice(&[0u8; 12]);
+        assert_eq!(EgressPayload::decode(&bytes), Err(WireError::BadLength));
+    }
+
+    #[test]
+    fn setup_egress_op_round_trips() {
+        assert_eq!(Op::from_byte(Op::SetupEgress.to_byte()), Some(Op::SetupEgress));
     }
 
     #[test]

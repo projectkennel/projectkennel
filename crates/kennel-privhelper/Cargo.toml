@@ -10,11 +10,20 @@ repository.workspace = true
 
 [dependencies]
 kennel-syscall = { path = "../kennel-syscall" }
+# Only pulled in (and only then is clang needed at build time) when the
+# bpf-egress feature is on; a plain `cargo build` of the helper stays clang-free.
+kennel-bpf = { path = "../kennel-bpf", optional = true }
 
 [features]
-# Tests that need privilege (real cgroup/address ops). Run via:
+# Egress BPF setup (Op::SetupEgress). Embeds the cgroup BPF programs, so it
+# requires clang at build time; the installed helper is built with it. Off by
+# default to keep plain builds and the unprivileged test suite clang-free.
+bpf-egress = ["dep:kennel-bpf", "kennel-bpf/embed-programs"]
+
+# Tests that need privilege (real cgroup/address/BPF ops). Implies bpf-egress so
+# the egress root-test can attach real programs. Run via:
 #   sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features root-tests
-root-tests = []
+root-tests = ["bpf-egress"]
 
 [lints]
 workspace = true

@@ -18,19 +18,30 @@ use std::io::{Read as _, Write as _};
 use std::process::ExitCode;
 
 use kennel_privhelper::{alloc, exec};
-use kennel_privhelper::wire::{Request, Response, Status};
+use kennel_privhelper::wire::{EgressPayload, Op, Request, Response, Status, REQUEST_LEN};
 
 fn main() -> ExitCode {
     let mut buf = Vec::new();
     if std::io::stdin().read_to_end(&mut buf).is_err() {
         return respond(Response::protocol());
     }
-    let Ok(request) = Request::decode(&buf) else {
+    // The fixed request is always the first REQUEST_LEN bytes.
+    let head = buf.get(..REQUEST_LEN).unwrap_or(&buf);
+    let Ok(request) = Request::decode(head) else {
         return respond(Response::protocol());
+    };
+    // SetupEgress carries a variable-length payload appended after the request.
+    let egress = if request.op == Op::SetupEgress {
+        match EgressPayload::decode(buf.get(REQUEST_LEN..).unwrap_or(&[])) {
+            Ok(p) => Some(p),
+            Err(_) => return respond(Response::protocol()),
+        }
+    } else {
+        None
     };
     // The caller's real UID is the trusted identity; look up its allocation.
     let scope = alloc::load(kennel_syscall::unistd::real_uid());
-    respond(exec::perform(&request, scope.as_ref()))
+    respond(exec::perform(&request, egress.as_ref(), scope.as_ref()))
 }
 
 /// Write the response and map its status to the process exit code (matching the

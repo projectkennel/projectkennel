@@ -9,7 +9,7 @@
 use std::ffi::CString;
 
 use crate::validate::{validate_addr, validate_cgroup, AddrRequest, CgroupRequest, Refusal, ReservedScope};
-use crate::wire::{Op, Request, Response};
+use crate::wire::{EgressPayload, Op, Request, Response};
 
 /// Stable refusal codes carried on the wire (`Response::refusal`).
 const fn refusal_code(r: &Refusal) -> u8 {
@@ -28,24 +28,114 @@ const fn refusal_code(r: &Refusal) -> u8 {
 /// cannot service an address request". Distinct from the validation refusals.
 pub const REFUSAL_NO_SCOPE: u8 = 100;
 
+/// `ENOSYS` on Linux — returned when a [`Op::SetupEgress`] request reaches a
+/// helper built without the `bpf-egress` feature.
+const ENOSYS: i32 = 38;
+
 fn errno_of(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(0)
 }
 
-/// Validate and perform `req`. Address operations require a configured `scope`
-/// (the installation constants, from a trusted source); cgroup operations do
-/// not. Returns the [`Response`] to send back.
+/// Validate and perform `req`.
+///
+/// Every operation is confined to the caller's allocation (`scope`), so a user
+/// with no allocation can do nothing. A [`Op::SetupEgress`] request additionally
+/// carries an `egress` payload (the BPF map contents); the other ops ignore it.
+/// Returns the [`Response`] to send back.
 #[must_use]
-pub fn perform(req: &Request, scope: Option<&ReservedScope>) -> Response {
-    // Every operation is confined to the caller's allocation now (cgroup ops use
-    // the namespace too), so a user with no allocation can do nothing.
+pub fn perform(req: &Request, egress: Option<&EgressPayload>, scope: Option<&ReservedScope>) -> Response {
     let Some(scope) = scope else {
         return Response::refused(REFUSAL_NO_SCOPE);
     };
     match req.op {
         Op::AddAddr | Op::DelAddr => perform_addr(req, scope),
         Op::CreateCgroup | Op::DeleteCgroup => perform_cgroup(req, scope),
+        // SetupEgress needs the variable payload; without it the request is malformed.
+        Op::SetupEgress => egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload, scope)),
     }
+}
+
+/// Validate the target cgroup against the caller's scope, then load, populate,
+/// and attach the egress BPF programs. The map contents are not scope-checked
+/// (they only shape the kennel's own egress, which the user already controls);
+/// the cgroup path is the cross-user boundary and is validated like a cgroup op.
+fn perform_egress(req: &Request, payload: &EgressPayload, scope: &ReservedScope) -> Response {
+    let creq = CgroupRequest { path: req.cgroup_path.clone() };
+    if let Err(r) = validate_cgroup(&creq, scope) {
+        return Response::refused(refusal_code(&r));
+    }
+    attach_egress_programs(&req.cgroup_path, payload)
+}
+
+/// Load every egress program, populate its maps from `payload`, and attach it to
+/// the cgroup at `path`. `BPF_PROG_ATTACH` outlives this process, so the
+/// programs stay attached after the helper exits even though the program/map fds
+/// close when each `Loaded` drops.
+#[cfg(feature = "bpf-egress")]
+fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Response {
+    use std::os::fd::AsFd as _;
+
+    let dir = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => return Response::internal(errno_of(&e)),
+    };
+    let cgroup_fd = dir.as_fd();
+
+    for spec in kennel_bpf::KENNEL_PROGRAMS {
+        let Some(elf) = kennel_bpf::programs::object(spec.name) else {
+            // The binary was built without this program embedded — treat as unsupported.
+            return Response::internal(ENOSYS);
+        };
+        let loaded = match kennel_bpf::load_program(elf, spec, kennel_bpf::KENNEL_MAPS) {
+            Ok(l) => l,
+            Err(e) => return Response::internal(errno_of(&e)),
+        };
+        if let Err(e) = populate_maps(&loaded, payload) {
+            return Response::internal(errno_of(&e));
+        }
+        if let Err(e) = loaded.attach(cgroup_fd, spec.attach_type) {
+            return Response::internal(errno_of(&e));
+        }
+        // `loaded` drops here: its fds close, but the cgroup keeps the attachment.
+    }
+    Response::ok()
+}
+
+/// Write `payload` into whichever of a loaded program's egress maps it declares.
+#[cfg(feature = "bpf-egress")]
+fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::io::Result<()> {
+    use kennel_bpf::sys::BPF_ANY;
+
+    if loaded.maps.contains_key("kennel_meta_map") {
+        loaded.update_map("kennel_meta_map", &0u32.to_ne_bytes(), &payload.meta, BPF_ANY)?;
+    }
+    if loaded.maps.contains_key("allow_v4") {
+        for (key, value) in &payload.allow_v4 {
+            loaded.update_map("allow_v4", key, value, BPF_ANY)?;
+        }
+    }
+    if loaded.maps.contains_key("deny_v4") {
+        for (key, value) in &payload.deny_v4 {
+            loaded.update_map("deny_v4", key, value, BPF_ANY)?;
+        }
+    }
+    if loaded.maps.contains_key("allow_v6") {
+        for (key, value) in &payload.allow_v6 {
+            loaded.update_map("allow_v6", key, value, BPF_ANY)?;
+        }
+    }
+    if loaded.maps.contains_key("deny_v6") {
+        for (key, value) in &payload.deny_v6 {
+            loaded.update_map("deny_v6", key, value, BPF_ANY)?;
+        }
+    }
+    Ok(())
+}
+
+/// Built without egress support: the helper cannot honour `SetupEgress`.
+#[cfg(not(feature = "bpf-egress"))]
+const fn attach_egress_programs(_path: &std::path::Path, _payload: &EgressPayload) -> Response {
+    Response::internal(ENOSYS)
 }
 
 fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {

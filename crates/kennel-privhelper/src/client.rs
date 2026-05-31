@@ -11,7 +11,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::wire::{Op, Request, Response};
+use crate::wire::{EgressPayload, Op, Request, Response};
 
 /// The installed location of the setuid helper.
 pub const DEFAULT_HELPER: &str = "/opt/kennel/sbin/kennel-privhelper";
@@ -29,19 +29,43 @@ pub fn default_helper_path() -> &'static Path {
 /// Returns an OS error if the helper cannot be spawned or the exchange fails, or
 /// `InvalidData` if the helper's response is malformed.
 pub fn invoke(helper: &Path, request: &Request) -> io::Result<Response> {
+    exchange(helper, &request.encode())
+}
+
+/// Spawn `helper`, write `bytes` to its stdin (closing the pipe so it sees EOF),
+/// and return the decoded response.
+fn exchange(helper: &Path, bytes: &[u8]) -> io::Result<Response> {
     let mut child = Command::new(helper)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("privhelper stdin unavailable"))?
-        .write_request(request)?;
+    {
+        use std::io::Write as _;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("privhelper stdin unavailable"))?;
+        stdin.write_all(bytes)?;
+        // `stdin` drops here, closing the helper's stdin so it sees EOF.
+    }
     let out = child.wait_with_output()?;
     Response::decode(&out.stdout)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("malformed privhelper response: {e:?}")))
+}
+
+/// Load, populate, and attach the egress BPF programs to a kennel's cgroup.
+///
+/// Asks the helper to attach the egress programs to the cgroup at `cgroup`;
+/// `payload` carries the resolved map contents (built from the spawn `Plan`).
+///
+/// # Errors
+///
+/// As [`invoke`].
+pub fn setup_egress(helper: &Path, cgroup: PathBuf, payload: &EgressPayload) -> io::Result<Response> {
+    let mut bytes = cgroup_request(Op::SetupEgress, cgroup).encode();
+    bytes.extend_from_slice(&payload.encode());
+    exchange(helper, &bytes)
 }
 
 /// Ask the helper to create the cgroup at `path` (in the user's namespace).
@@ -99,18 +123,5 @@ fn addr_request(op: Op, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> 
         prefix,
         interface: interface.to_owned(),
         cgroup_path: PathBuf::new(),
-    }
-}
-
-/// Helper so `invoke` reads cleanly; writes the encoded request and drops the pipe.
-trait WriteRequest {
-    fn write_request(self, request: &Request) -> io::Result<()>;
-}
-
-impl WriteRequest for std::process::ChildStdin {
-    fn write_request(mut self, request: &Request) -> io::Result<()> {
-        use std::io::Write as _;
-        self.write_all(&request.encode())
-        // `self` drops here, closing the helper's stdin so it sees EOF.
     }
 }
