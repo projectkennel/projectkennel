@@ -6,9 +6,10 @@
 //! the bytes the same way — a deterministic `basic-toml` serialisation of the
 //! body struct in declaration order — they agree byte-for-byte.
 //!
-//! This pins the canonical form *for this build*. The architecture's canonical
-//! JSON form (`02-2-config-schema.md`) is the eventual interop format; adopting
-//! it is deferred with the JSON serialiser (see `settled` module docs).
+//! This pins the canonical form: a deterministic `basic-toml` serialisation of
+//! the body in struct-field order. JSON's canonicalisation (sorted keys,
+//! normalised numbers) buys nothing here — we control both ends, and the schema
+//! has no floats (`02-2-config-schema.md` §Format).
 
 use crate::error::PolicyError;
 use crate::settled::SettledPolicy;

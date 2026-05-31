@@ -25,10 +25,10 @@ User configuration. Created by the CLI on first use if absent.
 ├── kennels/                         leaf policy files (one per kennel)
 │   ├── ai-coding.toml
 │   ├── ai-coding.lock               lockfile beside each leaf policy
-│   ├── ai-coding.settled.json       compiled settled policy (dev mode)
+│   ├── ai-coding.settled.toml       compiled settled policy (dev mode)
 │   ├── web-dev.toml
 │   ├── web-dev.lock
-│   ├── web-dev.settled.json
+│   ├── web-dev.settled.toml
 │   └── ...
 ├── templates/                       user-installed templates and fragments
 │   ├── ai-coding-strict@v4.toml     filename encodes the versioned reference
@@ -43,7 +43,7 @@ User configuration. Created by the CLI on first use if absent.
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-The `kennels/<name>.toml` filename and the policy's `name = "<name>"` field must match; the loader rejects on mismatch. The `kennels/<name>.lock` lockfile sits beside its policy and records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). The `kennels/<name>.settled.json` is the compiled settled policy in development mode — what `kennel run` actually enforces (`02-2-config-schema.md` §The settled policy); it is regenerated when the source or lockfile changes. Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
+The `kennels/<name>.toml` filename and the policy's `name = "<name>"` field must match; the loader rejects on mismatch. The `kennels/<name>.lock` lockfile sits beside its policy and records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). The `kennels/<name>.settled.toml` is the compiled settled policy in development mode — what `kennel run` actually enforces (`02-2-config-schema.md` §The settled policy); it is regenerated when the source or lockfile changes. Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
 
 ### `~/.local/state/kennel/<kennel>/`
 
@@ -121,7 +121,7 @@ System configuration. Installed by the package; managed by the administrator.
 │   ├── ai-coding-strict@v4.toml
 │   └── ...
 ├── settled/                         fleet-pushed signed settled policies (attested mode)
-│   ├── ai-coding.settled.json
+│   ├── ai-coding.settled.toml
 │   └── ...
 ├── keys/                            project + org signing keys (shipped or pushed)
 │   ├── kennel-maint-2026-01.pub

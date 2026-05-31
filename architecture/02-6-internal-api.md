@@ -31,7 +31,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `validate(policy: &Policy) -> Result<(), Vec<InvariantViolation>>`.
 - `verify_signature(envelope: &SignatureEnvelope, key_set: &KeySet) -> Result<(), SignatureError>`.
 
-**Depends on.** `kennel-text` (sanitisation), `kennel-syscall` (canonical-path resolution), `serde`, `toml`, `serde_json` (settled-policy canonical JSON), `ed25519-dalek` (or equivalent vetted cryptography crate).
+**Depends on.** `kennel-text` (sanitisation), `kennel-syscall` (canonical-path resolution), `serde`, `basic-toml` (both source and settled policies are TOML — no JSON), `ed25519-compact` (the vetted Ed25519 verifier; see `DEPENDENCIES.md`).
 
 **Depended on by.** Every other crate that reads policy: `kennel-spawn` (consumes `SettledPolicy`), `kennel-cli` (`kennel compile` calls `compile`/`sign_settled`), `kenneld`, `kennel-bpf` (loader side).
 
@@ -88,7 +88,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Public surface (library).** None. The privhelper is a binary crate with `main.rs` only; helper functions are `pub(crate)` and tested in-crate.
 
-**Depends on.** `kennel-syscall` (for the privileged syscalls), `kennel-text` (sanitisation), `serde_json`.
+**Depends on.** `kennel-syscall` (for the privileged syscalls), `kennel-text` (sanitisation). The IPC framing format is TBD (not `serde_json`); the validation core is std-only.
 
 **Depended on by.** Nothing in the workspace links this crate.
 
@@ -116,7 +116,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `emit(event: AuditEvent)` — synchronous append.
 - `Reader::query(filter: AuditFilter) -> impl Iterator<Item=AuditEvent>` — for `kennel audit` queries.
 
-**Depends on.** `kennel-text` (sanitisation), `serde_json`, `time`.
+**Depends on.** `kennel-text` (sanitisation), `time`. Audit events are emitted as JSON Lines by a small hand-rolled writer (the schema is fixed and known — no `serde_json`).
 
 **Depended on by.** `kennel-spawn`, `kennel-netproxy`, `kenneld`, `kennel-bpf` (the ringbuf reader translates BPF events into `AuditEvent`s).
 
@@ -179,7 +179,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `kennel-ipc-client`: `Client::connect(socket: &Path)`, `Client::request(req) -> Response`, streaming subscription helpers.
 - `kennel-ipc-server`: `Server::bind(socket: &Path)`, `accept_loop`, request dispatcher trait that kenneld implements.
 
-**Depends on.** `serde`, `serde_json`, `tokio` (server only; client can be sync), `kennel-syscall` (for `SO_PEERCRED` and lockfile).
+**Depends on.** `serde`, `tokio` (server only; client can be sync), `kennel-syscall` (for `SO_PEERCRED` and lockfile). Wire framing is TBD (not `serde_json`).
 
 ---
 

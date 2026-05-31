@@ -9,13 +9,13 @@
 //!
 //! ## Serialisation format
 //!
-//! The architecture specifies the settled policy as canonical JSON for fleet
-//! interop (`02-2-config-schema.md`). This increment serialises it as TOML via
-//! `basic-toml`; the JSON form is deferred until `serde_json`'s dependency
-//! closure (`zmij`) is vendored under §5.5. The struct field order below is
-//! chosen so the TOML serialisation is valid (scalars and inline arrays precede
-//! sub-tables and arrays-of-tables) and deterministic, which is what the
-//! canonical-form signature relies on.
+//! The settled policy is TOML, like every Project Kennel config artefact
+//! (`02-2-config-schema.md`) — there is no JSON config. The struct field order
+//! below is chosen so the TOML serialisation is valid (scalars and inline arrays
+//! precede sub-tables and arrays-of-tables) and deterministic, which is what the
+//! canonical-form signature relies on: because the same implementation produces
+//! and verifies the canonical bytes, a fixed-field-order serialisation is
+//! reproducible without JSON's canonicalisation machinery.
 
 use serde::{Deserialize, Serialize};
 

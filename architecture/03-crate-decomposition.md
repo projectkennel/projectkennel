@@ -152,7 +152,7 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 
 - Binary crate. Sync, no async runtime.
 - `[profile.release] panic = "abort"`; `[profile.test] panic = "unwind"` per CODING-STANDARDS.md §8.5.
-- Has its own dep list distinct from the workspace: only `kennel-syscall`, `kennel-text`, `serde`, `serde_json`. No async, no proc-macros beyond serde_derive.
+- Has its own dep list distinct from the workspace: only `kennel-syscall`, `kennel-text`, `serde`. Audit events are written as JSON Lines by a small hand-rolled emitter (fixed schema — no `serde_json`). No async, no proc-macros beyond serde_derive.
 
 ### `kenneld`
 

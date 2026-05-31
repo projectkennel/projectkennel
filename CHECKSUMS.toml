@@ -101,8 +101,9 @@ notes = "Direct dependency of kennel-syscall: compiles and installs seccomp-BPF 
 # ---- data/cli/caps batch (§5.5-approved; reviewer remco). Provenance proven
 # independent of crates.io via tools/audit-source.sh (verified-against below).
 # Vendored ahead of use; wired into each consumer as that crate is built
-# (caps -> kennel-syscall; serde/basic-toml -> kennel-policy; serde_json/time ->
-# kennel-audit; lexopt -> kennel-cli). The BPF loader deps are decided separately.
+# (caps -> kennel-syscall; serde/basic-toml/ed25519-compact -> kennel-policy;
+# time -> kennel-audit; lexopt -> kennel-cli). All config is TOML — no serde_json;
+# audit JSONL is hand-rolled. The BPF loader deps are decided separately.
 
 [crate."basic-toml"]
 version = "=0.1.10"
@@ -146,7 +147,7 @@ verified-against = [
     "crates.io static.crates.io .crate download — sha256 matches",
     "github.com/dtolnay/itoa @ af77385d0daf4d0e949e81f2588be2e44f69f086 (tag 1.0.18) — 10 source files byte-identical via tools/audit-source.sh",
 ]
-notes = "Transitive via serde_json (integer formatting)."
+notes = "Transitive via time (integer formatting)."
 
 [crate."lexopt"]
 version = "=0.3.2"
@@ -168,7 +169,7 @@ verified-against = [
     "crates.io static.crates.io .crate download — sha256 matches",
     "github.com/BurntSushi/memchr @ ff7dca72388ade97ec536f550271fe5acab0a05f (tag 2.8.1) — 55 source files byte-identical via tools/audit-source.sh",
 ]
-notes = "Transitive via serde_json (byte search)."
+notes = "Transitive via object (byte search); also used by time."
 
 [crate."num-conv"]
 version = "=0.2.2"
@@ -246,17 +247,6 @@ verified-against = [
     "github.com/serde-rs/serde @ a866b336f14aa57a07f0d0be9f8762746e64ecb4 (tag v1.0.228) — 32 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "Transitive via serde feature "derive" — proc-macro."
-
-[crate."serde_json"]
-version = "=1.0.150"
-crate-sha256 = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
-audited-by = "remco"
-audited-on = "2026-05-31"
-verified-against = [
-    "crates.io static.crates.io .crate download — sha256 matches",
-    "github.com/serde-rs/json @ a1ae73ac6a6940a4a57c673aebaa13ed4dfe3e8c (tag v1.0.150) — 85 source files byte-identical via tools/audit-source.sh",
-]
-notes = "Direct dep (settled-policy canonical JSON, IPC, audit JSONL)."
 
 [crate."syn"]
 version = "=2.0.117"

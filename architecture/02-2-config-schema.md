@@ -313,36 +313,48 @@ The settled policy is an **internal-stable** surface per `02-0-overview.md`, wit
 
 ### Format
 
-The settled policy is a canonical JSON document (not TOML — it is machine-produced and machine-consumed, never hand-edited). Canonical JSON is deterministic (sorted keys, normalised numbers, no insignificant whitespace) so the document hashes and signs reproducibly.
+The settled policy is a TOML document, like every other Project Kennel config artefact — there is no second config format. It is machine-produced and machine-consumed (never hand-edited), but TOML serves a machine artefact just as well as a hand-authored one, and keeping one format avoids a second parser/serialiser dependency.
 
-Top-level structure:
+Reproducible hashing and signing do **not** require JSON's canonical form (sorted keys, normalised numbers): the canonical bytes are produced and verified by the *same* implementation, so a deterministic serialisation in fixed field order is sufficient and reproducible. (The schema carries no floating-point values, so "number normalisation" — the hard part of any canonicalisation — does not arise.) The procedure is documented under `kennel-policy::canonical`; the `[signature]` table is excluded from it. If independent third-party verification ever becomes a hard requirement, the signature would cover the literal stored payload bytes (still TOML), which is format-agnostic and needs no canonicaliser at all.
 
-```json
-{
-  "settled_schema_version": 1,
-  "name": "ai-coding",
-  "effective_policy": { ...flat resolved policy, every section, final values... },
-  "deferred_substitutions": ["<ctx>", "<uid>", "<kennel>", "<home>"],
-  "framework_invariants_asserted": [ ...invariant ids the compiler checked... ],
-  "provenance": {
-    "leaf_policy_sha256": "...",
-    "resolved_artifacts": [
-      { "name": "base-confined", "version": "v3", "content_sha256": "...", "signing_key_id": "kennel-maint-2026-01" },
-      { "name": "ai-coding-strict", "version": "v4", "content_sha256": "...", "signing_key_id": "kennel-maint-2026-01" },
-      { "name": "corp-egress-allowlist", "version": "v2.33.2", "content_sha256": "...", "signing_key_id": "corp-policy-2026" }
-    ],
-    "schema_version": 1,
-    "invariant_set_sha256": "...",
-    "threat_catalogue_version": "0.1",
-    "install_constants": { "tag": 42, "ula_gid": "..." },
-    "compiler_version": "0.4.2"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "key_id": "corp-policy-2026",
-    "signature": "BASE64..."
-  }
-}
+Top-level structure (the `[signature]` table is a sibling, excluded from the canonical form):
+
+```toml
+settled_schema_version = 1
+name = "ai-coding"
+deferred_substitutions = ["<ctx>", "<uid>", "<kennel>", "<home>"]
+framework_invariants_asserted = [ "cap.no_new_privs", "..." ]  # ids the compiler checked
+
+[effective_policy]
+# ...flat resolved policy, every section, final values...
+
+[provenance]
+leaf_policy_sha256 = "..."
+schema_version = 1
+invariant_set_sha256 = "..."
+threat_catalogue_version = "0.1"
+compiler_version = "0.4.2"
+
+[provenance.install_constants]
+tag = 42
+ula_gid = "..."
+
+[[provenance.resolved_artifacts]]
+name = "base-confined"
+version = "v3"
+content_sha256 = "..."
+signing_key_id = "kennel-maint-2026-01"
+
+[[provenance.resolved_artifacts]]
+name = "corp-egress-allowlist"
+version = "v2.33.2"
+content_sha256 = "..."
+signing_key_id = "corp-policy-2026"
+
+[signature]
+algorithm = "ed25519"
+key_id = "corp-policy-2026"
+signature = "BASE64..."
 ```
 
 - `effective_policy` is the resolved policy: no `template_base`, no `include`, no delta operators (`.add`/`.remove`/`.override`/`.invariant`), only final rule sets. Installation-constant variables (`<tag>`, `<gid>`) are already substituted.
@@ -374,7 +386,7 @@ This is the one place the runtime deliberately repeats compile-time work, and it
 
 ### On-disk
 
-Settled policies live beside their source under `~/.config/kennel/kennels/<name>.settled.json` in development mode, or are pushed to `/etc/kennel/settled/<name>.settled.json` (or a fleet-tool-chosen path) in attested deployments. `07-paths.md` is authoritative.
+Settled policies live beside their source under `~/.config/kennel/kennels/<name>.settled.toml` in development mode, or are pushed to `/etc/kennel/settled/<name>.settled.toml` (or a fleet-tool-chosen path) in attested deployments. `07-paths.md` is authoritative.
 
 ---
 

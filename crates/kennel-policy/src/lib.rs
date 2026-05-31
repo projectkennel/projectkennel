@@ -18,10 +18,7 @@
 //! Implemented: the runtime verification core (this is what the spawn path
 //! needs). **Not yet** implemented: the compile-time resolution machinery
 //! (template-chain walking, includes, deltas, the lockfile) that *produces* a
-//! settled policy from source templates — a separate, off-hot-path concern. The
-//! settled policy is serialised as TOML here; the architecture's canonical JSON
-//! form is deferred until `serde_json`'s dependency closure is vendored (see the
-//! `settled` module docs).
+//! settled policy from source templates — a separate, off-hot-path concern.
 
 #![forbid(unsafe_code)]
 

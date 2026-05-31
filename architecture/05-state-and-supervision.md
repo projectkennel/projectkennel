@@ -18,7 +18,7 @@ Project Kennel keeps as little persistent state as it can. State is recoverable 
 | Loopback address allocation | kernel (the `lo`/dummy interface) | the interface itself | Yes — the addresses persist; kenneld re-reads them |
 | cgroup membership | kernel | `/sys/fs/cgroup/kennel/<id>/cgroup.procs` | Yes — the source of truth for "who is running" |
 | Audit log | filesystem | `~/.local/state/kennel/<kennel>/` | Yes — append-only files |
-| Settled policy | filesystem | `~/.config/kennel/kennels/<name>.settled.json` or `/etc/kennel/settled/` | Yes |
+| Settled policy | filesystem | `~/.config/kennel/kennels/<name>.settled.toml` or `/etc/kennel/settled/` | Yes |
 
 The design principle: the kernel and the filesystem hold the durable truth (who is in which cgroup, which addresses are bound, which audit events were written). kenneld's in-memory registry is a *cache* of that truth, rebuilt on restart. kenneld crashing and restarting does not lose kennels or orphan workloads; it re-derives its view from the system.
 

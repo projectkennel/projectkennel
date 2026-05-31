@@ -33,7 +33,7 @@ Each direct dependency gets an entry:
 The short list of things we use a dependency for rather than writing ourselves (§5.1); expanding it is a maintainer decision:
 
 - Cryptography (e.g. `ring`, `ed25519-dalek`, `rustls`).
-- TOML and JSON (`serde`, `toml`, `serde_json`).
+- TOML, for every config artefact including the settled policy (`serde`, `basic-toml`). There is **no** JSON config: the audit log is JSON Lines (a fixed-schema output stream) written by a small hand-rolled emitter, not `serde_json`.
 - Security-ABI helpers where the kernel ABI is genuinely non-trivial: `seccompiler` (seccomp-BPF bytecode). Landlock and the BPF loader were instead hand-rolled (their vetted crates' cost — proc-macros/TCB for `landlock`; ~1435 vendored C files for `libbpf-sys`, 19 crates for `aya` — outweighed the small `unsafe` they save); the BPF loader uses `object` for ELF parsing only.
 - One async runtime, in the proxy and server crates only — never in the privhelper.
 - Hashing for the checksum verifier (`sha2`), itself bootstrapped per §5.5.1.
@@ -75,7 +75,7 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Justification:** ELF parsing for the BPF loader (`kennel-bpf`) — sections, symbols, relocations. The generic, error-prone-but-not-security-specific part, delegated to a vetted crate (gimli-rs/object) exactly as `seccompiler` handles BPF bytecode. The security-bearing loader (the `bpf(2)` syscalls, map creation, relocation patching, cgroup attach) is hand-rolled over `libc`. This replaces `libbpf-rs`/`libbpf-sys` (which would vendor zlib+libelf+libbpf C, ~1435 files) and `aya` (19 crates) with a single dependency.
 - **Licence:** Apache-2.0 OR MIT (we take Apache-2.0).
 - **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/gimli-rs/object` at tag 0.36.7.
-- **Transitive deps added:** none new — with `read_core, elf` only, its sole dependency `memchr` is already vendored (via serde_json).
+- **Transitive deps added:** none new — with `read_core, elf` only, its sole dependency `memchr` is already vendored.
 - **Proc-macros / build.rs:** none.
 
 ### seccompiler
