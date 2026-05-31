@@ -41,15 +41,17 @@ use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response, Status};
 use kennel_spawn::{Plan, ProxyEndpoint, SpawnError};
 
-/// Host offset of the kennel's proxy within its subnet (`…|0001` in v4, `::1` in
-/// v6). The proxy is where confined egress is funnelled once it lands.
+/// The default proxy host offset within the kennel's subnet (`…|0001` / `::1`).
+///
+/// Mirrors what [`kennel_policy::ProxyListen::default`] resolves to; the live
+/// offset comes from the signed policy (`net.proxy.offset`). The reference the
+/// tests compute against.
 pub const PROXY_HOST: u8 = 1;
 
-/// The TCP port the per-kennel egress proxy listens on.
+/// The default TCP port the per-kennel egress proxy listens on.
 ///
-/// A fixed default for now; a later signed-`SettledPolicy` field can make it
-/// policy-controlled (the netproxy already takes its listen port from its
-/// derived TOML config).
+/// Mirrors what [`kennel_policy::ProxyListen::default`] resolves to; the live
+/// port comes from the signed policy (`net.proxy.port`).
 pub const PROXY_PORT: u16 = 1080;
 
 /// The loopback interface the per-kennel addresses live on.
@@ -317,15 +319,17 @@ fn bring_up<P: Privileged>(
     std::fs::create_dir_all(cgroup)?;
     state.made_cgroup = true;
 
-    // 2. loopback addresses. v4 only when ctx fits the 8-bit field it carries;
-    //    a higher ctx is a v6-only kennel. The proxy listens on the host-offset-1
-    //    address in each family (PROXY_HOST), so these are the proxy's addresses.
+    // 2. loopback addresses. The proxy's listen offset + port come from the signed
+    //    policy (`net.proxy`); offset 1 / port 1080 by default. v4 only when ctx
+    //    fits the 8-bit field it carries; a higher ctx is a v6-only kennel.
+    let offset = net.proxy.offset;
+    let port = net.proxy.port;
     if let Ok(c) = u8::try_from(ctx) {
-        let addr = loopback_v4(scope.tag(), c, PROXY_HOST);
+        let addr = loopback_v4(scope.tag(), c, offset);
         expect_ok("add_address v4", privileged.add_address(ctx, LOOPBACK, addr.into(), V4_PREFIX))?;
         state.v4 = Some(addr);
     }
-    let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(PROXY_HOST));
+    let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
     expect_ok("add_address v6", privileged.add_address(ctx, LOOPBACK, addr6.into(), V6_PREFIX))?;
     state.v6 = Some(addr6);
 
@@ -334,7 +338,7 @@ fn bring_up<P: Privileged>(
     // records the proxy in kennel_meta). Without it the BPF would deny every
     // connect, the proxy included, so no egress could flow. `state.v4` is the
     // proxy's v4 address (absent for a v6-only kennel); `addr6` its v6.
-    plan.stamp_proxy(&ProxyEndpoint { v4: state.v4, v6: addr6, port: PROXY_PORT });
+    plan.stamp_proxy(&ProxyEndpoint { v4: state.v4, v6: addr6, port });
 
     // 3. egress BPF (privileged: load + attach in the helper).
     let payload = EgressPayload {
@@ -352,7 +356,7 @@ fn bring_up<P: Privileged>(
     //     BPF already permits the workload to reach it. Skipped when no proxy is
     //     configured (unit tests).
     if let Some(setup) = proxy {
-        let listen = proxy_listen(state.v4, addr6);
+        let listen = proxy_listen(state.v4, addr6, port);
         let config = crate::proxy::config_toml(net, listen, None).map_err(Error::ProxyConfig)?;
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
@@ -377,13 +381,13 @@ fn expect_ok(op: &'static str, response: io::Result<Response>) -> Result<(), Err
 }
 
 /// The socket address the egress proxy listens on: the kennel's primary v4
-/// loopback address when it has one, else its v6, at [`PROXY_PORT`]. (The current
+/// loopback address when it has one, else its v6, at `port`. (The current
 /// netproxy binds a single listener; a dual-stack kennel funnels through the v4
 /// one. Both proxy addresses are BPF-allowed regardless.)
-fn proxy_listen(v4: Option<Ipv4Addr>, v6: Ipv6Addr) -> SocketAddr {
+fn proxy_listen(v4: Option<Ipv4Addr>, v6: Ipv6Addr, port: u16) -> SocketAddr {
     v4.map_or_else(
-        || SocketAddr::new(v6.into(), PROXY_PORT),
-        |addr| SocketAddr::new(addr.into(), PROXY_PORT),
+        || SocketAddr::new(v6.into(), port),
+        |addr| SocketAddr::new(addr.into(), port),
     )
 }
 
@@ -497,6 +501,7 @@ mod tests {
             cgroup,
             net: NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,
+                proxy: kennel_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
@@ -572,6 +577,27 @@ mod tests {
         // The meta carries the proxy port (network order, offset 12) and v6 (16).
         assert_eq!(payload.meta.get(12..14), Some(&PROXY_PORT.to_be_bytes()[..]), "meta proxy_port");
         assert_eq!(payload.meta.get(16..32), Some(&want_v6.octets()[..]), "meta proxy_addr_v6");
+    }
+
+    #[test]
+    fn proxy_offset_and_port_come_from_the_policy() {
+        let cgroup = temp_cgroup("proxy-policy");
+        let _ = std::fs::remove_dir(&cgroup);
+        let fake = FakePriv::new(None);
+
+        let mut s = spec(cgroup, 5);
+        s.net.proxy = kennel_policy::ProxyListen { offset: 2, port: 8080 };
+        let kennel = start(&fake, s, &mut Command::new("/bin/true")).expect("start");
+        let payload = fake.egress();
+        kennel.stop(&fake).expect("stop");
+
+        // The flagged proxy allow-entry reflects the policy's offset (2) and port
+        // (8080), not the 1/1080 default.
+        let want_v4 = loopback_v4(9, 5, 2);
+        let (key_v4, val_v4) = payload.allow_v4.first().expect("v4 proxy entry");
+        assert_eq!(key_v4.get(4..8), Some(&want_v4.octets()[..]), "v4 key at offset 2");
+        assert_eq!(val_v4.get(0..2), Some(&8080u16.to_ne_bytes()[..]), "proxy port from policy");
+        assert_eq!(payload.meta.get(12..14), Some(&8080u16.to_be_bytes()[..]), "meta proxy_port from policy");
     }
 
     #[test]

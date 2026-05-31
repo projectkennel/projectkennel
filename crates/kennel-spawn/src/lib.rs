@@ -366,6 +366,7 @@ mod tests {
             effective_policy: EffectivePolicy {
                 net: NetPolicy {
                     mode: NetMode::Constrained,
+                    proxy: kennel_policy::ProxyListen::default(),
                     allow: vec![
                         NetRule { cidr: "93.184.216.0".to_owned(), prefix_len: 24, port_min: 443, port_max: 443, protocol: Protocol::Tcp },
                         NetRule { cidr: "10.1.0.0".to_owned(), prefix_len: 16, port_min: 1024, port_max: 2048, protocol: Protocol::Tcp },

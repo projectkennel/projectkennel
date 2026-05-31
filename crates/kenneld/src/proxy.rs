@@ -180,6 +180,7 @@ mod tests {
     fn net() -> NetPolicy {
         NetPolicy {
             mode: NetMode::Constrained,
+            proxy: kennel_policy::ProxyListen::default(),
             allow: vec![NetRule {
                 cidr: "10.0.0.0".to_owned(),
                 prefix_len: 24,

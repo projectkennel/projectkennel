@@ -35,7 +35,7 @@ pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
     CapPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy, NetMode,
-    NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ResolvedArtifact,
+    NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact,
     SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, TtlAction,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
@@ -114,6 +114,7 @@ mod tests {
             effective_policy: EffectivePolicy {
                 net: NetPolicy {
                     mode: NetMode::Constrained,
+                    proxy: ProxyListen::default(),
                     allow: vec![NetRule {
                         cidr: "93.184.216.0".to_owned(),
                         prefix_len: 24,
@@ -216,6 +217,25 @@ mod tests {
         if let Some(rule) = tampered.policy.effective_policy.net.allow_names.first_mut() {
             rule.name = "evil.example.com".to_owned();
         }
+        let bytes = to_bytes(&tampered).expect("serialise");
+        let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
+        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+    }
+
+    #[test]
+    fn proxy_listen_round_trips_and_is_signature_bound() {
+        let key = signing_key();
+        let mut policy = sample_policy();
+        policy.effective_policy.net.proxy = ProxyListen { offset: 3, port: 8443 };
+
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert_eq!(verified.effective_policy.net.proxy, ProxyListen { offset: 3, port: 8443 });
+
+        // Tampering with the resolved offset/port breaks the signature.
+        let mut tampered = doc;
+        tampered.policy.effective_policy.net.proxy.port = 1080;
         let bytes = to_bytes(&tampered).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
         assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");

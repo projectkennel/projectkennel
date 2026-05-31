@@ -111,12 +111,39 @@ pub struct NameRule {
     pub protocol: Protocol,
 }
 
+/// Where the per-kennel egress proxy listens, resolved from the source policy's
+/// `proxy_listen_*_address = "offset:port"` (`docs/07-3-network.md` §7.3.4).
+///
+/// `offset` is the host offset within the kennel's own subnet (the `/28` in IPv4,
+/// the `/64` in IPv6); offset 1 is the kennel's primary address, where the proxy
+/// lives by default. `port` is the listener's TCP port. Carrying these in the
+/// signed policy makes the BPF-enforced proxy address signature-bound rather than
+/// a runtime constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyListen {
+    /// Host offset within the kennel's subnet (1..=14; 0 and 15 reserved).
+    pub offset: u8,
+    /// The proxy's listen port (1025..=32767).
+    pub port: u16,
+}
+
+impl Default for ProxyListen {
+    /// The documented default: offset 1 (the kennel's primary address), port 1080.
+    fn default() -> Self {
+        Self { offset: 1, port: 1080 }
+    }
+}
+
 /// Network policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
+    /// Where the egress proxy listens (offset + port within the kennel's subnet).
+    #[serde(default)]
+    pub proxy: ProxyListen,
     /// Allowlisted destinations by address. Enforced directly by the cgroup BPF
     /// (a direct `connect()` to one of these is permitted) and also honoured by
     /// the proxy.

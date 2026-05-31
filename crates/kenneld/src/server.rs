@@ -350,6 +350,7 @@ mod tests {
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,
+                proxy: kennel_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),

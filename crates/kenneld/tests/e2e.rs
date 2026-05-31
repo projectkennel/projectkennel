@@ -77,6 +77,7 @@ fn minimal_policy() -> SettledPolicy {
         effective_policy: EffectivePolicy {
             net: NetPolicy {
                 mode: NetMode::Constrained,
+                proxy: kennel_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: vec![NetRule {
