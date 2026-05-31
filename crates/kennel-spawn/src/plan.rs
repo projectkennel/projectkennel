@@ -130,6 +130,12 @@ pub struct Plan {
     pub namespaces: Namespaces,
     /// The per-kennel cgroup the workload joins and the BPF programs attach to.
     pub cgroup: PathBuf,
+    /// Whether the workload joins [`cgroup`](Self::cgroup) (writes its own pid to
+    /// `cgroup.procs`) in the seal, before the irreversible confinement. True for
+    /// policy-derived plans; the migration succeeds because kenneld and the
+    /// workload share kenneld's delegated `user@<uid>` subtree, of which the
+    /// kennel cgroup is a descendant (`08-enforcement-architecture.md` §8.5).
+    pub cgroup_join: bool,
     /// Paths bind-mounted read-only into the shim view.
     pub bind_read: Vec<PathBuf>,
     /// Paths bind-mounted writable into the shim view.
@@ -212,6 +218,7 @@ impl Plan {
         Ok(Self {
             namespaces,
             cgroup,
+            cgroup_join: true,
             bind_read,
             bind_write,
             landlock_fs,

@@ -223,11 +223,23 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     }
     let seal_ns = plan.namespaces & !Namespaces::PID;
 
+    // The cgroup the workload joins itself into (writes its own pid before any
+    // namespace/seal), or None if this plan does not enter a cgroup.
+    let cgroup_join = plan.cgroup_join.then(|| plan.cgroup.clone());
+
     // `restrict_current_process` consumes the ruleset; an Option lets the FnMut
     // seal move it out on its single call.
     let mut ruleset = Some(ruleset);
     let seal = move || -> io::Result<()> {
-        // Namespaces first; mounts need the mount ns.
+        // Join the cgroup first, before any namespace/mount change: the BPF
+        // attached to it only governs processes that are members, and cgroup
+        // membership inherits across the upcoming exec and any fork. The write
+        // happens while still in the host mount namespace (cgroupfs visible) and
+        // before Landlock seals (which would otherwise deny the write).
+        if let Some(cgroup) = &cgroup_join {
+            join_cgroup(cgroup)?;
+        }
+        // Namespaces next; mounts need the mount ns.
         if !seal_ns.is_empty() {
             kennel_syscall::namespace::unshare(seal_ns)?;
         }
@@ -253,6 +265,19 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     };
 
     kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall)
+}
+
+/// Join the current process into `cgroup` by writing its own pid to
+/// `<cgroup>/cgroup.procs`.
+///
+/// Called in the forked child's seal. The kernel resolves the written pid in the
+/// writer's pid namespace, so writing `getpid()` is correct even after the PID
+/// namespace has been unshared (the child is pid 1 of the new namespace and the
+/// kernel maps it back). The migration is permitted because the destination is a
+/// descendant of kenneld's own delegated cgroup subtree.
+fn join_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
+    let procs = cgroup.join("cgroup.procs");
+    std::fs::write(procs, std::process::id().to_string())
 }
 
 /// Load the given BPF programs, populate their egress maps, and attach to a cgroup.
@@ -411,6 +436,7 @@ mod tests {
 
         // cgroup lives under the caller's resource namespace, keyed by ctx.
         assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));
+        assert!(plan.cgroup_join, "policy-derived plans enter their cgroup");
 
         // Landlock: a read rule for each read path, a write rule for each write.
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)));
@@ -507,6 +533,7 @@ mod tests {
         Plan {
             namespaces: Namespaces::empty(),
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false, // these tests join manually / isolate other layers
             bind_read: Vec::new(),
             bind_write: Vec::new(),
             landlock_fs: read_dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
@@ -600,6 +627,7 @@ mod root_tests {
         let plan = Plan {
             namespaces: Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC,
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false, // these tests join manually / isolate other layers
             bind_read: Vec::new(),
             bind_write: Vec::new(),
             landlock_fs: dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
@@ -664,6 +692,7 @@ mod root_tests {
         Plan {
             namespaces: Namespaces::empty(),
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false, // these tests join manually / isolate other layers
             bind_read: Vec::new(),
             bind_write: Vec::new(),
             landlock_fs: Vec::new(),
@@ -733,5 +762,48 @@ mod root_tests {
 
         assert!(allowed, "connect to an allowlisted destination should be permitted");
         assert!(denied, "connect with an empty allowlist should be denied (fail closed)");
+    }
+
+    #[test]
+    fn spawn_joins_the_workload_into_its_cgroup() {
+        // The workload, spawned with `cgroup_join`, should write itself into the
+        // cgroup in the seal — so its /proc/self/cgroup reports that cgroup. Run
+        // as root, which may write any cgroup.procs; the delegated-subtree case
+        // (unprivileged migration within user@<uid>) is covered separately.
+        let name = "kennel-spawn-join-test";
+        let cg_path = PathBuf::from(format!("/sys/fs/cgroup/{name}"));
+        let _ = std::fs::remove_dir(&cg_path);
+        std::fs::create_dir(&cg_path).expect("create cgroup");
+
+        let access = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let plan = Plan {
+            namespaces: Namespaces::empty(),
+            cgroup: cg_path.clone(),
+            cgroup_join: true,
+            bind_read: Vec::new(),
+            bind_write: Vec::new(),
+            landlock_fs: vec![(PathBuf::from("/"), access)], // permissive: isolate the join
+            landlock_net: Vec::new(),
+            seccomp_allow: Vec::new(),
+            seccomp_default: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+        };
+
+        let mut cmd = Command::new("/bin/cat");
+        cmd.arg("/proc/self/cgroup").stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = spawn(&plan, &mut cmd).expect("spawn");
+        let mut out = String::new();
+        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        assert!(child.wait().expect("wait").success(), "the workload should have run");
+
+        assert!(
+            out.contains(name),
+            "the workload's /proc/self/cgroup should name its kennel cgroup (got {out:?})"
+        );
+        let _ = std::fs::remove_dir(&cg_path);
     }
 }
