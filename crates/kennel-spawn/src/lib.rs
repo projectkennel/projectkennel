@@ -34,7 +34,7 @@ use kennel_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_syscall::landlock::Ruleset;
 use kennel_syscall::namespace::Namespaces;
 
-pub use plan::Plan;
+pub use plan::{Plan, ProxyEndpoint};
 
 /// The per-instance values the runtime fills into a settled policy's deferred
 /// placeholders.
@@ -501,6 +501,78 @@ mod tests {
             [a, b, a, b, 6, 0, 0, 0]
         };
         assert_eq!(value, &want_val);
+    }
+
+    /// A plan with two v4 allow rules and one deny, from the shared fixture.
+    fn fixture_plan() -> Plan {
+        let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+        Plan::from_policy(&p, 7, "kennel-dev").expect("plan")
+    }
+
+    #[test]
+    fn stamp_proxy_writes_meta_proxy_fields() {
+        let mut plan = fixture_plan();
+        let v4: std::net::Ipv4Addr = "127.0.144.1".parse().expect("v4");
+        let v6: std::net::Ipv6Addr = "fd00:0:0:42::1".parse().expect("v6");
+        plan.stamp_proxy(&ProxyEndpoint { v4: Some(v4), v6, port: 1080 });
+
+        // proxy_addr_v4 @8 (network order = the octets).
+        assert_eq!(plan.bpf_meta.get(8..12), Some(&v4.octets()[..]));
+        // proxy_port @12 (network order).
+        assert_eq!(plan.bpf_meta.get(12..14), Some(&1080u16.to_be_bytes()[..]));
+        // _pad0 @14 stays zero.
+        assert_eq!(plan.bpf_meta.get(14..16), Some(&[0u8, 0][..]));
+        // proxy_addr_v6 @16.
+        assert_eq!(plan.bpf_meta.get(16..32), Some(&v6.octets()[..]));
+        // The magic/abi/ctx head is untouched.
+        assert_eq!(plan.bpf_meta.get(6), Some(&7u8), "ctx byte preserved");
+    }
+
+    #[test]
+    fn stamp_proxy_adds_a_flagged_allow_entry_v4_and_v6() {
+        let mut plan = fixture_plan();
+        let before_v4 = plan.bpf_allow_v4.len();
+        let before_v6 = plan.bpf_allow_v6.len();
+        let v4: std::net::Ipv4Addr = "127.0.144.1".parse().expect("v4");
+        let v6: std::net::Ipv6Addr = "fd00:0:0:42::1".parse().expect("v6");
+        plan.stamp_proxy(&ProxyEndpoint { v4: Some(v4), v6, port: 1080 });
+
+        // Exactly one entry appended to each trie; the policy rules are preserved.
+        assert_eq!(plan.bpf_allow_v4.len(), before_v4 + 1);
+        assert_eq!(plan.bpf_allow_v6.len(), before_v6 + 1);
+
+        // v4 proxy entry: /32 host key + the flagged TCP allow_entry on the port.
+        let want_key_v4 = {
+            let [p0, p1, p2, p3] = 32u32.to_ne_bytes();
+            let [o0, o1, o2, o3] = v4.octets();
+            [p0, p1, p2, p3, o0, o1, o2, o3]
+        };
+        let want_val = {
+            let [a, b] = 1080u16.to_ne_bytes();
+            [a, b, a, b, 6, 0x01, 0, 0] // port twice (host order), TCP, FLAG_PROXY
+        };
+        assert_eq!(plan.bpf_allow_v4.last(), Some(&(want_key_v4, want_val)));
+
+        // v6 proxy entry: /128 host key + the same flagged value.
+        let (key_v6, val_v6) = plan.bpf_allow_v6.last().expect("v6 proxy entry");
+        assert_eq!(key_v6.get(0..4), Some(&128u32.to_ne_bytes()[..]));
+        assert_eq!(key_v6.get(4..20), Some(&v6.octets()[..]));
+        assert_eq!(val_v6, &want_val);
+    }
+
+    #[test]
+    fn stamp_proxy_v6_only_kennel_skips_v4() {
+        let mut plan = fixture_plan();
+        let before_v4 = plan.bpf_allow_v4.len();
+        let v6: std::net::Ipv6Addr = "fd00:0:0:42::1".parse().expect("v6");
+        plan.stamp_proxy(&ProxyEndpoint { v4: None, v6, port: 1080 });
+
+        // No v4 entry added, and proxy_addr_v4 in meta stays zero.
+        assert_eq!(plan.bpf_allow_v4.len(), before_v4, "no v4 proxy entry");
+        assert_eq!(plan.bpf_meta.get(8..12), Some(&[0u8, 0, 0, 0][..]));
+        // The v6 entry and meta are still stamped.
+        assert_eq!(plan.bpf_meta.get(16..32), Some(&v6.octets()[..]));
+        assert_eq!(plan.bpf_meta.get(12..14), Some(&1080u16.to_be_bytes()[..]));
     }
 
     #[test]

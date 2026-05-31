@@ -48,8 +48,8 @@ fn lpm_v4_key(addr: [u8; 4], prefix_len: u8) -> [u8; 8] {
 }
 
 /// Encode an `allow_entry { __u16 port_min; __u16 port_max; __u8 protocol;
-/// __u8 flags; __u8 _pad[2] }` (8 bytes). Ports are host order; flags 0.
-const fn allow_entry(port_min: u16, port_max: u16, protocol: Protocol) -> [u8; 8] {
+/// __u8 flags; __u8 _pad[2] }` (8 bytes). Ports are host order.
+const fn allow_entry(port_min: u16, port_max: u16, protocol: Protocol, flags: u8) -> [u8; 8] {
     let [lo0, lo1] = port_min.to_ne_bytes();
     let [hi0, hi1] = port_max.to_ne_bytes();
     let proto = match protocol {
@@ -57,7 +57,7 @@ const fn allow_entry(port_min: u16, port_max: u16, protocol: Protocol) -> [u8; 8
         Protocol::Tcp => IPPROTO_TCP,
         Protocol::Udp => IPPROTO_UDP,
     };
-    [lo0, lo1, hi0, hi1, proto, 0, 0, 0]
+    [lo0, lo1, hi0, hi1, proto, flags, 0, 0]
 }
 
 /// Encode `bpf/maps.h`'s `kennel_meta` (64 bytes); only magic/abi/ctx are set,
@@ -90,7 +90,7 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
     for r in rules {
-        let value = allow_entry(r.port_min, r.port_max, r.protocol);
+        let value = allow_entry(r.port_min, r.port_max, r.protocol, 0);
         if let Ok(addr) = r.cidr.parse::<Ipv4Addr>() {
             v4.push((lpm_v4_key(addr.octets(), r.prefix_len), value));
         } else if let Ok(addr) = r.cidr.parse::<Ipv6Addr>() {
@@ -119,6 +119,24 @@ fn write_access() -> AccessFs {
         | AccessFs::REMOVE_FILE
         | AccessFs::REMOVE_DIR
         | AccessFs::TRUNCATE
+}
+
+/// The kennel's egress proxy endpoint: the per-kennel loopback address(es) and
+/// TCP port its SOCKS5/HTTP proxy listens on. Computed by kenneld from the
+/// caller's reserved scope and the kennel's `ctx`, then [stamped into the
+/// plan](Plan::stamp_proxy) before the BPF payload is derived.
+///
+/// The IPv4 address is absent for a v6-only kennel (one whose `ctx` does not fit
+/// the 8-bit field the v4 loopback address carries), matching the addressing in
+/// `kenneld`'s bring-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxyEndpoint {
+    /// The proxy's IPv4 loopback address, if the kennel has one.
+    pub v4: Option<Ipv4Addr>,
+    /// The proxy's IPv6 loopback address.
+    pub v6: Ipv6Addr,
+    /// The TCP port the proxy listens on.
+    pub port: u16,
 }
 
 /// The kernel enforcement objects derived from a settled policy.
@@ -231,6 +249,23 @@ impl Plan {
             bpf_deny_v6,
             bpf_meta: meta_bytes(ctx),
         })
+    }
+
+    /// Stamp the kennel's egress proxy `endpoint` into the plan: record it in the
+    /// BPF `kennel_meta` (`proxy_addr_v4`/`proxy_port`/`proxy_addr_v6`), and add a
+    /// `KENNEL_ALLOW_FLAG_PROXY`-flagged allow-entry for the proxy's exact
+    /// address and port to `bpf_allow_v4`/`bpf_allow_v6`.
+    ///
+    /// That flagged entry is what lets the confined workload `connect()` to its
+    /// proxy; every other destination outside the policy's allowlist is denied by
+    /// the cgroup BPF, which is what makes the proxy the unbypassable egress
+    /// funnel (`08-enforcement-architecture.md`; the proxy thesis in the exec
+    /// summary). Call once, after [`from_policy`](Self::from_policy) and before
+    /// deriving the BPF payload.
+    pub fn stamp_proxy(&mut self, endpoint: &ProxyEndpoint) {
+        // Implemented in the following commit; no-op stub so the structure
+        // compiles and the structural tests pass while the behaviour tests fail.
+        let _ = endpoint;
     }
 
     /// Build the seccomp filter this plan describes. Pure — the filter is not
