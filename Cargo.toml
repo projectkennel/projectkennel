@@ -18,6 +18,7 @@ members = [
     "crates/kennel-spawn",
     "crates/kennel-syscall",
     "crates/kennel-text",
+    "crates/kennel-netproxy",
     "crates/kenneld",
 ]
 
