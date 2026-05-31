@@ -88,7 +88,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Public surface (library).** None. The privhelper is a binary crate with `main.rs` only; helper functions are `pub(crate)` and tested in-crate.
 
-**Depends on.** `kennel-syscall` (for the privileged syscalls), `kennel-text` (sanitisation). The IPC framing format is TBD (not `serde_json`); the validation core is std-only.
+**Depends on.** `kennel-syscall` (for the privileged syscalls — netlink address ops). The IPC is fixed-layout struct messages over stdin/stdout (the `wire` module; no serde), and the validation core is std-only — so the crate stays `#![forbid(unsafe_code)]`.
 
 **Depended on by.** Nothing in the workspace links this crate.
 
