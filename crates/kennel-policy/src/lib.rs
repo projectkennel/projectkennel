@@ -34,9 +34,10 @@ pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
-    CapPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy, NetMode,
-    NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact,
-    SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, TtlAction,
+    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
+    NetMode, NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
+    ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy,
+    TmpPolicy, TtlAction,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 
@@ -136,6 +137,10 @@ mod tests {
                     shim_root: "/run/kennel/ai-coding".to_owned(),
                     read: vec!["/usr".to_owned()],
                     write: vec!["/run/kennel/ai-coding/home".to_owned()],
+                    tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
+                    dev: DevPolicy {
+                        allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
+                    },
                 },
                 exec: ExecPolicy {
                     deny_setuid: true,
@@ -144,7 +149,7 @@ mod tests {
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
                 },
-                proc: ProcPolicy { visibility: ProcVisibility::SelfOnly },
+                proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
                 cap: CapPolicy { no_new_privs: true },
                 seccomp: SeccompPolicy {
                     default_action: SeccompAction::Errno,
@@ -217,6 +222,36 @@ mod tests {
         if let Some(rule) = tampered.policy.effective_policy.net.allow_names.first_mut() {
             rule.name = "evil.example.com".to_owned();
         }
+        let bytes = to_bytes(&tampered).expect("serialise");
+        let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
+        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+    }
+
+    #[test]
+    fn fs_tmp_dev_and_proc_hidepid_round_trip_and_are_signature_bound() {
+        let key = signing_key();
+        let mut policy = sample_policy();
+        policy.effective_policy.fs.tmp = TmpPolicy { private: true, size_mib: 256, mode: "0750".to_owned() };
+        policy.effective_policy.fs.dev = DevPolicy {
+            allow: vec!["/dev/null".to_owned(), "/dev/zero".to_owned(), "/dev/tty".to_owned()],
+        };
+        policy.effective_policy.proc.hidepid = true;
+
+        // The new filesystem knobs survive a sign -> serialise -> verify round trip.
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert_eq!(verified.effective_policy.fs.tmp, policy.effective_policy.fs.tmp);
+        assert_eq!(verified.effective_policy.fs.dev, policy.effective_policy.fs.dev);
+        assert!(verified.effective_policy.proc.hidepid);
+
+        // They are inside the signed canonical form: tampering with the device
+        // allowlist (e.g. smuggling in /dev/mem) breaks the signature.
+        let canon = String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(canon.contains("size_mib") && canon.contains("/dev/tty"), "new fields are in the canonical form");
+
+        let mut tampered = doc;
+        tampered.policy.effective_policy.fs.dev.allow.push("/dev/mem".to_owned());
         let bytes = to_bytes(&tampered).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
         assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");

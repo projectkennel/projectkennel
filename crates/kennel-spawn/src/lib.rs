@@ -27,14 +27,14 @@
 pub mod plan;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use kennel_policy::{KeySet, PolicyError, SettledPolicy};
-use kennel_syscall::landlock::Ruleset;
+use kennel_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 use kennel_syscall::namespace::Namespaces;
 
-pub use plan::{Plan, ProxyEndpoint};
+pub use plan::{BindMount, Plan, ProxyEndpoint, ShimView};
 
 /// The per-instance values the runtime fills into a settled policy's deferred
 /// placeholders.
@@ -162,7 +162,7 @@ pub fn substitute(policy: &SettledPolicy, subst: &RuntimeSubstitutions) -> Resul
 pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Result<Plan, SpawnError> {
     let verified = kennel_policy::verify_settled(bytes, keys)?;
     let substituted = substitute(&verified, subst)?;
-    Plan::from_policy(&substituted, subst.ctx, &subst.namespace)
+    Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
 }
 
 /// Spawn `command` confined by `plan`.
@@ -202,21 +202,31 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 /// Returns [`SpawnError::Syscall`] if a namespace unshare, building the ruleset,
 /// the seal, or the spawn fails. A seal failure aborts the spawn fail-closed.
 pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
-    // Build in the parent: opening the Landlock path fds and allocating the
-    // filter here keeps the post-fork seal to syscalls only.
+    // Build the seccomp filter in the parent (allocation off the seal path). An
+    // empty allowlist means "no seccomp filter" (rely on Landlock).
     let filter = if plan.seccomp_allow.is_empty() {
         None
     } else {
         Some(plan.seccomp_filter())
     };
 
-    let mut ruleset = Ruleset::new().map_err(SpawnError::Syscall)?;
-    for (path, access) in &plan.landlock_fs {
-        ruleset.allow_path(path, *access).map_err(SpawnError::Syscall)?;
-    }
-    for (port, access) in &plan.landlock_net {
-        ruleset.allow_port(*port, *access);
-    }
+    // The constructed-view path (`pivot_root`) engages only with a mount
+    // namespace, a policy-derived view, and a runtime staging root. Without all
+    // three we keep the in-place fallback seal (fresh `/proc` + private `/tmp` +
+    // single-file shadow binds), which is also the unprivileged/no-namespace path.
+    let pivoting =
+        plan.namespaces.contains(Namespaces::MOUNT) && plan.view.is_some() && plan.new_root.is_some();
+
+    // Build the Landlock ruleset in the parent ONLY when not pivoting: there the
+    // granted paths resolve to the host inodes the child still sees. When
+    // pivoting, the view's inodes (notably the constructed `/etc`, fresh tmpfs
+    // inodes a host-opened fd would not match) exist only after `pivot_root`, so
+    // the ruleset is built inside the seal, post-pivot.
+    let mut parent_ruleset = if pivoting {
+        None
+    } else {
+        Some(build_ruleset(&plan.landlock_fs, &plan.landlock_net, false).map_err(SpawnError::Syscall)?)
+    };
 
     // PID namespace: unshare in the parent so the next fork lands the workload as
     // PID 1 of a new namespace. Mount/IPC are deferred to the seal.
@@ -225,16 +235,14 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     }
     let seal_ns = plan.namespaces & !Namespaces::PID;
 
-    // The cgroup the workload joins itself into (writes its own pid before any
-    // namespace/seal), or None if this plan does not enter a cgroup.
+    // Captured by the seal closure (clones keep it `'static`).
     let cgroup_join = plan.cgroup_join.then(|| plan.cgroup.clone());
-
-    // The per-file shadow binds (synthetic /etc), applied in the mount seal.
     let file_binds = plan.file_binds.clone();
+    let view = plan.view.clone();
+    let new_root = plan.new_root.clone();
+    let landlock_fs = plan.landlock_fs.clone();
+    let landlock_net = plan.landlock_net.clone();
 
-    // `restrict_current_process` consumes the ruleset; an Option lets the FnMut
-    // seal move it out on its single call.
-    let mut ruleset = Some(ruleset);
     let seal = move || -> io::Result<()> {
         // Join the cgroup first, before any namespace/mount change: the BPF
         // attached to it only governs processes that are members, and cgroup
@@ -249,31 +257,158 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
             kennel_syscall::namespace::unshare(seal_ns)?;
         }
         if seal_ns.contains(Namespaces::MOUNT) {
-            // Detach propagation from the host, then give the workload a fresh
-            // /proc (reflecting its PID namespace) and a private /tmp. The full
-            // pivot_root shim ($HOME shadowing, hiding non-granted paths) is a
-            // later increment; Landlock already denies access to non-granted
-            // paths in the meantime.
+            // Detach mount propagation from the host first (`MS_PRIVATE` — stronger
+            // than the `MS_SLAVE` of §7.2.10: no propagation in either direction).
             kennel_syscall::mount::make_root_private()?;
-            kennel_syscall::mount::mount_special("proc", std::path::Path::new("/proc"))?;
-            kennel_syscall::mount::mount_special("tmpfs", std::path::Path::new("/tmp"))?;
-            // Shadow individual files (the synthetic /etc set) over their host
-            // counterparts. Read-only so the workload cannot tamper the staged
-            // copies. A target that does not exist on the host is skipped.
-            apply_file_binds(&file_binds)?;
+            if let (Some(v), Some(root)) = (&view, &new_root) {
+                // The constructed view: build a fresh root, bind the granted paths
+                // into it, construct the synthetic `/etc` + `/dev` + `/proc` +
+                // `/tmp`, then `pivot_root` so non-granted path *names* are absent.
+                build_view_and_pivot(v, root, &file_binds)?;
+            } else {
+                // Fallback (no view/staging): in-place fresh `/proc` + private
+                // `/tmp` + the single-file shadow binds. Landlock still denies
+                // access to non-granted paths; only the name-hiding is absent.
+                kennel_syscall::mount::mount_special("proc", Path::new("/proc"))?;
+                kennel_syscall::mount::mount_special("tmpfs", Path::new("/tmp"))?;
+                apply_file_binds(&file_binds)?;
+            }
         }
         // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
         kennel_syscall::process::set_no_new_privs()?;
         if let Some(f) = filter.as_ref() {
             f.install()?;
         }
-        let rs = ruleset
-            .take()
-            .ok_or_else(|| io::Error::other("landlock ruleset already consumed"))?;
+        // The ruleset: the parent-built one for the fallback path, or built here
+        // (post-`pivot_root`, so the fds reference the constructed view's inodes)
+        // when pivoting. `skip_missing` drops a grant the view does not contain
+        // (vacuous — the path the workload would reach does not exist).
+        let rs = match parent_ruleset.take() {
+            Some(rs) => rs,
+            None => build_ruleset(&landlock_fs, &landlock_net, true)?,
+        };
         rs.restrict_current_process()
     };
 
     kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall)
+}
+
+/// Build (but do not install) a Landlock ruleset from a plan's path and port
+/// rules. With `skip_missing`, a path that cannot be opened — absent from the
+/// constructed view — is skipped rather than failing the build; a grant for a
+/// path the view does not contain is vacuous. The seal builds with `skip_missing`
+/// after `pivot_root`; the fallback path builds in the parent without it.
+fn build_ruleset(fs: &[(PathBuf, AccessFs)], net: &[(u16, AccessNet)], skip_missing: bool) -> io::Result<Ruleset> {
+    let mut ruleset = Ruleset::new()?;
+    for (path, access) in fs {
+        match ruleset.allow_path(path, *access) {
+            Ok(()) => {}
+            Err(e) if skip_missing && e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    for (port, access) in net {
+        ruleset.allow_port(*port, *access);
+    }
+    Ok(ruleset)
+}
+
+/// Construct the kennel's filesystem view in a fresh tmpfs root and `pivot_root`
+/// into it (§7.2.5), so non-granted path *names* are absent from the view, not
+/// merely access-denied.
+///
+/// Runs in the forked child's mount-namespace seal, after [`make_root_private`].
+/// In order: mount the new root (a tmpfs holding only scaffolding); bind the
+/// granted system and `~/…` paths in (same-inode binds, so the post-pivot
+/// Landlock rules match, and writable binds resolve to **persistent host
+/// inodes** so the work survives teardown); copy the staged synthetic `/etc`
+/// (the host `/etc` is never bound in); bind the allowlisted `/dev` nodes;
+/// mount a fresh `/proc` and the private `/tmp`; then `pivot_root` and detach the
+/// old root.
+///
+/// [`make_root_private`]: kennel_syscall::mount::make_root_private
+fn build_view_and_pivot(view: &ShimView, new_root: &Path, file_binds: &[(PathBuf, PathBuf)]) -> io::Result<()> {
+    use kennel_syscall::mount;
+
+    // Map an absolute in-kennel path to its staging location under `new_root`.
+    let under = |abs: &Path| new_root.join(abs.strip_prefix("/").unwrap_or(abs));
+
+    // 1. The new root: a fresh tmpfs (scaffolding only; bound content is host-backed).
+    mount::mount_special("tmpfs", new_root)?;
+
+    // 2. Bind the granted system + home paths in. Recursive, so submounts come
+    //    along; read-only unless the grant is writable (those resolve to the real
+    //    host inode, the persistence guarantee).
+    for b in &view.binds {
+        let dest = under(&b.target);
+        create_bind_target(&b.source, &dest)?;
+        mount::bind(&b.source, &dest, true)?;
+        if !b.writable {
+            mount::remount_readonly(&dest)?;
+        }
+    }
+
+    // 3. The synthetic /etc: a fresh dir in the root tmpfs populated with the
+    //    staged vanilla files. The host /etc is never bound in (it carries host
+    //    specifics). Writes are denied by the Landlock read grant on /etc.
+    let etc = under(Path::new("/etc"));
+    std::fs::create_dir_all(&etc)?;
+    for (source, target) in file_binds {
+        let dest = under(target);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, &dest)?;
+    }
+
+    // 4. The constructed /dev: a dev-permitting tmpfs with the allowlisted nodes
+    //    bind-mounted from the host (same inode, so they function and the Landlock
+    //    rules match). nosuid; devices come only from the explicit binds.
+    let dev = under(Path::new("/dev"));
+    std::fs::create_dir_all(&dev)?;
+    mount::mount_tmpfs(&dev, None, Some("0755"), true)?;
+    for node in &view.dev_allow {
+        let dest = under(node);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::File::create(&dest)?;
+        mount::bind(node, &dest, false)?;
+    }
+
+    // 5. Fresh /proc (reflecting the PID namespace) and the private /tmp.
+    let proc = under(Path::new("/proc"));
+    std::fs::create_dir_all(&proc)?;
+    mount::mount_proc(&proc, view.proc_hidepid)?;
+    let tmp = under(Path::new("/tmp"));
+    std::fs::create_dir_all(&tmp)?;
+    mount::mount_tmpfs(&tmp, Some(view.tmp_size_mib), Some(&view.tmp_mode), false)?;
+
+    // 6. Ensure the shim $HOME exists even if no ~ path was granted, so HOME resolves.
+    std::fs::create_dir_all(under(&view.shim_root))?;
+
+    // 7. pivot_root into the new root, then detach the old one.
+    let put_old = under(Path::new("/.kennel-oldroot"));
+    std::fs::create_dir_all(&put_old)?;
+    mount::pivot_root(new_root, &put_old)?;
+    std::env::set_current_dir("/")?;
+    mount::unmount_detach(Path::new("/.kennel-oldroot"))?;
+    let _ = std::fs::remove_dir(Path::new("/.kennel-oldroot"));
+    Ok(())
+}
+
+/// Create `dest` (and its parent) as the right type to bind `source` over: a
+/// directory for a directory source, otherwise an empty file.
+fn create_bind_target(source: &Path, dest: &Path) -> io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if source.is_dir() {
+        std::fs::create_dir_all(dest)?;
+    } else {
+        std::fs::File::create(dest)?;
+    }
+    Ok(())
 }
 
 /// Apply the plan's single-file shadow binds, read-only, in the workload's mount
@@ -377,13 +512,14 @@ fn populate_egress_maps(loaded: &kennel_bpf::Loaded, plan: &Plan) -> Result<(), 
 mod tests {
     use super::*;
     use kennel_policy::{
-        CapPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
-        NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
-        SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TtlAction,
+        CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants,
+        LifecyclePolicy, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
+        Provenance, SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
     };
     use kennel_syscall::landlock::{AccessFs, AccessNet};
     use kennel_syscall::namespace::Namespaces;
     use kennel_syscall::seccomp::Action;
+    use std::path::Path;
 
     fn policy_with_placeholders() -> SettledPolicy {
         SettledPolicy {
@@ -407,9 +543,11 @@ mod tests {
                     shim_root: "/run/kennel/<kennel>".to_owned(),
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
+                    tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
+                    dev: DevPolicy { allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()] },
                 },
                 exec: ExecPolicy { deny_setuid: true, deny_setgid: true, deny_setcap: true, deny_writable: true, allow: vec!["/usr/bin/python3".to_owned()] },
-                proc: ProcPolicy { visibility: ProcVisibility::SelfOnly },
+                proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
                 cap: CapPolicy { no_new_privs: true },
                 seccomp: SeccompPolicy { default_action: SeccompAction::Errno, allow: vec![0, 1, 2, 60] },
                 lifecycle: LifecyclePolicy { ttl_seconds: None, ttl_action: TtlAction::Warn },
@@ -458,7 +596,7 @@ mod tests {
     #[test]
     fn plan_translates_policy() {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7, "kennel-dev").expect("plan");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
         // Namespaces: mount/pid/ipc, never net.
         assert_eq!(plan.namespaces, Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC);
@@ -507,6 +645,75 @@ mod tests {
     }
 
     #[test]
+    fn view_classifies_system_home_and_etc_paths() {
+        // System paths bind at their own location (read-only); paths under the
+        // real $HOME remap beneath shim_root; /etc is the constructed synthetic
+        // set and is never bound from the host (but still gets a Landlock rule).
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.read.push("/etc/ssl".to_owned());
+        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let view = plan.view.as_ref().expect("a policy-derived plan carries a view");
+        assert_eq!(view.shim_root, PathBuf::from("/run/kennel/ai-coding"));
+
+        assert!(
+            view.binds.iter().any(|b| b.source == Path::new("/usr") && b.target == Path::new("/usr") && !b.writable),
+            "system path bound at its own location, read-only"
+        );
+        assert!(
+            view.binds.iter().any(|b|
+                b.source == Path::new("/home/dev/.config")
+                    && b.target == Path::new("/run/kennel/ai-coding/.config")
+                    && !b.writable),
+            "home path remapped beneath shim_root"
+        );
+        assert!(!view.binds.iter().any(|b| b.source.starts_with("/etc")), "no /etc bind: it is constructed");
+        assert!(
+            plan.landlock_fs.iter().any(|(path, _)| path == &PathBuf::from("/etc/ssl")),
+            "the constructed /etc still gets a Landlock rule"
+        );
+        assert_eq!(view.dev_allow, vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/urandom")]);
+        assert!(view.proc_hidepid);
+    }
+
+    #[test]
+    fn writable_home_grant_binds_to_the_persistent_host_path() {
+        // The work an agent writes must outlive the kennel: a writable grant under
+        // the real $HOME binds onto the real host inode, not the ephemeral tmpfs.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.write.push("<home>/projects/foo".to_owned());
+        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let view = plan.view.as_ref().expect("view");
+        let bind = view
+            .binds
+            .iter()
+            .find(|b| b.target == Path::new("/run/kennel/ai-coding/projects/foo"))
+            .expect("remapped writable bind");
+        assert_eq!(bind.source, PathBuf::from("/home/dev/projects/foo"), "writes resolve to the persistent host path");
+        assert!(bind.writable);
+    }
+
+    #[test]
+    fn from_policy_rejects_non_octal_tmp_mode() {
+        // A non-octal mode would inject extra comma-separated tmpfs mount options.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.tmp.mode = "0700,size=10G".to_owned();
+        let err = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev"))
+            .expect_err("must reject");
+        assert!(matches!(err, SpawnError::InvalidPolicy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn from_policy_rejects_dev_paths_that_escape_dev() {
+        for bad in ["/etc/shadow", "/dev/../etc/shadow", "/dev"] {
+            let mut p = policy_with_placeholders();
+            p.effective_policy.fs.dev.allow = vec![bad.to_owned()];
+            let err = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev"))
+                .expect_err("must reject");
+            assert!(matches!(err, SpawnError::InvalidPolicy(_)), "{bad} should be rejected, got {err:?}");
+        }
+    }
+
+    #[test]
     fn v6_rules_encode_to_lpm_v6() {
         let mut p = policy_with_placeholders();
         p.effective_policy.net.allow.push(NetRule {
@@ -516,7 +723,7 @@ mod tests {
             port_max: 443,
             protocol: Protocol::Tcp,
         });
-        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev").expect("plan");
+        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
         // The two original rules stay v4; the new one lands in v6.
         assert_eq!(plan.bpf_allow_v4.len(), 2);
@@ -536,7 +743,7 @@ mod tests {
     /// A plan with two v4 allow rules and one deny, from the shared fixture.
     fn fixture_plan() -> Plan {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        Plan::from_policy(&p, 7, "kennel-dev").expect("plan")
+        Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan")
     }
 
     #[test]
@@ -636,8 +843,8 @@ mod tests {
             namespaces: Namespaces::empty(),
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
             cgroup_join: false, // these tests join manually / isolate other layers
-            bind_read: Vec::new(),
-            bind_write: Vec::new(),
+            view: None,
+            new_root: None,
             landlock_fs: read_dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
             landlock_net: Vec::new(),
             seccomp_allow: Vec::new(), // empty => no seccomp, isolating the Landlock check
@@ -731,8 +938,8 @@ mod root_tests {
             namespaces: Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC,
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
             cgroup_join: false, // these tests join manually / isolate other layers
-            bind_read: Vec::new(),
-            bind_write: Vec::new(),
+            view: None,
+            new_root: None,
             landlock_fs: dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
             landlock_net: Vec::new(),
             seccomp_allow: Vec::new(),
@@ -793,8 +1000,8 @@ mod root_tests {
             namespaces: Namespaces::MOUNT, // mount ns only: no parent PID unshare
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
             cgroup_join: false,
-            bind_read: Vec::new(),
-            bind_write: Vec::new(),
+            view: None,
+            new_root: None,
             landlock_fs,
             landlock_net: Vec::new(),
             seccomp_allow: Vec::new(),
@@ -817,6 +1024,82 @@ mod root_tests {
         assert_eq!(out.trim(), "SYNTHETIC", "the bound synthetic file shadows the target");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pivot_root_hides_non_granted_names() {
+        // The constructed view (§7.2.5) must make a non-granted sibling's NAME
+        // absent (ENOENT), not merely access-denied, while a granted path stays
+        // readable through the shim. Staged outside /tmp (the seal tmpfs-mounts
+        // /tmp). namespaces = MOUNT only, so the parent harness is undisturbed.
+        let base = PathBuf::from(format!("/run/kennel-spawn-pivot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real_home = base.join("home");
+        let granted = real_home.join("granted");
+        let secret = real_home.join("secret");
+        std::fs::create_dir_all(&granted).expect("mkdir granted");
+        std::fs::create_dir_all(&secret).expect("mkdir secret");
+        std::fs::write(granted.join("file"), "GRANTED\n").expect("write granted");
+        std::fs::write(secret.join("file"), "SECRET\n").expect("write secret");
+        let new_root = base.join("root");
+        std::fs::create_dir_all(&new_root).expect("mkdir new_root");
+
+        let shim_root = PathBuf::from("/khome");
+        let ro = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let sys = ["/usr", "/bin", "/lib", "/lib64"];
+        let mut binds: Vec<BindMount> = sys
+            .iter()
+            .map(|d| BindMount { source: PathBuf::from(*d), target: PathBuf::from(*d), writable: false })
+            .collect();
+        // The one granted ~ path, remapped beneath the shim root.
+        binds.push(BindMount { source: granted, target: shim_root.join("granted"), writable: false });
+
+        // Landlock rules reference the post-pivot targets (built in the seal).
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> = sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
+        landlock_fs.push((shim_root.clone(), ro));
+        landlock_fs.push((shim_root.join("granted"), ro));
+
+        let plan = Plan {
+            namespaces: Namespaces::MOUNT,
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false,
+            view: Some(ShimView {
+                shim_root: shim_root.clone(),
+                binds,
+                dev_allow: Vec::new(),
+                tmp_size_mib: 64,
+                tmp_mode: "0700".to_owned(),
+                proc_hidepid: false,
+            }),
+            new_root: Some(new_root),
+            landlock_fs,
+            landlock_net: Vec::new(),
+            seccomp_allow: Vec::new(),
+            seccomp_default: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
+        };
+
+        // Granted file readable through $HOME, and the non-granted sibling's name
+        // absent (`! test -e` is true only when it does not exist).
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("HOME", &shim_root)
+            .arg("-c")
+            .arg(r#"cat "$HOME/granted/file" && ! test -e "$HOME/secret""#)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = spawn(&plan, &mut cmd).expect("spawn");
+        let mut out = String::new();
+        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        let status = child.wait().expect("wait");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(status.success(), "granted path readable and non-granted name absent (got {status:?})");
+        assert_eq!(out.trim(), "GRANTED", "the granted file is readable through the shim");
     }
 
     use std::net::TcpListener;
@@ -845,8 +1128,8 @@ mod root_tests {
             namespaces: Namespaces::empty(),
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
             cgroup_join: false, // these tests join manually / isolate other layers
-            bind_read: Vec::new(),
-            bind_write: Vec::new(),
+            view: None,
+            new_root: None,
             landlock_fs: Vec::new(),
             landlock_net: Vec::new(),
             seccomp_allow: Vec::new(),
@@ -933,8 +1216,8 @@ mod root_tests {
             namespaces: Namespaces::empty(),
             cgroup: cg_path.clone(),
             cgroup_join: true,
-            bind_read: Vec::new(),
-            bind_write: Vec::new(),
+            view: None,
+            new_root: None,
             landlock_fs: vec![(PathBuf::from("/"), access)], // permissive: isolate the join
             landlock_net: Vec::new(),
             seccomp_allow: Vec::new(),

@@ -20,9 +20,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use kennel_policy::{
-    CapPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy, NetMode, NetPolicy, NetRule,
-    ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction, SeccompPolicy, SettledPolicy, SigningKey,
-    TtlAction,
+    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy, NetMode, NetPolicy,
+    NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction, SeccompPolicy, SettledPolicy, SigningKey,
+    TmpPolicy, TtlAction,
 };
 use kennel_privhelper::validate::ReservedScope;
 use kennel_spawn::{prepare, RuntimeSubstitutions};
@@ -93,6 +93,8 @@ fn minimal_policy() -> SettledPolicy {
                 shim_root: "/run/kennel/e2e".to_owned(),
                 read: vec!["/".to_owned()],
                 write: Vec::new(),
+                tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
+                dev: DevPolicy { allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()] },
             },
             exec: ExecPolicy {
                 deny_setuid: true,
@@ -101,7 +103,7 @@ fn minimal_policy() -> SettledPolicy {
                 deny_writable: true,
                 allow: Vec::new(),
             },
-            proc: ProcPolicy { visibility: ProcVisibility::SelfOnly },
+            proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
             cap: CapPolicy { no_new_privs: true },
             seccomp: SeccompPolicy { default_action: SeccompAction::Errno, allow: Vec::new() },
             lifecycle: LifecyclePolicy { ttl_seconds: None, ttl_action: TtlAction::Warn },

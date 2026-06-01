@@ -8,7 +8,7 @@
 //! needs a fork/exec primitive in `kennel-syscall` (no `unsafe` lives here).
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use kennel_syscall::landlock::{AccessFs, AccessNet};
 use kennel_syscall::namespace::Namespaces;
@@ -166,6 +166,83 @@ pub struct ProxyEndpoint {
     pub port: u16,
 }
 
+/// One bind mount composing the constructed view.
+///
+/// `source` (a host path) is made visible at `target` (an absolute path as seen
+/// inside the kennel, after `pivot_root`), read-only unless `writable`.
+///
+/// Writable binds resolve to **persistent host locations** — the granted paths
+/// under the user's real `$HOME`. The workload's writes land on the real inode,
+/// so the work survives the kennel's teardown even though the new root that
+/// frames it is an ephemeral tmpfs (§7.2.5: the constructed view is scaffolding;
+/// the bound content is not).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindMount {
+    /// The host path bound in.
+    pub source: PathBuf,
+    /// Where it appears inside the kennel (absolute, post-`pivot_root`).
+    pub target: PathBuf,
+    /// Writable when true; read-only (bind, then RO remount) otherwise.
+    pub writable: bool,
+}
+
+/// The constructed-`$HOME` view (§7.2.5).
+///
+/// What the mount seal needs to build a fresh root for the kennel and
+/// `pivot_root` into it, so non-granted path *names* do not exist in the view —
+/// absent, not merely denied.
+///
+/// Present whenever the policy shadows `$HOME` (a framework invariant, so always
+/// in a policy-derived [`Plan`]); `None` is the escape hatch for the
+/// unprivileged/unit-test path that does not unshare a mount namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShimView {
+    /// The in-kennel `$HOME` (the substituted `fs.shim_root`, under
+    /// `/run/kennel/`). The workload's `HOME` is set to this; granted `~/…` paths
+    /// are bound beneath it.
+    pub shim_root: PathBuf,
+    /// The bind mounts composing the view (system paths read-only, granted `~/…`
+    /// paths remapped beneath `shim_root`). The synthetic `/etc` is *not* here —
+    /// it is constructed fresh, never bound from the host.
+    pub binds: Vec<BindMount>,
+    /// Device nodes the constructed `/dev` exposes (absolute, under `/dev`).
+    pub dev_allow: Vec<PathBuf>,
+    /// Private-`/tmp` tmpfs size cap, in mebibytes.
+    pub tmp_size_mib: u32,
+    /// Private-`/tmp` tmpfs mode (octal digits, validated at translation).
+    pub tmp_mode: String,
+    /// Mount `/proc` with `hidepid=2`.
+    pub proc_hidepid: bool,
+}
+
+/// Remap a granted host path to where it appears inside the kennel: a path under
+/// the real `$HOME` moves beneath `shim_root`; any other absolute path keeps its
+/// own location in the new root.
+fn remap_target(path: &Path, home: &Path, shim_root: &Path) -> PathBuf {
+    path.strip_prefix(home).map_or_else(|_| path.to_path_buf(), |rel| shim_root.join(rel))
+}
+
+/// Whether `path` is served by the constructed synthetic `/etc` (and so is *not*
+/// bound from the host). Matches `/etc` and anything beneath it on a component
+/// boundary (`/etcfoo` does not match).
+fn is_constructed_etc(path: &Path) -> bool {
+    path.starts_with("/etc")
+}
+
+/// Whether `mode` is a safe tmpfs `mode=` value: 3 or 4 octal digits and nothing
+/// else, so it cannot inject extra comma-separated mount options (§10.3).
+fn is_octal_mode(mode: &str) -> bool {
+    matches!(mode.len(), 3 | 4) && mode.bytes().all(|b| matches!(b, b'0'..=b'7'))
+}
+
+/// Whether `path` is a device node safe to bind into the constructed `/dev`:
+/// beneath `/dev`, not the bare `/dev`, and free of `..` components.
+fn is_safe_dev_path(path: &Path) -> bool {
+    path.starts_with("/dev")
+        && path != Path::new("/dev")
+        && !path.components().any(|c| c == Component::ParentDir)
+}
+
 /// The kernel enforcement objects derived from a settled policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -181,11 +258,19 @@ pub struct Plan {
     /// workload share kenneld's delegated `user@<uid>` subtree, of which the
     /// kennel cgroup is a descendant (`08-enforcement-architecture.md` §8.5).
     pub cgroup_join: bool,
-    /// Paths bind-mounted read-only into the shim view.
-    pub bind_read: Vec<PathBuf>,
-    /// Paths bind-mounted writable into the shim view.
-    pub bind_write: Vec<PathBuf>,
-    /// Landlock path rules `(path, access)`.
+    /// The constructed-`$HOME` view (§7.2.5) the mount seal builds before
+    /// `pivot_root`, or `None` for the escape-hatch path that does not unshare a
+    /// mount namespace.
+    pub view: Option<ShimView>,
+    /// The host staging directory the mount seal mounts the fresh tmpfs new root
+    /// on, then `pivot_root`s into. A runtime input (kenneld creates it under
+    /// `$XDG_RUNTIME_DIR`, outside `/tmp`, and sets this at bring-up, like
+    /// [`cgroup`](Self::cgroup)); `None` falls back to the in-place fresh-`/proc`
+    /// + private-`/tmp` seal without a `pivot_root`. Not policy-derived.
+    pub new_root: Option<PathBuf>,
+    /// Landlock path rules `(path, access)`. With a [`view`](Self::view) these are
+    /// the **post-`pivot_root`** targets (Landlock seals after the pivot), so a
+    /// granted `~/…` path is keyed on its remapped location under `shim_root`.
     pub landlock_fs: Vec<(PathBuf, AccessFs)>,
     /// Landlock TCP-port rules `(port, access)`. Best-effort port hardening that
     /// complements the authoritative BPF (CIDR+port) egress control.
@@ -225,8 +310,9 @@ impl Plan {
     /// # Errors
     ///
     /// Returns [`SpawnError::InvalidPolicy`] if a network rule's CIDR is not a
-    /// valid IPv4 or IPv6 address.
-    pub fn from_policy(policy: &SettledPolicy, ctx: u16, namespace: &str) -> Result<Self, SpawnError> {
+    /// valid IPv4 or IPv6 address, if `fs.tmp.mode` is not octal digits, or if an
+    /// `fs.dev.allow` entry is not a device path under `/dev`.
+    pub fn from_policy(policy: &SettledPolicy, ctx: u16, namespace: &str, home: &Path) -> Result<Self, SpawnError> {
         let ep = &policy.effective_policy;
 
         // Mount/PID/IPC isolation; never NET (see field docs).
@@ -234,16 +320,55 @@ impl Plan {
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
 
-        let bind_read: Vec<PathBuf> = ep.fs.read.iter().map(PathBuf::from).collect();
-        let bind_write: Vec<PathBuf> = ep.fs.write.iter().map(PathBuf::from).collect();
+        let shim_root = PathBuf::from(&ep.fs.shim_root);
 
+        // Classify every granted path once. The in-kennel target — `~/…` paths
+        // remap beneath `shim_root`, `/etc` is the constructed synthetic set, any
+        // other absolute path keeps its place — drives both the Landlock rule and
+        // the bind mount. Landlock is sealed AFTER `pivot_root`, so it references
+        // the post-pivot target, not the host source. `/etc` gets a Landlock rule
+        // (on the constructed `/etc`) but no bind (it is built, not bound).
         let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
-        for p in &ep.fs.read {
-            landlock_fs.push((PathBuf::from(p), read_access()));
+        let mut binds: Vec<BindMount> = Vec::new();
+        let grants = ep.fs.read.iter().map(|p| (p, false)).chain(ep.fs.write.iter().map(|p| (p, true)));
+        for (path_str, writable) in grants {
+            let source = PathBuf::from(path_str.as_str());
+            let target = remap_target(&source, home, &shim_root);
+            landlock_fs.push((target.clone(), if writable { write_access() } else { read_access() }));
+            if !is_constructed_etc(&source) {
+                binds.push(BindMount { source, target, writable });
+            }
         }
-        for p in &ep.fs.write {
-            landlock_fs.push((PathBuf::from(p), write_access()));
+
+        // Validate the tmpfs mode and device allowlist before they reach mount
+        // syscalls: the mode flows into a comma-separated mount data string, so a
+        // non-octal value is an option-injection vector (§10.3); a device path
+        // outside `/dev` or carrying `..` would escape the constructed `/dev`.
+        if !is_octal_mode(&ep.fs.tmp.mode) {
+            return Err(SpawnError::InvalidPolicy(format!(
+                "fs.tmp.mode must be 3-4 octal digits, got `{}`",
+                ep.fs.tmp.mode
+            )));
         }
+        let mut dev_allow: Vec<PathBuf> = Vec::new();
+        for d in &ep.fs.dev.allow {
+            let path = PathBuf::from(d.as_str());
+            if !is_safe_dev_path(&path) {
+                return Err(SpawnError::InvalidPolicy(format!(
+                    "fs.dev.allow entry must be a device under /dev, got `{d}`"
+                )));
+            }
+            dev_allow.push(path);
+        }
+
+        let view = Some(ShimView {
+            shim_root,
+            binds,
+            dev_allow,
+            tmp_size_mib: ep.fs.tmp.size_mib,
+            tmp_mode: ep.fs.tmp.mode.clone(),
+            proc_hidepid: ep.proc.hidepid,
+        });
 
         // Landlock net only expresses per-port allow; map single-port TCP/Any
         // allow rules to CONNECT_TCP. Port *ranges* and CIDR scoping are left to
@@ -271,8 +396,8 @@ impl Plan {
             namespaces,
             cgroup,
             cgroup_join: true,
-            bind_read,
-            bind_write,
+            view,
+            new_root: None,
             landlock_fs,
             landlock_net,
             seccomp_allow: ep.seccomp.allow.clone(),

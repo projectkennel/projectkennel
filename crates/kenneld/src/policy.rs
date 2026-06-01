@@ -78,7 +78,7 @@ impl PolicyLoader for TrustStoreLoader {
         // section is available to configure the egress proxy).
         let verified = kennel_policy::verify_settled(&bytes, &self.keys).map_err(|e| e.to_string())?;
         let substituted = kennel_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
-        let plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace).map_err(|e| e.to_string())?;
+        let plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home).map_err(|e| e.to_string())?;
         let net = substituted.effective_policy.net;
         Ok(Loaded { plan, net })
     }

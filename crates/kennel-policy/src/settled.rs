@@ -159,6 +159,36 @@ pub struct NetPolicy {
     pub deny_invariant: Vec<NetRule>,
 }
 
+/// Private-`/tmp` tmpfs parameters (§7.2.6).
+///
+/// The settled policy carries the resolved numeric size; the source policy's
+/// human form (`size = "512M"`) is converted to mebibytes at compile time so the
+/// runtime parses a plain integer, not a units string.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TmpPolicy {
+    /// Whether `/tmp` is a private tmpfs. Confined templates always set this
+    /// true; `false` would bind-mount the host `/tmp` (which templates never do).
+    pub private: bool,
+    /// Size cap of the tmpfs, in mebibytes.
+    pub size_mib: u32,
+    /// Mount mode for the tmpfs root, as octal digits (e.g. `"0700"`). The
+    /// runtime validates it is octal-only before it reaches the mount data
+    /// string (it would otherwise be an option-injection vector).
+    pub mode: String,
+}
+
+/// Device-file policy (§7.2.8): which `/dev` nodes the kennel's constructed
+/// `/dev` exposes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevPolicy {
+    /// Device paths the kennel may access (absolute, under `/dev` — e.g.
+    /// `/dev/null`, `/dev/urandom`, `/dev/tty`). The runtime refuses any entry
+    /// outside `/dev` or carrying a `..` component before it binds it.
+    pub allow: Vec<String>,
+}
+
 /// Filesystem policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -171,6 +201,11 @@ pub struct FsPolicy {
     pub read: Vec<String>,
     /// Paths granted write access.
     pub write: Vec<String>,
+    /// Private-`/tmp` tmpfs parameters. Declared after the scalar/array fields
+    /// so the canonical TOML emits this sub-table last (valid table ordering).
+    pub tmp: TmpPolicy,
+    /// Device-file allowlist for the constructed `/dev`.
+    pub dev: DevPolicy,
 }
 
 /// Exec policy. The four `deny_*` flags are framework invariants (all true);
@@ -198,6 +233,10 @@ pub struct ExecPolicy {
 pub struct ProcPolicy {
     /// Procfs visibility (must be `self`).
     pub visibility: ProcVisibility,
+    /// Mount `/proc` with `hidepid=2` (§7.2.7): even within the PID namespace,
+    /// `/proc/<pid>` is accessible only to the process owner. Belt-and-braces
+    /// atop the namespace, which is the strong isolation.
+    pub hidepid: bool,
 }
 
 /// Capability policy.
