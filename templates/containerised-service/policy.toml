@@ -1,0 +1,78 @@
+# ============================================================================
+# Template: containerised-service  (v1)
+# Inherits: base-confined@v1
+# Threat catalogue: THREATS.md v0.1
+#
+# A long-lived containerised service for local development — a Postgres, a Redis,
+# a message broker. The goals: the service is reachable from the developer's
+# workstation but NOT the LAN, its data and credentials are confined to a chosen
+# path, and the container cannot be run with the escape-hatch flags
+# (--privileged / --pid=host / --network=host).
+#
+# *** DESIGN-LEVEL — NOT YET ENFORCED. *** The [container] section below has no
+# runtime behind it: Project Kennel has no container-runtime integration today
+# (templates/README.md, architecture/08-as-built-notes.md §8.2). The fs/net/cap
+# parts inherited from base-confined are enforced; the container orchestration is
+# the design contract for when that integration lands. This template is included
+# for completeness of the executive-summary set and to pin the intended shape.
+#
+# Defends: T21 (LAN exposure of a dev service), T22, T1 (partial). Residuals:
+# T20 (container escape via a runtime/kernel CVE — out of any userspace
+# framework's reach); T23 (root-with-host-UID — mitigated only if Docker runs
+# with userns-remap).
+# ============================================================================
+
+template_base = "base-confined@v1"
+template_name = "containerised-service"
+template_version = "1"
+
+
+# --- The container (DESIGN-LEVEL; see header) -------------------------------
+[container]
+# image + digest are pinned; the leaf supplies the concrete digest.
+image = "docker.io/library/postgres:17"
+# image_digest = "sha256:..."   # pinned by the leaf policy
+# Escape-hatch flags are forbidden — these are template invariants the leaf
+# cannot remove.
+allow_privileged = false        # invariant: never --privileged
+allow_pid_host = false          # invariant: never --pid=host
+allow_network_host = false      # invariant: never --network=host
+run_as_nonroot = true           # use the image's non-root user where supported
+
+# Published ports bind to the kennel's OWN loopback address (computed from
+# <tag>/<ctx>), so the service is reachable from the developer's default context
+# but invisible to the LAN (T21). 0.0.0.0 publishing is refused.
+[[container.published_ports]]
+container_port = 5432
+host_offset = 1                 # host bind = the kennel's loopback :5432 (computed)
+host_port = 5432
+reason = "Postgres reachable from the workstation, not the LAN"
+threats.mitigated = ["T21"]
+
+# Data volume: the only host path the container can touch. The leaf supplies the
+# real host directory.
+[[container.volumes]]
+host = "<home>/data/<kennel>"
+container = "/var/lib/postgresql/data"
+reason = "service data persistence"
+
+
+# --- Filesystem: the data directory is writable -----------------------------
+# The leaf grants the concrete data path; the template documents the shape.
+[fs]
+write = [
+    "<home>/data/<kennel>/**",
+]
+
+
+# --- Network: constrained (image pull + the service's own egress) -----------
+# Inherits base-confined's proxy-only egress + invariant denies. The leaf adds
+# the registry the image is pulled from and any egress the service legitimately
+# needs (most dev services need none).
+[net]
+mode = "constrained"
+
+
+# --- Lifecycle: long-lived ---------------------------------------------------
+[lifecycle]
+ttl_action = "warn"

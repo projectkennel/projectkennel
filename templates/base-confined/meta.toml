@@ -1,0 +1,12 @@
+# Template identity + signing metadata (docs/05-templates.md §5.2, §5.10).
+name = "base-confined"
+version = "1"
+# Root template — no parent.
+template_base = ""
+# The signing key this version is signed under (id in the template trust store,
+# §5.10). NB: template signing infrastructure is not yet established; this names
+# the intended project maintainer key.
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.1"
+last_reviewed = "2026-06-02"
+description = "The factored root of every confined template; not used directly."

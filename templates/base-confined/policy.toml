@@ -1,0 +1,257 @@
+# ============================================================================
+# Template: base-confined  (v1)
+# Inherits: nothing — this is the root of every confined template.
+# Threat catalogue: THREATS.md v0.1
+#
+# The minimal confined posture every other template builds on: no_new_privs,
+# setuid/setgid/setcap denial, the constructed-$HOME view, proxy-only egress,
+# the cloud-metadata / RFC1918 invariant denies, the credential denylist, a
+# curated environment, and a defence-in-depth seccomp filter. base-confined has
+# NO filesystem or execution scope of its own (read = system baseline only,
+# write = the kennel's own state) and so cannot be run directly; derive a usable
+# template from it.
+#
+# See docs/05-templates.md, TEMPLATE-ai-coding-strict.md, and templates/README.md
+# (implementation status — some sections below are design-level / compiler-folded).
+# ============================================================================
+
+template_name = "base-confined"
+template_version = "1"
+
+
+# --- Capabilities (framework invariants) ------------------------------------
+[cap]
+no_new_privs = true        # PR_SET_NO_NEW_PRIVS, always; cannot be set false
+bounding_set = []          # drop the entire capability bounding set
+
+
+# --- Execution --------------------------------------------------------------
+# exec.allow is intentionally empty here: a usable template adds the interpreters
+# and tools its workflow needs. The deny list + the deny_* flags are baseline.
+[exec]
+allow = []
+
+deny = [
+    "/usr/bin/sudo", "/usr/bin/su", "/usr/bin/pkexec", "/usr/bin/doas",
+    "/usr/bin/chsh", "/usr/bin/passwd", "/usr/bin/gpasswd", "/usr/bin/newgrp",
+    "/usr/bin/mount", "/usr/bin/umount",
+    "/usr/bin/at", "/usr/bin/crontab",   # scheduled persistence (T8)
+    "/usr/sbin/**", "/sbin/**",          # admin binaries, categorically
+]
+
+deny_setuid = true         # refuse setuid binaries at execve (framework invariant)
+deny_setgid = true         # refuse setgid binaries (framework invariant)
+deny_setcap = true         # refuse file-capability binaries
+deny_writable = true       # refuse execution of files in writable paths
+
+path = ["/usr/bin", "/usr/local/bin", "/bin"]
+
+
+# --- Filesystem -------------------------------------------------------------
+# The constructed view (fs.home, below): $HOME is a fresh tmpfs into which only
+# granted paths are bound. Non-granted paths do not exist in the view (T1).
+[fs]
+# Read baseline: the system files any dynamically-linked workload needs. A usable
+# template/leaf adds its project paths.
+read = [
+    "/usr/**", "/lib/**", "/lib64/**",
+    "/etc/ssl/**", "/etc/pki/**",        # TLS root CAs (vanilla, bound read-only)
+    "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    # The libc/NSS files are SYNTHESISED per-kennel (scrubbed of host specifics),
+    # not bound from the host: /etc/{hosts,resolv.conf,nsswitch.conf,services,
+    # protocols,passwd,group,host.conf}. See kenneld::etc and §7.2.5.
+    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/version",
+    "/sys/devices/system/cpu/**",        # processor-count detection
+]
+
+# Write baseline: only the kennel's own state. /tmp is the private tmpfs below.
+write = [
+    "/run/kennel/<kennel>/state/**",
+]
+
+# Categorical denies. Most are redundant with the constructed view (the paths are
+# simply not bound in), but explicit deny is belt-and-braces against template/leaf
+# bugs. Defends T1 (reconnaissance) and T12 (host-control deactivation).
+deny = [
+    # Credentials (T1)
+    "~/.ssh/**", "~/.gnupg/**", "~/.aws/**", "~/.azure/**",
+    "~/.config/gcloud/**", "~/.oci/**", "~/.config/gh/**", "~/.config/glab/**",
+    "~/.netrc", "~/.npmrc", "~/.pypirc", "~/.cargo/credentials",
+    "~/.cargo/credentials.toml", "~/.docker/config.json", "~/.kube/config",
+    "~/.terraform.d/credentials.tfrc.json", "~/.password-store/**",
+    "~/.config/keepassxc/**", "~/.config/1Password/**",
+    "~/.local/share/keyrings/**", "~/.gnome2/keyrings/**",
+    # Browser / messaging / wallet state (T1)
+    "~/.mozilla/**", "~/.config/google-chrome/**", "~/.config/chromium/**",
+    "~/.config/BraveSoftware/**", "~/.config/Signal/**", "~/.config/Slack/**",
+    "~/.thunderbird/**", "~/.electrum/**", "~/.ethereum/**", "~/.bitcoin/**",
+    # Shell / tool histories (T1)
+    "~/.bash_history", "~/.zsh_history", "~/.python_history",
+    "~/.node_repl_history", "~/.psql_history", "~/.mysql_history",
+    "~/.lesshst", "~/.viminfo",
+    # Host security configuration (T12)
+    "/etc/ssh/**", "/etc/sudoers*", "/etc/shadow", "/etc/security/**",
+    "/etc/pam.d/**", "/etc/apparmor.d/**", "/etc/selinux/**",
+    # Kernel/hardware surfaces categorically not for confined contexts
+    "/proc/sys/kernel/**", "/sys/kernel/**",
+    "/dev/mem", "/dev/kmem", "/dev/port", "/boot/**",
+]
+
+# The constructed $HOME (T1). HOME points at the shim; granted ~/ paths are bound
+# beneath it; the Landlock ruleset backstops on the resolved view (§7.2.3/.5).
+[fs.home]
+shadow = true
+shim_root = "/run/kennel/<kennel>/home"
+
+# Private /tmp (T1): a fresh tmpfs; the host /tmp is invisible.
+[fs.tmp]
+private = true
+size = "512M"
+mode = "0700"
+
+# Procfs: PID namespace + hidepid=2 — the workload sees only its own tree (T1, T6).
+[fs.proc]
+visibility = "self"
+hidepid = true
+
+# Minimal /dev: a constructed tmpfs with only these nodes bound in (T1, T6). Each
+# granted node is also Landlock read/write/ioctl-able (§8.1).
+[fs.dev]
+allow = [
+    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom",
+    "/dev/tty", "/dev/pts/**",
+]
+
+
+# --- Network ----------------------------------------------------------------
+# All egress funnels through a per-kennel SOCKS5/HTTP proxy; the cgroup BPF denies
+# direct connect() to anything but the proxy (fail-closed). The proxy resolves
+# names via the OS resolver and vets the answers against the allowlist + the
+# invariant denies (rebinding defence) — there is no configurable [net.dns].
+[net]
+mode = "constrained"
+proxy_listen_v4 = true
+proxy_listen_v6 = true
+# Listener address is computed from the kennel's <tag>/<ctx> (§7.3.2); override the
+# host offset/port within the kennel's own subnet with proxy_listen_v4_address =
+# "offset:port" (offset 1..=14, default "1:1080"). Project Kennel injects
+# HTTPS_PROXY / HTTP_PROXY / ALL_PROXY pointing at the computed proxy address.
+
+# Invariant denies — cloud metadata, link-local, RFC1918, CGNAT. Enforced
+# deny-first by the BPF AND refused by the proxy after name resolution. INVARIANT:
+# no downstream template or leaf may remove these (T6). (THREATS: T6.)
+[[net.deny.invariant]]
+cidr = "169.254.169.254/32"
+reason = "cloud metadata IPv4 — never permitted from a kennel"
+[[net.deny.invariant]]
+cidr = "fd00:ec2::254/128"
+reason = "AWS IPv6 metadata — never permitted"
+[[net.deny.invariant]]
+cidr = "fe80::/10"
+reason = "IPv6 link-local — no legitimate egress destination"
+[[net.deny.invariant]]
+cidr = "10.0.0.0/8"
+reason = "RFC1918 — internal-network exfiltration"
+[[net.deny.invariant]]
+cidr = "172.16.0.0/12"
+reason = "RFC1918"
+[[net.deny.invariant]]
+cidr = "192.168.0.0/16"
+reason = "RFC1918"
+[[net.deny.invariant]]
+cidr = "100.64.0.0/10"
+reason = "CGNAT range"
+
+# Bind: a wildcard bind (0.0.0.0 / ::) is rewritten to the kennel's private
+# loopback address (so dev servers work but are reachable only from inside the
+# kennel's address space); host loopback is not bindable; no privileged ports.
+[net.bind]
+inaddr_any_policy = "rewrite"
+in6addr_any_policy = "rewrite"
+allow_host_loopback_v4 = false
+allow_host_loopback_v6 = false
+min_port = 1024
+
+# Force IPV6_V6ONLY=1 so a dual-stack socket cannot escape the v4 rewrite (T6).
+[net.ipv6]
+force_v6only = true
+
+# Per-kennel egress audit log (one JSONL record per request; denies at higher
+# level). Written by the proxy; persists across runs.
+[net.audit]
+log_path = "~/.local/state/kennel/<kennel>/network.jsonl"
+level = "summary"
+
+
+# --- AF_UNIX sockets --------------------------------------------------------
+# Default-deny; the constructed view contains only granted sockets. Abstract-
+# namespace sockets are denied categorically — enforced natively by Landlock
+# scoping (ABI 6, §8.1), not the legacy seccomp/AppArmor fallback. (T6.)
+[unix]
+default = "deny"
+abstract = "deny"
+
+
+# --- D-Bus / X11 (off by default) -------------------------------------------
+# A confined workload has no display or bus access. Templates that need them
+# (notifications, GUI) opt in via an xdg-dbus-proxy / isolated X server.
+[dbus]
+session.enabled = false
+system.enabled = false
+
+[x11]
+xwayland_isolated = false
+xephyr_isolated = false
+
+
+# --- Process introspection / signals / ptrace ------------------------------
+# PID namespace hides other processes; signal scope (Landlock ABI 6) denies
+# signalling outside the kennel; ptrace across the boundary is denied. (T6, T1.)
+[proc]
+visibility = "self"
+hidepid = true
+
+[ptrace]
+allow_targets = []
+allow_from = []
+
+[signal]
+allow_targets = ["self"]
+allow_from = []
+
+
+# --- Environment ------------------------------------------------------------
+# A curated environment, not the user's full shell env. Secrets are stripped;
+# framework variables are forced. (T1: credentials in env; T12: shim HOME.)
+[env]
+pass = [
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TZ",
+    "COLORTERM", "TMPDIR",
+]
+set = { PATH = "/usr/bin:/usr/local/bin:/bin", HOME = "/run/kennel/<kennel>/home", TMPDIR = "/tmp", NO_PROXY = "" }
+deny = [
+    "SSH_AUTH_SOCK", "GPG_AGENT_INFO",
+    "AWS_*", "AZURE_*", "GCP_*", "GOOGLE_APPLICATION_CREDENTIALS",
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+    "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "NPM_TOKEN", "PYPI_TOKEN",
+    "DOCKER_AUTH_CONFIG", "KUBECONFIG", "DATABASE_URL",
+    "*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "*_APIKEY", "*_PRIVATE_KEY",
+    "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY",
+]
+
+
+# --- Seccomp (defence in depth) ---------------------------------------------
+# Most enforcement is at higher layers (Landlock for files, cgroup BPF for net);
+# this filter denies a small set of syscalls with no legitimate use here and a
+# history of exploit-chain involvement. Default action: errno (EPERM).
+[seccomp]
+profile = "default"
+deny = [
+    "userfaultfd", "perf_event_open", "bpf",
+    "process_vm_readv", "process_vm_writev",
+    "kexec_load", "kexec_file_load",
+    "mount", "umount", "umount2", "pivot_root",
+    "swapon", "swapoff", "reboot",
+    "init_module", "finit_module", "delete_module",
+    "personality",
+]
