@@ -58,22 +58,20 @@ Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3.
 
 The workspace is acyclic and layered. Lower-level crates do not depend on higher-level ones.
 
+As-built (8 crates; the control/CLI/audit layers are folded into kenneld and the
+functional crates rather than separate — see §8.1):
+
 ```
-                      kennel-cli           kenneld
-                          |                   |
-                          +---------+---------+
-                                    |
-                          kennel-ipc-client / server
-                                    |
-                          kennel-ipc-shared
-                                    |
-       +-------------+-------------+-------------+
-       |             |             |             |
-  kennel-spawn  kennel-netproxy  kennel-bpf   kennel-policy
-       |             |             |             |
-       +-------------+-------------+-------------+
-                          |
-                    kennel-audit
+        kenneld (lib + bin kenneld + bin kennel)   kennel-netproxy (bin)
+          |  owns control.rs (CLI<->daemon wire)      |
+          |  + proxy.rs config writer                 |
+          +----------------+--------------------------+
+                           |
+       +-------------+------+------+--------------+
+       |             |             |              |
+  kennel-spawn  kennel-privhelper  kennel-bpf   kennel-policy
+       |          (lib+bin; wire.rs)   |              |
+       +-------------+-------------+----+-------------+
                           |
                     kennel-text
                           |
@@ -87,7 +85,7 @@ Rules:
 - **No cycles.** Enforced by Cargo (a cycle is a build error).
 - **No depth skipping in spirit.** A crate may depend on any layer below it, but a binary depending directly on `kennel-syscall` to bypass the safe wrappers in `kennel-spawn` is a smell that warrants a review note.
 - **`kennel-syscall` is the only `unsafe`-bearing crate** (besides `kennel-bpf` for its hand-rolled `bpf(2)` FFI surface). Every other crate carries `#![forbid(unsafe_code)]` per CODING-STANDARDS.md §4.
-- **`kennel-text` and `kennel-audit` are leaf-side utility crates** consumed by everything that emits text or events. They have no Project Kennel deps (only stdlib and minimal external crates).
+- **`kennel-text` is a leaf-side utility crate** consumed by everything that emits text. It has no Project Kennel deps (only stdlib and minimal external crates). (There is no `kennel-audit` crate as-built — see §8.1; audit is split between the BPF ringbuf drain and the netproxy's formatter.)
 - **`kennel-policy`** does not depend on `kennel-spawn`, `kennel-bpf`, or any binary crate. The policy module is purely functional: same input, same output, no runtime side-effects.
 
 ---
@@ -114,15 +112,9 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 - Builds with no I/O (file reading is the caller's responsibility); takes `&[u8]` for parsing.
 - Has fuzz targets for the parser and the resolver.
 
-### `kennel-audit`
+### `kennel-audit` (not built as a crate — see §8.1/§8.2)
 
-- Owns the `AuditEvent` enum and `AuditWriter`.
-- Sink implementations are behind feature flags:
-  - `sink-file` (default-on): JSONL file writer.
-  - `sink-journald` (default-off): links a vetted Rust journald binding.
-  - `sink-syslog` (default-off): `/dev/log` writer; no external dep beyond stdlib.
-  - `sink-stdout` (default-on): emits to a `Write` handle the caller provides.
-- The default feature set is `["sink-file", "sink-stdout"]`. Distributions with journald enable `sink-journald` in their build.
+The unified audit writer + sink crate described here (and the journald/syslog/stdout sinks + feature flags) is **deferred**. As built, audit is split: BPF events are drained from a kernel ring buffer by `kennel-bpf::ringbuf` (drops on full), and the egress proxy formats one JSONL record per request in `kennel-netproxy::audit` (the server owns the sink — a per-kennel file, wired by kenneld, or stderr). When a unified writer/sink layer lands, this section becomes its home; until then see `02-3-audit-schema.md` and §8.2.
 
 ### `kennel-bpf`
 
@@ -130,11 +122,9 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 - The `bpf/` programs compile against the kernel UAPI (no CO-RE/`vmlinux.h`); `object` parses the `.o` and the loader resolves map relocations by symbol name (see `06-build-and-test.md`, `bpf/README.md`).
 - The compiled `.bpf.o` files are embedded into the crate (no skeleton generation); `KENNEL_MAPS`/`KENNEL_PROGRAMS` describe the maps and programs in Rust, mirroring `bpf/maps.h`.
 
-### `kennel-ipc-shared`, `-client`, `-server`
+### IPC (folded — no `kennel-ipc-*` crates; see §8.1)
 
-- The three-crate split keeps the CLI binary free of server code and kenneld free of client code (a small but real attack-surface reduction).
-- `kennel-ipc-shared` is sync-only (no async runtime). `kennel-ipc-client` is sync. `kennel-ipc-server` uses the workspace's async runtime (`tokio`).
-- The wire-format types in `kennel-ipc-shared` are tested via fuzz targets at the framing layer.
+The three-crate IPC split was not built. As-built, the control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`Response` + length-prefixed `read_frame`, native-endian, `MAX_MESSAGE`-bounded) and the privhelper protocol in `kennel-privhelper::wire` (fixed-size packed structs). Both are sync/blocking; there is no async runtime anywhere. The wire parsers are the natural fuzz-target homes when the fuzzing harness lands (§8.2).
 
 ### `kennel-spawn`
 
@@ -163,10 +153,10 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 - The `kennel` binary lives inside `kenneld`, not a separate crate. It is a thin sync Unix-socket client of the control protocol in `kenneld::control`.
 - Argument parsing uses `lexopt` (not `clap` — see `DEPENDENCIES.md`; `clap`'s proc-macro tree was rejected for the CLI in favour of the dependency-light `lexopt`).
 
-### `kennel-checksum-verify`
+### `kennel-checksum-verify` (deferred — shell twin exists, Rust crate not yet built, §8.2)
 
-- Binary crate. Tiny dep graph: `sha2`, `serde`, `toml`, and that's it.
-- The shell-script twin in `tools/verify-checksums.sh` uses system `sha256sum`. Both must agree; CI runs both.
+- Will be a binary crate with a tiny dep graph: `sha2`, `serde`, `toml`, and that's it.
+- The shell-script twin in `tools/verify-checksums.sh` (system `sha256sum`) exists today; the Rust crate lands at/after the first vendored-dep milestone. Both must agree; CI runs both.
 
 ---
 
@@ -176,12 +166,9 @@ A small set of feature flags allows distribution variation without forking. Each
 
 | Flag | Crate | Default | Effect |
 |---|---|---|---|
-| `bwrap-compose` | `kennel-spawn` | off | Delegate namespace/mount setup to `bubblewrap` subprocess instead of doing it in-crate. |
-| `sink-file` | `kennel-audit` | on | Compile the JSONL file sink. |
-| `sink-journald` | `kennel-audit` | off | Compile the systemd-journald sink. Pulls a vetted journald binding crate. |
-| `sink-syslog` | `kennel-audit` | off | Compile the syslog sink. |
-| `sink-stdout` | `kennel-audit` | on | Compile the stdout sink. |
-| `root-tests` | several | off | Compile and run tests that require root (cgroup creation, namespace ops, Landlock sealing on real kernel). |
+| `bpf-egress` | `kennel-privhelper` | off | Compile the BPF load/attach path into the privhelper (clang-free, embedded `.o`). Required for live egress; rebuild before root tests (§8.4). |
+| `root-tests` | several | off | Compile and run tests that require root (cgroup creation, namespace ops, Landlock sealing, the kenneld e2e). |
+| `sink-*` | (`kennel-audit`, deferred) | — | The audit sink flags (`sink-file`/`-journald`/`-syslog`/`-stdout`) belong to the not-yet-built audit crate (§8.2). |
 
 Feature combinations tested in CI are listed in `06-build-and-test.md`. The default feature set is the minimum that produces a working binary for the most-common installation (single-user developer workstation, no journald requirement).
 
@@ -201,10 +188,10 @@ The root `Cargo.toml` carries:
 
 ## Where to add new crates
 
-- **A new sink** for the audit stream → a feature flag in `kennel-audit`, not a new crate. The sink is small enough that a separate crate adds overhead without benefit.
+- **A new sink** for the audit stream → today, where the audit is produced (the netproxy's `audit.rs`, or the BPF ringbuf reader in kenneld); a unified audit crate with sink feature flags is the deferred home (§8.2).
 - **A new BPF program** → C source in `bpf/`, loader code in `kennel-bpf`. No new crate.
 - **A new privileged operation** → a new operation type in `kennel-privhelper`. No new crate; the privhelper's scope is bounded by its review burden, not by line count.
-- **A new external integration** (e.g., an MCP server to expose audit events via MCP) → consider a separate binary crate `kennel-<integration>`, depending on `kennel-audit` and the integration's protocol. Adding such an integration is itself an architectural decision and needs a doc update.
+- **A new external integration** (e.g., an MCP server to expose audit events via MCP) → a separate binary crate `kennel-<integration>`. Adding such an integration is itself an architectural decision and needs a doc update.
 
 ---
 

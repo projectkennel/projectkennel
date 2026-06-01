@@ -43,7 +43,10 @@ the design chapters that describe them should read as roadmap, not as-built:
   and a centralised `kennel-audit` writer. **Today:** BPF events go to a lock-free
   ring buffer that drops on full (`kennel-bpf/src/ringbuf.rs`, `bpf/kennel.bpf.h`),
   and the netproxy *formats* one JSONL record per request (`kennel-netproxy/src/audit.rs`)
-  with the server owning the sink (stderr/file). No journald, no `sd_journal_send`.
+  with the server owning the sink. kenneld now wires a **per-kennel file sink**
+  (`~/.local/state/kennel/<kennel>/network.jsonl`, §7.3.4) — the journald/syslog
+  sinks, the `[audit]` policy section, and a unified writer remain deferred. No
+  journald, no `sd_journal_send`.
 - **The IPC handshake** (`02-4-ipc.md`): the JSON `kind`/`client_version`/`protocol_version`
   exchange. Today the control socket goes straight to request/response.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md` / §5.5):

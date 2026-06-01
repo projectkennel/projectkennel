@@ -1,5 +1,15 @@
 # API surfaces — internal Rust API
 
+> **As-built status (see `08-as-built-notes.md` §8.1).** This chapter is indexed by
+> the original ~13-crate decomposition; the as-built workspace has **8** crates.
+> The `kennel-audit`, `kennel-ipc-shared`/`-client`/`-server`, and `kennel-cli`
+> sections describe components that were **folded** (control protocol →
+> `kenneld::control`; privhelper wire → `kennel-privhelper::wire`; CLI →
+> `kenneld/src/bin/kennel.rs`; audit → the BPF ringbuf drain + the netproxy
+> formatter) or **deferred** (a unified audit crate). There is no async runtime
+> (`tokio`) and the CLI uses `lexopt`, not `clap`. The authoritative per-crate API
+> is the rustdoc; read the folded/deferred sections through §8.1/§8.2.
+
 ## Stability commitment
 
 **Unstable** per `02-0-overview.md`. Crate-to-crate APIs in the Project Kennel workspace are not commitments to external consumers. They are documented here as *review boundaries*: when a maintainer changes a crate's public surface, the change is visible at compile time across the workspace, and the documentation here helps reviewers understand what changed and why.
