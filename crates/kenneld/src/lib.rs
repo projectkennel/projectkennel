@@ -222,6 +222,12 @@ pub struct Spec {
     /// (or a view-less plan) keeps the in-place fallback seal. kenneld creates it
     /// at bring-up and removes it at teardown.
     pub view_root: Option<PathBuf>,
+    /// Where the egress proxy writes its JSONL audit log
+    /// (`~/.local/state/kennel/<kennel>/network.jsonl`, §7.3.4), or `None` to
+    /// leave it on stderr. kenneld creates the parent directory at bring-up; the
+    /// log persists across runs (it is *not* removed at teardown — it is audit
+    /// data). Ignored when no proxy runs.
+    pub audit_path: Option<PathBuf>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -331,7 +337,7 @@ struct Provision {
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
 pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root } = spec;
+    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root, audit_path } = spec;
     let mut state = Provision::default();
 
     match bring_up(
@@ -344,6 +350,7 @@ pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -
         proxy.as_ref(),
         etc.as_ref(),
         view_root.as_deref(),
+        audit_path.as_deref(),
         command,
         &mut state,
     ) {
@@ -383,6 +390,7 @@ fn bring_up<P: Privileged>(
     proxy: Option<&ProxySetup>,
     etc: Option<&EtcSetup>,
     view_root: Option<&Path>,
+    audit_path: Option<&Path>,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<Child, Error> {
@@ -428,7 +436,14 @@ fn bring_up<P: Privileged>(
     //     configured (unit tests).
     if let Some(setup) = proxy {
         let listen = proxy_listen(state.v4, addr6, port);
-        let config = crate::proxy::config_toml(net, &listen, None).map_err(Error::ProxyConfig)?;
+        // The per-kennel audit log persists across runs; create its directory but
+        // never remove it at teardown (it is audit data, not scratch).
+        if let Some(audit) = audit_path {
+            if let Some(parent) = audit.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let config = crate::proxy::config_toml(net, &listen, audit_path).map_err(Error::ProxyConfig)?;
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
         std::fs::write(&config_path, config)?;
@@ -631,6 +646,7 @@ mod tests {
             proxy: None,
             etc: None,
             view_root: None,
+            audit_path: None,
         }
     }
 

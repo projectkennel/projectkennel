@@ -81,6 +81,10 @@ pub struct Identity {
     /// created under (one `root-<ctx>` dir each), or `None` to keep the in-place
     /// fallback seal (no `pivot_root`).
     pub view_base: Option<PathBuf>,
+    /// Base directory the per-kennel egress-proxy audit log is written under
+    /// (`<audit_base>/<kennel>/network.jsonl`, §7.3.4), or `None` to leave the
+    /// proxy logging to stderr. Persistent (state home, not the runtime dir).
+    pub audit_base: Option<PathBuf>,
 }
 
 /// Registry metadata for one kennel (the workload itself is owned by the
@@ -265,6 +269,7 @@ where
         proxy: id.proxy.clone(),
         etc,
         view_root: id.view_base.as_ref().map(|base| base.join(format!("root-{ctx}"))),
+        audit_path: id.audit_base.as_ref().map(|base| base.join(&req.kennel).join("network.jsonl")),
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
@@ -397,6 +402,7 @@ mod tests {
                 proxy: None,
                 etc_base: None,
                 view_base: None,
+                audit_base: None,
             },
             OkPriv,
             FakeLoader,

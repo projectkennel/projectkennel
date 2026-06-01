@@ -175,9 +175,13 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     // The constructed-view new-root staging mountpoint (kenneld creates it, mounts
     // a tmpfs on it in the child seal, pivot_roots into it, removes it on teardown).
     let view_root = PathBuf::from(format!("/run/kenneld-e2e-root-{}", std::process::id()));
+    // The per-kennel egress audit log base (production: ~/.local/state/kennel).
+    let audit_base = PathBuf::from(format!("/run/kenneld-e2e-audit-{}", std::process::id()));
+    let audit_path = audit_base.join("e2e").join("network.jsonl");
     let _ = std::fs::remove_dir_all(&proxy_cfg);
     let _ = std::fs::remove_dir_all(&etc_base);
     let _ = std::fs::remove_dir_all(&view_root);
+    let _ = std::fs::remove_dir_all(&audit_base);
 
     // The granted ~ subdir (with a file) and a non-granted sibling, under the real
     // home. In the view the granted path remaps beneath the shim root; the sibling
@@ -206,6 +210,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
             home: PathBuf::from("/root"),
         }),
         view_root: Some(view_root.clone()),
+        audit_path: Some(audit_path.clone()),
     };
 
     // The workload proves three things about the constructed view, then sleeps so
@@ -236,9 +241,18 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let proxy_addr6 = "[fd00:0:1:1::1]:1080";
     assert!(listening(proxy_addr6), "the egress proxy should be listening on {proxy_addr6}");
     // And kenneld wrote its config and the synthetic /etc.
-    assert!(proxy_cfg.join(format!("proxy-{ctx}.toml")).exists(), "the proxy config should be written");
+    let proxy_config = proxy_cfg.join(format!("proxy-{ctx}.toml"));
+    assert!(proxy_config.exists(), "the proxy config should be written");
     let staged_hosts = etc_base.join("etc-1").join("hosts");
     assert!(staged_hosts.exists(), "the synthetic /etc/hosts should be staged");
+    // The per-kennel audit log is wired: kenneld created its directory and pointed
+    // the proxy config at it (§7.3.4).
+    assert!(audit_path.parent().is_some_and(Path::exists), "the audit log directory should be created");
+    let written = std::fs::read_to_string(&proxy_config).expect("read proxy config");
+    assert!(
+        written.contains(&audit_path.display().to_string()),
+        "the proxy config should point at the per-kennel audit log"
+    );
 
     // Wait for the workload to finish and tear everything down (incl. the proxy).
     // success ⇒ inside the kennel: synthetic /etc/hosts present, the granted ~ path
@@ -252,7 +266,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     assert!(!quick_connect(&proxy_addr), "the proxy should be killed on teardown");
     // The constructed-view staging mountpoint is removed on teardown.
     assert!(!view_root.exists(), "the view staging mountpoint should be removed on teardown");
+    // The audit log directory persists across teardown (it is audit data).
+    assert!(audit_base.exists(), "the audit log directory should survive teardown");
 
+    let _ = std::fs::remove_dir_all(&audit_base);
     let _ = std::fs::remove_dir_all(&proxy_cfg);
     let _ = std::fs::remove_dir_all(&etc_base);
     let _ = std::fs::remove_dir_all(&home_test);

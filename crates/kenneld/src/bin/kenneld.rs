@@ -50,5 +50,11 @@ fn build_identity() -> Result<Identity, String> {
     });
     let etc_base = Some(socket::runtime_dir().join("etc"));
     let view_base = Some(socket::runtime_dir().join("root"));
-    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base, view_base })
+    // The per-kennel network audit log persists across runs, so it lives under
+    // the state home (not the volatile runtime dir): ~/.local/state/kennel/<kennel>/
+    // network.jsonl (§7.3.4), honouring $XDG_STATE_HOME when set.
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map_or_else(|| home.join(".local/state"), PathBuf::from);
+    let audit_base = Some(state_home.join("kennel"));
+    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base, view_base, audit_base })
 }
