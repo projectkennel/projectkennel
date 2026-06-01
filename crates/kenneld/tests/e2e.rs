@@ -229,9 +229,12 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let v4 = "127.0.144.17";
     assert!(lo_has(v4), "the kennel's loopback address {v4} should be added");
 
-    // The netproxy should be listening on the kennel's address:1080.
+    // The netproxy should be listening on BOTH the kennel's v4 and v6 addresses
+    // (dual-stack: one listener per family, served by the proxy's serve_all).
     let proxy_addr = format!("{v4}:1080");
     assert!(listening(&proxy_addr), "the egress proxy should be listening on {proxy_addr}");
+    let proxy_addr6 = "[fd00:0:1:1::1]:1080";
+    assert!(listening(proxy_addr6), "the egress proxy should be listening on {proxy_addr6}");
     // And kenneld wrote its config and the synthetic /etc.
     assert!(proxy_cfg.join(format!("proxy-{ctx}.toml")).exists(), "the proxy config should be written");
     let staged_hosts = etc_base.join("etc-1").join("hosts");

@@ -44,13 +44,19 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         Some(p) => Box::new(OpenOptions::new().create(true).append(true).open(p)?),
         None => Box::new(io::stderr()),
     };
-    let listener = TcpListener::bind(cfg.listen)?;
+    // One listener per configured address (a dual-stack kennel has a v4 and a v6
+    // loopback address; one TcpListener binds a single family).
+    let listeners = cfg
+        .listen
+        .iter()
+        .map(TcpListener::bind)
+        .collect::<io::Result<Vec<_>>>()?;
     let proxy = Arc::new(Proxy::new(
         cfg.ruleset,
         SystemResolver,
         cfg.accept_private_resolved,
         audit,
     ));
-    proxy.serve(&listener)?;
+    proxy.serve_all(listeners)?;
     Ok(())
 }

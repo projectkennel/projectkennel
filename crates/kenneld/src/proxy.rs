@@ -33,7 +33,7 @@ pub const DEFAULT_NETPROXY_BIN: &str = "/opt/kennel/bin/kennel-netproxy";
 /// scalars precede sub-tables/arrays-of-tables.
 #[derive(Serialize)]
 struct ProxyToml {
-    listen: String,
+    listen: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     audit_log: Option<String>,
     accept_private_resolved: bool,
@@ -122,9 +122,11 @@ fn allow_from_name(rule: &NameRule) -> AllowToml {
     }
 }
 
-/// Build the proxy's TOML config from the policy's network section, the address
-/// the proxy should listen on, and an optional audit-log path (`None` ⇒ the
-/// proxy logs to stderr).
+/// Build the proxy's TOML config from the policy's network section.
+///
+/// `listen` is the address(es) the proxy should bind — a dual-stack kennel passes
+/// both its v4 and v6 loopback addresses; `audit` is an optional audit-log path
+/// (`None` ⇒ the proxy logs to stderr).
 ///
 /// The allowlist is the union of the policy's by-address (`net.allow`) and
 /// by-name (`net.allow_names`) rules; the denylist is the invariant deny CIDRs,
@@ -135,7 +137,7 @@ fn allow_from_name(rule: &NameRule) -> AllowToml {
 ///
 /// Returns the serialiser error string if the TOML cannot be produced (a shape
 /// `basic-toml` rejects — caught by the round-trip test).
-pub fn config_toml(net: &NetPolicy, listen: SocketAddr, audit: Option<&Path>) -> Result<String, String> {
+pub fn config_toml(net: &NetPolicy, listen: &[SocketAddr], audit: Option<&Path>) -> Result<String, String> {
     let mut allow: Vec<AllowToml> = net.allow.iter().map(allow_from_cidr).collect();
     allow.extend(net.allow_names.iter().map(allow_from_name));
 
@@ -146,7 +148,7 @@ pub fn config_toml(net: &NetPolicy, listen: SocketAddr, audit: Option<&Path>) ->
         .collect();
 
     let doc = ProxyToml {
-        listen: listen.to_string(),
+        listen: listen.iter().map(ToString::to_string).collect(),
         audit_log: audit.map(|p| p.display().to_string()),
         accept_private_resolved: false,
         net: NetToml { mode: mode_str(net.mode), allow, deny },
@@ -205,13 +207,15 @@ mod tests {
 
     #[test]
     fn config_round_trips_through_the_netproxy_parser() {
-        let listen: SocketAddr = "127.0.144.81:1080".parse().expect("addr");
-        let toml = config_toml(&net(), listen, None).expect("toml");
+        // Both a v4 and a v6 listen address (the dual-stack case).
+        let listen: Vec<SocketAddr> =
+            vec!["127.0.144.81:1080".parse().expect("v4"), "[fd00:0:1:1::1]:1080".parse().expect("v6")];
+        let toml = config_toml(&net(), &listen, None).expect("toml");
 
         // The netproxy's own reader must accept what we wrote, and reconstruct
         // the same ruleset — the anti-drift guarantee.
         let cfg = kennel_netproxy::config::from_toml_str(&toml).expect("netproxy parses our config");
-        assert_eq!(cfg.listen, listen);
+        assert_eq!(cfg.listen, listen, "both listen addresses round-trip");
         assert!(cfg.audit_log.is_none());
         assert_eq!(cfg.ruleset.allow.len(), 2, "one cidr + one name allow");
         assert_eq!(cfg.ruleset.deny.len(), 1, "the invariant deny");
@@ -227,8 +231,8 @@ mod tests {
 
     #[test]
     fn audit_path_is_written_when_present() {
-        let listen: SocketAddr = "127.0.144.81:1080".parse().expect("addr");
-        let toml = config_toml(&net(), listen, Some(Path::new("/run/kennel/p.jsonl"))).expect("toml");
+        let listen = ["127.0.144.81:1080".parse::<SocketAddr>().expect("addr")];
+        let toml = config_toml(&net(), &listen, Some(Path::new("/run/kennel/p.jsonl"))).expect("toml");
         let cfg = kennel_netproxy::config::from_toml_str(&toml).expect("parse");
         assert_eq!(cfg.audit_log.as_deref(), Some(Path::new("/run/kennel/p.jsonl")));
     }

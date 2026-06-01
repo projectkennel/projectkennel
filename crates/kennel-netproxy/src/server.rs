@@ -119,6 +119,36 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
         Ok(())
     }
 
+    /// Accept on every `listener` forever, each listener on its own thread (and
+    /// each connection on its own thread, as [`serve`](Self::serve)).
+    ///
+    /// One `TcpListener` binds a single address family, so a dual-stack kennel —
+    /// one with both a v4 and a v6 loopback proxy address — serves both through
+    /// this. Returns when any listener fails; the rest keep running until the
+    /// process exits (a listener failure is fatal to the proxy either way).
+    ///
+    /// # Errors
+    ///
+    /// The first listener error observed (an OS accept failure), or an error if a
+    /// listener thread panicked.
+    pub fn serve_all(self: &Arc<Self>, listeners: Vec<TcpListener>) -> io::Result<()>
+    where
+        W: 'static,
+        R: 'static,
+    {
+        let handles: Vec<_> = listeners
+            .into_iter()
+            .map(|listener| {
+                let me = Arc::clone(self);
+                std::thread::spawn(move || me.serve(&listener))
+            })
+            .collect();
+        for handle in handles {
+            handle.join().map_err(|_| io::Error::other("listener thread panicked"))??;
+        }
+        Ok(())
+    }
+
     /// Write one audit record. A poisoned lock or a write error is swallowed: an
     /// audit-sink failure must not take down request handling.
     fn write_audit(&self, record: &Record) {
@@ -596,6 +626,27 @@ mod tests {
 
         drop(client);
         let _ = echo_handle.join();
+    }
+
+    #[test]
+    fn serve_all_serves_every_listener() {
+        // The dual-stack case: one proxy serving two listeners (two loopback
+        // listeners stand in for the v4 + v6 pair). Each must run the handshake —
+        // a completed SOCKS5 greeting (method-selection reply) proves the listener
+        // was accepted and handled. socks5_greet sets a 5s read timeout, so a
+        // listener that is not served fails rather than hangs.
+        let proxy = Arc::new(Proxy::new(allow_cidr("127.0.0.0", 8, 9), no_resolver(), false, io::sink()));
+        let l1 = TcpListener::bind("127.0.0.1:0").expect("bind l1");
+        let a1 = l1.local_addr().expect("a1");
+        let l2 = TcpListener::bind("127.0.0.1:0").expect("bind l2");
+        let a2 = l2.local_addr().expect("a2");
+        let serving = Arc::clone(&proxy);
+        std::thread::spawn(move || drop(serving.serve_all(vec![l1, l2])));
+
+        for addr in [a1, a2] {
+            let mut client = TcpStream::connect(addr).expect("connect proxy");
+            socks5_greet(&mut client); // its internal asserts are the per-listener check
+        }
     }
 
     #[test]

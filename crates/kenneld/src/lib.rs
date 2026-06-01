@@ -428,7 +428,7 @@ fn bring_up<P: Privileged>(
     //     configured (unit tests).
     if let Some(setup) = proxy {
         let listen = proxy_listen(state.v4, addr6, port);
-        let config = crate::proxy::config_toml(net, listen, None).map_err(Error::ProxyConfig)?;
+        let config = crate::proxy::config_toml(net, &listen, None).map_err(Error::ProxyConfig)?;
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
         std::fs::write(&config_path, config)?;
@@ -493,11 +493,17 @@ fn expect_ok(op: &'static str, response: io::Result<Response>) -> Result<(), Err
 /// loopback address when it has one, else its v6, at `port`. (The current
 /// netproxy binds a single listener; a dual-stack kennel funnels through the v4
 /// one. Both proxy addresses are BPF-allowed regardless.)
-fn proxy_listen(v4: Option<Ipv4Addr>, v6: Ipv6Addr, port: u16) -> SocketAddr {
-    v4.map_or_else(
-        || SocketAddr::new(v6.into(), port),
-        |addr| SocketAddr::new(addr.into(), port),
-    )
+fn proxy_listen(v4: Option<Ipv4Addr>, v6: Ipv6Addr, port: u16) -> Vec<SocketAddr> {
+    // Both loopback addresses the kennel owns: the proxy listens on each, so a
+    // dual-stack workload reaches it over v4 or v6. v4 is absent for a v6-only
+    // kennel (ctx > 255). One TcpListener binds a single family; the netproxy's
+    // serve_all accepts on all of them.
+    let mut addrs = Vec::with_capacity(2);
+    if let Some(addr) = v4 {
+        addrs.push(SocketAddr::new(addr.into(), port));
+    }
+    addrs.push(SocketAddr::new(v6.into(), port));
+    addrs
 }
 
 /// Best-effort reverse of bring-up: kill the proxy, remove the addresses, then the

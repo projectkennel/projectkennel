@@ -20,7 +20,7 @@
 //! # Schema
 //!
 //! ```toml
-//! listen = "127.42.7.1:1080"          # the proxy's listen socket address
+//! listen = ["127.42.7.1:1080"]        # listen socket address(es); 1+ (v4 and/or v6)
 //! audit_log = "/path/audit.jsonl"     # optional; default: stderr
 //! accept_private_resolved = false     # optional; default: false
 //!
@@ -59,8 +59,10 @@ pub const MAX_CONFIG: u64 = 1024 * 1024;
 /// The proxy's fully-validated runtime configuration.
 #[derive(Clone, Debug)]
 pub struct ProxyConfig {
-    /// The socket address the proxy listens on.
-    pub listen: SocketAddr,
+    /// The socket addresses the proxy listens on (at least one). A dual-stack
+    /// kennel lists both its v4 and v6 loopback addresses, since one listener
+    /// binds a single family; the proxy serves all of them ([`crate::server::Proxy::serve_all`]).
+    pub listen: Vec<SocketAddr>,
     /// The resolved egress ruleset.
     pub ruleset: Ruleset,
     /// Whether a name may connect to a resolved special-use address.
@@ -136,7 +138,7 @@ pub fn from_toml_str(text: &str) -> Result<ProxyConfig, ConfigError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
-    listen: String,
+    listen: Vec<String>,
     #[serde(default)]
     audit_log: Option<PathBuf>,
     #[serde(default)]
@@ -196,9 +198,17 @@ struct RawDeny {
 
 impl RawConfig {
     fn validate(self) -> Result<ProxyConfig, ConfigError> {
-        let listen = self.listen.parse::<SocketAddr>().map_err(|_| {
-            ConfigError::Invalid(format!("listen is not a socket address: `{}`", self.listen))
-        })?;
+        if self.listen.is_empty() {
+            return Err(ConfigError::Invalid("listen must give at least one socket address".to_owned()));
+        }
+        let listen = self
+            .listen
+            .iter()
+            .map(|s| {
+                s.parse::<SocketAddr>()
+                    .map_err(|_| ConfigError::Invalid(format!("listen is not a socket address: `{s}`")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mode = match self.net.mode {
             Mode::None => NetMode::None,
             Mode::Constrained => NetMode::Constrained,
@@ -304,7 +314,7 @@ mod tests {
     use super::*;
 
     const VALID: &str = r#"
-listen = "127.42.7.1:1080"
+listen = ["127.42.7.1:1080"]
 accept_private_resolved = false
 
 [net]
@@ -326,7 +336,7 @@ name = ".tracker.example"
     #[test]
     fn parses_a_valid_config() {
         let cfg = from_toml_str(VALID).expect("valid config");
-        assert_eq!(cfg.listen, "127.42.7.1:1080".parse().expect("addr"));
+        assert_eq!(cfg.listen, vec!["127.42.7.1:1080".parse::<SocketAddr>().expect("addr")]);
         assert!(!cfg.accept_private_resolved);
         assert_eq!(cfg.ruleset.mode, NetMode::Constrained);
         assert_eq!(cfg.ruleset.allow.len(), 2);
@@ -343,7 +353,7 @@ name = ".tracker.example"
 
     #[test]
     fn bare_address_is_a_host_route() {
-        let cfg = from_toml_str("listen = \"127.0.0.1:1\"\n[net]\nmode=\"open\"\n[[net.deny]]\ncidr=\"169.254.169.254\"\n")
+        let cfg = from_toml_str("listen = [\"127.0.0.1:1\"]\n[net]\nmode=\"open\"\n[[net.deny]]\ncidr=\"169.254.169.254\"\n")
             .expect("config");
         let denied = cfg.ruleset.decide_request(
             &crate::allow::Destination::Addr("169.254.169.254".parse().expect("ip")),
@@ -358,7 +368,7 @@ name = ".tracker.example"
 
     #[test]
     fn unknown_field_is_rejected() {
-        let toml = "listen = \"127.0.0.1:1\"\nbogus = true\n[net]\nmode = \"open\"\n";
+        let toml = "listen = [\"127.0.0.1:1\"]\nbogus = true\n[net]\nmode = \"open\"\n";
         assert!(
             matches!(from_toml_str(toml), Err(ConfigError::Parse(_))),
             "deny_unknown_fields"
@@ -368,39 +378,53 @@ name = ".tracker.example"
     #[test]
     fn unknown_nested_field_is_rejected() {
         let toml =
-            "listen=\"127.0.0.1:1\"\n[net]\nmode=\"open\"\n[[net.allow]]\nname=\"x\"\nbogus=1\n";
+            "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"open\"\n[[net.allow]]\nname=\"x\"\nbogus=1\n";
         assert!(matches!(from_toml_str(toml), Err(ConfigError::Parse(_))));
     }
 
     #[test]
     fn entry_with_both_name_and_cidr_is_invalid() {
-        let toml = "listen=\"127.0.0.1:1\"\n[net]\nmode=\"constrained\"\n[[net.allow]]\nname=\"x\"\ncidr=\"10.0.0.0/8\"\n";
+        let toml = "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"constrained\"\n[[net.allow]]\nname=\"x\"\ncidr=\"10.0.0.0/8\"\n";
         assert!(matches!(from_toml_str(toml), Err(ConfigError::Invalid(_))));
     }
 
     #[test]
     fn entry_with_neither_name_nor_cidr_is_invalid() {
         let toml =
-            "listen=\"127.0.0.1:1\"\n[net]\nmode=\"constrained\"\n[[net.allow]]\nports=[443]\n";
+            "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"constrained\"\n[[net.allow]]\nports=[443]\n";
         assert!(matches!(from_toml_str(toml), Err(ConfigError::Invalid(_))));
     }
 
     #[test]
     fn bad_cidr_is_invalid() {
         let toml =
-            "listen=\"127.0.0.1:1\"\n[net]\nmode=\"open\"\n[[net.deny]]\ncidr=\"10.0.0.0/99\"\n";
+            "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"open\"\n[[net.deny]]\ncidr=\"10.0.0.0/99\"\n";
         assert!(matches!(from_toml_str(toml), Err(ConfigError::Invalid(_))));
     }
 
     #[test]
     fn bad_listen_is_invalid() {
-        let toml = "listen=\"not-an-address\"\n[net]\nmode=\"open\"\n";
+        let toml = "listen=[\"not-an-address\"]\n[net]\nmode=\"open\"\n";
         assert!(matches!(from_toml_str(toml), Err(ConfigError::Invalid(_))));
     }
 
     #[test]
+    fn empty_listen_is_invalid() {
+        let toml = "listen=[]\n[net]\nmode=\"open\"\n";
+        assert!(matches!(from_toml_str(toml), Err(ConfigError::Invalid(_))), "at least one listen address required");
+    }
+
+    #[test]
+    fn two_listen_addresses_parse() {
+        // The dual-stack case: a v4 and a v6 loopback address.
+        let toml = "listen=[\"127.0.0.1:1080\", \"[::1]:1080\"]\n[net]\nmode=\"open\"\n";
+        let cfg = from_toml_str(toml).expect("two-address config");
+        assert_eq!(cfg.listen.len(), 2);
+    }
+
+    #[test]
     fn unknown_mode_is_rejected() {
-        let toml = "listen=\"127.0.0.1:1\"\n[net]\nmode=\"yolo\"\n";
+        let toml = "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"yolo\"\n";
         assert!(
             matches!(from_toml_str(toml), Err(ConfigError::Parse(_))),
             "unknown enum variant"
@@ -410,7 +434,7 @@ name = ".tracker.example"
     #[test]
     fn protocol_defaults_to_tcp() {
         let toml =
-            "listen=\"127.0.0.1:1\"\n[net]\nmode=\"constrained\"\n[[net.allow]]\nname=\"x\"\n";
+            "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"constrained\"\n[[net.allow]]\nname=\"x\"\n";
         let cfg = from_toml_str(toml).expect("config");
         assert_eq!(
             cfg.ruleset.allow.first().map(|r| r.protocol),
