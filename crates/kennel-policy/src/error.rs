@@ -21,6 +21,9 @@ pub enum PolicyError {
     },
     /// One or more framework invariants were violated.
     InvariantViolations(Vec<InvariantViolation>),
+    /// A source policy failed schema validation (identity, reference grammar, or
+    /// a missing `reason`). Carries one human-readable message per problem found.
+    SourceValidation(Vec<String>),
 }
 
 impl core::fmt::Display for PolicyError {
@@ -36,6 +39,13 @@ impl core::fmt::Display for PolicyError {
                 write!(f, "framework invariant violations:")?;
                 for v in vs {
                     write!(f, " [{}: {}]", v.id, v.detail)?;
+                }
+                Ok(())
+            }
+            Self::SourceValidation(ms) => {
+                write!(f, "source-policy validation failed:")?;
+                for m in ms {
+                    write!(f, " [{m}]")?;
                 }
                 Ok(())
             }

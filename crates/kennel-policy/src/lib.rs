@@ -16,9 +16,12 @@
 //! # Scope of this build
 //!
 //! Implemented: the runtime verification core (this is what the spawn path
-//! needs). **Not yet** implemented: the compile-time resolution machinery
-//! (template-chain walking, includes, deltas, the lockfile) that *produces* a
-//! settled policy from source templates — a separate, off-hot-path concern.
+//! needs), plus the [`source`] schema — the parser and per-artefact validation
+//! for the templates `kennel compile` consumes. **Not yet** implemented: the rest
+//! of the compile-time resolution machinery (template-chain walking, includes,
+//! delta folding, substitution, the lockfile) that *produces* a settled policy
+//! from source templates — a separate, off-hot-path concern built in increments
+//! on top of [`source`].
 
 #![forbid(unsafe_code)]
 
@@ -29,6 +32,7 @@ pub mod invariant;
 pub mod keys;
 pub mod settled;
 pub mod signature;
+pub mod source;
 
 pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
@@ -40,6 +44,7 @@ pub use settled::{
     TmpPolicy, TtlAction,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
+pub use source::{parse as parse_source, SourcePolicy};
 
 /// The newest `settled_schema_version` this build accepts.
 pub const SETTLED_SCHEMA_VERSION: u32 = 1;
