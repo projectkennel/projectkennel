@@ -37,6 +37,12 @@ agree once both exist.
 8. Commit `CHECKSUMS.toml`, `crates-archive/<crate>-<version>.crate`, and
    `Cargo.lock` together; two maintainer approvals (§5.5).
 
+## Install (`07-paths.md`, `08-as-built-notes.md` §8.4)
+
+| Tool | What it does |
+|---|---|
+| `install.sh` | System installer (run with `sudo`): builds the release binaries (the privhelper with `--features bpf-egress`), installs them under `--prefix` (default `/opt/kennel`; binaries in `bin/`, the **setuid-root** privhelper in `sbin/`), installs the systemd *user* units to `/usr/lib/systemd/user/`, and creates the `/etc/kennel` skeleton. Supports `--no-build` and `--dry-run`. It does **not** fabricate the admin-provisioned security inputs (`/etc/kennel/subkennel` allocations, `/etc/kennel/scope` constants, trust-store keys) — it prints what the admin must populate, then each user runs `systemctl --user enable --now kenneld.socket`. |
+
 ## Git hooks (CODING-STANDARDS.md §15)
 
 | Tool | What it does |
