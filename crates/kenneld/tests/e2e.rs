@@ -64,10 +64,12 @@ fn listening(addr: &str) -> bool {
     false
 }
 
-/// A minimal settled policy that satisfies the framework invariants and lets a
-/// trivial workload run: permissive Landlock (read+exec under `/`), no seccomp
-/// filter, no network allowlist (the orchestration adds the loopback addresses
-/// regardless).
+/// A settled policy that exercises the constructed view: the system dirs a shell
+/// needs (read+exec), the constructed `/etc`, and one granted `~` subdir
+/// (`/root/kennel-e2e/granted`, which remaps beneath the shim root). A sibling
+/// `~/kennel-e2e/secret` is deliberately NOT granted, so its name must be absent
+/// in the view. No seccomp filter; no network allowlist (the orchestration adds
+/// the loopback addresses regardless).
 fn minimal_policy() -> SettledPolicy {
     SettledPolicy {
         settled_schema_version: 1,
@@ -91,7 +93,14 @@ fn minimal_policy() -> SettledPolicy {
             fs: FsPolicy {
                 home_shadow: true,
                 shim_root: "/run/kennel/e2e".to_owned(),
-                read: vec!["/".to_owned()],
+                read: vec![
+                    "/usr".to_owned(),
+                    "/bin".to_owned(),
+                    "/lib".to_owned(),
+                    "/lib64".to_owned(),
+                    "/etc".to_owned(),
+                    "/root/kennel-e2e/granted".to_owned(),
+                ],
                 write: Vec::new(),
                 tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
                 dev: DevPolicy { allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()] },
@@ -145,8 +154,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let mut plan = prepare(&bytes, &keys, &subst).expect("verify + plan");
     // Drop the PID namespace (spawn unshares CLONE_NEWPID in the *parent* — this
     // test process — which would disrupt the harness's own forks). Keep MOUNT, so
-    // the synthetic /etc shadow binds actually apply and the workload can observe
-    // them; MOUNT is unshared in the child seal and does not affect the harness.
+    // the constructed view (pivot_root) is built and the workload observes it;
+    // MOUNT is unshared in the child seal and does not affect the harness.
     plan.namespaces = Namespaces::MOUNT;
 
     // A cgroup base we own; the kennel cgroup is a child of it.
@@ -163,8 +172,23 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     // before the shadow binds, which would hide a /tmp-staged source. Production
     // stages under $XDG_RUNTIME_DIR (/run/user/<uid>), likewise outside /tmp.
     let etc_base = PathBuf::from(format!("/run/kenneld-e2e-etc-{}", std::process::id()));
+    // The constructed-view new-root staging mountpoint (kenneld creates it, mounts
+    // a tmpfs on it in the child seal, pivot_roots into it, removes it on teardown).
+    let view_root = PathBuf::from(format!("/run/kenneld-e2e-root-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&proxy_cfg);
     let _ = std::fs::remove_dir_all(&etc_base);
+    let _ = std::fs::remove_dir_all(&view_root);
+
+    // The granted ~ subdir (with a file) and a non-granted sibling, under the real
+    // home. In the view the granted path remaps beneath the shim root; the sibling
+    // must be absent (its name gone, not merely denied).
+    let home_test = PathBuf::from("/root/kennel-e2e");
+    let _ = std::fs::remove_dir_all(&home_test);
+    std::fs::create_dir_all(home_test.join("granted")).expect("mkdir granted");
+    std::fs::create_dir_all(home_test.join("secret")).expect("mkdir secret");
+    std::fs::write(home_test.join("granted/file"), "OK\n").expect("write granted file");
+    std::fs::write(home_test.join("secret/file"), "SECRET\n").expect("write secret file");
+
     let helper = HelperClient::new(privhelper_path());
     let spec = Spec {
         cgroup: cgroup.clone(),
@@ -181,15 +205,23 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
             gid: 0,
             home: PathBuf::from("/root"),
         }),
+        view_root: Some(view_root.clone()),
     };
 
-    // The workload proves it sees the *synthetic* /etc inside the kennel: the
-    // synthetic /etc/hosts maps the kennel's own primary address to its hostname
-    // ("e2e"), which the host's /etc/hosts never does. If the shadow bind did not
-    // apply, grep fails and the shell exits non-zero. The brief sleep keeps it
-    // alive long enough to observe the proxy listening.
+    // The workload proves three things about the constructed view, then sleeps so
+    // the proxy-listening assertion can run:
+    //   1. the synthetic /etc applied — /etc/hosts maps the kennel's own primary
+    //      address to its hostname ("e2e"), which the host's /etc/hosts never does;
+    //   2. the granted ~ path is readable through the shim ($HOME == shim root);
+    //   3. the non-granted sibling's NAME is absent (ENOENT, not merely denied).
+    // Any failing clause exits the shell non-zero.
     let mut workload = Command::new("/bin/sh");
-    workload.arg("-c").arg("grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts && sleep 2");
+    workload.arg("-c").arg(
+        "grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts \
+         && test -r \"$HOME/kennel-e2e/granted/file\" \
+         && ! test -e \"$HOME/kennel-e2e/secret\" \
+         && sleep 2",
+    );
     let kennel = start(&helper, spec, &mut workload).expect("start kennel");
     assert!(cgroup.is_dir(), "the kennel cgroup should exist while running");
 
@@ -206,17 +238,21 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     assert!(staged_hosts.exists(), "the synthetic /etc/hosts should be staged");
 
     // Wait for the workload to finish and tear everything down (incl. the proxy).
-    // success ⇒ the grep inside the kennel found the synthetic /etc/hosts.
+    // success ⇒ inside the kennel: synthetic /etc/hosts present, the granted ~ path
+    // readable through the shim, and the non-granted sibling's name absent (ENOENT).
     let status = kennel.stop(&helper).expect("stop");
-    assert!(status.success(), "the workload saw the synthetic /etc/hosts and exited 0 (got {status:?})");
+    assert!(status.success(), "the constructed view held (synthetic /etc, granted readable, sibling ENOENT) (got {status:?})");
 
     assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
     assert!(!lo_has(v4), "the loopback address should be removed on teardown");
     // The proxy is gone: nothing answers on its address now.
     assert!(!quick_connect(&proxy_addr), "the proxy should be killed on teardown");
+    // The constructed-view staging mountpoint is removed on teardown.
+    assert!(!view_root.exists(), "the view staging mountpoint should be removed on teardown");
 
     let _ = std::fs::remove_dir_all(&proxy_cfg);
     let _ = std::fs::remove_dir_all(&etc_base);
+    let _ = std::fs::remove_dir_all(&home_test);
     let _ = std::fs::remove_dir(&base);
 }
 

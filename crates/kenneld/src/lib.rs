@@ -216,6 +216,12 @@ pub struct Spec {
     pub proxy: Option<ProxySetup>,
     /// How to build the synthetic `/etc`, or `None` to skip it.
     pub etc: Option<EtcSetup>,
+    /// The host staging mountpoint the constructed-view seal builds its fresh
+    /// tmpfs root on and `pivot_root`s into (under `$XDG_RUNTIME_DIR`, outside
+    /// `/tmp`). Used only when [`plan`](Self::plan) carries a shim view; `None`
+    /// (or a view-less plan) keeps the in-place fallback seal. kenneld creates it
+    /// at bring-up and removes it at teardown.
+    pub view_root: Option<PathBuf>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -228,6 +234,10 @@ pub struct Kennel {
     v6: Option<Ipv6Addr>,
     /// The egress-proxy child, if one was launched. Killed and reaped on teardown.
     proxy: Option<Child>,
+    /// The constructed-view staging mountpoint, if one was created. Removed on
+    /// teardown (the tmpfs mounted on it lived in the workload's now-gone mount
+    /// namespace, so only the empty host directory remains).
+    view_root: Option<PathBuf>,
 }
 
 impl Kennel {
@@ -280,7 +290,15 @@ impl Kennel {
     /// An OS error if waiting on the workload fails.
     pub fn stop<P: Privileged>(mut self, privileged: &P) -> io::Result<ExitStatus> {
         let status = self.child.wait()?;
-        teardown(privileged, self.ctx, Some(self.cgroup.as_path()), self.v4, self.v6, self.proxy.take());
+        teardown(
+            privileged,
+            self.ctx,
+            Some(self.cgroup.as_path()),
+            self.v4,
+            self.v6,
+            self.proxy.take(),
+            self.view_root.as_deref(),
+        );
         Ok(status)
     }
 }
@@ -301,6 +319,7 @@ struct Provision {
     v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
+    view_root: Option<PathBuf>,
 }
 
 /// Bring a kennel up. On any error the partial bring-up is unwound, so no
@@ -312,13 +331,41 @@ struct Provision {
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
 pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc } = spec;
+    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root } = spec;
     let mut state = Provision::default();
 
-    match bring_up(privileged, &cgroup, ctx, &scope, &mut plan, &net, proxy.as_ref(), etc.as_ref(), command, &mut state) {
-        Ok(child) => Ok(Kennel { child, cgroup, ctx, v4: state.v4, v6: state.v6, proxy: state.proxy }),
+    match bring_up(
+        privileged,
+        &cgroup,
+        ctx,
+        &scope,
+        &mut plan,
+        &net,
+        proxy.as_ref(),
+        etc.as_ref(),
+        view_root.as_deref(),
+        command,
+        &mut state,
+    ) {
+        Ok(child) => Ok(Kennel {
+            child,
+            cgroup,
+            ctx,
+            v4: state.v4,
+            v6: state.v6,
+            proxy: state.proxy,
+            view_root: state.view_root,
+        }),
         Err(e) => {
-            teardown(privileged, ctx, state.made_cgroup.then_some(cgroup.as_path()), state.v4, state.v6, state.proxy);
+            teardown(
+                privileged,
+                ctx,
+                state.made_cgroup.then_some(cgroup.as_path()),
+                state.v4,
+                state.v6,
+                state.proxy,
+                state.view_root.as_deref(),
+            );
             Err(e)
         }
     }
@@ -335,6 +382,7 @@ fn bring_up<P: Privileged>(
     net: &NetPolicy,
     proxy: Option<&ProxySetup>,
     etc: Option<&EtcSetup>,
+    view_root: Option<&Path>,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<Child, Error> {
@@ -403,6 +451,28 @@ fn bring_up<P: Privileged>(
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
     }
 
+    // 3d. constructed-view wiring (§7.2.5). When the plan carries a shim view and
+    //     the daemon gave us a staging mountpoint: point HOME at the shim root,
+    //     add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
+    //     read-only — distro content, no host specifics), and hand the seal the
+    //     new-root staging dir to pivot_root into. Without a view (or staging) the
+    //     seal keeps the in-place fallback.
+    if view_root.is_some() {
+        if let Some(view) = plan.view.as_mut() {
+            for sub in crate::etc::essential_etc_subtrees() {
+                view.binds.push(kennel_spawn::BindMount { source: sub.clone(), target: sub, writable: false });
+            }
+            command.env("HOME", &view.shim_root);
+        }
+    }
+    if let Some(view_root) = view_root {
+        if plan.view.is_some() {
+            std::fs::create_dir_all(view_root)?;
+            plan.new_root = Some(view_root.to_path_buf());
+            state.view_root = Some(view_root.to_path_buf());
+        }
+    }
+
     // 4. spawn the workload into this cgroup (it joins itself in the seal).
     plan.cgroup = cgroup.to_path_buf();
     kennel_spawn::spawn(plan, command).map_err(Error::Spawn)
@@ -440,6 +510,7 @@ fn teardown<P: Privileged>(
     v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
+    view_root: Option<&Path>,
 ) {
     reap_proxy(proxy);
     if let Some(addr) = v6 {
@@ -450,6 +521,11 @@ fn teardown<P: Privileged>(
     }
     if let Some(cg) = cgroup {
         let _ = std::fs::remove_dir(cg);
+    }
+    // The constructed-view tmpfs lived in the workload's mount namespace (gone
+    // with it); only the empty host mountpoint remains to remove.
+    if let Some(vr) = view_root {
+        let _ = std::fs::remove_dir(vr);
     }
 }
 
@@ -548,6 +624,7 @@ mod tests {
             },
             proxy: None,
             etc: None,
+            view_root: None,
         }
     }
 

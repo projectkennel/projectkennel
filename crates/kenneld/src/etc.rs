@@ -230,6 +230,30 @@ pub fn materialize(dir: &Path, p: &EtcParams<'_>) -> io::Result<Vec<(PathBuf, Pa
     Ok(binds)
 }
 
+/// The vanilla TLS + dynamic-linker `/etc` subtrees that exist on this host.
+///
+/// Returned as the subset present on the host (§7.2.5, the "complete-but-vanilla"
+/// `/etc`): the files a confined workload needs for TLS and dynamic linking.
+/// The synthetic set ([`materialize`]) covers the libc/NSS files that must be
+/// scrubbed (passwd/group/hosts/…). These, by contrast, are package-managed
+/// distro content carrying no host-specific detail — the CA-certificate bundle
+/// and the dynamic-linker configuration — so binding the host's own copy
+/// read-only into the constructed `/etc` is sound. Cross-distro: Debian's
+/// `/etc/ssl` versus Red Hat's `/etc/pki` (only existing paths are returned).
+/// The caller binds each read-only; `/etc` itself is never bound wholesale.
+#[must_use]
+pub fn essential_etc_subtrees() -> Vec<PathBuf> {
+    const CANDIDATES: &[&str] = &[
+        "/etc/ssl/certs",       // Debian/Ubuntu/Arch CA bundle + hash symlinks
+        "/etc/ca-certificates", // Debian CA store
+        "/etc/pki",             // Red Hat/Fedora CA store + crypto policies
+        "/etc/ld.so.conf",      // dynamic-linker search configuration
+        "/etc/ld.so.conf.d",
+        "/etc/ld.so.cache",     // cache; references /usr,/lib (bound at the same paths)
+    ];
+    CANDIDATES.iter().map(PathBuf::from).filter(|p| p.exists()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +323,16 @@ mod tests {
     #[test]
     fn render_is_none_for_an_unknown_file() {
         assert!(render("shadow", &params()).is_none());
+    }
+
+    #[test]
+    fn essential_subtrees_are_existing_paths_under_etc() {
+        // Returns only host paths that exist, all under /etc (the vanilla TLS +
+        // linker set). A bare CI image may have few; whatever is returned must be
+        // a real, /etc-rooted path the caller can bind read-only.
+        for p in essential_etc_subtrees() {
+            assert!(p.starts_with("/etc"), "{} is under /etc", p.display());
+            assert!(p.exists(), "{} exists (filtered by existence)", p.display());
+        }
     }
 }

@@ -49,5 +49,6 @@ fn build_identity() -> Result<Identity, String> {
         config_dir: socket::runtime_dir().join("proxy"),
     });
     let etc_base = Some(socket::runtime_dir().join("etc"));
-    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base })
+    let view_base = Some(socket::runtime_dir().join("root"));
+    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base, view_base })
 }

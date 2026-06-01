@@ -77,6 +77,10 @@ pub struct Identity {
     /// Base directory the per-kennel synthetic `/etc` is staged under, or `None`
     /// to skip the synthetic `/etc`.
     pub etc_base: Option<PathBuf>,
+    /// Base directory the per-kennel constructed-view new-root mountpoint is
+    /// created under (one `root-<ctx>` dir each), or `None` to keep the in-place
+    /// fallback seal (no `pivot_root`).
+    pub view_base: Option<PathBuf>,
 }
 
 /// Registry metadata for one kennel (the workload itself is owned by the
@@ -260,6 +264,7 @@ where
         net: loaded.net,
         proxy: id.proxy.clone(),
         etc,
+        view_root: id.view_base.as_ref().map(|base| base.join(format!("root-{ctx}"))),
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
@@ -391,6 +396,7 @@ mod tests {
                 cgroup_base: base,
                 proxy: None,
                 etc_base: None,
+                view_base: None,
             },
             OkPriv,
             FakeLoader,
