@@ -104,7 +104,8 @@ the design chapters that describe them should read as roadmap, not as-built:
 
 ## 8.5 Verify baseline (kernel 6.17, ABI 7)
 
-As of this writing: `cargo test --workspace --offline` = 255 unprivileged tests,
+As of this writing: `cargo test --workspace --offline` = 258 unprivileged tests,
 clippy-clean under `-D warnings`. Root under sudo: kennel-syscall mount+landlock,
 kennel-spawn 21/21, kenneld e2e 1/1 (the full vertical: addresses + BPF + real
-netproxy + synthetic `/etc` + constructed view + teardown).
+netproxy on **both** v4+v6 listeners + synthetic `/etc` + constructed view +
+teardown).
