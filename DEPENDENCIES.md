@@ -11,7 +11,7 @@ This ledger pairs with:
 
 ## Status
 
-Six direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins 27 `.crate` artefacts. Further entries are added with the PR that introduces each dependency.
+Six direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins the shipped artefacts plus one **staged, not-yet-approved** entry: `arbitrary` (fuzz-only; see its entry below and §5.5 — awaiting the maintainer's source-read and two approvals). Further entries are added with the PR that introduces each dependency.
 
 ## Entry format
 
@@ -94,4 +94,13 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Licence:** MIT.
 - **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: 15 source files byte-identical to `github.com/jedisct1/rust-ed25519-compact` at tag 2.3.0. Source read for backdoors: no FFI/asm/process/net/fs/env; the single `unsafe` is the volatile secret-wipe; verification rejects non-canonical `S` (malleability) and weak/identity keys.
 - **Transitive deps added:** none. `getrandom`, `ct-codecs`, and `ed25519` are optional dependencies, gated behind the `random`/`pem`/`traits` features, none of which we enable. `x25519.rs` and `pem.rs` are not compiled.
+- **Proc-macros / build.rs:** none.
+
+### arbitrary (fuzz-only — STAGED, pending §5.5 approval)
+
+- **Version:** =1.4.1 (exact pin), `default-features = false` (no `derive`).
+- **Justification:** Turns a flat fuzzer seed into byte/structured inputs for the fuzz harnesses (`fuzz/`, §10.6). **Not a dependency of any shipped crate** — it is used only by `kennel-fuzz`, a non-shipped crate in its own separate workspace (`fuzz/`), so it is in no release artefact and no shipped `Cargo.lock`. Chosen as the lightest fuzzing approach ("Path C"): with no `derive` feature it has zero transitive deps and no native runtime, versus the `cargo-fuzz`/`libfuzzer-sys` path (a C++-compiling `build.rs` + bundled LLVM + ~5 crates).
+- **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
+- **Reviewer:** **PENDING.** Mechanically staged by the agent; the maintainer must read the source and record their name + the two §5.5 approvals. Provenance done so far (via `tools/audit-helper.sh` + `tools/audit-source.sh`): `.crate` sha256 matches an independent re-download and the crates.io index `cksum`; 60 source files byte-identical to `github.com/rust-fuzz/arbitrary` @ the published commit `690db067`. `audit-source.sh` tag note (explained): the `v1.4.1` tag is one commit ahead of the published commit and that commit only bumps the sibling `derive_arbitrary` crate's version (`derive/Cargo.toml` 1.4.0→1.4.1) — it does not touch the `arbitrary` crate's source. The crate has **not** been built or executed pending approval.
+- **Transitive deps added:** none (with `default-features = false`; the optional `derive_arbitrary` and the dev-only `exhaustigen` are not pulled).
 - **Proc-macros / build.rs:** none.

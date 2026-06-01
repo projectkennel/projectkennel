@@ -328,3 +328,15 @@ verified-against = [
     "github.com/jedisct1/rust-ed25519-compact @ bbbb92975251bff440109513eb95a68471d398de (tag 2.3.0) — 15 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "Direct dep of kennel-policy (Ed25519 verify on the spawn path; sign+verify in the compiler). default-features = false, features = [\"std\"] — zero transitive deps (getrandom/ct-codecs/ed25519 all optional, not enabled; x25519.rs/pem.rs not compiled). Field arithmetic is fiat-crypto formally-verified code; single unsafe is volatile secret-wipe; verify rejects non-canonical S and weak keys."
+
+[crate."arbitrary"]
+version = "=1.4.1"
+crate-sha256 = "dde20b3d026af13f561bdd0f15edf01fc734f0dafcedbaf42bba506a9517f223"
+audited-by = "remco"
+audited-on = "2026-06-01"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
+    "crates.io sparse index line for 1.4.1 — cksum equals the .crate sha256",
+    "github.com/rust-fuzz/arbitrary @ 690db067c94e0644eb9da556caef3df8692a91b6 (the .crate's published commit) — 60 source files byte-identical, Cargo.toml.orig == upstream, via tools/audit-source.sh",
+]
+notes = "Fuzz-only: a dependency of the non-shipped, separate-workspace fuzz/ crate (kennel-fuzz); in NO shipped crate's Cargo.lock and no release artefact. Used with default-features = false (no `derive`), so ZERO transitive deps — the optional derive_arbitrary and the dev-only exhaustigen are not pulled (confirmed against the index line and the crate's Cargo.toml). No build.rs, not a proc-macro; licence MIT OR Apache-2.0; MSRV 1.63. audit-source.sh flagged a tag/commit mismatch, EXPLAINED: the v1.4.1 git tag (c22d7c85) is one commit ahead of the published commit (690db067), and that single commit only bumps derive/Cargo.toml (the sibling derive_arbitrary crate) 1.4.0->1.4.1 — it does NOT touch the arbitrary crate's source; the vendored .crate is byte-identical to the real published upstream commit 690db067. Maintainer: read the source, replace audited-by with your name, give the two approvals."
