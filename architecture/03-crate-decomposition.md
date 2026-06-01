@@ -2,6 +2,8 @@
 
 This chapter describes the Cargo workspace layout: which crates exist, what each owns, how they depend on each other, and what build-time choices they expose. The *public APIs* of each crate are in `02-6-internal-api.md`; this chapter is the structural view — how the code is cut up, not what each piece exposes.
 
+> **As-built status (see `08-as-built-notes.md` §8.1).** The implemented workspace has **8** crates, not the ~13 this chapter originally drew. The separate `kennel-ipc-shared`/`-client`/`-server`, `kennel-cli`, and `kennel-audit` crates were **folded**: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`), and audit is split between the BPF ringbuf drain (`kennel-bpf`) and the netproxy's JSONL formatter. The async-runtime claims below are also stale — everything is blocking, thread-per-connection. The layout and notes below have been corrected to match.
+
 ---
 
 ## Workspace layout
@@ -27,21 +29,18 @@ kennel/
 │   ├── kennel.bpf.h                 shared helpers (UAPI-based; no vmlinux.h/CO-RE)
 │   ├── README.md                    why no CO-RE; build/inspect instructions
 │   └── HELPERS.md                   whitelist of permitted BPF helper functions
-├── crates/                          Rust workspace members
+├── crates/                          Rust workspace members (the 8 as-built)
 │   ├── kennel-syscall/              the only unsafe-bearing crate (besides BPF FFI)
 │   ├── kennel-text/                 sanitisation helpers
-│   ├── kennel-policy/               TOML parsing, template resolution, signature verification
-│   ├── kennel-audit/                event types, writer, sink implementations
+│   ├── kennel-policy/               TOML parsing, signature verification (settled-policy core)
 │   ├── kennel-bpf/                  hand-rolled bpf(2) loader (object for ELF), .o, ringbuf reader
-│   ├── kennel-ipc-shared/           wire-format types, framing
-│   ├── kennel-ipc-client/           client-side connection, request, subscribe
-│   ├── kennel-ipc-server/           server-side accept loop, dispatcher trait
-│   ├── kennel-spawn/                policy → setup sequence → execve
-│   ├── kennel-netproxy/             binary: SOCKS5 proxy
-│   ├── kennel-privhelper/           binary: privileged operations helper
-│   ├── kenneld/                     binary: per-user supervisor
-│   ├── kennel-cli/                  binary: kennel(1)
-│   └── kennel-checksum-verify/      binary: tools/verify-checksums
+│   ├── kennel-spawn/                policy → Plan → setup sequence (incl. the pivot_root view) → execve
+│   ├── kennel-netproxy/             binary: SOCKS5/HTTP egress proxy (blocking, thread-per-conn)
+│   ├── kennel-privhelper/           binary + lib: privileged operations helper (wire format in src/wire.rs)
+│   └── kenneld/                     lib + binaries: per-user supervisor (src/bin/kenneld.rs)
+│                                    and the CLI (src/bin/kennel.rs); control protocol in src/control.rs
+│       (folded-in, no separate crate: kennel-ipc-*, kennel-cli, kennel-audit — see §8.1)
+│       (deferred: kennel-checksum-verify — shell witness exists; Rust crate at first vendored-dep, §8.2)
 ├── tools/
 │   ├── install-hooks.sh             git hooks installer
 │   ├── verify-checksums.sh          shell verifier (twin of kennel-checksum-verify)
@@ -51,7 +50,7 @@ kennel/
 └── architecture/, docs/, .github/, etc.
 ```
 
-Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. Binary crates (`kennel-netproxy`, `kennel-privhelper`, `kenneld`, `kennel-cli`, `kennel-checksum-verify`) have a `src/main.rs`; library crates have `src/lib.rs`. Some binaries also expose a tiny library half (`kenneld` exposes its dispatcher trait via `kennel-ipc-server`; the binary's own code is `main.rs` only).
+Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), and `kenneld` (a library half in `src/lib.rs` providing the orchestration both binaries use, plus `src/bin/kenneld.rs` for the daemon and `src/bin/kennel.rs` for the CLI). The remaining crates are libraries (`src/lib.rs`).
 
 ---
 
@@ -145,8 +144,8 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 
 ### `kennel-netproxy`
 
-- Binary crate. Uses the async runtime.
-- The SOCKS5 server lives in `src/server.rs`; the allowlist evaluator in `src/allow.rs`; both are unit-tested without the network.
+- Binary crate. **Sync, blocking — one thread per connection. No async runtime** (§8.1).
+- The SOCKS5/HTTP server lives in `src/server.rs`; the allowlist evaluator in `src/allow.rs`; both are unit-tested without the network.
 
 ### `kennel-privhelper`
 
@@ -156,13 +155,13 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 
 ### `kenneld`
 
-- Binary crate. Uses the async runtime.
-- Owns the in-memory kennel registry, the per-kennel state machines, the audit reader for the BPF ringbuf.
+- Library + binaries. **Sync, blocking — `serve()` accepts and spawns one thread per connection. No async runtime** (§8.1).
+- Owns the in-memory kennel registry, the per-kennel orchestration (`lib.rs`), the control protocol (`control.rs`), and the audit reader for the BPF ringbuf.
 
-### `kennel-cli`
+### `kennel-cli` (folded into `kenneld` as `src/bin/kennel.rs`, §8.1)
 
-- Binary crate. Mostly sync; uses `kennel-ipc-client` sync mode.
-- The subcommand dispatcher uses `clap` derive. Per CODING-STANDARDS.md §5.3, `clap`'s proc-macros require explicit per-version justification in `DEPENDENCIES.md`; we accept them as the alternative (hand-written argument parsing across 13 subcommands) is worse.
+- The `kennel` binary lives inside `kenneld`, not a separate crate. It is a thin sync Unix-socket client of the control protocol in `kenneld::control`.
+- Argument parsing uses `lexopt` (not `clap` — see `DEPENDENCIES.md`; `clap`'s proc-macro tree was rejected for the CLI in favour of the dependency-light `lexopt`).
 
 ### `kennel-checksum-verify`
 

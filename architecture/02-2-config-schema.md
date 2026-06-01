@@ -303,6 +303,19 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 
 ## The settled policy (compilation)
 
+> **As-built status (see `08-as-built-notes.md` §8.1/§8.2).** The implemented
+> settled schema is authoritative in `crates/kennel-policy/src/settled.rs`. Two
+> things to know when reading below. (1) The settled `effective_policy` carries
+> only the **runtime-relevant** sections — `net`, `fs`, `exec`, `proc`, `cap`,
+> `seccomp`, `lifecycle`; the source-only sections (`unix`, `dbus`, `x11`, `env`,
+> `ptrace`, `signal`, `audit`) are compile-time concerns and are **not** present
+> in the settled form, so "every section" below means that resolved subset.
+> (2) Fields added since this chapter was written: `fs.tmp` (`private`,
+> `size_mib`, `mode`), `fs.dev.allow`, `proc.hidepid`, `net.allow_names`
+> (by-name proxy allowlist), and `net.proxy` (`offset`, `port`). Settled
+> `FsPolicy` uses flat field names (`home_shadow`, `shim_root`), not nested
+> `fs.home.*`.
+
 The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
 
 The split: all resolution (chain-walking, include merging, delta application, source-signature verification, lockfile byte-checks, invariant and threat-tag validation, installation-constant substitution) happens at compile time. The spawn path verifies one signature, re-asserts framework invariants, fills per-instance substitution slots, and builds kernel objects. It links none of the template machinery.

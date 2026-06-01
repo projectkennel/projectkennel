@@ -85,6 +85,13 @@ proxy_listen_v4_address = "1:1080"  # optional "offset:port" within the kennel's
 proxy_listen_v6 = true              # enable the v6 listener (default false)
 proxy_listen_v6_address = "1:1080"  # optional "offset:port" within the kennel's /64
 
+# NOTE (as-built, 08-as-built-notes.md §8.1): the [net.dns] block below was
+# DROPPED. The proxy resolves names with the OS resolver (getaddrinfo) and vets
+# the answers by policy (the name must clear the allowlist; the resolved address
+# is re-checked against the deny rules + special-use refusal). There is no
+# configurable resolver/mode/cache_ttl. The tls.* fields below are likewise NOT
+# built (TLS inspection is an enterprise/future layer); a NameRule carries only
+# name/ports/protocol. Both are retained here as design intent, not as-built.
 [net.dns]
 resolver = "1.1.1.1:53"     # kennel's DNS resolver, used by the proxy
 mode = "allowlist"          # "allowlist" | "passthrough" | "system"
@@ -99,8 +106,8 @@ on_resolve_change = "deny"  # "deny" | "warn" | "allow" — see §7.3.5
 name = "api.openai.com"
 ports = [443]
 protocol = "tcp"
-tls.required = true         # refuse plaintext
-tls.pin_sha256 = ["abc123..."]   # optional cert pinning
+tls.required = true         # NOT BUILT (see note above) — design intent only
+tls.pin_sha256 = ["abc123..."]   # NOT BUILT — optional cert pinning, future
 
 [[net.allow]]
 name = "github.com"

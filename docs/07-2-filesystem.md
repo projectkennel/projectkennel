@@ -137,6 +137,21 @@ allow = [
 
 ## 7.2.5 The constructed `$HOME`
 
+> **As-built (see `08-as-built-notes.md` §8.1).** This view is **implemented**:
+> `kennel-spawn`'s `build_view_and_pivot` mounts a fresh tmpfs new root, binds the
+> granted system paths in place and the granted `~/…` paths remapped beneath
+> `shim_root` (read-only unless the grant is writable), constructs `/dev` from
+> `fs.dev.allow` (nodes bind-mounted and Landlock-granted read/write/`IOCTL_DEV`),
+> mounts a fresh `/proc` with `hidepid=2` and a private `/tmp` (`fs.tmp` size/mode),
+> then `pivot_root`s in. The synthetic `/etc` is **constructed, never the host
+> `/etc` bound in**: `kenneld::etc` writes the libc/NSS files (passwd/group/hosts/
+> resolv.conf/…) scrubbed of host specifics, plus read-only binds of the vanilla
+> TLS/linker subtrees (`/etc/ssl`,`/etc/pki`,`/etc/ld.so.*`). Two invariants worth
+> repeating: **writable binds resolve to persistent host inodes** (work survives
+> teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is built
+> **after** `pivot_root` so its rules key on the view's inodes. kenneld sets
+> `HOME=shim_root` and provides the new-root staging dir at bring-up.
+
 The most important transformation in the filesystem policy: the kennel does not see the real `$HOME`. Project Kennel constructs a shim directory and bind-mounts the policy-granted paths from the real `$HOME` into it.
 
 For a kennel with:

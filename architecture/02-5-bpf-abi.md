@@ -67,30 +67,31 @@ Each kennel has its own copy of the per-kennel maps; the project-wide audit ring
 A single-element array carrying per-kennel metadata. Read by every program at every invocation; updated by the loader at kennel start (and never again — the map is marked read-only via `BPF_F_RDONLY_PROG` once populated).
 
 ```c
-struct kennel_meta {
-    __u32 magic;             // 0x4B4E454C ("KNEL"); sentinel for ABI version detect
-    __u16 abi_version;       // currently 1; bump on incompatible change
-    __u16 ctx_byte;          // the <ctx> for this kennel
-    __u32 proxy_addr_v4;     // the proxy listen address (network byte order)
-    __u8  proxy_addr_v6[16]; // IPv6
-    __u16 proxy_port;        // network byte order
-    __u8  policy_hash[32];   // SHA-256 of the resolved policy; for audit correlation
+struct kennel_meta {           // 64 bytes (loader value_size); bpf/maps.h is authoritative
+    __u32 magic;             // 0  0x4B4E454C ("KNEL"); sentinel for ABI version detect
+    __u16 abi_version;       // 4  currently 1; bump on incompatible change
+    __u16 ctx_byte;          // 6  the <ctx> for this kennel
+    __u32 proxy_addr_v4;     // 8  the proxy listen address (network byte order)
+    __u16 proxy_port;        // 12 network byte order
+    __u16 _pad0;             // 14
+    __u8  proxy_addr_v6[16]; // 16 IPv6
+    __u8  policy_hash[32];   // 32 SHA-256 of the resolved policy; for audit correlation
 };
 ```
 
-The loader verifies `magic` and `abi_version` after population by reading the map back. Mismatch indicates a corrupted build; the kennel fails to start.
+The loader verifies `magic` and `abi_version` after population by reading the map back. Mismatch indicates a corrupted build; the kennel fails to start. (NB the proxy fields ended up ordered `proxy_port` before `proxy_addr_v6`, with explicit `_pad0`, for natural alignment — see `08-as-built-notes.md` §8.1; the BPF enforcement path reads the deny/allow tries, not these fields.)
 
 **`allow_v4`** (BPF_MAP_TYPE_LPM_TRIE)
 
-LPM trie keyed by `(prefix_len, addr_v4)`. Value:
+LPM trie keyed by `(prefix_len, addr_v4)`. Value (`struct allow_entry` — one layout shared by the v4 and v6 tries; they differ only in key width):
 
 ```c
-struct allow_entry_v4 {
+struct allow_entry {
     __u16 port_min;       // inclusive
     __u16 port_max;       // inclusive
     __u8  protocol;       // IPPROTO_TCP, IPPROTO_UDP, or 0 for any
-    __u8  flags;          // bit 0: this entry is the proxy (special-case)
-    __u8  reserved[2];
+    __u8  flags;          // bit 0 (KENNEL_ALLOW_FLAG_PROXY): this entry is the proxy
+    __u8  _pad[2];
 };
 ```
 
@@ -167,6 +168,7 @@ enum audit_kind {
     AUDIT_NET_BIND_DENY = 4,
     AUDIT_NET_SOCK_DENY = 5,
     AUDIT_NET_SETSOCKOPT_FORCED = 6,
+    AUDIT_NET_SENDMSG_DENY = 7,   // sendmsg4/sendmsg6 UDP destination denial
 };
 
 struct audit_payload_connect {

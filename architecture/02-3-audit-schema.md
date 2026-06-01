@@ -1,5 +1,17 @@
 # API surfaces — audit schema
 
+> **As-built status (see `08-as-built-notes.md` §8.2).** The sink machinery this
+> chapter describes — the `journald`/`syslog`/`stdout` sinks, the centralised
+> `kennel-audit` writer, the `[audit]` policy section / `audit.toml`, and the
+> per-sink 50 ms timeout — is **designed but not yet built**, and there is no
+> `kennel-audit` crate or `sd_journal_send` in the tree. What exists today: BPF
+> events are reserved/submitted to a kernel **ring buffer** (`bpf/audit_events.h`,
+> `bpf/kennel.bpf.h`) drained lock-free by `kennel-bpf::ringbuf` (drops on full,
+> counted by the reader); the egress proxy **formats** one JSONL record per
+> request in `kennel-netproxy::audit` and the server owns the sink (stderr/file).
+> The *event schema* below is the durable contract; treat the *sink/writer*
+> sections as roadmap until §8.2 says otherwise.
+
 ## Stability commitment
 
 **Stable** per `02-0-overview.md`. The audit *event schema* is versioned by an explicit `schema_version` field present on every event regardless of which sink emits it. Consumers read the field and decide how to handle it.
