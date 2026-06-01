@@ -178,6 +178,15 @@ Notes on the diagram:
 
 ## Lifecycle sketch
 
+> **As-built (see `08-as-built-notes.md` §8.1 row 15).** The per-kennel
+> reference-counting, the **60s grace period**, and the `draining`/reclaim states
+> below were **dropped** (maintainer decision). As built: the *daemon* (kenneld)
+> persists for the user session; a `kennel run` is *one* kennel (its own ctx,
+> cgroup, proxy, loopback addresses, view), and those resources tear down
+> **immediately** when the workload exits — no grace window, no daemon sharing by
+> name, no reclaim. The `starting`/`running` registry states and the concurrent
+> accept loop are real; the `draining`/reclaim machinery is not.
+
 The full lifecycle is described in `05-state-and-supervision.md`. The summary:
 
 - **kenneld** starts at login (via `systemd --user`) and runs until logout. It is the longest-lived Kennel process.

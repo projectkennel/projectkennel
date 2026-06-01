@@ -1,5 +1,15 @@
 # State and supervision
 
+> **As-built status (see `08-as-built-notes.md` §8.1 row 15).** This chapter
+> specifies a richer lifecycle than is built or intended. By maintainer decision,
+> the **grace period**, the `draining`/reclaim states, and per-kennel **reference
+> counting** (multiple `kennel run`s sharing one named kennel) are **dropped**.
+> As built: kenneld persists for the user session; each `kennel run` is one kennel
+> with its own ctx/cgroup/proxy/addresses/view; teardown is **immediate** on
+> workload exit (`kenneld::Kennel::stop`). The state machine reduces to
+> `starting → running → (stopped on exit)`. Read the grace/draining/reclaim and
+> refcount material below as the original design, superseded here.
+
 This chapter is the authoritative treatment of runtime state: the per-kennel state machine, how kenneld counts and reaps, the locking matrix that keeps concurrent access correct, how recovery works when kenneld restarts with daemons still alive, and the failure modes. The process-topology view is in `01-process-model.md`; this chapter is what happens at the edges where those processes meet.
 
 ---
