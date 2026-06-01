@@ -103,6 +103,8 @@ Seccomp inspection caveat: `sun_path` is in userspace memory, which seccomp filt
 
 Pragmatic stance: ship with AppArmor as the supported mechanism for abstract-socket denial; seccomp-TRAP as fallback for non-AppArmor systems; track BPF LSM for when it's ubiquitous.
 
+**Update — Landlock scoping (ABI 6, kernel 6.12+) closes this gap natively.** `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` makes a Landlock domain deny `connect()` to any abstract-namespace socket bound *outside* the sandbox — no `sun_path` inspection, no userspace-memory dereference, no AppArmor dependency. This is the kernel-native form of `unix.abstract = "deny"` and supersedes the seccomp-TRAP/AppArmor fallback above on kernels that support it. Project Kennel's runtime queries the Landlock ABI and enables this scope by default wherever the kernel reports ABI ≥ 6 (the runtime floor is 6.10 = ABI 5; on a 6.12+ host scoping applies, below it the fallback still does). Implemented in `kennel-syscall::landlock` (`Scope::ABSTRACT_UNIX_SOCKET`, set unconditionally in `Ruleset::new`). Reference runtime verified on 6.17 (ABI 7).
+
 ## 7.4.4 Policy primitives
 
 ```toml

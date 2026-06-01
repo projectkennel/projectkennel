@@ -25,7 +25,14 @@
 //! the running kernel so callers can refuse an unsupported one and mask the
 //! requested access rights to what that ABI defines (requesting an unknown bit
 //! is `EINVAL`). ABI history: 1 = filesystem (5.13), 2 = `REFER` (5.19),
-//! 3 = `TRUNCATE` (6.2), 4 = TCP network (6.7), 5 = `IOCTL_DEV` (6.10).
+//! 3 = `TRUNCATE` (6.2), 4 = TCP network (6.7), 5 = `IOCTL_DEV` (6.10),
+//! 6 = scoping — abstract-AF_UNIX + signals (6.12), 7 (6.16). The crate handles
+//! every right an ABI defines and degrades to the empty set below it, so a newer
+//! kernel (e.g. 6.17 reports ABI 7) is used to its supported extent and an older
+//! one is never asked for a bit it lacks. Scoping (ABI 6) is the kernel-native
+//! enforcement of the `unix.abstract = "deny"` posture (`docs/07-4`) and a
+//! complement to the PID-namespace signal isolation (`docs/07-7`), superseding
+//! the seccomp `connect()` filter those sections describe as a fallback.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -95,13 +102,31 @@ bitflags! {
     }
 }
 
-/// `struct landlock_ruleset_attr`. `handled_access_net` exists from ABI 4; the
-/// kernel accepts the full struct on older ABIs as long as the unknown trailing
-/// bytes are zero, which they are when `supported_net` masks the field empty.
+bitflags! {
+    /// Landlock scoping (`LANDLOCK_SCOPE_*`, ABI 6). Unlike the access rights,
+    /// scoping takes no per-resource exceptions: handling a scope confines the
+    /// sandboxed process from reaching that resource class *outside* its own
+    /// Landlock domain.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Scope: u64 {
+        /// `connect(2)` to an abstract-namespace AF_UNIX socket bound outside the
+        /// sandbox (the `docs/07-4` gap Landlock previously could not close).
+        const ABSTRACT_UNIX_SOCKET = 0x1;
+        /// Send a signal to a process outside the sandbox (`docs/07-7`).
+        const SIGNAL = 0x2;
+    }
+}
+
+/// `struct landlock_ruleset_attr`. `handled_access_net` exists from ABI 4 and
+/// `scoped` from ABI 6; the kernel accepts the full struct on older ABIs as long
+/// as the unknown trailing bytes are zero, which they are when `supported_net` /
+/// `supported_scope` mask those fields empty (the kernel's extensible-struct
+/// `copy_struct_from_user` contract).
 #[repr(C)]
 struct RulesetAttr {
     handled_access_fs: u64,
     handled_access_net: u64,
+    scoped: u64,
 }
 
 /// `struct landlock_path_beneath_attr` — packed, per the UAPI.
@@ -193,6 +218,17 @@ pub fn supported_net(abi: u32) -> AccessNet {
         AccessNet::BIND_TCP | AccessNet::CONNECT_TCP
     } else {
         AccessNet::empty()
+    }
+}
+
+/// The scoping an `abi` kernel understands (none before ABI 6). Requesting a
+/// scope bit an older kernel lacks is `EINVAL`, so callers mask to this.
+#[must_use]
+pub fn supported_scope(abi: u32) -> Scope {
+    if abi >= 6 {
+        Scope::ABSTRACT_UNIX_SOCKET | Scope::SIGNAL
+    } else {
+        Scope::empty()
     }
 }
 
@@ -330,14 +366,18 @@ fn open_o_path(path: &Path) -> io::Result<File> {
 pub struct Ruleset {
     handled_fs: AccessFs,
     handled_net: AccessNet,
+    handled_scope: Scope,
     path_rules: Vec<(File, AccessFs)>,
     net_rules: Vec<(u16, AccessNet)>,
 }
 
 impl Ruleset {
     /// A ruleset that handles every access right the running kernel's Landlock
-    /// ABI defines — i.e. denies everything until [`Ruleset::allow_path`] /
-    /// [`Ruleset::allow_port`] grant exceptions.
+    /// ABI defines and enables every scope it supports — i.e. denies everything,
+    /// and confines abstract-AF_UNIX/signal reach to the sandbox, until
+    /// [`Ruleset::allow_path`] / [`Ruleset::allow_port`] grant exceptions.
+    /// Scoping is all-or-nothing (no per-resource exception) and on by default,
+    /// the native form of the `unix.abstract = "deny"` posture (`docs/07-4`).
     ///
     /// # Errors
     ///
@@ -347,6 +387,7 @@ impl Ruleset {
         Ok(Self {
             handled_fs: supported_fs(abi),
             handled_net: supported_net(abi),
+            handled_scope: supported_scope(abi),
             path_rules: Vec::new(),
             net_rules: Vec::new(),
         })
@@ -375,6 +416,7 @@ impl Ruleset {
         let attr = RulesetAttr {
             handled_access_fs: self.handled_fs.bits(),
             handled_access_net: self.handled_net.bits(),
+            scoped: self.handled_scope.bits(),
         };
         let ruleset = create_ruleset(&attr)?;
         for (file, access) in &self.path_rules {
@@ -425,9 +467,10 @@ mod tests {
 
     #[test]
     fn supported_sets_grow_monotonically_with_abi() {
-        for abi in 1..6 {
+        for abi in 1..8 {
             assert!(supported_fs(abi).contains(supported_fs(abi - 1)));
             assert!(supported_net(abi).contains(supported_net(abi - 1)));
+            assert!(supported_scope(abi).contains(supported_scope(abi - 1)));
         }
     }
 
@@ -444,6 +487,8 @@ mod tests {
             supported_net(4),
             AccessNet::BIND_TCP | AccessNet::CONNECT_TCP
         );
+        assert_eq!(supported_scope(5), Scope::empty()); // scoping is ABI 6
+        assert_eq!(supported_scope(6), Scope::ABSTRACT_UNIX_SOCKET | Scope::SIGNAL);
     }
 
     /// Build and install a ruleset (`create_ruleset` + `add_rule`) without sealing —
@@ -503,6 +548,108 @@ mod tests {
                     "sandboxed child reported failure: {status:?}"
                 );
             }
+        }
+    }
+
+    /// Build an abstract-namespace `AF_UNIX` address (NUL-prefixed `name`) and its
+    /// length, with raw libc (the crate's socket style, cf. `netlink`). Kept lint-
+    /// clean: no per-element indexing or `as` casts.
+    fn abstract_addr(name: &[u8]) -> (libc::sockaddr_un, libc::socklen_t) {
+        // SAFETY: sockaddr_un is plain-old-data; an all-zero value is valid.
+        let mut sun: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        sun.sun_family = libc::sa_family_t::try_from(libc::AF_UNIX).expect("AF_UNIX fits sa_family_t");
+        // SAFETY: `sun_path` is `[c_char; N]`; c_char and u8 share a 1-byte POD
+        // layout, so a u8 slice aliasing the same storage is sound for a byte copy.
+        // The abstract namespace is NUL-prefixed, so the name starts at index 1.
+        let path: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(sun.sun_path.as_mut_ptr().cast::<u8>(), sun.sun_path.len()) };
+        if let Some(dst) = path.get_mut(1..=name.len()) {
+            dst.copy_from_slice(name);
+        }
+        let raw_len = size_of::<libc::sa_family_t>().saturating_add(1).saturating_add(name.len());
+        let len = libc::socklen_t::try_from(raw_len).expect("addr len fits");
+        (sun, len)
+    }
+
+    /// ABI-6 scoping must deny a sandboxed process `connect(2)` to an
+    /// abstract-namespace `AF_UNIX` socket bound outside its domain (the native
+    /// `unix.abstract = "deny"`), while the same socket is reachable un-sandboxed.
+    /// Landlock is unprivileged, so this needs no root.
+    #[test]
+    fn scoping_denies_a_host_abstract_socket() {
+        let Ok(abi) = abi_version() else {
+            return; // no Landlock: skip
+        };
+        if abi < 6 {
+            return; // scoping is ABI 6+: skip on older kernels
+        }
+
+        let name = format!("kennel-scope-{}", std::process::id());
+        let (addr, addrlen) = abstract_addr(name.as_bytes());
+        let addr_ptr = std::ptr::from_ref(&addr).cast::<libc::sockaddr>();
+
+        // SAFETY: socket/bind/listen/connect/close with valid constants and a live
+        // sockaddr (`addr` outlives the block); each result is checked. The control
+        // connect proves the abstract name is reachable when un-sandboxed.
+        let listener = unsafe {
+            let l = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(l >= 0, "socket: {}", io::Error::last_os_error());
+            assert_eq!(libc::bind(l, addr_ptr, addrlen), 0, "bind abstract: {}", io::Error::last_os_error());
+            assert_eq!(libc::listen(l, 1), 0, "listen: {}", io::Error::last_os_error());
+            let c = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert_eq!(libc::connect(c, addr_ptr, addrlen), 0, "control connect should reach it");
+            libc::close(c);
+            l
+        };
+        // SAFETY: a fresh AF_UNIX socket the sandboxed child will try to connect.
+        let client = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(client >= 0, "client socket");
+        let rs = Ruleset::new().expect("ruleset"); // scoping on by default
+
+        // SAFETY: fork() in a multi-threaded test. The child performs only
+        // async-signal-safe work (the Landlock restrict syscalls, one libc::connect
+        // on a pre-created fd, _exit) and never returns to the harness; all
+        // allocation (the addr, the ruleset) happened before the fork.
+        match unsafe { nix::unistd::fork() }.expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let code = scope_child_verdict(rs, client, addr_ptr, addrlen);
+                // SAFETY: _exit ends the child without Drop/atexit glue.
+                unsafe { libc::_exit(code) };
+            }
+            nix::unistd::ForkResult::Parent { child } => {
+                let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
+                // SAFETY: closing fds the parent owns.
+                unsafe {
+                    libc::close(client);
+                    libc::close(listener);
+                }
+                // 0 = connect denied by the scope (EPERM/EACCES); 1 = connect allowed
+                // (scope did not bite); 2 = denied with an unrelated errno; 3 = seal failed.
+                assert!(
+                    matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
+                    "scoped child must be denied the abstract socket: {status:?}"
+                );
+            }
+        }
+    }
+
+    /// Child body for the scoping test: seal `rs`, then `connect` the pre-created
+    /// `client_fd` to the abstract address. Returns the exit code (0 = EACCES).
+    fn scope_child_verdict(rs: Ruleset, client_fd: RawFd, addr: *const libc::sockaddr, addrlen: libc::socklen_t) -> i32 {
+        if rs.restrict_current_process().is_err() {
+            return 3;
+        }
+        // SAFETY: connect on a valid pre-created AF_UNIX fd with a live sockaddr
+        // (built before the fork); a pure syscall, async-signal-safe.
+        let r = unsafe { libc::connect(client_fd, addr, addrlen) };
+        if r == 0 {
+            return 1; // connect succeeded — scoping did not deny it
+        }
+        // A Landlock scope denies abstract-socket connect with EPERM; accept EACCES
+        // too (the errno other Landlock denials use) so the test is robust to it.
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::EPERM | libc::EACCES) => 0, // denied by the scope
+            _ => 2,                                // denied, but by an unrelated errno
         }
     }
 
