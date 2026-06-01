@@ -133,6 +133,16 @@ fn read_access() -> AccessFs {
     AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE
 }
 
+/// The Landlock access a granted device node receives: read and write the file,
+/// and `ioctl(2)` on it (`IOCTL_DEV`, ABI 5; [`Ruleset::allow_path`] masks the
+/// bit away on older kernels). Not `EXECUTE`/`READ_DIR` — a device node is
+/// neither a program nor a directory.
+///
+/// [`Ruleset::allow_path`]: kennel_syscall::landlock::Ruleset::allow_path
+fn dev_access() -> AccessFs {
+    AccessFs::READ_FILE | AccessFs::WRITE_FILE | AccessFs::IOCTL_DEV
+}
+
 /// The Landlock access a write-granted path subtree receives: read plus the
 /// mutating rights (create/remove/truncate).
 fn write_access() -> AccessFs {
@@ -358,6 +368,13 @@ impl Plan {
                     "fs.dev.allow entry must be a device under /dev, got `{d}`"
                 )));
             }
+            // Grant the device its Landlock access too, not just view visibility:
+            // read/write plus `ioctl` (IOCTL_DEV). The ruleset handles IOCTL_DEV on
+            // ABI >= 5, so without an explicit grant here a device `ioctl` (a tty
+            // TCGETS/TIOCGWINSZ, §7.7.2) is denied even on an allowlisted node;
+            // the grant makes the allowed devices usable while every non-granted
+            // device — and the gated ioctls on them — stays denied.
+            landlock_fs.push((path.clone(), dev_access()));
             dev_allow.push(path);
         }
 

@@ -653,6 +653,81 @@ mod tests {
         }
     }
 
+    /// `IOCTL_DEV` (ABI 5) must gate a device `ioctl`: with the ruleset handling
+    /// it, a granted device node's `ioctl` clears Landlock only when the path rule
+    /// also grants `IOCTL_DEV`; otherwise it is denied (EACCES). Landlock is
+    /// unprivileged. Uses `/dev/null` + `TIOCGWINSZ` — a gated (non-exempt) ioctl
+    /// that `/dev/null` answers with ENOTTY once it clears Landlock.
+    #[test]
+    fn ioctl_dev_gates_device_ioctls() {
+        let Ok(abi) = abi_version() else {
+            return; // no Landlock: skip
+        };
+        if abi < 5 {
+            return; // IOCTL_DEV is ABI 5+: skip
+        }
+        assert!(ioctl_denied_under(false), "a device ioctl without an IOCTL_DEV grant must be denied");
+        assert!(!ioctl_denied_under(true), "a device ioctl with an IOCTL_DEV grant must clear Landlock");
+    }
+
+    /// Seal a ruleset granting `/dev/null` read+write (+ `IOCTL_DEV` iff
+    /// `grant_ioctl`) in a child, then `ioctl(TIOCGWINSZ)` it. Returns whether
+    /// Landlock denied the ioctl — true only when the grant is absent.
+    fn ioctl_denied_under(grant_ioctl: bool) -> bool {
+        let Ok(mut rs) = Ruleset::new() else {
+            return grant_ioctl; // no Landlock: make the caller's asserts vacuous
+        };
+        let mut access = AccessFs::READ_FILE | AccessFs::WRITE_FILE;
+        if grant_ioctl {
+            access |= AccessFs::IOCTL_DEV;
+        }
+        rs.allow_path(Path::new("/dev/null"), access).expect("allow /dev/null");
+        let devnull = std::ffi::CString::new("/dev/null").expect("cstring");
+
+        // SAFETY: fork(); the child does only async-signal-safe work (Landlock
+        // restrict, libc open/ioctl/close, _exit) and never returns to the harness;
+        // all allocation happened before the fork.
+        match unsafe { nix::unistd::fork() }.expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let code = ioctl_child_verdict(rs, &devnull);
+                // SAFETY: _exit ends the child without Drop/atexit glue.
+                unsafe { libc::_exit(code) };
+            }
+            nix::unistd::ForkResult::Parent { child } => {
+                let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
+                // 0 = ioctl denied (EACCES); 1 = ioctl cleared Landlock; 2 = setup failed.
+                matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0))
+            }
+        }
+    }
+
+    /// Child body: seal `rs`, open `/dev/null`, `ioctl(TIOCGWINSZ)`. Returns 0 if
+    /// Landlock denied it (EACCES), 1 if it cleared Landlock (ENOTTY from the
+    /// device), 2 on a setup failure.
+    fn ioctl_child_verdict(rs: Ruleset, devnull: &std::ffi::CStr) -> i32 {
+        if rs.restrict_current_process().is_err() {
+            return 2;
+        }
+        // SAFETY: open a valid NUL-terminated path; returns an fd or -1.
+        let fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDONLY) };
+        if fd < 0 {
+            return 2; // open should be permitted (READ_FILE granted)
+        }
+        let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: ioctl on a valid fd with a writable winsize out-param.
+        let r = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, std::ptr::from_mut(&mut ws)) };
+        let errno = io::Error::last_os_error().raw_os_error();
+        // SAFETY: closing an fd we just opened.
+        unsafe { libc::close(fd) };
+        if r == 0 {
+            return 1; // the ioctl succeeded outright — it cleared Landlock
+        }
+        match errno {
+            Some(libc::EACCES) => 0, // Landlock denied the ioctl
+            _ => 1,                  // ENOTTY etc. — reached the device, i.e. cleared Landlock
+        }
+    }
+
     /// Child body: seal `rs`, then check the forbidden path is denied and the
     /// allowed path is permitted. Returns the process exit code (0 = correct).
     fn child_verdict(rs: Ruleset, allowed: &std::ffi::CStr, forbidden: &std::ffi::CStr) -> i32 {

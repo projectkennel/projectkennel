@@ -676,6 +676,20 @@ mod tests {
     }
 
     #[test]
+    fn dev_nodes_get_landlock_read_write_ioctl() {
+        // Allowlisted devices are Landlock-granted read+write+ioctl (so device
+        // ioctls work on them), not merely made visible in the constructed /dev.
+        let plan = Plan::from_policy(&substitute(&policy_with_placeholders(), &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let want = AccessFs::READ_FILE | AccessFs::WRITE_FILE | AccessFs::IOCTL_DEV;
+        for dev in ["/dev/null", "/dev/urandom"] {
+            assert!(
+                plan.landlock_fs.iter().any(|(p, a)| p == Path::new(dev) && *a == want),
+                "{dev} should carry a read+write+ioctl Landlock rule"
+            );
+        }
+    }
+
+    #[test]
     fn writable_home_grant_binds_to_the_persistent_host_path() {
         // The work an agent writes must outlive the kennel: a writable grant under
         // the real $HOME binds onto the real host inode, not the ephemeral tmpfs.
