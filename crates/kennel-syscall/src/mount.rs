@@ -90,6 +90,46 @@ pub fn mount_special(fstype: &str, target: &Path) -> io::Result<()> {
     .map_err(map_err)
 }
 
+/// Mount a fresh `tmpfs` at `target` with `nosuid` (and `nodev` unless
+/// `allow_dev`), an optional `size_mib` cap (mebibytes) and octal `mode`.
+///
+/// `allow_dev` exists for the constructed `/dev`, whose bind-mounted device nodes
+/// must function; every other tmpfs (`/tmp`, the new root) forbids devices.
+/// `mode` must be octal digits — the caller validates it (it flows into the
+/// comma-separated mount data string, so a stray comma would inject an option).
+///
+/// # Errors
+///
+/// Returns the OS error if the mount fails.
+pub fn mount_tmpfs(target: &Path, size_mib: Option<u32>, mode: Option<&str>, allow_dev: bool) -> io::Result<()> {
+    let mut opts: Vec<String> = Vec::new();
+    if let Some(s) = size_mib {
+        opts.push(format!("size={s}M"));
+    }
+    if let Some(m) = mode {
+        opts.push(format!("mode={m}"));
+    }
+    let data = opts.join(",");
+    let mut flags = MsFlags::MS_NOSUID;
+    if !allow_dev {
+        flags |= MsFlags::MS_NODEV;
+    }
+    nix::mount::mount(Some("tmpfs"), target, Some("tmpfs"), flags, Some(data.as_str())).map_err(map_err)
+}
+
+/// Mount a fresh `proc` at `target` (`nosuid,nodev`), with `hidepid=2` when
+/// `hidepid` so `/proc/<pid>` is owner-only even within the PID namespace
+/// (§7.2.7, belt-and-braces atop the namespace).
+///
+/// # Errors
+///
+/// Returns the OS error if the mount fails.
+pub fn mount_proc(target: &Path, hidepid: bool) -> io::Result<()> {
+    let data = if hidepid { "hidepid=2" } else { "" };
+    nix::mount::mount(Some("proc"), target, Some("proc"), MsFlags::MS_NOSUID | MsFlags::MS_NODEV, Some(data))
+        .map_err(map_err)
+}
+
 /// `pivot_root(new_root, put_old)`: make `new_root` the process's root,
 /// relocating the old root under `put_old` (which must be beneath `new_root`).
 ///
@@ -195,6 +235,47 @@ mod root_tests {
                 Ok(()) => 5, // should have been denied
                 Err(_) => 0,
             }
+        });
+    }
+
+    #[test]
+    fn tmpfs_with_size_and_mode_mounts_and_is_writable() {
+        in_private_mount_ns(|| {
+            let dir = Path::new("/tmp/kennel-mnt-tmpfs-opts");
+            if std::fs::create_dir_all(dir).is_err() {
+                return 1;
+            }
+            if mount_tmpfs(dir, Some(8), Some("0700"), false).is_err() {
+                return 2;
+            }
+            if std::fs::write(dir.join("probe"), b"x").is_err() {
+                return 3;
+            }
+            if unmount_detach(dir).is_err() {
+                return 4;
+            }
+            0
+        });
+    }
+
+    #[test]
+    fn proc_with_hidepid_mounts() {
+        in_private_mount_ns(|| {
+            let dir = Path::new("/tmp/kennel-mnt-proc-hidepid");
+            if std::fs::create_dir_all(dir).is_err() {
+                return 1;
+            }
+            if mount_proc(dir, true).is_err() {
+                return 2;
+            }
+            // A freshly-mounted proc exposes /proc/self.
+            if std::fs::metadata(dir.join("self")).is_err() {
+                return 3;
+            }
+            if unmount_detach(dir).is_err() {
+                return 4;
+            }
+            0
         });
     }
 
