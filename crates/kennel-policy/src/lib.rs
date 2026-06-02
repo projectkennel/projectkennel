@@ -34,6 +34,7 @@ pub mod resolve;
 pub mod settled;
 pub mod signature;
 pub mod source;
+pub mod translate;
 
 pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
@@ -47,6 +48,7 @@ pub use settled::{
 pub use resolve::{resolve, ChainLink, ResolvedChain, TemplateSource};
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
+pub use translate::{translate, Translated};
 
 /// The newest `settled_schema_version` this build accepts.
 pub const SETTLED_SCHEMA_VERSION: u32 = 1;

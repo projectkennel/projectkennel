@@ -27,6 +27,9 @@ pub enum PolicyError {
     /// Template-chain resolution failed: a reference was malformed, not found in
     /// the search path, formed a cycle, or exceeded the depth bound.
     Resolution(String),
+    /// Translating the resolved source policy into the settled form failed: a
+    /// malformed CIDR, size, duration, or an unrepresentable value.
+    Translation(String),
 }
 
 impl core::fmt::Display for PolicyError {
@@ -53,6 +56,7 @@ impl core::fmt::Display for PolicyError {
                 Ok(())
             }
             Self::Resolution(m) => write!(f, "template resolution failed: {m}"),
+            Self::Translation(m) => write!(f, "settled-policy translation failed: {m}"),
         }
     }
 }
