@@ -218,26 +218,32 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     add_default_template_dirs(&mut template_dirs);
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
-    let entry = match kennel_policy::parse_source(&bytes) {
-        Ok(entry) => entry,
-        Err(e) => {
-            eprintln!("kennel: {e}");
-            return Ok(ExitCode::from(3));
-        }
-    };
 
     // Installation constants are fixed at install time; until an install-config
     // reader exists they take the documented defaults (tag 42, ULA fd00::).
     let install = InstallConstants { tag: 42, ula_gid: "fd00::".to_owned() };
     let source = FsTemplateSource { dirs: template_dirs };
-    let policy =
-        match kennel_policy::compile(&entry, &source, &install, env!("CARGO_PKG_VERSION")) {
-            Ok(policy) => policy,
-            Err(e) => {
-                eprintln!("kennel: {e}");
-                return Ok(ExitCode::from(policy_error_code(&e)));
-            }
-        };
+    let version = env!("CARGO_PKG_VERSION");
+
+    // A template / direct policy parses as a SourcePolicy; a leaf in the delta form
+    // (`[[fs.read.add]]`, …) does not, so fall back to the leaf parser.
+    let result = match kennel_policy::parse_source(&bytes) {
+        Ok(entry) => kennel_policy::compile(&entry, &source, &install, version),
+        Err(source_err) => {
+            let Ok(leaf) = kennel_policy::parse_leaf(&bytes) else {
+                eprintln!("kennel: {source_err}");
+                return Ok(ExitCode::from(3));
+            };
+            kennel_policy::compile_leaf(&leaf, &source, &install, version)
+        }
+    };
+    let policy = match result {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("kennel: {e}");
+            return Ok(ExitCode::from(policy_error_code(&e)));
+        }
+    };
 
     let doc = if unsigned {
         kennel_policy::seal_unsigned(&policy)

@@ -25,11 +25,12 @@
 //!
 //! I/O-free: the caller supplies the [`TemplateSource`] and writes the output.
 
-use crate::resolve::{resolve, TemplateSource};
+use crate::leaf::LeafPolicy;
+use crate::resolve::{resolve, ChainLink, TemplateSource};
 use crate::settled::{InstallConstants, Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy};
 use crate::signature::SignatureEnvelope;
 use crate::source::SourcePolicy;
-use crate::translate::translate;
+use crate::translate::{translate, Translated};
 use crate::{PolicyError, SETTLED_SCHEMA_VERSION};
 
 /// The framework-invariant IDs the compiler asserts, mirroring
@@ -69,7 +70,6 @@ pub fn compile(
 ) -> Result<SettledPolicy, PolicyError> {
     let resolved = resolve(entry, source)?;
     let translated = translate(&resolved.effective, install)?;
-
     let name = resolved
         .effective
         .name
@@ -78,9 +78,66 @@ pub fn compile(
         .ok_or_else(|| {
             PolicyError::Translation("policy has neither `name` nor `template_name`".to_owned())
         })?;
+    let tcv = resolved.effective.threat_catalogue_version.clone().unwrap_or_default();
+    assemble(name, &translated, &resolved.chain, &tcv, install, compiler_version)
+}
 
-    let resolved_artifacts = resolved
-        .chain
+/// Resolve, apply a leaf's deltas, translate, and assemble a settled policy.
+///
+/// A leaf policy is the delta form (`[[fs.read.add]]`, …); its chain is resolved
+/// from `template_base`, the deltas are applied to the folded effective policy
+/// (`+=`/`-=`), and the result is translated and assembled as for a template.
+///
+/// # Errors
+///
+/// Propagates [`PolicyError`] from validation, resolution, translation, or the
+/// framework-invariant re-assertion.
+pub fn compile_leaf(
+    leaf: &LeafPolicy,
+    source: &dyn TemplateSource,
+    install: &InstallConstants,
+    compiler_version: &str,
+) -> Result<SettledPolicy, PolicyError> {
+    leaf.validate()?;
+    let base = leaf
+        .template_base
+        .clone()
+        .ok_or_else(|| PolicyError::Resolution("leaf policy has no `template_base`".to_owned()))?;
+    let name = leaf
+        .name
+        .clone()
+        .ok_or_else(|| PolicyError::Translation("leaf policy has no `name`".to_owned()))?;
+
+    // Resolve the parent chain via a stub that carries only the leaf's base.
+    let stub = SourcePolicy {
+        template_base: Some(base),
+        template_name: Some("<leaf>".to_owned()),
+        ..SourcePolicy::default()
+    };
+    let resolved = resolve(&stub, source)?;
+    let mut effective = resolved.effective;
+    leaf.apply(&mut effective);
+
+    let tcv = leaf
+        .threat_catalogue_version
+        .clone()
+        .or_else(|| effective.threat_catalogue_version.clone())
+        .unwrap_or_default();
+    let translated = translate(&effective, install)?;
+    assemble(name, &translated, &resolved.chain, &tcv, install, compiler_version)
+}
+
+/// Assemble a [`SettledPolicy`] from a translated effective policy and provenance
+/// inputs, then re-assert the framework invariants on the result.
+fn assemble(
+    name: String,
+    translated: &Translated,
+    chain: &[ChainLink],
+    threat_catalogue_version: &str,
+    install: &InstallConstants,
+    compiler_version: &str,
+) -> Result<SettledPolicy, PolicyError> {
+    let resolved_artifacts = chain
         .iter()
         .map(|link| ResolvedArtifact {
             name: link.name.clone(),
@@ -95,13 +152,13 @@ pub fn compile(
     let policy = SettledPolicy {
         settled_schema_version: SETTLED_SCHEMA_VERSION,
         name,
-        deferred_substitutions: translated.deferred_substitutions,
+        deferred_substitutions: translated.deferred_substitutions.clone(),
         framework_invariants_asserted: ASSERTED_INVARIANTS.iter().map(|s| (*s).to_owned()).collect(),
-        effective_policy: translated.effective_policy,
+        effective_policy: translated.effective_policy.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),
             schema_version: SETTLED_SCHEMA_VERSION,
-            threat_catalogue_version: resolved.effective.threat_catalogue_version.unwrap_or_default(),
+            threat_catalogue_version: threat_catalogue_version.to_owned(),
             leaf_policy_sha256: String::new(),
             invariant_set_sha256: String::new(),
             install_constants: install.clone(),

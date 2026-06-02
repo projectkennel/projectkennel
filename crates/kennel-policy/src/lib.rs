@@ -31,14 +31,16 @@ pub mod compile;
 pub mod error;
 pub mod invariant;
 pub mod keys;
+pub mod leaf;
 pub mod resolve;
 pub mod settled;
 pub mod signature;
 pub mod source;
 pub mod translate;
 
-pub use compile::{compile, seal_unsigned};
+pub use compile::{compile, compile_leaf, seal_unsigned};
 pub use error::PolicyError;
+pub use leaf::{parse as parse_leaf, LeafPolicy};
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
