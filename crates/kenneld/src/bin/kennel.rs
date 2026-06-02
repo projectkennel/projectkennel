@@ -43,8 +43,9 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some((cmd, rest)) if cmd == "stop" => stop(rest),
         Some((cmd, _)) if cmd == "list" => list(),
         Some((cmd, rest)) if cmd == "compile" => compile(rest),
+        Some((cmd, rest)) if cmd == "validate" => validate(rest),
         Some((cmd, rest)) if cmd == "sign" => sign(rest),
-        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel sign <template> --key K".to_owned()),
+        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K".to_owned()),
     }
 }
 
@@ -246,19 +247,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         kennel_policy::Trust::allow_unsigned(Some(&keys))
     };
 
-    // A template / direct policy parses as a SourcePolicy; a leaf in the delta form
-    // (`[[fs.read.add]]`, …) does not, so fall back to the leaf parser.
-    let result = match kennel_policy::parse_source(&bytes) {
-        Ok(entry) => kennel_policy::compile(&entry, &source, &trust, &install, version),
-        Err(source_err) => {
-            let Ok(leaf) = kennel_policy::parse_leaf(&bytes) else {
-                eprintln!("kennel: {source_err}");
-                return Ok(ExitCode::from(3));
-            };
-            kennel_policy::compile_leaf(&leaf, &source, &trust, &install, version)
-        }
-    };
-    let compiled = match result {
+    let compiled = match build_settled(&bytes, &source, &trust, &install, version) {
         Ok(compiled) => compiled,
         Err(e) => {
             eprintln!("kennel: {e}");
@@ -304,6 +293,77 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
 /// The `<name>.lock` path beside the settled output.
 fn lock_path_for(output: &Path, name: &str) -> PathBuf {
     output.parent().unwrap_or_else(|| Path::new(".")).join(format!("{name}.lock"))
+}
+
+/// Compile policy `bytes` (a template/direct policy parses as a `SourcePolicy`; a
+/// leaf in the delta form does not, so fall back to the leaf parser). On a
+/// double parse failure the source parse error is returned.
+fn build_settled(
+    bytes: &[u8],
+    source: &FsTemplateSource,
+    trust: &kennel_policy::Trust<'_>,
+    install: &InstallConstants,
+    version: &str,
+) -> Result<kennel_policy::Compiled, kennel_policy::PolicyError> {
+    match kennel_policy::parse_source(bytes) {
+        Ok(entry) => kennel_policy::compile(&entry, source, trust, install, version),
+        Err(source_err) => kennel_policy::parse_leaf(bytes).map_or(Err(source_err), |leaf| {
+            kennel_policy::compile_leaf(&leaf, source, trust, install, version)
+        }),
+    }
+}
+
+/// `kennel validate <policy> [--template-dir D] [--require-signed] [--trust-dir D]`
+///
+/// Resolve and check a policy (chain, signatures, deltas, includes, invariants)
+/// without emitting a settled artefact. Exit 0 if valid; otherwise the same code
+/// `compile` would return.
+fn validate(args: &[String]) -> Result<ExitCode, String> {
+    let mut policy_path: Option<&str> = None;
+    let mut require_signed = false;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--require-signed" => require_signed = true,
+            "--template-dir" => template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into()),
+            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            value if policy_path.is_none() => policy_path = Some(value),
+            _ => return Err("only one <policy> may be given".to_owned()),
+        }
+    }
+    let policy_path = policy_path.ok_or("usage: kennel validate <policy> [--template-dir D] [--require-signed]")?;
+    add_default_template_dirs(&mut template_dirs);
+    add_default_trust_dirs(&mut trust_dirs);
+
+    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let install = InstallConstants { tag: 42, ula_gid: "fd00::".to_owned() };
+    let source = FsTemplateSource { dirs: template_dirs };
+    let keys = load_trust_store(&trust_dirs)?;
+    let trust = if require_signed {
+        kennel_policy::Trust::require(&keys)
+    } else {
+        kennel_policy::Trust::allow_unsigned(Some(&keys))
+    };
+
+    match build_settled(&bytes, &source, &trust, &install, env!("CARGO_PKG_VERSION")) {
+        Ok(compiled) => {
+            eprintln!(
+                "valid: `{}` resolves cleanly ({} references, {} deferred substitutions)",
+                compiled.policy.name,
+                compiled.lock.entries.len(),
+                compiled.policy.deferred_substitutions.len()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            eprintln!("invalid: {e}");
+            Ok(ExitCode::from(policy_error_code(&e)))
+        }
+    }
 }
 
 /// `kennel sign <template> --key <key> [--output <path>]`
