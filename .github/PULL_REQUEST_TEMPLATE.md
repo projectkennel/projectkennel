@@ -39,7 +39,7 @@ _If you folded any phases, state which pair and why. Folding `test:` + `scaffold
 
 ## Dependency changes — OPTIONAL
 
-_Delete this entire section if the PR does not touch `Cargo.toml`, `Cargo.lock`, `crates-archive/`, or `CHECKSUMS.toml`._
+_Delete this entire section if the PR does not touch `Cargo.toml`, `Cargo.lock`, `src/vendor/`, or `CHECKSUMS.toml`._
 
 **Crate(s) added / updated / removed:** `<name>`, `<old version>` → `<new version>`
 

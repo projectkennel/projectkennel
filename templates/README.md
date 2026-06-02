@@ -4,7 +4,7 @@ Operators do not write policy from scratch. They derive from the **templates**
 here: signed, versioned, threat-tagged baselines for recognisable workflows. A
 user's leaf policy is a short delta from a template (typically 5–15 lines with a
 `reason` on every addition). The template system is specified in
-`docs/05-templates.md`; the fully-annotated reference is
+`docs/design/05-templates.md`; the fully-annotated reference is
 `TEMPLATE-ai-coding-strict.md` at the repo root.
 
 ## The set (this directory)
@@ -25,7 +25,7 @@ Each template directory carries `policy.toml` (the template's policy), `meta.tom
 
 > These templates are **source policies**: the design contract and the input the
 > policy compiler will consume. They are intentionally ahead of the runtime. Two
-> things are not yet built (`architecture/08-as-built-notes.md` §8.2):
+> things are not yet built (`docs/architecture/08-as-built-notes.md` §8.2):
 >
 > 1. **The compiler.** `kennel compile` — which resolves the template/include
 >    chain, applies deltas, verifies signatures, and emits a signed *settled*
@@ -46,7 +46,7 @@ Each template directory carries `policy.toml` (the template's policy), `meta.tom
 | `net.mode`, `net.allow` (by-CIDR → BPF+proxy; by-name → proxy), `net.deny.invariant` | **Yes** — cgroup BPF (deny-first, fail-closed) + per-kennel `kennel-netproxy` (dual-stack). |
 | `exec.allow`, `exec.deny_setuid`/`setgid`/`setcap`/`deny_writable` | **Yes** — Landlock `EXECUTE` allowlist + the BPF/settled invariants + seccomp. |
 | `proc`, `cap.no_new_privs`, `seccomp` | **Yes**. |
-| `unix.abstract = "deny"`, signal isolation | **Yes, natively** — Landlock ABI-6 scoping (§8.1; supersedes the AppArmor/seccomp fallback in `docs/07-4`/`07-7`). |
+| `unix.abstract = "deny"`, signal isolation | **Yes, natively** — Landlock ABI-6 scoping (§8.1; supersedes the AppArmor/seccomp fallback in `docs/design/07-4`/`07-7`). |
 | `fs.dev` `ioctl` on granted nodes | **Yes** — `IOCTL_DEV` (§8.1). |
 | `lifecycle.ttl` | Schema-carried; the TTL *timer/reaping* enforcement is owed. |
 | `unix.allow` path sockets (per-kennel ssh-agent), `[dbus]`, `[x11]`, `[env]` curation, `[ptrace]`, `fs.home.sanitise`, `fs.scrub` per-file overlay | **Not yet** — design-level; the spawn builds a synthetic `/etc` + essential binds rather than arbitrary-file sanitise, and hides non-granted *names* (ENOENT) rather than per-pattern scrubbing inside granted dirs. |

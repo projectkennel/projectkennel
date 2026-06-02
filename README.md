@@ -10,35 +10,35 @@ Policy describes kernel-level constraints (which files, which network destinatio
 
 Pre-release; unversioned. The threat catalogue and design document (v0.1) are publishable, and the **reference runtime and policy compiler are implemented** — not just designed.
 
-Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](BUILD-ENV.md)): the confinement seal (mount/PID/IPC namespaces, the constructed-`$HOME` view via `pivot_root`, a synthetic `/etc`, Landlock filesystem + network rules with abstract-unix/signal scoping, a seccomp denylist, `PR_SET_NO_NEW_PRIVS`, cgroup join); per-kennel egress through a SOCKS5/HTTP proxy with a cgroup-BPF fail-closed allowlist and a per-kennel audit log; and the `kennel` CLI — `compile` (resolve a source policy + its templates into a signed, byte-pinned settled policy), `validate`, `sign`, `run`, `stop`, `list`. Policy trust is end-to-end ed25519 (templates, fragments, and the settled artefact), with a `kennel.lock` byte-pin.
+Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/BUILD-ENV.md)): the confinement seal (mount/PID/IPC namespaces, the constructed-`$HOME` view via `pivot_root`, a synthetic `/etc`, Landlock filesystem + network rules with abstract-unix/signal scoping, a seccomp denylist, `PR_SET_NO_NEW_PRIVS`, cgroup join); per-kennel egress through a SOCKS5/HTTP proxy with a cgroup-BPF fail-closed allowlist and a per-kennel audit log; and the `kennel` CLI — `compile` (resolve a source policy + its templates into a signed, byte-pinned settled policy), `validate`, `sign`, `run`, `stop`, `list`. Policy trust is end-to-end ed25519 (templates, fragments, and the settled artefact), with a `kennel.lock` byte-pin.
 
-Deferred (designed, not yet built — see [architecture/08-as-built-notes.md](architecture/08-as-built-notes.md) §8.2): the journald/syslog/stdout audit sinks and a unified audit writer (a per-kennel file sink exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell witness exists), and container-runtime integration. The shipped templates are not yet signed by a maintainer key.
+Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.2): the journald/syslog/stdout audit sinks and a unified audit writer (a per-kennel file sink exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell witness exists), and container-runtime integration. The shipped templates are not yet signed by a maintainer key.
 
 ## What is here
 
 | Path | What |
 |---|---|
-| [EXEC-SUMMARY.md](EXEC-SUMMARY.md) | Why the project exists; the one-page case. |
-| [THREATS.md](THREATS.md) | The threat catalogue: stable IDs, incident citations, MITRE/compliance mappings. The durable contribution. |
+| [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) | Why the project exists; the one-page case. |
+| [THREATS.md](docs/design/THREATS.md) | The threat catalogue: stable IDs, incident citations, MITRE/compliance mappings. The durable contribution. |
 | [docs/](docs/) | The design document — threat model, policy surface, template system, enforcement architecture. Its own product; an implementation-independent specification. |
-| [TEMPLATE-ai-coding-strict.md](TEMPLATE-ai-coding-strict.md) | A complete, annotated worked policy template. |
-| [architecture/](architecture/) | The reference implementation's architecture — process model, API surfaces, crate decomposition, trust boundaries, state and supervision, build, paths. |
-| [CODING-STANDARDS.md](CODING-STANDARDS.md) | Normative engineering rules (the bar is OpenSSH / libpam). |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, and what gets closed without review. |
+| [TEMPLATE-ai-coding-strict.md](docs/design/TEMPLATE-ai-coding-strict.md) | A complete, annotated worked policy template. |
+| [architecture/](docs/architecture/) | The reference implementation's architecture — process model, API surfaces, crate decomposition, trust boundaries, state and supervision, build, paths. |
+| [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md) | Normative engineering rules (the bar is OpenSSH / libpam). |
+| [CONTRIBUTING.md](.github/CONTRIBUTING.md) | How to contribute, and what gets closed without review. |
 
 ## Reading order
 
-New readers: [EXEC-SUMMARY.md](EXEC-SUMMARY.md) → [THREATS.md](THREATS.md) → [docs/](docs/) (start at §1) → [TEMPLATE-ai-coding-strict.md](TEMPLATE-ai-coding-strict.md). Implementers and auditors then read [architecture/](architecture/) and [CODING-STANDARDS.md](CODING-STANDARDS.md).
+New readers: [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) → [THREATS.md](docs/design/THREATS.md) → [docs/](docs/) (start at §1) → [TEMPLATE-ai-coding-strict.md](docs/design/TEMPLATE-ai-coding-strict.md). Implementers and auditors then read [architecture/](docs/architecture/) and [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md).
 
 ## Reporting a vulnerability
 
-See [SECURITY.md](SECURITY.md). Do not file a public issue for a specific exploitable vulnerability in Project Kennel itself.
+See [SECURITY.md](.github/SECURITY.md). Do not file a public issue for a specific exploitable vulnerability in Project Kennel itself.
 
 ## Licence
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The threat catalogue, design document, and reference runtime are all Apache-2.0.
 
-One exception: the BPF programs under [bpf/](bpf/) (the `*.bpf.c` sources and their shared headers) are GPL-2.0, declared by the SPDX headers in those files and required by the Linux kernel for programs that declare a "GPL" license section. That applies to the in-kernel BPF object code; the user-space loader and everything else are Apache-2.0.
+One exception: the BPF programs under [bpf/](src/bpf/) (the `*.bpf.c` sources and their shared headers) are GPL-2.0, declared by the SPDX headers in those files and required by the Linux kernel for programs that declare a "GPL" license section. That applies to the in-kernel BPF object code; the user-space loader and everything else are Apache-2.0.
 
 ## Contact and links
 

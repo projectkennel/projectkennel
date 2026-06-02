@@ -6,7 +6,7 @@ container escape-hatch flags.
 
 > **Design-level — not yet enforced.** Project Kennel has no container-runtime
 > integration today, so the `[container]` section is the design contract, not a
-> working path (`templates/README.md`, `architecture/08-as-built-notes.md` §8.2).
+> working path (`templates/README.md`, `docs/architecture/08-as-built-notes.md` §8.2).
 > The inherited `fs`/`net`/`cap` confinement is enforced; the container
 > orchestration is not. This template is here to pin the intended shape and to
 > complete the executive-summary set.

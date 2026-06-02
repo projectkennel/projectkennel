@@ -11,7 +11,7 @@
 # write = the kennel's own state) and so cannot be run directly; derive a usable
 # template from it.
 #
-# See docs/05-templates.md, TEMPLATE-ai-coding-strict.md, and templates/README.md
+# See docs/design/05-templates.md, TEMPLATE-ai-coding-strict.md, and templates/README.md
 # (implementation status — some sections below are design-level / compiler-folded).
 # ============================================================================
 

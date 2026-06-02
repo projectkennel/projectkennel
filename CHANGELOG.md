@@ -2,7 +2,7 @@
 
 All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
-Per [CODING-STANDARDS.md](CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency updates (§5), MSRV changes (§2), and threat-catalogue additions are also recorded here.
+Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency updates (§5), MSRV changes (§2), and threat-catalogue additions are also recorded here.
 
 ## [Unreleased]
 
@@ -23,7 +23,7 @@ First versioned cut: all workspace crates set to `0.1.0` (centralised in `[works
 
 ### Dependencies
 
-- **First dependency adopted: `libc` =0.2.186** (§5.5-approved; reviewer remco). Vendored to `crates-archive/` as a cargo local registry (`.cargo/config.toml` replaces crates.io); recorded in `CHECKSUMS.toml`, `DEPENDENCIES.md`, `RELEASE-WATCH.toml`. Provenance verified independent of crates.io against the GitHub source at tag 0.2.186 (`tools/audit-source.sh`). No transitive deps.
+- **First dependency adopted: `libc` =0.2.186** (§5.5-approved; reviewer remco). Vendored to `src/vendor/` as a cargo local registry (`.cargo/config.toml` replaces crates.io); recorded in `CHECKSUMS.toml`, `DEPENDENCIES.md`, `RELEASE-WATCH.toml`. Provenance verified independent of crates.io against the GitHub source at tag 0.2.186 (`tools/audit-source.sh`). No transitive deps.
 - **`nix` =0.31.3** adopted (§5.5-approved; reviewer remco), `default-features = false, features = ["user", "process"]`. Safe, typed syscall wrappers preferred over hand-rolled `unsafe` (§4, "don't roll your own `unsafe`"). Transitive: `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal), `cfg_aliases` =0.2.1 (build). Each vendored and GitHub-provenance-checked (`tools/audit-source.sh`).
 - **`bitflags` =2.11.1** promoted to a direct dependency of `kennel-syscall` (typed Landlock access-right sets); already approved as a nix transitive.
 - **data/cli/caps dependency batch** (§5.5-approved; reviewer remco) vendored ahead of use, all provenance-proven against GitHub via `tools/audit-source.sh`: direct `caps`, `serde`, `basic-toml`, `time`, `lexopt`; transitive serde proc-macro stack (`serde_core`/`serde_derive`/`proc-macro2`/`quote`/`syn`/`unicode-ident`), `time` (`itoa`/`time-core`/`time-macros`/`deranged`/`powerfmt`/`num-conv`). Chose `lexopt` over clap and `basic-toml` over toml to avoid their large trees.
@@ -105,7 +105,7 @@ First versioned cut: all workspace crates set to `0.1.0` (centralised in `[works
 
 ### Pending
 
-- Documented-but-deferred (`architecture/08-as-built-notes.md` §8.2): the
+- Documented-but-deferred (`docs/architecture/08-as-built-notes.md` §8.2): the
   journald/syslog/stdout audit sinks + unified audit writer (a per-kennel file sink
   exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell
   witness exists), and container-runtime integration.

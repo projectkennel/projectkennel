@@ -1,14 +1,14 @@
 # Cargo source replacement (CODING-STANDARDS.md §5.5).
 #
 # Every crate Cargo resolves comes from the in-repo local registry under
-# crates-archive/ (the audited .crate tarballs + their index), NOT from
+# src/vendor/ (the audited .crate tarballs + their index), NOT from
 # crates.io. Builds never reach the network for sources: the only thing that
 # fetches from crates.io is tools/audit-helper.sh, independently, at audit time.
 # This is what makes a post-audit registry compromise unable to change our build
 # (the on-disk .crate is authoritative; CHECKSUMS.toml and verify-checksums.sh
 # enforce it).
 #
-# crates-archive/ is a cargo "local registry": the <name>-<version>.crate files
+# src/vendor/ is a cargo "local registry": the <name>-<version>.crate files
 # at its root plus an index/ tree. Entries are added via the §5.5 procedure
 # (tools/README.md); the index line for each crate is taken verbatim from
 # crates.io's index so metadata and checksum match exactly.
@@ -17,4 +17,4 @@
 replace-with = "vendored"
 
 [source.vendored]
-local-registry = "crates-archive"
+local-registry = "src/vendor"

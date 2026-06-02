@@ -1,4 +1,4 @@
-# Template identity + signing metadata (docs/05-templates.md §5.2, §5.10).
+# Template identity + signing metadata (docs/design/05-templates.md §5.2, §5.10).
 name = "base-confined"
 version = "1"
 # Root template — no parent.

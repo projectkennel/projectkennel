@@ -11,7 +11,7 @@
 #
 # *** DESIGN-LEVEL — NOT YET ENFORCED. *** The [container] section below has no
 # runtime behind it: Project Kennel has no container-runtime integration today
-# (templates/README.md, architecture/08-as-built-notes.md §8.2). The fs/net/cap
+# (templates/README.md, docs/architecture/08-as-built-notes.md §8.2). The fs/net/cap
 # parts inherited from base-confined are enforced; the container orchestration is
 # the design contract for when that integration lands. This template is included
 # for completeness of the executive-summary set and to pin the intended shape.

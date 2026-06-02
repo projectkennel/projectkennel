@@ -1,6 +1,6 @@
 # Project Kennel — Cargo workspace root.
 #
-# One crate per architectural module (architecture/03-crate-decomposition.md),
+# One crate per architectural module (docs/architecture/03-crate-decomposition.md),
 # each prefixed `kennel-`. Crates are added as they are implemented; this is
 # not yet the full set described in the architecture.
 #
@@ -12,14 +12,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/kennel-privhelper",
-    "crates/kennel-bpf",
-    "crates/kennel-policy",
-    "crates/kennel-spawn",
-    "crates/kennel-syscall",
-    "crates/kennel-text",
-    "crates/kennel-netproxy",
-    "crates/kenneld",
+    "src/crates/kennel-privhelper",
+    "src/crates/kennel-bpf",
+    "src/crates/kennel-policy",
+    "src/crates/kennel-spawn",
+    "src/crates/kennel-syscall",
+    "src/crates/kennel-text",
+    "src/crates/kennel-netproxy",
+    "src/crates/kenneld",
 ]
 
 [workspace.package]

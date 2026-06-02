@@ -3,7 +3,7 @@
 Strict confinement for an AI coding agent (Claude Code, Codex, Cursor, Aider, …)
 working against **one project**. The canonical case Project Kennel was designed
 for. The fully-annotated reference — every rule mapped to its kernel mechanism,
-with worked denials — is [`TEMPLATE-ai-coding-strict.md`](../../TEMPLATE-ai-coding-strict.md)
+with worked denials — is [`TEMPLATE-ai-coding-strict.md`](../../docs/design/TEMPLATE-ai-coding-strict.md)
 at the repo root.
 
 ## What the user adds

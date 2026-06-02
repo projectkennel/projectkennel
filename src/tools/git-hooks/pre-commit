@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Project Kennel pre-commit hook (CODING-STANDARDS.md §15.2).
+#
+# Target: under five seconds on a clean workspace, so no one is tempted to
+# bypass it. Runs the fast subset of the CI gate (§14) plus two repository
+# hygiene checks. The slower, full-workspace checks live in pre-push.
+#
+# bash (not POSIX sh): we use arrays and `set -o pipefail` to handle the staged
+# file list safely (§15.4 permits bash where features genuinely require it).
+#
+# The secret scan named in §15.2 lives in the commit-msg hook, not here: its
+# false-positive waiver is a commit-message footer (`kennel-secret-waiver:`),
+# which is not available until the message exists. commit-msg has both the
+# staged content and the message, so the scan is correct only there.
+set -euo pipefail
+
+MAX_FILE_BYTES=$((10 * 1024 * 1024)) # 10 MiB (§15.2 file-size sanity)
+
+fail() {
+	echo "pre-commit: $1" >&2
+	exit 1
+}
+
+# Staged, added/copied/modified paths (deletions excluded: nothing to check).
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACM)
+if [ ${#staged[@]} -eq 0 ]; then
+	exit 0
+fi
+
+# 1. Formatting — whole workspace; fmt is fast and the check is all-or-nothing.
+cargo fmt --all -- --check ||
+	fail "cargo fmt found unformatted code; run 'cargo fmt --all'"
+
+# 2. Clippy, scoped to the crates with staged changes (not the whole workspace;
+#    speed). Package name == crate directory name under crates/.
+declare -A touched=()
+for f in "${staged[@]}"; do
+	case "$f" in
+	src/crates/*)
+		pkg=$(printf '%s\n' "$f" | cut -d/ -f3)
+		touched["$pkg"]=1
+		;;
+	esac
+done
+for pkg in "${!touched[@]}"; do
+	cargo clippy -p "$pkg" --all-targets -- -D warnings ||
+		fail "clippy failed for $pkg"
+done
+
+# 3. File-size sanity. crates-archive/ is exempt by prefix (audited tarballs).
+for f in "${staged[@]}"; do
+	[ -f "$f" ] || continue
+	case "$f" in
+	src/vendor/*) continue ;;
+	esac
+	size=$(wc -c <"$f")
+	if [ "$size" -gt "$MAX_FILE_BYTES" ]; then
+		fail "$f is ${size} bytes, over the ${MAX_FILE_BYTES}-byte limit"
+	fi
+done
+
+# 4. Vendoring consistency: crates-archive/ and CHECKSUMS.toml move together.
+archive_staged=0
+checksums_staged=0
+for f in "${staged[@]}"; do
+	case "$f" in
+	src/vendor/*) archive_staged=1 ;;
+	supply-chain/CHECKSUMS.toml) checksums_staged=1 ;;
+	esac
+done
+if [ "$archive_staged" -eq 1 ] && [ "$checksums_staged" -eq 0 ]; then
+	fail "crates-archive/ changed but CHECKSUMS.toml is not staged"
+fi
+if [ "$checksums_staged" -eq 1 ] && [ "$archive_staged" -eq 0 ]; then
+	fail "CHECKSUMS.toml changed but no crates-archive/ change is staged"
+fi
+
+exit 0

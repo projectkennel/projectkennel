@@ -7,12 +7,12 @@
 # tracked as owed (the notes below); CI must not claim to run a check it does not.
 #
 # The `supply-chain` job is a blocking gate: the tool-binary pins
-# (tools/ci-tools.toml) are maintainer-ratified (§5.5), and all three checks have
+# (src/tools/ci-tools.toml) are maintainer-ratified (§5.5), and all three checks have
 # been observed green. A maintainer still must mark it a *required* status check
 # in branch protection — that is a GitHub repo setting, not expressible here.
 #
 # Owed (land with the release infra):
-#   - tools/verify-checksums (Rust) — needs sha2 (§5.5.1 bootstrap).
+#   - src/tools/verify-checksums (Rust) — needs sha2 (§5.5.1 bootstrap).
 #   - reproducible-build double-build — needs the release-image (§BUILD-ENV).
 #   - BPF verifier-load matrix (bpftool prog load on kernels >= 6.10) — needs
 #     custom-kernel runners; the compile check below is the hosted-runner part.
@@ -79,7 +79,7 @@ jobs:
       # kennel-bpf-loadable). The verifier-load matrix is owed (custom-kernel
       # runners); this catches compile regressions.
       - name: Compile all programs
-        working-directory: bpf
+        working-directory: src/bpf
         run: |
           set -euo pipefail
           for f in connect4 connect6 bind4 bind6 setsockopt sock_create sendmsg4 sendmsg6; do
@@ -98,14 +98,14 @@ jobs:
       # `fuzz/` is a separate workspace (it must not perturb the shipped
       # build/Cargo.lock); the main `cargo test` never reaches it. This runs the
       # no-panic corpus across every untrusted-input parser. `arbitrary` is
-      # vendored in crates-archive/, so the run is offline like every other build.
+      # vendored in src/vendor/, so the run is offline like every other build.
       - name: Toolchain
         run: rustup show && cargo --version
       - name: Clippy (fuzz workspace)
-        working-directory: fuzz
+        working-directory: src/fuzz
         run: cargo clippy --offline --locked --all-targets -- -D warnings
       - name: Fuzz smoke test
-        working-directory: fuzz
+        working-directory: src/fuzz
         run: cargo test --offline --locked
 
   supply-chain:
@@ -119,11 +119,11 @@ jobs:
       # binaries. `cargo install` is impossible here: the offline
       # `.cargo/config.toml` replaces crates.io with the local registry, so the
       # tools' own dependency trees cannot resolve. The script verifies each
-      # archive's SHA-256 against tools/ci-tools.toml before extracting it.
+      # archive's SHA-256 against src/tools/ci-tools.toml before extracting it.
       - name: Install pinned tools
         run: |
           set -euo pipefail
-          bindir="$(tools/install-ci-tools.sh)"
+          bindir="$(src/tools/install-ci-tools.sh)"
           echo "$bindir" >> "$GITHUB_PATH"
       # Licences, bans, sources (offline), and RustSec advisories (fetches the DB).
       - name: cargo deny
@@ -134,7 +134,7 @@ jobs:
       # warning, so --deny warnings does not trip on it.
       - name: cargo audit
         run: cargo audit --deny warnings
-      # The audit chain (supply-chain/): 6 of the 17 third-party crates are
+      # The audit chain (supply-chain/): 11 of the 17 third-party crates are
       # fully audited (audits.toml), the rest exempted (config.toml). --locked
       # additionally requires the store to be cargo-vet-fmt canonical.
       - name: cargo vet
@@ -146,12 +146,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Checksum witness (shell, §5.5.1)
-        run: tools/verify-checksums.sh
+        run: src/tools/verify-checksums.sh
       - name: Hook + tool tests
         run: |
           set -euo pipefail
-          tools/git-hooks/tests/commit-msg.sh
-          tools/tests/verify-checksums.sh
-          tools/tests/audit-helper.sh
-          tools/tests/audit-source.sh
-          tools/tests/install-ci-tools.sh
+          src/tools/git-hooks/tests/commit-msg.sh
+          src/tools/tests/verify-checksums.sh
+          src/tools/tests/audit-helper.sh
+          src/tools/tests/audit-source.sh
+          src/tools/tests/install-ci-tools.sh

@@ -4,7 +4,7 @@ The project's **public** signing keys — `<key_id>.pub`, each the base64 of a
 32-byte Ed25519 public key. These verify the signed reference templates
 (`templates/*/policy.toml` carry a matching `[signature]`) and signed release
 artefacts. The register, holders, and rotation policy are in
-[MAINTAINERS.md](../MAINTAINERS.md).
+[MAINTAINERS.md](../docs/governance/MAINTAINERS.md).
 
 `tools/install.sh` deploys every `*.pub` here into the runtime trust store at
 `/etc/kennel/keys/`; the CLI also reads `~/.config/kennel/keys/`. An org or
