@@ -24,6 +24,9 @@ pub enum PolicyError {
     /// A source policy failed schema validation (identity, reference grammar, or
     /// a missing `reason`). Carries one human-readable message per problem found.
     SourceValidation(Vec<String>),
+    /// Template-chain resolution failed: a reference was malformed, not found in
+    /// the search path, formed a cycle, or exceeded the depth bound.
+    Resolution(String),
 }
 
 impl core::fmt::Display for PolicyError {
@@ -49,6 +52,7 @@ impl core::fmt::Display for PolicyError {
                 }
                 Ok(())
             }
+            Self::Resolution(m) => write!(f, "template resolution failed: {m}"),
         }
     }
 }

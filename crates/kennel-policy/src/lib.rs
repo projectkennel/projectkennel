@@ -30,6 +30,7 @@ pub mod canonical;
 pub mod error;
 pub mod invariant;
 pub mod keys;
+pub mod resolve;
 pub mod settled;
 pub mod signature;
 pub mod source;
@@ -43,6 +44,7 @@ pub use settled::{
     ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy,
     TmpPolicy, TtlAction,
 };
+pub use resolve::{resolve, ChainLink, ResolvedChain, TemplateSource};
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
 

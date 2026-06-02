@@ -760,7 +760,7 @@ fn is_blank(s: Option<&str>) -> bool {
 }
 
 /// Validate a full versioned reference `<name>@v<semver-core>`.
-fn validate_reference(reference: &str) -> Result<(), String> {
+pub(crate) fn validate_reference(reference: &str) -> Result<(), String> {
     let Some((name, version)) = reference.split_once('@') else {
         return Err("missing `@version` (expected `<name>@v<ver>`)".to_owned());
     };
@@ -769,7 +769,7 @@ fn validate_reference(reference: &str) -> Result<(), String> {
 }
 
 /// Validate the `<name>` part of a reference: `[a-z0-9][a-z0-9-]{0,63}`.
-fn validate_ref_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_ref_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 {
         return Err("name must be 1..=64 characters".to_owned());
     }
@@ -785,7 +785,7 @@ fn validate_ref_name(name: &str) -> Result<(), String> {
 }
 
 /// Validate the `<version>` part of a reference: `v` + a 1..=3-component numeric core.
-fn validate_ref_version(version: &str) -> Result<(), String> {
+pub(crate) fn validate_ref_version(version: &str) -> Result<(), String> {
     let Some(core) = version.strip_prefix('v') else {
         return Err("version must start with `v` (e.g. `v4`, `v2.33.2`)".to_owned());
     };
