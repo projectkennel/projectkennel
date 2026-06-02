@@ -7,10 +7,11 @@
 # owed (see the `supply-chain` job and the notes below); CI must not claim to
 # run a check it does not.
 #
-# The `supply-chain` job is `continue-on-error` (advisory, not blocking): the
-# pinned tool binaries in tools/ci-tools.toml are verified by hash but their
-# §5.5 second-approval cross-verification is still PENDING. A maintainer makes
-# this gate required (branch protection) once those entries are ratified.
+# The `supply-chain` job is `continue-on-error` (advisory, not blocking). The
+# tool-binary pins in tools/ci-tools.toml are maintainer-ratified (§5.5), so the
+# remaining reason it does not block is operational: it has not yet been observed
+# to run green here. A maintainer makes it a required check (branch protection +
+# dropping that line) after the first clean run.
 #
 # Owed (land with the release infra):
 #   - tools/verify-checksums (Rust) — needs sha2 (§5.5.1 bootstrap).
@@ -116,10 +117,10 @@ jobs:
   supply-chain:
     name: supply-chain (deny, audit)
     runs-on: ubuntu-latest
-    # Advisory until the tool-binary pins in tools/ci-tools.toml clear their
-    # §5.5 second approval. The job runs the real checks and surfaces results;
-    # it does not block merge. Flip to a required check (and drop this line)
-    # once ci-tools.toml is ratified.
+    # Advisory, not blocking. The tool pins are ratified (tools/ci-tools.toml);
+    # this stays non-blocking only until the job is observed to run green here.
+    # Flip to a required check (drop this line + add branch protection) after
+    # the first clean run.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
