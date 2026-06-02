@@ -27,9 +27,44 @@
 //! store is supplied, in either mode.
 
 use crate::keys::{KeySet, SigningKey};
+use crate::leaf::LeafPolicy;
 use crate::signature::{verify_signature, SignatureEnvelope, SignatureError};
 use crate::source::SourcePolicy;
 use crate::PolicyError;
+
+/// A signable artefact: an optional signature envelope plus the canonical bytes it
+/// covers.
+///
+/// Implemented for both source templates ([`SourcePolicy`]) and included fragments
+/// ([`LeafPolicy`]), so [`Trust::check`] verifies either against the same trust store.
+pub trait Signable {
+    /// The artefact's signature envelope, if present.
+    fn signature(&self) -> Option<&SignatureEnvelope>;
+    /// The canonical bytes the signature covers (the artefact minus `[signature]`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::Canonical`] if serialisation fails.
+    fn canonical_bytes(&self) -> Result<Vec<u8>, PolicyError>;
+}
+
+impl Signable for SourcePolicy {
+    fn signature(&self) -> Option<&SignatureEnvelope> {
+        self.signature.as_ref()
+    }
+    fn canonical_bytes(&self) -> Result<Vec<u8>, PolicyError> {
+        canonical_source(self)
+    }
+}
+
+impl Signable for LeafPolicy {
+    fn signature(&self) -> Option<&SignatureEnvelope> {
+        self.signature.as_ref()
+    }
+    fn canonical_bytes(&self) -> Result<Vec<u8>, PolicyError> {
+        canonical_leaf(self)
+    }
+}
 
 /// Whether unsigned source artefacts are tolerated during resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,19 +109,21 @@ impl<'a> Trust<'a> {
         matches!(self.mode, SignatureMode::Require)
     }
 
-    /// Verify one ancestor against this trust context, returning the verified
-    /// signing-key id (if a signature was checked).
+    /// Verify a [`Signable`] artefact (a template ancestor or an included fragment)
+    /// against this trust context, returning the verified signing-key id (if a
+    /// signature was checked).
     ///
     /// # Errors
     ///
     /// Returns [`PolicyError::Resolution`] when [`SignatureMode::Require`] and the
     /// artefact is unsigned or no trust store is configured, or
     /// [`PolicyError::Signature`] when a present signature fails to verify.
-    pub fn check(&self, name: &str, policy: &SourcePolicy) -> Result<Option<String>, PolicyError> {
-        match (&policy.signature, self.keys) {
+    pub fn check<T: Signable>(&self, name: &str, policy: &T) -> Result<Option<String>, PolicyError> {
+        match (policy.signature(), self.keys) {
             (Some(env), Some(keys)) => {
-                let key_id = verify_source(policy, env, keys)?;
-                Ok(Some(key_id))
+                let canonical = policy.canonical_bytes()?;
+                verify_signature(&canonical, env, keys).map_err(PolicyError::Signature)?;
+                Ok(Some(env.key_id.clone()))
             }
             (Some(_), None) => {
                 if self.mode == SignatureMode::Require {
@@ -104,6 +141,35 @@ impl<'a> Trust<'a> {
             }
         }
     }
+}
+
+/// The canonical bytes a fragment's ([`LeafPolicy`]) signature covers: its TOML
+/// serialisation with the `[signature]` table excluded.
+///
+/// # Errors
+///
+/// Returns [`PolicyError::Canonical`] if serialisation fails.
+pub fn canonical_leaf(leaf: &LeafPolicy) -> Result<Vec<u8>, PolicyError> {
+    let mut bare = leaf.clone();
+    bare.signature = None;
+    basic_toml::to_string(&bare).map(String::into_bytes).map_err(|e| PolicyError::Canonical(e.to_string()))
+}
+
+/// Sign a fragment ([`LeafPolicy`]), returning a copy with its `[signature]` set.
+///
+/// # Errors
+///
+/// Returns [`PolicyError::Canonical`] if the canonical form cannot be produced.
+pub fn sign_leaf(leaf: &LeafPolicy, key: &SigningKey) -> Result<LeafPolicy, PolicyError> {
+    let sig = key.sign(&canonical_leaf(leaf)?);
+    let mut signed = leaf.clone();
+    signed.signature = Some(SignatureEnvelope {
+        algorithm: "ed25519".to_owned(),
+        key_id: key.key_id().to_owned(),
+        signature: crate::b64::encode(&sig),
+        signed_fields: Vec::new(),
+    });
+    Ok(signed)
 }
 
 fn require_err(name: &str, why: &str) -> PolicyError {
@@ -226,6 +292,25 @@ mod tests {
             trust.check("base-confined", &signed).expect("verify"),
             Some("kennel-maint-2026".to_owned())
         );
+    }
+
+    #[test]
+    fn fragment_signing_verifies_through_trust_check() {
+        let (key, ks) = keypair();
+        let frag = crate::leaf::parse(
+            b"name = \"corp-egress\"\n[[net.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
+        )
+        .expect("parse fragment");
+        let signed = sign_leaf(&frag, &key).expect("sign fragment");
+        // Verified via the generic Signable path that includes use.
+        assert_eq!(
+            Trust::require(&ks).check("corp-egress", &signed).expect("verify"),
+            Some("kennel-maint-2026".to_owned())
+        );
+        // Tampering after signing is caught.
+        let mut tampered = signed;
+        tampered.threat_catalogue_version = Some("x".to_owned());
+        assert!(Trust::require(&ks).check("corp-egress", &tampered).is_err());
     }
 
     #[test]

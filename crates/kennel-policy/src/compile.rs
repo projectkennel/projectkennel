@@ -167,10 +167,9 @@ pub fn compile_leaf(
 /// an [`PolicyError::IncludeConflict`] — resolution is not last-wins. Returns the
 /// resolved fragments as chain links for the lockfile.
 ///
-/// Scope: this build resolves fragments in development mode. Fragment **signature
-/// verification** and fragment-declared **invariants** are deferred; under
-/// `--require-signed`, the presence of includes is therefore refused rather than
-/// silently trusted.
+/// Scope: fragment-declared **invariants** (`[[net.deny.invariant]]` inside a
+/// fragment) are not yet honoured; fragment signatures, however, are verified
+/// against `trust` exactly like template ancestors.
 fn apply_includes(
     effective: &mut SourcePolicy,
     includes: &[String],
@@ -178,17 +177,6 @@ fn apply_includes(
     trust: &Trust<'_>,
 ) -> Result<Vec<ChainLink>, PolicyError> {
     use crate::resolve::split_reference;
-
-    if includes.is_empty() {
-        return Ok(Vec::new());
-    }
-    if trust.requires_signatures() {
-        return Err(PolicyError::Resolution(
-            "includes are not yet supported under --require-signed (fragment signature \
-             verification is a later increment); recompile without it or drop the include"
-                .to_owned(),
-        ));
-    }
 
     let mut links = Vec::new();
     let mut seen_net: Vec<crate::source::NetAllow> = Vec::new();
@@ -211,6 +199,10 @@ fn apply_includes(
                 )));
             }
         }
+        // Verify the fragment's signature against the trust store (refuses an
+        // unsigned/unverifiable fragment under --require-signed).
+        let signing_key_id = trust.check(&name, &fragment)?;
+
         // Conflict check: a host added by two fragments with differing rules.
         for entry in fragment.net_allow_adds() {
             let key = crate::leaf::net_key(entry);
@@ -229,7 +221,7 @@ fn apply_includes(
         links.push(ChainLink {
             name,
             version,
-            signing_key_id: None,
+            signing_key_id,
             signature: fragment.signature.as_ref().map(|e| e.signature.clone()),
         });
     }
@@ -441,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn includes_refused_under_require_signed() {
+    fn unsigned_include_is_refused_under_require_signed() {
         let frag = "name = \"corp-egress\"\n[[net.allow.add]]\nname = \"x.corp\"\nports = [443]\nreason = \"r\"\n";
         let source = source_with_fragments(&[("corp-egress", frag)]);
         let ks = KeySet::new();
@@ -449,9 +441,42 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
-        // require-signed compiles need signed ancestors too, but the include guard
-        // fires first; either way it must not silently trust the fragment.
+        // An unsigned fragment must not be silently trusted when signatures are required.
         assert!(compile_leaf(&leaf, &source, &Trust::require(&ks), &install(), "v").is_err());
+    }
+
+    #[test]
+    fn signed_include_verifies_and_is_lock_pinned_under_require_signed() {
+        use crate::source_sig::{sign_leaf, sign_source};
+        let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
+        let mut ks = KeySet::new();
+        ks.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+
+        // Sign the chain (base-confined, ai-coding-strict) and the fragment.
+        let to_bytes = |p: &crate::source::SourcePolicy| {
+            basic_toml::to_string(&sign_source(p, &key).expect("sign")).expect("ser").into_bytes()
+        };
+        let frag = crate::leaf::parse(
+            b"name = \"corp-egress\"\n[[net.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
+        )
+        .expect("parse fragment");
+        let signed_frag = basic_toml::to_string(&sign_leaf(&frag, &key).expect("sign"))
+            .expect("ser")
+            .into_bytes();
+        let source = MapSource(vec![
+            ("base-confined".to_owned(), "v1".to_owned(), to_bytes(&parse(BASE_CONFINED.as_bytes()).expect("p"))),
+            ("ai-coding-strict".to_owned(), "v1".to_owned(), to_bytes(&parse(AI_CODING_STRICT.as_bytes()).expect("p"))),
+            ("corp-egress".to_owned(), "v1".to_owned(), signed_frag),
+        ]);
+        let leaf = crate::leaf::parse(
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
+        )
+        .expect("parse leaf");
+        let compiled = compile_leaf(&leaf, &source, &Trust::require(&ks), &install(), "v")
+            .expect("signed chain + signed fragment verifies under require");
+        assert!(compiled.policy.effective_policy.net.allow_names.iter().any(|n| n.name == "proxy.corp"));
+        let locked = compiled.lock.entries.iter().find(|e| e.name == "corp-egress").expect("locked");
+        assert_eq!(locked.signing_key_id, "kennel-maint-2026", "fragment key recorded in the lock");
     }
 
     #[test]

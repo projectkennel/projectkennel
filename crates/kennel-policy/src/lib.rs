@@ -53,7 +53,7 @@ pub use settled::{
     TmpPolicy, TtlAction,
 };
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
-pub use source_sig::{sign_source, verify_self, verify_source, SignatureMode, Trust};
+pub use source_sig::{sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust};
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
 pub use translate::{translate, Translated};
