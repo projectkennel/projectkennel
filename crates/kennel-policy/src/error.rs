@@ -33,6 +33,9 @@ pub enum PolicyError {
     /// A resolved reference's content no longer matches the lockfile pin — the same
     /// `name@version` resolved to different signed bytes than were recorded.
     LockMismatch(String),
+    /// Two included fragments contribute conflicting entries for the same unique key
+    /// (the author must reconcile them; resolution is not last-wins).
+    IncludeConflict(String),
 }
 
 impl core::fmt::Display for PolicyError {
@@ -61,6 +64,7 @@ impl core::fmt::Display for PolicyError {
             Self::Resolution(m) => write!(f, "template resolution failed: {m}"),
             Self::Translation(m) => write!(f, "settled-policy translation failed: {m}"),
             Self::LockMismatch(m) => write!(f, "lockfile mismatch: {m}"),
+            Self::IncludeConflict(m) => write!(f, "include conflict: {m}"),
         }
     }
 }

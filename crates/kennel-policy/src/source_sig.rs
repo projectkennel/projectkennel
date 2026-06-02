@@ -68,6 +68,12 @@ impl<'a> Trust<'a> {
         Self { keys: None, mode: SignatureMode::AllowUnsigned }
     }
 
+    /// Whether this context requires signatures ([`SignatureMode::Require`]).
+    #[must_use]
+    pub const fn requires_signatures(&self) -> bool {
+        matches!(self.mode, SignatureMode::Require)
+    }
+
     /// Verify one ancestor against this trust context, returning the verified
     /// signing-key id (if a signature was checked).
     ///

@@ -174,7 +174,7 @@ pub fn resolve_verified(
 }
 
 /// Split and validate a versioned reference into `(name, version)`.
-fn split_reference(reference: &str) -> Result<(String, String), PolicyError> {
+pub(crate) fn split_reference(reference: &str) -> Result<(String, String), PolicyError> {
     let bad = |d: String| PolicyError::Resolution(format!("`template_base` = \"{reference}\": {d}"));
     let (name, version) = reference
         .split_once('@')

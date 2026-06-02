@@ -370,7 +370,8 @@ const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
         | E::InvariantViolations(_)
         | E::SourceValidation(_)
         | E::Resolution(_)
-        | E::Translation(_) => 3,
+        | E::Translation(_)
+        | E::IncludeConflict(_) => 3,
     }
 }
 

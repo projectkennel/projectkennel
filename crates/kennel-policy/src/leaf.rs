@@ -230,6 +230,27 @@ impl LeafPolicy {
         }
     }
 
+    /// Whether this policy is additive-only — it carries no `*.remove` deltas. An
+    /// included fragment must satisfy this (`02-2` §Includes): fragments may only add.
+    #[must_use]
+    pub fn is_additive_only(&self) -> bool {
+        let path_clean = |d: &Option<PathListDelta>| d.as_ref().is_none_or(|x| x.remove.is_empty());
+        let fs_ok = self
+            .fs
+            .as_ref()
+            .is_none_or(|f| path_clean(&f.read) && path_clean(&f.write) && path_clean(&f.deny));
+        let exec_ok = self.exec.as_ref().is_none_or(|e| path_clean(&e.allow));
+        let net_ok = self.net.as_ref().is_none_or(|n| n.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
+        let unix_ok = self.unix.as_ref().is_none_or(|u| u.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
+        fs_ok && exec_ok && net_ok && unix_ok
+    }
+
+    /// This policy's `[[net.allow.add]]` entries (for include conflict checks).
+    #[must_use]
+    pub fn net_allow_adds(&self) -> &[NetAllow] {
+        self.net.as_ref().and_then(|n| n.allow.as_ref()).map_or(&[], |a| a.add.as_slice())
+    }
+
     /// Apply this leaf's deltas to the folded effective policy, in place.
     ///
     /// `add` appends entries not already present; `remove` drops entries matching by
@@ -287,7 +308,7 @@ fn apply_paths(target: &mut Option<Vec<String>>, delta: Option<&PathListDelta>) 
 }
 
 /// Unique key for a network allow entry (name, else cidr).
-fn net_key(a: &NetAllow) -> &str {
+pub(crate) fn net_key(a: &NetAllow) -> &str {
     a.name.as_deref().or(a.cidr.as_deref()).unwrap_or("")
 }
 
