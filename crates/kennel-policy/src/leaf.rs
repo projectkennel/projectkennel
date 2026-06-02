@@ -22,7 +22,7 @@
 //! covers add/remove on the list-valued sections; the scalar `[*.override]` form is
 //! a later increment (the template chain already overrides scalars).
 
-use crate::source::{NetAllow, NetDenyRule, SourcePolicy, UnixAllow};
+use crate::source::{LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, UnixAllow};
 use crate::PolicyError;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +61,27 @@ pub struct LeafPolicy {
     /// `[exec.allow.add]` / `[exec.allow.remove]` deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecLeaf>,
+    /// `[lifecycle.override]` — scalar override of the inherited TTL/action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleLeaf>,
+}
+
+/// `[lifecycle.override]` — a leaf's scalar override of lifecycle fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleLeaf {
+    /// The override table (`[lifecycle.override]`).
+    #[serde(rename = "override", default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<LifecycleSection>,
+}
+
+/// `[net.audit.override]` — a leaf's scalar override of audit fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditLeaf {
+    /// The override table (`[net.audit.override]`).
+    #[serde(rename = "override", default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<NetAudit>,
 }
 
 /// One path delta entry (`path` plus the required `reason`).
@@ -115,6 +136,9 @@ pub struct NetLeaf {
     /// denies. Permitted only in fragments, not leaf policies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<FragmentDeny>,
+    /// `[net.audit.override]` — scalar override of the inherited audit config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditLeaf>,
 }
 
 /// Fragment-declared invariant denies (`[[net.deny.invariant]]`).
@@ -315,6 +339,26 @@ impl LeafPolicy {
                 target.allow.retain(|e| !d.remove.iter().any(|r| unix_key(r) == unix_key(e)));
             }
         }
+        // Scalar overrides (`[*.override]`): replace only the fields the leaf sets.
+        if let Some(over) = self.lifecycle.as_ref().and_then(|l| l.over.as_ref()) {
+            let target = effective.lifecycle.get_or_insert_with(Default::default);
+            if over.ttl.is_some() {
+                target.ttl.clone_from(&over.ttl);
+            }
+            if over.ttl_action.is_some() {
+                target.ttl_action.clone_from(&over.ttl_action);
+            }
+        }
+        if let Some(over) = self.net.as_ref().and_then(|n| n.audit.as_ref()).and_then(|a| a.over.as_ref()) {
+            let net = effective.net.get_or_insert_with(Default::default);
+            let target = net.audit.get_or_insert_with(Default::default);
+            if over.log_path.is_some() {
+                target.log_path.clone_from(&over.log_path);
+            }
+            if over.level.is_some() {
+                target.level.clone_from(&over.level);
+            }
+        }
     }
 }
 
@@ -437,6 +481,28 @@ reason = "already inherited; should not duplicate"
         let (eff, _) = effective_with_leaf(leaf);
         let n = eff.net.expect("net").allow.iter().filter(|a| a.name.as_deref() == Some("github.com")).count();
         assert_eq!(n, 1, "no duplicate github.com");
+    }
+
+    #[test]
+    fn leaf_override_replaces_inherited_scalars() {
+        // ai-coding-strict sets ttl 8h / warn; override to 2h / stop and audit full.
+        let leaf = r#"
+name = "n"
+template_base = "ai-coding-strict@v1"
+[lifecycle.override]
+ttl = "2h"
+ttl_action = "stop"
+[net.audit.override]
+level = "full"
+"#;
+        let (eff, _) = effective_with_leaf(leaf);
+        let lc = eff.lifecycle.expect("lifecycle");
+        assert_eq!(lc.ttl.as_deref(), Some("2h"), "ttl overridden");
+        assert_eq!(lc.ttl_action.as_deref(), Some("stop"), "action overridden");
+        let audit = eff.net.expect("net").audit.expect("audit");
+        assert_eq!(audit.level.as_deref(), Some("full"), "audit level overridden");
+        // The log_path the leaf did not set is inherited.
+        assert!(audit.log_path.is_some(), "unset override field inherits");
     }
 
     #[test]
