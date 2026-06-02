@@ -10,26 +10,27 @@
 //! block — then re-asserts the framework invariants the runtime will check again.
 //! [`crate::sign_settled`] signs the result; the CLI writes it to disk.
 //!
-//! # Integrity model (and what is deferred)
+//! # Integrity model
 //!
-//! The Ed25519 signature over the canonical body is the integrity control: it
-//! covers the whole settled policy, provenance included. The `*_sha256` provenance
-//! fields and the lockfile are a *second*, self-describing record of the source
-//! bytes; computing them needs a vetted SHA-256 (`sha2`) dependency the workspace
-//! does not yet carry — the same milestone `08 §8.2` defers `kennel-checksum-verify`
-//! to. Until then those fields are emitted empty and `resolved_artifacts` records
-//! names/versions without hashes. Source-signature verification of the templates
-//! themselves (and the `signing_key_id` field) lands with the trust-store increment.
+//! Ed25519 signatures are the integrity control end to end. Each source template is
+//! signature-verified at resolution against the trust store ([`crate::source_sig`],
+//! threaded in as [`Trust`]); the settled policy is itself ed25519-signed over its
+//! canonical body. A deterministic signature over canonical content *is* the content
+//! commitment, so no separate content hash — and no `sha2` dependency — is needed
+//! (the maintainer's call). `resolved_artifacts` records each verified
+//! `signing_key_id`; the `*_sha256` fields stay empty pending the lockfile increment,
+//! which will record the signature commitment rather than a hash.
 //!
 //! # Non-goals
 //!
 //! I/O-free: the caller supplies the [`TemplateSource`] and writes the output.
 
 use crate::leaf::LeafPolicy;
-use crate::resolve::{resolve, ChainLink, TemplateSource};
+use crate::resolve::{resolve_verified, ChainLink, TemplateSource};
 use crate::settled::{InstallConstants, Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy};
 use crate::signature::SignatureEnvelope;
 use crate::source::SourcePolicy;
+use crate::source_sig::Trust;
 use crate::translate::{translate, Translated};
 use crate::{PolicyError, SETTLED_SCHEMA_VERSION};
 
@@ -65,10 +66,11 @@ pub const UNSIGNED_ALGORITHM: &str = "none";
 pub fn compile(
     entry: &SourcePolicy,
     source: &dyn TemplateSource,
+    trust: &Trust<'_>,
     install: &InstallConstants,
     compiler_version: &str,
 ) -> Result<SettledPolicy, PolicyError> {
-    let resolved = resolve(entry, source)?;
+    let resolved = resolve_verified(entry, source, trust)?;
     let translated = translate(&resolved.effective, install)?;
     let name = resolved
         .effective
@@ -95,6 +97,7 @@ pub fn compile(
 pub fn compile_leaf(
     leaf: &LeafPolicy,
     source: &dyn TemplateSource,
+    trust: &Trust<'_>,
     install: &InstallConstants,
     compiler_version: &str,
 ) -> Result<SettledPolicy, PolicyError> {
@@ -114,7 +117,7 @@ pub fn compile_leaf(
         template_name: Some("<leaf>".to_owned()),
         ..SourcePolicy::default()
     };
-    let resolved = resolve(&stub, source)?;
+    let resolved = resolve_verified(&stub, source, trust)?;
     let mut effective = resolved.effective;
     leaf.apply(&mut effective);
 
@@ -142,10 +145,11 @@ fn assemble(
         .map(|link| ResolvedArtifact {
             name: link.name.clone(),
             version: link.version.clone(),
-            // Deferred: content hashing needs a vetted sha2 dep (08 §8.2); source
-            // signing-key verification lands with the trust-store increment.
+            // Integrity is the ed25519 signature verified at resolution (no separate
+            // content hash, hence no sha2 dependency); `content_sha256` stays empty
+            // pending the lockfile increment that records the signature commitment.
             content_sha256: String::new(),
-            signing_key_id: String::new(),
+            signing_key_id: link.signing_key_id.clone().unwrap_or_default(),
         })
         .collect();
 
@@ -214,7 +218,7 @@ mod tests {
 
     fn compile_ai() -> SettledPolicy {
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
-        compile(&entry, &src(), &install(), "test-0.0.0").expect("compile")
+        compile(&entry, &src(), &Trust::dev(), &install(), "test-0.0.0").expect("compile")
     }
 
     #[test]
@@ -240,6 +244,37 @@ mod tests {
         keys.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
         let verified = verify_settled(&bytes, &keys).expect("verify");
         assert_eq!(verified.name, "ai-coding-strict");
+    }
+
+    #[test]
+    fn require_mode_compiles_with_a_signed_ancestor_and_records_the_key_id() {
+        use crate::source_sig::sign_source;
+        let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
+        let mut ks = KeySet::new();
+        ks.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+        // Sign base-confined and serve the signed bytes.
+        let signed = sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
+        let signed_bytes = basic_toml::to_string(&signed).expect("serialise").into_bytes();
+        let source = MapSource(vec![("base-confined".to_owned(), "v1".to_owned(), signed_bytes)]);
+
+        let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
+        let policy = compile(&entry, &source, &Trust::require(&ks), &install(), "v")
+            .expect("compile with signed ancestor");
+        assert!(
+            policy.provenance.resolved_artifacts.iter().any(|a| a.signing_key_id == "kennel-maint-2026"),
+            "the verified signing key is recorded in provenance"
+        );
+    }
+
+    #[test]
+    fn require_mode_refuses_an_unsigned_ancestor() {
+        // `src()` serves the unsigned in-tree base-confined.
+        let ks = KeySet::new();
+        let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
+        assert!(
+            compile(&entry, &src(), &Trust::require(&ks), &install(), "v").is_err(),
+            "an unsigned ancestor is refused when signatures are required"
+        );
     }
 
     #[test]

@@ -31,9 +31,10 @@
 //! # Threat bearing
 //!
 //! Resolution is the supply-chain choke point: every parent is parsed, validated,
-//! and (in later increments) signature- and lockfile-checked before its bytes are
-//! folded in. Cycles, over-deep chains, and missing references are hard errors, so
-//! a policy cannot quietly resolve against an unexpected or absent base.
+//! and signature-checked against the trust store ([`resolve_verified`]) before its
+//! bytes are folded in. Cycles, over-deep chains, and missing references are hard
+//! errors, so a policy cannot quietly resolve against an unexpected or absent base.
+//! (Lockfile byte-pinning of each resolved reference is the remaining increment.)
 //!
 //! # Non-goals
 //!
@@ -48,6 +49,7 @@ use crate::source::{
     NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection, SourcePolicy,
     UnixSection, X11Section,
 };
+use crate::source_sig::Trust;
 use crate::PolicyError;
 
 /// Maximum inheritance-chain depth (number of `template_base` hops), per
@@ -70,6 +72,8 @@ pub struct ChainLink {
     pub name: String,
     /// The artefact's version (with leading `v`).
     pub version: String,
+    /// The signing-key id its signature verified against, if it was verified.
+    pub signing_key_id: Option<String>,
 }
 
 /// The product of resolving a chain: the folded effective policy plus the list of
@@ -95,6 +99,25 @@ pub struct ResolvedChain {
 /// [`PolicyError::Parse`] if an ancestor is unparseable; or
 /// [`PolicyError::SourceValidation`] if an ancestor fails validation.
 pub fn resolve(entry: &SourcePolicy, source: &dyn TemplateSource) -> Result<ResolvedChain, PolicyError> {
+    resolve_verified(entry, source, &Trust::dev())
+}
+
+/// Resolve and fold, verifying each fetched ancestor against `trust`.
+///
+/// Identical to [`resolve`] but each parent's `[signature]` is checked according to
+/// `trust` ([`Trust::require`] in attested deployments, [`Trust::dev`] / unsigned in
+/// development). The entry itself is *not* signature-checked — a leaf policy is loaded
+/// under the user's own authority (`02-2` §Signatures).
+///
+/// # Errors
+///
+/// As [`resolve`], plus [`PolicyError::Signature`] / [`PolicyError::Resolution`] when an
+/// ancestor fails the trust check.
+pub fn resolve_verified(
+    entry: &SourcePolicy,
+    source: &dyn TemplateSource,
+    trust: &Trust<'_>,
+) -> Result<ResolvedChain, PolicyError> {
     entry.validate()?;
     // Walk parents, leaf-first, detecting cycles and bounding depth.
     let mut parents: Vec<SourcePolicy> = Vec::new();
@@ -118,7 +141,8 @@ pub fn resolve(entry: &SourcePolicy, source: &dyn TemplateSource) -> Result<Reso
         })?;
         let parent = source::parse(&bytes)?;
         parent.validate()?;
-        links.push(ChainLink { name, version });
+        let signing_key_id = trust.check(&name, &parent)?;
+        links.push(ChainLink { name, version, signing_key_id });
         parents.push(parent.clone());
         current = parent;
     }

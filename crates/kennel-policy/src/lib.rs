@@ -36,6 +36,7 @@ pub mod resolve;
 pub mod settled;
 pub mod signature;
 pub mod source;
+pub mod source_sig;
 pub mod translate;
 
 pub use compile::{compile, compile_leaf, seal_unsigned};
@@ -49,7 +50,8 @@ pub use settled::{
     ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy,
     TmpPolicy, TtlAction,
 };
-pub use resolve::{resolve, ChainLink, ResolvedChain, TemplateSource};
+pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
+pub use source_sig::{sign_source, verify_self, verify_source, SignatureMode, Trust};
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
 pub use translate::{translate, Translated};

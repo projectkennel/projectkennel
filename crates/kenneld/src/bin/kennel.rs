@@ -183,7 +183,9 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     let mut output_path: Option<PathBuf> = None;
     let mut key_path: Option<&str> = None;
     let mut unsigned = false;
+    let mut require_signed = false;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -193,8 +195,12 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             }
             "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
             "--unsigned" => unsigned = true,
+            "--require-signed" => require_signed = true,
             "--template-dir" => {
                 template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            "--trust-dir" => {
+                trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into());
             }
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             value => {
@@ -225,16 +231,28 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     let source = FsTemplateSource { dirs: template_dirs };
     let version = env!("CARGO_PKG_VERSION");
 
+    // Build the trust context: `--require-signed` refuses unsigned templates and
+    // verifies against the trust store (`--trust-dir`, else the default key dirs);
+    // otherwise unsigned templates resolve (development), still verifying any present
+    // signature against whatever keys are loaded.
+    add_default_trust_dirs(&mut trust_dirs);
+    let keys = load_trust_store(&trust_dirs)?;
+    let trust = if require_signed {
+        kennel_policy::Trust::require(&keys)
+    } else {
+        kennel_policy::Trust::allow_unsigned(Some(&keys))
+    };
+
     // A template / direct policy parses as a SourcePolicy; a leaf in the delta form
     // (`[[fs.read.add]]`, …) does not, so fall back to the leaf parser.
     let result = match kennel_policy::parse_source(&bytes) {
-        Ok(entry) => kennel_policy::compile(&entry, &source, &install, version),
+        Ok(entry) => kennel_policy::compile(&entry, &source, &trust, &install, version),
         Err(source_err) => {
             let Ok(leaf) = kennel_policy::parse_leaf(&bytes) else {
                 eprintln!("kennel: {source_err}");
                 return Ok(ExitCode::from(3));
             };
-            kennel_policy::compile_leaf(&leaf, &source, &install, version)
+            kennel_policy::compile_leaf(&leaf, &source, &trust, &install, version)
         }
     };
     let policy = match result {
@@ -287,6 +305,35 @@ fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
 fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
     let dir = Path::new(policy_path).parent().unwrap_or_else(|| Path::new("."));
     dir.join(format!("{name}.settled.toml"))
+}
+
+/// Append the default trust-store directories (user, then system).
+fn add_default_trust_dirs(dirs: &mut Vec<PathBuf>) {
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join(".config/kennel/keys"));
+    }
+    dirs.push(PathBuf::from("/etc/kennel/keys"));
+}
+
+/// Load a trust store: every `<key_id>.pub` (base64 32-byte public key) under each
+/// directory. Missing directories are skipped; a malformed key file is an error.
+fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_policy::KeySet, String> {
+    let mut keys = kennel_policy::KeySet::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("pub") {
+                continue;
+            }
+            let Some(key_id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let contents =
+                std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+            keys.insert_b64(key_id, contents.trim())
+                .map_err(|e| format!("key {}: {e}", path.display()))?;
+        }
+    }
+    Ok(keys)
 }
 
 /// Load a signing key from a file holding the base64 of a 32-byte Ed25519 seed.

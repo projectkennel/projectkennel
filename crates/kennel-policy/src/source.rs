@@ -329,12 +329,14 @@ pub struct NetAllow {
     /// Transport protocol (`"tcp"`, `"udp"`, `"any"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
-    /// `tls.required` and friends.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls: Option<NetTls>,
     /// Why this destination is permitted (required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    // `tls` and `threats` are TOML tables: declared after the scalar fields so they
+    // serialise last (`basic-toml` emits values before tables).
+    /// `tls.required` and friends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<NetTls>,
     /// Threat tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
@@ -529,12 +531,13 @@ pub struct EnvSection {
     /// Variables passed through from the caller's environment (globs allowed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass: Option<Vec<String>>,
-    /// Variables forced to a specific value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub set: Option<BTreeMap<String, String>>,
     /// Variables denied even if passed (globs allowed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<Vec<String>>,
+    /// Variables forced to a specific value. Declared last: as a TOML table it must
+    /// serialise after the array-valued fields (`basic-toml` emits values first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set: Option<BTreeMap<String, String>>,
 }
 
 /// `[seccomp]` — the seccomp filter (source carries a deny list; the resolver
