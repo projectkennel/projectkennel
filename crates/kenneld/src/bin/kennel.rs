@@ -18,8 +18,11 @@
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use kennel_policy::settled::InstallConstants;
+use kennel_policy::TemplateSource;
 use kenneld::control::{self, Request, Response, StartRequest};
 use kenneld::socket;
 
@@ -39,7 +42,8 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some((cmd, rest)) if cmd == "run" => run(rest),
         Some((cmd, rest)) if cmd == "stop" => stop(rest),
         Some((cmd, _)) if cmd == "list" => list(),
-        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list".to_owned()),
+        Some((cmd, rest)) if cmd == "compile" => compile(rest),
+        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned]".to_owned()),
     }
 }
 
@@ -142,4 +146,153 @@ fn send(conn: &UnixStream, request: &Request, fds: &[BorrowedFd<'_>]) -> Result<
 /// Map a daemon-reported exit code to a process `ExitCode` (clamped to a byte).
 fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+// ---- `kennel compile` ----------------------------------------------------------
+
+/// A filesystem-backed [`TemplateSource`]: searches each directory for a flat
+/// `<name>@<version>.toml` (the installed layout) and then `<name>/policy.toml`
+/// (the in-tree source layout), so the same resolver serves both.
+struct FsTemplateSource {
+    dirs: Vec<PathBuf>,
+}
+
+impl TemplateSource for FsTemplateSource {
+    fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        for dir in &self.dirs {
+            let flat = dir.join(format!("{name}@{version}.toml"));
+            if let Ok(bytes) = std::fs::read(&flat) {
+                return Some(bytes);
+            }
+            let nested = dir.join(name).join("policy.toml");
+            if let Ok(bytes) = std::fs::read(&nested) {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+}
+
+/// `kennel compile <policy> [--output-path P] [--key K] [--unsigned] [--template-dir D]...`
+///
+/// Resolves a source policy fully and writes a settled policy. Stateless: it never
+/// contacts the daemon. Exit codes follow `02-1-cli.md` (3 = validation/resolution,
+/// 6 = signature).
+fn compile(args: &[String]) -> Result<ExitCode, String> {
+    let mut policy_path: Option<&str> = None;
+    let mut output_path: Option<PathBuf> = None;
+    let mut key_path: Option<&str> = None;
+    let mut unsigned = false;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--output-path" => {
+                output_path = Some(it.next().ok_or("--output-path needs a value")?.into());
+            }
+            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--unsigned" => unsigned = true,
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            value => {
+                if policy_path.is_some() {
+                    return Err("only one <policy> may be given".to_owned());
+                }
+                policy_path = Some(value);
+            }
+        }
+    }
+
+    let policy_path = policy_path.ok_or(
+        "usage: kennel compile <policy> [--output-path P] [--key K | --unsigned] [--template-dir D]...",
+    )?;
+    if key_path.is_some() && unsigned {
+        return Err("--key and --unsigned are mutually exclusive".to_owned());
+    }
+    if key_path.is_none() && !unsigned {
+        return Err("provide --key <path> to sign, or --unsigned for a development build".to_owned());
+    }
+    add_default_template_dirs(&mut template_dirs);
+
+    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let entry = match kennel_policy::parse_source(&bytes) {
+        Ok(entry) => entry,
+        Err(e) => {
+            eprintln!("kennel: {e}");
+            return Ok(ExitCode::from(3));
+        }
+    };
+
+    // Installation constants are fixed at install time; until an install-config
+    // reader exists they take the documented defaults (tag 42, ULA fd00::).
+    let install = InstallConstants { tag: 42, ula_gid: "fd00::".to_owned() };
+    let source = FsTemplateSource { dirs: template_dirs };
+    let policy =
+        match kennel_policy::compile(&entry, &source, &install, env!("CARGO_PKG_VERSION")) {
+            Ok(policy) => policy,
+            Err(e) => {
+                eprintln!("kennel: {e}");
+                return Ok(ExitCode::from(policy_error_code(&e)));
+            }
+        };
+
+    let doc = if unsigned {
+        kennel_policy::seal_unsigned(&policy)
+    } else {
+        let key = load_signing_key(key_path.ok_or("internal: key path lost")?)?;
+        kennel_policy::sign_settled(&policy, &key).map_err(|e| format!("signing: {e}"))?
+    };
+    let out_bytes = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
+    let out = output_path.unwrap_or_else(|| default_settled_path(policy_path, &policy.name));
+    std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
+
+    let note = if unsigned { " (unsigned development build)" } else { "" };
+    eprintln!("compiled `{}` -> {}{note}", policy.name, out.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Map a compile-time [`kennel_policy::PolicyError`] to a CLI exit code (`02-1`).
+const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
+    use kennel_policy::PolicyError as E;
+    match err {
+        E::Signature(_) => 6,
+        E::Parse(_)
+        | E::Canonical(_)
+        | E::UnsupportedSchemaVersion { .. }
+        | E::InvariantViolations(_)
+        | E::SourceValidation(_)
+        | E::Resolution(_)
+        | E::Translation(_) => 3,
+    }
+}
+
+/// Append the default template search directories (user, then system).
+fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join(".config/kennel/templates"));
+    }
+    dirs.push(PathBuf::from("/etc/kennel/templates"));
+}
+
+/// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
+fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
+    let dir = Path::new(policy_path).parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!("{name}.settled.toml"))
+}
+
+/// Load a signing key from a file holding the base64 of a 32-byte Ed25519 seed.
+/// The key id is the file stem, mirroring the `.pub` trust-store convention.
+fn load_signing_key(path: &str) -> Result<kennel_policy::SigningKey, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {path}: {e}"))?;
+    let seed = kennel_policy::b64::decode(text.trim().as_bytes())
+        .ok_or_else(|| format!("key {path} is not valid base64"))?;
+    let key_id = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("cannot derive a key id from {path}"))?;
+    kennel_policy::SigningKey::from_seed(key_id, &seed)
+        .map_err(|e| format!("loading key {path}: {e}"))
 }

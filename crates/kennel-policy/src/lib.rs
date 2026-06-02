@@ -27,6 +27,7 @@
 
 pub mod b64;
 pub mod canonical;
+pub mod compile;
 pub mod error;
 pub mod invariant;
 pub mod keys;
@@ -36,6 +37,7 @@ pub mod signature;
 pub mod source;
 pub mod translate;
 
+pub use compile::{compile, seal_unsigned};
 pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
