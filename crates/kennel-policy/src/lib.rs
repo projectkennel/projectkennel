@@ -15,13 +15,13 @@
 //!
 //! # Scope of this build
 //!
-//! Implemented: the runtime verification core (this is what the spawn path
-//! needs), plus the [`source`] schema — the parser and per-artefact validation
-//! for the templates `kennel compile` consumes. **Not yet** implemented: the rest
-//! of the compile-time resolution machinery (template-chain walking, includes,
-//! delta folding, substitution, the lockfile) that *produces* a settled policy
-//! from source templates — a separate, off-hot-path concern built in increments
-//! on top of [`source`].
+//! Both halves are implemented. The runtime verification core ([`verify_settled`])
+//! is the spawn hot path. The compile-time front end is the rest: the [`source`]
+//! schema and validation, template-chain [`resolve`]ution and folding, [`leaf`]
+//! `+=`/`-=` deltas, [`translate`]ion + substitution to the settled form, ed25519
+//! [`source_sig`]nature verification, the [`lock`]file, and the [`compile`]
+//! orchestrator that ties them together. The CLI (`kennel compile`/`validate`/`sign`)
+//! drives this crate.
 
 #![forbid(unsafe_code)]
 

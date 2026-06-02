@@ -8,7 +8,11 @@ Policy describes kernel-level constraints (which files, which network destinatio
 
 ## Status
 
-Documentation and design stage. The threat catalogue is publishable; the design document is at v0.1; the reference runtime is in design, implementation pending. This repository currently contains the design, the threat catalogue, the implementation architecture, and the project's engineering standards — no runtime code yet.
+Pre-release; unversioned. The threat catalogue and design document (v0.1) are publishable, and the **reference runtime and policy compiler are implemented** — not just designed.
+
+Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](BUILD-ENV.md)): the confinement seal (mount/PID/IPC namespaces, the constructed-`$HOME` view via `pivot_root`, a synthetic `/etc`, Landlock filesystem + network rules with abstract-unix/signal scoping, a seccomp denylist, `PR_SET_NO_NEW_PRIVS`, cgroup join); per-kennel egress through a SOCKS5/HTTP proxy with a cgroup-BPF fail-closed allowlist and a per-kennel audit log; and the `kennel` CLI — `compile` (resolve a source policy + its templates into a signed, byte-pinned settled policy), `validate`, `sign`, `run`, `stop`, `list`. Policy trust is end-to-end ed25519 (templates, fragments, and the settled artefact), with a `kennel.lock` byte-pin.
+
+Deferred (designed, not yet built — see [architecture/08-as-built-notes.md](architecture/08-as-built-notes.md) §8.2): the journald/syslog/stdout audit sinks and a unified audit writer (a per-kennel file sink exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell witness exists), and container-runtime integration. The shipped templates are not yet signed by a maintainer key.
 
 ## What is here
 

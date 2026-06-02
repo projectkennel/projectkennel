@@ -14,13 +14,14 @@
 //!
 //! # Scope of this build
 //!
-//! Implemented: the pure runtime pipeline up to and including the [`Plan`]
-//! (verify → substitute → translate), which is fully testable off the spawn
-//! path. **Not yet** implemented: the execution step (fork, namespace/mount
-//! setup, the Landlock/seccomp seal, cgroup join, BPF attach, exec). That step
-//! needs a fork/exec primitive added to `kennel-syscall` (so the post-fork
-//! `unsafe` stays in the sanctioned crate), which is a reviewed addition of its
-//! own.
+//! The full pipeline is implemented: the pure part (verify → substitute →
+//! translate into a [`Plan`], all testable off the spawn path) and the execution
+//! step. [`spawn`] applies the irreversible seal in the forked child immediately
+//! before `execve` — namespace/mount setup, a fresh `/proc` + private `/tmp`, the
+//! synthetic-`/etc` binds, the constructed-`$HOME` `pivot_root`, the Landlock and
+//! seccomp seals, and cgroup join — via [`kennel_syscall::spawn::spawn_sealed`], so
+//! the post-`fork` `unsafe` stays in the sanctioned crate. Egress BPF is attached by
+//! the privhelper out of band. The root e2e exercises the whole vertical.
 
 #![forbid(unsafe_code)]
 

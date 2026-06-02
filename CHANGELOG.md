@@ -6,7 +6,7 @@ Per [CODING-STANDARDS.md](CODING-STANDARDS.md), changes that touch a stable surf
 
 ## [Unreleased]
 
-The project is in its documentation and design stage. No releases yet; no runtime code yet. This section accumulates notable changes until the first tagged release.
+Pre-release; no tagged release yet. The reference runtime and the policy compiler are implemented (kernel 6.17, Landlock ABI ≥ 6); this section accumulates notable changes until the first tagged release.
 
 ### Documentation and design
 
@@ -38,11 +38,53 @@ The project is in its documentation and design stage. No releases yet; no runtim
 - **`unistd` credential wrappers** (`effective_uid`, `real_uid`) over `nix::unistd` — no `unsafe` of ours.
 - **Hand-rolled Landlock** (`landlock` module): `AccessFs`/`AccessNet`, `abi_version`, ABI-support masking, and a `Ruleset` builder that seals the current process (`set_no_new_privs` via nix, then `restrict_self`). Chosen over the `landlock` crate to keep `syn`/proc-macros out of the privileged dependency tree; the ABI is taken from the kernel UAPI. `kennel-syscall` carries `#![allow(unsafe_code)]` with the `unsafe` confined to Landlock's six raw syscall wrappers (each §4-commented). A fork-based test confirms the seal denies an un-allowed path while permitting an allowed one.
 
+### Runtime (kennel-spawn, kenneld, kennel-netproxy, kennel-privhelper)
+
+- **The confinement seal** (`kennel-spawn`): `verify_settled` → substitute the
+  per-instance placeholders → translate into a `Plan` → `spawn`, which seals the
+  forked child before `execve` — mount/PID/IPC namespaces, a fresh `/proc` + private
+  `/tmp`, the synthetic `/etc` binds, the constructed-`$HOME` view via `pivot_root`,
+  the Landlock filesystem + network ruleset (built post-pivot; abstract-unix + signal
+  scoping on ABI ≥ 6), the seccomp denylist, and cgroup join. Root e2e drives the
+  whole vertical.
+- **Per-kennel egress proxy** (`kennel-netproxy`): a blocking SOCKS5/HTTP proxy on
+  the kennel's own v4+v6 loopback; the cgroup BPF fail-closed allowlist denies direct
+  `connect()` to anything but the proxy; the proxy resolves names via the OS resolver
+  and re-checks the answer against the allowlist + invariant denies. One JSONL audit
+  record per request.
+- **Per-user daemon + CLI** (`kenneld`): control socket (request/response), bring-up
+  and teardown, the synthetic-`/etc` generator, the per-kennel egress audit-log file
+  sink, and the dual-stack proxy config writer. The `kennel` client speaks to it over
+  `SCM_RIGHTS` (stdio passed to the workload).
+- **Privileged helper** (`kennel-privhelper`): setuid helper for address setup and
+  BPF attach, with a tight wire protocol and dependency list; `panic = "abort"`.
+
+### Policy compiler and CLI changes (kennel-policy, `kennel`)
+
+- **`kennel compile`** resolves a source policy fully — template-chain folding (the
+  SSH `=`/`+=`/`-=` model), additive signed `include` fragments (with conflict
+  detection and fragment-declared invariants), leaf `add`/`remove`/`override` deltas,
+  install-constant substitution, translation to the settled `EffectivePolicy`, and
+  ed25519 signing — and emits a signed, byte-pinned settled policy + `kennel.lock`.
+- **Trust is end-to-end ed25519**: templates, fragments, and the settled artefact are
+  signed and verified; the lockfile pins each resolved reference by its signature (no
+  separate content hash). `--require-signed` enforces the trust store.
+- **Seccomp** translates a denylist by name; the spawn layer resolves names to numbers
+  via `libc::SYS_*`, keeping the signed policy architecture-independent.
+- New CLI verbs: **`compile`**, **`validate`**, **`sign`** (exit codes per
+  `02-1-cli.md`). The template set under `templates/` (base-confined + the five
+  executive-summary templates) compiles cleanly.
+
 ### Licensing
 
 - Adopted **Apache License 2.0** for the project (Rust crates, threat catalogue, design document, reference runtime). The BPF programs under `bpf/` remain GPL-2.0 (SPDX headers; required by the kernel for "GPL"-declaring programs). See `LICENSE` and `NOTICE`.
 
 ### Pending
 
-- Reference runtime implementation (the Cargo workspace and crates described in `architecture/03-crate-decomposition.md`).
-- The remaining §14 CI checks (Rust checksum verifier, `cargo deny`/`audit`/`vet`, fuzz, reproducible build, the BPF verifier-load matrix) that activate with their inputs.
+- Documented-but-deferred (`architecture/08-as-built-notes.md` §8.2): the
+  journald/syslog/stdout audit sinks + unified audit writer (a per-kennel file sink
+  exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell
+  witness exists), and container-runtime integration.
+- Signing the shipped templates with a maintainer key (a key-custody decision).
+- The remaining §14 CI checks (`cargo deny`/`audit`/`vet`, the `fuzz/` job, reproducible
+  build, the BPF verifier-load matrix) that activate with their inputs.

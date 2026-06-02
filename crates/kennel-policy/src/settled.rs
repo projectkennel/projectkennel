@@ -5,7 +5,8 @@
 //! `include`, no delta operators — only the final effective rules, plus
 //! provenance and a single signature. The template/resolution machinery that
 //! *produces* a settled policy (chain-walking, includes, deltas, the lockfile)
-//! is a separate, compile-time concern not yet implemented here.
+//! lives alongside this module ([`crate::compile`] and friends) but is a separate,
+//! compile-time concern off the spawn hot path.
 //!
 //! ## Serialisation format
 //!
