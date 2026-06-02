@@ -43,7 +43,7 @@ checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
 name = "kennel-bpf"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "object",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-netproxy"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "basic-toml",
  "serde",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-policy"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "basic-toml",
  "ed25519-compact",
@@ -79,14 +79,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-privhelper"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kennel-syscall",
 ]
 
 [[package]]
 name = "kennel-spawn"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kennel-bpf",
  "kennel-policy",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-syscall"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitflags",
  "libc",
@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "kenneld"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "basic-toml",
  "kennel-policy",

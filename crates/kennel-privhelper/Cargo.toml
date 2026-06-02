@@ -1,6 +1,6 @@
 [package]
 name = "kennel-privhelper"
-version = "0.0.0"
+version.workspace = true
 description = "Project Kennel privileged-operation helper: validates and performs the minimal set of privileged operations (loopback address and cgroup management) for a kennel, refusing anything outside Project Kennel's reserved scope."
 edition.workspace = true
 rust-version.workspace = true

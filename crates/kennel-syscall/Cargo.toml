@@ -1,6 +1,6 @@
 [package]
 name = "kennel-syscall"
-version = "0.0.0"
+version.workspace = true
 description = "Project Kennel low-level system-call and path primitives. The single crate permitted to contain `unsafe` (Linux syscalls, namespaces, Landlock/seccomp, FFI); the portable, std-only path-canonicalisation helper lands first while the crate is still unsafe-free."
 edition.workspace = true
 rust-version.workspace = true

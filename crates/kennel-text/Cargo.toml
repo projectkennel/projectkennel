@@ -1,6 +1,6 @@
 [package]
 name = "kennel-text"
-version = "0.0.0"
+version.workspace = true
 description = "Project Kennel text-sanitisation helpers: neutralise attacker-controlled bytes (terminal control sequences, bidi spoofing, non-printables) on the way into terminals, logs, and audit JSONL. Stdlib only."
 edition.workspace = true
 rust-version.workspace = true

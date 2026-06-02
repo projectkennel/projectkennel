@@ -1,6 +1,6 @@
 [package]
 name = "kennel-policy"
-version = "0.0.0"
+version.workspace = true
 description = "Project Kennel policy crate: settled-policy types, the canonical-form serialisation, and Ed25519 signature verification (the runtime trust surface consumed by kennel-spawn). Pure and I/O-free; callers supply bytes."
 edition.workspace = true
 rust-version.workspace = true

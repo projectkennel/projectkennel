@@ -1,12 +1,16 @@
 # Changelog
 
-All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project will adopt semantic versioning at its first release.
+All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
 Per [CODING-STANDARDS.md](CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency updates (§5), MSRV changes (§2), and threat-catalogue additions are also recorded here.
 
 ## [Unreleased]
 
-Pre-release; no tagged release yet. The reference runtime and the policy compiler are implemented (kernel 6.17, Landlock ABI ≥ 6); this section accumulates notable changes until the first tagged release.
+Nothing yet.
+
+## [0.1.0] — 2026-06-03
+
+First versioned cut: all workspace crates set to `0.1.0` (centralised in `[workspace.package]`). Not yet git-tagged — the tag is a separate, deliberate release step. The reference runtime and the policy compiler are implemented (kernel 6.17, Landlock ABI ≥ 6). Everything below is the content of this cut.
 
 ### Documentation and design
 
@@ -79,6 +83,12 @@ Pre-release; no tagged release yet. The reference runtime and the policy compile
 
 - Adopted **Apache License 2.0** for the project (Rust crates, threat catalogue, design document, reference runtime). The BPF programs under `bpf/` remain GPL-2.0 (SPDX headers; required by the kernel for "GPL"-declaring programs). See `LICENSE` and `NOTICE`.
 
+### Supply-chain tooling
+
+- **CI tool-install path** for the supply-chain gate. `cargo-deny`/`cargo-audit`/`cargo-vet` cannot be `cargo install`ed under the offline `.cargo/config.toml` (crates.io is replaced by the local registry), so they are installed from pinned, SHA-256-verified prebuilt binaries: `tools/ci-tools.toml` (the integrity manifest, mirroring `CHECKSUMS.toml`) + `tools/install-ci-tools.sh` (verifies each archive before extracting; refuses on mismatch). Pins maintainer-ratified (§5.5; reviewer remco), each cross-checked by an independent second download.
+- **`deny.toml`** added: licence allow-list pinned to the 27-crate graph (`Apache-2.0`/`MIT`/`Unicode-3.0`), sources locked to the crates.io index only (no git, no other registry — §5.5 mechanised), multiple-versions/wildcards denied, advisories v2 with `yanked = deny`.
+- New **`supply-chain` CI job** runs `cargo deny` + `cargo audit` via the install path (advisory/`continue-on-error` until observed green, then promoted to a required check). The `fuzz/` smoke job also runs. `cargo vet --locked` remains owed: its audit corpus (`supply-chain/audits.toml`) is unwritten.
+
 ### Pending
 
 - Documented-but-deferred (`architecture/08-as-built-notes.md` §8.2): the
@@ -86,5 +96,6 @@ Pre-release; no tagged release yet. The reference runtime and the policy compile
   exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell
   witness exists), and container-runtime integration.
 - Signing the shipped templates with a maintainer key (a key-custody decision).
-- The remaining §14 CI checks (`cargo deny`/`audit`/`vet`, the `fuzz/` job, reproducible
-  build, the BPF verifier-load matrix) that activate with their inputs.
+- `cargo vet --locked` (audit corpus owed), the reproducible-build double-run, and the
+  BPF verifier-load matrix — the §14 checks still awaiting their inputs.
+- The workspace `repository` URL (`Cargo.toml`) is still `TBD`.
