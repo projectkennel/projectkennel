@@ -218,6 +218,18 @@ fn apply_includes(
         }
 
         fragment.apply(effective);
+        // Union the fragment's invariant denies into the effective policy (additive;
+        // invariants are non-removable, so a fragment can only add to them).
+        let invariants = fragment.invariant_denies();
+        if !invariants.is_empty() {
+            let net = effective.net.get_or_insert_with(Default::default);
+            let deny = net.deny.get_or_insert_with(Default::default);
+            for rule in invariants {
+                if !deny.invariant.iter().any(|e| e.cidr == rule.cidr) {
+                    deny.invariant.push(rule.clone());
+                }
+            }
+        }
         links.push(ChainLink {
             name,
             version,
@@ -416,6 +428,32 @@ mod tests {
         .expect("parse leaf");
         let err = compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect_err("conflict");
         assert!(matches!(err, PolicyError::IncludeConflict(_)), "got {err}");
+    }
+
+    #[test]
+    fn a_fragment_can_contribute_an_invariant_deny() {
+        let frag = "name = \"corp-deny\"\n[[net.deny.invariant]]\ncidr = \"203.0.113.0/24\"\nreason = \"corp blocklist\"\n";
+        let source = source_with_fragments(&[("corp-deny", frag)]);
+        let leaf = crate::leaf::parse(
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-deny@v1\"]\n",
+        )
+        .expect("parse leaf");
+        let compiled = compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect("compile");
+        let denies = &compiled.policy.effective_policy.net.deny_invariant;
+        assert!(denies.iter().any(|r| r.cidr == "203.0.113.0" && r.prefix_len == 24), "fragment invariant added");
+        assert!(denies.iter().any(|r| r.cidr == "169.254.169.254"), "base invariants still present");
+    }
+
+    #[test]
+    fn a_leaf_may_not_declare_an_invariant_deny() {
+        let leaf = crate::leaf::parse(
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[net.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"r\"\n",
+        )
+        .expect("parse leaf");
+        let err = leaf.validate().expect_err("leaf invariant must be rejected");
+        if let PolicyError::SourceValidation(ms) = err {
+            assert!(ms.iter().any(|m| m.contains("invariant")));
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //! covers add/remove on the list-valued sections; the scalar `[*.override]` form is
 //! a later increment (the template chain already overrides scalars).
 
-use crate::source::{NetAllow, SourcePolicy, UnixAllow};
+use crate::source::{NetAllow, NetDenyRule, SourcePolicy, UnixAllow};
 use crate::PolicyError;
 use serde::{Deserialize, Serialize};
 
@@ -104,13 +104,26 @@ pub struct FsLeaf {
     pub deny: Option<PathListDelta>,
 }
 
-/// `[net.allow]` leaf deltas.
+/// `[net.allow]` / `[net.deny]` leaf-and-fragment deltas.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetLeaf {
     /// `[[net.allow.add]]` / `[[net.allow.remove]]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<NetAllowDelta>,
+    /// `[net.deny]` — its `invariant` array carries fragment-declared invariant
+    /// denies. Permitted only in fragments, not leaf policies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<FragmentDeny>,
+}
+
+/// Fragment-declared invariant denies (`[[net.deny.invariant]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FragmentDeny {
+    /// Non-removable deny CIDRs the fragment contributes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariant: Vec<NetDenyRule>,
 }
 
 /// An add/remove delta over network allow entries.
@@ -177,6 +190,13 @@ impl LeafPolicy {
         }
         if self.template_base.is_none() {
             errs.push("leaf policy has no `template_base`".to_owned());
+        }
+        if !self.invariant_denies().is_empty() {
+            errs.push(
+                "a leaf policy may not declare `[[net.deny.invariant]]`; invariants are \
+                 template- and fragment-author tools (docs/05-templates.md §5.5)"
+                    .to_owned(),
+            );
         }
         self.check_reasons(&mut errs);
         if errs.is_empty() {
@@ -249,6 +269,12 @@ impl LeafPolicy {
     #[must_use]
     pub fn net_allow_adds(&self) -> &[NetAllow] {
         self.net.as_ref().and_then(|n| n.allow.as_ref()).map_or(&[], |a| a.add.as_slice())
+    }
+
+    /// This policy's fragment-declared invariant denies (`[[net.deny.invariant]]`).
+    #[must_use]
+    pub fn invariant_denies(&self) -> &[NetDenyRule] {
+        self.net.as_ref().and_then(|n| n.deny.as_ref()).map_or(&[], |d| d.invariant.as_slice())
     }
 
     /// Apply this leaf's deltas to the folded effective policy, in place.
