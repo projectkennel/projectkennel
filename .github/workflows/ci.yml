@@ -7,13 +7,19 @@
 # `supply-chain` job and the notes below); CI must not claim to run a check it
 # does not.
 #
-# Owed (land with the first vendored dependency / release infra):
+# Owed (land with the release infra):
 #   - tools/verify-checksums (Rust) — needs sha2 (§5.5.1 bootstrap).
-#   - cargo deny / cargo audit / cargo vet — need a dependency graph + config.
-#   - fuzz smoke tests — need the fuzz harness crate.
+#   - cargo deny / cargo audit / cargo vet — need the tool binaries, which the
+#     offline `.cargo/config.toml` (crates.io replaced by the local registry)
+#     prevents `cargo install` from fetching. Needs a tool-install path (pinned
+#     prebuilt binary, or a vetted action) before these can run; the in-repo §5.5
+#     ledger (CHECKSUMS.toml + tools/audit-source.sh) is the audit mechanism today.
 #   - reproducible-build double-build — needs the release-image (§BUILD-ENV).
 #   - BPF verifier-load matrix (bpftool prog load on kernels >= 6.10) — needs
 #     custom-kernel runners; the compile check below is the hosted-runner part.
+#
+# The `fuzz/` smoke test (a separate workspace; its `arbitrary` dep is vendored)
+# runs in the `fuzz` job below.
 #
 # Third-party actions are kept to actions/checkout. Pinning it by full commit
 # SHA (rather than the @v4 tag) is the recommended hardening once a maintainer
@@ -84,6 +90,24 @@ jobs:
             echo "::endgroup::"
           done
           echo "all 8 programs compiled clean (UAPI, no CO-RE)"
+
+  fuzz:
+    name: fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `fuzz/` is a separate workspace (it must not perturb the shipped
+      # build/Cargo.lock); the main `cargo test` never reaches it. This runs the
+      # no-panic corpus across every untrusted-input parser. `arbitrary` is
+      # vendored in crates-archive/, so the run is offline like every other build.
+      - name: Toolchain
+        run: rustup show && cargo --version
+      - name: Clippy (fuzz workspace)
+        working-directory: fuzz
+        run: cargo clippy --offline --locked --all-targets -- -D warnings
+      - name: Fuzz smoke test
+        working-directory: fuzz
+        run: cargo test --offline --locked
 
   tooling:
     name: tooling (shell tests + checksum witness)
