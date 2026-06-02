@@ -18,7 +18,7 @@
 //!
 //! # Threat bearing
 //!
-//! Fail-closed front door (T8 and the general "only talk to the proxy" thesis):
+//! Fail-closed front door (T1.8 and the general "only talk to the proxy" thesis):
 //! an unrecognised leading byte is refused rather than guessed at, so a
 //! malformed or hostile client cannot coax the proxy into a handler it did not
 //! intend.

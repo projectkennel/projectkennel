@@ -25,7 +25,7 @@ name = "myproj-ai"
 - name = "api.anthropic.com"
   ports = [443]
   reason = "Claude API"
-  threats.exposed = ["T8"]
+  threats.exposed = ["T1.8"]
 ```
 
 Total user content: ~10 lines. Everything else is inherited from the template.
@@ -46,14 +46,14 @@ The agent cannot:
 - Manipulate clipboard or read the user's other windows.
 
 **Residuals.**
-- **T8 (exfiltration via allowed API).** The agent talks to api.anthropic.com; nothing stops it from putting stolen data in API requests. Mitigations are external: don't put high-value secrets in `myproj`, monitor API usage patterns, use the optional TLS-inspection layer if the threat model demands it.
+- **T1.8 (exfiltration via allowed API).** The agent talks to api.anthropic.com; nothing stops it from putting stolen data in API requests. Mitigations are external: don't put high-value secrets in `myproj`, monitor API usage patterns, use the optional TLS-inspection layer if the threat model demands it.
 - **Within-project compromise.** The agent has full read/write on the project. If the project itself contains credentials (`.env`, etc), the agent has them. The threat model says: keep secrets out of project trees.
 
 **Startup.** Cold: ~1.5s. Warm (re-entering existing kennel): ~150ms.
 
 ## 6.2 `npm install` of an unfamiliar package
 
-The user wants to try a new npm package. Post-install scripts (T2) are the threat.
+The user wants to try a new npm package. Post-install scripts (T1.2) are the threat.
 
 **Policy** (`~/.config/kennel/kennels/npm-try.toml`):
 
@@ -173,7 +173,7 @@ name = "postgres"
 addr_v4 = "127.0.0.1:5432"
 proxy.required = false
 reason = "local development Postgres instance"
-threats.exposed = ["T6:local-service-via-explicit-grant"]
+threats.exposed = ["T1.6:local-service-via-explicit-grant"]
 
 [net.bind.allowed_ports]
 add = [3000, 3001]
@@ -265,7 +265,7 @@ image_digest = "sha256:..."  # pinned
 container_port = 5432
 host_bind = "127.<tag>.<ctx>.1:5432"
 reason = "Postgres reachable from default context only, not LAN"
-threats.mitigated = ["T21"]
+threats.mitigated = ["T3.3"]
 
 [[container.volumes]]
 host = "~/data/dev-postgres"
@@ -283,8 +283,8 @@ POSTGRES_PASSWORD = "..." # from the user's secret store; never in this file
 - Runs with a non-root container user where the image supports it.
 
 **Residuals.**
-- **T20 (container escape) — in scope but not fully mitigated.** A kernel CVE in runc or the container runtime would allow escape. Out of any user-space framework's reach.
-- **T23 (root-with-host-UID) — depends on workstation configuration.** If Docker is configured with `userns-remap`, mitigated. Otherwise the container's root has uid 0 on the host with permissions on the volume mount. Documented in template README.
+- **T3.2 (container escape) — in scope but not fully mitigated.** A kernel CVE in runc or the container runtime would allow escape. Out of any user-space framework's reach.
+- **T3.5 (root-with-host-UID) — depends on workstation configuration.** If Docker is configured with `userns-remap`, mitigated. Otherwise the container's root has uid 0 on the host with permissions on the volume mount. Documented in template README.
 
 **Startup.** Cold: ~3s (container pull + start).
 
@@ -304,7 +304,7 @@ name = "corp-ai"
   reason = "work project"
 - path = "/opt/corp-toolchain/**"
   reason = "company-installed dev tools"
-  threats.exposed = ["T4:corp-toolchain-integrity"]
+  threats.exposed = ["T1.4:corp-toolchain-integrity"]
 
 [fs.write.add]
 - path = "~/projects/work/**"
@@ -325,7 +325,7 @@ name = "corp-ai"
   real = "/run/corp/vpn-agent.sock"
   shim = "/run/corp/vpn-agent.sock"
   reason = "corp VPN agent for cert-based auth to internal services"
-  threats.exposed = ["T6:privileged-service-surface"]
+  threats.exposed = ["T1.6:privileged-service-surface"]
 ```
 
 **Diff output** (when running `kennel diff corp-ai`):
@@ -333,14 +333,14 @@ name = "corp-ai"
 ```
 + fs.read: /opt/corp-toolchain/**
     reason: company-installed dev tools
-    threats.exposed: T4 (corp-toolchain integrity)
+    threats.exposed: T1.4 (corp-toolchain integrity)
     impact: read access to a non-user-controlled directory.
             Acceptable if /opt/corp-toolchain is managed by IT;
             consider if the toolchain itself is in scope of your trust model.
 
 + unix.allow: /run/corp/vpn-agent.sock
     reason: corp-vpn-agent
-    threats.exposed: T6 (privileged service surface)
+    threats.exposed: T1.6 (privileged service surface)
     impact: WARNING — granting access to a privileged service socket.
             This service has capability X, Y, Z.
             Consider whether the kennel truly needs this.

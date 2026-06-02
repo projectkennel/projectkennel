@@ -31,12 +31,12 @@ never in the policy file.
 
 ## Defends / residuals
 
-- **Defends:** T21 (LAN exposure — published ports bind only to the kennel's
-  loopback, never `0.0.0.0`), T22, T1 (partial — the container sees only its data
+- **Defends:** T3.3 (LAN exposure — published ports bind only to the kennel's
+  loopback, never `0.0.0.0`), T3.4, T1.1 (partial — the container sees only its data
   volume). `--privileged` / `--pid=host` / `--network=host` are template
   invariants the leaf cannot remove.
-- **Residuals:** T20 (container escape via a runtime/kernel CVE — beyond any
-  userspace framework). T23 (the container's root is uid 0 on the host on the
+- **Residuals:** T3.2 (container escape via a runtime/kernel CVE — beyond any
+  userspace framework). T3.5 (the container's root is uid 0 on the host on the
   volume mount) — mitigated only if Docker runs with `userns-remap`; documented
   here, not enforceable from the policy.
 

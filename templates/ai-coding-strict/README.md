@@ -27,7 +27,7 @@ reason = "the project I am working on"
 name = "api.anthropic.com"   # or api.openai.com, generativelanguage.googleapis.com, …
 ports = [443]
 reason = "the LLM API for the agent I use"
-threats.exposed = ["T8"]
+threats.exposed = ["T1.8"]
 ```
 
 Switching agents is a one-line change (the API host). Everything else — the
@@ -36,12 +36,12 @@ filter, the ssh-agent — is inherited.
 
 ## Defends / residuals
 
-- **Defends:** T1 (credential recon), T2 (post-install scripts), T3 (compromised
-  extension/MCP), T6 (lateral movement), T12 (host-control deactivation), T14
-  (secrets in unintended locations), T25 (prompt injection blast-radius).
-- **Residuals:** **T8** — the agent legitimately reaches the LLM API and can put
+- **Defends:** T1.1 (credential recon), T1.2 (post-install scripts), T1.3 (compromised
+  extension/MCP), T1.6 (lateral movement), T2.1 (host-control deactivation), T2.3
+  (secrets in unintended locations), T3.7 (prompt injection blast-radius).
+- **Residuals:** **T1.8** — the agent legitimately reaches the LLM API and can put
   exfiltrated data in API requests (mitigate externally: keep secrets out of the
-  project; optional TLS-inspection layer). **T13** — semantic security
+  project; optional TLS-inspection layer). **T2.2** — semantic security
   regressions in produced code (output-review tooling, not this template).
 
 ## Adds over base-confined

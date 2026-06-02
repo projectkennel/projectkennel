@@ -25,7 +25,7 @@
 //!
 //! # Threat bearing
 //!
-//! T6 (lateral movement) and T2 (confused deputy): an untrusted path that
+//! T1.6 (lateral movement) and T1.2 (confused deputy): an untrusted path that
 //! escapes the prefix — via an absolute path elsewhere, a `..` sequence, or a
 //! symlink — is refused before any caller acts on it.
 

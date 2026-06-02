@@ -28,7 +28,7 @@ Project Kennel checks kernel feature availability at policy-load time, against t
 | AppArmor | `unix.abstract = "deny"` policy | Warn; fall back to seccomp-TRAP for abstract-socket denial; functionality reduced |
 | `legacy_tiocsti` sysctl | `tty.require_tiocsti_disabled = true` and kernel ≥6.2 | If sysctl is enabled, refuse to start; report how to disable |
 
-The principle is "refuse to start rather than silently weaken the confinement". A policy that claims to defend against T13 (lateral movement to local services) and runs without cgroup BPF is not defending against T13; the user must be told.
+The principle is "refuse to start rather than silently weaken the confinement". A policy that claims to defend against T2.2 (lateral movement to local services) and runs without cgroup BPF is not defending against T2.2; the user must be told.
 
 For users on older kernels who genuinely cannot upgrade: Project Kennel supports a `--unsafe-degrade` flag that turns refusals into warnings. The flag is loud, logged, and visible in audit. Templates can also declare which features they tolerate degradation on; `inspect-only` may permit running without cgroup BPF (it has `net.mode = "none"` anyway), while `ai-coding-strict` may not.
 

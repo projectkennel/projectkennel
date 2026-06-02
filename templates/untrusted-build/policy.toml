@@ -1,11 +1,11 @@
 # ============================================================================
 # Template: untrusted-build  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.1
+# Threat catalogue: THREATS.md v0.3
 #
 # Building from source you do not trust (a cloned repo's `make`, a downloaded
 # tarball's `./configure && make`). The threats are the build script itself
-# fetching/exfiltrating (T2) and compromising the build (T5). The defining move:
+# fetching/exfiltrating (T1.2) and compromising the build (T1.5). The defining move:
 # NETWORK OFF. The build gets the toolchain and the source tree, and nothing
 # reaches the network — so a malicious build script has no egress for C2 or
 # exfiltration, and cannot fetch a second-stage payload.
@@ -14,7 +14,7 @@
 # vendor directory / offline mirror in the project tree (the user grants it
 # writable). This is the cost of the strong guarantee.
 #
-# Defends: T2 (strong), T5 (strong). Residual: needs offline mirrors for real deps.
+# Defends: T1.2 (strong), T1.5 (strong). Residual: needs offline mirrors for real deps.
 # ============================================================================
 
 template_base = "base-confined@v1"

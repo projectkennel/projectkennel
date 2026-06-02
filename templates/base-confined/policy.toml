@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: base-confined  (v1)
 # Inherits: nothing — this is the root of every confined template.
-# Threat catalogue: THREATS.md v0.1
+# Threat catalogue: THREATS.md v0.3
 #
 # The minimal confined posture every other template builds on: no_new_privs,
 # setuid/setgid/setcap denial, the constructed-$HOME view, proxy-only egress,
@@ -35,7 +35,7 @@ deny = [
     "/usr/bin/sudo", "/usr/bin/su", "/usr/bin/pkexec", "/usr/bin/doas",
     "/usr/bin/chsh", "/usr/bin/passwd", "/usr/bin/gpasswd", "/usr/bin/newgrp",
     "/usr/bin/mount", "/usr/bin/umount",
-    "/usr/bin/at", "/usr/bin/crontab",   # scheduled persistence (T8)
+    "/usr/bin/at", "/usr/bin/crontab",   # scheduled persistence (T1.8)
     "/usr/sbin/**", "/sbin/**",          # admin binaries, categorically
 ]
 
@@ -49,7 +49,7 @@ path = ["/usr/bin", "/usr/local/bin", "/bin"]
 
 # --- Filesystem -------------------------------------------------------------
 # The constructed view (fs.home, below): $HOME is a fresh tmpfs into which only
-# granted paths are bound. Non-granted paths do not exist in the view (T1).
+# granted paths are bound. Non-granted paths do not exist in the view (T1.1).
 [fs]
 # Read baseline: the system files any dynamically-linked workload needs. A usable
 # template/leaf adds its project paths.
@@ -71,9 +71,9 @@ write = [
 
 # Categorical denies. Most are redundant with the constructed view (the paths are
 # simply not bound in), but explicit deny is belt-and-braces against template/leaf
-# bugs. Defends T1 (reconnaissance) and T12 (host-control deactivation).
+# bugs. Defends T1.1 (reconnaissance) and T2.1 (host-control deactivation).
 deny = [
-    # Credentials (T1)
+    # Credentials (T1.1)
     "~/.ssh/**", "~/.gnupg/**", "~/.aws/**", "~/.azure/**",
     "~/.config/gcloud/**", "~/.oci/**", "~/.config/gh/**", "~/.config/glab/**",
     "~/.netrc", "~/.npmrc", "~/.pypirc", "~/.cargo/credentials",
@@ -81,15 +81,15 @@ deny = [
     "~/.terraform.d/credentials.tfrc.json", "~/.password-store/**",
     "~/.config/keepassxc/**", "~/.config/1Password/**",
     "~/.local/share/keyrings/**", "~/.gnome2/keyrings/**",
-    # Browser / messaging / wallet state (T1)
+    # Browser / messaging / wallet state (T1.1)
     "~/.mozilla/**", "~/.config/google-chrome/**", "~/.config/chromium/**",
     "~/.config/BraveSoftware/**", "~/.config/Signal/**", "~/.config/Slack/**",
     "~/.thunderbird/**", "~/.electrum/**", "~/.ethereum/**", "~/.bitcoin/**",
-    # Shell / tool histories (T1)
+    # Shell / tool histories (T1.1)
     "~/.bash_history", "~/.zsh_history", "~/.python_history",
     "~/.node_repl_history", "~/.psql_history", "~/.mysql_history",
     "~/.lesshst", "~/.viminfo",
-    # Host security configuration (T12)
+    # Host security configuration (T2.1)
     "/etc/ssh/**", "/etc/sudoers*", "/etc/shadow", "/etc/security/**",
     "/etc/pam.d/**", "/etc/apparmor.d/**", "/etc/selinux/**",
     # Kernel/hardware surfaces categorically not for confined contexts
@@ -97,24 +97,24 @@ deny = [
     "/dev/mem", "/dev/kmem", "/dev/port", "/boot/**",
 ]
 
-# The constructed $HOME (T1). HOME points at the shim; granted ~/ paths are bound
+# The constructed $HOME (T1.1). HOME points at the shim; granted ~/ paths are bound
 # beneath it; the Landlock ruleset backstops on the resolved view (§7.2.3/.5).
 [fs.home]
 shadow = true
 shim_root = "/run/kennel/<kennel>/home"
 
-# Private /tmp (T1): a fresh tmpfs; the host /tmp is invisible.
+# Private /tmp (T1.1): a fresh tmpfs; the host /tmp is invisible.
 [fs.tmp]
 private = true
 size = "512M"
 mode = "0700"
 
-# Procfs: PID namespace + hidepid=2 — the workload sees only its own tree (T1, T6).
+# Procfs: PID namespace + hidepid=2 — the workload sees only its own tree (T1.1, T1.6).
 [fs.proc]
 visibility = "self"
 hidepid = true
 
-# Minimal /dev: a constructed tmpfs with only these nodes bound in (T1, T6). Each
+# Minimal /dev: a constructed tmpfs with only these nodes bound in (T1.1, T1.6). Each
 # granted node is also Landlock read/write/ioctl-able (§8.1).
 [fs.dev]
 allow = [
@@ -139,7 +139,7 @@ proxy_listen_v6 = true
 
 # Invariant denies — cloud metadata, link-local, RFC1918, CGNAT. Enforced
 # deny-first by the BPF AND refused by the proxy after name resolution. INVARIANT:
-# no downstream template or leaf may remove these (T6). (THREATS: T6.)
+# no downstream template or leaf may remove these (T1.6). (THREATS: T1.6.)
 [[net.deny.invariant]]
 cidr = "169.254.169.254/32"
 reason = "cloud metadata IPv4 — never permitted from a kennel"
@@ -172,7 +172,7 @@ allow_host_loopback_v4 = false
 allow_host_loopback_v6 = false
 min_port = 1024
 
-# Force IPV6_V6ONLY=1 so a dual-stack socket cannot escape the v4 rewrite (T6).
+# Force IPV6_V6ONLY=1 so a dual-stack socket cannot escape the v4 rewrite (T1.6).
 [net.ipv6]
 force_v6only = true
 
@@ -186,7 +186,7 @@ level = "summary"
 # --- AF_UNIX sockets --------------------------------------------------------
 # Default-deny; the constructed view contains only granted sockets. Abstract-
 # namespace sockets are denied categorically — enforced natively by Landlock
-# scoping (ABI 6, §8.1), not the legacy seccomp/AppArmor fallback. (T6.)
+# scoping (ABI 6, §8.1), not the legacy seccomp/AppArmor fallback. (T1.6.)
 [unix]
 default = "deny"
 abstract = "deny"
@@ -206,7 +206,7 @@ xephyr_isolated = false
 
 # --- Process introspection / signals / ptrace ------------------------------
 # PID namespace hides other processes; signal scope (Landlock ABI 6) denies
-# signalling outside the kennel; ptrace across the boundary is denied. (T6, T1.)
+# signalling outside the kennel; ptrace across the boundary is denied. (T1.6, T1.1.)
 [proc]
 visibility = "self"
 hidepid = true
@@ -222,7 +222,7 @@ allow_from = []
 
 # --- Environment ------------------------------------------------------------
 # A curated environment, not the user's full shell env. Secrets are stripped;
-# framework variables are forced. (T1: credentials in env; T12: shim HOME.)
+# framework variables are forced. (T1.1: credentials in env; T2.1: shim HOME.)
 [env]
 pass = [
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TZ",

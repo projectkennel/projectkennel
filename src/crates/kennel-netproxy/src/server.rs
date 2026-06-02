@@ -31,7 +31,7 @@
 //!
 //! # Threat bearing
 //!
-//! T8 and the "only talk to the proxy" thesis: this is the user-space half of
+//! T1.8 and the "only talk to the proxy" thesis: this is the user-space half of
 //! egress control. The kernel (cgroup BPF) guarantees the workload can reach
 //! nothing but this proxy; this code decides what the proxy reaches on the
 //! workload's behalf, and records every decision.

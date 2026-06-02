@@ -25,7 +25,7 @@
 //!
 //! # Threat bearing
 //!
-//! T9 and the audit-integrity goals: an attacker who controls a string that
+//! T1.9 and the audit-integrity goals: an attacker who controls a string that
 //! reaches an operator's terminal (directly, via a log, or via a rendered audit
 //! record) must not thereby control the terminal. "It is only an error message"
 //! is not a defence — error messages are exactly where attacker strings land

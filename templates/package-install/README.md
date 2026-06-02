@@ -1,7 +1,7 @@
 # package-install
 
 For installing packages from a registry when you don't fully trust the package.
-The threat is the **post-install / setup script** (T2): it runs as you, with the
+The threat is the **post-install / setup script** (T1.2): it runs as you, with the
 package manager's reach. This template cuts that reach to one registry, a scratch
 directory, and a short lifetime.
 
@@ -28,13 +28,13 @@ For a pip or cargo install, add the registry the leaf needs:
 name = "pypi.org"
 ports = [443]
 reason = "Python package index"
-threats.exposed = ["T9"]
+threats.exposed = ["T1.9"]
 ```
 
 ## Defends / residuals
 
-- **Defends:** T2 (post-install scripts — no curl/wget, egress limited to the
-  registry, fs limited to scratch), T9 (partial), T10 (the TTL bounds persistence).
+- **Defends:** T1.2 (post-install scripts — no curl/wget, egress limited to the
+  registry, fs limited to scratch), T1.9 (partial), T1.10 (the TTL bounds persistence).
 - **Residuals:** a compromise of the registry itself delivers the malicious
   package through legitimate channels (out of scope). In-band exfil to the
   registry is theoretical and low-realism.

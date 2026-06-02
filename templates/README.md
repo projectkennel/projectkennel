@@ -11,12 +11,12 @@ user's leaf policy is a short delta from a template (typically 5–15 lines with
 
 | Template | For | Defends (THREATS.md) | Notable residuals |
 |---|---|---|---|
-| [`base-confined`](base-confined/) | The factored root of every confined template. Not used directly. | T19, baseline T1/T6/T12 | No fs/exec scope of its own |
-| [`ai-coding-strict`](ai-coding-strict/) | An AI coding agent on a single project. | T1, T2, T3, T6, T12, T14, T25 | T8 (exfil via the LLM API); T13 |
-| [`package-install`](package-install/) | Installing from a specific registry, time-bounded. | T2, T9 (partial) | TTL is the main T10 defence |
-| [`untrusted-build`](untrusted-build/) | Building from untrusted source, network-off. | T2, T5 (strong) | Needs offline mirrors for real deps |
-| [`inspect-only`](inspect-only/) | Read-only inspection of a directory; no build. | T2, T4, T5 (strong) | Cannot build/run/test |
-| [`containerised-service`](containerised-service/) | A long-lived containerised service (Postgres, …). | T21, T22, T1 (partial) | T20 (container escape); T23 needs userns-remap |
+| [`base-confined`](base-confined/) | The factored root of every confined template. Not used directly. | T3.1, baseline T1.1/T1.6/T2.1 | No fs/exec scope of its own |
+| [`ai-coding-strict`](ai-coding-strict/) | An AI coding agent on a single project. | T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7 | T1.8 (exfil via the LLM API); T2.2 |
+| [`package-install`](package-install/) | Installing from a specific registry, time-bounded. | T1.2, T1.9 (partial) | TTL is the main T1.10 defence |
+| [`untrusted-build`](untrusted-build/) | Building from untrusted source, network-off. | T1.2, T1.5 (strong) | Needs offline mirrors for real deps |
+| [`inspect-only`](inspect-only/) | Read-only inspection of a directory; no build. | T1.2, T1.4, T1.5 (strong) | Cannot build/run/test |
+| [`containerised-service`](containerised-service/) | A long-lived containerised service (Postgres, …). | T3.3, T3.4, T1.1 (partial) | T3.2 (container escape); T3.5 needs userns-remap |
 
 Each template directory carries `policy.toml` (the template's policy), `meta.toml`
 (identity + signing reference), and `README.md` (the threat-model summary).

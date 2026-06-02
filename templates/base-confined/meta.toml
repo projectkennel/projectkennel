@@ -7,6 +7,6 @@ template_base = ""
 # §5.10). policy.toml carries the matching [signature]; verify with
 # `kennel validate --require-signed` against keys/kennel-maint-2026.pub.
 maintainer_key = "kennel-maint-2026"
-threat_catalogue_version = "0.1"
+threat_catalogue_version = "0.3"
 last_reviewed = "2026-06-02"
 description = "The factored root of every confined template; not used directly."

@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: containerised-service  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.1
+# Threat catalogue: THREATS.md v0.3
 #
 # A long-lived containerised service for local development — a Postgres, a Redis,
 # a message broker. The goals: the service is reachable from the developer's
@@ -16,9 +16,9 @@
 # the design contract for when that integration lands. This template is included
 # for completeness of the executive-summary set and to pin the intended shape.
 #
-# Defends: T21 (LAN exposure of a dev service), T22, T1 (partial). Residuals:
-# T20 (container escape via a runtime/kernel CVE — out of any userspace
-# framework's reach); T23 (root-with-host-UID — mitigated only if Docker runs
+# Defends: T3.3 (LAN exposure of a dev service), T3.4, T1.1 (partial). Residuals:
+# T3.2 (container escape via a runtime/kernel CVE — out of any userspace
+# framework's reach); T3.5 (root-with-host-UID — mitigated only if Docker runs
 # with userns-remap).
 # ============================================================================
 
@@ -41,13 +41,13 @@ run_as_nonroot = true           # use the image's non-root user where supported
 
 # Published ports bind to the kennel's OWN loopback address (computed from
 # <tag>/<ctx>), so the service is reachable from the developer's default context
-# but invisible to the LAN (T21). 0.0.0.0 publishing is refused.
+# but invisible to the LAN (T3.3). 0.0.0.0 publishing is refused.
 [[container.published_ports]]
 container_port = 5432
 host_offset = 1                 # host bind = the kennel's loopback :5432 (computed)
 host_port = 5432
 reason = "Postgres reachable from the workstation, not the LAN"
-threats.mitigated = ["T21"]
+threats.mitigated = ["T3.3"]
 
 # Data volume: the only host path the container can touch. The leaf supplies the
 # real host directory.
@@ -80,4 +80,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "jaaOuVQ9UK0ath7xnHegr+HE2q0YXc0o5Qs11m77lyPjc+ETvm2S4Dh6akhOkAjpLWKq4bJdW7dwzxfnz5q5Cw=="
+signature = "QYySO1qjTleb38T+tY6TglZKTDFRZV9cjKUX1NAneAHrX+RZt1nbwze8lL/EWIJUoRR8KWW2Srmp6Y2Vm7awAA=="

@@ -32,7 +32,7 @@
 //!
 //! # Threat bearing
 //!
-//! Defends against T6 (lateral movement) and the cloud-metadata case in
+//! Defends against T1.6 (lateral movement) and the cloud-metadata case in
 //! particular: a request to add `169.254.169.254` is refused because it is not
 //! in the reserved loopback block. This module is pure and platform-
 //! independent; it is exercised by the unit tests below on any host.

@@ -67,7 +67,7 @@ name = "api.anthropic.com"
 ports = [443]
 tls.required = true
 reason = "Claude API"
-threats.exposed = ["T8"]
+threats.exposed = ["T1.8"]
 ```
 
 The user policy is approximately 10 lines. Everything else — the credential denylist, the constructed view, the per-kennel loopback, the seccomp filter — is inherited from the template.
@@ -97,13 +97,13 @@ name = "api.anthropic.com"
 ports = [443]
 tls.required = true
 reason = "Claude API"
-threats.exposed = ["T8"]
+threats.exposed = ["T1.8"]
 
 # Remove a default deny — rare; surfaces strongly in the diff.
 [[fs.deny.remove]]
 path = "~/.config/git/**"
-reason = "this workflow needs the user's git config; accepted T1 exposure"
-threats.exposed = ["T1"]
+reason = "this workflow needs the user's git config; accepted T1.1 exposure"
+threats.exposed = ["T1.1"]
 
 # Override a scalar — moderately common, e.g., raising audit verbosity.
 [net.audit.override]
@@ -195,29 +195,29 @@ name = "api.anthropic.com"
 ports = [443]
 tls.required = true
 reason = "Claude API"
-threats.exposed = ["T8"]
+threats.exposed = ["T1.8"]
 ```
 
-The tag values reference entries in `THREATS.md`. Tags are bare T-numbers (`"T8"`) or T-numbers with informative slugs (`"T8:exfil-via-allowed-host"`). The slug is purely for readability; the T-number is canonical.
+The tag values reference entries in `THREATS.md`. Tags are bare T-numbers (`"T1.8"`) or T-numbers with informative slugs (`"T1.8:exfil-via-allowed-host"`). The slug is purely for readability; the T-number is canonical.
 
 Two threat-tag fields are defined:
 
 - `threats.exposed` — threats this rule weakens defence against, or fails to defend against. Recommended for any rule that grants a capability the baseline template would have denied.
 - `threats.mitigated` — threats this rule actively mitigates. Rare on individual rules; more commonly, the template documents mitigations at the template level (in its `THREATS.md` companion file). Use on individual rules only when the rule is the *primary* mitigation for a specific threat.
 
-The diff command, audit reports, and `--explain` output all reference these tags. A user reviewing their policy can ask "for T2 (malicious post-install), what rules mitigate it and what rules expose it?" Project Kennel answers mechanically by scanning the effective policy.
+The diff command, audit reports, and `--explain` output all reference these tags. A user reviewing their policy can ask "for T1.2 (malicious post-install), what rules mitigate it and what rules expose it?" Project Kennel answers mechanically by scanning the effective policy.
 
 When a user delta adds a rule with `threats.exposed`, the diff tool surfaces this:
 
 ```
 + unix.allow: /run/corp/vpn-agent.sock
     reason: corp-vpn-agent
-    threats.exposed: T6 (privileged service surface)
+    threats.exposed: T1.6 (privileged service surface)
     WARNING: granting access to a privileged service socket.
              Consider whether the kennel truly needs this.
 ```
 
-The user sees not just "you added a grant" but "you added a grant that exposes you to T6". This is what makes the diff actionable.
+The user sees not just "you added a grant" but "you added a grant that exposes you to T1.6". This is what makes the diff actionable.
 
 ## 5.7 The template set
 
@@ -225,19 +225,19 @@ The minimum viable set of templates, each maintained as a first-class artefact:
 
 | Template | Purpose | Defends | Notable residuals |
 |---|---|---|---|
-| `base-confined` | The root of all confined templates. Minimal: `no_new_privs`, deny setuid, deny sudo, no display, no dbus, no abstract unix sockets, deny RFC1918 and cloud metadata, empty `fs.read`/`fs.write`. | T19, T18, baseline against T6 | Cannot be used directly (no fs scope) |
-| `ai-coding-strict` | AI agent on a single project. Worked example in `TEMPLATE-ai-coding-strict.md`. | T1, T2, T3, T6, T12, T14, T25 | T8 (exfil via API); T13 (semantic regressions in code) |
-| `ai-coding-permissive` | Same shape, broader fs scope and open-net audit mode. | T1 partial | T8; weaker T12; documented as weaker |
-| `untrusted-build` | Build script from untrusted source. `net.mode = "none"` during install. | T2 strong, T5 strong | Needs offline mirrors for legitimate dependencies |
-| `inspect-only` | Read-only fs on a directory; no exec beyond inspection tools. | T2, T4, T5 strong | Cannot build, run, or test |
-| `package-install` | Install from specific registries. Time-bounded. | T2 partial, T9 partial | TTL is the primary defence against T10 |
-| `dev-server` | Run a local dev server. Grants specific host loopback services. | T1, T3 | Explicit T6 exposures for granted services |
-| `docs-and-research` | AI agent doing web research. `net.mode = "open"` with heavy audit. | T1 | T9, T8; weaker than strict |
-| `containerised-service` | Long-lived containerised service (Postgres, Redis, etc). Per-kennel loopback for published ports. | T21, T22, T1 partial | T20 (container escape) is in-scope but cannot be fully mitigated; T23 requires `userns-remap` |
-| `containerised-tool` | Short-lived containers running build tools, linters, formatters. | T2, T21, T22 | Strict outbound; no published ports by default |
-| `ml-coding` | ML workflow with GPU. | T1 with GPU caveat | GPU driver surface in scope; documented |
-| `x11-isolated-dev` | Workflow needing X11. Xwayland-isolated on Wayland hosts, Xephyr-isolated on X11. | T17, T18 | Clipboard bridging off by default |
-| `mcp-server` | MCP server invoked by an agent in another kennel. | T24, T1 | Inherits parent kennel's policy by default |
+| `base-confined` | The root of all confined templates. Minimal: `no_new_privs`, deny setuid, deny sudo, no display, no dbus, no abstract unix sockets, deny RFC1918 and cloud metadata, empty `fs.read`/`fs.write`. | T3.1, T2.7, baseline against T1.6 | Cannot be used directly (no fs scope) |
+| `ai-coding-strict` | AI agent on a single project. Worked example in `TEMPLATE-ai-coding-strict.md`. | T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7 | T1.8 (exfil via API); T2.2 (semantic regressions in code) |
+| `ai-coding-permissive` | Same shape, broader fs scope and open-net audit mode. | T1.1 partial | T1.8; weaker T2.1; documented as weaker |
+| `untrusted-build` | Build script from untrusted source. `net.mode = "none"` during install. | T1.2 strong, T1.5 strong | Needs offline mirrors for legitimate dependencies |
+| `inspect-only` | Read-only fs on a directory; no exec beyond inspection tools. | T1.2, T1.4, T1.5 strong | Cannot build, run, or test |
+| `package-install` | Install from specific registries. Time-bounded. | T1.2 partial, T1.9 partial | TTL is the primary defence against T1.10 |
+| `dev-server` | Run a local dev server. Grants specific host loopback services. | T1.1, T1.3 | Explicit T1.6 exposures for granted services |
+| `docs-and-research` | AI agent doing web research. `net.mode = "open"` with heavy audit. | T1.1 | T1.9, T1.8; weaker than strict |
+| `containerised-service` | Long-lived containerised service (Postgres, Redis, etc). Per-kennel loopback for published ports. | T3.3, T3.4, T1.1 partial | T3.2 (container escape) is in-scope but cannot be fully mitigated; T3.5 requires `userns-remap` |
+| `containerised-tool` | Short-lived containers running build tools, linters, formatters. | T1.2, T3.3, T3.4 | Strict outbound; no published ports by default |
+| `ml-coding` | ML workflow with GPU. | T1.1 with GPU caveat | GPU driver surface in scope; documented |
+| `x11-isolated-dev` | Workflow needing X11. Xwayland-isolated on Wayland hosts, Xephyr-isolated on X11. | T2.6, T2.7 | Clipboard bridging off by default |
+| `mcp-server` | MCP server invoked by an agent in another kennel. | T3.6, T1.1 | Inherits parent kennel's policy by default |
 
 Each ships in the Project Kennel repository, versioned. The repository is the canonical source; users typically reference templates by name and Project Kennel resolves to the local installed copy.
 
@@ -309,7 +309,7 @@ For each pattern, Project Kennel overlays a tmpfs at any matching path during sh
 
 The default is `"empty"` for compatibility; templates that prioritise strictness over compatibility can override to `"enoent"`.
 
-`fs.scrub` is a defence against T14 (introduction or preservation of secrets in unintended locations). It is a partial defence: the agent can recover scrubbed file contents through indirect paths (`git show HEAD:.env`, reading from the index, reading from build artefacts). Project Kennel cannot prevent semantic-level recovery without breaking legitimate tooling; `fs.scrub` is best-effort for direct reads, documented as such.
+`fs.scrub` is a defence against T2.3 (introduction or preservation of secrets in unintended locations). It is a partial defence: the agent can recover scrubbed file contents through indirect paths (`git show HEAD:.env`, reading from the index, reading from build artefacts). Project Kennel cannot prevent semantic-level recovery without breaking legitimate tooling; `fs.scrub` is best-effort for direct reads, documented as such.
 
 ### Per-kennel service instances
 
@@ -428,11 +428,11 @@ $ kennel upgrade my-ai-coding
 ai-coding-strict v4 → v5 changes:
 
   + Added [[net.deny.invariant]] for 100.64.0.0/10 (CGNAT)
-    threats.mitigated: T6 (lateral via CGNAT)
+    threats.mitigated: T1.6 (lateral via CGNAT)
     impact: small; almost no workflows hit this
 
   ~ Changed fs.scrub.patterns to include "*.p12" and "*.pfx"
-    threats.mitigated: T14 (cert-key exfiltration)
+    threats.mitigated: T2.3 (cert-key exfiltration)
     impact: workloads reading PKCS#12 files now see empty content
 
   - Removed [[exec.allow]] /usr/bin/python3.10 (EOL upstream)
@@ -455,8 +455,8 @@ $ kennel init my-ai-coding --template ai-coding-strict
 Created ~/.config/kennel/kennels/my-ai-coding.toml
 Based on: ai-coding-strict (v4)
 
-This template defends against: T1, T2, T3, T6, T12, T14, T25
-Known residuals: T8 (exfil via API), T13 (semantic code regressions)
+This template defends against: T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7
+Known residuals: T1.8 (exfil via API), T2.2 (semantic code regressions)
 See ai-coding-strict/README.md for the full threat-model summary.
 
 Customize by editing the file. Run `kennel diff my-ai-coding` to review.
@@ -493,23 +493,23 @@ Your deltas (3):
 
   + fs.write.add: ~/projects/myproj/**
       reason: the project I am working on
-      threats.exposed: T13, T14, T15, T16
+      threats.exposed: T2.2, T2.3, T2.4, T2.5
       threat impact: workload can write to the project tree. Output review
                      tooling (kennel review) flags security-degrading
                      diffs at commit time.
 
   + net.allow.add: api.anthropic.com:443 (TLS required)
       reason: Claude API
-      threats.exposed: T8
+      threats.exposed: T1.8
       threat impact: outbound to one additional host. Audited via proxy.
-                     T8 (in-band exfiltration via the API) is the
+                     T1.8 (in-band exfiltration via the API) is the
                      primary residual; documented and accepted.
 
 Effective policy summary:
-  Threats defended: T1, T2, T3, T7, T12, T14, T19
-  Threats exposed: T8 (by Claude API grant); T13 (semantic regressions
+  Threats defended: T1.1, T1.2, T1.3, T1.7, T2.1, T2.3, T3.1
+  Threats exposed: T1.8 (by Claude API grant); T2.2 (semantic regressions
                    in produced code)
-  Threats unchanged from template: T18 (TIOCSTI prevented by kernel sysctl)
+  Threats unchanged from template: T2.7 (TIOCSTI prevented by kernel sysctl)
 
 Audit-log location: ~/.local/state/kennel/my-ai-coding/
 ```

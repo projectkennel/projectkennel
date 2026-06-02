@@ -79,8 +79,8 @@ Every issue title must start with exactly one of three tags, as the first thing 
 **Pass:**
 
 ```
-[T12] Panic in template-chain depth-limit check
-[T1]  fs.scrub does not catch .envrc.local pattern
+[T2.1] Panic in template-chain depth-limit check
+[T1.1]  fs.scrub does not catch .envrc.local pattern
 [T-NEW] Resolver trusts template mtime for cache invalidation; not catalogued, looks attackable
 [T-NONE] Build fails on aarch64-musl
 [T-NONE] Typo in EXEC-SUMMARY.md §3

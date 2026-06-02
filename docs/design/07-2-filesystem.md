@@ -186,7 +186,7 @@ Two template-level features extend the constructed-`$HOME` pattern. They are not
 
 **`fs.scrub`** overlays a tmpfs over files within otherwise-granted directories that match a glob pattern. The canonical use case is hiding `.env`, `.env.*`, `terraform.tfstate`, `*.pem`, `*.key`, and similar credential-shaped files within the project tree. The agent can read the file but sees either an empty file (`mode = "empty"`, the default) or ENOENT (`mode = "enoent"`, stricter but breaks tools that test for file existence). Project Kennel iterates the granted directories at shim construction time, finds files matching the patterns, and overlays a per-file tmpfs at each match.
 
-Both constructs are best-effort against direct reads, not against semantic-level recovery. An agent that can run `git show HEAD:.env` on a scrubbed file can recover the original contents from git's object store; an agent that can execute the build system can recover sanitised config via the build's normal credential-handling paths. Project Kennel does not claim these constructs prevent determined recovery; they prevent the casual reconnaissance pattern catalogued as T1 and the secret-introduction pattern catalogued as T19.
+Both constructs are best-effort against direct reads, not against semantic-level recovery. An agent that can run `git show HEAD:.env` on a scrubbed file can recover the original contents from git's object store; an agent that can execute the build system can recover sanitised config via the build's normal credential-handling paths. Project Kennel does not claim these constructs prevent determined recovery; they prevent the casual reconnaissance pattern catalogued as T1.1 and the secret-introduction pattern catalogued as T3.1.
 
 ## 7.2.6 The private `/tmp`
 

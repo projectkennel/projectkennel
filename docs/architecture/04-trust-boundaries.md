@@ -45,7 +45,7 @@ The validator rejects out-of-scope requests with the `out-of-scope` error code; 
 
 **Failure mode.** A compromised kenneld asking the privhelper to add `169.254.169.254` to loopback would be refused. The privhelper logs the refusal to its own audit channel (the `priv.jsonl` file or journald, per the configured sink) and exits non-zero. kenneld observes the refusal and surfaces it.
 
-**Threat IDs addressed.** T6 (lateral movement: a hostile caller cannot direct the privhelper to do anything outside the reserved scope), T19 (setuid escalation: the privhelper is small and refuses out-of-scope requests; even on subversion of the calling process, the privileged syscall surface is bounded).
+**Threat IDs addressed.** T1.6 (lateral movement: a hostile caller cannot direct the privhelper to do anything outside the reserved scope), T3.1 (setuid escalation: the privhelper is small and refuses out-of-scope requests; even on subversion of the calling process, the privileged syscall surface is bounded).
 
 **Bounded duration of privilege.** The privhelper is short-lived per operation. The privileged process exists only for the milliseconds of one validated syscall sequence. There is no long-running daemon with continuous `CAP_NET_ADMIN`. A future revision may revisit this trade; see `01-process-model.md`.
 
@@ -71,7 +71,7 @@ The validator rejects out-of-scope requests with the `out-of-scope` error code; 
 
 **Failure mode.** Categorical reject. The parser returns a `PolicyError` variant naming the offending field; the policy is not loaded. No partial state is constructed.
 
-**Threat IDs addressed.** T16 (template tampering), T17 (invariant weakening by user delta), T18 (template-chain depth-DoS).
+**Threat IDs addressed.** T2.5 (template tampering), T2.6 (invariant weakening by user delta), T2.7 (template-chain depth-DoS).
 
 ---
 
@@ -95,7 +95,7 @@ An artefact that fails signature verification, or whose content hash does not ma
 
 **Failure mode.** `PolicyError::SignatureFailure` (with `key_id` if recognised) or `PolicyError::LockMismatch` (naming the reference and both hashes). The artefact is not loaded; any policy that depends on it cannot be resolved. The only sanctioned way to change a locked entry is `kennel upgrade`, which surfaces the content change for review.
 
-**Threat IDs addressed.** T16 (template tampering: a re-signed or re-tagged artefact under the same version is caught by the lockfile byte-pin; an artefact signed by an untrusted key is refused), and the supply-chain class generally — a versioned reference is a pin to signed bytes, not a name lookup against whatever sits at that name today.
+**Threat IDs addressed.** T2.5 (template tampering: a re-signed or re-tagged artefact under the same version is caught by the lockfile byte-pin; an artefact signed by an untrusted key is refused), and the supply-chain class generally — a versioned reference is a pin to signed bytes, not a name lookup against whatever sits at that name today.
 
 ---
 
@@ -116,7 +116,7 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 
 **Failure mode.** Verdict is allow or deny. Deny returns 0 from the BPF program, which causes the kernel to fail the syscall with `EPERM` (or with `ECONNREFUSED` for connect). The deny event is emitted via the ringbuf for audit.
 
-**Threat IDs addressed.** T1 (recon: workload cannot enumerate sockets we have not bound), T6 (lateral movement: workload cannot connect to host loopback services), T7 (DNS exfiltration: workload cannot issue DNS directly), T9 (supply-chain: unexpected destinations show up in audit).
+**Threat IDs addressed.** T1.1 (recon: workload cannot enumerate sockets we have not bound), T1.6 (lateral movement: workload cannot connect to host loopback services), T1.7 (DNS exfiltration: workload cannot issue DNS directly), T1.9 (supply-chain: unexpected destinations show up in audit).
 
 ---
 
@@ -174,7 +174,7 @@ The PID from `SO_PEERCRED` is recorded in audit events but not used for authoris
 
 **Failure mode.** Connection closed without any response; an audit event records the rejected attempt with the peer UID/PID. This is rare: only a misconfigured filesystem or a same-UID-but-distinct-program would trigger it.
 
-**Threat IDs addressed.** T6 (lateral movement: another user on the same machine cannot ask kenneld to start a kennel as us, even if the socket file were inadvertently world-readable).
+**Threat IDs addressed.** T1.6 (lateral movement: another user on the same machine cannot ask kenneld to start a kennel as us, even if the socket file were inadvertently world-readable).
 
 ---
 
@@ -191,7 +191,7 @@ The PID from `SO_PEERCRED` is recorded in audit events but not used for authoris
 
 **Failure mode.** Out-of-scope D-Bus calls are denied by `xdg-dbus-proxy` and surface as `dbus.call-deny` audit events. SSH-agent malformed messages are handled by the agent; if the agent crashes, the workload loses git-over-SSH capability for the kennel's remaining lifetime (or until kenneld restarts the agent).
 
-**Threat IDs addressed.** T1 (recon of host SSH keys: the user's ssh-agent is not in the workload's view), T6 (lateral movement to D-Bus services: the host dbus is not reachable, only the filtered proxy).
+**Threat IDs addressed.** T1.1 (recon of host SSH keys: the user's ssh-agent is not in the workload's view), T1.6 (lateral movement to D-Bus services: the host dbus is not reachable, only the filtered proxy).
 
 ---
 
@@ -209,7 +209,7 @@ The PID from `SO_PEERCRED` is recorded in audit events but not used for authoris
 
 **Failure mode.** Unallowed destination → SOCKS5 reply 0x02 (connection not allowed by ruleset). Audit event emitted.
 
-**Threat IDs addressed.** T1 (exfiltration: arbitrary destinations refused), T7 (DNS exfiltration: workload cannot ask DNS for unallowed names, even via SOCKS5 — the proxy refuses), T9 (supply-chain).
+**Threat IDs addressed.** T1.1 (exfiltration: arbitrary destinations refused), T1.7 (DNS exfiltration: workload cannot ask DNS for unallowed names, even via SOCKS5 — the proxy refuses), T1.9 (supply-chain).
 
 ---
 
@@ -245,7 +245,7 @@ The PID from `SO_PEERCRED` is recorded in audit events but not used for authoris
 
 **Failure mode.** A name not in the allowlist returns SOCKS5 `host unreachable` to the workload. A malformed DNS response is treated as resolution failure.
 
-**Threat IDs addressed.** T7 (DNS exfiltration), T9 (supply-chain: unexpected resolver-rewrites are visible in audit).
+**Threat IDs addressed.** T1.7 (DNS exfiltration), T1.9 (supply-chain: unexpected resolver-rewrites are visible in audit).
 
 ---
 
@@ -261,7 +261,7 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 **Failure mode.** Attempted access from inside the kennel resolves to `ENOENT` (path not in view).
 
-**Threat IDs addressed.** T1 (recon: workload cannot learn what is being audited), T13 (anti-forensics: workload cannot tamper with audit data).
+**Threat IDs addressed.** T1.1 (recon: workload cannot learn what is being audited), T2.2 (anti-forensics: workload cannot tamper with audit data).
 
 ---
 
@@ -282,7 +282,7 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 **Failure mode.** `SpawnError::SettledSignatureFailure`, `SpawnError::SettledSchemaUnsupported`, `SpawnError::FrameworkInvariantViolated` (naming the invariant), or `SpawnError::UnsubstitutedPlaceholder` (naming the placeholder). The spawn is refused; no workload runs.
 
-**Threat IDs addressed.** T16 and T17 at runtime (a tampered or invariant-weakening settled policy is refused by signature check and invariant re-assertion respectively); supports the attestation capability (the workstation enforces exactly the signed artefact, identified by content hash, with no live resolution that could diverge).
+**Threat IDs addressed.** T2.5 and T2.6 at runtime (a tampered or invariant-weakening settled policy is refused by signature check and invariant re-assertion respectively); supports the attestation capability (the workstation enforces exactly the signed artefact, identified by content hash, with no live resolution that could diverge).
 
 ---
 

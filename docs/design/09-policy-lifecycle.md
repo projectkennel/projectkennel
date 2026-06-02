@@ -129,7 +129,7 @@ Reaches the TTL, Project Kennel either:
 
 Default is `exit` for templates that don't override.
 
-Time-bounded kennels address T10 (long-lived workload capability creep). A `package-install` kennel with a 30-minute TTL cannot accumulate capability over months because it cannot exist for months. Users who need long-lived kennels use templates without TTLs (`ai-coding-strict` has none); the explicit non-TTL is itself a documented choice.
+Time-bounded kennels address T1.10 (long-lived workload capability creep). A `package-install` kennel with a 30-minute TTL cannot accumulate capability over months because it cannot exist for months. Users who need long-lived kennels use templates without TTLs (`ai-coding-strict` has none); the explicit non-TTL is itself a documented choice.
 
 ## 9.8 Periodic re-consent
 

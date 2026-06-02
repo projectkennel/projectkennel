@@ -37,7 +37,7 @@
 //!
 //! # Threat bearing
 //!
-//! Defends against T8 (exfiltration via an allowed destination — the audit
+//! Defends against T1.8 (exfiltration via an allowed destination — the audit
 //! record and the per-destination allowlist are the mitigation surface), the DNS
 //! rebinding class (resolution is here, not in the kennel), and the
 //! terminal-injection class on the audit/error path (every untrusted string —

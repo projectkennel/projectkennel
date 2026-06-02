@@ -1,19 +1,19 @@
 # ============================================================================
 # Template: package-install  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.1
+# Threat catalogue: THREATS.md v0.3
 #
 # Installing packages from a specific registry, time-bounded. The threat is the
-# post-install / setup script (T2): it runs as the user with whatever the package
+# post-install / setup script (T1.2): it runs as the user with whatever the package
 # manager runs. This template gives it a single registry, a scratch directory,
 # the package manager + interpreters (NO curl/wget), and a SHORT TTL — the TTL is
-# the primary defence against capability creep over time (T10).
+# the primary defence against capability creep over time (T1.10).
 #
 # The user's leaf policy adds the scratch path to install into, and may add a
 # second registry. Default egress is the npm registry; for a pip/cargo install
 # the leaf adds pypi.org / crates.io.
 #
-# Defends: T2 (partial), T9 (partial). Residuals: a compromise of the registry
+# Defends: T1.2 (partial), T1.9 (partial). Residuals: a compromise of the registry
 # itself (out of scope); the short TTL bounds persistence.
 # ============================================================================
 
@@ -47,12 +47,12 @@ name = "registry.npmjs.org"
 ports = [443]
 protocol = "tcp"
 reason = "npm package registry (default; leaf adds pypi.org / crates.io as needed)"
-threats.exposed = ["T9"]
+threats.exposed = ["T1.9"]
 
 
 # --- Lifecycle: short by default; the TTL is the point ----------------------
 # A trial install should be ephemeral. Kill at the TTL (not warn) so a package
-# that tries to linger as a background process cannot (T10).
+# that tries to linger as a background process cannot (T1.10).
 [lifecycle]
 ttl = "1h"
 ttl_action = "stop"
@@ -60,4 +60,4 @@ ttl_action = "stop"
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "634uvQVKBtLAWRqzxjaEFHJEuKim1ZL8RkEFZXAPXslYCBRFofm/d/9gnfNNwqJUSfk6so281ngn5LQ+N2OlBw=="
+signature = "f87+PZSYrJlpXrdwIVAgTMV1CVf9GIToKI02PnREBYPwVggx3Xv4CGywbiZL2RTLiG27ZM4Olt70EmbIyqchCA=="

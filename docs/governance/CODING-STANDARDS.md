@@ -386,8 +386,8 @@ Example skeleton:
 //!
 //! # Threat bearing
 //!
-//! Defends against T16 (template tampering) by signature verification,
-//! T17 (invariant weakening by user delta) by the validator, and T18
+//! Defends against T2.5 (template tampering) by signature verification,
+//! T2.6 (invariant weakening by user delta) by the validator, and T2.7
 //! (template-version drift) by the version-pinning checks.
 //!
 //! # Non-goals
@@ -455,7 +455,7 @@ A non-trivial pattern is one where the *why* would not be obvious from re-readin
 - Order-dependent operations where the order is not arbitrary. ("We set `PR_SET_NO_NEW_PRIVS` before installing the seccomp filter because the filter relies on no-new-privs being already set.")
 - Workarounds for a specific kernel version, library bug, or distro behaviour. Cite the bug.
 - A comparison or check whose absence would be a subtle vulnerability. ("Constant-time compare: timing leak otherwise.")
-- A loop bound or recursion limit. ("Bounded at 64 to prevent DoS from adversarial template chains; see T18.")
+- A loop bound or recursion limit. ("Bounded at 64 to prevent DoS from adversarial template chains; see T2.7.")
 
 The standard is: if a reviewer would have to ask "why?", write it down. This rule is `[review]`.
 
@@ -889,13 +889,13 @@ Exactly one further exception, as before: a CI failure caused by *our* infrastru
 Every PR carries a description following `.github/PULL_REQUEST_TEMPLATE.md`. The template requires, at minimum:
 
 - **What changes.** One or two sentences naming the behaviour added, removed, or fixed, in terms a reader can verify against the diff. Not "improves X"; *names* the change.
-- **Why, in project-local terms.** Which threat ID from `THREATS.md` this addresses, which design-document invariant it implements, which open issue it closes, which user-visible behaviour it changes. Generic justifications fail the template. "T18 (template chain DoS) is currently unbounded in the resolver; this caps it at the documented limit" is an answer. "Best practice" is not.
+- **Why, in project-local terms.** Which threat ID from `THREATS.md` this addresses, which design-document invariant it implements, which open issue it closes, which user-visible behaviour it changes. Generic justifications fail the template. "T2.7 (template chain DoS) is currently unbounded in the resolver; this caps it at the documented limit" is an answer. "Best practice" is not.
 - **Phase boundaries.** Explicit identification of the `test:`, `scaffold:`, and `feat:` commits in the PR. If folded (per §7.1 notes), the reason. If only some phases are present, the reason and the tracked follow-up issue.
 - **Dependency changes.** If the PR touches `Cargo.toml`, `Cargo.lock`, `src/vendor/`, or `CHECKSUMS.toml`: an explicit account of how §5.5 verification was performed. Which independent sources were consulted, what their results were, who is named as `audited-by` in the checksum entry. "I ran `cargo update`" fails the template; the §5.5 procedure is the substance.
 - **Tests.** What was tested, including test names. New behaviour without new tests fails §7.
 - **Threat-surface impact.** For any change that adds or removes a behaviour exposed to a confined workload: explicit statement of whether this expands, contracts, or leaves unchanged the workload-reachable surface, with reasoning.
 
-The template's specificity is the test. AI agents fill plausible-sounding generic text easily; specific references to `T18`, to a named invariant, to the §5.5 procedure they actually performed, are hard to fabricate without engaging with the codebase. Maintainers can verify a threat-ID claim against the catalogue in seconds; an invented one is obvious.
+The template's specificity is the test. AI agents fill plausible-sounding generic text easily; specific references to `T2.7`, to a named invariant, to the §5.5 procedure they actually performed, are hard to fabricate without engaging with the codebase. Maintainers can verify a threat-ID claim against the catalogue in seconds; an invented one is obvious.
 
 #### What this is not
 
@@ -928,9 +928,9 @@ Do **not** reach for `[T-NONE]` when you are merely unsure. `[T-NONE]` is a clai
 Examples that pass:
 
 ```
-[T12] Panic in template-chain depth-limit check
-[T1] fs.scrub does not catch .envrc.local pattern
-[T9] static.crates.io reachable via DNS rebinding when proxy not started
+[T2.1] Panic in template-chain depth-limit check
+[T1.1] fs.scrub does not catch .envrc.local pattern
+[T1.9] static.crates.io reachable via DNS rebinding when proxy not started
 [T-NEW] Resolver trusts template mtime for cache invalidation; not in catalogue, looks attackable
 [T-NONE] Build fails on aarch64-musl
 [T-NONE] Typo in EXEC-SUMMARY.md §3

@@ -436,7 +436,7 @@ reason = "the project I am working on"
 name = "api.anthropic.com"
 ports = [443]
 reason = "Claude API"
-threats.exposed = ["T8"]
+threats.exposed = ["T1.8"]
 "#;
 
     #[test]

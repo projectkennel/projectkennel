@@ -200,7 +200,7 @@ A delta cannot weaken a *framework invariant* (see below). Attempting to do so c
 
 ### Threat tagging
 
-Each delta and each `[[net.allow]]` entry may carry a `threats.exposed` array listing threat IDs (`["T8", "T9"]`) that this entry exposes. The list is informational; tooling reads it but does not enforce.
+Each delta and each `[[net.allow]]` entry may carry a `threats.exposed` array listing threat IDs (`["T1.8", "T1.9"]`) that this entry exposes. The list is informational; tooling reads it but does not enforce.
 
 The threat IDs must be present in the version of `THREATS.md` named by `threat_catalogue_version`. The validator does not require the IDs to be there at parse time (the catalogue may not be available), but `kennel validate --strict-invariants` does check.
 
@@ -345,7 +345,7 @@ framework_invariants_asserted = [ "cap.no_new_privs", "..." ]  # ids the compile
 leaf_policy_sha256 = "..."
 schema_version = 1
 invariant_set_sha256 = "..."
-threat_catalogue_version = "0.1"
+threat_catalogue_version = "0.3"
 compiler_version = "0.4.2"
 
 [provenance.install_constants]

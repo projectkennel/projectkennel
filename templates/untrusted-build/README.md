@@ -2,7 +2,7 @@
 
 For running a build from source you don't trust — a cloned repo's `make`, a
 tarball's `./configure && make`. The defining property: **the network is off**.
-A malicious build script (T2/T5) has the toolchain and the source tree and
+A malicious build script (T1.2/T1.5) has the toolchain and the source tree and
 nothing else: no egress for command-and-control, no exfiltration, no fetching a
 second-stage payload.
 
@@ -27,7 +27,7 @@ the project tree. That is the cost of the strong guarantee.
 
 ## Defends / residuals
 
-- **Defends:** T2 (post-install/build scripts — no egress at all), T5 (build-time
+- **Defends:** T1.2 (post-install/build scripts — no egress at all), T1.5 (build-time
   compromise — the build cannot reach out to alter itself or report back).
 - **Residual:** legitimate builds that fetch at build time fail; you must supply
   dependencies offline. If a workflow genuinely needs network, it is not an

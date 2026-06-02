@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: inspect-only  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.1
+# Threat catalogue: THREATS.md v0.3
 #
 # Reading a directory to decide whether to trust it — grep/cat/less over a freshly
 # cloned repo — WITHOUT giving its build system any chance to run. Network off,
@@ -12,7 +12,7 @@
 # The user's leaf grants the read path; it adds no write and no exec (the strict
 # allowlist is the point).
 #
-# Defends: T2, T4, T5 (strong). Residual: a CVE in an inspection tool itself
+# Defends: T1.2, T1.4, T1.5 (strong). Residual: a CVE in an inspection tool itself
 # (assumes vetted system tools).
 # ============================================================================
 

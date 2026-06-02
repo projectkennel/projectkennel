@@ -232,7 +232,7 @@ For interactive workflows and developer-tool workloads, the overhead is negligib
 
 - **systemd.** `kennel` and `systemd-run --user` should coexist. A long-running user service can wrap itself in a kennel.
 - **Flatpak.** Orthogonal. Flatpak handles packaged desktop apps; this handles command-line and developer workflows.
-- **Docker / Podman.** A kennel can grant or deny the container daemon socket. Containers running inside a kennel are bounded by that kennel's policy (volume mounts must be within `fs.read`/`fs.write`, published ports go via per-kennel loopback). The `containerised-service` and `containerised-tool` templates encode the conventions. T20–T23 in `THREATS.md` document the container-specific threats and their residuals.
+- **Docker / Podman.** A kennel can grant or deny the container daemon socket. Containers running inside a kennel are bounded by that kennel's policy (volume mounts must be within `fs.read`/`fs.write`, published ports go via per-kennel loopback). The `containerised-service` and `containerised-tool` templates encode the conventions. T3.2–T3.5 in `THREATS.md` document the container-specific threats and their residuals.
 - **System-wide AppArmor.** Project Kennel's optional AppArmor fragments compose with system policies; Project Kennel's fragments are loaded as additional profiles, not replacements.
 - **System-wide SELinux.** Compatible; Project Kennel's enforcement is independent of SELinux labels. On SELinux systems, Project Kennel runs within the user's domain and adds layered constraints.
 - **Firejail, bubblewrap.** Project Kennel uses bubblewrap-equivalent mechanisms (mount namespaces, etc) directly. Running firejail-wrapped commands inside a kennel is permissible but generally redundant.

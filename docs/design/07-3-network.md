@@ -270,15 +270,15 @@ The userspace process believes it bound to `0.0.0.0`; the kernel actually bound 
 
 Against the threats in `THREATS.md`:
 
-- **T1 (credential reconnaissance):** kennel cannot exfiltrate code to `attacker.example.com` because the proxy refuses. Cannot reach the user's other dev services on loopback. Cannot bypass via raw socket. Audit log records every destination attempted.
-- **T2 (malicious post-install script):** with `net.mode = "none"`, the script can't reach anything. With `constrained` to the registry only, can't exfiltrate stolen data.
-- **T9 (supply chain in legitimately-allowed dependency):** the audit log surfaces unexpected destinations the dependency tries to reach.
-- **T7 (DNS exfiltration):** structurally impossible — kennel cannot make raw DNS queries.
-- **T6 (lateral movement to local services):** if dockerd socket denied, no escape. Postgres on host loopback unreachable unless explicitly granted.
+- **T1.1 (credential reconnaissance):** kennel cannot exfiltrate code to `attacker.example.com` because the proxy refuses. Cannot reach the user's other dev services on loopback. Cannot bypass via raw socket. Audit log records every destination attempted.
+- **T1.2 (malicious post-install script):** with `net.mode = "none"`, the script can't reach anything. With `constrained` to the registry only, can't exfiltrate stolen data.
+- **T1.9 (supply chain in legitimately-allowed dependency):** the audit log surfaces unexpected destinations the dependency tries to reach.
+- **T1.7 (DNS exfiltration):** structurally impossible — kennel cannot make raw DNS queries.
+- **T1.6 (lateral movement to local services):** if dockerd socket denied, no escape. Postgres on host loopback unreachable unless explicitly granted.
 
 ## 7.3.9 Residuals
 
-- **TLS exfiltration via allowed destinations (T8).** Kennel can reach `api.openai.com`, so it can exfiltrate by putting data in API requests. Proxy can't see inside TLS without MITM. Optional TLS inspection layer mitigates if user accepts CA management; otherwise this is a known residual.
+- **TLS exfiltration via allowed destinations (T1.8).** Kennel can reach `api.openai.com`, so it can exfiltrate by putting data in API requests. Proxy can't see inside TLS without MITM. Optional TLS inspection layer mitigates if user accepts CA management; otherwise this is a known residual.
 - **Covert channels.** Timing, DNS query patterns to allowed resolvers, TLS SNI to allowed hosts can carry exfiltration bandwidth. Out of scope for a non-paranoid threat model.
 - **Pre-existing trust.** If the user pasted `OPENAI_API_KEY` into the kennel's env, the kennel can use it. Limiting which env vars cross the boundary (§7.7) is the mitigation, not the proxy.
 

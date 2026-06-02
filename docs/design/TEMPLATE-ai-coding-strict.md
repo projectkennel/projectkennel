@@ -26,21 +26,21 @@ The template is intentionally strict. The `ai-coding-permissive` variant (not sh
 
 The template defends against the following threats from the catalogue (THREATS.md):
 
-- **T1** (credential reconnaissance): the agent cannot enumerate or read paths outside the granted view.
-- **T2** (malicious post-install scripts): the constrained network and exec ACL limits what `npm install` post-install scripts can do.
-- **T3** (compromised IDE extension/MCP server): when the agent CLI is invoked inside the kennel, the IDE's compromised state cannot escalate via the agent.
-- **T9** (supply chain): unexpected destinations are surfaced in the audit log.
-- **T7** (DNS exfiltration): structurally prevented — the agent cannot make DNS queries directly.
-- **T19** (setuid escalation): denied by Project Kennel invariants.
-- **T6** (lateral movement to local services): per-kennel loopback and AF_UNIX shim deny by default.
-- **T12** (host security control deactivation): the agent's `$HOME` is a shim; host config files are not writable.
-- **T14** (secrets in unintended locations): `.env*` files are scrubbed from the agent's view by default.
-- **T25** (prompt injection from project content): not prevented, but the kennel bounds the blast radius — injected instructions cannot direct the agent to read or write anything outside the granted view, or reach anywhere outside the allowlisted network.
+- **T1.1** (credential reconnaissance): the agent cannot enumerate or read paths outside the granted view.
+- **T1.2** (malicious post-install scripts): the constrained network and exec ACL limits what `npm install` post-install scripts can do.
+- **T1.3** (compromised IDE extension/MCP server): when the agent CLI is invoked inside the kennel, the IDE's compromised state cannot escalate via the agent.
+- **T1.9** (supply chain): unexpected destinations are surfaced in the audit log.
+- **T1.7** (DNS exfiltration): structurally prevented — the agent cannot make DNS queries directly.
+- **T3.1** (setuid escalation): denied by Project Kennel invariants.
+- **T1.6** (lateral movement to local services): per-kennel loopback and AF_UNIX shim deny by default.
+- **T2.1** (host security control deactivation): the agent's `$HOME` is a shim; host config files are not writable.
+- **T2.3** (secrets in unintended locations): `.env*` files are scrubbed from the agent's view by default.
+- **T3.7** (prompt injection from project content): not prevented, but the kennel bounds the blast radius — injected instructions cannot direct the agent to read or write anything outside the granted view, or reach anywhere outside the allowlisted network.
 
 The template explicitly does NOT defend against:
 
-- **T8** (TLS-channel exfiltration via the LLM API): residual; the agent has legitimate access to the LLM API and can put exfiltrated data in API requests.
-- **T13** (security-degrading patterns in agent-produced code): partially addressed by output review tooling, but semantic regressions are out of scope.
+- **T1.8** (TLS-channel exfiltration via the LLM API): residual; the agent has legitimate access to the LLM API and can put exfiltrated data in API requests.
+- **T2.2** (security-degrading patterns in agent-produced code): partially addressed by output review tooling, but semantic regressions are out of scope.
 - **X9, X11** as documented in THREATS.md.
 
 The user's leaf policy will typically add 2-3 deltas: the project path, the LLM API endpoint they use, optionally a corp-specific registry. Everything else is inherited.
@@ -57,7 +57,7 @@ This is the actual TOML file Project Kennel consumes, with extensive comments on
 # Inherits: base-confined
 # Version: 4
 # Maintainer: <project signing key>
-# Threat catalogue version: THREATS.md v0.1
+# Threat catalogue version: THREATS.md v0.3
 #
 # This template provides strict confinement for AI coding agents operating
 # against a single project tree. User policies typically extend this with
@@ -140,7 +140,7 @@ allow = [
 
 # Categorically refused. These could appear in /usr/bin/* if a broader
 # pattern were used; explicit deny is belt-and-braces. Defends against
-# T19 (setuid escalation) and T12 (host security control deactivation).
+# T3.1 (setuid escalation) and T2.1 (host security control deactivation).
 #
 # Implementation: Landlock denies these paths under FS_EXECUTE.
 # Additionally, PR_SET_NO_NEW_PRIVS (set unconditionally as a Project Kennel
@@ -158,7 +158,7 @@ deny = [
     "/usr/bin/umount",
     "/usr/bin/newgrp",
     "/usr/bin/at",
-    "/usr/bin/crontab",          # T8: scheduled persistence
+    "/usr/bin/crontab",          # T1.8: scheduled persistence
     "/usr/sbin/**",              # admin binaries categorically denied
     "/sbin/**",                  # ditto
 ]
@@ -192,7 +192,7 @@ path = ["/usr/bin", "/usr/local/bin", "/bin"]
 # Credential locations are not denied on access; they simply do not exist in
 # the agent's view of the filesystem.
 #
-# This defends against T1 (reconnaissance): the agent cannot enumerate paths
+# This defends against T1.1 (reconnaissance): the agent cannot enumerate paths
 # that are not in the view, regardless of whether those paths exist on the
 # host outside the view.
 # ============================================================================
@@ -241,11 +241,11 @@ write = [
 # is belt-and-braces against template bugs and user policy errors.
 #
 # Implementation: Landlock applies these as additional negative rules
-# after the positive rules above. Defends against T1 (reconnaissance) and
-# T12 (host security control deactivation).
+# after the positive rules above. Defends against T1.1 (reconnaissance) and
+# T2.1 (host security control deactivation).
 deny = [
     # ──────────────────────────────────────────────────────────────────
-    # Credentials (T1)
+    # Credentials (T1.1)
     # ──────────────────────────────────────────────────────────────────
     "~/.ssh/**",
     "~/.gnupg/**",
@@ -278,7 +278,7 @@ deny = [
     "~/.gnome2/keyrings/**",
 
     # ──────────────────────────────────────────────────────────────────
-    # Browser state and cookies (T1)
+    # Browser state and cookies (T1.1)
     # ──────────────────────────────────────────────────────────────────
     "~/.mozilla/**",
     "~/.config/google-chrome/**",
@@ -288,7 +288,7 @@ deny = [
     "~/.config/vivaldi/**",
 
     # ──────────────────────────────────────────────────────────────────
-    # Messaging and communication (T1)
+    # Messaging and communication (T1.1)
     # ──────────────────────────────────────────────────────────────────
     "~/.config/Signal/**",
     "~/.config/Slack/**",
@@ -298,7 +298,7 @@ deny = [
     "~/.mozilla-thunderbird/**",
 
     # ──────────────────────────────────────────────────────────────────
-    # Shell and tool histories (T1)
+    # Shell and tool histories (T1.1)
     # ──────────────────────────────────────────────────────────────────
     "~/.bash_history",
     "~/.zsh_history",
@@ -315,7 +315,7 @@ deny = [
     "~/.viminfo",
 
     # ──────────────────────────────────────────────────────────────────
-    # Cryptocurrency wallets (T1)
+    # Cryptocurrency wallets (T1.1)
     # ──────────────────────────────────────────────────────────────────
     "~/.electrum/**",
     "~/.bitcoin/**",
@@ -324,7 +324,7 @@ deny = [
     "~/.config/Atomic/**",
 
     # ──────────────────────────────────────────────────────────────────
-    # VPN configuration (T1)
+    # VPN configuration (T1.1)
     # ──────────────────────────────────────────────────────────────────
     "~/.config/openvpn3/**",
     "~/.config/wireguard/**",
@@ -332,7 +332,7 @@ deny = [
     "~/.config/forticlient/**",
 
     # ──────────────────────────────────────────────────────────────────
-    # Host security configuration (T12)
+    # Host security configuration (T2.1)
     # The agent must not be able to modify these even if other rules
     # would have granted write access. Framework invariants.
     # ──────────────────────────────────────────────────────────────────
@@ -369,7 +369,7 @@ deny = [
 #   4. setenv("HOME", "/run/kennel/<kennel>/home") in the spawn
 #      wrapper before execve.
 #
-# Defends against T1: the agent's view of $HOME contains only what policy
+# Defends against T1.1: the agent's view of $HOME contains only what policy
 # grants. find ~ -name '.env' returns nothing if the policy did not grant
 # .env files.
 [fs.home]
@@ -383,13 +383,13 @@ shim_root = "/run/kennel/<kennel>/home"
 real = "~/.gitconfig"
 shim = "~/.gitconfig"
 strip = ["credential.*", "github.user", "github.token", "url.*.insteadof"]
-# Defends against T1: gitconfig in the agent's view has no credential
+# Defends against T1.1: gitconfig in the agent's view has no credential
 # helpers, no embedded URL rewrites, no usernames. The agent sees a
 # minimal gitconfig that lets git commit but reveals nothing personal.
 
 # Private /tmp. Implementation:
 #   mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID|MS_NODEV, "size=512m,mode=0700")
-# Defends against T1 (host /tmp contents invisible) and prevents the
+# Defends against T1.1 (host /tmp contents invisible) and prevents the
 # agent from leaving artefacts the user's other processes might read.
 [fs.tmp]
 private = true
@@ -404,8 +404,8 @@ mode = "0700"
 #   unshare(CLONE_NEWPID)  (in the spawn wrapper before fork)
 #   mount("proc", "/proc", "proc", 0, "hidepid=2")
 #
-# Defends against T1 (the agent cannot enumerate the user's other
-# processes via /proc) and T6 (cannot read /proc/<pid>/environ of the
+# Defends against T1.1 (the agent cannot enumerate the user's other
+# processes via /proc) and T1.6 (cannot read /proc/<pid>/environ of the
 # user's shell to harvest env vars).
 [fs.proc]
 visibility = "self"
@@ -415,7 +415,7 @@ hidepid = true
 # masked even within otherwise-granted write directories. Project Kennel
 # overlays a tmpfs at the matching path during shim construction.
 #
-# Defends against T14 (secrets in unintended locations): the agent cannot
+# Defends against T2.3 (secrets in unintended locations): the agent cannot
 # read .env files in the project tree even when the project tree is
 # writable. User can override per-pattern with explicit policy delta.
 [fs.scrub]
@@ -446,8 +446,8 @@ mode = "empty"   # the file appears as empty rather than as ENOENT
 #   For each allowed device, bind-mount from host:
 #     mount("/dev/null", "<shim>/dev/null", "", MS_BIND, "")
 #
-# Defends against T6 (cannot use /dev/kmem etc for escalation) and
-# T1 (cannot read /dev/input/* for keylogging or /dev/video* for camera).
+# Defends against T1.6 (cannot use /dev/kmem etc for escalation) and
+# T1.1 (cannot read /dev/input/* for keylogging or /dev/video* for camera).
 [fs.dev]
 allow = [
     "/dev/null",
@@ -472,12 +472,12 @@ allow = [
 # (DNS, TLS optional inspection, audit logging) lives in the proxy.
 #
 # Defends against:
-#   - T1 (exfiltration to attacker.example.com): proxy denies.
-#   - T7 (DNS exfiltration): the agent cannot make DNS queries; the
+#   - T1.1 (exfiltration to attacker.example.com): proxy denies.
+#   - T1.7 (DNS exfiltration): the agent cannot make DNS queries; the
 #     proxy resolves names against an allowlist.
-#   - T6 (lateral movement to host loopback): per-kennel loopback
+#   - T1.6 (lateral movement to host loopback): per-kennel loopback
 #     subnet means the agent's 127.0.0.1 is not the user's 127.0.0.1.
-#   - T9 (supply-chain in allowed dep): unexpected destinations show
+#   - T1.9 (supply-chain in allowed dep): unexpected destinations show
 #     up in the audit log.
 # ============================================================================
 
@@ -534,7 +534,7 @@ ports = [443]
 protocol = "tcp"
 tls.required = true
 reason = "npm package registry"
-threats.exposed = ["T9"]         # supply-chain compromise in deps is residual
+threats.exposed = ["T1.9"]         # supply-chain compromise in deps is residual
 
 [[net.allow]]
 name = "pypi.org"
@@ -542,7 +542,7 @@ ports = [443]
 protocol = "tcp"
 tls.required = true
 reason = "Python package index"
-threats.exposed = ["T9"]
+threats.exposed = ["T1.9"]
 
 [[net.allow]]
 name = "files.pythonhosted.org"
@@ -590,7 +590,7 @@ reason = "git LFS and large-file storage"
 #   ports = [443]
 #   tls.required = true
 #   reason = "AI service endpoint"
-#   threats.exposed = ["T8"]   # in-band exfiltration via API is residual
+#   threats.exposed = ["T1.8"]   # in-band exfiltration via API is residual
 
 # Categorical denies. Evaluated before allow.
 #
@@ -600,7 +600,7 @@ reason = "git LFS and large-file storage"
 # proxy somehow.
 #
 # These are Project Kennel invariants — they cannot be removed by user
-# policy deltas. Defends against T6 (cloud metadata theft, lateral
+# policy deltas. Defends against T1.6 (cloud metadata theft, lateral
 # movement to RFC1918 services).
 [[net.deny.invariant]]
 cidr = "169.254.169.254/32"      # AWS, GCP, Azure IPv4 metadata
@@ -636,7 +636,7 @@ reason = "CGNAT range"
 #
 # The template does not grant any host loopback services. User policies
 # may add them with explicit reasons; the diff tool surfaces these as
-# T6 exposures.
+# T1.6 exposures.
 #
 # Implementation:
 #   - cgroup BPF on connect4/connect6: deny addresses outside the
@@ -710,8 +710,8 @@ level = "summary"
 #   - AppArmor (or seccomp-TRAP fallback) denies abstract-namespace
 #     AF_UNIX connect() entirely.
 #
-# Defends against T6 (lateral movement to ssh-agent, gpg-agent, dbus,
-# docker, etc.) and T1 (cannot enumerate sockets that aren't there).
+# Defends against T1.6 (lateral movement to ssh-agent, gpg-agent, dbus,
+# docker, etc.) and T1.1 (cannot enumerate sockets that aren't there).
 # ============================================================================
 
 [unix]
@@ -790,8 +790,8 @@ xephyr_isolated = false
 #   - /proc with hidepid=2 makes /proc/<pid> directories accessible
 #     only to the owner of the process.
 #
-# Defends against T6 (cannot ptrace the user's shell to extract
-# memory contents) and T1 (cannot read other processes' /proc/<pid>/
+# Defends against T1.6 (cannot ptrace the user's shell to extract
+# memory contents) and T1.1 (cannot read other processes' /proc/<pid>/
 # environ for env vars).
 # ============================================================================
 
@@ -818,8 +818,8 @@ allow_from = []                  # cannot be signalled from sibling contexts
 # the rules below. Inheritance is not automatic; only listed variables
 # pass through.
 #
-# Defends against T1 (cannot read OPENAI_API_KEY etc that the user has
-# in their shell env) and T12 (the agent's $HOME points at the shim,
+# Defends against T1.1 (cannot read OPENAI_API_KEY etc that the user has
+# in their shell env) and T2.1 (the agent's $HOME points at the shim,
 # not the host).
 # ============================================================================
 
@@ -859,7 +859,7 @@ set = {
 # Categorical denies. Patterns matching these are dropped from the
 # inherited environment even if they would have been passed through.
 #
-# Defends against T1 (credentials in env vars) and T12 (config leakage).
+# Defends against T1.1 (credentials in env vars) and T2.1 (config leakage).
 deny = [
     "SSH_AUTH_SOCK",             # use per-kennel agent, not user's
     "GPG_AGENT_INFO",
@@ -1014,7 +1014,7 @@ name = "myproj-ai"
   protocol = "tcp"
   tls.required = true
   reason = "Claude API"
-  threats.exposed = ["T8"]
+  threats.exposed = ["T1.8"]
 ```
 
 That is the entire user-authored policy. Everything else — the credential denylist, the constructed view of $HOME, the per-kennel loopback, the seccomp filter, the proxy configuration, the AF_UNIX shim — is inherited from the template.
@@ -1055,7 +1055,7 @@ If the agent attempts `kill(<some-pid>, 0)` for various PIDs to find live proces
 
 The agent's `127.0.0.1` is not the user's `127.0.0.1`. The cgroup BPF connect rule denies connections to `127.0.0.1` (or rewrites them to the kennel's private subnet, depending on configuration). The user's Postgres on the host loopback is unreachable. The audit log records the attempt.
 
-If the user wants the agent to reach Postgres legitimately (the `dev-server` template handles this case), they explicitly grant a `net.loopback.host_services` entry with a reason. The grant is visible in the policy diff, threat-tagged as T6 exposure.
+If the user wants the agent to reach Postgres legitimately (the `dev-server` template handles this case), they explicitly grant a `net.loopback.host_services` entry with a reason. The grant is visible in the policy diff, threat-tagged as T1.6 exposure.
 
 **The agent attempts to disable the sandbox.**
 
@@ -1082,7 +1082,7 @@ templates/ai-coding-strict/
 │                       coverage level.
 ├── CHANGELOG.md        Versioned changes between template versions.
 │                       Stable format: "v4 (2026-05-16): added .env*
-│                       to fs.scrub patterns (T14); rationale: ..."
+│                       to fs.scrub patterns (T2.3); rationale: ..."
 ├── meta.toml           Maintainer key reference, signing metadata,
 │                       version, last-reviewed date.
 └── tests/
@@ -1111,7 +1111,7 @@ It is worth being explicit about what `ai-coding-strict` does not cover, so that
 
 **Workflows requiring open internet egress.** Some build pipelines need to fetch from arbitrary URLs (cargo dependencies from random git repos, for example). The `ai-coding-permissive` template sets `net.mode = "open"` with full audit; the strict template does not.
 
-**MCP server access.** A confined agent that needs to talk to an MCP server requires either the MCP server inside the same kennel (added to `exec.allow`) or a careful AF_UNIX socket grant (added to `unix.allow` with a reason). See T24 (MCP server capability creep) in THREATS.md for the threat-model treatment. Neither is the default; both are user-policy deltas.
+**MCP server access.** A confined agent that needs to talk to an MCP server requires either the MCP server inside the same kennel (added to `exec.allow`) or a careful AF_UNIX socket grant (added to `unix.allow` with a reason). See T3.6 (MCP server capability creep) in THREATS.md for the threat-model treatment. Neither is the default; both are user-policy deltas.
 
 **Long-lived background contexts.** The TTL of 8 hours is suited to interactive coding sessions. Background services (a watcher, a periodic task) need a different lifecycle policy and probably a different template.
 

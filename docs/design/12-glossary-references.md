@@ -114,7 +114,7 @@
 ### Threat-modelling references
 
 - MITRE ATT&CK: <https://attack.mitre.org/>
-- npm supply-chain incident catalogue (various): a useful corpus of T2-class incidents.
+- npm supply-chain incident catalogue (various): a useful corpus of T1.2-class incidents.
 - LWN.net articles on Landlock, BPF, sandboxing (search engine the canonical source).
 
 ### Adjacent reading

@@ -21,7 +21,7 @@ That's the whole leaf — read the path, and nothing else.
 
 ## Defends / residuals
 
-- **Defends:** T2 (no build/install can run), T4, T5 (strong — the source cannot
+- **Defends:** T1.2 (no build/install can run), T1.4, T1.5 (strong — the source cannot
   execute).
 - **Residual:** a CVE in an inspection tool processing crafted input (e.g. a
   hostile file that exploits `less`). Out of scope — assumes vetted system tools.

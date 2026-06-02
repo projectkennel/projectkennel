@@ -27,8 +27,8 @@ The confined posture every other template inherits:
 
 ## Threats
 
-Defends the baseline of T1 (reconnaissance), T6 (lateral movement), T12 (host
-control deactivation), T19 (setuid escalation). Workflow-specific threats are the
+Defends the baseline of T1.1 (reconnaissance), T1.6 (lateral movement), T2.1 (host
+control deactivation), T3.1 (setuid escalation). Workflow-specific threats are the
 deriving template's job.
 
 ## Status

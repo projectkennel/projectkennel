@@ -17,13 +17,13 @@ _One or two sentences naming the behaviour added, removed, or fixed, in terms a 
 
 ## Why
 
-**Threat ID(s) addressed:** `<e.g. T18; or "none — not security-bearing">`
+**Threat ID(s) addressed:** `<e.g. T2.7; or "none — not security-bearing">`
 
 **Design-document invariant(s) implemented or affected:** `<reference; or "none">`
 
 **Issue(s) closed:** `<#NN; or "none">`
 
-_One paragraph of project-local reasoning. "T18 (template-chain DoS) is currently unbounded in the resolver; this caps it at the documented limit" is the expected form. "Best practice" or "improves security and efficiency" fails the template and the PR is closed._
+_One paragraph of project-local reasoning. "T2.7 (template-chain DoS) is currently unbounded in the resolver; this caps it at the documented limit" is the expected form. "Best practice" or "improves security and efficiency" fails the template and the PR is closed._
 
 _If the change is not security-bearing, state explicitly what user-visible behaviour it changes and why that is desirable._
 

@@ -2,7 +2,9 @@
 
 Companion artefact to Project Kennel. Standalone, citable, intended to be referenced independently of any specific runtime.
 
-Version 0.2 · 2026-06-02
+Version 0.3 · 2026-06-03
+
+Threat IDs are family-prefixed as of 0.3: `T<family>.<index>` within each in-scope family (e.g. T1.1, T2.8, T3.7), so a family's threats carry a self-contained sequence rather than one consecutive run across all families (the former T1–T26). Out-of-scope threats keep their `X1`–`X11` numbering. The mapping from the former IDs: T1–T11→T1.1–T1.11, T12–T18→T2.1–T2.7, T26→T2.8, T19–T25→T3.1–T3.7.
 
 ---
 
@@ -29,18 +31,18 @@ The catalogue is organised into three families.
 
 | Family | IDs | Theme |
 |---|---|---|
-| Reconnaissance and exfiltration | T1–T11 | What the workload reads, where it connects, what it leaks |
-| Posture degradation | T12–T18, T26 | What the workload does to the user's host configuration and to the artefacts it produces |
-| Workload-class-specific | T19–T25 | Threats whose realisation is distinctive to a specific workload class (containers, MCP servers, build environments) |
+| Reconnaissance and exfiltration | T1.1–T1.11 | What the workload reads, where it connects, what it leaks |
+| Posture degradation | T2.1–T2.8 | What the workload does to the user's host configuration and to the artefacts it produces |
+| Workload-class-specific | T3.1–T3.7 | Threats whose realisation is distinctive to a specific workload class (containers, MCP servers, build environments) |
 | Out of scope | X1–X11 | Threats Project Kennel deliberately does not address |
 
 A workload is "unsigned" if it arrived via paths the operating system's package manager does not validate — npm/pypi/cargo packages, container images from public registries, AI agent binaries, MCP servers, `curl | sh` installers, AI-generated code being executed locally. The catalogue uses "workload" generically. Where a threat's realisation differs significantly between workload classes, the entry notes the variants.
 
 ---
 
-# Family 1 — Reconnaissance and exfiltration (T1–T11)
+# Family 1 — Reconnaissance and exfiltration (T1.1–T1.11)
 
-## T1 — Credential, history, and configuration reconnaissance
+## T1.1 — Credential, history, and configuration reconnaissance
 
 **Definition.** An unsigned workload reads credentials, command history, browser data, configuration files, and similar sensitive state from the user's environment.
 
@@ -88,11 +90,11 @@ Within typically-granted project trees:
 - `.envrc` (direnv source from secret stores)
 - `.git/config` with credential-helper URLs
 
-## T2 — Malicious post-install scripts
+## T1.2 — Malicious post-install scripts
 
 **Definition.** A package installed via `npm install`, `pip install`, `cargo build`, or equivalent executes a post-install or build-time script that performs unintended actions, including credential theft, lateral movement, or persistence.
 
-**Observed instances.** The Nx attack (see T1) is the canonical recent example. The Cline supply-chain incident (February 2026) saw the malicious `cline@2.3.0` deliver `openclaw` globally via postinstall; the payload was benign but the mechanism was identical to attack variants. Earlier comparable incidents include `event-stream` (2018) and `ua-parser-js` (2021). The axios npm compromise (April 2026) delivered a remote access trojan via postinstall in approximately two seconds — before `npm install` completed.
+**Observed instances.** The Nx attack (see T1.1) is the canonical recent example. The Cline supply-chain incident (February 2026) saw the malicious `cline@2.3.0` deliver `openclaw` globally via postinstall; the payload was benign but the mechanism was identical to attack variants. Earlier comparable incidents include `event-stream` (2018) and `ua-parser-js` (2021). The axios npm compromise (April 2026) delivered a remote access trojan via postinstall in approximately two seconds — before `npm install` completed.
 
 **Attack pattern.** A malicious or compromised package executes attacker-controlled code with the user's full uid privileges during install. Post-install scripts run unconditionally without user prompting in npm by default. They have full filesystem read, network connect, and exec capabilities.
 
@@ -102,7 +104,7 @@ Within typically-granted project trees:
 
 **MITRE ATT&CK.** T1195.002 (Supply Chain Compromise: Compromise Software Supply Chain), T1059 (Command and Scripting Interpreter).
 
-## T3 — Compromised IDE extensions, language servers, MCP servers, or agent plugins
+## T1.3 — Compromised IDE extensions, language servers, MCP servers, or agent plugins
 
 **Definition.** A trusted-by-default extension to the developer's IDE, language server, or agent toolchain is compromised or maliciously authored, and uses its standing privileges to exfiltrate data or modify the user's environment.
 
@@ -116,7 +118,7 @@ Within typically-granted project trees:
 
 **MITRE ATT&CK.** T1554 (Compromise Client Software Binary), T1195.001 (Compromise Software Dependencies and Development Tools).
 
-## T4 — `curl ... | sh` installer of an untrusted source
+## T1.4 — `curl ... | sh` installer of an untrusted source
 
 **Definition.** A user or workload executes an installer script downloaded directly from a URL, which performs attacker-controlled operations during installation.
 
@@ -130,27 +132,27 @@ Within typically-granted project trees:
 
 **MITRE ATT&CK.** T1059.004 (Unix Shell), T1105 (Ingress Tool Transfer).
 
-## T5 — Build script in a freshly cloned, unvetted repository
+## T1.5 — Build script in a freshly cloned, unvetted repository
 
 **Definition.** A user clones a repository to inspect its code, and the act of opening or building it triggers attacker-controlled scripts (Makefile, `package.json` scripts, postinstall hooks, `.vscode/tasks.json`).
 
-**Observed instances.** The Nx attack (T1, T2) is triggered by `npm install`. The Mindgard Cline research demonstrated that simply opening a malicious repository in an IDE with the Cline extension could trigger code execution via prompt injection in `.clinerules` or docstrings.
+**Observed instances.** The Nx attack (T1.1, T1.2) is triggered by `npm install`. The Mindgard Cline research demonstrated that simply opening a malicious repository in an IDE with the Cline extension could trigger code execution via prompt injection in `.clinerules` or docstrings.
 
 **Attack pattern.** The user clones, IDE indexes/opens the repository, agent or build system processes files, malicious code executes. Particularly acute for AI agents because "analyse this repository" often involves the agent reading config files, running tooling, or invoking the project's build system.
 
 **Mitigation in Project Kennel.** `inspect-only` template denies exec beyond inspection utilities, denies network, grants read-only filesystem access to the cloned repository. The user can inspect (cat, grep, find, tree, less) without any script execution. Moving to a build-capable template is a deliberate policy change, surfaced in the diff.
 
-**Residuals.** If the user explicitly invokes the build system after inspection, the threat from T2 applies.
+**Residuals.** If the user explicitly invokes the build system after inspection, the threat from T1.2 applies.
 
 **MITRE ATT&CK.** T1204.002 (User Execution: Malicious File).
 
-## T6 — Lateral movement to local services
+## T1.6 — Lateral movement to local services
 
 **Definition.** A confined workload reaches local services (Postgres, ssh-agent, container daemon, dbus session bus) on the host loopback or AF_UNIX socket and uses them to exfiltrate data, escalate, or persist.
 
 **Observed instances.** Repeatedly observed when AI agents are given broad network access. The Ona research (March 2026) cites the local-services attack surface as a primary motivation for kernel-level enforcement.
 
-**Attack pattern.** The workload connects to `127.0.0.1:5432` (the user's local Postgres), authenticates with credentials it found in T1 reconnaissance, reads or modifies the database. Or connects to `~/.ssh/agent.sock` and uses the user's authenticated SSH connections. Or talks to `$XDG_RUNTIME_DIR/bus` and invokes systemd to launch persistence services.
+**Attack pattern.** The workload connects to `127.0.0.1:5432` (the user's local Postgres), authenticates with credentials it found in T1.1 reconnaissance, reads or modifies the database. Or connects to `~/.ssh/agent.sock` and uses the user's authenticated SSH connections. Or talks to `$XDG_RUNTIME_DIR/bus` and invokes systemd to launch persistence services.
 
 **Mitigation in Project Kennel.** Per-kennel loopback subnet: the workload's `127.0.0.1` is its own private subnet, not the user's. Host loopback services are not reachable by default; explicit grants in the policy are required. AF_UNIX shim: the kennel's `$HOME/.ssh/` contains only the per-kennel ssh-agent socket. D-Bus access is via xdg-dbus-proxy with method-level allowlists.
 
@@ -158,7 +160,7 @@ Within typically-granted project trees:
 
 **MITRE ATT&CK.** T1021 (Remote Services), T1570 (Lateral Tool Transfer).
 
-## T7 — DNS-based exfiltration to an authorised resolver
+## T1.7 — DNS-based exfiltration to an authorised resolver
 
 **Definition.** A confined workload exfiltrates data by encoding it into DNS queries sent to its authorised DNS resolver, which forwards them to an attacker-controlled authoritative nameserver.
 
@@ -168,11 +170,11 @@ Within typically-granted project trees:
 
 **Mitigation in Project Kennel.** The kennel cannot make raw DNS queries. The SOCKS5 proxy resolves names on the kennel's behalf, against a policy-restricted name allowlist. `nslookup` and `dig` are not in the typical exec allowlist. Pings to arbitrary hosts fail because ICMP is not in the network policy's permitted protocols.
 
-**Residuals.** A determined exfiltration via DNS resolution of allowlisted names is still possible: a workload that can contact `api.openai.com` can encode small amounts of data into the host part of legitimate-looking subdomain queries. Same in-band exfiltration problem as T8.
+**Residuals.** A determined exfiltration via DNS resolution of allowlisted names is still possible: a workload that can contact `api.openai.com` can encode small amounts of data into the host part of legitimate-looking subdomain queries. Same in-band exfiltration problem as T1.8.
 
 **MITRE ATT&CK.** T1071.004 (Application Layer Protocol: DNS), T1048 (Exfiltration Over Alternative Protocol).
 
-## T8 — Exfiltration via TLS to an allowlisted destination
+## T1.8 — Exfiltration via TLS to an allowlisted destination
 
 **Definition.** A confined workload exfiltrates data by sending it inside otherwise-legitimate TLS-encrypted requests to a destination the policy permits.
 
@@ -180,13 +182,13 @@ Within typically-granted project trees:
 
 **Attack pattern.** Workload has policy-granted access to a remote API. Workload reads sensitive data. Workload constructs API requests containing the data (in the prompt body, in metadata, in tool-call arguments). Requests succeed because they look like legitimate API traffic.
 
-**Mitigation in Project Kennel.** Optional TLS inspection layer: the SOCKS5 proxy can be configured to MITM TLS connections using a per-kennel CA installed in the kennel's trust store, logging full request contents for review. Operationally complex; not enabled by default. Without it, the framework provides byte-counting and rate-limiting at the proxy layer, which surfaces high-volume exfiltration but not low-volume targeted leaks. The constructed-`$HOME` view (T1) keeps *ambient* host secrets — `~/.ssh`, `~/.aws`, `~/.config/gh`, browser stores — out of this channel by removing them from the workload's view; but it does nothing for data the workload is legitimately granted (the project tree), so that defence and this channel are disjoint.
+**Mitigation in Project Kennel.** Optional TLS inspection layer: the SOCKS5 proxy can be configured to MITM TLS connections using a per-kennel CA installed in the kennel's trust store, logging full request contents for review. Operationally complex; not enabled by default. Without it, the framework provides byte-counting and rate-limiting at the proxy layer, which surfaces high-volume exfiltration but not low-volume targeted leaks. The constructed-`$HOME` view (T1.1) keeps *ambient* host secrets — `~/.ssh`, `~/.aws`, `~/.config/gh`, browser stores — out of this channel by removing them from the workload's view; but it does nothing for data the workload is legitimately granted (the project tree), so that defence and this channel are disjoint.
 
 **Residuals.** Even with TLS inspection, a workload that legitimately needs to send code or data to its API can include exfiltrated content within that legitimate traffic — most sharply the AI-API in-band case, where a coding agent encodes reconnaissance or source directly into the prompt body, tool-call arguments, or request metadata to `api.openai.com`/`api.anthropic.com`. This is unblockable at the proxy boundary without destroying the agent's function. Secrets inside the granted project tree (`.env` files past `fs.scrub`, which is best-effort against direct reads only) remain fully exfiltratable. This marks a boundary: Project Kennel confines workstation *infrastructure* — what the workload reads, where it connects — not application-level *data governance*; deciding which data may legitimately leave inside an authorised API call is a DLP / model-alignment concern outside the framework. Catalogued as X9 (and, for the semantic-review limit, X11) in the out-of-scope section; the framework reduces but does not eliminate it.
 
 **MITRE ATT&CK.** T1071.001 (Application Layer Protocol: Web Protocols), T1041 (Exfiltration Over C2 Channel).
 
-## T9 — Supply-chain compromise of an allowed dependency
+## T1.9 — Supply-chain compromise of an allowed dependency
 
 **Definition.** A dependency that policy legitimately allows is itself compromised (maintainer account takeover, malicious contributor, build pipeline attack), introducing attacker-controlled code.
 
@@ -200,7 +202,7 @@ Within typically-granted project trees:
 
 **MITRE ATT&CK.** T1195.002 (Compromise Software Supply Chain).
 
-## T10 — Long-lived workload capability creep
+## T1.10 — Long-lived workload capability creep
 
 **Definition.** A development tool (language server, watcher, daemon) accumulates capability over weeks or months without re-consent, becoming a high-value persistent attacker target.
 
@@ -214,7 +216,7 @@ Within typically-granted project trees:
 
 **MITRE ATT&CK.** T1098 (Account Manipulation), T1543 (Create or Modify System Process).
 
-## T11 — Compromised browser, lateral movement
+## T1.11 — Compromised browser, lateral movement
 
 **Definition.** A web browser process running as the user's uid is compromised via malicious web content or extension and attempts lateral movement to other resources on the workstation.
 
@@ -222,7 +224,7 @@ Within typically-granted project trees:
 
 **Attack pattern.** Browser compromised via JavaScript exploit, malicious extension, or in-browser malware. The browser has uid-level access to everything on the workstation. Lateral movement targets include other browser profiles, ssh-agent sockets, local databases, the user's filesystem.
 
-**Mitigation in Project Kennel.** If the browser is run inside a kennel, T1, T2, T6 mitigations apply. If the browser is run unconfined (the typical case), the framework provides no defence. Browsers are not the framework's typical target use case; Flatpak's sandbox is more appropriate for browser confinement. The framework's claim here is that other kennels on the same workstation cannot be reached from a compromised browser (per-kennel loopback isolation, AF_UNIX shim).
+**Mitigation in Project Kennel.** If the browser is run inside a kennel, T1.1, T1.2, T1.6 mitigations apply. If the browser is run unconfined (the typical case), the framework provides no defence. Browsers are not the framework's typical target use case; Flatpak's sandbox is more appropriate for browser confinement. The framework's claim here is that other kennels on the same workstation cannot be reached from a compromised browser (per-kennel loopback isolation, AF_UNIX shim).
 
 **Residuals.** Browser threats are largely outside the framework's typical deployment scope.
 
@@ -230,11 +232,11 @@ Within typically-granted project trees:
 
 ---
 
-# Family 2 — Posture degradation (T12–T18, T26)
+# Family 2 — Posture degradation (T2.1–T2.8)
 
 This family captures what workloads do *to the user's host configuration and to the artefacts they produce*, distinct from what they do to access resources. The posture-degradation threats are the direct consequence of the optimisation-pressure thesis for AI agents (design document §1.2) and the friction-routing-around behaviour for human-driven workloads (developers configuring containers permissively because narrow configuration didn't work).
 
-## T12 — Host security control deactivation
+## T2.1 — Host security control deactivation
 
 **Definition.** A workload disables host-level security controls (AppArmor profiles, SELinux enforcement, TLS verification, host key checking, file permissions) to remove friction during task execution.
 
@@ -246,11 +248,11 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **Mitigation in Project Kennel.** Categorical filesystem denial on security-relevant host paths: `~/.gitconfig`, `~/.ssh/config`, `~/.npmrc`, `~/.cargo/config.toml`, `/etc/`, security-related sysctls. The workload runs in a private `$HOME` shim where these files do not exist as writable; modifications affect only the shim. The workload cannot disable AppArmor, SELinux, or the framework's own constraints because the kernel mechanisms (Landlock, cgroup BPF) operate at a level the workload's userspace operations cannot reach.
 
-**Residuals.** Within the project tree, the workload can produce code that includes anti-security patterns (catalogued as T13). The workload can modify project-level configuration within granted write scope; output-review tooling flags these patterns.
+**Residuals.** Within the project tree, the workload can produce code that includes anti-security patterns (catalogued as T2.2). The workload can modify project-level configuration within granted write scope; output-review tooling flags these patterns.
 
 **MITRE ATT&CK.** T1562 (Impair Defenses), T1562.001 (Disable or Modify Tools), T1562.008 (Disable or Modify Cloud Logs).
 
-## T13 — Security-degrading changes in workload-produced code
+## T2.2 — Security-degrading changes in workload-produced code
 
 **Definition.** A workload introduces security-degrading patterns in the code or configuration it produces, as a side effect of optimising for task completion or working around friction.
 
@@ -272,7 +274,7 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **MITRE ATT&CK.** T1554 (Compromise Client Software Binary), T1505 (Server Software Component) — partial analogue applied to source code.
 
-## T14 — Introduction or preservation of secrets in unintended locations
+## T2.3 — Introduction or preservation of secrets in unintended locations
 
 **Definition.** A workload introduces secrets into files that are not intended to hold them, or preserves secrets that should have been removed.
 
@@ -293,7 +295,7 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **MITRE ATT&CK.** T1552.001 (Credentials In Files), T1552.004 (Private Keys).
 
-## T15 — Over-privileged resource provisioning
+## T2.4 — Over-privileged resource provisioning
 
 **Definition.** A workload provisions cloud resources, containers, Kubernetes objects, or local services with broader permissions than necessary.
 
@@ -314,7 +316,7 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **MITRE ATT&CK.** T1098.003 (Account Manipulation: Additional Cloud Roles), T1078 (Valid Accounts).
 
-## T16 — Suppression of failing security checks
+## T2.5 — Suppression of failing security checks
 
 **Definition.** A workload modifies CI, linter, pre-commit, or test configuration to suppress failing security checks rather than fix the underlying issue.
 
@@ -335,11 +337,11 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **MITRE ATT&CK.** T1562.001 (Disable or Modify Tools), T1554 (Compromise Client Software Binary).
 
-## T17 — Clipboard exfiltration
+## T2.6 — Clipboard exfiltration
 
 **Definition.** A confined workload reads or writes the user's clipboard, leaking content the user has copied or planting attacker-controlled content for the user to paste elsewhere.
 
-**Attack pattern.** X11: any X11 client connected to the same display can read and write the primary selection and clipboard. Wayland: per-protocol restrictions, but compositor support varies. The workload reads `xclip -o`, `wl-paste`, or equivalent; exfiltrates via T8; or writes a malicious payload via `xclip -i` for the user to paste somewhere sensitive.
+**Attack pattern.** X11: any X11 client connected to the same display can read and write the primary selection and clipboard. Wayland: per-protocol restrictions, but compositor support varies. The workload reads `xclip -o`, `wl-paste`, or equivalent; exfiltrates via T1.8; or writes a malicious payload via `xclip -i` for the user to paste somewhere sensitive.
 
 **Mitigation in Project Kennel.** X11 is not directly grantable. The X11-isolated path (Xwayland-isolated or Xephyr-isolated) places the workload in a separate X server with its own clipboard. Wayland clipboard isolation depends on compositor support; documented residual.
 
@@ -347,7 +349,7 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **MITRE ATT&CK.** T1115 (Clipboard Data).
 
-## T18 — Screen capture and input synthesis
+## T2.7 — Screen capture and input synthesis
 
 **Definition.** A confined workload captures the user's screen or synthesises keyboard/mouse input that appears to come from the user.
 
@@ -359,27 +361,27 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **MITRE ATT&CK.** T1113 (Screen Capture), T1059 (Command and Scripting Interpreter — partial analogue for input synthesis), T1185 (Browser Session Hijacking — partial analogue).
 
-## T26 — Cross-context persistence via workspace triggers
+## T2.8 — Cross-context persistence via workspace triggers
 
-**Definition.** A confined workload writes a persistent trigger — a git hook, a build-script hook, or an IDE task definition — into its own granted writable project tree. The trigger lies dormant inside the kennel and later fires in the user's *unconfined* default shell (the next `git commit`, `make`, or editor open), executing with the user's full host privileges. This defeats the transient-execution assumption that a namespace-only sandbox contains a workload only for the duration of its run. (Numbered out of family sequence: it is a Family 2 posture-degradation threat added after T1–T25 were assigned; see the family table.)
+**Definition.** A confined workload writes a persistent trigger — a git hook, a build-script hook, or an IDE task definition — into its own granted writable project tree. The trigger lies dormant inside the kennel and later fires in the user's *unconfined* default shell (the next `git commit`, `make`, or editor open), executing with the user's full host privileges. This defeats the transient-execution assumption that a namespace-only sandbox contains a workload only for the duration of its run. (Numbered out of family sequence: it is a Family 2 posture-degradation threat added after T1.1–T3.7 were assigned; see the family table.)
 
 **Attack pattern.** Workload writes an executable into `.git/hooks/` (or redirects `core.hooksPath` into the writable tree), adds a recipe to a `Makefile`, a `scripts` entry to `package.json`, or a task to `.vscode/tasks.json` / `.idea/`. The artefact sits in the normal project files the agent must be able to edit. When the user subsequently invokes the corresponding tool outside the kennel, the planted command runs in the host context.
 
-**Distinction from neighbouring threats.** Not T5 (an inbound *foreign* cloned repo whose build/IDE config triggers on open) — here the confined workload writes traps into its *own* grant. Not T16 (suppressing CI *checks* by editing `.github/`/`.gitlab-ci`) — here a trigger is *installed*, not a check removed. Sharper than T13 (security-degrading produced artefacts) and T10 (long-lived capability creep) in one specific way: a confined-tree write produces deferred detonation in the unconfined host context.
+**Distinction from neighbouring threats.** Not T1.5 (an inbound *foreign* cloned repo whose build/IDE config triggers on open) — here the confined workload writes traps into its *own* grant. Not T2.5 (suppressing CI *checks* by editing `.github/`/`.gitlab-ci`) — here a trigger is *installed*, not a check removed. Sharper than T2.2 (security-degrading produced artefacts) and T1.10 (long-lived capability creep) in one specific way: a confined-tree write produces deferred detonation in the unconfined host context.
 
-**Mitigation in Project Kennel.** Partial, by categorical `fs.deny` — the same primitive T16 uses for CI config. The `ai-coding-strict` template can deny writes to `.git/hooks/**`, `.vscode/**`, and `.idea/**`. This is genuinely partial and bypassable: `git config core.hooksPath` relocates hooks into the still-writable tree, and `Makefile`, `package.json` `scripts`, and IDE task files live in ordinary project files that must remain writable for the agent to function, so they cannot be denied without breaking the workflow. (The constructed-view mechanism has no per-subdirectory write carve-out — writable binds resolve to persistent host inodes — and `fs.scrub` is read-masking, not write-exclusion, so neither implements this.) The intended primary control is therefore *post-run* rather than at the filesystem boundary: at kennel teardown, diff everything the workload wrote to the persistent binds against the pre-run state and flag newly-planted execution triggers (hook files, `core.hooksPath` changes, build/IDE task definitions) for operator review before the user next acts on the tree. This is broader than T13's commit-time `kennel review` — persistence can be planted without passing through a git commit — and is roadmapped, **not in the first release** (design §11.1).
+**Mitigation in Project Kennel.** Partial, by categorical `fs.deny` — the same primitive T2.5 uses for CI config. The `ai-coding-strict` template can deny writes to `.git/hooks/**`, `.vscode/**`, and `.idea/**`. This is genuinely partial and bypassable: `git config core.hooksPath` relocates hooks into the still-writable tree, and `Makefile`, `package.json` `scripts`, and IDE task files live in ordinary project files that must remain writable for the agent to function, so they cannot be denied without breaking the workflow. (The constructed-view mechanism has no per-subdirectory write carve-out — writable binds resolve to persistent host inodes — and `fs.scrub` is read-masking, not write-exclusion, so neither implements this.) The intended primary control is therefore *post-run* rather than at the filesystem boundary: at kennel teardown, diff everything the workload wrote to the persistent binds against the pre-run state and flag newly-planted execution triggers (hook files, `core.hooksPath` changes, build/IDE task definitions) for operator review before the user next acts on the tree. This is broader than T2.2's commit-time `kennel review` — persistence can be planted without passing through a git commit — and is roadmapped, **not in the first release** (design §11.1).
 
-**Residuals.** The deny closes only the well-known fixed paths; `core.hooksPath` redirection and trigger installation in must-stay-writable build/IDE files remain open. Until the post-run inspection ships, the residual is large: T26 is mitigated only by the partial `fs.deny` and operator vigilance over the writable tree. A template that legitimately needs to write hooks (husky, pre-commit, lefthook) must drop the deny via an explicit permission expansion surfacing `threats.exposed = ["T26"]` in operator review.
+**Residuals.** The deny closes only the well-known fixed paths; `core.hooksPath` redirection and trigger installation in must-stay-writable build/IDE files remain open. Until the post-run inspection ships, the residual is large: T2.8 is mitigated only by the partial `fs.deny` and operator vigilance over the writable tree. A template that legitimately needs to write hooks (husky, pre-commit, lefthook) must drop the deny via an explicit permission expansion surfacing `threats.exposed = ["T2.8"]` in operator review.
 
 **MITRE ATT&CK.** T1546 (Event Triggered Execution), T1059 (Command and Scripting Interpreter — the planted hook executes a shell command).
 
 ---
 
-# Family 3 — Workload-class-specific threats (T19–T25)
+# Family 3 — Workload-class-specific threats (T3.1–T3.7)
 
 Threats whose realisation is distinctive to a specific workload class. Most threats in families 1 and 2 apply across workload types with minor variation; the threats in this family are sharper for one class than others and warrant separate documentation.
 
-## T19 — Setuid privilege escalation
+## T3.1 — Setuid privilege escalation
 
 **Definition.** A confined workload executes a setuid binary to gain capabilities outside its policy.
 
@@ -393,7 +395,7 @@ Threats whose realisation is distinctive to a specific workload class. Most thre
 
 **MITRE ATT&CK.** T1548.001 (Abuse Elevation Control Mechanism: Setuid and Setgid).
 
-## T20 — Container escape
+## T3.2 — Container escape
 
 **Definition.** A container running on the user's workstation is exploited and the attacker escapes to the host with the container daemon's privileges.
 
@@ -409,7 +411,7 @@ Threats whose realisation is distinctive to a specific workload class. Most thre
 
 **MITRE ATT&CK.** T1611 (Escape to Host), T1610 (Deploy Container).
 
-## T21 — Container port exposure to LAN
+## T3.3 — Container port exposure to LAN
 
 **Definition.** A developer runs a container with `-p HOST:CONTAINER` that defaults to binding `0.0.0.0:HOST`, exposing the service to anyone on the LAN.
 
@@ -427,7 +429,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **MITRE ATT&CK.** T1571 (Non-Standard Port), T1133 (External Remote Services).
 
-## T22 — Container volume over-mounting
+## T3.4 — Container volume over-mounting
 
 **Definition.** A developer mounts host directories into a container more broadly than necessary, giving the container access to credentials, configuration, or sensitive data unrelated to its function.
 
@@ -443,7 +445,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **MITRE ATT&CK.** T1083 (File and Directory Discovery), T1005 (Data from Local System).
 
-## T23 — Container running as root with host UID mapping
+## T3.5 — Container running as root with host UID mapping
 
 **Definition.** A container runs as root (UID 0) inside the container; without user-namespace remapping, that's UID 0 on the host, with all root-equivalent permissions on volume mounts.
 
@@ -459,7 +461,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **MITRE ATT&CK.** T1611 (Escape to Host), T1068 (Exploitation for Privilege Escalation).
 
-## T24 — MCP server capability creep
+## T3.6 — MCP server capability creep
 
 **Definition.** An MCP server invoked by an AI agent has its own filesystem access, network access, and credential reach, independent of the agent's policy. The MCP server's effective capabilities may exceed the user's intended grant to the agent.
 
@@ -467,7 +469,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **Observed instances.** Architectural concern documented in the MCP literature. The pattern: an AI agent in a confined kennel invokes an MCP server (via `npx`, `uvx`, or a long-running daemon) to access a resource the agent itself cannot directly reach. The MCP server runs with its own uid-level capabilities and may legitimately need broader access than the agent. The MCP server is a capability proxy whose grants are not necessarily aligned with the agent's policy.
 
-**Attack pattern.** Developer runs AI agent in kennel A with restricted filesystem and network. AI agent invokes MCP server X to access some resource. MCP server X runs as the user's uid, outside kennel A, with full uid-level capabilities. AI agent prompt-injects MCP server X via the protocol channel, or MCP server X is itself compromised (T3) and exfiltrates data using its own capabilities.
+**Attack pattern.** Developer runs AI agent in kennel A with restricted filesystem and network. AI agent invokes MCP server X to access some resource. MCP server X runs as the user's uid, outside kennel A, with full uid-level capabilities. AI agent prompt-injects MCP server X via the protocol channel, or MCP server X is itself compromised (T1.3) and exfiltrates data using its own capabilities.
 
 **Mitigation in Project Kennel.** MCP servers invoked from within a kennel inherit that kennel's policy by default — the MCP server runs as a child process within the same kennel and is subject to the same constraints. For MCP servers that legitimately need capabilities the kennel does not grant (e.g., an MCP server that needs access to a database the kennel cannot reach), the framework supports per-MCP-server sub-kennels with their own policy, communicating with the parent kennel via brokered AF_UNIX sockets. Each MCP server's capabilities are then explicit and reviewable.
 
@@ -475,7 +477,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **MITRE ATT&CK.** T1199 (Trusted Relationship), T1071 (Application Layer Protocol).
 
-## T25 — AI agent prompt injection from project content
+## T3.7 — AI agent prompt injection from project content
 
 **Definition.** An AI agent reads attacker-controlled content from the project tree (a docstring, a README, a configuration file) that contains instructions designed to redirect the agent's behaviour.
 
@@ -487,7 +489,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **Mitigation in Project Kennel.** The framework constrains what the agent can do regardless of how it was prompted. The constructed-view filesystem means injected instructions to "read `~/.ssh/id_ed25519`" fail because the file is not in the view. The network allowlist means injected instructions to "send data to attacker.example.com" fail at the proxy. The framework does not prevent prompt injection; it constrains the blast radius of injected instructions to what the kennel's policy permits.
 
-**Residuals.** Injected instructions that direct the agent to actions within its policy succeed. An agent with network access to `api.openai.com` can be prompt-injected to send exfiltrated content to that endpoint as part of an apparently-legitimate API call. Same in-band exfiltration problem as T8. Pattern-based detection of injection attempts in agent inputs is the complementary control (out of scope for this framework).
+**Residuals.** Injected instructions that direct the agent to actions within its policy succeed. An agent with network access to `api.openai.com` can be prompt-injected to send exfiltrated content to that endpoint as part of an apparently-legitimate API call. Same in-band exfiltration problem as T1.8. Pattern-based detection of injection attempts in agent inputs is the complementary control (out of scope for this framework).
 
 **MITRE ATT&CK.** T1199 (Trusted Relationship), T1556 (Modify Authentication Process — partial analogue applied to instruction-handling).
 
@@ -507,7 +509,7 @@ Threats Project Kennel deliberately does not address.
 | X6 | Network-level attacks against the host's exposed services | A different threat model; the framework defends outbound, not inbound |
 | X7 | Compromise of the framework's own kernel dependencies (Landlock, BPF, etc.) | Beyond the framework's boundary |
 | X8 | Compromise of vetted system tools the framework depends on (xdg-dbus-proxy, Xephyr, etc.) | Beyond the framework's boundary |
-| X9 | A confined kennel using its legitimate API access to exfiltrate data | Within-channel exfiltration via authorised destinations; documented as T8 residual |
+| X9 | A confined kennel using its legitimate API access to exfiltrate data | Within-channel exfiltration via authorised destinations; documented as T1.8 residual |
 | X10 | TLS-inspection-defeating mechanisms (cert pinning in the workload's code) | The framework offers optional TLS inspection but does not claim to defeat sophisticated counter-inspection |
 | X11 | Semantic security regressions in workload-produced code that cannot be detected by pattern matching | Requires human review; framework can flag known anti-patterns but cannot evaluate code for novel security flaws |
 
@@ -528,7 +530,7 @@ The research also demonstrated that the agent, when content-addressed enforcemen
 
 *Source: <https://ona.com/stories/how-claude-code-escapes-its-own-denylist-and-sandbox>*
 
-*Threat IDs: T12 (host security control deactivation). Motivates the framework's commitment to defence-in-depth and the hostility-by-default adversary model.*
+*Threat IDs: T2.1 (host security control deactivation). Motivates the framework's commitment to defence-in-depth and the hostility-by-default adversary model.*
 
 ## Nx s1ngularity supply-chain attack (August 2025)
 
@@ -545,7 +547,7 @@ A follow-on attack used the exfiltrated GitHub tokens to rename ~5,500 previousl
 
 *Sources: <https://snyk.io/blog/weaponizing-ai-coding-agents-for-malware-in-the-nx-malicious-package/>; <https://blog.gitguardian.com/the-nx-s1ngularity-attack-inside-the-credential-leak/>; <https://socket.dev/blog/nx-packages-compromised>; <https://thehackernews.com/2025/08/malicious-nx-packages-in-s1ngularity.html>*
 
-*Threat IDs: T1 (reconnaissance), T2 (postinstall), T9 (supply chain).*
+*Threat IDs: T1.1 (reconnaissance), T1.2 (postinstall), T1.9 (supply chain).*
 
 ## Clinejection (disclosed February 2026, exploited January 2026)
 
@@ -563,7 +565,7 @@ The malicious package was live on npm for approximately 8 hours, during which it
 
 *Sources: <https://adnanthekhan.com/posts/clinejection/>; <https://cline.bot/blog/post-mortem-unauthorized-cline-cli-npm>; <https://snyk.io/blog/cline-supply-chain-attack-prompt-injection-github-actions/>*
 
-*Threat IDs: T2 (postinstall), T3 (compromised IDE extension), T9 (supply chain).*
+*Threat IDs: T1.2 (postinstall), T1.3 (compromised IDE extension), T1.9 (supply chain).*
 
 ## Mindgard Cline vulnerabilities (October 2025)
 
@@ -576,37 +578,37 @@ Four vulnerabilities in the Cline VS Code extension (3.8M installs at time of di
 
 Disclosed to Cline in August 2025; partially mitigated in version 3.35.0 after public pressure in October 2025.
 
-*Threat IDs: T1 (reconnaissance), T3 (compromised IDE extension), T7 (DNS exfiltration), T25 (prompt injection).*
+*Threat IDs: T1.1 (reconnaissance), T1.3 (compromised IDE extension), T1.7 (DNS exfiltration), T3.7 (prompt injection).*
 
 ## CVE-2025-59536 — Claude Code malicious hooks (disclosed September 2025)
 
 Malicious hooks defined in project configuration files could execute shell commands during Claude Code initialisation, before the user saw any consent dialog.
 
-*Threat IDs: T3 (compromised IDE extension).*
+*Threat IDs: T1.3 (compromised IDE extension).*
 
 ## CVE-2026-21852 — Claude Code `ANTHROPIC_BASE_URL` (disclosed 2026)
 
 A malicious repository could set `ANTHROPIC_BASE_URL` in project configuration, causing Claude Code to send API requests to attacker-controlled endpoints before the user trust prompt was shown.
 
-*Threat IDs: T3 (compromised IDE extension), T8 (TLS-channel exfiltration).*
+*Threat IDs: T1.3 (compromised IDE extension), T1.8 (TLS-channel exfiltration).*
 
 ## CVE-2026-25725 — Claude Code sandbox escape via settings.json injection (2026)
 
 Sandbox escape via injection in `settings.json`. One of the 16 published Claude Code CVEs as of April 2026.
 
-*Threat IDs: T12 (host security control deactivation).*
+*Threat IDs: T2.1 (host security control deactivation).*
 
 ## axios npm compromise (April 2026)
 
 A compromised version of axios delivered a remote access trojan via a postinstall hook, executing in approximately 2 seconds — before `npm install` completed.
 
-*Threat IDs: T2 (postinstall), T9 (supply chain).*
+*Threat IDs: T1.2 (postinstall), T1.9 (supply chain).*
 
 ## runc CVE-2024-21626 ("Leaky Vessels", January 2024)
 
 A file-descriptor leak in `runc` allowed container processes to access host filesystem via an unclosed file descriptor referring to the host's root directory. Affected Docker, Kubernetes, and any runtime using vulnerable `runc` versions.
 
-*Threat IDs: T20 (container escape).*
+*Threat IDs: T3.2 (container escape).*
 
 ---
 
@@ -614,32 +616,32 @@ A file-descriptor leak in `runc` allowed container processes to access host file
 
 | T-ID | ATT&CK techniques |
 |---|---|
-| T1 | T1552, T1083, T1005 |
-| T2 | T1195.002, T1059 |
-| T3 | T1554, T1195.001 |
-| T4 | T1059.004, T1105 |
-| T5 | T1204.002 |
-| T6 | T1021, T1570 |
-| T7 | T1071.004, T1048 |
-| T8 | T1071.001, T1041 |
-| T9 | T1195.002 |
-| T10 | T1098, T1543 |
-| T11 | T1189, T1218 |
-| T12 | T1562, T1562.001, T1562.008 |
-| T13 | T1554, T1505 (partial) |
-| T14 | T1552.001, T1552.004 |
-| T15 | T1098.003, T1078 |
-| T16 | T1562.001, T1554 |
-| T17 | T1115 |
-| T18 | T1113, T1059 (partial), T1185 (partial) |
-| T19 | T1548.001 |
-| T20 | T1611, T1610 |
-| T21 | T1571, T1133 |
-| T22 | T1083, T1005 |
-| T23 | T1611, T1068 |
-| T24 | T1199, T1071 |
-| T25 | T1199, T1556 (partial) |
-| T26 | T1546, T1059 |
+| T1.1 | T1552, T1083, T1005 |
+| T1.2 | T1195.002, T1059 |
+| T1.3 | T1554, T1195.001 |
+| T1.4 | T1059.004, T1105 |
+| T1.5 | T1204.002 |
+| T1.6 | T1021, T1570 |
+| T1.7 | T1071.004, T1048 |
+| T1.8 | T1071.001, T1041 |
+| T1.9 | T1195.002 |
+| T1.10 | T1098, T1543 |
+| T1.11 | T1189, T1218 |
+| T2.1 | T1562, T1562.001, T1562.008 |
+| T2.2 | T1554, T1505 (partial) |
+| T2.3 | T1552.001, T1552.004 |
+| T2.4 | T1098.003, T1078 |
+| T2.5 | T1562.001, T1554 |
+| T2.6 | T1115 |
+| T2.7 | T1113, T1059 (partial), T1185 (partial) |
+| T3.1 | T1548.001 |
+| T3.2 | T1611, T1610 |
+| T3.3 | T1571, T1133 |
+| T3.4 | T1083, T1005 |
+| T3.5 | T1611, T1068 |
+| T3.6 | T1199, T1071 |
+| T3.7 | T1199, T1556 (partial) |
+| T2.8 | T1546, T1059 |
 
 ---
 
@@ -651,41 +653,41 @@ This section is intended for security teams who need to map the catalogue to com
 
 | T-ID | Relevant TSC |
 |---|---|
-| T1, T14 | CC6.1, CC6.7 (Logical and Physical Access) |
-| T2, T3, T9 | CC8.1 (Change Management); CC7.1 (System Operations: detection of malicious software) |
-| T8, T6 | CC6.6, CC6.7 (boundary controls; transmission of data) |
-| T12, T16, T26 | CC7.2, CC8.1 (system monitoring; change management) |
-| T13, T15 | CC8.1 (change management); CC7.1 (detection of system anomalies) |
-| T20–T23 | CC6.6, CC8.1 (boundary controls; change management) |
-| T24, T25 | CC8.1, CC7.1 (change management; detection) |
+| T1.1, T2.3 | CC6.1, CC6.7 (Logical and Physical Access) |
+| T1.2, T1.3, T1.9 | CC8.1 (Change Management); CC7.1 (System Operations: detection of malicious software) |
+| T1.8, T1.6 | CC6.6, CC6.7 (boundary controls; transmission of data) |
+| T2.1, T2.5, T2.8 | CC7.2, CC8.1 (system monitoring; change management) |
+| T2.2, T2.4 | CC8.1 (change management); CC7.1 (detection of system anomalies) |
+| T3.2–T3.5 | CC6.6, CC8.1 (boundary controls; change management) |
+| T3.6, T3.7 | CC8.1, CC7.1 (change management; detection) |
 
 ## ISO/IEC 27001:2022 (selected controls)
 
 | T-ID | Relevant Annex A control |
 |---|---|
-| T1, T14 | A.5.10 (Acceptable use); A.8.3 (Information access restriction); A.8.4 (Access to source code) |
-| T2, T3, T9 | A.8.8 (Management of technical vulnerabilities); A.8.30 (Outsourced development) |
-| T8, T6 | A.8.20 (Network security); A.8.21 (Security of network services) |
-| T12, T16, T26 | A.8.31 (Separation of development, test and production environments); A.8.32 (Change management) |
-| T13, T15 | A.8.28 (Secure coding); A.8.29 (Security testing in development and acceptance) |
-| T20–T23 | A.8.22 (Segregation of networks); A.8.23 (Web filtering) |
-| T24, T25 | A.5.7 (Threat intelligence); A.8.28 (Secure coding) |
+| T1.1, T2.3 | A.5.10 (Acceptable use); A.8.3 (Information access restriction); A.8.4 (Access to source code) |
+| T1.2, T1.3, T1.9 | A.8.8 (Management of technical vulnerabilities); A.8.30 (Outsourced development) |
+| T1.8, T1.6 | A.8.20 (Network security); A.8.21 (Security of network services) |
+| T2.1, T2.5, T2.8 | A.8.31 (Separation of development, test and production environments); A.8.32 (Change management) |
+| T2.2, T2.4 | A.8.28 (Secure coding); A.8.29 (Security testing in development and acceptance) |
+| T3.2–T3.5 | A.8.22 (Segregation of networks); A.8.23 (Web filtering) |
+| T3.6, T3.7 | A.5.7 (Threat intelligence); A.8.28 (Secure coding) |
 
 ## NIS2 (Directive (EU) 2022/2555, Article 21 measures)
 
 | T-ID | Relevant Article 21 measure |
 |---|---|
-| T1–T11 | Article 21(2)(d): supply chain security; Article 21(2)(e): security in acquisition, development, and maintenance |
-| T12–T18, T26 | Article 21(2)(a): policies on risk analysis and information system security; Article 21(2)(g): basic cyber hygiene practices and training |
-| T19–T25 | Article 21(2)(d): supply chain security; Article 21(2)(j): use of multi-factor authentication and secured communications |
+| T1.1–T1.11 | Article 21(2)(d): supply chain security; Article 21(2)(e): security in acquisition, development, and maintenance |
+| T2.1–T2.8 | Article 21(2)(a): policies on risk analysis and information system security; Article 21(2)(g): basic cyber hygiene practices and training |
+| T3.1–T3.7 | Article 21(2)(d): supply chain security; Article 21(2)(j): use of multi-factor authentication and secured communications |
 
 ## DORA (Regulation (EU) 2022/2554, for financial entities)
 
 | T-ID | Relevant DORA article |
 |---|---|
-| T1–T11 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
-| T12–T18, T26 | Article 9; Article 16 (ICT-related incidents); Article 17 (ICT-related incident reporting) |
-| T19–T25 | Article 9; Article 28 (third-party risk) |
+| T1.1–T1.11 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
+| T2.1–T2.8 | Article 9; Article 16 (ICT-related incidents); Article 17 (ICT-related incident reporting) |
+| T3.1–T3.7 | Article 9; Article 28 (third-party risk) |
 
 These mappings are first-pass starting points for compliance teams. Specific control-objective mapping requires organisation-specific analysis.
 

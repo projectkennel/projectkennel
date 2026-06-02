@@ -25,8 +25,8 @@
 //!
 //! # Threat bearing
 //!
-//! Defends against T6 (lateral movement: a hostile caller cannot direct the
-//! helper outside the reserved scope) and T19 (setuid escalation: the helper
+//! Defends against T1.6 (lateral movement: a hostile caller cannot direct the
+//! helper outside the reserved scope) and T3.1 (setuid escalation: the helper
 //! is small, refuses out-of-scope requests, and bounds the privileged surface
 //! to one validated operation).
 //!

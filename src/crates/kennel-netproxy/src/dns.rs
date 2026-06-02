@@ -42,7 +42,7 @@
 //!
 //! # Threat bearing
 //!
-//! T8 and the DNS-rebinding class: resolution happens here on the workload's
+//! T1.8 and the DNS-rebinding class: resolution happens here on the workload's
 //! behalf, never in the workload, and the resolved address is policed (deny
 //! rules plus the special-use refusal) before any connection.
 

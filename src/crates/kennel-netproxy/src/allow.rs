@@ -23,7 +23,7 @@
 //!
 //! # Threat bearing
 //!
-//! T8 (exfiltration via an allowed destination): the per-destination allowlist is
+//! T1.8 (exfiltration via an allowed destination): the per-destination allowlist is
 //! the surface that constrains where an allowed workload may reach. The
 //! deny-before-allow ordering and the resolved-address re-check are what stop a
 //! permissive allow rule, or a hostile resolver, from reaching an

@@ -50,8 +50,8 @@
 //!
 //! # Threat bearing
 //!
-//! Defends against path-traversal and symlink-escape (the T6 lateral-movement
-//! and T2 confused-deputy classes): an untrusted path that resolves outside the
+//! Defends against path-traversal and symlink-escape (the T1.6 lateral-movement
+//! and T1.2 confused-deputy classes): an untrusted path that resolves outside the
 //! allowed prefix — directly, via `..`, or via a symlink — is refused rather
 //! than silently accepted.
 

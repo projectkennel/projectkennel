@@ -79,7 +79,7 @@ Code blocks in policy examples use TOML for the policy language and shell/C for 
 - **A kennel** is a confined execution context: the unit of confinement, the space a workload runs in, the thing a policy describes.
 - **Workload** is the generic term for code being confined inside a kennel. AI agent, container image, package install script, MCP server, downloaded tool — all are workloads.
 - **Default context** is the user's normal shell environment, unconstrained by Project Kennel. The trust root.
-- **Threat IDs** (T1, T2, ...) are stable references that cross-link `THREATS.md`, this document, templates, and the audit log. The catalogue is at v0.1; T-numbers are not yet stable across major-version revisions and may be reorganised before v1.0.
+- **Threat IDs** are family-prefixed `T<family>.<index>` (T1.1, T1.2, …, T2.1, …, T3.7): the integer before the dot is the threat family, so each family carries its own sequence. They cross-link `THREATS.md`, this document, templates, and the audit log. The catalogue is at v0.3 (the family-prefix scheme landed in 0.3, replacing the former consecutive T1–T26).
 - **Out-of-scope IDs** (X1, X2, ...) identify explicit non-goals.
 - **Resource classes** in §7 follow a consistent naming convention: `exec.*`, `fs.*`, `net.*`, `unix.*`, `dbus.*`, `x11.*`, `proc.*`, `env.*`, `cap.*`.
 
