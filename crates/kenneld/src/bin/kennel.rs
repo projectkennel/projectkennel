@@ -184,6 +184,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     let mut key_path: Option<&str> = None;
     let mut unsigned = false;
     let mut require_signed = false;
+    let mut no_lock = false;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
 
@@ -196,6 +197,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
             "--unsigned" => unsigned = true,
             "--require-signed" => require_signed = true,
+            "--no-lock" => no_lock = true,
             "--template-dir" => {
                 template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
             }
@@ -255,22 +257,42 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             kennel_policy::compile_leaf(&leaf, &source, &trust, &install, version)
         }
     };
-    let policy = match result {
-        Ok(policy) => policy,
+    let compiled = match result {
+        Ok(compiled) => compiled,
         Err(e) => {
             eprintln!("kennel: {e}");
             return Ok(ExitCode::from(policy_error_code(&e)));
         }
     };
+    let policy = &compiled.policy;
+
+    let out = output_path.unwrap_or_else(|| default_settled_path(policy_path, &policy.name));
+
+    // Byte-pin the resolved references: check the fresh lockfile against any prior
+    // `<name>.lock` beside the output, then (re)write it. A re-tagged/re-signed
+    // reference is an integrity failure (exit 6).
+    if !no_lock {
+        let lock_path = lock_path_for(&out, &policy.name);
+        if let Ok(prev_bytes) = std::fs::read(&lock_path) {
+            let previous = kennel_policy::Lockfile::parse(&prev_bytes)
+                .map_err(|e| format!("reading {}: {e}", lock_path.display()))?;
+            if let Err(e) = compiled.lock.verify_against(&previous) {
+                eprintln!("kennel: {e}");
+                return Ok(ExitCode::from(6));
+            }
+        }
+        let lock_bytes = compiled.lock.to_bytes().map_err(|e| format!("lockfile: {e}"))?;
+        std::fs::write(&lock_path, &lock_bytes)
+            .map_err(|e| format!("writing {}: {e}", lock_path.display()))?;
+    }
 
     let doc = if unsigned {
-        kennel_policy::seal_unsigned(&policy)
+        kennel_policy::seal_unsigned(policy)
     } else {
         let key = load_signing_key(key_path.ok_or("internal: key path lost")?)?;
-        kennel_policy::sign_settled(&policy, &key).map_err(|e| format!("signing: {e}"))?
+        kennel_policy::sign_settled(policy, &key).map_err(|e| format!("signing: {e}"))?
     };
     let out_bytes = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
-    let out = output_path.unwrap_or_else(|| default_settled_path(policy_path, &policy.name));
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
 
     let note = if unsigned { " (unsigned development build)" } else { "" };
@@ -278,11 +300,16 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The `<name>.lock` path beside the settled output.
+fn lock_path_for(output: &Path, name: &str) -> PathBuf {
+    output.parent().unwrap_or_else(|| Path::new(".")).join(format!("{name}.lock"))
+}
+
 /// Map a compile-time [`kennel_policy::PolicyError`] to a CLI exit code (`02-1`).
 const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
     use kennel_policy::PolicyError as E;
     match err {
-        E::Signature(_) => 6,
+        E::Signature(_) | E::LockMismatch(_) => 6,
         E::Parse(_)
         | E::Canonical(_)
         | E::UnsupportedSchemaVersion { .. }

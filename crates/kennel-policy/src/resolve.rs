@@ -74,6 +74,9 @@ pub struct ChainLink {
     pub version: String,
     /// The signing-key id its signature verified against, if it was verified.
     pub signing_key_id: Option<String>,
+    /// The artefact's on-disk ed25519 signature (base64), if it carried one. This is
+    /// the deterministic content commitment the lockfile pins.
+    pub signature: Option<String>,
 }
 
 /// The product of resolving a chain: the folded effective policy plus the list of
@@ -142,7 +145,8 @@ pub fn resolve_verified(
         let parent = source::parse(&bytes)?;
         parent.validate()?;
         let signing_key_id = trust.check(&name, &parent)?;
-        links.push(ChainLink { name, version, signing_key_id });
+        let signature = parent.signature.as_ref().map(|e| e.signature.clone());
+        links.push(ChainLink { name, version, signing_key_id, signature });
         parents.push(parent.clone());
         current = parent;
     }

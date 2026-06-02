@@ -30,6 +30,9 @@ pub enum PolicyError {
     /// Translating the resolved source policy into the settled form failed: a
     /// malformed CIDR, size, duration, or an unrepresentable value.
     Translation(String),
+    /// A resolved reference's content no longer matches the lockfile pin — the same
+    /// `name@version` resolved to different signed bytes than were recorded.
+    LockMismatch(String),
 }
 
 impl core::fmt::Display for PolicyError {
@@ -57,6 +60,7 @@ impl core::fmt::Display for PolicyError {
             }
             Self::Resolution(m) => write!(f, "template resolution failed: {m}"),
             Self::Translation(m) => write!(f, "settled-policy translation failed: {m}"),
+            Self::LockMismatch(m) => write!(f, "lockfile mismatch: {m}"),
         }
     }
 }

@@ -32,6 +32,7 @@ pub mod error;
 pub mod invariant;
 pub mod keys;
 pub mod leaf;
+pub mod lock;
 pub mod resolve;
 pub mod settled;
 pub mod signature;
@@ -39,9 +40,10 @@ pub mod source;
 pub mod source_sig;
 pub mod translate;
 
-pub use compile::{compile, compile_leaf, seal_unsigned};
+pub use compile::{compile, compile_leaf, seal_unsigned, Compiled};
 pub use error::PolicyError;
 pub use leaf::{parse as parse_leaf, LeafPolicy};
+pub use lock::{LockEntry, Lockfile};
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{

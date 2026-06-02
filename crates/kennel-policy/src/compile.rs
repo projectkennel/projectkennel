@@ -26,6 +26,7 @@
 //! I/O-free: the caller supplies the [`TemplateSource`] and writes the output.
 
 use crate::leaf::LeafPolicy;
+use crate::lock::Lockfile;
 use crate::resolve::{resolve_verified, ChainLink, TemplateSource};
 use crate::settled::{InstallConstants, Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy};
 use crate::signature::SignatureEnvelope;
@@ -53,6 +54,18 @@ pub const ASSERTED_INVARIANTS: &[&str] = &[
 /// The `algorithm` marker used for a content-sealed but unsigned settled policy.
 pub const UNSIGNED_ALGORITHM: &str = "none";
 
+/// The output of a compile: the settled policy plus the lockfile.
+///
+/// The lockfile describes the source references that produced the policy. The caller
+/// signs/writes the policy and checks/writes the lockfile against any prior `kennel.lock`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compiled {
+    /// The settled policy.
+    pub policy: SettledPolicy,
+    /// The freshly-resolved lockfile (one entry per resolved reference).
+    pub lock: Lockfile,
+}
+
 /// Resolve, translate, and assemble `entry` into a settled policy.
 ///
 /// `entry` is the most-derived source artefact (a leaf or a template); `source`
@@ -69,7 +82,7 @@ pub fn compile(
     trust: &Trust<'_>,
     install: &InstallConstants,
     compiler_version: &str,
-) -> Result<SettledPolicy, PolicyError> {
+) -> Result<Compiled, PolicyError> {
     let resolved = resolve_verified(entry, source, trust)?;
     let translated = translate(&resolved.effective, install)?;
     let name = resolved
@@ -100,7 +113,7 @@ pub fn compile_leaf(
     trust: &Trust<'_>,
     install: &InstallConstants,
     compiler_version: &str,
-) -> Result<SettledPolicy, PolicyError> {
+) -> Result<Compiled, PolicyError> {
     leaf.validate()?;
     let base = leaf
         .template_base
@@ -139,7 +152,7 @@ fn assemble(
     threat_catalogue_version: &str,
     install: &InstallConstants,
     compiler_version: &str,
-) -> Result<SettledPolicy, PolicyError> {
+) -> Result<Compiled, PolicyError> {
     let resolved_artifacts = chain
         .iter()
         .map(|link| ResolvedArtifact {
@@ -172,7 +185,7 @@ fn assemble(
 
     // Defence in depth: assert now what the runtime will re-assert at spawn.
     crate::invariant::validate(&policy).map_err(PolicyError::InvariantViolations)?;
-    Ok(policy)
+    Ok(Compiled { policy, lock: Lockfile::from_chain(chain) })
 }
 
 /// Seal a settled policy without a signature (development use only).
@@ -218,7 +231,7 @@ mod tests {
 
     fn compile_ai() -> SettledPolicy {
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
-        compile(&entry, &src(), &Trust::dev(), &install(), "test-0.0.0").expect("compile")
+        compile(&entry, &src(), &Trust::dev(), &install(), "test-0.0.0").expect("compile").policy
     }
 
     #[test]
@@ -258,12 +271,16 @@ mod tests {
         let source = MapSource(vec![("base-confined".to_owned(), "v1".to_owned(), signed_bytes)]);
 
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
-        let policy = compile(&entry, &source, &Trust::require(&ks), &install(), "v")
+        let compiled = compile(&entry, &source, &Trust::require(&ks), &install(), "v")
             .expect("compile with signed ancestor");
         assert!(
-            policy.provenance.resolved_artifacts.iter().any(|a| a.signing_key_id == "kennel-maint-2026"),
+            compiled.policy.provenance.resolved_artifacts.iter().any(|a| a.signing_key_id == "kennel-maint-2026"),
             "the verified signing key is recorded in provenance"
         );
+        // The lockfile pins the signed ancestor with its signature.
+        let locked = compiled.lock.entries.iter().find(|e| e.name == "base-confined").expect("locked");
+        assert_eq!(locked.signing_key_id, "kennel-maint-2026");
+        assert!(!locked.signature.is_empty(), "the signature commitment is recorded");
     }
 
     #[test]
