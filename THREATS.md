@@ -2,7 +2,7 @@
 
 Companion artefact to Project Kennel. Standalone, citable, intended to be referenced independently of any specific runtime.
 
-Version 0.1 · 2026-05-16
+Version 0.2 · 2026-06-02
 
 ---
 
@@ -30,7 +30,7 @@ The catalogue is organised into three families.
 | Family | IDs | Theme |
 |---|---|---|
 | Reconnaissance and exfiltration | T1–T11 | What the workload reads, where it connects, what it leaks |
-| Posture degradation | T12–T18 | What the workload does to the user's host configuration and to the artefacts it produces |
+| Posture degradation | T12–T18, T26 | What the workload does to the user's host configuration and to the artefacts it produces |
 | Workload-class-specific | T19–T25 | Threats whose realisation is distinctive to a specific workload class (containers, MCP servers, build environments) |
 | Out of scope | X1–X11 | Threats Project Kennel deliberately does not address |
 
@@ -180,9 +180,9 @@ Within typically-granted project trees:
 
 **Attack pattern.** Workload has policy-granted access to a remote API. Workload reads sensitive data. Workload constructs API requests containing the data (in the prompt body, in metadata, in tool-call arguments). Requests succeed because they look like legitimate API traffic.
 
-**Mitigation in Project Kennel.** Optional TLS inspection layer: the SOCKS5 proxy can be configured to MITM TLS connections using a per-kennel CA installed in the kennel's trust store, logging full request contents for review. Operationally complex; not enabled by default. Without it, the framework provides byte-counting and rate-limiting at the proxy layer, which surfaces high-volume exfiltration but not low-volume targeted leaks.
+**Mitigation in Project Kennel.** Optional TLS inspection layer: the SOCKS5 proxy can be configured to MITM TLS connections using a per-kennel CA installed in the kennel's trust store, logging full request contents for review. Operationally complex; not enabled by default. Without it, the framework provides byte-counting and rate-limiting at the proxy layer, which surfaces high-volume exfiltration but not low-volume targeted leaks. The constructed-`$HOME` view (T1) keeps *ambient* host secrets — `~/.ssh`, `~/.aws`, `~/.config/gh`, browser stores — out of this channel by removing them from the workload's view; but it does nothing for data the workload is legitimately granted (the project tree), so that defence and this channel are disjoint.
 
-**Residuals.** Even with TLS inspection, a workload that legitimately needs to send code or data to its API can include exfiltrated content within that legitimate traffic. Catalogued as X9 in the out-of-scope section; the framework reduces but does not eliminate it.
+**Residuals.** Even with TLS inspection, a workload that legitimately needs to send code or data to its API can include exfiltrated content within that legitimate traffic — most sharply the AI-API in-band case, where a coding agent encodes reconnaissance or source directly into the prompt body, tool-call arguments, or request metadata to `api.openai.com`/`api.anthropic.com`. This is unblockable at the proxy boundary without destroying the agent's function. Secrets inside the granted project tree (`.env` files past `fs.scrub`, which is best-effort against direct reads only) remain fully exfiltratable. This marks a boundary: Project Kennel confines workstation *infrastructure* — what the workload reads, where it connects — not application-level *data governance*; deciding which data may legitimately leave inside an authorised API call is a DLP / model-alignment concern outside the framework. Catalogued as X9 (and, for the semantic-review limit, X11) in the out-of-scope section; the framework reduces but does not eliminate it.
 
 **MITRE ATT&CK.** T1071.001 (Application Layer Protocol: Web Protocols), T1041 (Exfiltration Over C2 Channel).
 
@@ -230,7 +230,7 @@ Within typically-granted project trees:
 
 ---
 
-# Family 2 — Posture degradation (T12–T18)
+# Family 2 — Posture degradation (T12–T18, T26)
 
 This family captures what workloads do *to the user's host configuration and to the artefacts they produce*, distinct from what they do to access resources. The posture-degradation threats are the direct consequence of the optimisation-pressure thesis for AI agents (design document §1.2) and the friction-routing-around behaviour for human-driven workloads (developers configuring containers permissively because narrow configuration didn't work).
 
@@ -358,6 +358,20 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 **Residuals.** On Wayland systems with portal-mediated screenshots granted, workloads can craft requests that look benign. On older kernels with TIOCSTI re-enabled, the seccomp fallback denies the ioctl.
 
 **MITRE ATT&CK.** T1113 (Screen Capture), T1059 (Command and Scripting Interpreter — partial analogue for input synthesis), T1185 (Browser Session Hijacking — partial analogue).
+
+## T26 — Cross-context persistence via workspace triggers
+
+**Definition.** A confined workload writes a persistent trigger — a git hook, a build-script hook, or an IDE task definition — into its own granted writable project tree. The trigger lies dormant inside the kennel and later fires in the user's *unconfined* default shell (the next `git commit`, `make`, or editor open), executing with the user's full host privileges. This defeats the transient-execution assumption that a namespace-only sandbox contains a workload only for the duration of its run. (Numbered out of family sequence: it is a Family 2 posture-degradation threat added after T1–T25 were assigned; see the family table.)
+
+**Attack pattern.** Workload writes an executable into `.git/hooks/` (or redirects `core.hooksPath` into the writable tree), adds a recipe to a `Makefile`, a `scripts` entry to `package.json`, or a task to `.vscode/tasks.json` / `.idea/`. The artefact sits in the normal project files the agent must be able to edit. When the user subsequently invokes the corresponding tool outside the kennel, the planted command runs in the host context.
+
+**Distinction from neighbouring threats.** Not T5 (an inbound *foreign* cloned repo whose build/IDE config triggers on open) — here the confined workload writes traps into its *own* grant. Not T16 (suppressing CI *checks* by editing `.github/`/`.gitlab-ci`) — here a trigger is *installed*, not a check removed. Sharper than T13 (security-degrading produced artefacts) and T10 (long-lived capability creep) in one specific way: a confined-tree write produces deferred detonation in the unconfined host context.
+
+**Mitigation in Project Kennel.** Partial, by categorical `fs.deny` — the same primitive T16 uses for CI config. The `ai-coding-strict` template can deny writes to `.git/hooks/**`, `.vscode/**`, and `.idea/**`. This is genuinely partial and bypassable: `git config core.hooksPath` relocates hooks into the still-writable tree, and `Makefile`, `package.json` `scripts`, and IDE task files live in ordinary project files that must remain writable for the agent to function, so they cannot be denied without breaking the workflow. (The constructed-view mechanism has no per-subdirectory write carve-out — writable binds resolve to persistent host inodes — and `fs.scrub` is read-masking, not write-exclusion, so neither implements this.) The load-bearing complementary control is commit-time output review (`kennel review`, see T13) scanning diffs for newly installed hooks and triggers.
+
+**Residuals.** The deny closes only the well-known fixed paths; `core.hooksPath` redirection and trigger installation in must-stay-writable build/IDE files remain open, so the residual is large and rests on diff review catching the planted artefact. A template that legitimately needs to write hooks (husky, pre-commit, lefthook) must drop the deny via an explicit permission expansion surfacing `threats.exposed = ["T26"]` in operator review.
+
+**MITRE ATT&CK.** T1546 (Event Triggered Execution), T1059 (Command and Scripting Interpreter — the planted hook executes a shell command).
 
 ---
 
@@ -625,6 +639,7 @@ A file-descriptor leak in `runc` allowed container processes to access host file
 | T23 | T1611, T1068 |
 | T24 | T1199, T1071 |
 | T25 | T1199, T1556 (partial) |
+| T26 | T1546, T1059 |
 
 ---
 
@@ -639,7 +654,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T1, T14 | CC6.1, CC6.7 (Logical and Physical Access) |
 | T2, T3, T9 | CC8.1 (Change Management); CC7.1 (System Operations: detection of malicious software) |
 | T8, T6 | CC6.6, CC6.7 (boundary controls; transmission of data) |
-| T12, T16 | CC7.2, CC8.1 (system monitoring; change management) |
+| T12, T16, T26 | CC7.2, CC8.1 (system monitoring; change management) |
 | T13, T15 | CC8.1 (change management); CC7.1 (detection of system anomalies) |
 | T20–T23 | CC6.6, CC8.1 (boundary controls; change management) |
 | T24, T25 | CC8.1, CC7.1 (change management; detection) |
@@ -651,7 +666,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T1, T14 | A.5.10 (Acceptable use); A.8.3 (Information access restriction); A.8.4 (Access to source code) |
 | T2, T3, T9 | A.8.8 (Management of technical vulnerabilities); A.8.30 (Outsourced development) |
 | T8, T6 | A.8.20 (Network security); A.8.21 (Security of network services) |
-| T12, T16 | A.8.31 (Separation of development, test and production environments); A.8.32 (Change management) |
+| T12, T16, T26 | A.8.31 (Separation of development, test and production environments); A.8.32 (Change management) |
 | T13, T15 | A.8.28 (Secure coding); A.8.29 (Security testing in development and acceptance) |
 | T20–T23 | A.8.22 (Segregation of networks); A.8.23 (Web filtering) |
 | T24, T25 | A.5.7 (Threat intelligence); A.8.28 (Secure coding) |
@@ -661,7 +676,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T-ID | Relevant Article 21 measure |
 |---|---|
 | T1–T11 | Article 21(2)(d): supply chain security; Article 21(2)(e): security in acquisition, development, and maintenance |
-| T12–T18 | Article 21(2)(a): policies on risk analysis and information system security; Article 21(2)(g): basic cyber hygiene practices and training |
+| T12–T18, T26 | Article 21(2)(a): policies on risk analysis and information system security; Article 21(2)(g): basic cyber hygiene practices and training |
 | T19–T25 | Article 21(2)(d): supply chain security; Article 21(2)(j): use of multi-factor authentication and secured communications |
 
 ## DORA (Regulation (EU) 2022/2554, for financial entities)
@@ -669,7 +684,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T-ID | Relevant DORA article |
 |---|---|
 | T1–T11 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
-| T12–T18 | Article 9; Article 16 (ICT-related incidents); Article 17 (ICT-related incident reporting) |
+| T12–T18, T26 | Article 9; Article 16 (ICT-related incidents); Article 17 (ICT-related incident reporting) |
 | T19–T25 | Article 9; Article 28 (third-party risk) |
 
 These mappings are first-pass starting points for compliance teams. Specific control-objective mapping requires organisation-specific analysis.
