@@ -167,8 +167,8 @@ mod tests {
                 proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
                 cap: CapPolicy { no_new_privs: true },
                 seccomp: SeccompPolicy {
-                    default_action: SeccompAction::Errno,
-                    allow: vec![0, 1, 2],
+                    deny_action: SeccompAction::Errno,
+                    deny: vec!["bpf".to_owned()],
                 },
                 lifecycle: LifecyclePolicy {
                     ttl_seconds: Some(3600),

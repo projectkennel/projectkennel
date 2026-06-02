@@ -173,8 +173,8 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 ///
 /// The confinement objects are built in the parent (so opens and allocations
 /// happen pre-`fork`); the child only issues the sealing syscalls. An empty
-/// seccomp allowlist means "no seccomp filter" (rely on Landlock); otherwise the
-/// allowlist is enforced with the plan's default action.
+/// seccomp denylist means "no seccomp filter" (rely on Landlock + the cgroup BPF);
+/// otherwise the denied syscalls get the plan's deny action.
 ///
 /// # Namespaces
 ///
@@ -203,8 +203,8 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 /// the seal, or the spawn fails. A seal failure aborts the spawn fail-closed.
 pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     // Build the seccomp filter in the parent (allocation off the seal path). An
-    // empty allowlist means "no seccomp filter" (rely on Landlock).
-    let filter = if plan.seccomp_allow.is_empty() {
+    // empty denylist means "no seccomp filter" (rely on Landlock + the cgroup BPF).
+    let filter = if plan.seccomp_deny.is_empty() {
         None
     } else {
         Some(plan.seccomp_filter())
@@ -549,7 +549,7 @@ mod tests {
                 exec: ExecPolicy { deny_setuid: true, deny_setgid: true, deny_setcap: true, deny_writable: true, allow: vec!["/usr/bin/python3".to_owned()] },
                 proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
                 cap: CapPolicy { no_new_privs: true },
-                seccomp: SeccompPolicy { default_action: SeccompAction::Errno, allow: vec![0, 1, 2, 60] },
+                seccomp: SeccompPolicy { deny_action: SeccompAction::Errno, deny: vec!["bpf".to_owned(), "userfaultfd".to_owned()] },
                 lifecycle: LifecyclePolicy { ttl_seconds: None, ttl_action: TtlAction::Warn },
             },
             provenance: Provenance {
@@ -614,9 +614,15 @@ mod tests {
         // is left to BPF.
         assert_eq!(plan.landlock_net, vec![(443u16, AccessNet::CONNECT_TCP)]);
 
-        // Seccomp passed through.
-        assert_eq!(plan.seccomp_allow, vec![0, 1, 2, 60]);
-        assert_eq!(plan.seccomp_default, Action::Errno(1));
+        // Seccomp deny names resolved to numbers, in order.
+        assert_eq!(
+            plan.seccomp_deny,
+            vec![
+                kennel_syscall::seccomp::syscall_number("bpf").expect("bpf"),
+                kennel_syscall::seccomp::syscall_number("userfaultfd").expect("userfaultfd"),
+            ]
+        );
+        assert_eq!(plan.seccomp_deny_action, Action::Errno(1));
 
         // The filter builds without panicking.
         let _filter = plan.seccomp_filter();
@@ -837,7 +843,7 @@ mod tests {
 
         let plan = prepare(&bytes, &ks, &subst()).expect("prepare");
         assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));
-        assert_eq!(plan.seccomp_allow, vec![0, 1, 2, 60]);
+        assert_eq!(plan.seccomp_deny.len(), 2, "bpf + userfaultfd resolved");
     }
 
     #[test]
@@ -861,8 +867,8 @@ mod tests {
             new_root: None,
             landlock_fs: read_dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
             landlock_net: Vec::new(),
-            seccomp_allow: Vec::new(), // empty => no seccomp, isolating the Landlock check
-            seccomp_default: Action::KillProcess,
+            seccomp_deny: Vec::new(), // empty => no seccomp, isolating the Landlock check
+            seccomp_deny_action: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
             bpf_deny_v4: Vec::new(),
             bpf_allow_v6: Vec::new(),
@@ -956,8 +962,8 @@ mod root_tests {
             new_root: None,
             landlock_fs: dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
             landlock_net: Vec::new(),
-            seccomp_allow: Vec::new(),
-            seccomp_default: Action::KillProcess,
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
             bpf_deny_v4: Vec::new(),
             bpf_allow_v6: Vec::new(),
@@ -1018,8 +1024,8 @@ mod root_tests {
             new_root: None,
             landlock_fs,
             landlock_net: Vec::new(),
-            seccomp_allow: Vec::new(),
-            seccomp_default: Action::KillProcess,
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
             bpf_deny_v4: Vec::new(),
             bpf_allow_v6: Vec::new(),
@@ -1088,8 +1094,8 @@ mod root_tests {
             new_root: Some(new_root),
             landlock_fs,
             landlock_net: Vec::new(),
-            seccomp_allow: Vec::new(),
-            seccomp_default: Action::KillProcess,
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
             bpf_deny_v4: Vec::new(),
             bpf_allow_v6: Vec::new(),
@@ -1146,8 +1152,8 @@ mod root_tests {
             new_root: None,
             landlock_fs: Vec::new(),
             landlock_net: Vec::new(),
-            seccomp_allow: Vec::new(),
-            seccomp_default: Action::KillProcess,
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
             bpf_allow_v4: allow,
             bpf_deny_v4: Vec::new(),
             bpf_allow_v6: Vec::new(),
@@ -1234,8 +1240,8 @@ mod root_tests {
             new_root: None,
             landlock_fs: vec![(PathBuf::from("/"), access)], // permissive: isolate the join
             landlock_net: Vec::new(),
-            seccomp_allow: Vec::new(),
-            seccomp_default: Action::KillProcess,
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
             bpf_deny_v4: Vec::new(),
             bpf_allow_v6: Vec::new(),

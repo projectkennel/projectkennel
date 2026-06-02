@@ -114,7 +114,7 @@ fn minimal_policy() -> SettledPolicy {
             },
             proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
             cap: CapPolicy { no_new_privs: true },
-            seccomp: SeccompPolicy { default_action: SeccompAction::Errno, allow: Vec::new() },
+            seccomp: SeccompPolicy { deny_action: SeccompAction::Errno, deny: Vec::new() },
             lifecycle: LifecyclePolicy { ttl_seconds: None, ttl_action: TtlAction::Warn },
         },
         provenance: Provenance {

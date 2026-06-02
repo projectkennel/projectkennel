@@ -29,15 +29,12 @@
 //!
 //! # Non-goals
 //!
-//! - **Seccomp.** The source expresses a *denylist by name*; the settled form is an
-//!   *allowlist by syscall number*. Inverting one into the other needs a syscall
-//!   name→number table this workspace does not carry and must not hand-roll (the
-//!   project's no-hand-roll rule) or pull in unvetted. Until that table is sourced
-//!   (a dependency/approval decision), seccomp translates to an empty allowlist,
-//!   which the runtime reads as "no seccomp filter installed" — the source seccomp
-//!   is documented defence-in-depth, so this neither breaks workloads nor weakens
-//!   the primary controls (Landlock, the cgroup BPF). Tracked as owed.
-//! - Provenance, signing, and the lockfile: the next increment.
+//! - Provenance, signing, and the lockfile: a separate increment.
+//!
+//! Seccomp is carried as a **denylist by name**, matching the source: the syscall
+//! names pass through verbatim and the spawn layer resolves them to numbers via
+//! `kennel_syscall::seccomp::syscall_number` (`libc::SYS_*`) — so the signed policy
+//! stays architecture-independent and no syscall-number table lives in this pure crate.
 
 use crate::settled::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
@@ -79,8 +76,13 @@ pub fn translate(
     let cap = CapPolicy {
         no_new_privs: effective.cap.as_ref().and_then(|c| c.no_new_privs).unwrap_or(false),
     };
-    // Seccomp: empty allowlist => no filter installed (see module docs).
-    let seccomp = SeccompPolicy { default_action: SeccompAction::Errno, allow: Vec::new() };
+    // Seccomp is a denylist by name: carry the source's denied syscalls through
+    // verbatim (the spawn layer resolves names→numbers via libc). An empty deny list
+    // means no filter is installed.
+    let seccomp = SeccompPolicy {
+        deny_action: SeccompAction::Errno,
+        deny: effective.seccomp.as_ref().and_then(|s| s.deny.clone()).unwrap_or_default(),
+    };
     let lifecycle = translate_lifecycle(effective)?;
 
     Ok(Translated {
@@ -475,10 +477,13 @@ mod tests {
     }
 
     #[test]
-    fn seccomp_is_an_empty_allowlist_pending_a_syscall_table() {
+    fn seccomp_carries_the_deny_names() {
         let t = translate_template(AI_CODING_STRICT);
-        assert!(t.effective_policy.seccomp.allow.is_empty());
-        assert_eq!(t.effective_policy.seccomp.default_action, SeccompAction::Errno);
+        let sc = &t.effective_policy.seccomp;
+        assert_eq!(sc.deny_action, SeccompAction::Errno);
+        // base-confined's denylist is inherited.
+        assert!(sc.deny.iter().any(|s| s == "bpf"));
+        assert!(sc.deny.iter().any(|s| s == "userfaultfd"));
     }
 
     #[test]

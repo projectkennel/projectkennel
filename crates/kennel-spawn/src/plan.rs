@@ -285,10 +285,11 @@ pub struct Plan {
     /// Landlock TCP-port rules `(port, access)`. Best-effort port hardening that
     /// complements the authoritative BPF (CIDR+port) egress control.
     pub landlock_net: Vec<(u16, AccessNet)>,
-    /// Syscall numbers the seccomp filter allows.
-    pub seccomp_allow: Vec<i64>,
-    /// The seccomp action for syscalls not on the allowlist.
-    pub seccomp_default: Action,
+    /// Syscall numbers the seccomp filter denies (resolved from the policy's deny
+    /// names via `kennel_syscall::seccomp::syscall_number`). Empty ⇒ no filter.
+    pub seccomp_deny: Vec<i64>,
+    /// The seccomp action applied to a denied syscall.
+    pub seccomp_deny_action: Action,
     /// BPF `allow_v4` LPM entries for the egress allowlist.
     pub bpf_allow_v4: Vec<LpmV4Entry>,
     /// BPF `deny_v4` LPM entries (invariant deny CIDRs), consulted deny-first.
@@ -400,11 +401,19 @@ impl Plan {
             }
         }
 
-        let seccomp_default = match ep.seccomp.default_action {
+        let seccomp_deny_action = match ep.seccomp.deny_action {
             SeccompAction::Errno => Action::Errno(EPERM),
             SeccompAction::KillThread => Action::KillThread,
             SeccompAction::KillProcess => Action::KillProcess,
         };
+        // Resolve deny names → numbers on this arch; unknown names are skipped
+        // (seccomp is defence-in-depth under Landlock + the cgroup BPF).
+        let seccomp_deny: Vec<i64> = ep
+            .seccomp
+            .deny
+            .iter()
+            .filter_map(|name| kennel_syscall::seccomp::syscall_number(name))
+            .collect();
 
         let (bpf_allow_v4, bpf_allow_v6) = encode(&ep.net.allow)?;
         let (bpf_deny_v4, bpf_deny_v6) = encode(&ep.net.deny_invariant)?;
@@ -417,8 +426,8 @@ impl Plan {
             new_root: None,
             landlock_fs,
             landlock_net,
-            seccomp_allow: ep.seccomp.allow.clone(),
-            seccomp_default,
+            seccomp_deny,
+            seccomp_deny_action,
             bpf_allow_v4,
             bpf_deny_v4,
             bpf_allow_v6,
@@ -457,6 +466,6 @@ impl Plan {
     /// the spawn path.
     #[must_use]
     pub fn seccomp_filter(&self) -> Filter {
-        Filter::allowlist(&self.seccomp_allow, self.seccomp_default)
+        Filter::denylist(&self.seccomp_deny, self.seccomp_deny_action)
     }
 }

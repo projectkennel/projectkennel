@@ -106,9 +106,55 @@ impl Filter {
     }
 }
 
+/// Resolve a syscall *name* to its number on the build target, using the `libc`
+/// `SYS_*` constants (the vetted name→number table — no hand-rolled numbers).
+///
+/// Covers the syscalls Project Kennel templates deny; returns `None` for an unknown
+/// name so a caller can skip it (seccomp is defence-in-depth, layered under Landlock
+/// and the cgroup BPF). `"umount"` aliases `umount2` (modern Linux has no separate
+/// `umount` syscall). Extend the table as templates grow.
+#[must_use]
+pub fn syscall_number(name: &str) -> Option<i64> {
+    let n: i64 = match name {
+        "userfaultfd" => libc::SYS_userfaultfd,
+        "perf_event_open" => libc::SYS_perf_event_open,
+        "bpf" => libc::SYS_bpf,
+        "process_vm_readv" => libc::SYS_process_vm_readv,
+        "process_vm_writev" => libc::SYS_process_vm_writev,
+        "kexec_load" => libc::SYS_kexec_load,
+        "kexec_file_load" => libc::SYS_kexec_file_load,
+        "mount" => libc::SYS_mount,
+        "umount" | "umount2" => libc::SYS_umount2,
+        "pivot_root" => libc::SYS_pivot_root,
+        "swapon" => libc::SYS_swapon,
+        "swapoff" => libc::SYS_swapoff,
+        "reboot" => libc::SYS_reboot,
+        "init_module" => libc::SYS_init_module,
+        "finit_module" => libc::SYS_finit_module,
+        "delete_module" => libc::SYS_delete_module,
+        "personality" => libc::SYS_personality,
+        "ptrace" => libc::SYS_ptrace,
+        "add_key" => libc::SYS_add_key,
+        "keyctl" => libc::SYS_keyctl,
+        "request_key" => libc::SYS_request_key,
+        "setns" => libc::SYS_setns,
+        "unshare" => libc::SYS_unshare,
+        _ => return None,
+    };
+    Some(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn syscall_names_resolve_to_libc_numbers() {
+        assert_eq!(syscall_number("bpf"), Some(libc::SYS_bpf));
+        assert_eq!(syscall_number("umount"), Some(libc::SYS_umount2), "umount aliases umount2");
+        assert_eq!(syscall_number("umount2"), Some(libc::SYS_umount2));
+        assert_eq!(syscall_number("definitely_not_a_syscall"), None);
+    }
 
     #[test]
     fn an_allowlist_with_allow_default_is_rejected() {

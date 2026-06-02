@@ -251,10 +251,16 @@ pub struct CapPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeccompPolicy {
-    /// Action for syscalls not in the allowlist.
-    pub default_action: SeccompAction,
-    /// Allowlisted syscall numbers (architecture-specific).
-    pub allow: Vec<i64>,
+    /// Action applied to a denied syscall (the source policy's seccomp filter is a
+    /// denylist; everything not named here is permitted).
+    pub deny_action: SeccompAction,
+    /// Denied syscalls, by *name*. Names (not numbers) keep the signed policy
+    /// architecture-independent; the spawn layer resolves them to numbers via
+    /// `kennel_syscall::seccomp::syscall_number` (`libc::SYS_*`) at plan time. An
+    /// empty list means no seccomp filter is installed (Landlock + the cgroup BPF
+    /// remain the primary controls).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
 }
 
 /// Lifecycle policy.
