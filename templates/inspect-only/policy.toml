@@ -46,3 +46,8 @@ allow = [
 [lifecycle]
 ttl = "2h"
 ttl_action = "warn"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "g9d+RWwi51FC/jyATwsLCkLq/aDRGlhuObtxuJrVyknGE7zz9eaHtQjogW6w1OExXsTL/AW6yLog/7T0Dr7TCQ=="

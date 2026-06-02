@@ -76,3 +76,8 @@ mode = "constrained"
 # --- Lifecycle: long-lived ---------------------------------------------------
 [lifecycle]
 ttl_action = "warn"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "jaaOuVQ9UK0ath7xnHegr+HE2q0YXc0o5Qs11m77lyPjc+ETvm2S4Dh6akhOkAjpLWKq4bJdW7dwzxfnz5q5Cw=="

@@ -255,3 +255,8 @@ deny = [
     "init_module", "finit_module", "delete_module",
     "personality",
 ]
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "fcADhBCcEaV7rPkb4YyuTS1T36r5oSLCM3iPTJn517MZ/jWynb9RX7+vEKXyxCfYTroCH4qkbnFwyaeAu/KpDQ=="

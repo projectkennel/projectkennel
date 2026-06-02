@@ -91,12 +91,23 @@ First versioned cut: all workspace crates set to `0.1.0` (centralised in `[works
 - New **`supply-chain` CI job** runs `cargo deny` + `cargo audit` + `cargo vet --locked` via the install path; all three observed green. The `fuzz/` smoke job also runs. The job is a blocking gate in-workflow (a maintainer marks it a *required* status check in branch protection separately).
 - All workspace crates set **`publish = false`** (centralised in `[workspace.package]`): they are the application, not a crates.io library set; this is also what lets `cargo deny`'s wildcard-path allowance apply.
 
+### Template signing
+
+- The six reference templates (`templates/*/policy.toml`) are now **signed** with
+  the project key `kennel-maint-2026` (Ed25519): each carries a `[signature]` over
+  its canonical form, verifiable with `kennel validate --require-signed`. The
+  public key ships at `keys/kennel-maint-2026.pub` and is registered in
+  `MAINTAINERS.md`; `tools/install.sh` deploys `keys/*.pub` into the runtime trust
+  store (`/etc/kennel/keys/`, corrected from the stale `trust/` path). Private
+  seeds stay in the holder's `~/.config/kennel/keys/` (mode `0600`, never in the
+  repo; `.gitignore` blocks `*.key`). This is a software-held pre-release key,
+  to be rotated to hardware before GA.
+
 ### Pending
 
 - Documented-but-deferred (`architecture/08-as-built-notes.md` §8.2): the
   journald/syslog/stdout audit sinks + unified audit writer (a per-kennel file sink
   exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell
   witness exists), and container-runtime integration.
-- Signing the shipped templates with a maintainer key (a key-custody decision).
 - The reproducible-build double-run and the BPF verifier-load matrix — the §14 checks
   still awaiting their infrastructure (release image; custom-kernel runners).

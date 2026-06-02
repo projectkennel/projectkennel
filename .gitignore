@@ -3,3 +3,5 @@
 **/*.rs.bk
 # Verified CI tool binaries + download cache (tools/install-ci-tools.sh).
 /.ci-tools/
+# Private signing seeds never belong in the repo (keys/ holds *.pub only).
+*.key

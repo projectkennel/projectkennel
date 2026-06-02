@@ -100,12 +100,26 @@ install_units() {
 }
 
 install_etc_skeleton() {
-	# Root-owned configuration root. The trust store (public keys) and the
-	# per-user allocations are provisioned by the admin, not by this installer.
-	run install -d -m 0755 /etc/kennel /etc/kennel/trust /etc/kennel/policies
+	# Root-owned configuration root. `keys/` is the runtime trust store
+	# (07-paths.md §/etc, consumed by the CLI's load_trust_store); org-specific
+	# keys and the per-user allocations are provisioned by the admin.
+	run install -d -m 0755 /etc/kennel /etc/kennel/keys /etc/kennel/policies
 	if [ ! -e /etc/kennel/subkennel ]; then
 		echo "install.sh: /etc/kennel/subkennel is absent — the admin must create it"
 		echo "            (one line per user: <uid>:<tag>:<gid>:<namespace>, e.g. 1000:42:0000000001:kennel-alice)"
+	fi
+}
+
+install_keys() {
+	# Ship the project's own template-signing public key(s) into the trust store,
+	# so the signed reference templates verify out of the box. Private seeds are
+	# never in the repo (MAINTAINERS.md); only `*.pub` is shipped. Org/customer
+	# keys are added alongside these by the admin.
+	if [ -d "$repo_root/keys" ]; then
+		for pub in "$repo_root"/keys/*.pub; do
+			[ -e "$pub" ] || continue
+			run install -m 0644 "$pub" "/etc/kennel/keys/$(basename "$pub")"
+		done
 	fi
 }
 
@@ -119,7 +133,8 @@ Remaining admin steps (root):
        <uid>:<tag>:<gid>:<namespace>      e.g.  1000:42:0000000001:kennel-alice
   2. Install the installation constants in /etc/kennel/scope (the tag + ULA GID
      the privhelper validates against).
-  3. Place trusted policy-signing public keys in /etc/kennel/trust/<key_id>.pub.
+  3. Add any org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
+     (The project's own template-signing key is already installed there.)
 
 Per-user enable (each user, unprivileged):
        systemctl --user enable --now kenneld.socket
@@ -134,4 +149,5 @@ require_root
 install_binaries
 install_units
 install_etc_skeleton
+install_keys
 [ "$dry_run" -eq 1 ] || print_next_steps

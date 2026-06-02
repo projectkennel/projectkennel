@@ -6,7 +6,7 @@ This file lists the people who may approve and merge changes, sign releases, and
 
 | Name | Contact | Release signing key | Areas |
 |---|---|---|---|
-| Remco van Mook | remco.vanmook@gmail.com | *[TBD — key to be published]* | Founding maintainer; all areas |
+| Remco van Mook | remco.vanmook@gmail.com | `kennel-maint-2026` (ed25519) | Founding maintainer; all areas |
 
 The maintainer set is intentionally small at this stage. It grows as the project does; additions are themselves maintainer decisions, recorded here in a signed commit.
 
@@ -20,7 +20,13 @@ The maintainer set is intentionally small at this stage. It grows as the project
 
 ## Release signing keys
 
-Release tags and official templates are signed by the keys recorded above. The public keys are published *[TBD — location to be decided: in-repo under keys/, plus an out-of-band channel]*. Project Kennel refuses to load templates with invalid signatures; verifying a release means verifying its tag signature against a key in this file.
+Release tags and official templates are signed by the keys recorded above. The public keys are published **in-repo under `keys/<key_id>.pub`** (base64 of the 32-byte Ed25519 public key); `tools/install.sh` deploys them to the runtime trust store at `/etc/kennel/keys/`. Project Kennel refuses to load templates with invalid signatures; verifying a release means verifying its tag signature against a key in this file.
+
+| `key_id` | Public key (Ed25519, base64) | Held by | Status |
+|---|---|---|---|
+| `kennel-maint-2026` | `KWVn2EUqe+ju7quWQv7aY/ihwMpBFaipL7vU2UVH85I=` | Remco van Mook | Active — 0.1.x template/release key |
+
+The Ed25519 public key *is* the fingerprint (the project uses no separate hash — §5.5); to corroborate a key out of band, compare this base64 string directly. The private seed lives only in the holder's `~/.config/kennel/keys/<key_id>.key` (mode `0600`), never in the repo. This is a software-held pre-release key; rotating to a hardware-backed key before GA is expected, and is a key-rotation event (below).
 
 Key rotation, when it happens, is announced in [CHANGELOG.md](CHANGELOG.md) and the old key is retained here marked retired, so historical tags and templates remain verifiable.
 

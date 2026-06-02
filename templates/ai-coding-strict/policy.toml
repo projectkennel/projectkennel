@@ -132,3 +132,8 @@ reason = "git-over-SSH via a per-kennel agent, not the user's"
 [lifecycle]
 ttl = "8h"
 ttl_action = "warn"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "J/8lvNfEGWufUzEdxdWGF2XxA3HSaiXPO/N3rcZpmYmF6tPXw1bKpFh2QUYxw2khGKUJvY7aVADaSRgsEHkJAQ=="

@@ -56,3 +56,8 @@ threats.exposed = ["T9"]
 [lifecycle]
 ttl = "1h"
 ttl_action = "stop"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "634uvQVKBtLAWRqzxjaEFHJEuKim1ZL8RkEFZXAPXslYCBRFofm/d/9gnfNNwqJUSfk6so281ngn5LQ+N2OlBw=="
