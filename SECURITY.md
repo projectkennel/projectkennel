@@ -20,11 +20,13 @@ This includes weaknesses in the policy compiler, the signature/lockfile verifica
 
 The [threat catalogue](THREATS.md) describes *classes* of risk and is public by design. Documented residual threats (those the design explicitly does not defend against — e.g. T8 in `ai-coding-strict`) are known limitations, not vulnerabilities. A *specific implementation flaw* that breaks a guarantee the design claims to provide is a vulnerability; report it privately.
 
+A *suspected* threat class that the catalogue does not yet cover — where you do not have a specific exploit — is not a private report either: open a public issue tagged `[T-NEW]` (see CONTRIBUTING.md and CODING-STANDARDS.md §13.5). The split is: **specific working exploit → private email; suspected uncatalogued threat class → public `[T-NEW]` issue.** When in doubt, email privately and we will redirect you.
+
 ## How to report
 
-Email: *[TBD — security contact to be published]*.
+Email: **security@projectkennel.org**.
 
-If a PGP key is published for the security contact, encrypt sensitive details to it. Until a contact is published, hold reports; do not open a public issue for a specific exploitable flaw.
+A PGP key for this address may be published alongside this file; if one is present, encrypt sensitive details to it. Do not open a public issue for a specific exploitable flaw.
 
 Include, where you can: affected component and version (commit hash), a description of the weakness, reproduction steps or a proof of concept, the guarantee you believe is broken (cite the design section or threat ID), and any suggested remediation.
 

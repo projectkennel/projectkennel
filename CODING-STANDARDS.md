@@ -18,6 +18,8 @@ Vendored third-party code under `vendor/` is governed by §5 (Dependencies), not
 
 When this document and an external style guide disagree, this document wins. When this document and the Rust API Guidelines disagree, this document wins. When this document and a maintainer disagree, the maintainer either updates this document or the standard stands.
 
+**Enforcement legend.** Throughout this document, each rule is enforced either by *tooling* (clippy/rustc lints, CI checks — mechanical, non-waivable, catches every instance) or by *review* (a human reading the diff — catches intent and content that tooling cannot express). Where it is not obvious, rules are marked `[tool]` or `[review]`. A `[review]`-only rule is exactly as binding as a `[tool]` rule; the difference is *who* catches a violation, not whether it is permitted. The §13.4 close-on-arrival filter and the §14 CI gate test only the `[tool]` subset; the `[review]` subset is what maintainer reading is for. A quick reference of the tool-vs-review split, the close-on-arrival categories, and the issue tags is in Appendix B.
+
 ---
 
 ## 2. Toolchain and versions
@@ -29,6 +31,8 @@ The project has two toolchains: Rust for the userspace, and clang/LLVM for the B
 **Development toolchain:** the version of Rust everyone uses to build the workspace, pinned in `rust-toolchain.toml`. Stable channel; no nightly. No `#![feature(...)]` in any crate. Contributors install via `rustup`, which honours `rust-toolchain.toml` automatically. We do not build against the distro's Rust package; Debian/Fedora packagers may target a different version (see MSRV below), but contributor workflow is `rustup`-driven and reproducible across hosts.
 
 Pinning to recent stable is intentional. The OpenSSH analogy is about *auditability*, not about supporting ancient compilers — Rust moves faster than C and "Debian stable's rustc" is typically 18–24 months behind upstream. Tying the development toolchain to that floor would forgo `let...else`, modern async-fn-in-trait, recent stdlib additions, and clippy improvements that materially help the project. We accept the cost of contributors running `rustup` over the cost of writing 2022-era Rust in 2026.
+
+Note the interaction with §12.2: because the development toolchain moves with `rustup`, lints whose set changes between clippy releases (notably `clippy::pedantic`) are denied only in the pinned-toolchain CI job, not on the moving toolchain. See §12.2 for the rationale; the short version is that a `rustup update` must never turn the tree red with no code change.
 
 **Minimum supported Rust version (MSRV):** the floor declared in each crate's `Cargo.toml` `rust-version` field. This is what *packagers* may use, not what contributors use. MSRV is set conservatively but not tied to one distro's choices; it lags the development toolchain by no more than two stable releases (roughly twelve weeks). CI builds the workspace against both the development toolchain and the MSRV on every PR; either failing blocks merge.
 
@@ -46,6 +50,7 @@ The BPF programs in `bpf/` are compiled by clang against the kernel UAPI (no CO-
 - **No libbpf, no aya.** We do not vendor or link libbpf, and we do not use libbpf-rs/libbpf-sys or aya (their cost — ~1435 vendored C files / a 19-crate tree — outweighed what they save; see `DEPENDENCIES.md`). The loader is a small, reviewed `bpf(2)` FFI over `libc` with `object` for ELF parsing.
 - **Kernel headers:** the programs compile against the kernel UAPI (`<linux/bpf.h>` from `linux-libc-dev`, plus the multiarch `<asm/types.h>` path), pinned in `BUILD-ENV.md`. There is **no** committed `vmlinux.h` and no BTF/CO-RE step — the programs touch only stable hook-context structs and our own maps.
 - **bpftool:** optional, for inspection and the verifier-load matrix only; never on the build/load path. When invoked, its version is pinned in the same container as clang.
+- **Map definitions** are declared in `bpf/maps.h`; the Rust loader mirrors them **by hand** in `kennel-bpf`'s `KENNEL_MAPS` (there is no skeleton-derived type generation), and the loader resolves map references by symbol name. The two sides share a layout via the committed `bpf/maps.h`, which is the single source of truth. Hand-mirroring is deliberate; drift between the C source of truth and the Rust mirror is caught by a test, not prevented by codegen (see §4.1, *Testing*).
 
 ### 2.3 Build properties
 
@@ -65,10 +70,16 @@ A crate that requires `unsafe` is annotated as such in its top-level `lib.rs` do
 
 Each crate carries, at minimum:
 
-- `Cargo.toml` with `rust-version`, `license`, `description`, and explicit dependency versions (§5).
+- `Cargo.toml` with `rust-version`, `license` (`Apache-2.0` for every Rust crate — see *Licensing* below), `description`, and explicit dependency versions (§5).
 - `src/lib.rs` (or `src/main.rs`) with a module-level doc comment describing the crate's purpose, its invariants, and which threats (from `THREATS.md`) bear on its design.
 - `README.md` if any external party will read the crate.
 - `tests/` for integration tests; unit tests live in `#[cfg(test)] mod tests` blocks beside the code.
+
+### Licensing
+
+The userspace is **`Apache-2.0`**; every Rust crate declares `license = "Apache-2.0"` and carries an `SPDX-License-Identifier: Apache-2.0` header. The BPF programs in `bpf/` are **`GPL-2.0-only`** — not by preference but by necessity: the kernel marks several of the helpers we rely on as GPL-only (notably the `bpf_probe_read_kernel*` family on the §4.1 whitelist), and the verifier rejects a program that calls them unless it declares a GPL-compatible license. The per-program declaration is specified in §4.1.
+
+The `Apache-2.0` / `GPL-2.0-only` combination is legitimate here precisely because the two are *separate works*, not a combined derivative. The BPF `.o` files and the Rust binaries are distinct compilation units that communicate only across the stable `bpf(2)`/map ABI (§2.2), with no shared linkage and no GPL code linked into the userspace. `Apache-2.0` and `GPLv2` are mutually incompatible as a *single combined* work; we never create one, and the architectural separation that makes that true is the same separation §2.2 already requires for other reasons. The repository carries `LICENSE` (Apache-2.0) at the root and `bpf/LICENSE` (GPL-2.0-only), and every source file carries the matching SPDX header. A contributor's inbound license follows the file they touch: Rust under `Apache-2.0`, `bpf/` C under `GPL-2.0-only`.
 
 ---
 
@@ -116,6 +127,7 @@ C is `unsafe` by construction. The BPF programs in `bpf/` are the only C in this
 
 - POSIX C11 with the standard BPF map/helper macro idioms, compiled against the kernel UAPI (`<linux/bpf.h>`) — **no** CO-RE/`vmlinux.h`. No GCC-isms beyond what clang accepts. `-Wall -Wextra -Werror` in the build.
 - `static` everything that isn't a BPF section symbol. No global mutable state beyond BPF maps.
+- **License declaration.** Every program declares a GPL-compatible license at runtime — `char _license[] SEC("license") = "GPL";` — and carries an `SPDX-License-Identifier: GPL-2.0-only` header. This is mandatory, not stylistic: the GPL-only kernel helpers on the `bpf/HELPERS.md` whitelist (including the `bpf_probe_read_kernel*` family required below) cause the verifier to **reject** any program that declares a non-GPL-compatible license, so a wrong or missing declaration is a load failure, not a paperwork slip. The SPDX header and the `SEC("license")` string must agree; CI checks both are present on every program, and the §3 *Licensing* rationale explains why `bpf/` is `GPL-2.0-only` while the userspace is `Apache-2.0`.
 - Map definitions are declared in `bpf/maps.h`; the Rust loader mirrors them by hand in `kennel-bpf`'s `KENNEL_MAPS` (there is no skeleton-derived type generation), and the loader resolves map references by symbol name. The two sides share a layout via the committed `bpf/maps.h`.
 
 **Bounds and safety idioms required:**
@@ -148,7 +160,7 @@ C is `unsafe` by construction. The BPF programs in `bpf/` are the only C in this
 **Testing:**
 
 - BPF programs are tested via two paths. First, unit tests against the loader crate use the kernel's `BPF_PROG_TEST_RUN` interface to invoke the program with constructed inputs and assert outputs. Second, integration tests run a real kennel and assert kernel-observable behaviour (cgroup BPF connect denials, etc.). Both run in CI on the kernel-version matrix.
-- BPF map type definitions are *generated* into the Rust side from the C side (or vice versa); drift is detected by `cargo test` failing at compile time. Manual `repr(C)` mirroring is rejected.
+- **BPF map types are hand-mirrored on the Rust side per §2.2**, with `bpf/maps.h` as the single source of truth. Drift between the C source of truth and the Rust mirror is caught by a **test, not by codegen**: a build-time check compiles a small C shim that emits `sizeof`/`offsetof` for each map-bearing struct against the committed `bpf/maps.h`, and compares those values against the Rust mirror's `size_of`/`offset_of!`. Any mismatch fails `cargo test`. We do **not** generate the Rust types from C (or C from Rust): generation would place unreviewed, machine-emitted code on the build path, which §5.3 (`build.rs`/codegen) constrains, and it would obscure exactly the layout a reviewer must check by eye. Hand-mirroring keeps both sides reviewable in plain source; the drift test keeps them honest. Manual `repr(C)` mirroring is therefore *required*, and the drift test — not codegen — is what makes it safe.
 
 ---
 
@@ -180,7 +192,7 @@ Adding a direct dependency requires, in the PR:
 1. An entry in `DEPENDENCIES.md` with:
    - Crate name and exact version (no `^`, no `>=`, no `*` — see §5.4).
    - One-paragraph justification: what does it do, why are we using it instead of writing it.
-   - License (must be MIT, BSD-2, BSD-3, Apache-2.0, ISC, or compatible; GPL/AGPL requires maintainer ratification).
+   - License (must be MIT, BSD-2, BSD-3, Apache-2.0, ISC, or compatible; GPL/AGPL requires maintainer ratification). The permissive-only rule protects the **`Apache-2.0` userspace**: a GPL Rust crate linked into it would create exactly the `Apache`/`GPL` combined-work incompatibility §3 (*Licensing*) avoids. The `GPL-2.0-only` `bpf/` side pulls in no third-party code at all (no libbpf, no aya — §2.2), so its license raises no dependency question.
    - Maintainer-reviewer assignment: who on our side has read enough of this crate to vouch for it.
    - List of transitive dependencies added by this change.
 2. A `cargo vet` audit entry for the crate and every newly transitively pulled crate. We use `cargo vet` (Mozilla) as the audit-of-record tool; entries cite version, audit type (full / delta), and reviewer.
@@ -202,7 +214,7 @@ The following patterns require explicit per-instance maintainer approval, docume
 
 - **Procedural macros.** Proc-macros execute arbitrary code at compile time. We allow `serde_derive` and its near relatives; everything else needs a reason. We do not allow proc-macros in the privhelper or its dependency chain.
 - **`build.rs` that does anything other than `println!("cargo:rustc-cfg=...")`-style metadata.** Build scripts that invoke external tools, fetch resources, or generate non-trivial code are an attack surface and require review of the script source.
-- **Crates with `unsafe` in their public API path.** If the crate's public API requires us to call `unsafe`, the wrapping happens in `kennel-syscall` and nowhere else.
+- **Crates whose public API forces the *caller* to write `unsafe`** — an exported `unsafe fn`, or a documented safety contract the caller must uphold to use even the "safe" API soundly. This is about the *call site*, not the crate's internals. `ring`, `rustls`, and most of our allow-list use `unsafe` internally and expose a safe API; that is fine and is not what this rule covers. Where a dependency's API genuinely forces `unsafe` on us, the wrapping happens in `kennel-syscall` and nowhere else.
 - **Crates that themselves depend on more than ten transitive crates.** We will sometimes accept this for foundational deps (the async runtime is the obvious case); we do not accept it for utility crates.
 - **Crates whose latest release is more than two years old AND whose repository shows no maintenance activity.** Stagnation is not automatically disqualifying, but it requires us to commit to maintaining the dep ourselves if needed.
 
@@ -301,7 +313,7 @@ The helper is treated as security-critical code: it is in the workspace, it is r
 
 #### What this does not defend against
 
-- A pre-compromised upstream where the malicious code is published as the canonical release across all sources (the Nx/Cline scenario, where the original author's account was compromised and the malicious code is *what was published*). No checksum scheme defends against this; only human reading of the source code does. `cargo vet` (§5.5) and the explicit auditor sign-off in `DEPENDENCIES.md` are the partial mitigations.
+- A pre-compromised upstream where the malicious code is published as the canonical release across all sources (the Nx/Cline scenario, where the original author's account was compromised and the malicious code is *what was published*). No checksum scheme defends against this; only human reading of the source code does. `cargo vet` (§5.2) and the explicit auditor sign-off in `DEPENDENCIES.md` are the partial mitigations.
 - An auditor who reads the source superficially and misses a backdoor. The checksum proves "what we audited is what we use"; it does not prove "what we audited is safe."
 
 ### 5.6 Audit cadence
@@ -338,6 +350,8 @@ Two additional discipline rules:
 ## 6. Documentation
 
 Code is read more often than it is written. In a security-critical project, it is read by people who do not have the option of asking the author what something meant.
+
+Enforcement split for this section: doc-comment *presence* on `pub` items is `[tool]` (`missing_docs`, §12.2); the *structure* of `# Errors` and `# Panics` sections is `[tool]` (`clippy::missing_errors_doc` / `clippy::missing_panics_doc`, kept from pedantic specifically for this — §12.2); the *content quality* of every section, and the presence/accuracy of `# Security` and `# Safety`, is `[review]`.
 
 ### 6.1 Module-level documentation
 
@@ -410,24 +424,29 @@ The standard form is:
 /// Each `Err` variant this function can produce, and what triggers it.
 /// "Returns `Err(PolicyError::CycleDetected)` if the template chain
 /// contains a cycle, before any signature is verified."
+/// (Presence of this section on a fallible fn is enforced by
+/// clippy::missing_errors_doc — see §12.2.)
 ///
 /// # Panics
 ///
 /// Every condition under which this function panics. If it never panics,
 /// say so. If it panics on invariant violation, name the invariant.
+/// (Presence of this section on a panicking fn is enforced by
+/// clippy::missing_panics_doc — see §12.2.)
 ///
 /// # Security
 ///
 /// Anything a reviewer should think about. Examples: "Caller must not
 /// pass attacker-controlled paths without canonicalising first." "This
 /// function does not constant-time-compare; do not use for secret material."
+/// (This section is [review]; no lint checks it.)
 ///
 /// # Example
 ///
 /// A doc-test if the function is non-trivial to call. Doc-tests run in CI.
 ```
 
-`# Arguments` and `# Example` are optional; the others are required for any function whose failure modes are not trivially obvious.
+`# Arguments` and `# Example` are optional; the others are required for any function whose failure modes are not trivially obvious. The `# Errors`/`# Panics` *sections* are `[tool]`-enforced; their *accuracy* (do they actually list every variant / every panic) is `[review]`.
 
 ### 6.3 Non-trivial code patterns
 
@@ -438,7 +457,7 @@ A non-trivial pattern is one where the *why* would not be obvious from re-readin
 - A comparison or check whose absence would be a subtle vulnerability. ("Constant-time compare: timing leak otherwise.")
 - A loop bound or recursion limit. ("Bounded at 64 to prevent DoS from adversarial template chains; see T18.")
 
-The standard is: if a reviewer would have to ask "why?", write it down.
+The standard is: if a reviewer would have to ask "why?", write it down. This rule is `[review]`.
 
 ### 6.4 What not to document
 
@@ -473,9 +492,9 @@ Commit message: `feat: <behaviour>` or `fix: <behaviour>`.
 #### Notes on the cadence
 
 - The three commits live on the feature branch in order. Each one compiles; each one runs `cargo test`; each one is a valid `git bisect` candidate. Reviewers may ask to see the un-squashed history.
-- PRs preserve the three commits on merge by default. Squashing is permitted when the change is small enough that the separation no longer aids review; the PR author decides, the reviewer can object.
+- PRs preserve the three commits on merge by default. Squashing is permitted when the change is small enough that the separation no longer aids review; the PR author decides, the reviewer can object. **Note the interaction with §13.4:** the folding rules below never collapse a PR below *two* commits, so a compliant PR — even a fully folded one — always carries a `test:` commit plus at least one other. A single squashed `feat:` commit is never compliant. This is what the §13.4 cadence check keys on.
 - `todo!()`, `unimplemented!()` and similar stub macros are permitted in intermediate commits on feature branches. They are not permitted on `main`; CI's clippy lints catch this on every PR (§8.4). A PR that lands only Phase 1 (no Phase 2 or 3) must replace `todo!()` with either a tracked `Err(...)` variant or `#[ignore = "tracking issue #NN"]` on the happy-path tests, so that `main` never carries a `todo!()`.
-- Folding phases 2 and 3 into one commit is acceptable when the implementation is genuinely small (a handful of lines, no algorithmic substance). Folding phases 1 and 2 is acceptable when the structure is small enough that pulling them apart adds no review value. Skipping Phase 1 is never acceptable.
+- Folding phases 2 and 3 into one commit is acceptable when the implementation is genuinely small (a handful of lines, no algorithmic substance). Folding phases 1 and 2 is acceptable when the structure is small enough that pulling them apart adds no review value. **Skipping Phase 1 (the `test:` commit) is never acceptable, and no fold ever removes it.**
 - The three-phase pattern is *generative*, not just procedural: writing the structure with stubs and seeing the structure-level tests pass forces clean boundaries between validation and computation. If you find Phase 2 hard to test because validation and computation are tangled, that is a design signal — separate them.
 
 ### 7.2 What tests cover
@@ -520,7 +539,7 @@ Errors carry enough context for a human reading the audit log to act. "File not 
 
 ### 8.2 No `unwrap`
 
-`.unwrap()` is forbidden outside `#[cfg(test)]` code. The lint `clippy::unwrap_used` is `deny` in every crate.
+`.unwrap()` is forbidden outside `#[cfg(test)]` code. The lint `clippy::unwrap_used` is `deny` in every crate. `[tool]`.
 
 ### 8.3 `expect` with documented invariant
 
@@ -531,11 +550,11 @@ let parsed = u32::from_str(value)
     .expect("INVARIANT: schema validator rejects non-numeric values before reaching here");
 ```
 
-The privhelper crate is stricter: `.expect()` is also forbidden. The privhelper handles every case explicitly.
+The privhelper crate is stricter: `.expect()` is also forbidden. The privhelper handles every case explicitly. (Presence of `.expect()` is `[tool]` via `clippy::expect_used` in the privhelper; the *quality* of the invariant message elsewhere is `[review]`.)
 
 ### 8.4 No `panic!`, `todo!`, `unimplemented!` in shipped code
 
-Lints `clippy::panic`, `clippy::todo`, `clippy::unimplemented` are `deny`. These are fine in tests; they do not ship. They are also fine in the structure-phase commit on a feature branch (§7.1); CI runs against the PR head, so the lints catch any state where structure has been merged without implementation.
+Lints `clippy::panic`, `clippy::todo`, `clippy::unimplemented` are `deny`. `[tool]`. These are fine in tests; they do not ship. They are also fine in the structure-phase commit on a feature branch (§7.1); CI runs against the PR head, so the lints catch any state where structure has been merged without implementation.
 
 ### 8.5 Privhelper-specific
 
@@ -580,7 +599,7 @@ Audit events are structured records of security-relevant decisions: a policy loa
 - The contents of network payloads (lengths and destinations are fine; payload bytes are not).
 - Environment variable *values* (variable *names* may be fine in debug logging; values, no).
 
-A log line that prints a value the writer has not personally verified to be non-sensitive is a bug.
+A log line that prints a value the writer has not personally verified to be non-sensitive is a bug. `[review]`.
 
 ### 9.4 Redaction
 
@@ -628,9 +647,12 @@ Practically:
 
 Where data crosses into a context that interprets formatting, the data is sanitised on the way out. The sanitiser is chosen by the destination format, not by the producer.
 
-- **Terminals (stdout, stderr, terminal-attached logs).** ANSI escape sequences, control characters, and non-printable bytes are stripped or escaped from any string of untrusted origin before writing. Terminal injection — write attacker-controlled bytes, get cursor movement, screen clearing, paste-buffer abuse in some emulators — is a real attack class. "It is only an error message" is not a defence; error messages are exactly where attacker-controlled strings end up.
+- **Terminals (stdout, stderr, terminal-attached logs).** ANSI escape sequences, control characters, and non-printable bytes are stripped or escaped from any string of untrusted origin before writing, via `display_untrusted` (§10.4). Terminal injection — write attacker-controlled bytes, get cursor movement, screen clearing, paste-buffer abuse in some emulators — is a real attack class. "It is only an error message" is not a defence; error messages are exactly where attacker-controlled strings end up.
 - **JSON (audit log, IPC).** Use a serialiser. JSON is never constructed by string concatenation. The serialiser handles escaping; ad-hoc code does not.
-- **Markdown.** Markdown rendering is a code path; attacker-controlled markdown is attacker-controlled output. Where we generate markdown that may include an untrusted substring (a policy diff that quotes a `reason` field, an error report citing a config value), the untrusted portion is wrapped in backtick fences or escaped for the relevant metacharacters (`*`, `_`, `` ` ``, `#`, `[`, `]`, `(`, `)`, `!`, `\`, `|`). We do not interpolate untrusted strings into markdown headers, link targets, or image syntax. We do not produce markdown for downstream HTML rendering without a downstream HTML sanitiser in the chain.
+- **Markdown.** Markdown is a code path; attacker-controlled markdown is attacker-controlled output. We do **not** attempt to neutralise untrusted substrings by ad-hoc metacharacter escaping or by backtick-fencing — fencing does not contain a value that itself contains backticks, and CommonMark has no single stable escaping rule across reference-link definitions, autolinks, and raw-HTML passthrough. Two sound options, in order of preference:
+  1. **Do not emit untrusted content as markdown markup at all.** Render it as inert text through `display_untrusted` (§10.4) — the same primitive used for terminals. This is the default. A policy diff quoting a `reason` field, an error report citing a config value, etc., all take this path.
+  2. **If structured markdown rendering of untrusted content is genuinely required**, route it through a real CommonMark renderer in *safe mode* with raw HTML disabled and dangerous URL schemes filtered. Ad-hoc escaping is not an acceptable substitute for a renderer.
+  - We never produce markdown for downstream HTML rendering without a downstream HTML sanitiser in the chain. We never interpolate untrusted strings into markdown headers, link targets, or image syntax under any option.
 - **HTML.** HTML is an injection hazard. We do not produce HTML by string templating with interpolation. If we generate HTML at all, it is via a library that escapes by default, and untrusted strings pass through that library's escape function explicitly. Type-level distinction between "raw HTML" (a small whitelist of internally-produced content) and "untrusted text" (everything else) is the goal; bypassing the escaper "because we know the value is safe" defeats the type and is rejected at review.
 - **Shell.** Never. External commands are invoked via `Command::new(...).arg(...)`-style APIs that take argv arrays. We do not construct a shell command string and pass it to `sh -c`, even for prototyping. The privhelper has no shell path at all.
 - **File paths.** Untrusted strings do not flow into `Path::join` directly. Path construction from untrusted input goes through the canonicalising helper of §11.3, which verifies the result is within an explicit allowed prefix.
@@ -639,31 +661,33 @@ Where data crosses into a context that interprets formatting, the data is saniti
 
 ### 10.4 Error messages that quote input
 
-Error messages frequently quote the input that caused the error: `invalid policy at line 42: '<bad-value>'`. The quoted portion is sanitised by the rules of §10.3 before it appears in the output. Otherwise the error path is a covert channel: an attacker controls a configuration field containing terminal escape sequences, our error message writes those escapes to the user's terminal, and the terminal does whatever the escapes tell it to.
+Error messages frequently quote the input that caused the error: `invalid policy at line 42: '<bad-value>'`. The quoted portion is sanitised before it appears in the output. Otherwise the error path is a covert channel: an attacker controls a configuration field containing terminal escape sequences, our error message writes those escapes to the user's terminal, and the terminal does whatever the escapes tell it to.
 
-A helper (`display_untrusted` or equivalent in `kennel-text`) handles this. It:
+`display_untrusted` (in `kennel-text`) is the single sound primitive for rendering an untrusted string into a *human-facing plain-text or markdown* context (terminal, error message, log line a human reads, or markdown-as-inert-text per §10.3 option 1). It:
 
 - Replaces control characters with explicit escapes (`\x1b`, `\b`, `\r`, …) rather than emitting them raw.
 - Wraps the value in visible delimiters so its boundaries are unambiguous in the rendered output.
 - Truncates absurdly long values with an explicit marker, so the error message itself does not become a DoS vector.
 - Marks the value as untrusted in the rendered output (e.g., a prefix indicating provenance).
 
+`display_untrusted` is the default for *both* terminal and markdown contexts. It does not produce markdown markup — it produces inert, escaped text safe to drop into either. Where genuine markdown *structure* around untrusted content is required, see §10.3 option 2 (a real CommonMark renderer); `display_untrusted` handles the untrusted *leaf* values inside that structure.
+
 Audit log entries achieve the same property structurally by going through JSON encoding (§10.3); they do not need a separate helper.
 
 ### 10.5 Banned patterns
 
-The following patterns are forbidden by convention, surfaced by clippy where the lint exists and by review where it does not. They are listed here so that the rule is concrete and citable in code review.
+The following patterns are forbidden by convention. Some are caught by clippy (`[tool]`); the rest are caught by review (`[review]`) because no lint expresses them. They are listed here so that the rule is concrete and citable in code review.
 
-- String concatenation to build paths, URLs, SQL, shell, JSON, markdown, or HTML. Use the format-appropriate API.
-- `format!` (or `write!`, `writeln!`) with an untrusted format string. (Note: `rustc` already requires the format spec to be a string literal, so this is enforced at compile time. The rule is kept here for *intent* and to cover indirect paths via `fmt::Arguments`-style constructions.)
-- `Path::new(untrusted).join(...)` without going through the canonicalising helper.
-- `Command::new("sh").arg("-c").arg(untrusted)` or any equivalent indirect-execution path.
-- Reading untrusted sources with `read_to_string`, `read_to_end`, or any unbounded read. Use `take(N)` first.
-- Logging or displaying untrusted strings without `display_untrusted` (or the JSON sanitiser for audit-log entries).
-- `Regex::new(untrusted)`.
-- `serde` derives without `deny_unknown_fields` on any type that deserialises external input.
-- `serde_json::Value` or `toml::Value` as a long-lived type for data we introspect. Parse to a typed struct.
-- Implicit `From`/`Into` impls that produce a typed value from a string or byte slice of untrusted origin.
+- String concatenation to build paths, URLs, SQL, shell, JSON, markdown, or HTML. Use the format-appropriate API. `[review]`.
+- `format!` (or `write!`, `writeln!`) with an untrusted format string. (Note: `rustc` already requires the format spec to be a string literal, so the direct form is `[tool]` at compile time. The indirect path via `fmt::Arguments`-style constructions is `[review]`.)
+- `Path::new(untrusted).join(...)` without going through the canonicalising helper. `[review]`.
+- `Command::new("sh").arg("-c").arg(untrusted)` or any equivalent indirect-execution path. `[review]`.
+- Reading untrusted sources with `read_to_string`, `read_to_end`, or any unbounded read. Use `take(N)` first. `[review]`.
+- Logging or displaying untrusted strings without `display_untrusted` (or the JSON sanitiser for audit-log entries). `[review]`.
+- `Regex::new(untrusted)`. `[review]`.
+- `serde` derives without `deny_unknown_fields` on any type that deserialises external input. `[review]`.
+- `serde_json::Value` or `toml::Value` as a long-lived type for data we introspect. Parse to a typed struct. `[review]` (see the carve-out below).
+- Implicit `From`/`Into` impls that produce a typed value from a string or byte slice of untrusted origin. `[review]`.
 
 #### Carve-out: opaque payload envelopes
 
@@ -673,7 +697,7 @@ When this case arises:
 
 - Use `serde_json::value::RawValue` (or `&serde_json::value::RawValue`), not `Value`. `RawValue` preserves the original bytes byte-for-byte; `Value` is a parsed tree we would then have to validate. Bytes-through is the property we want.
 - The wrapping struct is typed; only the payload field is `RawValue`. The structural fields (timestamp, source ID, schema URI) are typed, validated, and authoritative.
-- The wrapped bytes are still untrusted. They are not displayed to a terminal without §10.3 sanitisation; they are not interpolated into markdown or HTML; they are not logged anywhere that interprets formatting.
+- The wrapped bytes are still untrusted. They are not displayed to a terminal without §10.4 sanitisation; they are not interpolated into markdown or HTML; they are not logged anywhere that interprets formatting.
 - The use site carries a comment naming the contract: what the payload is, who produces it, why we do not parse it.
 
 This carve-out is rare. The default is still: parse to a typed struct.
@@ -741,29 +765,39 @@ If a struct has more than four fields, it gets a builder. The builder enforces r
 
 ### 12.1 Formatting
 
-`cargo fmt` with default configuration. We do not customise rustfmt; reviewer attention is finite and "is this consistent with the rest of the codebase" should be answerable by running the formatter.
+`cargo fmt` with default configuration. We do not customise rustfmt; reviewer attention is finite and "is this consistent with the rest of the codebase" should be answerable by running the formatter. `[tool]`.
 
 ### 12.2 Lints
 
-The following lints are `deny` (compilation fails) in every crate:
+The following lints are `deny` (compilation fails) in **every** crate, on **every** toolchain (development and MSRV). `[tool]`:
 
 - `clippy::all`
-- `clippy::pedantic` (with documented per-crate `allow`s in `lib.rs` where the lint is genuinely wrong)
 - `clippy::unwrap_used`
 - `clippy::expect_used` (in `kennel-privhelper` only)
 - `clippy::panic`, `clippy::todo`, `clippy::unimplemented`
 - `clippy::dbg_macro`
 - `clippy::print_stdout`, `clippy::print_stderr` (in libraries; binaries handle stdout/stderr explicitly)
 - `clippy::indexing_slicing` (force explicit `.get()` with handled `None`)
-- `clippy::integer_arithmetic` (force explicit `checked_*` / `wrapping_*` / `saturating_*`)
+- `clippy::arithmetic_side_effects` (formerly `clippy::integer_arithmetic`, now deprecated under that name; force explicit `checked_*` / `wrapping_*` / `saturating_*`)
 - `rust_2018_idioms`
 - `missing_docs` (on all `pub` items in libraries)
 
-The following are `warn`:
+**`clippy::pedantic` is `deny` only in the pinned-toolchain CI job** — the job that builds with the exact `rust-toolchain.toml` version. Everywhere else (the MSRV CI job, contributor local builds, the git hooks) it is `warn`.
+
+Rationale: pedantic gains and changes lints across clippy releases. Because the development toolchain moves with `rustup` (§2.1), denying pedantic on that moving toolchain would let a `rustup update` with **no code change** turn the tree red — directly against the reproducibility goal of §2.1/§2.3. Pinning the deny to one known clippy version makes pedantic deterministic: new pedantic lints arrive only when we deliberately bump `rust-toolchain.toml`, and resolving them is part of that bump's PR (and CHANGELOG line). Contributors are never blocked by a lint their pinned toolchain does not yet have.
+
+We keep pedantic specifically for two lints that nothing else enforces:
+
+- `clippy::missing_errors_doc` — requires a `# Errors` section on every fallible `pub` function (§6.2).
+- `clippy::missing_panics_doc` — requires a `# Panics` section on every panicking `pub` function (§6.2).
+
+Plain `missing_docs` only checks that a doc comment *exists*; it does not check that a fallible function documents its errors or that a panicking function documents its panics. These two lints are the `[tool]` half of §6.2; everything else in §6.2 (content accuracy, `# Security`, `# Safety`) is `[review]`. Because both lints live under pedantic, they too are `deny` only in the pinned-toolchain job — which is sufficient: the pinned job runs on every PR.
+
+The following are `warn` on all toolchains:
 
 - `clippy::nursery`
 
-`allow`s require an inline `// allow: <reason>` comment.
+`allow`s require an inline `// allow: <reason>` comment. Per-crate `allow`s for genuinely-wrong pedantic lints live in `lib.rs` with the same comment form.
 
 ### 12.3 Naming
 
@@ -786,7 +820,7 @@ In code, comments, doc strings, commit messages, error messages, or any user-fac
 ### 13.1 Commits
 
 - Conventional Commits format: `<type>(<scope>): <summary>`. Types: `feat`, `fix`, `test`, `scaffold`, `docs`, `refactor`, `chore`, `build`, `ci`. Scope is the crate name or a top-level area. `scaffold` is our addition, for the structure phase of §7.1.
-- One logical change per commit. The three-phase cadence of §7.1 (`test:` → `scaffold:` → `feat:`) means up to three commits per behaviour change.
+- One logical change per commit. The three-phase cadence of §7.1 (`test:` → `scaffold:` → `feat:`) means up to three commits per behaviour change, and — after any permitted folding — never fewer than two.
 - Commit messages explain *why*. The diff explains *what*.
 - All commits are signed (GPG or SSH signature). CI verifies signatures.
 - No `WIP` commits on `main`. PR branches may carry them; squash or rebase before merge.
@@ -800,7 +834,7 @@ In code, comments, doc strings, commit messages, error messages, or any user-fac
 ### 13.3 Releases
 
 - Releases are tagged. Tags are signed. Signatures are by maintainer keys listed in `MAINTAINERS.md`.
-- Each release has a CHANGELOG entry listing every user-visible change, every dependency update, every MSRV change, and every threat-catalogue addition that landed.
+- Each release has a CHANGELOG entry listing every user-visible change, every dependency update, every MSRV change, every pinned-toolchain bump (§12.2), and every threat-catalogue addition that landed.
 - Release artefacts are built reproducibly. The release process publishes the build command, the toolchain version, and the expected output hashes; any third party can rebuild and verify.
 
 ### 13.4 Contributions from outside the maintainer set
@@ -815,9 +849,9 @@ A PR from a non-maintainer that meets any of the following conditions is closed 
 
 **Unsolicited refactors, stylistic changes, or "optimisations."** A PR that rewrites working code without an underlying behaviour change is closed unless it is directly attached to an issue that a maintainer has triaged and approved. "Modernising" a loop, "cleaning up" a function, swapping a `for` for an `iter()`, switching a `match` to an `if let`, or any AI-suggested cleanup of code that was not broken does not qualify as a contribution. The pattern is the most common form of LLM-generated open-source spam because it requires no understanding of the system, and we will not subsidise the production of it.
 
-**PRs missing the §7.1 commit cadence.** A PR that lands as a single squashed commit with `feat:` and the final code, with no preceding `test:` and `scaffold:` commits, indicates either ignorance of the standards or a deliberate decision to ignore them. Either way, it is not worth maintainer time to litigate. Standard close message:
+**PRs missing the §7.1 commit cadence.** The check is on the PR's **branch history**, not on the merge shape: a PR whose commits do not include a `test:` commit preceding the structure/implementation is closed. Because the §7.1 folding rules never collapse a PR below two commits — folding `test:`+`scaffold:` still leaves a `feat:`; folding `scaffold:`+`feat:` still leaves a `test:`; and Phase 1 is never folded away — a compliant PR always carries **at least two commits, one of which is `test:`**. A single squashed `feat:` commit is therefore never compliant, regardless of how the contributor intends it to be merged. (A maintainer may still ask to see the un-squashed history per §7.1; a contributor who squashed locally can re-push the unsquashed branch.) Standard close message:
 
-> This PR does not follow the §7.1 commit cadence required for review (`test:` → `scaffold:` → `feat:`). Closing. Please resubmit with the required commit history.
+> This PR does not follow the §7.1 commit cadence required for review (`test:` → `scaffold:` → `feat:`, minimum two commits including a `test:` commit). Closing. Please resubmit with the required commit history.
 
 No further explanation is owed. The §7.1 cadence is in the standards document; the contributor is expected to have read it.
 
@@ -825,11 +859,30 @@ No further explanation is owed. The §7.1 cadence is in the standards document; 
 
 > This PR's description does not satisfy the PR template's specificity requirements. Closing. See `.github/PULL_REQUEST_TEMPLATE.md` for required content.
 
-**PRs that fail CI on arrival.** A PR whose first CI run fails on the offline build, the clippy gate, the formatting check, the checksum verifier, the BPF verifier matrix, or any other §14 check is closed. The hooks in §15 run the same checks locally; the contributor had the opportunity to verify before pushing. Standard close message:
+**PRs that fail an arrival-blocking CI check.** Auto-close applies to the checks a contributor can run locally via the §15 git hooks — and *only* those:
 
-> This PR fails the §14 CI gate. Closing. Please resolve locally (`tools/install-hooks.sh` runs the same checks per §15) and resubmit.
+- `cargo fmt --check`
+- the clippy gate (`-D warnings`)
+- the offline `--frozen --locked` build
+- both checksum verifiers (`tools/verify-checksums` and `tools/verify-checksums.sh`)
 
-Exactly one exception: a CI failure caused by *our* infrastructure (CI-image bug, transient network in our own registry, a flaky test we own) is re-run by a maintainer. The exception covers our bugs, not the contributor's.
+A first CI run failing any of these is closed; the hooks would have caught it locally. Standard close message:
+
+> This PR fails an arrival-blocking §14 check that the §15 hooks run locally (`tools/install-hooks.sh` installs them). Closing. Please resolve locally and resubmit.
+
+The CI-only checks that the hooks **cannot** run locally are **not** grounds for auto-close on first arrival:
+
+- `cargo deny check`
+- `cargo audit`
+- `cargo vet --locked`
+- `cargo doc --no-deps -D warnings`
+- the fuzz smoke test
+- the reproducible-build double-run
+- the BPF verifier kernel-matrix
+
+These require a multi-kernel host, two runners, network-isolated infrastructure, or wall-clock time that a contributor cannot reasonably reproduce before pushing. A first-arrival failure on one of these gets a maintainer (or bot) comment naming the failing check and a chance to fix — *not* a close. A **repeated** failure on the same check after the comment is closed like any other. (Dependency PRs are the common case here: a missing `cargo vet` entry or a `cargo deny` licence hit is invisible to the hooks; contributors are nonetheless expected to run `cargo deny`/`audit`/`vet` themselves per §5.2/§5.5, and a maintainer comment will say so.)
+
+Exactly one further exception, as before: a CI failure caused by *our* infrastructure (CI-image bug, transient network in our own registry, a flaky test we own) is re-run by a maintainer. The exception covers our bugs, not the contributor's.
 
 #### The PR template
 
@@ -846,7 +899,7 @@ The template's specificity is the test. AI agents fill plausible-sounding generi
 
 #### What this is not
 
-These rules deter low-effort contribution. They do not gatekeep on identity. A contributor — human, human-with-AI, or otherwise — who reads the standards, runs the hooks locally, follows the cadence, files an issue first when one is needed, and writes a PR description that engages with the project's actual concerns will see their work reviewed on its merits. We do not detect AI; we filter on whether the contribution meets the bar. If an AI-assisted PR clears all four close-on-arrival categories, satisfies the template, passes CI, and references the codebase concretely, it is reviewed like any other PR.
+These rules deter low-effort contribution. They do not gatekeep on identity. A contributor — human, human-with-AI, or otherwise — who reads the standards, runs the hooks locally, follows the cadence, files an issue first when one is needed, and writes a PR description that engages with the project's actual concerns will see their work reviewed on its merits. We do not detect AI; we filter on whether the contribution meets the bar. If an AI-assisted PR clears all the close-on-arrival categories, satisfies the template, passes CI, and references the codebase concretely, it is reviewed like any other PR.
 
 The point is: the cost of compliance is the test. The PR template tests that the standards have been read. The CI gate tests that the standards have been followed. If all of them pass, the maintainer reads the code.
 
@@ -860,9 +913,17 @@ The list is small by intent. It exists to reduce friction for repeat contributor
 
 Issues are upstream of PRs. The same filtering principle applies: the cost of filing a serious issue is low enough that anyone who has read the project's threat catalogue can pay it, and high enough that an LLM hallucinating a generic bug into the queue will fail.
 
-#### The threat-ID tag
+#### The title tag
 
-Every issue title must start with a bracketed tag identifying the entry in `THREATS.md` that motivates the issue, or `[T-NONE]` if the issue is not security-bearing. The tag is the first non-whitespace content of the title, in square brackets, with the threat ID as it appears in `THREATS.md` verbatim.
+Every issue title must start with exactly one of three bracketed tags, as the first non-whitespace content of the title:
+
+- **`[T<id>]`** — an existing entry in `THREATS.md`, with the ID verbatim as it appears there. The issue concerns a catalogued threat.
+- **`[T-NONE]`** — a positive assertion that you read the catalogue and this issue is **not** security-bearing: a build failure on an unusual platform, a documentation typo, a feature request, a packaging request.
+- **`[T-NEW]`** — a positive assertion that you believe this issue **is** security-bearing but is **not yet** in the catalogue: a novel threat class, or a hardening observation `THREATS.md` does not cover.
+
+`[T-NEW]` exists so the filter does not close the single highest-value external report — a genuine threat we have not catalogued — for the crime of not matching an ID that, by definition, cannot exist yet. A `[T-NEW]` issue is **routed to maintainer triage, not auto-closed.** A maintainer either catalogues the threat (assigning a real `T<id>` and updating `THREATS.md`) and retags, or explains why it is out of scope.
+
+Do **not** reach for `[T-NONE]` when you are merely unsure. `[T-NONE]` is a claim that the issue is *not* a security concern; using it for an uncatalogued security concern routes that concern straight into the explicitly-ignored bucket. If you think something might be security-relevant and you cannot find a matching ID, that is exactly what `[T-NEW]` is for.
 
 Examples that pass:
 
@@ -870,6 +931,7 @@ Examples that pass:
 [T12] Panic in template-chain depth-limit check
 [T1] fs.scrub does not catch .envrc.local pattern
 [T9] static.crates.io reachable via DNS rebinding when proxy not started
+[T-NEW] Resolver trusts template mtime for cache invalidation; not in catalogue, looks attackable
 [T-NONE] Build fails on aarch64-musl
 [T-NONE] Typo in EXEC-SUMMARY.md §3
 ```
@@ -878,29 +940,38 @@ Examples that fail:
 
 ```
 Bug: panic in parser                       (no tag)
-[BUG] Panic in parser                      (not a threat ID)
-[CRITICAL] Issue with template parsing     (not a threat ID)
+[BUG] Panic in parser                      (not a recognised tag)
+[CRITICAL] Issue with template parsing     (not a recognised tag)
 [T99] Issue with template parsing          (T99 does not exist in THREATS.md)
-[Security] Hardening suggestion            (not a threat ID)
+[Security] Hardening suggestion            (not a recognised tag — use [T-NEW])
 ```
 
-`[T-NONE]` is the only non-threat tag accepted. It exists so that legitimate non-security issues (build failures on unusual platforms, documentation typos, feature requests, packaging requests) have a path. Using `[T-NONE]` is itself an assertion: "I read the threat catalogue and this issue is not in it." That assertion is the filter step.
+The three recognised tags are `[T<id>]` (valid ID), `[T-NONE]`, and `[T-NEW]`; nothing else is accepted.
+
+#### Specific exploitable vulnerabilities are never filed as issues
+
+A working, exploitable vulnerability in Kennel itself is **not** filed as any kind of public issue — not `[T-NEW]`, not anything. It goes to the private channel described in `SECURITY.md` (summarised in CONTRIBUTING.md, *Reporting security vulnerabilities*). The distinction:
+
+- **Private channel:** a *specific, exploitable* bug in our implementation. Disclosed privately; made public once a fix lands.
+- **`[T-NEW]`:** a *suspected, non-exploit-specific* threat class or hardening gap. Public issue; triaged by a maintainer.
+
+This boundary is load-bearing: the auto-close Action runs on public issues, and a live exploit posted as a public issue is a disclosure incident regardless of its tag. The private channel (`security@projectkennel.org`, see `SECURITY.md`) is the only correct destination for exploit specifics.
 
 #### Auto-close on missing or invalid tag
 
-A GitHub Action runs on every newly-opened issue. It parses the title against `THREATS.md` (the same catalogue the rest of the project references). If the title does not start with a valid `[T<id>]` or `[T-NONE]`, the action closes the issue with a standard comment:
+A GitHub Action runs on every newly-opened issue. It parses the title against the threat-ID list generated from `THREATS.md` at build time, plus the two literals `T-NONE` and `T-NEW`. If the title does not start with a valid `[T<id>]`, `[T-NONE]`, or `[T-NEW]`, the action closes the issue with a standard comment:
 
-> This issue's title does not begin with a valid `[T<id>]` or `[T-NONE]` tag. Closing. See §13.5 of CODING-STANDARDS.md and the threat catalogue in THREATS.md. Please refile with a corrected title; this is not a judgement on the underlying content, only a precondition for entering the queue.
+> This issue's title does not begin with a recognised `[T<id>]`, `[T-NONE]`, or `[T-NEW]` tag. Closing. See §13.5 of CODING-STANDARDS.md and the threat catalogue in THREATS.md. Please refile with a corrected title; this is not a judgement on the underlying content, only a precondition for entering the queue.
 
-The action runs server-side without maintainer attention. Invalid issues do not appear in maintainer queues; the cognitive load of triaging hallucinated bug reports is eliminated structurally.
+A `[T-NEW]` issue is **not** closed; the action labels it `triage:new-threat` and leaves it open for a maintainer.
 
-The action's source lives in `.github/workflows/issue-tag-check.yml` and `tools/check-issue-tag` (a small Rust binary, reviewed under §4 rules, depending only on the existing checksum-manifest tooling chain). The threat-ID list it validates against is generated from `THREATS.md` at build time; updates to the catalogue propagate to the check on the next release.
+The action runs server-side without maintainer attention. Invalid issues do not appear in maintainer queues; the cognitive load of triaging hallucinated bug reports is eliminated structurally. The action's source lives in `.github/workflows/issue-tag-check.yml` and `tools/check-issue-tag` (a small Rust binary, reviewed under §4 rules, depending only on the existing checksum-manifest tooling chain). The threat-ID list it validates against is generated from `THREATS.md` at build time; updates to the catalogue propagate to the check on the next release.
 
 #### Why this works as a filter
 
 The threat IDs are project-local and stable. An LLM that has not consulted `THREATS.md` cannot produce a plausible mapping — the IDs are not derivable from the project name or the README, and there are not so many of them that random guesses are likely to hit. Producing a correct tag requires retrieval, which requires the submitter (human or otherwise) to have engaged with the catalogue.
 
-`[T-NONE]` does not weaken this. A submitter using it is asserting they read the catalogue and decided their issue is not in scope. A submitter who has not read the catalogue typically defaults to no tag at all (LLMs writing GitHub issues do not invent bracketed tags absent training data telling them to), and the action closes the issue.
+Neither `[T-NONE]` nor `[T-NEW]` weakens this. Both are *positive assertions* about the issue's security character; a submitter who has not read the catalogue typically defaults to no tag at all (LLMs writing GitHub issues do not invent bracketed tags absent training data telling them to), and the action closes the issue. `[T-NEW]` opens a path for the rare high-value uncatalogued report without opening a path for spam: it still requires the submitter to assert, in a structured field, that they looked and did not find — and a maintainer reads every one.
 
 #### What this is not
 
@@ -914,19 +985,28 @@ For contributors on the trusted list (§13.4), the action posts a comment reques
 
 The following must pass on every PR before merge is permitted. CI failures are not waivable; a failing check means the work is not done.
 
+Checks the §15 hooks also run locally (arrival-blocking per §13.4):
+
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-features` (workspace-wide)
-- `cargo test --no-default-features` (where applicable)
 - `cargo build --offline --frozen --locked` (verifies `crates-archive/` completeness and no network access)
 - `tools/verify-checksums` (Rust verifier; matches `CHECKSUMS.toml` against `crates-archive/` and `Cargo.lock`)
 - `tools/verify-checksums.sh` (independent shell-based verifier; must agree with the Rust verifier)
+
+CI-only checks the hooks cannot run locally (commented-not-closed on first arrival per §13.4):
+
+- `cargo test --all-features` (workspace-wide) and `cargo test --no-default-features` (where applicable)
+- `cargo clippy` in the pinned-toolchain job with `clippy::pedantic` denied (§12.2)
 - `cargo deny check` (licences, advisories, banned crates, multiple-version policy)
 - `cargo audit` (RustSec advisories)
 - `cargo vet --locked` (audit chain)
 - `cargo doc --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - Fuzz smoke test: each fuzz target runs for one minute, no crashes.
 - Reproducible build: the release profile builds twice on separate runners; hashes match.
+- BPF verifier kernel-matrix: every BPF program loads on every supported kernel (§4.1).
+- MSRV build: the workspace builds against the `rust-version` floor (§2.1).
+
+(Note: `cargo test` is listed CI-only because the full workspace test run exceeds the hook time budget; the hooks run a scoped subset per §15. The arrival-blocking/commented split in §13.4 is what governs auto-close, not this list's ordering.)
 
 The CI configuration itself is in this repository, reviewable, and changes to it go through the same review process as code.
 
@@ -934,7 +1014,7 @@ The CI configuration itself is in this repository, reviewable, and changes to it
 
 ## 15. Git hooks
 
-Git hooks accelerate the developer loop by running CI checks locally before commits and pushes leave the machine. They are *convenience*, not a security gate; the gate is CI on the PR (§14). The hooks run a subset of the CI checks chosen to be fast enough that developers will not bypass them.
+Git hooks accelerate the developer loop by running a **fast subset** of CI checks locally before commits and pushes leave the machine. They are *convenience*, not a security gate; the gate is CI on the PR (§14). The hooks run a subset chosen to be fast enough that developers will not bypass them — which means they do **not** run every §14 check (see §15.5).
 
 ### 15.1 Location and installation
 
@@ -959,7 +1039,7 @@ The split is by speed. The commit hook must be fast enough that no one is tempte
 **`pre-commit`** — target under five seconds on a clean workspace:
 
 - `cargo fmt -- --check`.
-- A clippy pass scoped to crates with staged changes (not the full workspace; speed).
+- A clippy pass scoped to crates with staged changes (not the full workspace; speed). Pedantic is `warn` here, not `deny` (§12.2).
 - A secret-pattern scan over staged content: RSA/Ed25519/SSH private key headers, AWS access key ID prefixes, GitHub fine-grained token prefixes, generic high-entropy hex of plausible secret length. Patterns live in `tools/git-hooks/secret-patterns`. False positives are bypassed with a one-line waiver in the commit message footer: `kennel-secret-waiver: <reason>`.
 - File-size sanity: any single staged file over 10 MB is rejected. The `crates-archive/` path is exempt by prefix (audited tarballs land there).
 - Consistency: if anything under `crates-archive/` is staged, `CHECKSUMS.toml` must also be staged (and vice versa). Catches the easy mistake of vendoring without updating the manifest.
@@ -970,16 +1050,15 @@ The split is by speed. The commit hook must be fast enough that no one is tempte
 - Summary line ≤ 72 characters; body lines ≤ 100 (wrap them).
 - Rejects empty bodies on `feat:` and `fix:` commits (these change behaviour; the *why* belongs in the message).
 
-**`pre-push`** — mirrors §14 (CI gate). Slower; runs once per push, not per commit:
+**`pre-push`** — the arrival-blocking subset of §14. Slower; runs once per push, not per commit:
 
 - `cargo fmt --check` (workspace).
-- `cargo clippy --all-targets --all-features -- -D warnings`.
-- `cargo test --all-features` (workspace).
+- `cargo clippy --all-targets --all-features -- -D warnings` (pedantic `warn`, not `deny` — the pinned-toolchain pedantic-deny job is CI-only).
 - `cargo build --offline --frozen --locked`.
 - `tools/verify-checksums` (Rust verifier).
 - `tools/verify-checksums.sh` (independent shell verifier; must agree).
 
-If `pre-push` passes, CI is expected to pass. A persistent divergence between hook and CI is a project bug to be fixed in one or the other; it is not worked around with `--no-verify` as routine practice.
+If `pre-push` passes, the **arrival-blocking** CI checks (§13.4) are expected to pass. The hooks do **not** establish that the CI-only checks (`cargo deny`/`audit`/`vet`, `cargo doc`, fuzz, reproducible build, BPF matrix, full workspace `cargo test`) will pass — those are not run locally. A persistent divergence between hook and CI on the *arrival-blocking* checks is a project bug to be fixed in one or the other; it is not worked around with `--no-verify` as routine practice.
 
 ### 15.3 Bypass and authority
 
@@ -997,7 +1076,7 @@ The authoritative controls live server-side on the canonical repository:
 - Force-push to `main` denied.
 - Tag protection on release tags: only maintainer signing keys may push.
 
-These cannot be bypassed by `--no-verify` or by any other developer-side action. The local hooks exist so that someone who follows them encounters very few surprises at the server-side checks.
+These cannot be bypassed by `--no-verify` or by any other developer-side action. The local hooks exist so that someone who follows them encounters very few surprises at the *arrival-blocking* server-side checks; the CI-only checks may still surface issues the hooks could not have caught, which is why §13.4 treats those failures with a comment rather than a close.
 
 ### 15.4 Hook scripts as code
 
@@ -1013,10 +1092,11 @@ The hook scripts themselves are subject to the same standards as the rest of the
 
 The hooks are a *fast subset* of CI. They are not a place to add checks that exist nowhere else.
 
-- No check exists only in a hook. Every hook check is also a CI check, so that bypass with `--no-verify` cannot route around it.
-- No hook makes network calls. The pre-commit and pre-push hooks operate entirely on local content. A hook that needed to phone home would be both a privacy concern and an availability problem.
-- No hook modifies the working tree or staged content. Hooks check; they do not fix. Auto-formatters that rewrite staged content silently are a footgun (developer commits one diff, hook commits another) and we do not use them. If `cargo fmt --check` fails, the developer runs `cargo fmt` explicitly and re-stages.
-- No hook installs other hooks or pulls additional scripts. The hook content is what is in `tools/git-hooks/` at the time of the commit, no more.
+- **No check exists only in a hook.** Every hook check is also a CI check, so that bypass with `--no-verify` cannot route around it.
+- **Conversely, the hooks do not run every CI check.** The CI-only checks of §14 (`cargo deny`/`audit`/`vet`, `cargo doc -D warnings`, fuzz smoke, reproducible-build double-run, BPF kernel-matrix, full workspace `cargo test`, pinned-toolchain pedantic-deny) are deliberately absent from the hooks: they are too slow, need infrastructure a developer machine lacks, or both. This is why §13.4 does **not** auto-close a first-arrival failure on those checks — the contributor could not have run them. Documentation that claims "the hooks run the same checks as CI" is wrong and must be corrected.
+- **No hook makes network calls.** The pre-commit and pre-push hooks operate entirely on local content. A hook that needed to phone home would be both a privacy concern and an availability problem.
+- **No hook modifies the working tree or staged content.** Hooks check; they do not fix. Auto-formatters that rewrite staged content silently are a footgun (developer commits one diff, hook commits another) and we do not use them. If `cargo fmt --check` fails, the developer runs `cargo fmt` explicitly and re-stages.
+- **No hook installs other hooks or pulls additional scripts.** The hook content is what is in `tools/git-hooks/` at the time of the commit, no more.
 
 ---
 
@@ -1030,6 +1110,39 @@ Where this document is overridden in a specific PR, the PR description records:
 - Whether the deviation is permanent (and if so, a follow-up PR updating this document) or scoped to the change.
 
 Permanent deviations that are not folded back into this document are bugs in the document.
+
+---
+
+## Appendix B: Quick reference
+
+This appendix is a memory aid, not an authority. Where it abbreviates, the numbered section governs.
+
+**Issue title tags (§13.5).** Exactly one, first thing in the title:
+
+| Tag | Meaning | Action behaviour |
+| --- | --- | --- |
+| `[T<id>]` | Catalogued threat, ID verbatim from THREATS.md | Accepted |
+| `[T-NONE]` | "I read the catalogue; this is NOT security-bearing" | Accepted |
+| `[T-NEW]` | "I read the catalogue; this IS security-bearing but NOT catalogued" | Accepted; labelled `triage:new-threat`, never auto-closed |
+| anything else / none | — | Auto-closed with refile invitation |
+
+Exploitable specifics never go in a public issue → private channel in `SECURITY.md`.
+
+**PR close-on-arrival (§13.4), non-maintainers:**
+
+1. Unsolicited refactor/cleanup with no maintainer-approved issue.
+2. No `test:` commit in branch history (compliant PR = ≥2 commits incl. `test:`).
+3. PR description fails the template's specificity bar.
+4. First CI failure on an **arrival-blocking** check: `cargo fmt`, clippy gate, offline build, both checksum verifiers. (CI-only checks — `deny`/`audit`/`vet`/`doc`/fuzz/repro/BPF-matrix/full-`test` — get a comment, not a close.)
+
+**Commit cadence (§7.1):** `test:` → `scaffold:` → `feat:`. Folding never removes `test:`; minimum two commits.
+
+**Tool-enforced vs review-enforced (the legend, §1):**
+
+- `[tool]` examples: `cargo fmt`; `clippy::unwrap_used`, `panic`, `todo`, `unimplemented`, `indexing_slicing`, `arithmetic_side_effects`, `dbg_macro`; `missing_docs` (presence); `missing_errors_doc`/`missing_panics_doc` (the `# Errors`/`# Panics` *sections*); checksum verifiers; offline build.
+- `[review]` examples: doc *content* and `# Security`/`# Safety`; the §10.5 banned patterns that no lint expresses (path joins, unbounded reads, `display_untrusted` usage, untrusted regex, `deny_unknown_fields` presence); §6.3 non-trivial-pattern comments; §9.3 "no secrets in logs"; cadence-was-written-first.
+
+**Lints that move with the toolchain (§12.2):** `clippy::pedantic` is `deny` only in the pinned-toolchain CI job (`warn` everywhere else), so a `rustup update` cannot redden the tree. It is kept solely for `missing_errors_doc` and `missing_panics_doc`.
 
 ---
 
