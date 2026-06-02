@@ -1,11 +1,29 @@
 
 # cargo-vet audits file
 
+[[audits.basic-toml]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.1.10"
+notes = "Full source read 2026-06-03 (provenance via tools/audit-source.sh/CHECKSUMS.toml). On our policy-parse path. Zero unsafe, no build.rs, no process/net/fs/env; a pure TOML (de)serializer returning Result. Parser panic-resistance on malformed input is separately fuzzed (fuzz/)."
+
 [[audits.bitflags]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
 version = "2.11.1"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/bitflags/bitflags at tag 2.11.1 via tools/audit-source.sh. No build.rs, no proc-macro (derive feature off). Typed flag-sets only."
+
+[[audits.cfg-if]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.0.4"
+notes = "Full source read 2026-06-03. no_std; a single declarative macro (cfg_if!). Zero unsafe, zero dependencies, no build.rs, no I/O."
+
+[[audits.cfg_aliases]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.2.1"
+notes = "Full source read 2026-06-03. Build-time cfg-alias helper; reads only CARGO_CFG_*/PROFILE via std::env::var, no writes/process/net/fs. Zero unsafe, no build.rs of its own."
 
 [[audits.ed25519-compact]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
@@ -31,8 +49,20 @@ criteria = "safe-to-deploy"
 version = "0.36.7"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-31): byte-identical to github.com/gimli-rs/object at tag 0.36.7 via tools/audit-source.sh. No build.rs, no proc-macros. Built default-features=false, features=[read_core, elf] — ELF parsing only; the security-bearing BPF loader is hand-rolled over libc."
 
+[[audits.quote]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.0.45"
+notes = "Full source read 2026-06-03. proc-macro quasi-quoting (ToTokens). Zero unsafe in the library; build.rs only runs `$RUSTC --version` to set one cfg (no network, no fs writes, no arbitrary exec)."
+
 [[audits.seccompiler]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.5.0"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/rust-vmm/seccompiler at tag v0.5.0 via tools/audit-source.sh. No build.rs, no proc-macros. Built with default features (json/serde off). The vetted rust-vmm seccomp-BPF compiler — hand-rolling the bytecode is the dangerous case (§4)."
+
+[[audits.unicode-ident]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.0.24"
+notes = "Full source read 2026-06-03. XID_Start/XID_Continue lookup over static trie tables; the only unsafe is two get_unchecked table indexes whose offset is bounded by the trie structure. No I/O, no build.rs, no dependencies."
