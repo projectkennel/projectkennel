@@ -86,8 +86,10 @@ First versioned cut: all workspace crates set to `0.1.0` (centralised in `[works
 ### Supply-chain tooling
 
 - **CI tool-install path** for the supply-chain gate. `cargo-deny`/`cargo-audit`/`cargo-vet` cannot be `cargo install`ed under the offline `.cargo/config.toml` (crates.io is replaced by the local registry), so they are installed from pinned, SHA-256-verified prebuilt binaries: `tools/ci-tools.toml` (the integrity manifest, mirroring `CHECKSUMS.toml`) + `tools/install-ci-tools.sh` (verifies each archive before extracting; refuses on mismatch). Pins maintainer-ratified (§5.5; reviewer remco), each cross-checked by an independent second download.
-- **`deny.toml`** added: licence allow-list pinned to the 27-crate graph (`Apache-2.0`/`MIT`/`Unicode-3.0`), sources locked to the crates.io index only (no git, no other registry — §5.5 mechanised), multiple-versions/wildcards denied, advisories v2 with `yanked = deny`.
-- New **`supply-chain` CI job** runs `cargo deny` + `cargo audit` via the install path (advisory/`continue-on-error` until observed green, then promoted to a required check). The `fuzz/` smoke job also runs. `cargo vet --locked` remains owed: its audit corpus (`supply-chain/audits.toml`) is unwritten.
+- **`deny.toml`** added: licence allow-list pinned to the graph (`Apache-2.0`/`MIT`/`Unicode-3.0`), sources locked to the crates.io index only (no git, no other registry — §5.5 mechanised), multiple-versions/wildcards denied (with `allow-wildcard-paths` for the workspace's own path deps), advisories v2 with `yanked = deny`.
+- **`cargo vet` store** (`supply-chain/`): the 17 third-party crates in the main graph are covered — 6 fully audited (`audits.toml`: our own `safe-to-deploy` audits for the §5.5-reviewed direct deps), 11 carried as `[[exemptions]]` (provenance-verified, not yet read to the bar). No third-party audit sets are imported (§5.5 posture: own-verification only; documented in `tools/README.md`). Burning down the exemptions is owed work.
+- New **`supply-chain` CI job** runs `cargo deny` + `cargo audit` + `cargo vet --locked` via the install path; all three observed green. The `fuzz/` smoke job also runs. The job is a blocking gate in-workflow (a maintainer marks it a *required* status check in branch protection separately).
+- All workspace crates set **`publish = false`** (centralised in `[workspace.package]`): they are the application, not a crates.io library set; this is also what lets `cargo deny`'s wildcard-path allowance apply.
 
 ### Pending
 
@@ -96,6 +98,5 @@ First versioned cut: all workspace crates set to `0.1.0` (centralised in `[works
   exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell
   witness exists), and container-runtime integration.
 - Signing the shipped templates with a maintainer key (a key-custody decision).
-- `cargo vet --locked` (audit corpus owed), the reproducible-build double-run, and the
-  BPF verifier-load matrix — the §14 checks still awaiting their inputs.
-- The workspace `repository` URL (`Cargo.toml`) is still `TBD`.
+- The reproducible-build double-run and the BPF verifier-load matrix — the §14 checks
+  still awaiting their infrastructure (release image; custom-kernel runners).

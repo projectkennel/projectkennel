@@ -69,12 +69,31 @@ Pinning or bumping a CI tool (same shape as adding a dependency):
    `PENDING` and the CI `supply-chain` job is `continue-on-error` (advisory, not
    a required check). A maintainer flips it to required once ratified.
 
-**Owed: the `cargo vet` audit corpus.** `cargo-vet` installs via the above, but
-`cargo vet --locked` needs `supply-chain/audits.toml` — a human audit sign-off
-for every crate in the graph — which is not yet written. Until it exists, the
-`supply-chain` job runs `cargo deny` and `cargo audit` only; `cargo vet` is the
-remaining §14 supply-chain check owed. The §5.5 `audit-source.sh` provenance
-check is the audit-of-record in the meantime.
+### The `cargo vet` store (`supply-chain/`)
+
+`cargo vet --locked` runs in CI against the audit chain in `supply-chain/`.
+cargo-vet rewrites these files into a canonical form (`cargo vet fmt`) and strips
+free-floating header comments, so the project's posture is documented here rather
+than in the files:
+
+- **No third-party imports.** `config.toml` has no `[imports]` table. §5.5 is
+  built on the project verifying crates *itself* (provenance against upstream
+  GitHub at the release tag, source read, two approvals); importing another
+  org's audit verdicts (Mozilla, Google, …) would substitute their trust for
+  ours. Every crate is therefore covered by our own audit or an explicit
+  exemption — nothing is trusted on an outside say-so.
+- **Audits vs exemptions.** `audits.toml` holds our own `safe-to-deploy` audits
+  for the crates with a full §5.5 review in `DEPENDENCIES.md` (currently the six
+  direct deps: libc, nix, bitflags, object, seccompiler, ed25519-compact); each
+  `notes` field cites the provenance check and review date. The remaining
+  third-party crates (the serde / proc-macro build stack) are provenance-verified
+  but not yet read to the `safe-to-deploy` bar, so they sit in `config.toml` as
+  `[[exemptions]]`. **Burning the exemptions down** — reading each to the bar and
+  moving it to `audits.toml` — is the standing owed work.
+- **Editing the store.** Add an audit with `cargo vet certify`, or edit by hand
+  then run `cargo vet fmt` (CI's `--locked` rejects a non-canonical store). A new
+  dependency that is neither audited nor exempt fails the check until one or the
+  other is added — which is the point.
 
 ## Install (`07-paths.md`, `08-as-built-notes.md` §8.4)
 

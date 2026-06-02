@@ -34,7 +34,12 @@ edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Project Kennel maintainers"]
-repository = "TBD"
+repository = "https://github.com/projectkennel/projectkennel"
+# Not a crates.io library set — this is the application. `publish = false` is the
+# honest state (nothing is released to a registry; deps are vendored) and it
+# blocks an accidental `cargo publish`. Revisit per-crate if a library is ever
+# split out for publication.
+publish = false
 
 # Shared lint configuration, applied to every member via `[lints] workspace =
 # true`. Encodes CODING-STANDARDS.md §12.2. `#![forbid(unsafe_code)]` is a

@@ -1,24 +1,18 @@
 # Project Kennel CI gate (CODING-STANDARDS.md §14).
 #
 # What runs here today: formatting, clippy, tests, an offline/locked build,
-# docs, the BPF compile check, the shell tooling tests, and the supply-chain
-# gate (cargo deny + cargo audit, via the pinned-binary install path below).
-# The remaining §14 checks activate when their inputs exist and are tracked as
-# owed (see the `supply-chain` job and the notes below); CI must not claim to
-# run a check it does not.
+# docs, the BPF compile check, the shell tooling tests, and the full supply-chain
+# gate (cargo deny + cargo audit + cargo vet, via the pinned-binary install path
+# below). The remaining §14 checks activate when their inputs exist and are
+# tracked as owed (the notes below); CI must not claim to run a check it does not.
 #
-# The `supply-chain` job is `continue-on-error` (advisory, not blocking). The
-# tool-binary pins in tools/ci-tools.toml are maintainer-ratified (§5.5), so the
-# remaining reason it does not block is operational: it has not yet been observed
-# to run green here. A maintainer makes it a required check (branch protection +
-# dropping that line) after the first clean run.
+# The `supply-chain` job is a blocking gate: the tool-binary pins
+# (tools/ci-tools.toml) are maintainer-ratified (§5.5), and all three checks have
+# been observed green. A maintainer still must mark it a *required* status check
+# in branch protection — that is a GitHub repo setting, not expressible here.
 #
 # Owed (land with the release infra):
 #   - tools/verify-checksums (Rust) — needs sha2 (§5.5.1 bootstrap).
-#   - cargo vet --locked — the tool installs (below), but its audit corpus
-#     (supply-chain/audits.toml: a human sign-off per crate) is not yet written,
-#     so the check cannot gate. Tracked in tools/README.md; the in-repo §5.5
-#     ledger (CHECKSUMS.toml + tools/audit-source.sh) is the audit-of-record today.
 #   - reproducible-build double-build — needs the release-image (§BUILD-ENV).
 #   - BPF verifier-load matrix (bpftool prog load on kernels >= 6.10) — needs
 #     custom-kernel runners; the compile check below is the hosted-runner part.
@@ -115,18 +109,13 @@ jobs:
         run: cargo test --offline --locked
 
   supply-chain:
-    name: supply-chain (deny, audit)
+    name: supply-chain (deny, audit, vet)
     runs-on: ubuntu-latest
-    # Advisory, not blocking. The tool pins are ratified (tools/ci-tools.toml);
-    # this stays non-blocking only until the job is observed to run green here.
-    # Flip to a required check (drop this line + add branch protection) after
-    # the first clean run.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup show && cargo --version
-      # Install cargo-deny/-audit from the pinned, hash-verified prebuilt
+      # Install cargo-deny/-audit/-vet from the pinned, hash-verified prebuilt
       # binaries. `cargo install` is impossible here: the offline
       # `.cargo/config.toml` replaces crates.io with the local registry, so the
       # tools' own dependency trees cannot resolve. The script verifies each
@@ -140,10 +129,16 @@ jobs:
       - name: cargo deny
         run: cargo deny --all-features check
       # RustSec advisories against the locked graph (fetches the advisory DB).
+      # The "couldn't update crates.io index" line is an expected, benign infra
+      # warning from the local-registry source replacement, not an advisory
+      # warning, so --deny warnings does not trip on it.
       - name: cargo audit
         run: cargo audit --deny warnings
-      # cargo vet --locked is owed: the audit corpus (supply-chain/) is not yet
-      # written. cargo-vet is installed by the step above, ready for that work.
+      # The audit chain (supply-chain/): 6 of the 17 third-party crates are
+      # fully audited (audits.toml), the rest exempted (config.toml). --locked
+      # additionally requires the store to be cargo-vet-fmt canonical.
+      - name: cargo vet
+        run: cargo vet --locked
 
   tooling:
     name: tooling (shell tests + checksum witness)

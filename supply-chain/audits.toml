@@ -1,0 +1,38 @@
+
+# cargo-vet audits file
+
+[[audits.bitflags]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "2.11.1"
+notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/bitflags/bitflags at tag 2.11.1 via tools/audit-source.sh. No build.rs, no proc-macro (derive feature off). Typed flag-sets only."
+
+[[audits.ed25519-compact]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "2.3.0"
+notes = "§5.5 (DEPENDENCIES.md, 2026-05-31): 15 source files byte-identical to github.com/jedisct1/rust-ed25519-compact at tag 2.3.0. Source read for backdoors — no FFI/asm/process/net/fs/env; the one unsafe is the volatile secret-wipe; verification rejects non-canonical S (malleability) and weak/identity keys. Built default-features=false, features=[std]; x25519.rs/pem.rs not compiled."
+
+[[audits.libc]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.2.186"
+notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/rust-lang/libc at tag 0.2.186 via tools/audit-source.sh. build.rs confirmed to do target/toolchain cfg detection only; no proc-macros."
+
+[[audits.nix]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.31.3"
+notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/nix-rust/nix at tag v0.31.3 via tools/audit-source.sh. Built default-features=false, features=[user, process] — safe typed syscall wrappers preferred over our own unsafe (§4)."
+
+[[audits.object]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.36.7"
+notes = "§5.5 (DEPENDENCIES.md, 2026-05-31): byte-identical to github.com/gimli-rs/object at tag 0.36.7 via tools/audit-source.sh. No build.rs, no proc-macros. Built default-features=false, features=[read_core, elf] — ELF parsing only; the security-bearing BPF loader is hand-rolled over libc."
+
+[[audits.seccompiler]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.5.0"
+notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/rust-vmm/seccompiler at tag v0.5.0 via tools/audit-source.sh. No build.rs, no proc-macros. Built with default features (json/serde off). The vetted rust-vmm seccomp-BPF compiler — hand-rolling the bytecode is the dangerous case (§4)."

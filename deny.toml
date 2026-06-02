@@ -44,9 +44,9 @@ unused-allowed-license = "deny"
 # worth a deliberate decision, not a silent allow. Wildcard deps never ship.
 multiple-versions = "deny"
 wildcards = "deny"
-# Analyse build scripts as part of the graph (T-class: a dependency's build.rs
-# runs with full privileges at compile time).
-build.allow-build-scripts = true
+# Our own workspace crates are path deps with no version req (an intentional
+# "wildcard"); only registry deps must carry an exact pin.
+allow-wildcard-paths = true
 deny = []
 skip = []
 skip-tree = []
@@ -68,5 +68,5 @@ ignore = []
 # a git dep is an unpinned, unvendored source and must never enter the graph.
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-registry = ["https://github.com/rust-lang/crates-io-index"]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
