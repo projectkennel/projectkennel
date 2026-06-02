@@ -43,7 +43,8 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some((cmd, rest)) if cmd == "stop" => stop(rest),
         Some((cmd, _)) if cmd == "list" => list(),
         Some((cmd, rest)) if cmd == "compile" => compile(rest),
-        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned]".to_owned()),
+        Some((cmd, rest)) if cmd == "sign" => sign(rest),
+        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel sign <template> --key K".to_owned()),
     }
 }
 
@@ -303,6 +304,59 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
 /// The `<name>.lock` path beside the settled output.
 fn lock_path_for(output: &Path, name: &str) -> PathBuf {
     output.parent().unwrap_or_else(|| Path::new(".")).join(format!("{name}.lock"))
+}
+
+/// `kennel sign <template> --key <key> [--output <path>]`
+///
+/// Sign a source template/fragment with an ed25519 key, **appending** a
+/// `[signature]` block to the file so its comments are preserved (the signature
+/// covers the canonical re-serialisation, not the raw bytes). Prints the public key
+/// to install in the trust store as `<key_id>.pub`. Leaf policies may stay unsigned.
+fn sign(args: &[String]) -> Result<ExitCode, String> {
+    let mut path: Option<&str> = None;
+    let mut key_path: Option<&str> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--output" => output = Some(it.next().ok_or("--output needs a value")?.into()),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            value if path.is_none() => path = Some(value),
+            _ => return Err("only one <template> may be given".to_owned()),
+        }
+    }
+    let path = path.ok_or("usage: kennel sign <template> --key <key> [--output <path>]")?;
+    let key_path = key_path.ok_or("sign needs --key <path>")?;
+
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let policy = kennel_policy::parse_source(&bytes).map_err(|e| {
+        format!("{path} is not a signable source template/fragment ({e}); leaf policies may stay unsigned")
+    })?;
+    if policy.signature.is_some() {
+        return Err(format!("{path} already carries a [signature]; remove it before re-signing"));
+    }
+
+    let key = load_signing_key(key_path)?;
+    let signed = kennel_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
+    let env = signed.signature.ok_or("internal: signature not produced")?;
+    // Append the signature as a new top-level table, preserving the original text.
+    let block = format!(
+        "\n[signature]\nalgorithm = \"{}\"\nkey_id = \"{}\"\nsignature = \"{}\"\n",
+        env.algorithm, env.key_id, env.signature
+    );
+    let mut out_bytes = bytes;
+    out_bytes.extend_from_slice(block.as_bytes());
+    let out = output.unwrap_or_else(|| PathBuf::from(path));
+    std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
+
+    eprintln!("signed {} with key `{}`", out.display(), key.key_id());
+    eprintln!(
+        "install this public key in the trust store as `{}.pub`:\n{}",
+        key.key_id(),
+        kennel_policy::b64::encode(&key.public_key_bytes())
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Map a compile-time [`kennel_policy::PolicyError`] to a CLI exit code (`02-1`).
