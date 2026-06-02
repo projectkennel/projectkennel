@@ -1,0 +1,72 @@
+# Project Kennel — cargo-deny configuration (CODING-STANDARDS.md §5, §14).
+#
+# `cargo deny check` is one leg of the supply-chain gate. It reads Cargo.lock and
+# the vendored crate metadata (no network for the licence/ban/source checks; the
+# advisory check fetches the RustSec DB). The tool itself is installed by
+# tools/install-ci-tools.sh from the pinned, hash-verified binary in
+# tools/ci-tools.toml — there is no `cargo install` path under our offline
+# `.cargo/config.toml`.
+#
+# Schema is cargo-deny 0.19 (advisories/bans/sources v2). Unlisted licences are
+# denied by default — the allow-list below is exactly what the current 27-crate
+# graph needs and nothing more; a new dependency under any other licence fails
+# CI until a maintainer consciously widens this list.
+
+[graph]
+# Check the host target plus the cross-targets the runtime actually builds for.
+# (x86_64 is the reference; aarch64 is on the roadmap. Listing both keeps the
+# licence/advisory verdict honest for cfg-gated deps.)
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+all-features = true
+
+[licenses]
+# Every term that appears, resolved through the OR/AND expressions of the
+# vendored set: most crates are "MIT OR Apache-2.0"; unicode-ident is
+# "(MIT OR Apache-2.0) AND Unicode-3.0", so Unicode-3.0 must be allowed outright.
+# seccompiler ("Apache-2.0 OR BSD-3-Clause") and memchr ("Unlicense OR MIT")
+# resolve via Apache-2.0/MIT, so neither BSD-3-Clause nor Unlicense is needed.
+# The workspace's own crates are Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+# Fail if an allowed licence turns out to be unused — keeps the list honest as
+# the graph changes (a removed dep should narrow this list, not leave dead allows).
+unused-allowed-license = "deny"
+
+[bans]
+# We vendor exact pins (§5.5); two versions of one crate in the graph is a smell
+# worth a deliberate decision, not a silent allow. Wildcard deps never ship.
+multiple-versions = "deny"
+wildcards = "deny"
+# Analyse build scripts as part of the graph (T-class: a dependency's build.rs
+# runs with full privileges at compile time).
+build.allow-build-scripts = true
+deny = []
+skip = []
+skip-tree = []
+
+[advisories]
+version = 2
+# Yanked crates are treated as hard failures, not warnings: a yank is upstream
+# saying "do not use this", and our vendored copy would otherwise pin it forever.
+yanked = "deny"
+# Any unignored advisory fails the check (v2 default). Each entry added here must
+# carry a written reason and a tracking reference — an ignore is a documented,
+# time-boxed risk acceptance, reviewed when RELEASE-WATCH.toml is walked (§5.6).
+ignore = []
+
+[sources]
+# §5.5 in mechanical form: the only origin we accept is the crates.io index
+# (which our `.cargo/config.toml` then transparently replaces with the vendored
+# local registry). Arbitrary registries and *any* git dependency are denied —
+# a git dep is an unpinned, unvendored source and must never enter the graph.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates-io-index"]
+allow-git = []

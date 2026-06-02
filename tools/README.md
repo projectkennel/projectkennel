@@ -37,6 +37,45 @@ agree once both exist.
 8. Commit `CHECKSUMS.toml`, `crates-archive/<crate>-<version>.crate`, and
    `Cargo.lock` together; two maintainer approvals (§5.5).
 
+### CI tool binaries (`ci-tools.toml`, `install-ci-tools.sh`)
+
+The supply-chain gate's own tools — `cargo-deny`, `cargo-audit`, `cargo-vet` —
+are not workspace crates and **cannot** be `cargo install`ed: the offline
+`.cargo/config.toml` replaces crates.io with the local registry, so their
+dependency trees have no source to resolve from. They are installed instead the
+same way we treat a vendored `.crate` — pin the exact prebuilt release binary,
+record the SHA-256 we verified, and refuse anything that does not match.
+
+| Tool | What it does |
+|---|---|
+| `ci-tools.toml` | The integrity ground truth for the tool binaries (what `CHECKSUMS.toml` is for `.crate`s): per-tool version, download `url`, `archive-sha256`, in-archive `bin-path`, and the §5.5 audit fields. Entries start `audited-by = "PENDING"`. |
+| `install-ci-tools.sh` | Downloads each pinned `url`, verifies its SHA-256 against `ci-tools.toml` **before** extracting the binary, and refuses on any mismatch or on an empty/`PENDING` `archive-sha256`. Prints the bindir on stdout (`PATH="$(tools/install-ci-tools.sh):$PATH"`). Runs in the CI `supply-chain` job. |
+
+Pinning or bumping a CI tool (same shape as adding a dependency):
+
+1. Pick the exact upstream release tag; note the linux x86_64 asset and its
+   in-archive binary path.
+2. Download the asset **and** its upstream-published `.sha256` (where one
+   exists); confirm the computed hash equals the published one. For tools that
+   publish no per-asset checksum (cargo-audit today), this is a single source —
+   the cross-check in step 3 is then mandatory, not optional.
+3. **Cross-verify** independently of the download: confirm the release tag and,
+   where the project signs releases, the tag signature against `KEYS.md`. This
+   is the §5.5 "one source is not enough" rule applied to a binary.
+4. Record `url` / `archive-sha256` / `bin-path` in `ci-tools.toml`; fill
+   `audited-by` / `audited-on` and the `verified-against` lines.
+5. `tools/install-ci-tools.sh` must succeed (it re-verifies the hash).
+6. Two maintainer approvals. Until the second approval lands, the entry stays
+   `PENDING` and the CI `supply-chain` job is `continue-on-error` (advisory, not
+   a required check). A maintainer flips it to required once ratified.
+
+**Owed: the `cargo vet` audit corpus.** `cargo-vet` installs via the above, but
+`cargo vet --locked` needs `supply-chain/audits.toml` — a human audit sign-off
+for every crate in the graph — which is not yet written. Until it exists, the
+`supply-chain` job runs `cargo deny` and `cargo audit` only; `cargo vet` is the
+remaining §14 supply-chain check owed. The §5.5 `audit-source.sh` provenance
+check is the audit-of-record in the meantime.
+
 ## Install (`07-paths.md`, `08-as-built-notes.md` §8.4)
 
 | Tool | What it does |
@@ -61,4 +100,6 @@ above. Run them directly:
 tools/git-hooks/tests/commit-msg.sh
 tools/tests/verify-checksums.sh
 tools/tests/audit-helper.sh
+tools/tests/audit-source.sh
+tools/tests/install-ci-tools.sh
 ```

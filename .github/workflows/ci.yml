@@ -1,19 +1,23 @@
 # Project Kennel CI gate (CODING-STANDARDS.md §14).
 #
-# What runs here today is the subset of §14 that is meaningful while the
-# workspace is std-only: formatting, clippy, tests, an offline/locked build,
-# docs, the BPF compile check, and the shell tooling tests. The remaining §14
-# checks activate when their inputs exist and are tracked as owed (see the
-# `supply-chain` job and the notes below); CI must not claim to run a check it
-# does not.
+# What runs here today: formatting, clippy, tests, an offline/locked build,
+# docs, the BPF compile check, the shell tooling tests, and the supply-chain
+# gate (cargo deny + cargo audit, via the pinned-binary install path below).
+# The remaining §14 checks activate when their inputs exist and are tracked as
+# owed (see the `supply-chain` job and the notes below); CI must not claim to
+# run a check it does not.
+#
+# The `supply-chain` job is `continue-on-error` (advisory, not blocking): the
+# pinned tool binaries in tools/ci-tools.toml are verified by hash but their
+# §5.5 second-approval cross-verification is still PENDING. A maintainer makes
+# this gate required (branch protection) once those entries are ratified.
 #
 # Owed (land with the release infra):
 #   - tools/verify-checksums (Rust) — needs sha2 (§5.5.1 bootstrap).
-#   - cargo deny / cargo audit / cargo vet — need the tool binaries, which the
-#     offline `.cargo/config.toml` (crates.io replaced by the local registry)
-#     prevents `cargo install` from fetching. Needs a tool-install path (pinned
-#     prebuilt binary, or a vetted action) before these can run; the in-repo §5.5
-#     ledger (CHECKSUMS.toml + tools/audit-source.sh) is the audit mechanism today.
+#   - cargo vet --locked — the tool installs (below), but its audit corpus
+#     (supply-chain/audits.toml: a human sign-off per crate) is not yet written,
+#     so the check cannot gate. Tracked in tools/README.md; the in-repo §5.5
+#     ledger (CHECKSUMS.toml + tools/audit-source.sh) is the audit-of-record today.
 #   - reproducible-build double-build — needs the release-image (§BUILD-ENV).
 #   - BPF verifier-load matrix (bpftool prog load on kernels >= 6.10) — needs
 #     custom-kernel runners; the compile check below is the hosted-runner part.
@@ -109,6 +113,37 @@ jobs:
         working-directory: fuzz
         run: cargo test --offline --locked
 
+  supply-chain:
+    name: supply-chain (deny, audit)
+    runs-on: ubuntu-latest
+    # Advisory until the tool-binary pins in tools/ci-tools.toml clear their
+    # §5.5 second approval. The job runs the real checks and surfaces results;
+    # it does not block merge. Flip to a required check (and drop this line)
+    # once ci-tools.toml is ratified.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show && cargo --version
+      # Install cargo-deny/-audit from the pinned, hash-verified prebuilt
+      # binaries. `cargo install` is impossible here: the offline
+      # `.cargo/config.toml` replaces crates.io with the local registry, so the
+      # tools' own dependency trees cannot resolve. The script verifies each
+      # archive's SHA-256 against tools/ci-tools.toml before extracting it.
+      - name: Install pinned tools
+        run: |
+          set -euo pipefail
+          bindir="$(tools/install-ci-tools.sh)"
+          echo "$bindir" >> "$GITHUB_PATH"
+      # Licences, bans, sources (offline), and RustSec advisories (fetches the DB).
+      - name: cargo deny
+        run: cargo deny --all-features check
+      # RustSec advisories against the locked graph (fetches the advisory DB).
+      - name: cargo audit
+        run: cargo audit --deny warnings
+      # cargo vet --locked is owed: the audit corpus (supply-chain/) is not yet
+      # written. cargo-vet is installed by the step above, ready for that work.
+
   tooling:
     name: tooling (shell tests + checksum witness)
     runs-on: ubuntu-latest
@@ -123,3 +158,4 @@ jobs:
           tools/tests/verify-checksums.sh
           tools/tests/audit-helper.sh
           tools/tests/audit-source.sh
+          tools/tests/install-ci-tools.sh

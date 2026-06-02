@@ -1,3 +1,5 @@
 .claude/
 /target
 **/*.rs.bk
+# Verified CI tool binaries + download cache (tools/install-ci-tools.sh).
+/.ci-tools/
