@@ -130,6 +130,7 @@ fn minimal_policy() -> SettledPolicy {
         },
         ssh: kennel_policy::SshRuntime::default(),
         unix: kennel_policy::UnixRuntime::default(),
+        identity: kennel_policy::IdentityRuntime::default(),
     }
 }
 
@@ -176,6 +177,12 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     // the constructed view (pivot_root) is built and the workload observes it;
     // MOUNT is unshared in the child seal and does not affect the harness.
     plan.namespaces = Namespaces::MOUNT;
+    // Identity / supplementary-group isolation (§7.2): drop the inherited host groups
+    // to exactly one granted gid. As root the seal's setgroups may set any gid (the
+    // membership gate is kenneld's, bypassed here since this test builds the plan
+    // directly); a synthetic gid keeps the proof host-independent, named in the
+    // synthetic /etc/group below. After this the workload's groups are exactly {12345}.
+    plan.supplementary_groups = Some(vec![12345]);
 
     // A cgroup base we own; the kennel cgroup is a child of it.
     let base = PathBuf::from("/sys/fs/cgroup/kennel-e2e");
@@ -284,6 +291,9 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
             gid: 0,
             // The in-kennel shim $HOME (matches the view), never the operator's home.
             home: PathBuf::from("/run/kennel/e2e"),
+            // Name the granted supplementary gid in the synthetic /etc/group so `id`
+            // resolves 12345 → kennelgrp (matches plan.supplementary_groups above).
+            groups: vec![("kennelgrp".to_owned(), 12345)],
         }),
         view_root: Some(view_root.clone()),
         audit_path: Some(audit_path.clone()),
@@ -336,6 +346,13 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let id_clause = "&& grep -q '^kennel:' /etc/passwd \
          && grep -q '^kennel:' /etc/group \
          && ! grep -q '/home/' /etc/passwd ";
+    // Clause (8): supplementary-group isolation (§7.2) — the seal dropped the
+    // inherited host groups to exactly the granted gid (12345), which resolves to its
+    // synthetic /etc/group name. `id -G` is exactly the primary gid + 12345 (no
+    // inherited groups remain); `id -Gn` shows the name.
+    let groups_clause = "&& id -G | grep -qw 12345 \
+         && test \"$(id -G | wc -w)\" = 2 \
+         && id -Gn | grep -qw kennelgrp ";
     let mut workload = Command::new("/bin/sh");
     workload.arg("-c").arg(format!(
         "grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts \
@@ -345,6 +362,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
          {unix_clause} \
          {dev_clause} \
          {id_clause} \
+         {groups_clause} \
          && sleep 2",
     ));
     let kennel = start(&helper, spec, &mut workload).expect("start kennel");

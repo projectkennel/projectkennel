@@ -391,6 +391,32 @@ pub struct UnixSocket {
     pub env: Option<String>,
 }
 
+/// The workload's identity inside the kennel (`docs/design/07-2-filesystem.md`): the
+/// supplementary Unix groups it retains.
+///
+/// Like [`SshRuntime`]/[`UnixRuntime`], a *service* input `kenneld` realises, not part
+/// of the kernel-enforcement core. `kenneld` resolves each group name to a GID at
+/// spawn (refusing any the operator is not a member of), the privileged seal
+/// `setgroups` to exactly that set (default empty — all inherited host groups dropped),
+/// and the synthetic `/etc/group` names them so `id` shows names not bare numbers.
+/// Carried in the signed settled policy; omitted from the canonical form when empty.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityRuntime {
+    /// Supplementary group names to retain (resolved to GIDs at spawn). Includes the
+    /// groups named by `[[fs.dev.passthrough]]` (merged at translation).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+}
+
+impl IdentityRuntime {
+    /// Whether there is nothing to realise (no supplementary group granted).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+}
+
 /// `skip_serializing_if` helper: a `false` bool is omitted from the canonical form.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(b: &bool) -> bool {
@@ -469,6 +495,11 @@ pub struct SettledPolicy {
     /// policy signs exactly as before.
     #[serde(default, skip_serializing_if = "UnixRuntime::is_empty")]
     pub unix: UnixRuntime,
+    /// The workload's in-kennel identity (§7.2): the supplementary groups it retains.
+    /// A table like [`ssh`](Self::ssh)/[`unix`](Self::unix); omitted from the canonical
+    /// form when empty, so a policy that grants no group signs exactly as before.
+    #[serde(default, skip_serializing_if = "IdentityRuntime::is_empty")]
+    pub identity: IdentityRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

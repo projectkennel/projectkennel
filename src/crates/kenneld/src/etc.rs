@@ -55,6 +55,10 @@ pub struct EtcParams<'a> {
     /// the operator's real home (which would re-leak the identity the [`ACCOUNT_NAME`]
     /// mask hides). The `passwd` entry's home field.
     pub home: &'a Path,
+    /// The granted supplementary groups `(name, gid)` (§7.2): resolved + membership-
+    /// checked by `kenneld`, named in `/etc/group` so `id` shows names not bare
+    /// numbers. These are exactly the gids the seal `setgroups` to. Empty by default.
+    pub groups: &'a [(String, u32)],
     /// The kennel's primary IPv4 address, if it has one.
     pub v4: Option<Ipv4Addr>,
     /// The kennel's primary IPv6 address.
@@ -146,13 +150,23 @@ pub fn passwd(p: &EtcParams<'_>) -> String {
 /// group-isolation hardening (needs privilege/userns, §7.2.8).
 #[must_use]
 pub fn group(p: &EtcParams<'_>) -> String {
-    format!(
+    use std::fmt::Write as _;
+    let mut s = format!(
         "root:x:0:\n\
-         {grp}:x:{gid}:\n\
-         nogroup:x:65534:\n",
+         {grp}:x:{gid}:\n",
         grp = ACCOUNT_NAME,
         gid = p.gid,
-    )
+    );
+    // One line per granted supplementary group, with the kennel account as a member,
+    // so getgrgid resolves the gid to its name and `id` shows it. Skip a group equal
+    // to the primary gid (already the `kennel` line above).
+    for (name, gid) in p.groups {
+        if *gid != p.gid {
+            let _ = writeln!(s, "{name}:x:{gid}:{ACCOUNT_NAME}");
+        }
+    }
+    s.push_str("nogroup:x:65534:\n");
+    s
 }
 
 /// `/etc/host.conf`: the legacy resolver order; `multi on` so a host with several
@@ -280,6 +294,7 @@ mod tests {
             uid: 1000,
             gid: 1000,
             home: Path::new("/run/kennel/agent/home"),
+            groups: &[],
             v4: Some(Ipv4Addr::new(127, 0, 144, 17)),
             v6: "fd00:0:1:1::1".parse().expect("v6"),
         }
@@ -317,6 +332,18 @@ mod tests {
         let g = group(&params());
         assert!(g.contains("kennel:x:1000:"), "the gid resolves to `kennel`: {g}");
         assert!(!g.contains("dev"), "no real group/user name leaks");
+    }
+
+    #[test]
+    fn group_names_the_granted_supplementary_groups() {
+        let mut p = params();
+        let granted = [("dialout".to_owned(), 20u32), ("netdev".to_owned(), 28u32)];
+        p.groups = &granted;
+        let g = group(&p);
+        assert!(g.contains("dialout:x:20:kennel"), "granted group named with the kennel member: {g}");
+        assert!(g.contains("netdev:x:28:kennel"));
+        // The primary gid is still the masked `kennel` line, not duplicated.
+        assert!(g.contains("kennel:x:1000:"));
     }
 
     #[test]

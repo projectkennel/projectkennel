@@ -78,12 +78,46 @@ impl PolicyLoader for TrustStoreLoader {
         // section is available to configure the egress proxy).
         let verified = kennel_policy::verify_settled(&bytes, &self.keys).map_err(|e| e.to_string())?;
         let substituted = kennel_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
-        let plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home).map_err(|e| e.to_string())?;
+        let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home).map_err(|e| e.to_string())?;
+        // Resolve the policy's supplementary groups to GIDs and membership-check them
+        // (§7.2): kenneld runs as the operator, so a group the operator is not in is
+        // refused — the privileged seal could otherwise over-grant. The kennel always
+        // drops to exactly this set (empty ⇒ no supplementary groups at all).
+        let groups = resolve_groups(&substituted.identity.groups)?;
+        plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
-        Ok(Loaded { plan, net, ssh, unix })
+        Ok(Loaded { plan, net, ssh, unix, groups })
     }
+}
+
+/// Resolve the policy's supplementary group names to `(name, gid)` pairs, refusing
+/// any the operator is not a member of (§7.2).
+///
+/// kenneld runs as the operator, so its own group set is the operator's. A name that
+/// does not resolve, or resolves to a group the operator does not hold, is a
+/// fail-closed error: the privileged seal `setgroups` could otherwise grant a group
+/// the operator lacks (privilege escalation). De-duplicated, order-preserving.
+fn resolve_groups(names: &[String]) -> Result<Vec<(String, u32)>, String> {
+    use kennel_syscall::unistd;
+    let real_gid = unistd::real_gid();
+    let held = unistd::supplementary_groups();
+    let mut out: Vec<(String, u32)> = Vec::new();
+    for name in names {
+        let gid = unistd::group_gid(name)
+            .map_err(|e| format!("[identity] resolving group `{name}`: {e}"))?
+            .ok_or_else(|| format!("[identity] group `{name}` does not exist on this host"))?;
+        if gid != real_gid && !held.contains(&gid) {
+            return Err(format!(
+                "[identity] group `{name}` (gid {gid}): the user is not a member; refusing to grant it into the kennel"
+            ));
+        }
+        if !out.iter().any(|(_, g)| *g == gid) {
+            out.push((name.clone(), gid));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

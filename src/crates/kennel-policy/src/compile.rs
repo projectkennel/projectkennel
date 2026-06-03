@@ -104,6 +104,7 @@ pub fn compile(
     crate::ssh::validate(&effective)?;
     crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
+    crate::identity::validate(&effective)?;
     let translated = translate(&effective, install)?;
     assemble(name, &translated, &chain, &tcv, install, compiler_version)
 }
@@ -162,6 +163,7 @@ pub fn compile_leaf(
     crate::ssh::validate(&effective)?;
     crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
+    crate::identity::validate(&effective)?;
     let translated = translate(&effective, install)?;
     assemble(name, &translated, &chain, &tcv, install, compiler_version)
 }
@@ -279,6 +281,7 @@ fn assemble(
         effective_policy: translated.effective_policy.clone(),
         ssh: translated.ssh.clone(),
         unix: translated.unix.clone(),
+        identity: translated.identity.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),
             schema_version: SETTLED_SCHEMA_VERSION,

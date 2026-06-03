@@ -90,6 +90,9 @@ pub struct SourcePolicy {
     /// SSH egress section (`[ssh]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshSection>,
+    /// Identity section (`[identity]`) — the supplementary groups carried in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentitySection>,
     /// D-Bus section (`[dbus]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbus: Option<DbusSection>,
@@ -488,6 +491,24 @@ pub struct UnixAllow {
     /// Threat tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
+}
+
+/// `[identity]` — the workload's identity inside the kennel (`docs/design/07-2-filesystem.md`).
+///
+/// Source-only and realised by `kenneld`: the supplementary Unix groups the confined
+/// workload retains. By default a kennel carries **none** (the inherited host groups
+/// are dropped by the privileged seal, §7.2); each name listed here is kept — but only
+/// if the operator is actually a member (a group the user lacks is refused, never
+/// granted, since the privileged `setgroups` could otherwise over-grant). Groups named
+/// by `[[fs.dev.passthrough]]` are added automatically. The resolved set drives the
+/// seal's `setgroups` and is named in the synthetic `/etc/group` so `id` shows names.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentitySection {
+    /// Supplementary group names to retain (e.g. `["dialout", "plugdev"]`). The user
+    /// must be a member of each; resolved to GIDs at spawn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 /// `[ssh]` — per-kennel SSH egress (source-only; `docs/design/07-8-ssh.md` §7.8).

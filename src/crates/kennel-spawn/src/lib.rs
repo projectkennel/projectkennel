@@ -243,6 +243,7 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     let new_root = plan.new_root.clone();
     let landlock_fs = plan.landlock_fs.clone();
     let landlock_net = plan.landlock_net.clone();
+    let supplementary_groups = plan.supplementary_groups.clone();
 
     let seal = move || -> io::Result<()> {
         // Join the cgroup first, before any namespace/mount change: the BPF
@@ -274,6 +275,13 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
                 kennel_syscall::mount::mount_special("tmpfs", Path::new("/tmp"))?;
                 apply_file_binds(&file_binds)?;
             }
+        }
+        // Drop the inherited host supplementary groups to exactly the policy-granted
+        // set (§7.2) — privileged (CAP_SETGID), like the namespace unshare above, and
+        // done before no_new_privs. `None` leaves the inherited set untouched (the
+        // unprivileged / non-kenneld path); `Some([])` drops all supplementary groups.
+        if let Some(groups) = &supplementary_groups {
+            kennel_syscall::unistd::set_supplementary_groups(groups)?;
         }
         // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
         kennel_syscall::process::set_no_new_privs()?;
@@ -564,6 +572,7 @@ mod tests {
             },
             ssh: kennel_policy::SshRuntime::default(),
             unix: kennel_policy::UnixRuntime::default(),
+            identity: kennel_policy::IdentityRuntime::default(),
         }
     }
 
@@ -878,6 +887,7 @@ mod tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: Vec::new(),
+            supplementary_groups: None,
         }
     }
 
@@ -973,6 +983,7 @@ mod root_tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: Vec::new(),
+            supplementary_groups: None,
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -1105,6 +1116,7 @@ mod root_tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: Vec::new(),
+            supplementary_groups: None,
         };
 
         // Granted file readable through $HOME, and the non-granted sibling's name
@@ -1163,6 +1175,7 @@ mod root_tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: Vec::new(),
+            supplementary_groups: None,
         }
     }
 
@@ -1251,6 +1264,7 @@ mod root_tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: Vec::new(),
+            supplementary_groups: None,
         };
 
         let mut cmd = Command::new("/bin/cat");

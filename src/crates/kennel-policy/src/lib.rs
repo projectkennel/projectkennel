@@ -29,6 +29,7 @@ pub mod b64;
 pub mod canonical;
 pub mod compile;
 pub mod dev;
+pub mod identity;
 pub mod error;
 pub mod invariant;
 pub mod keys;
@@ -53,7 +54,7 @@ pub use settled::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
     NetMode, NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
     ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy,
-    SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
+    IdentityRuntime, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
 };
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use source_sig::{sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust};
@@ -199,6 +200,7 @@ mod tests {
             },
             ssh: settled::SshRuntime::default(),
             unix: settled::UnixRuntime::default(),
+            identity: settled::IdentityRuntime::default(),
         }
     }
 

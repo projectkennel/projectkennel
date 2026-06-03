@@ -40,7 +40,7 @@ use crate::settled::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
     NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen,
     SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction,
-    UnixRuntime, UnixSocket,
+    IdentityRuntime, UnixRuntime, UnixSocket,
 };
 use crate::source::SourcePolicy;
 use crate::PolicyError;
@@ -56,6 +56,8 @@ pub struct Translated {
     pub ssh: SshRuntime,
     /// The per-kennel `AF_UNIX` socket shims (§7.4) — a service input, not enforcement.
     pub unix: UnixRuntime,
+    /// The workload's in-kennel identity (§7.2) — the supplementary groups it retains.
+    pub identity: IdentityRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -91,13 +93,41 @@ pub fn translate(
     let lifecycle = translate_lifecycle(effective)?;
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, install, &mut deferred);
+    let identity = translate_identity(effective);
 
     Ok(Translated {
         effective_policy: EffectivePolicy { net, fs, exec, proc, cap, seccomp, lifecycle },
         ssh,
         unix,
+        identity,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Gather the workload's retained supplementary groups (§7.2): the explicit
+/// `[identity].groups` plus every group named by a `[[fs.dev.passthrough]]` (a device
+/// is unusable without its DAC group), de-duplicated in first-seen order. `kenneld`
+/// resolves these names to GIDs and membership-checks them at spawn.
+fn translate_identity(src: &SourcePolicy) -> IdentityRuntime {
+    let mut groups: Vec<String> = Vec::new();
+    let mut push = |g: &str| {
+        if !g.is_empty() && !groups.iter().any(|e| e == g) {
+            groups.push(g.to_owned());
+        }
+    };
+    if let Some(identity) = &src.identity {
+        for g in &identity.groups {
+            push(g);
+        }
+    }
+    if let Some(dev) = src.fs.as_ref().and_then(|fs| fs.dev.as_ref()) {
+        for pt in &dev.passthrough {
+            if let Some(g) = &pt.group {
+                push(g);
+            }
+        }
+    }
+    IdentityRuntime { groups }
 }
 
 /// Flatten the source `[unix]` section into the settled [`UnixRuntime`]: one
@@ -548,6 +578,39 @@ mod tests {
     }
 
     #[test]
+    fn identity_unions_explicit_groups_with_device_passthrough_groups() {
+        use crate::source::{DevPassthrough, FsDev, FsSection, IdentitySection, SourcePolicy, Threats};
+        let src = SourcePolicy {
+            identity: Some(IdentitySection { groups: vec!["plugdev".to_owned(), "dialout".to_owned()] }),
+            fs: Some(FsSection {
+                dev: Some(FsDev {
+                    allow: None,
+                    passthrough: vec![
+                        DevPassthrough {
+                            path: Some("/dev/ttyUSB0".to_owned()),
+                            group: Some("dialout".to_owned()), // already listed — de-duped
+                            reason: Some("serial".to_owned()),
+                            threats: Some(Threats { exposed: vec!["T2.1".to_owned()], mitigated: vec![] }),
+                        },
+                        DevPassthrough {
+                            path: Some("/dev/net/tun".to_owned()),
+                            group: Some("netdev".to_owned()), // contributed by the device
+                            reason: Some("vpn".to_owned()),
+                            threats: Some(Threats { exposed: vec!["T2.1".to_owned()], mitigated: vec![] }),
+                        },
+                    ],
+                }),
+                ..FsSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        let id = translate_identity(&src);
+        assert_eq!(id.groups, vec!["plugdev", "dialout", "netdev"], "explicit first, device groups added, de-duped");
+        // No [identity] and no device groups ⇒ empty (dropped from the canonical form).
+        assert!(translate_identity(&SourcePolicy::default()).is_empty());
+    }
+
+    #[test]
     fn dev_passthrough_paths_merge_into_the_settled_dev_allowlist() {
         use crate::source::{DevPassthrough, FsDev, FsHome, FsSection, NetSection, SourcePolicy, Threats};
         let src = SourcePolicy {
@@ -649,6 +712,7 @@ mod tests {
             },
             ssh: t.ssh,
             unix: t.unix,
+            identity: t.identity,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }

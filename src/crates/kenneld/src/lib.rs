@@ -200,6 +200,10 @@ pub struct EtcSetup {
     /// Written as the `passwd` home field — never the operator's real home, which the
     /// synthetic `/etc` masks along with the account name (`kennel`).
     pub home: PathBuf,
+    /// The granted supplementary groups `(name, gid)` (§7.2) — named in `/etc/group`
+    /// so they resolve by name; these are the gids the seal `setgroups` to. Empty by
+    /// default (the kennel carries no supplementary groups unless policy grants them).
+    pub groups: Vec<(String, u32)>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -513,6 +517,7 @@ fn bring_up<P: Privileged>(
             uid: etc.uid,
             gid: etc.gid,
             home: &etc.home,
+            groups: &etc.groups,
             v4: state.v4,
             v6: addr6,
         };
@@ -760,6 +765,7 @@ mod tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: Vec::new(),
+            supplementary_groups: None,
         }
     }
 

@@ -49,6 +49,11 @@ pub struct Loaded {
     /// The per-kennel `AF_UNIX` socket shims (§7.4): the host sockets `kenneld` binds
     /// into the kennel's view. Empty for a kennel with no `[unix]` policy.
     pub unix: kennel_policy::UnixRuntime,
+    /// The granted supplementary groups `(name, gid)` (§7.2): resolved and
+    /// membership-checked by the loader, named in the synthetic `/etc/group`. The
+    /// loader also sets `plan.supplementary_groups` to these gids (what the seal
+    /// `setgroups` to). Empty when no group is granted (the kennel drops all).
+    pub groups: Vec<(String, u32)>,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -450,6 +455,9 @@ where
         // The synthetic /etc/passwd home is the in-kennel shim $HOME, not the
         // operator's real home (which would re-leak the masked identity, §7.2.x).
         home: shim_root.clone(),
+        // The resolved supplementary groups, named in /etc/group (§7.2). The loader
+        // already set plan.supplementary_groups to their gids (what the seal drops to).
+        groups: loaded.groups.clone(),
     });
     let spec = crate::Spec {
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
@@ -594,6 +602,7 @@ mod tests {
                 bpf_deny_v6: Vec::new(),
                 bpf_meta: [0u8; 64],
                 file_binds: Vec::new(),
+                supplementary_groups: None,
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,
@@ -607,6 +616,7 @@ mod tests {
                 net,
                 ssh: kennel_policy::SshRuntime::default(),
                 unix: kennel_policy::UnixRuntime::default(),
+                groups: Vec::new(),
             })
         }
     }

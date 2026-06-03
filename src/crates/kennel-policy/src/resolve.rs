@@ -45,9 +45,9 @@
 
 use crate::source::{
     self, CapSection, ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev,
-    FsHome, FsProc, FsScrub, FsSection, FsTmp, LifecycleSection, NetAudit, NetBind, NetDeny,
-    NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection, SourcePolicy,
-    SshSection, UnixSection, X11Section,
+    FsHome, FsProc, FsScrub, FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit, NetBind,
+    NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection,
+    SourcePolicy, SshSection, UnixSection, X11Section,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -204,6 +204,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         net: merge(&parent.net, &child.net, fold_net),
         unix: merge(&parent.unix, &child.unix, fold_unix),
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
+        identity: merge(&parent.identity, &child.identity, fold_identity),
         dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
         x11: merge(&parent.x11, &child.x11, fold_x11),
         proc: merge(&parent.proc, &child.proc, fold_proc),
@@ -373,6 +374,13 @@ fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
         default: or(&c.default, &p.default),
         abstract_ns: or(&c.abstract_ns, &p.abstract_ns),
         allow: if c.allow.is_empty() { p.allow.clone() } else { c.allow.clone() },
+    }
+}
+
+fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
+    // Bare-set: a child's non-empty group list replaces the parent's.
+    IdentitySection {
+        groups: if c.groups.is_empty() { p.groups.clone() } else { c.groups.clone() },
     }
 }
 

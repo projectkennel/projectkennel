@@ -307,6 +307,12 @@ pub struct Plan {
     /// Not derived from policy — kenneld populates it at bring-up with the
     /// per-kennel staged files.
     pub file_binds: Vec<(PathBuf, PathBuf)>,
+    /// The supplementary group IDs the workload retains (§7.2). `Some(gids)` makes the
+    /// privileged seal `setgroups` to **exactly** these (empty ⇒ drop all inherited
+    /// host groups); `None` leaves the inherited set untouched (the unprivileged /
+    /// non-kenneld path). The names are resolved to GIDs and membership-checked by
+    /// kenneld (the host-runtime gate), so this carries only already-verified GIDs.
+    pub supplementary_groups: Option<Vec<u32>>,
 }
 
 impl Plan {
@@ -434,6 +440,7 @@ impl Plan {
             bpf_deny_v6,
             bpf_meta: meta_bytes(ctx),
             file_binds: Vec::new(),
+            supplementary_groups: None,
         })
     }
 
