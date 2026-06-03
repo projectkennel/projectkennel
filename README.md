@@ -24,6 +24,20 @@ On distributions that restrict unprivileged user namespaces (Ubuntu's `kernel.ap
 
 Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): the unified audit writer plus the journald/syslog/stdout sinks and the `[audit]` policy section (a per-kennel file sink and the proxy's per-request JSONL records run today), per-kennel `[unix]` service launching (§7.4.7), and the Rust `kennel-checksum-verify` (a dependency-free shell verifier runs today).
 
+## Size
+
+A rough sense of scale — far more specification than code, and the code that exists is small and mostly safe. (SLOC = lines of code excluding comments and blanks, via `tokei`; prose via `wc -w`. A snapshot that drifts.)
+
+| Artefact | Size |
+|---|---|
+| Design docs ([`docs/design/`](docs/design/), 27 files) | ≈ 65,600 words |
+| Architecture docs ([`docs/architecture/`](docs/architecture/), 15 files) | ≈ 32,500 words |
+| Implementation — Rust (10 crates, tests included) | ≈ 20,100 SLOC |
+| Implementation — BPF (C: 8 programs + 3 shared headers) | ≈ 510 SLOC |
+| `unsafe` Rust — confined to `kennel-syscall` + `kennel-bpf` | ≈ 3,020 SLOC, 97 `unsafe` blocks |
+
+The other eight crates carry `#![forbid(unsafe_code)]`: the entire `unsafe` surface — raw syscalls, the Landlock/seccomp FFI, and the hand-rolled `bpf(2)` loader — is quarantined to two crates sized to be reviewable in one sitting ([supply-chain/UNSAFE-CRATES.md](supply-chain/UNSAFE-CRATES.md)).
+
 ## What is here
 
 | Path | What |
