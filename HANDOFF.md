@@ -1,6 +1,6 @@
 # Handoff — unprivileged spawn (user namespace) work stream
 
-_Last updated: 2026-06-04. Branch: `master`. Pick up from here in a fresh session._
+_Last updated: 2026-06-04. Branch: `main`. Pick up from here in a fresh session._
 
 ## The one thing not to get wrong
 
@@ -20,7 +20,7 @@ with `--nocapture` (or the runner). On Ubuntu (`apparmor_restrict_unprivileged_u
 the spawn binary needs an `AppArmor` `userns` profile or the userns is created but
 capability-stripped; without the profile every userns proof skips.
 
-## State: the two remaining action items are DONE this session (4 commits on `master`)
+## State: the two remaining action items are DONE this session (4 commits on `main`)
 
 | Commit | What |
 |---|---|
