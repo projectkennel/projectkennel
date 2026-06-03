@@ -2,7 +2,7 @@
 
 **Kernel-enforced confinement for unsigned code on developer workstations.**
 
-Version 0.1 · 2026-05-16
+Version 0.1 · 2026-06-04
 
 ---
 
@@ -26,24 +26,24 @@ Project Kennel provides the enforcement vocabulary the user level should have ac
 
 **Workload-agnostic policy.** Policy describes kernel-level constraints (which files, which network destinations, which sockets, which D-Bus methods), not workload behaviour. The same policy applies whether the confined workload is Claude Code, Codex, Cursor, a Postgres container pulled from Docker Hub, an `npm install` of an unfamiliar package, or an MCP server. Switching workloads does not require rewriting policy or re-mapping compliance controls.
 
-**Kernel-enforced constraints the workload cannot influence.** The workload's `$HOME` is a shim filesystem view containing only what policy grants — credential locations are not denied on access; they do not exist in the view. The workload's `127.0.0.1` is its own private loopback subnet, not the user's. Outbound traffic terminates at a per-workload SOCKS5 proxy enforcing a per-destination allowlist; direct `connect()` to anywhere else is denied at the kernel level by cgroup BPF. D-Bus access goes through xdg-dbus-proxy with method-level filtering. All enforced via Landlock, cgroup BPF, mount namespaces, and seccomp — kernel mechanisms the workload's userspace operations cannot reach.
+**Kernel-enforced constraints the workload cannot influence.** The workload's `$HOME` is a shim filesystem view containing only what policy grants — credential locations are not denied on access; they do not exist in the view. The workload's `127.0.0.1` is its own private loopback subnet, not the user's. Outbound traffic terminates at a per-workload SOCKS5 proxy enforcing a per-destination allowlist; direct `connect()` to anywhere else is denied at the kernel level by cgroup BPF. D-Bus access goes through xdg-dbus-proxy with method-level filtering. All enforced via Landlock, cgroup BPF, user/mount/PID namespaces, and seccomp — kernel mechanisms the workload's userspace operations cannot reach.
 
 **Threat-tagged, signed templates.** Operators do not write policy from scratch. They derive from vetted templates (`ai-coding-strict`, `containerised-service`, `untrusted-build`, `package-install`, `inspect-only`) signed by maintainers or by the customer's organisation. Every deviation from a template requires a written reason and surfaces in a diff that maps the change to specific threat IDs from a versioned threat catalogue. CI tooling validates policies against the schema and against organisation-mandated baselines.
 
 Project Kennel does not ask the workload to be trustworthy. It assumes the workload will optimise for completion (in the AI agent case) or that the developer running it will route around friction (in every other case), and constrains what either is permitted to look like.
 
-Three artefacts ship together under permissive licence. **THREATS.md** is the threat catalogue: stable IDs, real-world incident citations, MITRE ATT&CK mappings, preliminary mappings to SOC 2, ISO 27001, NIS2, DORA. The catalogue is the durable contribution; security teams can cite it whether or not they adopt the runtime. **The design document** is the full technical specification — threat model, mechanism reference, template system, enforcement architecture. Approximately 35,000 words. **The reference runtime** is the Linux user-space implementation, composing existing primitives (bubblewrap, Landlock, cgroup BPF) rather than competing with them.
+Three artefacts ship together under permissive licence. **THREATS.md** is the threat catalogue: stable IDs, real-world incident citations, MITRE ATT&CK mappings, preliminary mappings to SOC 2, ISO 27001, NIS2, DORA. The catalogue is the durable contribution; security teams can cite it whether or not they adopt the runtime. **The design document** is the full technical specification — threat model, mechanism reference, template system, enforcement architecture. **The reference runtime** is the Linux user-space implementation, composing existing kernel primitives — user namespaces (the bubblewrap mechanism), Landlock, cgroup BPF, seccomp — rather than competing with them.
 
 Enterprise needs are met through paid features layered on top: centralised policy management across developer fleets, cryptographic attestation that workstations run approved policy revisions, audit log aggregation with SIEM integration, dashboards mapping kennel events to compliance control objectives, customer-owned template signing infrastructure, TLS-inspection layer for high-value contexts, threat-intelligence feed of new attack patterns observed in the wild, SLA-backed support. Individual developers and small teams do not need fleet management; enterprises cannot operate without it. Nothing in the free tier is artificially crippled.
 
-The threat catalogue is publishable today. The design document is at v0.1. The reference runtime and policy compiler are implemented (pre-release): the confinement seal, per-kennel proxied egress with a cgroup-BPF allowlist, and the `kennel compile`/`validate`/`sign`/`run` CLI all work on kernel 6.17, with ed25519 trust end to end. We are seeking security teams willing to review THREATS.md and cite gaps, errors, or missing incidents; pilot organisations interested in evaluating Project Kennel on a representative subset of developer workflows; standards bodies and security vendors evaluating whether the threat catalogue belongs in their reference material.
+The threat catalogue is at v0.3 and publishable today; the design document is at v0.1. The reference runtime and policy compiler are implemented (pre-release) and run **unprivileged** — `kenneld` is an ordinary user process, the workload sandbox is built via an identity-mapped user namespace, and a single narrow file-caps privhelper performs only the host-global operations a user namespace cannot reach; there is no `sudo` anywhere in the spawn. Proven end-to-end on kernel 6.17 as the operator: the constructed-`$HOME` view via `pivot_root`, a synthetic `/etc` with identity masking, per-kennel proxied egress with a cgroup-BPF fail-closed allowlist, an AF_UNIX socket shim and an SSH re-origination bastion, and the `kennel compile`/`validate`/`sign`/`run`/`stop`/`list` CLI with end-to-end ed25519 trust and maintainer-signed templates. We are seeking security teams willing to review THREATS.md and cite gaps, errors, or missing incidents; pilot organisations interested in evaluating Project Kennel on a representative subset of developer workflows; standards bodies and security vendors evaluating whether the threat catalogue belongs in their reference material.
 
 We are not asking for capital. We are asking for the readers without whom this work cannot be evaluated.
 
 ---
 
-**Contact:** *[TBD]*
-**Project repository:** *[TBD]*
-**Canonical THREATS.md:** *[TBD]*
+**Security contact:** security@projectkennel.org (see SECURITY.md)
+**Project repository:** https://github.com/projectkennel/projectkennel
+**Canonical THREATS.md:** https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md
 
 *Full design rationale: companion design document, starting with §1 (the user-level runtime) and §2 (adversary model). Threat catalogue as a standalone artefact: THREATS.md.*
