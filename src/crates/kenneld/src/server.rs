@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
@@ -88,6 +89,32 @@ pub struct Identity {
     /// (`<audit_base>/<kennel>/network.jsonl`, §7.3.4), or `None` to leave the
     /// proxy logging to stderr. Persistent (state home, not the runtime dir).
     pub audit_base: Option<PathBuf>,
+    /// The per-user SSH bastion's configuration (§7.8), or `None` to disable SSH
+    /// egress for this daemon. When set, a kennel with `[ssh]` grants gets a
+    /// synthetic `~/.ssh` and a route to the shared `kennel-sshd`.
+    pub bastion: Option<BastionSetup>,
+}
+
+/// How `kenneld` runs the per-user SSH bastion (§7.8). The daemon holds one
+/// `kennel-sshd` for the session; this is its fixed configuration.
+#[derive(Debug, Clone)]
+pub struct BastionSetup {
+    /// The safe-owned runtime dir for the bastion's host key, config, and
+    /// `authorized_keys` (under `$XDG_RUNTIME_DIR`, never world-writable).
+    pub dir: PathBuf,
+    /// The host-side `kennel-ssh-reorigin` the bastion's forced commands invoke.
+    pub reorigin_bin: PathBuf,
+    /// The in-kennel path of `kennel-socks-connect` (each synthetic `config`
+    /// stanza's `ProxyCommand`); also the host path bound into the kennel view.
+    pub socks_connect_bin: PathBuf,
+    /// The loopback address the bastion listens on.
+    pub listen: IpAddr,
+    /// The bastion's port.
+    pub port: u16,
+    /// The host-side agent socket holding the user's real keys (`$SSH_AUTH_SOCK`),
+    /// handed to the forced command so it can sign the outbound hop. `None` ⇒ the
+    /// helper finds no key and fails closed.
+    pub agent_sock: Option<PathBuf>,
 }
 
 /// Registry metadata for one kennel (the workload itself is owned by the
@@ -111,13 +138,104 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     privileged: P,
     loader: L,
     registry: Mutex<Registry>,
+    /// The per-user SSH bastion (§7.8), created lazily on the first kennel with an
+    /// `[ssh]` grant and shared by all of them. `None` until then, or always when
+    /// no `bastion` is configured in [`Identity`].
+    bastion: Mutex<Option<crate::bastion::Bastion>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// Build the shared state for `identity`.
     #[must_use]
     pub fn new(identity: Identity, privileged: P, loader: L) -> Self {
-        Self { identity, privileged, loader, registry: Mutex::new(Registry::default()) }
+        Self {
+            identity,
+            privileged,
+            loader,
+            registry: Mutex::new(Registry::default()),
+            bastion: Mutex::new(None),
+        }
+    }
+
+    /// Prepare a kennel's SSH egress (§7.8): mint a synthetic key per grant, register
+    /// each `(synthetic-key → dest, real-key)` edge with the per-user bastion (lazily
+    /// starting `kennel-sshd`), and materialise the synthetic `~/.ssh` for the kennel
+    /// view rooted at `shim_root`. A no-op (empty [`SshPrep`]) when the kennel has no
+    /// `[ssh]` grant or this daemon runs no bastion.
+    ///
+    /// # Errors
+    /// A human-readable reason if minting, the bastion, or materialisation fails.
+    fn register_ssh(
+        &self,
+        kennel: &str,
+        ssh: &kennel_policy::SshRuntime,
+        shim_root: &Path,
+    ) -> Result<crate::SshPrep, String> {
+        let Some(setup) = self.identity.bastion.as_ref() else { return Ok(crate::SshPrep::default()) };
+        if ssh.is_empty() {
+            return Ok(crate::SshPrep::default());
+        }
+        let mut guard = self.bastion.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bastion = guard.get_or_insert_with(|| {
+            crate::bastion::Bastion::new(crate::bastion::BastionConfig {
+                dir: setup.dir.clone(),
+                reorigin_bin: setup.reorigin_bin.clone(),
+                listen: setup.listen,
+                port: setup.port,
+                agent_sock: setup.agent_sock.clone(),
+            })
+        });
+
+        let staging = setup.dir.join("synthetic").join(kennel);
+        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        let mut host_files: Vec<(String, String)> = Vec::new();
+        for grant in &ssh.grants {
+            let key_file = format!("id_{}", grant.host);
+            let comment = format!("kennel {kennel} -> {}", grant.host);
+            let pub_line =
+                crate::ssh::mint_synthetic_key(&staging, &key_file, &comment).map_err(|e| e.to_string())?;
+            bastion
+                .register(crate::bastion::Edge {
+                    kennel: kennel.to_owned(),
+                    dest: grant.host.clone(),
+                    real_fp: grant.fingerprint.clone(),
+                    synthetic_pub: pub_line,
+                })
+                .map_err(|e| e.to_string())?;
+            host_files.push((grant.host.clone(), key_file));
+        }
+        let host_pub = bastion.host_pub().ok_or("bastion failed to start (no host key)")?.to_owned();
+        // The bastion lock is only needed for minting + registration; release it
+        // before the synthetic-config file I/O below.
+        drop(guard);
+
+        let host_grants: Vec<crate::ssh::HostGrant<'_>> =
+            host_files.iter().map(|(h, k)| crate::ssh::HostGrant { host: h, key_file: k }).collect();
+        let listen = setup.listen.to_string();
+        let socks_bin = setup.socks_connect_bin.to_string_lossy().into_owned();
+        let params = crate::ssh::SshParams {
+            bastion_host: &listen,
+            bastion_port: setup.port,
+            bastion_host_key: &host_pub,
+            socks_connect_bin: &socks_bin,
+            hosts: &host_grants,
+        };
+        let ssh_dir = shim_root.join(".ssh");
+        let file_binds = crate::ssh::materialize(&staging, &ssh_dir, &params).map_err(|e| e.to_string())?;
+        Ok(crate::SshPrep {
+            file_binds,
+            host_service: Some(SocketAddr::new(setup.listen, setup.port)),
+            socks_connect_bin: Some(setup.socks_connect_bin.clone()),
+        })
+    }
+
+    /// Drop a kennel's SSH edges from the bastion on teardown (§7.8.2): a synthetic
+    /// key never outlives the kennel it was minted for. Best-effort.
+    fn deregister_ssh(&self, kennel: &str) {
+        let mut guard = self.bastion.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bastion) = guard.as_mut() {
+            let _ = bastion.deregister(kennel);
+        }
     }
 
     /// Reserve a name and allocate its context, atomically. Returns the context,
@@ -254,6 +372,20 @@ where
         Ok(command) => command,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
     };
+    // Prepare SSH egress (§7.8): mint synthetic keys, register the edges with the
+    // per-user bastion, and build the synthetic ~/.ssh for the view. The ~/.ssh is
+    // rooted at the constructed-view HOME (the plan's shim root) when there is one.
+    let shim_root = loaded
+        .plan
+        .view
+        .as_ref()
+        .map_or_else(|| shared.identity.home.clone(), |v| v.shim_root.clone());
+    let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root) {
+        Ok(ssh) => ssh,
+        // `fail` deregisters any edges registered before the failure.
+        Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
+    };
+
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
         staging_dir: base.join(format!("etc-{ctx}")),
@@ -273,6 +405,7 @@ where
         etc,
         view_root: id.view_base.as_ref().map(|base| base.join(format!("root-{ctx}"))),
         audit_path: id.audit_base.as_ref().map(|base| base.join(&req.kennel).join("network.jsonl")),
+        ssh,
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
@@ -285,6 +418,7 @@ where
 
     // Block until the workload exits (on its own or via `stop`), then tear down.
     let status = kennel.stop(&shared.privileged);
+    shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
     let _ = control::send_response(conn, &Response::Exited { code: exit_code(&status) });
 }
@@ -297,6 +431,9 @@ fn fail<P: Privileged + Clone, L: PolicyLoader>(
     conn: &mut UnixStream,
     response: &Response,
 ) {
+    // Drop any SSH edges registered before the failing step (a no-op otherwise), so
+    // a failed bring-up leaves no synthetic key in the bastion.
+    shared.deregister_ssh(name);
     shared.release(name, ctx);
     let _ = control::send_response(conn, response);
 }
@@ -406,6 +543,7 @@ mod tests {
                 etc_base: None,
                 view_base: None,
                 audit_base: None,
+                bastion: None,
             },
             OkPriv,
             FakeLoader,

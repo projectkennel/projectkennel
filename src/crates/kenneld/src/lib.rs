@@ -231,6 +231,29 @@ pub struct Spec {
     /// log persists across runs (it is *not* removed at teardown — it is audit
     /// data). Ignored when no proxy runs.
     pub audit_path: Option<PathBuf>,
+    /// The prepared SSH egress (§7.8): the synthetic `~/.ssh` binds, the bastion
+    /// host-service to allow, and the in-kennel connector to bind in. Empty
+    /// ([`SshPrep::default`]) for a kennel with no `[ssh]` grant.
+    pub ssh: SshPrep,
+}
+
+/// The SSH egress prepared for one kennel (§7.8).
+///
+/// Built by `crate::server::Shared::register_ssh` and consumed by the bring-up: it
+/// carries the synthetic `~/.ssh` to lay into the view, the bastion endpoint to
+/// allow through the egress proxy, and the connector binary the kennel's `ssh`
+/// invokes as its `ProxyCommand`.
+#[derive(Debug, Default, Clone)]
+pub struct SshPrep {
+    /// `(host source, in-kennel target)` pairs for the synthetic `~/.ssh` files
+    /// (`config`, `known_hosts`, the synthetic keys), copied into the constructed view.
+    pub file_binds: Vec<(PathBuf, PathBuf)>,
+    /// The bastion's loopback endpoint, allowed as a host-loopback service so the
+    /// egress proxy forwards the kennel's SSH to it (§7.3 host services).
+    pub host_service: Option<SocketAddr>,
+    /// The host path of `kennel-socks-connect`, bound into the view (read+execute)
+    /// so the synthetic `config`'s `ProxyCommand` can run it. `None` when no SSH.
+    pub socks_connect_bin: Option<PathBuf>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -340,7 +363,7 @@ struct Provision {
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
 pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root, audit_path } = spec;
+    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root, audit_path, ssh } = spec;
     let mut state = Provision::default();
 
     match bring_up(
@@ -354,6 +377,7 @@ pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -
         etc.as_ref(),
         view_root.as_deref(),
         audit_path.as_deref(),
+        &ssh,
         command,
         &mut state,
     ) {
@@ -394,6 +418,7 @@ fn bring_up<P: Privileged>(
     etc: Option<&EtcSetup>,
     view_root: Option<&Path>,
     audit_path: Option<&Path>,
+    ssh: &SshPrep,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<Child, Error> {
@@ -446,7 +471,8 @@ fn bring_up<P: Privileged>(
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let config = crate::proxy::config_toml(net, &listen, audit_path).map_err(Error::ProxyConfig)?;
+        let config = crate::proxy::config_toml(net, &listen, audit_path, ssh.host_service.as_slice())
+            .map_err(Error::ProxyConfig)?;
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
         std::fs::write(&config_path, config)?;
@@ -469,6 +495,20 @@ fn bring_up<P: Privileged>(
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
     }
 
+    // 3c-ssh. Lay the synthetic ~/.ssh into the view (config, known_hosts, the
+    //     disposable synthetic keys) and point the kennel's ssh at its proxy: the
+    //     synthetic config's ProxyCommand SOCKS5s through it to the bastion (§7.8.4).
+    //     Empty for a kennel with no [ssh] grant, so nothing changes for it.
+    if !ssh.file_binds.is_empty() {
+        plan.file_binds.extend(ssh.file_binds.iter().cloned());
+        // The connector connects to the kennel's own proxy address.
+        let proxy_addr = state.v4.map_or_else(
+            || SocketAddr::new(addr6.into(), port),
+            |v4| SocketAddr::new(v4.into(), port),
+        );
+        command.env("KENNEL_SOCKS_PROXY", proxy_addr.to_string());
+    }
+
     // 3d. constructed-view wiring (§7.2.5). When the plan carries a shim view and
     //     the daemon gave us a staging mountpoint: point HOME at the shim root,
     //     add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
@@ -480,7 +520,23 @@ fn bring_up<P: Privileged>(
             for sub in crate::etc::essential_etc_subtrees() {
                 view.binds.push(kennel_spawn::BindMount { source: sub.clone(), target: sub, writable: false });
             }
+            // Bind the SOCKS connector in at its own path (read-only) so the synthetic
+            // ssh config's ProxyCommand can exec it.
+            if let Some(bin) = &ssh.socks_connect_bin {
+                view.binds.push(kennel_spawn::BindMount {
+                    source: bin.clone(),
+                    target: bin.clone(),
+                    writable: false,
+                });
+            }
             command.env("HOME", &view.shim_root);
+        }
+        // Grant Landlock execute on the connector (outside the `view` borrow of plan).
+        if let Some(bin) = &ssh.socks_connect_bin {
+            if plan.view.is_some() {
+                use kennel_syscall::landlock::AccessFs;
+                plan.landlock_fs.push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+            }
         }
     }
     if let Some(view_root) = view_root {
@@ -650,6 +706,7 @@ mod tests {
             etc: None,
             view_root: None,
             audit_path: None,
+            ssh: SshPrep::default(),
         }
     }
 

@@ -47,6 +47,15 @@ struct NetToml {
     allow: Vec<AllowToml>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deny: Vec<DenyToml>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    host_services: Vec<HostServiceToml>,
+}
+
+/// A sanctioned host-loopback service (the SSH bastion, §7.8.4) the proxy may reach
+/// despite the host-loopback invariant deny (`[[net.host_services]]`).
+#[derive(Serialize)]
+struct HostServiceToml {
+    addr: String,
 }
 
 /// An allow entry carries exactly one of `name`/`cidr` (the netproxy enforces
@@ -137,7 +146,12 @@ fn allow_from_name(rule: &NameRule) -> AllowToml {
 ///
 /// Returns the serialiser error string if the TOML cannot be produced (a shape
 /// `basic-toml` rejects — caught by the round-trip test).
-pub fn config_toml(net: &NetPolicy, listen: &[SocketAddr], audit: Option<&Path>) -> Result<String, String> {
+pub fn config_toml(
+    net: &NetPolicy,
+    listen: &[SocketAddr],
+    audit: Option<&Path>,
+    host_services: &[SocketAddr],
+) -> Result<String, String> {
     let mut allow: Vec<AllowToml> = net.allow.iter().map(allow_from_cidr).collect();
     allow.extend(net.allow_names.iter().map(allow_from_name));
 
@@ -146,12 +160,14 @@ pub fn config_toml(net: &NetPolicy, listen: &[SocketAddr], audit: Option<&Path>)
         .iter()
         .map(|r| DenyToml { cidr: Some(cidr_str(r)), ports: ports_for(r.port_min, r.port_max) })
         .collect();
+    let host_services: Vec<HostServiceToml> =
+        host_services.iter().map(|a| HostServiceToml { addr: a.to_string() }).collect();
 
     let doc = ProxyToml {
         listen: listen.iter().map(ToString::to_string).collect(),
         audit_log: audit.map(|p| p.display().to_string()),
         accept_private_resolved: false,
-        net: NetToml { mode: mode_str(net.mode), allow, deny },
+        net: NetToml { mode: mode_str(net.mode), allow, deny, host_services },
     };
     basic_toml::to_string(&doc).map_err(|e| e.to_string())
 }
@@ -210,7 +226,7 @@ mod tests {
         // Both a v4 and a v6 listen address (the dual-stack case).
         let listen: Vec<SocketAddr> =
             vec!["127.0.144.81:1080".parse().expect("v4"), "[fd00:0:1:1::1]:1080".parse().expect("v6")];
-        let toml = config_toml(&net(), &listen, None).expect("toml");
+        let toml = config_toml(&net(), &listen, None, &[]).expect("toml");
 
         // The netproxy's own reader must accept what we wrote, and reconstruct
         // the same ruleset — the anti-drift guarantee.
@@ -232,7 +248,7 @@ mod tests {
     #[test]
     fn audit_path_is_written_when_present() {
         let listen = ["127.0.144.81:1080".parse::<SocketAddr>().expect("addr")];
-        let toml = config_toml(&net(), &listen, Some(Path::new("/run/kennel/p.jsonl"))).expect("toml");
+        let toml = config_toml(&net(), &listen, Some(Path::new("/run/kennel/p.jsonl")), &[]).expect("toml");
         let cfg = kennel_netproxy::config::from_toml_str(&toml).expect("parse");
         assert_eq!(cfg.audit_log.as_deref(), Some(Path::new("/run/kennel/p.jsonl")));
     }

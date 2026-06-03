@@ -212,6 +212,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
         }),
         view_root: Some(view_root.clone()),
         audit_path: Some(audit_path.clone()),
+        ssh: kenneld::SshPrep::default(),
     };
 
     // The workload proves three things about the constructed view, then sleeps so

@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use kenneld::server::{serve, Identity, Shared};
+use std::net::{IpAddr, Ipv4Addr};
+
+use kenneld::server::{serve, BastionSetup, Identity, Shared};
 use kenneld::{policy, proxy, socket, HelperClient, ProxySetup};
 
 fn main() -> ExitCode {
@@ -56,5 +58,16 @@ fn build_identity() -> Result<Identity, String> {
     let state_home = std::env::var_os("XDG_STATE_HOME")
         .map_or_else(|| home.join(".local/state"), PathBuf::from);
     let audit_base = Some(state_home.join("kennel"));
-    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base, view_base, audit_base })
+    // The per-user SSH bastion (§7.8): one managed kennel-sshd for the session, on a
+    // host-loopback port derived from the user's tag (so two users' daemons do not
+    // clash on 127.0.0.1). Its forced commands sign with the user's own agent.
+    let bastion = Some(BastionSetup {
+        dir: socket::runtime_dir().join("bastion"),
+        reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-ssh-reorigin"),
+        socks_connect_bin: PathBuf::from("/opt/kennel/bin/kennel-socks-connect"),
+        listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 8022_u16.saturating_add(scope.tag()),
+        agent_sock: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
+    });
+    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base, view_base, audit_base, bastion })
 }
