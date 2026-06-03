@@ -132,6 +132,14 @@ pub trait Privileged {
     /// # Errors
     /// As [`add_address`](Self::add_address).
     fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response>;
+
+    /// Write process `pid`'s user-namespace `gid_map`, identity-mapping each gid in
+    /// `gids`, so a workload keeps a granted supplementary group (§7.2.8). The
+    /// helper re-checks the caller is a member of every gid and owns `pid`.
+    ///
+    /// # Errors
+    /// As [`add_address`](Self::add_address).
+    fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response>;
 }
 
 /// The production [`Privileged`] implementation: each call invokes the installed
@@ -166,6 +174,10 @@ impl Privileged for HelperClient {
 
     fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
         kennel_privhelper::client::setup_egress(&self.helper, cgroup.to_path_buf(), payload)
+    }
+
+    fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response> {
+        kennel_privhelper::client::set_gid_map(&self.helper, pid, gids)
     }
 }
 
@@ -402,7 +414,7 @@ struct Provision {
 /// # Errors
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
-pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
+pub fn start<P: Privileged + Sync>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
     let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root, audit_path, ssh, unix } = spec;
     let mut state = Provision::default();
 
@@ -448,7 +460,7 @@ pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -
 
 /// The bring-up steps, recording provisioning into `state` as it goes.
 #[allow(clippy::too_many_arguments)]
-fn bring_up<P: Privileged>(
+fn bring_up<P: Privileged + Sync>(
     privileged: &P,
     cgroup: &Path,
     ctx: u16,
@@ -610,7 +622,52 @@ fn bring_up<P: Privileged>(
 
     // 4. spawn the workload into this cgroup (it joins itself in the seal).
     plan.cgroup = cgroup.to_path_buf();
-    kennel_spawn::spawn(plan, command).map_err(Error::Spawn)
+    spawn_workload(privileged, plan, command)
+}
+
+/// Spawn the workload, routing through the privileged `gid_map` handshake (§7.2.8)
+/// when the kennel re-grants a supplementary group on the unprivileged userns path.
+///
+/// The handshake engages only when the plan unshares a user namespace *and* carries
+/// at least one granted supplementary group: an unprivileged `gid_map` can map only
+/// the caller's own primary gid, so the multi-gid map is written by the privhelper
+/// (it holds `CAP_SETGID` in the init userns), driven from a servicer thread inside
+/// [`kennel_spawn::spawn_with_gid_map`]. Otherwise (default drop-all on the userns
+/// path, or the legacy privileged path) the plain [`kennel_spawn::spawn`] is used and
+/// the helper is not consulted.
+fn spawn_workload<P: Privileged + Sync>(privileged: &P, plan: &Plan, command: &mut Command) -> Result<Child, Error> {
+    use kennel_syscall::namespace::Namespaces;
+
+    let granted = plan.supplementary_groups.as_deref().unwrap_or(&[]);
+    if !plan.namespaces.contains(Namespaces::USER) || granted.is_empty() {
+        return kennel_spawn::spawn(plan, command).map_err(Error::Spawn);
+    }
+
+    // The gids the privhelper identity-maps: the operator's real gid (kept so the
+    // workload's primary group is not the overflow gid) plus the granted groups.
+    let gids = gid_map_set(granted);
+    let map_gids = move |pid: u32| -> io::Result<()> {
+        let response = privileged.set_gid_map(pid, &gids)?;
+        if response.status == Status::Ok {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("privhelper refused the gid_map write: {response:?}")))
+        }
+    };
+    kennel_spawn::spawn_with_gid_map(plan, command, map_gids).map_err(Error::Spawn)
+}
+
+/// The gid list to identity-map for a granted-group kennel: the operator's real gid
+/// first (so the workload keeps a sane primary group rather than the overflow gid),
+/// then each granted supplementary gid, order-preserving and de-duplicated.
+fn gid_map_set(granted: &[u32]) -> Vec<u32> {
+    let mut gids = vec![kennel_syscall::unistd::real_gid()];
+    for &gid in granted {
+        if !gids.contains(&gid) {
+            gids.push(gid);
+        }
+    }
+    gids
 }
 
 /// Apply the `AF_UNIX` socket shims (§7.4): bind each granted host socket into the
@@ -704,26 +761,34 @@ fn teardown<P: Privileged>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
     use kennel_syscall::landlock::AccessFs;
     use kennel_syscall::namespace::Namespaces;
     use kennel_syscall::seccomp::Action;
 
     /// A recording [`Privileged`] fake: logs each call and can be set to fail at a
     /// chosen operation, so the bring-up order and its unwind are observable
-    /// without root or the real helper.
+    /// without root or the real helper. Uses `Mutex` (not `RefCell`) so it is `Sync`
+    /// — the bound the `gid_map` servicer thread imposes on the [`Privileged`] handle.
     struct FakePriv {
-        calls: RefCell<Vec<String>>,
+        calls: Mutex<Vec<String>>,
         fail_on: Option<&'static str>,
-        egress: RefCell<Option<EgressPayload>>,
+        egress: Mutex<Option<EgressPayload>>,
+        /// The gids of the last `set_gid_map` call, captured for assertions.
+        gid_map: Mutex<Option<Vec<u32>>>,
     }
 
     impl FakePriv {
         fn new(fail_on: Option<&'static str>) -> Self {
-            Self { calls: RefCell::new(Vec::new()), fail_on, egress: RefCell::new(None) }
+            Self {
+                calls: Mutex::new(Vec::new()),
+                fail_on,
+                egress: Mutex::new(None),
+                gid_map: Mutex::new(None),
+            }
         }
         fn answer(&self, op: &'static str) -> Response {
-            self.calls.borrow_mut().push(op.to_owned());
+            self.calls.lock().expect("calls lock").push(op.to_owned());
             if self.fail_on == Some(op) {
                 Response::refused(1)
             } else {
@@ -731,11 +796,15 @@ mod tests {
             }
         }
         fn log(&self) -> Vec<String> {
-            self.calls.borrow().clone()
+            self.calls.lock().expect("calls lock").clone()
         }
         /// The egress payload captured at the last `setup_egress` call.
         fn egress(&self) -> EgressPayload {
-            self.egress.borrow().clone().expect("setup_egress was called")
+            self.egress.lock().expect("egress lock").clone().expect("setup_egress was called")
+        }
+        /// The gids captured at the last `set_gid_map` call, if any.
+        fn gid_map(&self) -> Option<Vec<u32>> {
+            self.gid_map.lock().expect("gid_map lock").clone()
         }
     }
 
@@ -747,8 +816,18 @@ mod tests {
             Ok(self.answer(if addr.is_ipv4() { "del v4" } else { "del v6" }))
         }
         fn setup_egress(&self, _cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
-            *self.egress.borrow_mut() = Some(payload.clone());
+            *self.egress.lock().expect("egress lock") = Some(payload.clone());
             Ok(self.answer("setup_egress"))
+        }
+        fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response> {
+            *self.gid_map.lock().expect("gid_map lock") = Some(gids.to_vec());
+            // Stand in for the privhelper's privileged multi-gid write: write the
+            // single identity line an unprivileged parent is permitted to (the
+            // operator's own gid) so the spawn child can proceed. The fake records the
+            // *requested* gids regardless; the real privhelper writes all of them.
+            let gid = kennel_syscall::unistd::real_gid();
+            std::fs::write(format!("/proc/{pid}/gid_map"), format!("{gid} {gid} 1\n"))?;
+            Ok(self.answer("set_gid_map"))
         }
     }
 
@@ -945,5 +1024,102 @@ mod tests {
         assert_eq!(fake.log(), ["add v6", "setup_egress"], "no v4 for a high ctx");
         kennel.stop(&fake).expect("stop");
         assert_eq!(fake.log(), ["add v6", "setup_egress", "del v6"], "teardown removes only v6");
+    }
+
+    #[test]
+    fn gid_map_set_prepends_real_gid_and_dedupes() {
+        let real = kennel_syscall::unistd::real_gid();
+        // A granted set without the real gid: the real gid is prepended (so the
+        // workload keeps a sane primary group), the granted gids follow.
+        let got = gid_map_set(&[4242, 7]);
+        assert_eq!(got.first(), Some(&real), "real gid first");
+        assert!(got.contains(&4242) && got.contains(&7), "granted gids preserved");
+        assert_eq!(got.len(), 3, "no spurious entries");
+        // A granted gid equal to the real gid is not duplicated.
+        assert_eq!(gid_map_set(&[real, 99]), vec![real, 99], "deduped, order-preserving");
+    }
+
+    /// Whether the host forbids an unprivileged user namespace outright (the
+    /// `unshare(CLONE_NEWUSER)` itself fails), distinct from Ubuntu's
+    /// capability-stripping restriction (detected from the spawn error below).
+    fn userns_hard_disabled() -> bool {
+        let off = |p: &str| std::fs::read_to_string(p).is_ok_and(|s| s.trim() == "0");
+        off("/proc/sys/kernel/unprivileged_userns_clone") || off("/proc/sys/user/max_user_namespaces")
+    }
+
+    /// Whether `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+/24.04).
+    fn apparmor_restricts_userns() -> bool {
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|s| s.trim() == "1")
+    }
+
+    /// **The kenneld wiring of the `gid_map` handshake (§7.2.8).** A userns plan with a
+    /// granted supplementary group must drive `bring_up` through
+    /// [`kennel_spawn::spawn_with_gid_map`], which calls [`Privileged::set_gid_map`].
+    /// The granted gid here is the operator's own (so the fake's stand-in single-line
+    /// map is valid unprivileged), and the test asserts the helper was invoked with
+    /// exactly that gid set. Skips with the precise cause where the host forbids the
+    /// userns; the full multi-gid path with the real privhelper is the root e2e.
+    #[test]
+    fn userns_granted_group_drives_the_gid_map_handshake() {
+        if userns_hard_disabled() {
+            eprintln!("SKIP: unprivileged user namespaces are disabled on this host");
+            return;
+        }
+        let cgroup = temp_cgroup("gidmap");
+        let _ = std::fs::remove_dir(&cgroup);
+        let fake = FakePriv::new(None);
+        let gid = kennel_syscall::unistd::real_gid();
+
+        let mut s = spec(cgroup.clone(), 5);
+        s.plan = userns_granted_plan(&cgroup, gid);
+
+        let started = start(&fake, s, &mut Command::new("/bin/true"));
+        // A capability-stripped userns (Ubuntu AppArmor) surfaces as PermissionDenied
+        // from the seal's first privileged step — skip loudly, never a false pass.
+        if let Err(Error::Spawn(SpawnError::Syscall(e))) = &started {
+            if e.kind() == io::ErrorKind::PermissionDenied && apparmor_restricts_userns() {
+                let _ = std::fs::remove_dir(&cgroup);
+                eprintln!(
+                    "SKIP: capability-stripped userns (this test binary has no AppArmor `userns` profile): {e}"
+                );
+                return;
+            }
+        }
+        let kennel = started.expect("start a userns granted-group kennel");
+        kennel.stop(&fake).expect("stop");
+        assert!(
+            fake.log().contains(&"set_gid_map".to_owned()),
+            "bring_up drives the gid_map handshake on the userns granted path (log {:?})",
+            fake.log()
+        );
+        assert_eq!(
+            fake.gid_map(),
+            Some(vec![gid]),
+            "the mapped gids are the operator's real gid (the granted group is its own gid here)"
+        );
+    }
+
+    /// A userns plan re-granting `granted_gid` as a supplementary group, with the
+    /// in-place fallback view (no pivot) and permissive Landlock so `/bin/true` runs.
+    fn userns_granted_plan(cgroup: &Path, granted_gid: u32) -> Plan {
+        Plan {
+            namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::IPC | Namespaces::PID,
+            cgroup: cgroup.to_path_buf(),
+            cgroup_join: false,
+            view: None,
+            new_root: None,
+            landlock_fs: vec![(PathBuf::from("/"), AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE)],
+            landlock_net: Vec::new(),
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
+            supplementary_groups: Some(vec![granted_gid]),
+        }
     }
 }

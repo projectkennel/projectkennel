@@ -388,7 +388,7 @@ where
 /// blocks here until the workload exits; `Stop`/`List` return at once.
 fn handle_connection<P, L>(shared: &Shared<P, L>, conn: &mut UnixStream)
 where
-    P: Privileged + Clone,
+    P: Privileged + Clone + Sync,
     L: PolicyLoader,
 {
     // A malformed/closed connection is just dropped.
@@ -408,7 +408,7 @@ where
 /// it down, and report `Exited`.
 fn run_kennel<P, L>(shared: &Shared<P, L>, req: &StartRequest, fds: Vec<OwnedFd>, conn: &mut UnixStream)
 where
-    P: Privileged + Clone,
+    P: Privileged + Clone + Sync,
     L: PolicyLoader,
 {
     let ctx = match shared.reserve(&req.kennel) {
@@ -585,6 +585,9 @@ mod tests {
             Ok(HelperResponse::ok())
         }
         fn setup_egress(&self, _: &Path, _: &EgressPayload) -> io::Result<HelperResponse> {
+            Ok(HelperResponse::ok())
+        }
+        fn set_gid_map(&self, _: u32, _: &[u32]) -> io::Result<HelperResponse> {
             Ok(HelperResponse::ok())
         }
     }
