@@ -137,8 +137,8 @@ allow = [
 
 ## 7.2.5 The constructed `$HOME`
 
-> **As-built (see `08-as-built-notes.md` §8.1).** This view is **implemented**:
-> `kennel-spawn`'s `build_view_and_pivot` mounts a fresh tmpfs new root, binds the
+> The constructed `$HOME` view is built by
+> `kennel-spawn`'s `build_view_and_pivot`, which mounts a fresh tmpfs new root, binds the
 > granted system paths in place and the granted `~/…` paths remapped beneath
 > `shim_root` (read-only unless the grant is writable), constructs `/dev` from
 > `fs.dev.allow` (nodes bind-mounted and Landlock-granted read/write/`IOCTL_DEV`),

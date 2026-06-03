@@ -88,22 +88,20 @@ Setup flow:
      mount --bind /run/kennel/<ctx>/xdg   $XDG_RUNTIME_DIR
 6. Apply Landlock (defence in depth):
      Deny AF_UNIX path access outside /run/kennel/<ctx>/
-7. Apply seccomp filter for abstract-namespace:
-     Inspect connect() args, deny if sun_path[0] == '\0'
-8. execve
+     Enable LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET (+ SCOPE_SIGNAL)
+7. execve
 ```
 
-Step 7 is the awkward bit. Linux's AF_UNIX has two namespaces: filesystem-path sockets (covered by Landlock) and abstract-namespace sockets (starting with `\0`, covered by nothing in Landlock's current model). The seccomp filter inspects `connect()` syscalls, reads the first byte of `sun_path`, denies if `\0`. Fragile but cheap.
+Linux's AF_UNIX has two namespaces: filesystem-path sockets (covered by Landlock's path rules) and abstract-namespace sockets (starting with `\0`, addressed by no path ACL). Project Kennel denies the abstract namespace with **Landlock scoping**, the kernel-native mechanism.
 
-Seccomp inspection caveat: `sun_path` is in userspace memory, which seccomp filters can't dereference safely on most kernels. Workarounds:
+**Landlock scoping (ABI 6, kernel 6.12+) is the primary mechanism.** `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` makes a Landlock domain deny `connect()` to any abstract-namespace socket bound *outside* the sandbox — no `sun_path` inspection, no userspace-memory dereference, no AppArmor dependency. This is the kernel-native form of `unix.abstract = "deny"`. The companion `LANDLOCK_SCOPE_SIGNAL` isolates the kennel's signal-delivery domain the same way (a confined process cannot signal a process outside its domain), the native replacement for a PID-namespace + AppArmor signal story. Project Kennel queries the Landlock ABI and enables both scopes by default wherever the kernel reports ABI ≥ 6. Implemented in `kennel-syscall::landlock` (`Scope::ABSTRACT_UNIX_SOCKET`, `Scope::SIGNAL`, set in `Ruleset::new`). The runtime floor is 6.10 (ABI 5); the reference dev/CI box runs 6.17 (ABI 7), where both scopes apply.
 
-- **`SECCOMP_RET_TRAP`** to a userspace handler that does the inspection. Slow, complex, works.
-- **AppArmor `unix` rules** for the kennel (requires root or system policy). Cleaner.
-- **BPF LSM** with `bpf_lsm_unix_stream_connect` (kernel 5.7+, currently uncommon). Cleanest.
+**Fallback below ABI 6.** Where the kernel predates the scope bits, abstract-socket denial falls back to a seccomp `connect()` filter that reads the first byte of `sun_path` and denies on `\0`, or to AppArmor `unix` rules where a system policy is available:
 
-Pragmatic stance: ship with AppArmor as the supported mechanism for abstract-socket denial; seccomp-TRAP as fallback for non-AppArmor systems; track BPF LSM for when it's ubiquitous.
+- **`SECCOMP_RET_TRAP`** to a userspace handler that inspects `sun_path` (it lives in userspace memory most kernels can't safely dereference inline). Slow, complex, works.
+- **AppArmor `unix` rules** for the kennel (requires root or system policy). Cleaner where AppArmor is present.
 
-**Update — Landlock scoping (ABI 6, kernel 6.12+) closes this gap natively.** `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` makes a Landlock domain deny `connect()` to any abstract-namespace socket bound *outside* the sandbox — no `sun_path` inspection, no userspace-memory dereference, no AppArmor dependency. This is the kernel-native form of `unix.abstract = "deny"` and supersedes the seccomp-TRAP/AppArmor fallback above on kernels that support it. Project Kennel's runtime queries the Landlock ABI and enables this scope by default wherever the kernel reports ABI ≥ 6 (the runtime floor is 6.10 = ABI 5; on a 6.12+ host scoping applies, below it the fallback still does). Implemented in `kennel-syscall::landlock` (`Scope::ABSTRACT_UNIX_SOCKET`, set unconditionally in `Ruleset::new`). Reference runtime verified on 6.17 (ABI 7).
+The fallback is the documented path below ABI 6 only; on a supported kernel the native scoping supersedes it entirely.
 
 ## 7.4.4 Policy primitives
 
@@ -187,7 +185,7 @@ Filesystem grants (Landlock):
   deny: everything else under /home/u
 
 AF_UNIX rules:
-  abstract namespace: DENY (seccomp + AppArmor)
+  abstract namespace: DENY (Landlock scope)
   default for paths: DENY (Landlock)
   allow connect: <list of shim paths>
 
@@ -264,13 +262,13 @@ For each invariant, a regression test in `tests/unix/`:
 
 1. Context with `unix.allow = []` attempts `connect()` to `~/.ssh/agent.sock`; expect ENOENT (shim empty).
 2. Context with ssh-agent shim grant runs `ssh-add -l`; expect success against per-kennel agent.
-3. Context with `unix.abstract = "deny"` connects to `\0/org/freedesktop/DBus`; expect EACCES from seccomp or AppArmor.
+3. Context with `unix.abstract = "deny"` connects to `\0/org/freedesktop/DBus`; expect EPERM from the Landlock abstract-unix scope (EACCES from the seccomp/AppArmor fallback below ABI 6).
 4. Context lists `$XDG_RUNTIME_DIR`; expect to see only granted entries.
 5. Context attempts `cat ~/.ssh/config`; expect ENOENT.
 6. Two kennels both granted "ssh-agent" each see their own at `~/.ssh/agent.sock`; expect each agent's `ssh-add -l` to return only its own keys.
 7. Context attempts to read `~/.gnupg/private-keys-v1.d/`; expect ENOENT.
 8. Context attempts to connect to `/var/run/docker.sock`; expect ENOENT.
-9. Context attempts to connect to abstract `\0/var/run/docker.sock`; expect EACCES.
+9. Context attempts to connect to abstract `\0/var/run/docker.sock`; expect EPERM from the Landlock abstract-unix scope.
 10. Kennel's `--dry-run` output enumerates all bind mounts; verify against policy.
 
 The full test corpus is approximately 25 cases.

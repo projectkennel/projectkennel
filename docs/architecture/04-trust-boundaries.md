@@ -15,11 +15,11 @@ The discipline itself — *what* sanitisation looks like — is in CODING-STANDA
 | 3 | Untrusted template → signature verifier | bytes + claimed signature → verified bytes | `kennel-policy` (signature module) |
 | 4 | Workload → BPF programs | syscall args → kernel verdict | BPF programs in `bpf/` |
 | 5 | BPF → userspace audit reader | ringbuf bytes → typed `AuditEvent` | `kennel-bpf` (ringbuf parser) |
-| 6 | CLI → kenneld | wire-format bytes → typed request | `kennel-ipc-server` |
+| 6 | CLI → kenneld | wire-format bytes → typed request | kenneld (`control` decoder) |
 | 7 | Untrusted client → kenneld socket | connecting process → authenticated user | kenneld (SO_PEERCRED check) |
 | 8 | Workload → ssh-agent / dbus-proxy | socket data → daemon | external (`xdg-dbus-proxy`, ssh-agent) |
 | 9 | Workload → netproxy | SOCKS5 bytes → resolved destination | `kennel-netproxy` |
-| 10 | Kernel-side string → audit log | bytes from `task->comm`, paths → sanitised text | `kennel-audit` (sanitiser) |
+| 10 | Kernel-side string → audit log | bytes from `task->comm`, paths → sanitised text | `kennel-text` (sanitiser) |
 | 11 | Network bytes → DNS resolver | resolver response → allowlist decision | `kennel-netproxy` |
 | 12 | Workload → audit log files | file system access to its own audit dir | constructed shim (no access by default) |
 | 13 | Settled policy → runtime | signed settled artefact → enforced policy | `kennel-spawn` (settled verifier) |
@@ -43,7 +43,7 @@ Each boundary is described in its own section below. The descriptions follow a c
 
 The validator rejects out-of-scope requests with the `out-of-scope` error code; nothing happens at the privileged syscall level.
 
-**Failure mode.** A compromised kenneld asking the privhelper to add `169.254.169.254` to loopback would be refused. The privhelper logs the refusal to its own audit channel (the `priv.jsonl` file or journald, per the configured sink) and exits non-zero. kenneld observes the refusal and surfaces it.
+**Failure mode.** A compromised kenneld asking the privhelper to add `169.254.169.254` to loopback would be refused. The privhelper logs the refusal to its own audit channel and exits non-zero. kenneld observes the refusal and surfaces it.
 
 **Threat IDs addressed.** T1.6 (lateral movement: a hostile caller cannot direct the privhelper to do anything outside the reserved scope), T3.1 (setuid escalation: the privhelper is small and refuses out-of-scope requests; even on subversion of the calling process, the privileged syscall surface is bounded).
 
@@ -141,17 +141,16 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 
 ## 6. CLI → kenneld
 
-**What crosses.** Length-prefixed JSON requests on the kenneld Unix socket.
+**What crosses.** Length-prefixed binary frames on the kenneld Unix socket: a `u32` body length, then a body that begins with an op byte and continues with primitively-encoded fields (lengths, strings, argv).
 
 **Trusted side.** The wire format is internal. Both sides come from the same release. But kenneld still validates every field because protocol drift is a possibility (a CLI compiled against a different kenneld) and because the same socket handler is the path for any future external integration.
 
-**Validator.** `kennel-ipc-server`. Per CODING-STANDARDS.md §10.2 and `02-4-ipc.md`:
+**Validator.** kenneld's `control` decoder. Per CODING-STANDARDS.md §10.2 and `02-4-ipc.md`:
 
-- Frame length is bounded at 1 MiB; longer frames are a protocol violation, connection dropped.
-- Body must be UTF-8 JSON.
-- Parsing is to typed `Request` structs with `#[serde(deny_unknown_fields)]`.
+- Frame length is bounded; longer frames are a protocol violation, connection dropped (`WireError::TooLarge`).
+- Each field is bounds-checked as it is read; a truncated or oversized field is `WireError::Truncated`/`WireError::TooLarge`.
+- String fields must be valid UTF-8 (`WireError::BadString`); the op byte must name a known request.
 - Per-method param validation (e.g., kennel names follow `[a-z0-9-]{1,64}`).
-- The version handshake is the first exchange; mismatched protocol versions cause a structured `version-mismatch` error followed by connection close.
 
 **Failure mode.** Structured error response (with code from the catalogue in `02-4-ipc.md`); the connection remains open for the client to issue the next request or close. Protocol-framing violations close the connection.
 

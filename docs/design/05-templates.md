@@ -65,12 +65,11 @@ reason = "the project I am working on"
 [[net.allow.add]]
 name = "api.anthropic.com"
 ports = [443]
-tls.required = true
 reason = "Claude API"
 threats.exposed = ["T1.8"]
 ```
 
-The user policy is approximately 10 lines. Everything else — the credential denylist, the constructed view, the per-kennel loopback, the seccomp filter — is inherited from the template.
+The user policy is approximately 10 lines. Everything else — the credential denylist, the constructed view, the per-kennel loopback, the Landlock scoping — is inherited from the template.
 
 ## 5.3 Delta syntax
 
@@ -95,7 +94,6 @@ reason = "the project I am working on"
 [[net.allow.add]]
 name = "api.anthropic.com"
 ports = [443]
-tls.required = true
 reason = "Claude API"
 threats.exposed = ["T1.8"]
 
@@ -193,7 +191,6 @@ Every rule that grants a capability carries threat metadata:
 [[net.allow]]
 name = "api.anthropic.com"
 ports = [443]
-tls.required = true
 reason = "Claude API"
 threats.exposed = ["T1.8"]
 ```
@@ -365,10 +362,12 @@ Version pinning constrains *which* version is referenced. It does not, on its ow
 Project Kennel maintains a lockfile, `kennel.lock`, recording for each resolved reference:
 
 - The name and version.
-- The SHA-256 of the resolved artefact's signed content.
 - The signing key ID that the signature verified against.
+- The artefact's ed25519 signature.
 
-On every subsequent load, the resolver recomputes the artefact's content hash and checks it against the lockfile. A mismatch — same version, different bytes — is a hard error, not a warning. The lockfile is the transition from trust-on-first-use (the first time a reference is resolved and recorded) to trust-pinned (every load thereafter). `kennel upgrade` is the only sanctioned way to change a locked entry, and it surfaces the content change for review.
+The signature *is* the content commitment. An ed25519 signature is deterministic (RFC 8032) and bound to the exact canonical bytes it covers, so a version re-tagged to different bytes — even re-signed by another trusted key — produces a different signature. There is no separate content hash: pinning the signature already pins the bytes, and the project takes no `sha2` dependency for a second commitment it does not need.
+
+On every subsequent load, the resolver re-verifies each reference and checks its recorded signature against the lockfile. A mismatch — same version, different signature — is a hard error, not a warning. The lockfile is the transition from trust-on-first-use (the first time a reference is resolved and recorded) to trust-pinned (every load thereafter). `kennel upgrade` is the only sanctioned way to change a locked entry, and it surfaces the change for review.
 
 The lockfile lives beside the leaf policy and is committed to source control by teams who keep their kennel policies in a repository. A policy plus its lockfile is a reproducible specification: anyone resolving the same policy against the same trust store gets byte-identical effective policy, or a hard failure.
 

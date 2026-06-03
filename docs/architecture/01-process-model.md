@@ -10,24 +10,24 @@ Project Kennel ships the following binaries.
 
 ### `kennel` (the CLI)
 
-The user's entry point. Stateless. Reads a policy from disk, validates it, queries `kenneld` to ensure per-kennel daemons exist, performs the spawn sequence in its own process, and supervises the workload until it exits.
+The user's entry point. Stateless. For `run`, it asks `kenneld` to start the kennel, passing the terminal's three stdio file descriptors over `SCM_RIGHTS`; kenneld performs the spawn sequence and attaches the workload to those descriptors. The CLI blocks until the workload exits and returns its exit code. For `compile`, `validate`, and `sign` it works purely on local policy files and never contacts kenneld.
 
-The CLI's process is the parent of the workload. This means `ctrl-C` in the user's terminal propagates naturally to the workload; closing the terminal closes the kennel. Operationally the CLI behaves like any other command the user runs.
+The workload is a child of kenneld, not of the CLI. Signal handling is the CLI's job: `ctrl-C` reaches the CLI, which the user perceives as closing the kennel; the CLI blocks for the workload's lifetime and exits with its code. Operationally the CLI behaves like any other command the user runs.
 
 Runs as the user. Subcommands and flags are documented in `02-1-cli.md`.
 
 ### `kenneld` (the per-user supervisor)
 
-Long-running per-user daemon. One per logged-in user. Started by `systemd --user` on Linux (preferred), `launchd` on macOS, or manually for non-managed sessions.
+Per-user daemon, socket-activated by `systemd --user` on the first `kennel run` and persisting for the rest of the user session. One per logged-in user.
 
 Responsibilities:
 
-- **Daemon lifecycle.** Owns the lifetime of per-kennel daemons (`kennel-netproxy`, `kennel-ssh-agent`, `xdg-dbus-proxy`). Spawns them on first use; reaps them after a grace period when the last kennel referencing them exits.
-- **Audit log aggregation.** Per-kennel JSONL files live under `~/.local/state/kennel/<kennel>/`; kenneld writes to them, rotates them, and serves audit queries from the CLI's `kennel audit` subcommand.
-- **Policy caches.** Template-chain resolution is pure but not free; kenneld amortises it across multiple `kennel run` invocations for the same kennel.
-- **Privhelper mediation.** When a CLI needs a privhelper invocation (loopback address, cgroup creation), kenneld issues it on the CLI's behalf and returns the result. This means privhelper is invoked once per *kennel start* rather than once per *CLI invocation* for the same kennel.
+- **Kennel lifecycle.** Each `kennel run` is one kennel. kenneld brings it up — allocates a context byte, invokes the privhelper for the loopback addresses and cgroup, writes the proxy config, launches `kennel-netproxy`, performs the spawn sequence — and tears it down immediately when the workload exits. There is no grace period, no draining state, and no per-kennel reference counting; one workload is one kennel, with its own proxy, addresses, cgroup, and constructed view.
+- **Spawning the workload.** kenneld runs the spawn sequence (`kennel-spawn`) on the CLI's behalf, attaching the workload to the stdio descriptors the CLI passed over `SCM_RIGHTS`.
+- **Audit drain.** The BPF ringbuf reader drains kernel audit events; per-kennel JSONL files live under `~/.local/state/kennel/<kennel>/` (the egress proxy writes the network log, kenneld wires its path).
+- **Privhelper mediation.** kenneld issues the privhelper invocations (loopback address, cgroup creation) during a kennel's bring-up and teardown.
 
-Runs as the user. If kenneld is not running, the CLI degrades: it spawns daemons as its own children, they die with the kennel, and privhelper is invoked directly. Operationally this is fine for one-shot use; kenneld is the standard configuration for any workflow with multiple concurrent kennels or repeated re-entry.
+Runs as the user.
 
 ### `kennel-privhelper` (the privileged component)
 
@@ -100,26 +100,23 @@ A representative process tree for a user running two concurrent kennels (`ai-cod
 systemd --user                                              (user, supervisor)
 ├── kenneld                                                 (user)
 │   ├── kennel-netproxy [ai-coding]                         (user)
-│   ├── kennel-ssh-agent [ai-coding]                        (user)
-│   ├── xdg-dbus-proxy [web-dev]                            (user)
-│   └── kennel-netproxy [web-dev]                           (user)
+│   ├── bash [inside ai-coding kennel]                      (user, in cgroup, Landlock applied)
+│   │   └── ... workload subprocesses ...
+│   ├── kennel-netproxy [web-dev]                           (user)
+│   └── npm [inside web-dev kennel]                         (user, in cgroup, Landlock applied)
+│       └── ... build subprocesses ...
 │
 └── bash (the user's shell)                                 (user)
-    ├── kennel run ai-coding bash                           (user, supervisor of ai-coding workload)
-    │   └── bash [inside ai-coding kennel]                  (user, in cgroup, Landlock applied)
-    │       └── ... workload subprocesses ...
-    │
-    └── kennel run web-dev npm test                         (user, supervisor of web-dev workload)
-        └── npm [inside web-dev kennel]                     (user, in cgroup, Landlock applied)
-            └── ... build subprocesses ...
+    ├── kennel run ai-coding.settled.toml ai-coding -- bash (user, client; blocks on the workload)
+    └── kennel run web-dev.settled.toml web-dev -- npm test (user, client; blocks on the workload)
 ```
 
 `kennel-privhelper` does not appear: it is invoked on demand, performs one operation, and exits before any kennel workload starts.
 
 Two structural points worth naming:
 
-1. **The workload's immediate parent is the `kennel run` invocation**, not kenneld. Signal propagation (`ctrl-C`, `SIGHUP`, `SIGTERM` from the shell) reaches the workload naturally. Closing the terminal closes the kennel.
-2. **Per-kennel daemons are children of kenneld**, not of any `kennel run` invocation. They survive across multiple `kennel run` invocations against the same kennel. Re-entering a running kennel does not respawn the proxy or the ssh-agent.
+1. **The workload's immediate parent is kenneld**, not the `kennel run` invocation. kenneld performs the spawn and owns the workload; the CLI is a client that holds the connection open for the workload's lifetime and forwards its exit code.
+2. **Each `kennel run` is one kennel** with its own `kennel-netproxy` child of kenneld. Kennels are not shared by name and per-kennel resources are not reference-counted: a second `kennel run` is a separate kennel with its own proxy, addresses, cgroup, and view.
 
 ---
 
@@ -168,54 +165,42 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
 
 Notes on the diagram:
 
-- The "control protocol" between CLI and kenneld handles kennel start, kennel stop, status query, audit query, and policy reload. Wire format in `02-4-ipc.md`.
+- The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with the workload's stdio fds over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-4-ipc.md`.
 - The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is `127.<tag>.<ctx>.1:1080`, never the control socket.
 - The ssh-agent socket is bind-mounted from `/run/kennel/<id>/ssh-agent.sock` into the workload's `$HOME/.ssh/agent.sock` via the shim. The workload sees only the shim path.
-- BPF programs do not push events to userspace; they write into a ringbuf. A reader task in kenneld drains the ringbuf and writes JSONL events to the audit directory.
-- The privhelper is invoked by kenneld in the standard configuration, not by the CLI directly. Without kenneld, the CLI invokes the privhelper itself.
+- BPF programs do not push events to userspace; they write into a ringbuf. A reader in kenneld drains the ringbuf and writes JSONL events to the audit directory.
+- The privhelper is invoked by kenneld during a kennel's bring-up and teardown.
 
 ---
 
 ## Lifecycle sketch
 
-> **As-built (see `08-as-built-notes.md` §8.1 row 15).** The per-kennel
-> reference-counting, the **60s grace period**, and the `draining`/reclaim states
-> below were **dropped** (maintainer decision). As built: the *daemon* (kenneld)
-> persists for the user session; a `kennel run` is *one* kennel (its own ctx,
-> cgroup, proxy, loopback addresses, view), and those resources tear down
-> **immediately** when the workload exits — no grace window, no daemon sharing by
-> name, no reclaim. The `starting`/`running` registry states and the concurrent
-> accept loop are real; the `draining`/reclaim machinery is not.
+The full lifecycle is in `05-state-and-supervision.md`. The summary:
 
-The full lifecycle is described in `05-state-and-supervision.md`. The summary:
-
-- **kenneld** starts at login (via `systemd --user`) and runs until logout. It is the longest-lived Kennel process.
-- **The first `kennel run <kennel>`** for a given kennel asks kenneld to ensure the per-kennel daemons exist. If they do not, kenneld spawns them, invokes the privhelper to allocate the loopback addresses and cgroup, and waits for the daemons to signal ready. Then the CLI proceeds with the spawn sequence.
-- **The workload** runs as a child of the `kennel run` process. The CLI supervises it; the audit log captures lifecycle events (start, exit, abnormal termination).
-- **Subsequent `kennel run <kennel>`** invocations for the same kennel reuse the existing daemons. Kenneld's reference counter for the per-kennel daemons increments.
-- **When the last `kennel run` for a kennel exits**, kenneld's reference counter drops to zero. After a grace period (default: 60 seconds), kenneld reaps the daemons and invokes the privhelper to remove the loopback addresses. The grace period covers the user's "open another terminal and `kennel run` again" pattern without daemon churn.
-- **`kennel-privhelper`** invocations are stateless and synchronous: exec'd, read request, perform, respond, exit. The privhelper does not retain any state between invocations.
+- **kenneld** is socket-activated on the first `kennel run` and persists for the user session. It is the longest-lived Kennel process.
+- **`kennel run`** asks kenneld to start a kennel. kenneld allocates a context byte, invokes the privhelper to add the loopback addresses and create the cgroup, writes the proxy config and launches `kennel-netproxy`, then performs the spawn sequence. The workload's PID lands in the kennel's cgroup.
+- **The workload** runs as a child of kenneld. The CLI holds its connection open for the workload's lifetime; the audit log captures lifecycle events.
+- **When the workload exits**, kenneld tears the kennel down immediately: reaps the proxy, invokes the privhelper to remove the loopback addresses, deletes the cgroup, and discards the constructed view. There is no grace window and no daemon sharing by name — a second `kennel run` is a separate kennel.
+- **`kennel-privhelper`** invocations are stateless and synchronous: exec'd, read request, perform, respond, exit. The privhelper retains no state between invocations.
 
 ---
 
 ## Concurrency
 
-Multiple `kennel` CLI invocations connect to kenneld concurrently. This is the normal case — two terminals, parallel kennel starts, `kennel audit` running against one kennel while a workload runs in another. The transport supports it natively: kenneld uses a standard `accept()` loop over its Unix socket and handles each connection in its own worker.
+Multiple `kennel` CLI invocations connect to kenneld concurrently. This is the normal case — two terminals, parallel kennel starts. The transport supports it natively: kenneld runs a standard `accept()` loop over its Unix socket and handles each connection in its own thread (`serve()` spawns one thread per accepted connection; blocking, no async runtime).
 
 Coordination across concurrent requests *inside* kenneld is internal:
 
-- A mutex (or `RwLock` where reads dominate) guards the shared registry of kennels, the per-kennel reference counters, the `<ctx>` byte allocator, and the audit log file handles.
-- Each kennel has a state machine: `absent` → `starting` → `running` → `draining` → `stopped`. Transitions are guarded by the registry mutex; long operations (privhelper invocation, daemon readiness wait) happen outside the lock.
-- A CLI requesting a kennel in `starting` waits on a condvar until the in-flight setup completes. A CLI requesting a kennel in `draining` reclaims it — transitioning back to `running` rather than waiting through stop+restart. This handles "open another terminal during the grace window" cleanly.
+- A mutex guards the shared registry of kennels and the `<ctx>` byte allocator.
+- Each kennel is `starting` until its workload is launched, then `running`; it is removed from the registry when the workload exits and teardown completes. There is no `draining` state and no reference counting — one workload is one kennel.
+- The registry mutex is not held across the slow bring-up work (privhelper invocation, proxy launch, spawn); the registry records the kennel before that work begins and updates it after.
 
 Cross-process exclusion uses `flock`:
 
 - `/run/user/<uid>/kennel/kenneld.lock` — exclusive, one kenneld per user.
-- `/run/kennel/privhelper.lock` — exclusive across the machine, serialising privhelper invocations in degraded mode.
+- `/run/kennel/privhelper.lock` — exclusive across the machine, serialising privhelper invocations.
 
-Stale-state recovery (kenneld crashed while daemons survive) is handled at kenneld startup: scan `/run/kennel/<id>/` pidfiles, verify each survivor against `/proc/<pid>/exe`, adopt the survivors, reconstruct reference counts from cgroup membership.
-
-Full state-machine transitions, the lockfile inventory, and the recovery procedure are in `05-state-and-supervision.md`.
+Full state and the lockfile inventory are in `05-state-and-supervision.md`.
 
 ---
 

@@ -4,7 +4,7 @@ The pinned build environment, referenced by [CODING-STANDARDS.md](../governance/
 
 ## Status
 
-The reference runtime is not yet implemented; exact version pins below are marked *[TBD]* until the workspace and CI exist. The structure and intent are fixed.
+The workspace is built and the reference runtime is verified on kernel 6.17 (Landlock ABI 7). Some exact version pins below remain *[TBD]* until CI and the release-image recipe are finalised; the toolchain choices and structure are fixed. First-verify-pass versions are recorded inline where a final pin is still owed.
 
 ## Rust toolchain
 

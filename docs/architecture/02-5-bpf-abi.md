@@ -79,7 +79,7 @@ struct kennel_meta {           // 64 bytes (loader value_size); bpf/maps.h is au
 };
 ```
 
-The loader verifies `magic` and `abi_version` after population by reading the map back. Mismatch indicates a corrupted build; the kennel fails to start. (NB the proxy fields ended up ordered `proxy_port` before `proxy_addr_v6`, with explicit `_pad0`, for natural alignment — see `08-as-built-notes.md` §8.1; the BPF enforcement path reads the deny/allow tries, not these fields.)
+The loader verifies `magic` and `abi_version` after population by reading the map back. Mismatch indicates a corrupted build; the kennel fails to start. The proxy fields are ordered `proxy_port` before `proxy_addr_v6`, with an explicit `_pad0`, for natural alignment; the BPF enforcement path reads the deny/allow tries, not these fields.
 
 **`allow_v4`** (BPF_MAP_TYPE_LPM_TRIE)
 
@@ -182,7 +182,7 @@ struct audit_payload_connect {
 };
 ```
 
-Strings — destination names, paths — are not included in BPF events. The kernel side has the address; name resolution to a hostname happens in the netproxy (which sees the SOCKS5 request) or in the resolver, both userspace. Audit-log enrichment correlates by the `ts_ns` and the `(addr, port)` tuple.
+Strings — destination names, paths — are not included in BPF events. The kernel side has the address; name resolution to a hostname happens in the netproxy, which sees the SOCKS5 request and resolves names through the OS resolver in userspace. Audit-log enrichment correlates by the `ts_ns` and the `(addr, port)` tuple.
 
 ---
 

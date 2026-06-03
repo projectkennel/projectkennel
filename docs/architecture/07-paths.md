@@ -84,7 +84,7 @@ Owner: user. Mode: directory `0700`, files `0600` (the socket too).
 
 ### `/run/kennel/<id>/`
 
-Per-kennel runtime state. Created by kenneld; cleaned when the kennel exits (after the grace period).
+Per-kennel runtime state. Created by kenneld; cleaned immediately when the workload exits.
 
 ```
 /run/kennel/<id>/
@@ -96,7 +96,7 @@ Per-kennel runtime state. Created by kenneld; cleaned when the kennel exits (aft
 ├── dbus-proxy.sock                  dbus-proxy socket (shim-mounted)
 ├── dbus-proxy.ctl
 ├── dbus-proxy.pid
-├── kennel.lock                      flock target: per-kennel exclusion (rare; for restart-while-draining)
+├── kennel.lock                      flock target: per-kennel exclusion (rare; guards concurrent bring-up of one kennel)
 └── kennel.json                      current kennel metadata (uuid, ctx, policy_hash)
 ```
 
@@ -212,9 +212,9 @@ The resolver requires the *exact* `<name>@<version>`; it does not fall back to a
 | `~/.config/kennel/` | Operator | Operator | All restarts and reboots |
 | `~/.local/state/kennel/<kennel>/` | kenneld (first kennel start) | Operator (audit retention) | All restarts and reboots |
 | `/run/user/<uid>/kennel/` | kenneld (startup) | logout (systemd) or kenneld (graceful shutdown) | User session |
-| `/run/kennel/<id>/` | kenneld (kennel start) | kenneld (after grace period, last reference dropped) | Kennel lifetime |
-| `/sys/fs/cgroup/kennel/<id>/` | privhelper or systemd delegation | kenneld (after grace period) | Kennel lifetime |
-| `/sys/fs/bpf/kennel/<id>/` | kenneld (kennel start) | kenneld (after grace period) | Kennel lifetime |
+| `/run/kennel/<id>/` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/sys/fs/cgroup/kennel/<id>/` | privhelper or systemd delegation | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/sys/fs/bpf/kennel/<id>/` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/etc/kennel/` | Package installation | Package removal | All restarts and reboots |
 | `/run/kennel/privhelper.lock` | First privhelper invocation | Reboot (tmpfs) | Reboot |
 

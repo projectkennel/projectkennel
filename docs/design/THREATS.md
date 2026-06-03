@@ -27,7 +27,7 @@ For the strategic argument — why the user level requires its own enforcement v
 
 ## Threat families
 
-The catalogue is organised into three families.
+The catalogue is organised into three in-scope families plus a set of out-of-scope threats.
 
 | Family | IDs | Theme |
 |---|---|---|

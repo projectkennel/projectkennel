@@ -303,18 +303,16 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 
 ## The settled policy (compilation)
 
-> **As-built status (see `08-as-built-notes.md` §8.1/§8.2).** The implemented
-> settled schema is authoritative in `src/crates/kennel-policy/src/settled.rs`. Two
-> things to know when reading below. (1) The settled `effective_policy` carries
-> only the **runtime-relevant** sections — `net`, `fs`, `exec`, `proc`, `cap`,
-> `seccomp`, `lifecycle`; the source-only sections (`unix`, `dbus`, `x11`, `env`,
-> `ptrace`, `signal`, `audit`) are compile-time concerns and are **not** present
-> in the settled form, so "every section" below means that resolved subset.
-> (2) Fields added since this chapter was written: `fs.tmp` (`private`,
-> `size_mib`, `mode`), `fs.dev.allow`, `proc.hidepid`, `net.allow_names`
-> (by-name proxy allowlist), and `net.proxy` (`offset`, `port`). Settled
-> `FsPolicy` uses flat field names (`home_shadow`, `shim_root`), not nested
-> `fs.home.*`.
+The settled schema is defined in `src/crates/kennel-policy/src/settled.rs`. The
+settled `effective_policy` carries only the **runtime-relevant** sections —
+`net`, `fs`, `exec`, `proc`, `cap`, `seccomp`, `lifecycle`. The source-only
+sections (`unix`, `dbus`, `x11`, `env`, `ptrace`, `signal`, `audit`) are
+compile-time concerns and are not present in the settled form, so "every
+section" below means that resolved subset. The settled net section carries
+`net.allow_names` (the by-name proxy allowlist) and `net.proxy` (`offset`,
+`port`); the settled fs section adds `fs.tmp` (`private`, `size_mib`, `mode`)
+and `fs.dev.allow`, and the proc section adds `proc.hidepid`. Settled `FsPolicy`
+uses flat field names (`home_shadow`, `shim_root`), not nested `fs.home.*`.
 
 The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
 
@@ -326,9 +324,9 @@ The settled policy is an **internal-stable** surface per `02-0-overview.md`, wit
 
 ### Format
 
-The settled policy is a TOML document, like every other Project Kennel config artefact — there is no second config format. It is machine-produced and machine-consumed (never hand-edited), but TOML serves a machine artefact just as well as a hand-authored one, and keeping one format avoids a second parser/serialiser dependency.
+The settled policy is a TOML document, like every other Project Kennel config artefact — there is no second config format and no JSON serialiser anywhere in the tree (`basic-toml` is the only serde format dependency). It is machine-produced and machine-consumed (never hand-edited), but TOML serves a machine artefact just as well as a hand-authored one, and keeping one format avoids a second parser/serialiser dependency.
 
-Reproducible hashing and signing do **not** require JSON's canonical form (sorted keys, normalised numbers): the canonical bytes are produced and verified by the *same* implementation, so a deterministic serialisation in fixed field order is sufficient and reproducible. (The schema carries no floating-point values, so "number normalisation" — the hard part of any canonicalisation — does not arise.) The procedure is documented under `kennel-policy::canonical`; the `[signature]` table is excluded from it. If independent third-party verification ever becomes a hard requirement, the signature would cover the literal stored payload bytes (still TOML), which is format-agnostic and needs no canonicaliser at all.
+The canonical form for hashing and signing is **deterministic TOML emitted in struct-field order**. This is reproducible because the signer and the verifier are the *same* implementation: a fixed field order yields byte-identical canonical output on both sides. (The schema carries no floating-point values, so "number normalisation" — the hard part of any canonicalisation — does not arise.) The procedure is documented under `kennel-policy::canonical`; the `[signature]` table is excluded from it. If independent third-party verification ever becomes a hard requirement, the signature would cover the literal stored payload bytes (still TOML), which is format-agnostic and needs no canonicaliser at all.
 
 Top-level structure (the `[signature]` table is a sibling, excluded from the canonical form):
 

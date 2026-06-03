@@ -31,10 +31,10 @@ Every outbound connection from a kennel terminates at a kennel-local proxy that 
 
 Why this is the right primitive:
 
-- **Policy lives in user-space** where it can be expressive: per-destination TLS pinning, per-host rate limits, structured audit, name resolution control. The kernel just enforces "you may only talk to the proxy".
-- **DNS is the proxy's problem.** The kennel cannot resolve names itself; the proxy resolves on its behalf or refuses unknown names. DNS rebinding is structurally impossible — the kennel never holds an address, only a name, and the proxy resolves under policy.
+- **Policy lives in user-space** where it can be expressive: per-host rate limits, structured audit, name-resolution vetting. The kernel just enforces "you may only talk to the proxy".
+- **DNS is the proxy's problem.** The kennel cannot resolve names itself; the proxy resolves on its behalf (via the OS resolver) and vets the answers against the allowlist before dialling. DNS rebinding is structurally impossible — the kennel never holds an address, only a name, and the proxy resolves and vets under policy.
 - **Audit is free.** The proxy logs every request with the requesting kennel, destination, byte counts, duration. No need to correlate kernel events with policy decisions; the proxy is the policy decision.
-- **TLS inspection is optional but available.** If the proxy is MITM-capable (own CA installed in the kennel's trust store), certificate pinning and request logging become possible. Costs: complexity, breaks TLS-pinning apps, requires CA management. Optional layer, off by default.
+- **TLS inspection is a future enterprise layer.** A MITM-capable proxy (own CA installed in the kennel's trust store) would enable certificate pinning and request logging. Costs: complexity, breaks TLS-pinning apps, requires CA management. Roadmap, not in the v1 surface.
 - **Composes with loopback isolation** (§7.3.6). The kennel's `127.42.x.1` is where the proxy lives. The kennel cannot reach the user's `127.0.0.1` services except through the proxy.
 
 The kernel-level rules become trivially expressible:
@@ -50,12 +50,12 @@ The proxy is where the interesting policy lives, and that policy is in user-spac
 
 A small, single-purpose daemon launched per kennel:
 
-- Approximately 1000 lines of Go or Rust.
-- Reads its policy from the same TOML file the rest of the kennel config lives in.
-- Listens on the kennel's loopback address, port 1080 (or assigned).
+- Blocking, thread-per-connection Rust (`kennel-netproxy`). No async runtime — the same TCB bar as OpenSSH.
+- Reads the settled policy emitted by the compiler.
+- Listens on **both** the kennel's v4 and v6 loopback addresses (`Proxy::serve_all` over a listen set; kenneld passes both loopback addresses). Egress reaches the proxy symmetrically over either family.
 - Speaks SOCKS5 (well-defined, every HTTP client and most others speak it via `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`).
 - Optionally speaks HTTP CONNECT (some clients prefer it).
-- Resolves DNS itself, against a configured resolver, with the policy's name allowlist applied.
+- Resolves names via the OS resolver and vets the answers against the policy's name allowlist and the invariant denies before dialling.
 - Logs JSONL audit events.
 - Refuses gracefully on policy violation, with a useful error the requesting process can read.
 
@@ -66,7 +66,7 @@ SOCKS5 specifically because:
 - Universally supported. `curl`, `wget`, `git`, `pip`, `npm`, `cargo`, `ssh` (via `ProxyCommand`), every browser.
 - Crucially: `socks5h://` (with the `h`) means "let the proxy resolve the name". The kennel never resolves DNS itself.
 
-What SOCKS5 doesn't natively cover, the proxy adds: TLS inspection (optional), per-destination policy beyond allow/deny (rate limits, byte caps, time windows), structured audit.
+What SOCKS5 doesn't natively cover, the proxy adds: per-destination policy beyond allow/deny (rate limits, byte caps, time windows), structured audit. TLS inspection is a future enterprise layer.
 
 ## 7.3.4 Policy primitives
 
@@ -85,29 +85,16 @@ proxy_listen_v4_address = "1:1080"  # optional "offset:port" within the kennel's
 proxy_listen_v6 = true              # enable the v6 listener (default false)
 proxy_listen_v6_address = "1:1080"  # optional "offset:port" within the kennel's /64
 
-# NOTE (as-built, 08-as-built-notes.md §8.1): the [net.dns] block below was
-# DROPPED. The proxy resolves names with the OS resolver (getaddrinfo) and vets
-# the answers by policy (the name must clear the allowlist; the resolved address
-# is re-checked against the deny rules + special-use refusal). There is no
-# configurable resolver/mode/cache_ttl. The tls.* fields below are likewise NOT
-# built (TLS inspection is an enterprise/future layer); a NameRule carries only
-# name/ports/protocol. Both are retained here as design intent, not as-built.
-[net.dns]
-resolver = "1.1.1.1:53"     # kennel's DNS resolver, used by the proxy
-mode = "allowlist"          # "allowlist" | "passthrough" | "system"
-                            # allowlist: only names in net.allow are resolvable
-                            # passthrough: any name resolves, but connect still gated
-                            # system: use system resolver
-cache_ttl = "5m"            # how long resolved IPs are pinned
-on_resolve_change = "deny"  # "deny" | "warn" | "allow" — see §7.3.5
+# Name resolution is not configured in policy: the proxy uses the OS resolver and
+# vets the answers (the name must clear net.allow; the resolved address is
+# re-checked against net.deny + special-use refusal). The answer-vetting is the
+# security property — there is no hand-rolled DNS and no resolver dependency.
 
-# Outbound allow rules
+# Outbound allow rules. A settled rule carries only name/ports/protocol.
 [[net.allow]]
 name = "api.openai.com"
 ports = [443]
 protocol = "tcp"
-tls.required = true         # NOT BUILT (see note above) — design intent only
-tls.pin_sha256 = ["abc123..."]   # NOT BUILT — optional cert pinning, future
 
 [[net.allow]]
 name = "github.com"
@@ -178,19 +165,13 @@ DNS is where naive proxy designs leak. The full story:
 
 **The kennel cannot do its own DNS.** Cgroup BPF rules deny `connect()` to anything except the proxy. UDP/53 and TCP/53 to external resolvers are blocked. `/etc/resolv.conf` pointing at `127.0.0.53` (systemd-resolved) is broken inside the kennel unless that AF_UNIX socket is also denied.
 
-Best practice: shadow `/etc/resolv.conf` in the kennel to point at the proxy's address, run a stub DNS resolver inside the proxy daemon that serves only the allowlisted names.
+The kennel does not run DNS at all. Clients use `socks5h://` which defers resolution to the proxy and doesn't require local DNS; the proxy then resolves via the OS resolver and vets the answers. The kennel's `/etc/resolv.conf` can be set to an invalid IP so that failing-to-go-through-the-proxy is immediately obvious.
 
-Alternative: don't run DNS in the kennel at all. Clients use `socks5h://` which doesn't require local DNS. Set the kennel's `/etc/resolv.conf` to an invalid IP so failing-to-go-through-the-proxy is immediately obvious.
+**Name resolution happens in the proxy.** On a request to `github.com`, the proxy resolves the name via the OS resolver and dials the resulting address. There is no hand-rolled resolver and no configurable upstream: the proxy delegates resolution to the OS and makes its security decision on the *answer*.
 
-**Name resolution happens in the proxy.** The proxy maintains a name → IP cache. On first request to `github.com`, the proxy resolves via its configured upstream resolver, caches the result, and dials the resulting IP. On subsequent requests, the cached IP is used until `cache_ttl` expires.
+**Answer-vetting is the security property.** The name must clear the allowlist (`net.allow`), and every address the OS resolver returns is then re-checked against the deny rules and the special-use refusals (cloud metadata, RFC1918, link-local, host loopback) before the proxy dials it. A poisoned or rebinding answer that resolves an allowlisted name to a denied address is refused at dial time — the kennel never holds an address, only a name, and the proxy resolves and vets under policy on every request.
 
-**Re-resolution policy is explicit.** When the TTL expires and the proxy re-resolves, what happens if the IP has changed?
-
-- `on_resolve_change = "allow"`: accept the new IP, log a notice. Lowest friction. Vulnerable to TTL-driven DNS rebinding.
-- `on_resolve_change = "warn"`: accept the new IP but log a warning. Default for most workflows.
-- `on_resolve_change = "deny"`: refuse the new IP, require explicit policy reload. Highest friction, strongest. For high-value kennels.
-
-**The allowlist is by name, not IP.** The user writes `github.com`; the proxy enforces against whatever IP resolves to. This is the right level of abstraction — IPs change, names are stable — but the resolver itself is a trust point. Pin the resolver: use a known DoH endpoint if the threat model demands it.
+**The allowlist is by name, not IP.** The user writes `github.com`; the proxy enforces against whatever the name resolves to, then vets each resolved address against the denies. This is the right level of abstraction — IPs change, names are stable — and the answer-vetting means a malicious resolver answer cannot smuggle the kennel onto a denied address.
 
 **No DNS leakage.** The proxy is the only thing in the kennel that does DNS. Verifying this is part of the test plan: tcpdump on the host's external interface during kennel operation should show zero DNS queries originating from the kennel.
 
@@ -278,8 +259,8 @@ Against the threats in `THREATS.md`:
 
 ## 7.3.9 Residuals
 
-- **TLS exfiltration via allowed destinations (T1.8).** Kennel can reach `api.openai.com`, so it can exfiltrate by putting data in API requests. Proxy can't see inside TLS without MITM. Optional TLS inspection layer mitigates if user accepts CA management; otherwise this is a known residual.
-- **Covert channels.** Timing, DNS query patterns to allowed resolvers, TLS SNI to allowed hosts can carry exfiltration bandwidth. Out of scope for a non-paranoid threat model.
+- **TLS exfiltration via allowed destinations (T1.8).** Kennel can reach `api.openai.com`, so it can exfiltrate by putting data in API requests. The proxy can't see inside TLS. A future TLS-inspection layer would mitigate if the user accepts CA management; otherwise this is a known residual.
+- **Covert channels.** Timing, name-resolution patterns for allowed hosts, TLS SNI to allowed hosts can carry exfiltration bandwidth. Out of scope for a non-paranoid threat model.
 - **Pre-existing trust.** If the user pasted `OPENAI_API_KEY` into the kennel's env, the kennel can use it. Limiting which env vars cross the boundary (§7.7) is the mitigation, not the proxy.
 
 ## 7.3.10 Failure modes
@@ -292,7 +273,7 @@ Against the threats in `THREATS.md`:
 | Privileged helper unavailable | IPv6 disabled, IPv4 still works. Warn at startup. |
 | Context tries raw socket | `inet_sock_create` BPF denies, returns EPERM. |
 | Client doesn't honour `*_PROXY` env | Direct `connect()` fails at kernel level. Audit logs the BPF-level deny. |
-| Proxy resolver upstream fails | Per `on_resolve_change`: deny (don't fall back to direct), warn, or cache extension. |
+| OS resolver fails for an allowlisted name | Connection refused; the proxy never falls back to a direct dial. |
 
 ## 7.3.11 Test plan additions
 
@@ -315,6 +296,6 @@ For each invariant, a regression test in `tests/net/`:
 15. Context attempts `AF_NETLINK` socket creation; expect EACCES.
 16. Context exceeds `bytes_per_second` rate limit; expect proxy throttles.
 17. Context attempts to bind privileged port (`80`); expect EACCES (min_port).
-18. DNS rebinding test: resolver returns a different IP on second query with `on_resolve_change=deny`; expect connection refused.
+18. DNS rebinding test: an allowlisted name resolves to a denied address (e.g. RFC1918 or cloud metadata); expect the proxy refuses at dial time (answer-vetting).
 
 The full network test corpus is approximately 50 cases. The list above is the core invariants.

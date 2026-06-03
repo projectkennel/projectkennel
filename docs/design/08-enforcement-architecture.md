@@ -6,16 +6,16 @@ Each resource class maps to one or more kernel mechanisms. Project Kennel uses t
 
 | Resource class | Primary mechanism | Fallback / gap |
 |---|---|---|
-| Exec (§7.1) | Landlock `FS_EXECUTE` + `PR_SET_NO_NEW_PRIVS` | AppArmor for transition semantics |
+| Exec (§7.1) | Landlock `FS_EXECUTE` + `PR_SET_NO_NEW_PRIVS` | — |
 | Filesystem (§7.2) | Landlock filesystem ACL | Mount namespace for constructed view |
 | Network port (§7.3) | Landlock network (kernel 6.7+) | cgroup BPF for broader coverage |
 | Network address (§7.3) | cgroup BPF (inet*_connect hooks) | None — required |
 | Loopback isolation (§7.3) | cgroup BPF (rewrite/filter) | Netns for stronger isolation (optional) |
 | AF_UNIX path (§7.4) | Landlock (filesystem perms) | Mount namespace for shim view |
-| AF_UNIX abstract (§7.4) | AppArmor `unix` rules | BPF LSM, or seccomp on `connect()` |
+| AF_UNIX abstract (§7.4) | Landlock scoping (`SCOPE_ABSTRACT_UNIX_SOCKET`, ABI 6 / kernel 6.12+) | seccomp `connect()` filter or AppArmor `unix` rules below ABI 6 |
 | Proc visibility (§7.7) | Mount namespace + `hidepid` | PID namespace for stronger |
-| Ptrace (§7.7) | AppArmor `ptrace` | Yama (coarse) |
-| Signals (§7.7) | AppArmor `signal` | PID namespace |
+| Ptrace (§7.7) | PID namespace + seccomp (`SYS_ptrace`) | Yama (coarse) |
+| Signals (§7.7) | Landlock scoping (`SCOPE_SIGNAL`, ABI 6 / kernel 6.12+) + PID namespace | AppArmor `signal` below ABI 6 |
 | Env (§7.7) | User-space wrapper | None — wrapper-only |
 | Capabilities (§7.7) | `prctl`/`capset` in wrapper | None — wrapper-only |
 | Mount visibility (§7.7) | Mount namespace + Landlock | None — required |
@@ -31,6 +31,7 @@ Project Kennel requires the following kernel features, with version requirements
 | Landlock filesystem | 5.13 | Read/write/exec; the foundation |
 | Landlock network | 6.7 | Port-level restrictions |
 | Landlock FS_EXECUTE | 6.10 | Proper exec semantics |
+| Landlock scoping (ABI 6) | 6.12 | Abstract-AF_UNIX + signal isolation, default-on where present |
 | cgroup v2 | 4.5 | Universal on modern systems |
 | cgroup BPF (inet*_connect) | 4.10 | Universal |
 | cgroup BPF (bind, sock_create) | 5.7 | Common |
@@ -39,10 +40,10 @@ Project Kennel requires the following kernel features, with version requirements
 | Network namespace | 2.6.x | Universal (used optionally) |
 | User namespace | 3.8 | Used for some advanced configurations |
 | `PR_SET_NO_NEW_PRIVS` | 3.5 | Universal |
-| AppArmor | Distribution-dependent | Optional but recommended |
+| AppArmor | Distribution-dependent | Fallback only, below Landlock ABI 6 |
 | `legacy_tiocsti` sysctl | 6.2 | Defaults safe on newer kernels |
 
-Recommended minimum: kernel 6.10. Project Kennel refuses to apply policies that require unavailable features and reports clearly which features are missing.
+Recommended minimum: kernel 6.10 (Landlock ABI 5, the project floor). On 6.12+ (ABI 6) Landlock scoping comes into play and abstract-AF_UNIX/signal isolation is enforced natively rather than via the seccomp/AppArmor fallback; the development and CI box runs 6.17 (ABI 7). Project Kennel refuses to apply policies that require unavailable features and reports clearly which features are missing.
 
 ## 8.3 The spawn flow
 
@@ -84,8 +85,10 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    - bind4, bind6: loopback rewrite + denylist
    - setsockopt: force IPV6_V6ONLY=1
 
-7. (Optional) Load AppArmor profile fragment if policy uses unix-abstract,
-   ptrace, signal rules
+7. (Below Landlock ABI 6 only) Load the fallback for abstract-AF_UNIX/signal
+   isolation: a seccomp connect() filter, or an AppArmor profile fragment.
+   On ABI 6+ kernels this is unnecessary — the scoping bits added to the
+   Landlock ruleset (step 8l) cover it natively.
 
 8. Fork:
    parent: wait, manage lifecycle, audit
@@ -102,7 +105,9 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
      i. Set PR_SET_NO_NEW_PRIVS
      j. Drop capabilities per cap.* policy
      k. Apply seccomp filter
-     l. Apply Landlock ruleset (final step before exec; ruleset is sealed)
+     l. Apply Landlock ruleset, including ABI-6 scoping
+        (SCOPE_ABSTRACT_UNIX_SOCKET + SCOPE_SIGNAL) where the kernel
+        supports it (final step before exec; ruleset is sealed)
      m. execve(command)
 
 9. Parent process supervises the kennel:
@@ -154,7 +159,7 @@ Format: JSONL, one event per line, schema versioned.
 
 Sources of audit events:
 
-- **Kernel** via LSM hooks (Landlock, AppArmor). Captured by an audit daemon reading from `audit(7)` or netlink.
+- **Kernel** via LSM hooks (Landlock; AppArmor only on the below-ABI-6 fallback path). Captured by an audit daemon reading from `audit(7)` or netlink.
 - **cgroup BPF programs.** BPF maps store per-event records; user-space reader drains them.
 - **Project Kennel's daemons** (SOCKS5 proxy, dbus-proxy). Each writes its own audit events directly.
 - **The spawn wrapper.** Lifecycle events (kennel start, exit, daemon launches).
@@ -233,7 +238,7 @@ For interactive workflows and developer-tool workloads, the overhead is negligib
 - **systemd.** `kennel` and `systemd-run --user` should coexist. A long-running user service can wrap itself in a kennel.
 - **Flatpak.** Orthogonal. Flatpak handles packaged desktop apps; this handles command-line and developer workflows.
 - **Docker / Podman.** A kennel can grant or deny the container daemon socket. Containers running inside a kennel are bounded by that kennel's policy (volume mounts must be within `fs.read`/`fs.write`, published ports go via per-kennel loopback). The `containerised-service` and `containerised-tool` templates encode the conventions. T3.2–T3.5 in `THREATS.md` document the container-specific threats and their residuals.
-- **System-wide AppArmor.** Project Kennel's optional AppArmor fragments compose with system policies; Project Kennel's fragments are loaded as additional profiles, not replacements.
+- **System-wide AppArmor.** On the below-ABI-6 fallback path, Project Kennel's AppArmor fragments compose with system policies; they are loaded as additional profiles, not replacements. On ABI 6+ kernels Project Kennel does not rely on AppArmor at all.
 - **System-wide SELinux.** Compatible; Project Kennel's enforcement is independent of SELinux labels. On SELinux systems, Project Kennel runs within the user's domain and adds layered constraints.
 - **Firejail, bubblewrap.** Project Kennel uses bubblewrap-equivalent mechanisms (mount namespaces, etc) directly. Running firejail-wrapped commands inside a kennel is permissible but generally redundant.
 

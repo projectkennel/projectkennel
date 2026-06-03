@@ -1,14 +1,6 @@
 # API surfaces — internal Rust API
 
-> **As-built status (see `08-as-built-notes.md` §8.1).** This chapter is indexed by
-> the original ~13-crate decomposition; the as-built workspace has **8** crates.
-> The `kennel-audit`, `kennel-ipc-shared`/`-client`/`-server`, and `kennel-cli`
-> sections describe components that were **folded** (control protocol →
-> `kenneld::control`; privhelper wire → `kennel-privhelper::wire`; CLI →
-> `kenneld/src/bin/kennel.rs`; audit → the BPF ringbuf drain + the netproxy
-> formatter) or **deferred** (a unified audit crate). There is no async runtime
-> (`tokio`) and the CLI uses `lexopt`, not `clap`. The authoritative per-crate API
-> is the rustdoc; read the folded/deferred sections through §8.1/§8.2.
+The workspace has 8 crates: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kenneld`, and `kennel-text`. The control protocol (CLI ↔ kenneld) lives in `kenneld::control`; the privhelper wire protocol in `kennel-privhelper::wire`; the `kennel` CLI is `kenneld/src/bin/kennel.rs`; audit is split between the BPF ringbuf drain (`kennel-bpf`) and the netproxy's JSONL formatter (`kennel-netproxy::audit`). Everything is blocking, thread-per-connection — there is no async runtime in the workspace. The authoritative per-crate API is the rustdoc (`cargo doc --no-deps`); this chapter is the review-boundary index.
 
 ## Stability commitment
 
@@ -43,7 +35,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Depends on.** `kennel-text` (sanitisation), `kennel-syscall` (canonical-path resolution), `serde`, `basic-toml` (both source and settled policies are TOML — no JSON), `ed25519-compact` (the vetted Ed25519 verifier; see `DEPENDENCIES.md`).
 
-**Depended on by.** Every other crate that reads policy: `kennel-spawn` (consumes `SettledPolicy`), `kennel-cli` (`kennel compile` calls `compile`/`sign_settled`), `kenneld`, `kennel-bpf` (loader side).
+**Depended on by.** Every other crate that reads policy: `kennel-spawn` (consumes `SettledPolicy`), `kenneld` (the `kennel compile` path in `src/bin/kennel.rs` calls `compile`/`sign_settled`), `kennel-bpf` (loader side).
 
 **Notes.** This crate's public surface is the largest and most-consumed in the workspace. Changes here propagate widely. The `resolve`/`compile` path (heavy: parsing arbitrary templates, chain-walking, crypto) is exercised at compile time; the `verify_settled` path (light: one signature) is what runs on every spawn.
 
@@ -57,19 +49,17 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `spawn(settled: &SettledPolicy, runtime_subst: &RuntimeSubstitutions, command: &Command, env: Env, ...) -> Result<Workload, SpawnError>`.
 - `SpawnError` variants for every failure point, including `SettledSignatureFailure`, `FrameworkInvariantViolated`, `UnsubstitutedPlaceholder` (boundary 13 in `04-trust-boundaries.md`).
 
-**Depends on.** `kennel-policy` (for `SettledPolicy` and `verify_settled`), `kennel-syscall`, `kennel-bpf`, `kennel-audit`, optionally `bubblewrap-sys` (build-time feature flag — see `03-crate-decomposition.md`).
+**Depends on.** `kennel-policy` (for `SettledPolicy` and `verify_settled`), `kennel-syscall`, `kennel-bpf`, optionally `bubblewrap-sys` (build-time feature flag — see `03-crate-decomposition.md`).
 
-**Depended on by.** `kennel-cli` (CLI's spawn path), `kenneld` (when kenneld performs the spawn on the CLI's behalf — currently the CLI does it itself, but the option exists).
+**Depended on by.** `kenneld` — kenneld performs the spawn on the CLI's behalf (the CLI passes the workload's stdio over `SCM_RIGHTS` and kenneld runs the spawn sequence).
 
 ### `kennel-netproxy`
 
-**Purpose.** SOCKS5 proxy enforcing per-destination network allowlist. A standalone binary.
+**Purpose.** SOCKS5/HTTP proxy enforcing the per-destination network allowlist. A binary crate (`main.rs`) with a library half (`lib.rs`) so the server, allowlist evaluator, and audit formatter are unit-testable without the network.
 
-**Public surface (binary).** The control protocol described in `02-4-ipc.md` under "kenneld ↔ per-kennel daemons" → netproxy methods. The binary's command-line interface is internal; kenneld invokes it with a fixed flag set.
+**Public surface.** The proxy reads its per-kennel TOML config (written by kenneld) at startup. The server lives in `src/server.rs`/`socks5.rs`/`http.rs`, the allowlist evaluator in `src/allow.rs`, and the JSONL audit formatter in `src/audit.rs` (one record per request; the server owns the sink — a per-kennel file wired by kenneld, or stderr). Blocking, one thread per connection.
 
-**Public surface (library, optional).** A `kennel-netproxy-core` crate may be split out to expose the proxy logic as a library for testing; current decision is to keep the proxy as a single binary crate.
-
-**Depends on.** `kennel-policy` (for the network policy fragment), `kennel-audit`, `kennel-text`, an async runtime (one only; see `03-crate-decomposition.md`).
+**Depends on.** `kennel-policy` (for the network policy fragment), `kennel-text`. No async runtime — the proxy is deliberately built without a `tokio`/`mio` tree (see `03-crate-decomposition.md`).
 
 **Depended on by.** Nothing else in the workspace links this crate; kenneld invokes the binary.
 
@@ -92,11 +82,9 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 ### `kennel-privhelper`
 
-**Purpose.** The privileged binary. Reads JSON from stdin, validates, performs one network/cgroup operation, writes JSON to stdout, exits.
+**Purpose.** The privileged binary. Reads a fixed-layout request from stdin, validates it, performs one network/cgroup operation, writes a response to stdout, exits.
 
-**Public surface (binary).** The wire format documented in `02-4-ipc.md` under "kenneld ↔ privhelper protocol".
-
-**Public surface (library).** None. The privhelper is a binary crate with `main.rs` only; helper functions are `pub(crate)` and tested in-crate.
+**Public surface (binary + library).** The wire format is fixed-size packed structs in the `wire` module (`src/wire.rs`), documented in `02-4-ipc.md` under "kenneld ↔ privhelper protocol". The crate has a library half exposing `wire`/`validate`; the rest is `pub(crate)` and tested in-crate.
 
 **Depends on.** `kennel-syscall` (for the privileged syscalls — netlink address ops). The IPC is fixed-layout struct messages over stdin/stdout (the `wire` module; no serde), and the validation core is std-only — so the crate stays `#![forbid(unsafe_code)]`.
 
@@ -116,19 +104,14 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Notes.** Crate-level `#![allow(unsafe_code)]`; every `unsafe` block follows the comment template in §4. The crate is sized to be reviewable in one sitting — target ceiling 1500 lines of Rust.
 
-### `kennel-audit`
+### Audit (no single crate)
 
-**Purpose.** Audit event types and the writer that emits them as JSONL to the per-kennel files.
+There is no `kennel-audit` crate. Audit is split across two producers, each owning its own sink:
 
-**Public surface.**
-- `AuditEvent` enum, one variant per event type from `02-3-audit-schema.md`.
-- `AuditWriter` — the per-kennel writer; owns an `O_APPEND` file handle, rotates at threshold.
-- `emit(event: AuditEvent)` — synchronous append.
-- `Reader::query(filter: AuditFilter) -> impl Iterator<Item=AuditEvent>` — for `kennel audit` queries.
+- **BPF events** are drained from a kernel ring buffer by `kennel-bpf` (`next_audit_event` / the ringbuf reader); on a full ringbuf, events are dropped.
+- **Egress events** are formatted one JSONL record per request by `kennel-netproxy::audit`; the netproxy owns the file sink (a per-kennel file wired by kenneld, or stderr).
 
-**Depends on.** `kennel-text` (sanitisation), `time`. Audit events are emitted as JSON Lines by a small hand-rolled writer (the schema is fixed and known — no `serde_json`).
-
-**Depended on by.** `kennel-spawn`, `kennel-netproxy`, `kenneld`, `kennel-bpf` (the ringbuf reader translates BPF events into `AuditEvent`s).
+Both emit JSON Lines via small hand-rolled writers with fixed schemas (no `serde_json`); `kennel-text` sanitises untrusted string fields. A unified audit writer + sink layer (with journald/syslog/stdout sinks behind feature flags) remains a roadmap item; until it lands, see `02-3-audit-schema.md` for the schema.
 
 ### `kennel-text`
 
@@ -146,50 +129,22 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Notes.** Tiny crate; deliberately separate so the helpers are easy to find, easy to test (fuzz target included), and reviewable in one read.
 
-### `kennel-checksum-verify`
+### `kenneld` (library + binaries)
 
-**Purpose.** Implements `tools/verify-checksums`, the Rust half of the checksum-manifest verifier (CODING-STANDARDS.md §5.5).
+**Purpose.** The per-user supervisor. The crate has a library half (`src/lib.rs`) providing the kennel registry and per-kennel orchestration, plus two binaries: `src/bin/kenneld.rs` (the daemon) and `src/bin/kennel.rs` (the CLI). It owns the control protocol, the per-kennel teardown, and the BPF ringbuf audit reader.
 
-**Public surface (binary).** Command-line: verifies `src/vendor/` against `CHECKSUMS.toml` and `Cargo.lock`.
+**Public surface (library).**
+- `Kennel` — a live kennel; `Kennel::stop(&P)` performs immediate teardown (proxy reaped, addresses removed, cgroup deleted), returning the workload's exit status. There is no grace period, no draining state, and no reference counting: one `kennel run` is one kennel.
+- `serve(shared, listener)` — the accept loop; it spawns one thread per accepted connection (blocking, no async runtime).
+- `control` — the CLI ↔ daemon wire protocol: `Request`/`Response` plus length-prefixed `read_frame`/`write_frame` (native-endian, `MAX_MESSAGE`-bounded). The workload's stdio is passed from the CLI over `SCM_RIGHTS`.
+- `socket` — obtains the control listener (the socket-activation fd if present, else a fresh bind at the same path).
+- `proxy` — writes the per-kennel egress-proxy TOML config the netproxy reads.
 
-**Public surface (library).** A small `verify::run(manifest_path, archive_dir, lock_path) -> Result<Report, _>` for embedding in CI helpers.
+**Public surface (binaries).** `kenneld` is socket-activated (systemd passes the bound listener as fd 3) and serves the control protocol; `kennel` is the CLI client documented in `02-1-cli.md`. The CLI parses its own arguments with hand-rolled `std::env::args` dispatch (no `clap`).
 
-**Depends on.** `sha2` (which is itself in the checksum manifest; the shell-script verifier in `tools/verify-checksums.sh` is the second witness), `serde`, `toml`.
+**Depends on.** `kennel-policy`, `kennel-spawn` (kenneld performs the spawn on the CLI's behalf), `kennel-privhelper` (privileged operations), `kennel-syscall` (`SCM_RIGHTS`, the few syscalls outside spawn), `serde` + `basic-toml` (writing the proxy config).
 
-**Depended on by.** Build tooling, not by any runtime crate.
-
-### `kennel-cli`
-
-**Purpose.** The `kennel` binary's main and subcommand dispatch.
-
-**Public surface (binary).** The CLI documented in `02-1-cli.md`.
-
-**Public surface (library).** None. The CLI is a binary crate; subcommand handlers are `pub(crate)`.
-
-**Depends on.** `kennel-policy`, `kennel-spawn`, `kennel-ipc-client` (see below), `kennel-audit` (for `kennel audit` queries), `kennel-text`, `clap`.
-
-### `kenneld`
-
-**Purpose.** The kenneld binary's main, IPC handling, kennel registry, daemon supervision, audit reader.
-
-**Public surface (binary).** The IPC server protocol described in `02-4-ipc.md`.
-
-**Depends on.** `kennel-policy`, `kennel-ipc-server` (see below), `kennel-bpf` (ringbuf reader), `kennel-audit`, `kennel-spawn` (optional — when kenneld performs spawns on behalf of clients), `kennel-syscall` (for the few syscalls outside spawn).
-
-### `kennel-ipc-shared`, `kennel-ipc-client`, `kennel-ipc-server`
-
-**Purpose.** The wire-format types and the client/server framing logic for the protocols in `02-4-ipc.md`. Split into three crates so that:
-
-- The CLI links only `client`; the server code is not in the CLI binary.
-- kenneld links only `server`; the client code is not in the daemon binary.
-- The wire types and framing live in `shared`, used by both.
-
-**Public surface.**
-- `kennel-ipc-shared`: request/response types per `02-4-ipc.md`, framing functions.
-- `kennel-ipc-client`: `Client::connect(socket: &Path)`, `Client::request(req) -> Response`, streaming subscription helpers.
-- `kennel-ipc-server`: `Server::bind(socket: &Path)`, `accept_loop`, request dispatcher trait that kenneld implements.
-
-**Depends on.** `serde`, `tokio` (server only; client can be sync), `kennel-syscall` (for `SO_PEERCRED` and lockfile). Wire framing is TBD (not `serde_json`).
+**Notes.** The control protocol and the privhelper wire (`kennel-privhelper::wire`) are the natural fuzz-target homes. There is no separate `kennel-ipc-*` or `kennel-cli` crate — both are folded here. The Rust checksum-manifest verifier is also not a crate: the shell witness in `src/tools/verify-checksums.sh` (system `sha256sum`) is what runs today; a Rust twin is a roadmap item.
 
 ---
 

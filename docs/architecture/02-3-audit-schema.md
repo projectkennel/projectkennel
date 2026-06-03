@@ -1,16 +1,22 @@
 # API surfaces — audit schema
 
-> **As-built status (see `08-as-built-notes.md` §8.2).** The sink machinery this
-> chapter describes — the `journald`/`syslog`/`stdout` sinks, the centralised
-> `kennel-audit` writer, the `[audit]` policy section / `audit.toml`, and the
-> per-sink 50 ms timeout — is **designed but not yet built**, and there is no
-> `kennel-audit` crate or `sd_journal_send` in the tree. What exists today: BPF
-> events are reserved/submitted to a kernel **ring buffer** (`bpf/audit_events.h`,
-> `bpf/kennel.bpf.h`) drained lock-free by `kennel-bpf::ringbuf` (drops on full,
-> counted by the reader); the egress proxy **formats** one JSONL record per
-> request in `kennel-netproxy::audit` and the server owns the sink (stderr/file).
-> The *event schema* below is the durable contract; treat the *sink/writer*
-> sections as roadmap until §8.2 says otherwise.
+> **Scope.** The audit *event schema* below is the durable contract. The
+> multi-sink delivery layer — the `journald`/`syslog`/`stdout` sinks, the
+> centralised `kennel-audit` writer that fans one event out to several sinks, the
+> `[audit]` policy section / `audit.toml`, and the per-sink emit timeout — is the
+> **roadmap** delivery model; the sections describing it specify the target
+> design. Today the audit path is a per-kennel JSONL file sink:
+>
+> - BPF events are submitted to a kernel **ring buffer** (`bpf/audit_events.h`,
+>   `bpf/kennel.bpf.h`) and drained lock-free by `kennel-bpf::ringbuf`. The ring
+>   buffer drops events when full; the reader counts the drops.
+> - The egress proxy formats **one JSONL record per request** in
+>   `kennel-netproxy::audit`.
+> - kenneld wires a per-kennel **file sink** at
+>   `~/.local/state/kennel/<kennel>/network.jsonl`.
+>
+> The event schema is identical regardless of which delivery model is in use, so
+> records written today are forward-compatible with the multi-sink model.
 
 ## Stability commitment
 
@@ -42,7 +48,7 @@ Sources of events (where they originate before being passed to the sinks):
 - **The spawn wrapper (kennel-spawn).** Lifecycle events for the workload (start, exit, signal).
 - **kenneld.** Daemon lifecycle, policy load, kennel registration.
 
-The audit-event writer in `kennel-audit` is the seam between these sources and the sinks. Sources emit `AuditEvent` values; the writer fans them out to every configured sink.
+In the roadmap delivery model, a centralised audit-event writer (`kennel-audit`) is the seam between these sources and the sinks: sources emit `AuditEvent` values and the writer fans them out to every configured sink. Today each source owns its own sink directly — the netproxy formats its JSONL records and kenneld owns the per-kennel file.
 
 ---
 
@@ -95,9 +101,10 @@ The catalogue below names every event the project currently emits. Field lists a
 
 ### Network (`resource: "net"`)
 
-- **`net.connect-allow`** / **`net.connect-deny`** — connect() attempt. Allow under audit-level rules; deny always. Adds `addr_family`, `addr`, `port`, `name` (DNS name if resolved), `via_proxy`, and for allows `bytes_sent`, `bytes_recv`, `duration_ms`.
-- **`net.dns-resolve`** / **`net.dns-deny`** — proxy DNS lookup. Adds `name`, `resolver`, `rtype`, `answers`, `rtt_ms`.
-- **`net.bind-allow`** / **`net.bind-deny`** / **`net.bind-rewrite`** — bind() attempt. Adds `addr_requested`, `addr_rewritten` (for rewrites), `port`.
+- **`net.connect-allow`** / **`net.connect-deny`** — connect() attempt, sourced from the BPF connect programs. Allow under audit-level rules; deny always. Adds `addr_family`, `addr`, `port`.
+- **`net.bind-allow`** / **`net.bind-deny`** / **`net.bind-rewrite`** — bind() attempt, sourced from the BPF bind programs. Adds `addr_requested`, `addr_rewritten` (for rewrites), `port`.
+
+The per-kennel proxy emits one `egress` record per request (`kennel-netproxy::audit`), carrying `wire` (`socks5` or `http-connect`), `host`, `port`, `resolved` (the IP the name resolved to via the OS resolver, or null), `outcome` (`allowed` / `denied` / `failed`), `reason` (for denies and failures), and `bytes_up` / `bytes_down`. Name-to-address resolution goes through the OS resolver and is recorded in the `resolved` field of this single record — there is no separate DNS-lookup event and no DNS-protocol telemetry, because the proxy does not implement a resolver of its own.
 
 ### Filesystem (`resource: "fs"`)
 

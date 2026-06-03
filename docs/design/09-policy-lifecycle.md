@@ -182,7 +182,7 @@ The division of labour:
 - Resolve and merge all includes; detect and reject conflicts.
 - Apply all deltas.
 - Verify the signature of every source template and fragment against the trust store.
-- Check every resolved artefact's content hash against the lockfile.
+- Check every resolved artefact's signature against the lockfile pin.
 - Validate framework and template invariants.
 - Validate threat tags against the catalogue.
 - Substitute the *installation-constant* variables (`<tag>`, `<gid>`).
@@ -215,15 +215,15 @@ This is the one place runtime deliberately repeats compile-time work. It is wort
 
 ### Two operating modes
 
-**Local development.** A developer iterating on a policy does not want a manual compile step in the edit-run loop. `kennel run` of a source policy auto-compiles in memory when no fresh settled artefact exists, seals the result by content hash (and the lockfile), marks it a development build, and runs it. Staleness is detected by comparing the settled policy's provenance (the hashes of its inputs) against the current source; a changed input triggers recompilation. The loop stays tight; the developer rarely types `kennel compile` explicitly.
+**Local development.** A developer iterating on a policy does not want a manual compile step in the edit-run loop. `kennel run` of a source policy auto-compiles in memory when no fresh settled artefact exists, signs the result (and records the lockfile pins), marks it a development build, and runs it. Staleness is detected by comparing the settled policy's provenance (the recorded inputs) against the current source; a changed input triggers recompilation. The loop stays tight; the developer rarely types `kennel compile` explicitly.
 
 **Fleet / attested deployment.** An organisation compiles policies centrally — in CI, on infrastructure that holds the templates, the fragments, the lockfiles, and the signing key — and pushes *only the signed settled policies* to developer workstations. The workstation need not have the templates, the lockfile, or even the resolution code paths exercised. `kennel run` verifies the organisation's signature on the settled policy, re-asserts framework invariants, and spawns. The runtime trust surface on the workstation is reduced to a single signature verification against a pinned key.
 
-This is the foundation for the attestation capability described in the executive summary: a workstation can demonstrate that it is running an approved, signed policy revision, because the settled policy it enforces is exactly the artefact the organisation signed, identified by content hash, with no live resolution that could diverge.
+This is the foundation for the attestation capability described in the executive summary: a workstation can demonstrate that it is running an approved, signed policy revision, because the settled policy it enforces is exactly the artefact the organisation signed — its ed25519 signature is the identity — with no live resolution that could diverge.
 
 ### Provenance
 
-The settled policy carries a provenance block recording the hashes of every input that produced it: the leaf policy, each resolved template and fragment (by `name@version` and content hash, lifted from the lockfile), the schema version, the invariant set, the threat-catalogue version, the installation constants baked in, and the compiler version. The settled policy is therefore self-describing — anyone can read exactly which signed source artefacts, at which versions and bytes, were composed to produce it, without needing those sources present. `kennel diff` can diff two settled policies directly, and can show the provenance delta between revisions.
+The settled policy carries a provenance block recording every input that produced it: the leaf policy, each resolved template and fragment (by `name@version` and signature, lifted from the lockfile), the schema version, the invariant set, the threat-catalogue version, the installation constants baked in, and the compiler version. The settled policy is therefore self-describing — anyone can read exactly which signed source artefacts, at which versions and bytes, were composed to produce it, without needing those sources present. `kennel diff` can diff two settled policies directly, and can show the provenance delta between revisions.
 
 ## 9.11 Audit log uses
 
