@@ -313,20 +313,26 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// Handle a `Stop`: signal the named kennel's workload (the owning thread
     /// reaps and tears it down). Errors if the kennel is unknown or still starting.
     fn stop(&self, name: &str) -> Response {
-        let pid = {
+        let (ctx, started) = {
             let reg = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             match reg.kennels.get(name) {
-                Some(meta) => meta.pid,
+                Some(meta) => (meta.ctx, meta.pid.is_some()),
                 None => return Response::Error(format!("no kennel named `{name}`")),
             }
         };
-        pid.map_or_else(
-            || Response::Error(format!("kennel `{name}` is still starting")),
-            |pid| match kennel_syscall::signal::kill(pid) {
-                Ok(()) => Response::Stopped,
-                Err(e) => Response::Error(format!("could not stop `{name}`: {e}")),
-            },
-        )
+        if !started {
+            return Response::Error(format!("kennel `{name}` is still starting"));
+        }
+        // Kill via the cgroup, not the recorded pid: the unprivileged spawn makes
+        // the workload PID 1 of a nested PID namespace behind a double-fork, so the
+        // recorded handle is the intermediate init — `cgroup.kill` reaches the whole
+        // kennel (init + workload + descendants). The owning thread then reaps the
+        // init and tears the kennel down.
+        let cgroup = cgroup::kennel_cgroup(&self.identity.cgroup_base, ctx);
+        match cgroup::kill_cgroup(&cgroup) {
+            Ok(()) => Response::Stopped,
+            Err(e) => Response::Error(format!("could not stop `{name}`: {e}")),
+        }
     }
 
     /// Handle an `AuthorizedKeys` query (§7.8.7): the bastion's root-owned

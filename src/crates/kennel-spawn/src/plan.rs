@@ -332,8 +332,13 @@ impl Plan {
     pub fn from_policy(policy: &SettledPolicy, ctx: u16, namespace: &str, home: &Path) -> Result<Self, SpawnError> {
         let ep = &policy.effective_policy;
 
-        // Mount/PID/IPC isolation; never NET (see field docs).
-        let namespaces = Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
+        // The unprivileged spawn: USER establishes the identity-mapped user
+        // namespace (granting CAP_SYS_ADMIN within it) so MOUNT/IPC/PID and the
+        // mount/pivot_root need no real privilege; the spawn seal forks so the
+        // workload is PID 1 (required to mount a fresh /proc). NET is never
+        // unshared — egress is governed by the cgroup BPF + loopback proxy, not
+        // net-ns isolation (see field docs).
+        let namespaces = Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
 

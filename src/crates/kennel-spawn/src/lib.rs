@@ -685,8 +685,11 @@ mod tests {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
         let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
-        // Namespaces: mount/pid/ipc, never net.
-        assert_eq!(plan.namespaces, Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC);
+        // Namespaces: user (the unprivileged foundation) + mount/pid/ipc, never net.
+        assert_eq!(
+            plan.namespaces,
+            Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC
+        );
         assert!(!plan.namespaces.contains(Namespaces::NET));
 
         // cgroup lives under the caller's resource namespace, keyed by ctx.

@@ -49,6 +49,26 @@ pub fn kennel_cgroup(base: &Path, ctx: u16) -> PathBuf {
     base.join(format!("{KENNEL_PREFIX}{ctx}"))
 }
 
+/// Forcibly kill **every** process in `cgroup` (`SIGKILL`) by writing `1` to its
+/// `cgroup.kill` (cgroup v2, kernel 5.14+).
+///
+/// This is the correct way to stop a kennel's workload: with the unprivileged
+/// spawn the workload is PID 1 of a nested PID namespace reached via a double-fork
+/// (`kennel_spawn::spawn`), so the process kenneld holds a handle to is the
+/// intermediate init, *not* the workload — signalling that pid by hand would leave
+/// the workload running. `cgroup.kill` reaches every member regardless of PID-
+/// namespace nesting (the intermediate, the workload, and any descendants), and
+/// the kennel cgroup is in kenneld's own delegated subtree, so the write needs no
+/// privilege.
+///
+/// # Errors
+/// An OS error if the cgroup has no `cgroup.kill` (pre-5.14) or the write fails
+/// (e.g. the cgroup was already removed). Callers treat it as best-effort and may
+/// fall back to signalling the handle directly.
+pub fn kill_cgroup(cgroup: &Path) -> io::Result<()> {
+    std::fs::write(cgroup.join("cgroup.kill"), "1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +103,18 @@ mod tests {
     fn kennel_cgroup_is_a_child_named_by_ctx() {
         let base = PathBuf::from("/sys/fs/cgroup/user.slice/user@1000.service/kenneld.service");
         assert_eq!(kennel_cgroup(&base, 7), base.join("kennel-7"));
+    }
+
+    #[test]
+    fn kill_cgroup_writes_one_to_cgroup_kill() {
+        // Against a stand-in directory (a real cgroupfs write needs a delegated
+        // cgroup, exercised by the e2e): the helper must target `<cgroup>/cgroup.kill`
+        // and write exactly `1` (the kernel's "kill every member" trigger).
+        let dir = std::env::temp_dir().join(format!("kennel-cgkill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        kill_cgroup(&dir).expect("write cgroup.kill");
+        assert_eq!(std::fs::read_to_string(dir.join("cgroup.kill")).expect("read"), "1");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

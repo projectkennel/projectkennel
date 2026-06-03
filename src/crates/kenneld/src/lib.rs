@@ -322,10 +322,23 @@ impl Kennel {
     /// An OS error if signalling fails for a reason other than the child being
     /// gone.
     pub fn terminate(&mut self) -> io::Result<()> {
+        // Kill via the cgroup first: with the unprivileged spawn the workload is PID
+        // 1 of a nested PID namespace behind a double-fork, so `self.child` is the
+        // intermediate init — killing it by hand would leave the workload running.
+        // `cgroup.kill` reaches every member (the init, the workload, descendants).
+        // Best-effort: a pre-5.14 kernel or an already-removed cgroup falls through
+        // to signalling the handle (which also covers the no-cgroup unit-test path).
+        let via_cgroup = cgroup::kill_cgroup(&self.cgroup).is_ok();
         match self.child.kill() {
             Ok(()) => Ok(()),
-            // The child already exited — nothing to terminate.
+            // The handle already exited — fine, especially once cgroup.kill landed.
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            Err(e) if via_cgroup => {
+                // The cgroup kill succeeded; a failure to also signal the (already
+                // dying) init handle is not fatal.
+                let _ = e;
+                Ok(())
+            }
             Err(e) => Err(e),
         }
     }
