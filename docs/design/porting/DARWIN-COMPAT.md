@@ -4,13 +4,6 @@ This document maps Project Kennel's Linux reference design to macOS/Darwin. The 
 
 The grading lens is the project's, not marketing: **a control counts only if it is kernel-enforced and keyed to process identity such that the confined workload cannot forge or bypass it.** A rule the workload can sidestep by changing its source address, its environment, or its file-open path is not a control; it is a speed bump.
 
-> ### What changed from the previous draft, and why
-> - **Recon-resistance regraded Equal → Inferior.** Sandbox denials on macOS return `EPERM`, not `ENOENT` (confirmed by Apple DTS and by Mark Rowe's write-up). There is no documented SBPL modifier that remaps a denial to "file not found", so the previous `(with no-such-file-or-directory)` example is removed — it does not reflect real behaviour. macOS cannot make a path *structurally non-existent* the way a mount namespace or chroot can; the errno differential is itself a recon signal. New residual threat **[T-NEW: DARWIN-RECON]**.
-> - **Loopback isolation regraded Equal → Inferior, mechanism replaced.** PF cannot distinguish two kennels running under the *same UID* (its finest credential granularity is uid/gid), and the previous source-subnet rules are forgeable: a workload connecting to a sibling's `127.42.x.y` with default source `127.0.0.1` matches neither block rule. Loopback isolation moves into the Seatbelt profile (process-identity-keyed); PF is demoted to optional defence-in-depth. New residual threat **[T-NEW: DARWIN-LOOPBACK]**.
-> - **Filesystem rules switched from denylist to allowlist.** The previous profile enumerated secrets to deny (`~/.ssh`, `~/.aws`). That inverts the project's default-deny philosophy and is whack-a-mole (one un-enumerated path leaks — `~/.config/gcloud`, `~/.kube`, `~/.netrc`, …). It is also operationally broken on macOS, where *deny beats allow regardless of rule order*: a broad parent deny cannot be re-opened for a child. The profile is now `(deny default)` + targeted allows.
-> - **`mach-lookup` regraded Equal → Partial.** It filters at service granularity; `xdg-dbus-proxy` filters at method granularity. The macOS control is strictly coarser, and it is *coupled* to the network claim (macOS brokers networking through XPC services), so the two cannot be reasoned about independently.
-> - **Foundation regraded "Equal" → "industry-standard, unsupported-API."** SBPL/`sandbox(7)` is undocumented and version-volatile. It is nonetheless the only mechanism that can do this (App Sandbox is App-Store/entitlement-scoped and too coarse), and it is what Apple's own daemons and Chromium use. Honesty requires the "unsupported" label and a test matrix; it does not require abandoning the approach.
-
 ---
 
 ## 0. The foundation, stated plainly
@@ -54,7 +47,7 @@ Kennel does not call `sandbox_init` and then `exec` the workload in one breath. 
 2. The profile is **compiled** to its binary form once and validated.
 3. A small launcher child receives the compiled profile, applies it to itself, performs the minimal warmup the runtime needs, then `execvp`s the workload. Once applied, the profile **cannot be relaxed for the process lifetime** — this is the property that makes it safe to hand the resulting process untrusted code.
 
-The profile is `(deny default)`. Every capability the workload has is one we wrote down. This is the inverse of the previous draft's denylist and matters for a second reason specific to macOS:
+The profile is `(deny default)`. Every capability the workload has is one we wrote down — an allowlist, not a denylist of enumerated secrets (which would invert the project's default-deny philosophy and be whack-a-mole: one un-enumerated path — `~/.config/gcloud`, `~/.kube`, `~/.netrc` — leaks). Default-deny matters for a second reason specific to macOS:
 
 > **SBPL evaluation quirk (operational, must be encoded in the profile builder):** *deny rules beat allow rules regardless of order.* You cannot `(deny file* (subpath HOME))` and then re-open a child with `(allow file* (subpath HOME/project))` — the deny wins. Worse, a broad parent deny breaks `kqueue`/FSEvents watchers and SQLite locking, which silently breaks editors and toolchains. The builder therefore **never denies a parent of an allowed path**; with `(deny default)` it simply allows the specific subtrees the policy grants, and where it must carve a hole inside a granted tree it blocks specific siblings, not ancestors. (Tooling like `bx-mac` exists precisely because of this quirk; the builder encodes the same discipline.)
 
@@ -82,7 +75,7 @@ There is no documented SBPL action modifier that converts a denial to `ENOENT`. 
 
 Because this is enforced by the sandbox keyed to the confined process, the workload cannot reach anything but the proxy regardless of how it sources its packets. The SOCKS5 proxy enforces the destination allowlist exactly as on Linux. This replaces cgroup BPF's role and earns **Strong / unsupported-API**.
 
-**Loopback isolation (the PF correction).** The previous draft isolated sibling kennels with PF source-subnet rules. That does not work for Kennel's actual threat — multiple kennels under one developer UID:
+**Loopback isolation.** PF source-subnet rules do not isolate sibling kennels for Kennel's actual threat — multiple kennels under one developer UID:
 
 - PF's finest credential match is uid/gid; it cannot tell two same-UID siblings apart.
 - The rules keyed on *source* subnet (`from 127.42.7.0/24`), but nothing forces a workload to source from its assigned alias. Kennel A dials kennel B's `127.42.11.1` from default source `127.0.0.1` and matches neither block rule. Blocking all of `127.0.0.0/8` by destination would also sever each kennel from its own proxy.
@@ -101,7 +94,7 @@ macOS processes reach system services (Keychain, Apple Events, Pasteboard, and c
 (allow mach-lookup (global-name "com.apple.dnssd.service"))
 ```
 
-Two honesty points the previous draft missed:
+Two honesty points:
 
 1. **Service-level, not method-level.** Once a service is allowed, every method it exposes is reachable. `xdg-dbus-proxy` on Linux filters individual methods. The macOS control is strictly coarser; grade **Partial**, and the allowlist must be kept minimal precisely because each entry is all-or-nothing.
 2. **It is coupled to the egress claim.** Because networking is partly brokered through XPC services, "egress is sealed" is only true if `mach-lookup` is *also* sealed against the daemons that could re-introduce a network path. The two controls are not independent and must be reviewed together. This coupling is the substance of **[T-NEW: DARWIN-XPC]**.

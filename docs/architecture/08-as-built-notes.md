@@ -244,14 +244,14 @@ describe these read as roadmap.
   grants; by default **none** — every inherited host group is dropped — closing the
   leak the identity masking left (where `id` showed the operator's group memberships
   as bare numbers).
-  - **Mechanism — superseded by the unprivileged userns spawn.** The default drop-all
-    is now **free**: an unprivileged user namespace maps only the primary gid (an
-    unprivileged `gid_map` is limited to the single effective gid), so every inherited
-    supplementary group collapses to the overflow gid (`nogroup`) inside the kennel — no
-    `setgroups` call. `setgroups` is in fact *denied* once the userns is established, so
-    the old "`setgroups` in the privileged seal" mechanism only applies to the legacy
-    no-userns path (`Plan.supplementary_groups`, kept for the root tests). **Re-granting
-    a specific group** (the §7.2.8 device-passthrough case) cannot be done unprivileged;
+  - **Mechanism.** On the unprivileged userns path the default drop-all is free: an
+    unprivileged user namespace maps only the primary gid (an unprivileged `gid_map` is
+    limited to the single effective gid), so every inherited supplementary group collapses
+    to the overflow gid (`nogroup`) inside the kennel — no `setgroups` call (which the
+    kernel denies once the userns is established). The no-userns path instead drops to the
+    granted set with an explicit `setgroups` in the seal (`Plan.supplementary_groups`,
+    exercised by the root tests). **Re-granting a specific group** (the §7.2.8
+    device-passthrough case) cannot be done unprivileged;
     it needs the narrow **privhelper `set-gid-map` operation** (the privhelper holds
     `CAP_SETGID` in the init userns and writes the workload's `gid_map`) — **BUILT**. The
     spawn-time handshake is **design (a), kenneld-side**: child A establishes the userns
@@ -278,40 +278,37 @@ describe these read as roadmap.
     its gid, `id -Gn` shows `kennelgrp` via the synthetic `/etc/group`), while every
     other supplementary gid folds to the overflow gid (`nogroup`/65534) — the
     userns-correct isolation invariant (every gid is the primary, the overflow, or the
-    granted one). The legacy no-userns root path's `setgroups`-to-exactly-`{12345}` is
-    retained for the privileged unit/root tests, but the production proof is the
-    unprivileged vertical.
+    granted one). The no-userns path's `setgroups`-to-exactly-the-granted-set is covered
+    by the privileged unit/root tests; the production proof is the unprivileged vertical.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 
 - **A read-only bind remount must preserve the source's locked flags inside a userns.**
   `mount(MS_BIND|MS_REMOUNT|MS_RDONLY)` that *clears* a flag locked on the source
   superblock (`nosuid`/`nodev`/`noexec`) is `EPERM` in an unprivileged user namespace —
-  it only worked on the legacy root path, where clearing locked flags is allowed. A bind
-  of a file from a `nosuid,nodev` mount (e.g. the `AF_UNIX` socket whose source lives on
-  the `$XDG_RUNTIME_DIR` tmpfs) failed until `mount::remount_readonly` learned to
-  `statvfs` the target and carry the locked flags into the remount. This is also strictly
-  more restrictive (a read-only grant never wants `suid`/`dev`); a source without those
-  flags (the root fs under `/usr`) is unaffected, so an executable bind stays executable.
-  The lesson generalises: under a userns, a remount may only *add* restrictions.
-- **The kenneld `AppArmor` profile is `flags=(unconfined)` by necessity, not laziness.**
-  Its only job is to grant `userns` under Ubuntu's restriction (the capability
-  counterpart of the privhelper's file-caps). An *enforcing* profile is unworkable: the
-  forked spawn child shares the profile and needs `userns`/`mount`/`pivot_root`/
-  `sys_admin` to build the sandbox, then sets `PR_SET_NO_NEW_PRIVS` (seccomp requires it)
-  and execs the arbitrary workload — and under no-new-privs the kernel denies *every*
-  AppArmor exec transition (verified: `Ux`→unconfined and even `Cx`/`Px`→stricter both
-  give `apparmor="DENIED" … info="no new privs"`). That leaves only `ix` for the workload,
-  which would inherit kenneld's `mount`/`userns`/`sys_admin` — worse than unconfined. The
-  workload is confined by Landlock + seccomp + namespaces, not AppArmor; confining it via
-  AppArmor would need runtime `aa_change_onexec` (a v2 question). See `dist/apparmor/kenneld`.
-- **A skip is not a proof — and `cargo test` hides the skip.** The userns-dependent
-  spawn proofs `eprintln!` their precise skip cause, but a *passing* libtest captures
-  stdout/stderr, so a silent skip reads as a green `ok`. Confirm the real run with
-  `--nocapture` (or the runner), and on Ubuntu (`apparmor_restrict_unprivileged_userns=1`)
-  the binary needs an `AppArmor` `userns` profile or the proof skips. The production proof
-  is the off-sudo runner `src/tools/unprivileged-e2e.sh`, which sets that up; relaxing the
-  host sysctl is refused (security-weakening) and not the remedy.
+  the kernel permits clearing locked flags only with real privilege. So
+  `mount::remount_readonly` `statvfs`es the target and carries the locked flags into the
+  remount (this matters when binding a file from a `nosuid,nodev` mount — e.g. the
+  `AF_UNIX` socket on the `$XDG_RUNTIME_DIR` tmpfs). It is also strictly more restrictive
+  (a read-only grant never wants `suid`/`dev`), and a source without those flags (the root
+  fs under `/usr`) is unaffected, so an executable bind stays executable. The lesson
+  generalises: under a userns, a remount may only *add* restrictions.
+- **The kenneld `AppArmor` profile is `flags=(unconfined)`; its only job is to grant
+  `userns`.** An enforcing profile cannot confine kenneld here: the forked spawn child
+  shares the profile and needs `userns`/`mount`/`pivot_root`/`sys_admin` to build the
+  sandbox, then sets `PR_SET_NO_NEW_PRIVS` (seccomp requires it) and execs the arbitrary
+  workload — and under no-new-privs the kernel denies *every* AppArmor exec transition
+  (`Ux`→unconfined and even `Cx`/`Px`→stricter both give `apparmor="DENIED" …
+  info="no new privs"`). That leaves only `ix` for the workload, which would inherit
+  kenneld's `mount`/`userns`/`sys_admin` — worse than unconfined. The workload is confined
+  by Landlock + seccomp + namespaces, not AppArmor; confining it via AppArmor would need
+  runtime `aa_change_onexec` (a v2 question). See `dist/apparmor/kenneld`.
+- **Userns-dependent proofs must report their precise skip cause, and be confirmed with
+  `--nocapture`.** `cargo test` captures a passing test's output, so a test that skips
+  (e.g. where the host lacks the `AppArmor` `userns` grant) still reads as a green `ok`
+  unless its skip cause is surfaced. The spawn proofs `eprintln!` the exact reason; the
+  production proof is the off-sudo runner `src/tools/unprivileged-e2e.sh`, which loads the
+  `userns` profile. Relaxing the host sysctl is not the remedy (security-weakening).
 - **The Landlock ruleset must be built *after* `pivot_root`, in the child.** A rule
   opens an `O_PATH` fd at build time and is keyed to that inode. Bind mounts preserve
   inodes (so system/home/dev rules match a parent-built ruleset), but the constructed

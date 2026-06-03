@@ -633,7 +633,7 @@ fn bring_up<P: Privileged + Sync>(
 /// the caller's own primary gid, so the multi-gid map is written by the privhelper
 /// (it holds `CAP_SETGID` in the init userns), driven from a servicer thread inside
 /// [`kennel_spawn::spawn_with_gid_map`]. Otherwise (default drop-all on the userns
-/// path, or the legacy privileged path) the plain [`kennel_spawn::spawn`] is used and
+/// path, or the privileged path) the plain [`kennel_spawn::spawn`] is used and
 /// the helper is not consulted.
 fn spawn_workload<P: Privileged + Sync>(privileged: &P, plan: &Plan, command: &mut Command) -> Result<Child, Error> {
     use kennel_syscall::namespace::Namespaces;

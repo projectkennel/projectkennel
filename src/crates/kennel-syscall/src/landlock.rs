@@ -110,7 +110,8 @@ bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Scope: u64 {
         /// `connect(2)` to an abstract-namespace AF_UNIX socket bound outside the
-        /// sandbox (the `docs/design/07-4` gap Landlock previously could not close).
+        /// sandbox (the `docs/design/07-4` abstract-socket gap; closed natively from
+        /// Landlock ABI 6).
         const ABSTRACT_UNIX_SOCKET = 0x1;
         /// Send a signal to a process outside the sandbox (`docs/design/07-7`).
         const SIGNAL = 0x2;

@@ -22,11 +22,10 @@
 #
 # Why flags=(unconfined), not an enforcing profile
 # -------------------------------------------------
-# This profile deliberately does not confine kenneld; its sole job is to GRANT the
-# `userns` capability. The threat model trusts kenneld — the enforcer — and confines
-# the *workload*, via Landlock + seccomp + the namespaces + the egress proxy/BPF, not
-# by confining kenneld. An enforcing profile here is not just unnecessary, it is
-# unworkable, for a concrete reason:
+# This profile's sole job is to GRANT the `userns` capability; it does not confine
+# kenneld. The threat model trusts kenneld — the enforcer — and confines the
+# *workload*, via Landlock + seccomp + the namespaces + the egress proxy/BPF. An
+# enforcing profile cannot confine kenneld here, for a concrete reason:
 #
 #   - kenneld forks the spawn child, which (sharing this profile, by fork) must be
 #     permitted `userns` + `mount` + `pivot_root` + `capability sys_admin` to build

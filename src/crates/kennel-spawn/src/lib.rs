@@ -181,35 +181,34 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 ///
 /// # Namespaces
 ///
-/// Two regimes, selected by whether the plan unshares `USER`:
+/// Two paths, selected by whether the plan unshares `USER`:
 ///
-/// * **Unprivileged (the production target):** the seal establishes an
+/// * **Unprivileged userns** (the production path): the seal establishes an
 ///   identity-mapped **user namespace** first ([`establish_identity_userns`]),
-///   gaining `CAP_SYS_ADMIN` *within it*, then unshares mount/IPC and builds the
-///   view — all with no real privilege. PID-as-PID-1 needs a fork after the PID
-///   unshare (a separate double-fork increment), so `PID` is not applied on this
-///   path yet.
-/// * **Legacy privileged (root tests, under-sudo bring-up):** with no `USER` in
-///   the plan, `CLONE_NEWPID` is unshared in the **parent** before the `Command`
-///   fork so the workload becomes PID 1 (the flag only affects future children);
-///   the caller must treat `spawn` as having fork semantics for its own subsequent
-///   children. Mount/IPC are unshared in the child seal. Each unshare needs real
-///   `CAP_SYS_ADMIN`.
+///   gaining `CAP_SYS_ADMIN` *within it*, then unshares mount/IPC/PID and forks the
+///   PID-1 grandchild ([`fork_into_pid1`]) that builds the view and execs — all with
+///   no real privilege. The grandchild is PID 1 of the new PID namespace, which is
+///   what lets the constructed view mount a fresh `/proc`.
+/// * **Privileged** (no user namespace): `CLONE_NEWPID` is unshared in the
+///   **parent** before the `Command` fork so the workload becomes PID 1 (the flag
+///   only affects future children); the caller must treat `spawn` as having fork
+///   semantics for its own subsequent children. Mount/IPC are unshared in the child
+///   seal. Each unshare needs real `CAP_SYS_ADMIN`.
 ///
-/// An unprivileged caller that wants neither path can pass a plan with no
-/// namespaces (the Landlock + seccomp seal is unprivileged on its own).
+/// A caller that wants neither path can pass a plan with no namespaces (the
+/// Landlock + seccomp seal stands on its own).
 ///
 /// [`establish_identity_userns`]: kennel_syscall::namespace::establish_identity_userns
+/// [`fork_into_pid1`]: kennel_syscall::spawn::fork_into_pid1
 ///
 /// # Scope
 ///
-/// This applies, in the seal: cgroup-join, namespaces, a fresh `/proc` + private
-/// `/tmp`, the plan's single-file shadow binds (the synthetic `/etc`),
-/// `no_new_privs`, seccomp, and Landlock. **Not** applied here: the full
-/// `pivot_root` view (`$HOME` shadow, hiding non-granted path *names*) and the
-/// BPF egress attach (which the privhelper does on the cgroup). The returned child
-/// is namespace/Landlock/seccomp/cgroup confined; egress BPF is attached
-/// separately by the orchestrator before the workload connects.
+/// This applies, in the seal: cgroup-join, namespaces, the constructed `pivot_root`
+/// view (`$HOME` shadow + a fresh `/proc` and private `/tmp`, hiding non-granted
+/// path *names*) when the plan carries one — otherwise an in-place fallback (fresh
+/// `/proc` + `/tmp` + single-file shadow binds) — then `no_new_privs`, seccomp, and
+/// Landlock. The BPF egress attach is **not** applied here: the privhelper attaches
+/// it to the cgroup, separately, before the workload connects.
 ///
 /// # Errors
 ///
@@ -241,8 +240,8 @@ type GidMapper<'a> = Box<dyn FnOnce(u32) -> io::Result<()> + Send + 'a>;
 /// the init userns). A `map_gids` failure aborts the spawn fail-closed: the child
 /// receives an abort ack and never execs.
 ///
-/// `map_gids` is only consulted on the userns path; with a non-userns (legacy)
-/// plan this behaves exactly like [`spawn`] and `map_gids` is never called.
+/// `map_gids` is only consulted on the userns path; with a non-userns plan this
+/// behaves exactly like [`spawn`] and `map_gids` is never called.
 ///
 /// # Errors
 ///
@@ -285,12 +284,11 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
         Some(build_ruleset(&plan.landlock_fs, &plan.landlock_net, false).map_err(SpawnError::Syscall)?)
     };
 
-    // The unprivileged path (the production target): a plan that unshares USER
-    // builds the sandbox via a **user namespace** established in the seal, which
-    // grants `CAP_SYS_ADMIN` *inside it* so the mount-namespace work needs no real
-    // privilege. The legacy privileged path (no USER — the root tests, the
-    // under-sudo bring-up) keeps the parent-side PID unshare so the next fork lands
-    // the workload as PID 1.
+    // The unprivileged path (production): a plan that unshares USER builds the
+    // sandbox via a **user namespace** established in the seal, which grants
+    // `CAP_SYS_ADMIN` *inside it* so the mount-namespace work needs no real
+    // privilege. The privileged path (no USER, used by the root tests) keeps the
+    // parent-side PID unshare so the next fork lands the workload as PID 1.
     let use_userns = plan.namespaces.contains(Namespaces::USER);
     if !use_userns && plan.namespaces.contains(Namespaces::PID) {
         kennel_syscall::namespace::unshare(Namespaces::PID).map_err(SpawnError::Syscall)?;
@@ -311,7 +309,7 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
     // * userns path — kept in `seal_ns`: the seal unshares it, then forks so the
     //   grandchild is PID 1 (the only way to make the workload PID 1 *and* let it
     //   mount `/proc`; see `kennel_syscall::spawn::fork_into_pid1`).
-    // * legacy path — already unshared in the parent above, so excluded here.
+    // * privileged path — already unshared in the parent above, so excluded here.
     let seal_ns = if use_userns {
         plan.namespaces & !Namespaces::USER
     } else {
@@ -330,8 +328,8 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
 
     // The **inner seal** — the irreversible confinement that must run in the process
     // that ultimately `execve`s the workload: mount/`pivot_root`, the group drop
-    // (legacy path only), `no_new_privs`, seccomp, Landlock. On the userns path it
-    // runs in the PID-1 grandchild (B, via [`fork_into_pid1`]); on the legacy path it
+    // (privileged path only), `no_new_privs`, seccomp, Landlock. On the userns path it
+    // runs in the PID-1 grandchild (B, via [`fork_into_pid1`]); on the privileged path it
     // runs inline in the forked child. It must NOT join the cgroup or touch the
     // user/mount/PID namespaces — those are done once, in the outer seal, before the
     // PID-1 fork, so B inherits them.
@@ -359,7 +357,7 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
         }
         // Drop the inherited host supplementary groups (§7.2). Two regimes:
         //
-        // * Legacy privileged path (no USER ns): an explicit `setgroups` to the
+        // * Privileged path (no USER ns): an explicit `setgroups` to the
         //   granted set — `None` leaves the set untouched, `Some([])` drops all.
         //
         // * Unprivileged userns path: `setgroups` is **denied** by the kernel once
@@ -440,7 +438,7 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
             }
             kennel_syscall::spawn::fork_into_pid1(&mut inner_seal)
         } else {
-            // Legacy privileged path: PID was unshared in the parent, so the child
+            // Privileged path: PID was unshared in the parent, so the child
             // std forked is already in the new PID namespace. No second fork.
             if !seal_ns.is_empty() {
                 kennel_syscall::namespace::unshare(seal_ns)?;
@@ -450,7 +448,7 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
     };
 
     match handshake_parent {
-        // No handshake: the seal writes its own gid_map (or this is the legacy path).
+        // No handshake: the seal writes its own gid_map (or this is the privileged path).
         None => kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall),
         // Deferred gid_map: service the child's pipe on a thread while the spawn
         // blocks, so the privileged map write lands before the child proceeds.
@@ -1356,8 +1354,8 @@ mod tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: Vec::new(),
-            // The legacy setgroups field is unused on the userns path; the handshake
-            // carries the group grant instead.
+            // The setgroups field is unused on the userns path; the handshake carries
+            // the group grant instead.
             supplementary_groups: None,
         };
 

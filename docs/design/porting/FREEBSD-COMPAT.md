@@ -1,12 +1,6 @@
 # FreeBSD Compatibility Mapping & Security Implications
 
-This document maps Project Kennel's Linux reference design to FreeBSD. FreeBSD is, on balance, the *strongest* of the non-Linux ports: jails + VNET give cleaner same-UID isolation than cgroup BPF, and Capsicum gives a capability model with no Linux equivalent. The grading lens is the project's: **a control counts only if it is kernel-enforced and keyed to process/jail identity such that the confined workload cannot forge or bypass it.** By that test most FreeBSD mechanisms grade Equivalent or Superior — but the same VNET property that makes loopback isolation Superior also isolates the egress proxy, and that plumbing is a new trusted path the previous draft did not name.
-
-> ### What changed from the previous draft, and why
-> - **New trusted path called out: proxy ↔ VNET.** A VNET jail has its *own* network stack, so a SOCKS5 proxy running in the user context is unreachable from inside the jail without explicit `epair`/bridge plumbing or running the proxy inside the jail's vnet. The mechanism that earns "Superior" for isolation is the same one that complicates egress. New residual threat **[T-NEW: FBSD-PROXY-PATH]**.
-> - **VIMAGE availability corrected.** VNET/VIMAGE has shipped in `GENERIC` since **FreeBSD 12.0** (2018), not 13. The "custom kernel" caveat applies only to releases now long out of support.
-> - **Recon hardening made explicit.** The "Superior" recon grade was asserted from chroot alone; it is now backed by the concrete knobs that actually deliver it (`enforce_statfs=2`, `security.bsd.see_other_uids/gids=0`) and the `linprocfs` foot-gun is named.
-> - **Threat-bearing added** per CODING-STANDARDS.md §6.1.
+This document maps Project Kennel's Linux reference design to FreeBSD. FreeBSD is, on balance, the *strongest* of the non-Linux ports: jails + VNET give cleaner same-UID isolation than cgroup BPF, and Capsicum gives a capability model with no Linux equivalent. The grading lens is the project's: **a control counts only if it is kernel-enforced and keyed to process/jail identity such that the confined workload cannot forge or bypass it.** By that test most FreeBSD mechanisms grade Equivalent or Superior — but the same VNET property that makes loopback isolation Superior also isolates the egress proxy, and that plumbing is a new trusted path (**[T-NEW: FBSD-PROXY-PATH]**, §2.2).
 
 ---
 
@@ -35,7 +29,7 @@ Jails give recon-resistance by *construction*, which is why the grade is genuine
 
 - **Chroot root.** `jail(2)` chroots to the jail root; paths outside it cannot be named or traversed. A denied host path is not `EPERM`-blocked, it is *non-existent* — there is no errno differential to probe (contrast the macOS port's [T-NEW: DARWIN-RECON]).
 - **`nullfs` view.** The writable target and read-only host paths (`/bin`, `/usr/lib`, the project tree) are composed into the jail root with `nullfs`, matching bind-mount semantics.
-- **Concrete hardening the previous draft left implicit** (cheap, documented, and what actually delivers the Superior grade):
+- **Concrete hardening** (cheap, documented, and what actually delivers the Superior grade):
   - `enforce_statfs=2` — the jail sees only its own mounts; host mount topology is hidden (closes a recon channel `statfs`/`getfsstat` would otherwise open).
   - `security.bsd.see_other_uids=0` and `security.bsd.see_other_gids=0` — processes in the jail cannot enumerate host/other-jail processes by UID/GID.
   - `children.max=0` unless nested jails are required.
@@ -46,7 +40,7 @@ Jails give recon-resistance by *construction*, which is why the grade is genuine
 
 **VNET (preferred).** With VIMAGE the jail gets its own stack, loopback, and routing table. Sibling jails under the same UID have entirely separate `localhost`s that cannot route to each other — strictly better than cgroup BPF, which mediates connects but shares one loopback. This is the **Superior** grade, and it is real.
 
-**The catch the previous draft missed:** a private stack also means the jail cannot see a proxy living in the user context's stack. The egress path must be built deliberately. Two supported options:
+**The catch:** a private stack also means the jail cannot see a proxy living in the user context's stack. The egress path must be built deliberately. Two supported options:
 
 1. **Proxy inside the jail's vnet.** Run the per-kennel SOCKS5 proxy *inside* the jail (or a sibling jail sharing the vnet). Simplest reachability; the proxy is then itself confined and must be trusted within the jail boundary.
 2. **`epair` + bridge to a broker.** Create an `epair`, place one end in the jail, bridge the other to where the proxy/broker runs, and assign the jail a single address on that link. The jail's default route points only at the broker; no other destination is reachable. This keeps the proxy outside the workload's jail (better privilege separation) at the cost of explicit, audited plumbing.

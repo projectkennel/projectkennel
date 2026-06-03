@@ -143,7 +143,7 @@ log_path = "~/.local/state/kennel/<kennel>/network.jsonl"
 SSH_AUTH_SOCK = "/run/kennel/<kennel>/home/.ssh/agent.sock"
 ```
 
-The proxy listener address used to be templated as `127.<tag>.<ctx>.1:1080`. Under the bit-packed address scheme (§7.3.2) the kennel's subnet is computed from `<tag>` and `<ctx>`, so the address is no longer octet-aligned and cannot be assembled by lexical substitution. The config now names only the host offset and port within the kennel's own subnet; Project Kennel computes the full address.
+The proxy listener address cannot be assembled by lexical substitution: under the bit-packed address scheme (§7.3.2) the kennel's subnet is computed from `<tag>` and `<ctx>`, so the address is not octet-aligned. The config names only the host offset and port within the kennel's own subnet; Project Kennel computes the full address.
 
 The substitution is purely lexical and happens before validation. Project Kennel refuses to spawn a kennel if any unsubstituted variable remains in the effective policy. User policies typically do not need to use these substitution variables directly; they appear in template-level rules where the template author knows that kennel-specific values are needed.
 
