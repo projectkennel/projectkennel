@@ -40,6 +40,7 @@ use crate::settled::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
     NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen,
     SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction,
+    UnixRuntime, UnixSocket,
 };
 use crate::source::SourcePolicy;
 use crate::PolicyError;
@@ -53,6 +54,8 @@ pub struct Translated {
     pub effective_policy: EffectivePolicy,
     /// The per-kennel SSH runtime (§7.8) — a service input, not enforcement.
     pub ssh: SshRuntime,
+    /// The per-kennel `AF_UNIX` socket shims (§7.4) — a service input, not enforcement.
+    pub unix: UnixRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -87,12 +90,42 @@ pub fn translate(
     };
     let lifecycle = translate_lifecycle(effective)?;
     let ssh = translate_ssh(effective);
+    let unix = translate_unix(effective, install, &mut deferred);
 
     Ok(Translated {
         effective_policy: EffectivePolicy { net, fs, exec, proc, cap, seccomp, lifecycle },
         ssh,
+        unix,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Flatten the source `[unix]` section into the settled [`UnixRuntime`]: one
+/// [`UnixSocket`] per `[[unix.allow]]` grant. Already compile-time-validated
+/// (`crate::unix`), so each entry has `real`/`shim` and no SSH agent slips through.
+/// Install constants are substituted now; per-instance placeholders (`<kennel>`,
+/// `<uid>`, `<home>`) survive into [`Translated::deferred_substitutions`] for the
+/// runtime to fill.
+fn translate_unix(
+    src: &SourcePolicy,
+    install: &InstallConstants,
+    deferred: &mut BTreeSet<String>,
+) -> UnixRuntime {
+    let Some(unix) = &src.unix else { return UnixRuntime::default() };
+    let sockets = unix
+        .allow
+        .iter()
+        .filter_map(|a| match (&a.real, &a.shim) {
+            (Some(real), Some(shim)) => Some(UnixSocket {
+                name: a.name.clone().unwrap_or_default(),
+                real: subst(real, install, deferred),
+                shim: subst(shim, install, deferred),
+                env: a.env.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    UnixRuntime { sockets }
 }
 
 /// Flatten the source `[ssh]` section into the settled [`SshRuntime`]: one
@@ -474,6 +507,50 @@ mod tests {
     }
 
     #[test]
+    fn unix_section_flattens_into_the_settled_runtime() {
+        use crate::source::{SourcePolicy, UnixAllow, UnixSection};
+        let src = SourcePolicy {
+            unix: Some(UnixSection {
+                default: Some("deny".to_owned()),
+                abstract_ns: Some("deny".to_owned()),
+                allow: vec![UnixAllow {
+                    name: Some("gpg-agent".to_owned()),
+                    real: Some("~/.gnupg/kennels/<kennel>/S.gpg-agent".to_owned()),
+                    shim: Some("~/.gnupg/S.gpg-agent".to_owned()),
+                    reason: Some("sign commits".to_owned()),
+                    ..UnixAllow::default()
+                }],
+            }),
+            ..SourcePolicy::default()
+        };
+        let mut deferred = BTreeSet::new();
+        let unix = translate_unix(&src, &install(), &mut deferred);
+        assert_eq!(unix.sockets.len(), 1);
+        let s = unix.sockets.first().expect("socket");
+        assert_eq!(s.name, "gpg-agent");
+        assert_eq!(s.shim, "~/.gnupg/S.gpg-agent");
+        assert!(s.env.is_none());
+        // The per-instance placeholder in `real` is recorded for runtime substitution.
+        assert!(deferred.contains("<kennel>"), "the <kennel> placeholder is deferred");
+        assert!(!unix.is_empty());
+        // No [unix] ⇒ empty runtime, omitted from the canonical form.
+        assert!(translate_unix(&SourcePolicy::default(), &install(), &mut deferred).is_empty());
+    }
+
+    #[test]
+    fn ai_coding_strict_translates_its_unix_shim() {
+        let t = translate_template(AI_CODING_STRICT);
+        assert!(!t.unix.is_empty(), "the template grants a gpg-agent shim");
+        let gpg = t.unix.sockets.iter().find(|s| s.name == "gpg-agent").expect("gpg-agent socket");
+        assert_eq!(gpg.shim, "~/.gnupg/S.gpg-agent");
+        // <kennel> in the real path is deferred to the runtime.
+        assert!(gpg.real.contains("<kennel>"));
+        assert!(t.deferred_substitutions.iter().any(|p| p == "<kennel>"));
+        // SSH is never a unix shim.
+        assert!(!t.unix.sockets.iter().any(|s| s.env.as_deref() == Some("SSH_AUTH_SOCK")));
+    }
+
+    #[test]
     fn an_empty_ssh_runtime_does_not_change_the_canonical_bytes() {
         // A no-SSH policy must serialise byte-for-byte as before the field existed,
         // so existing signatures stay valid.
@@ -534,6 +611,7 @@ mod tests {
                 resolved_artifacts: Vec::<ResolvedArtifact>::new(),
             },
             ssh: t.ssh,
+            unix: t.unix,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }

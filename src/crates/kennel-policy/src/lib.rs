@@ -40,6 +40,7 @@ pub mod source;
 pub mod source_sig;
 pub mod ssh;
 pub mod translate;
+pub mod unix;
 
 pub use compile::{compile, compile_leaf, seal_unsigned, Compiled};
 pub use error::PolicyError;
@@ -51,7 +52,7 @@ pub use settled::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
     NetMode, NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
     ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy,
-    SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction,
+    SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
 };
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use source_sig::{sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust};
@@ -196,6 +197,7 @@ mod tests {
                 }],
             },
             ssh: settled::SshRuntime::default(),
+            unix: settled::UnixRuntime::default(),
         }
     }
 

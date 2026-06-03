@@ -114,17 +114,20 @@ reason = "git LFS / large-file storage"
 threats.exposed = ["T1.9"]
 
 
-# --- AF_UNIX: a per-kennel ssh-agent ----------------------------------------
-# A dedicated agent is launched at kennel start; its socket is bound into the
-# view at ~/.ssh/agent.sock and SSH_AUTH_SOCK points there. The user's REAL
-# ~/.ssh and their main agent are never exposed (T1.6). Keys added to this agent
-# are lost when the kennel exits.
+# --- AF_UNIX: a per-kennel gpg-agent ----------------------------------------
+# SSH is NOT shimmed as an agent socket — an exposed ssh-agent is a
+# destination-blind signing oracle (§7.8.1). Per-kennel SSH egress goes through
+# the re-origination bastion (the [ssh] section, §7.8), never AF_UNIX.
+#
+# The shim is for the other agent-shaped services. Here: a per-kennel gpg-agent,
+# bound at the path gpg expects. The user's REAL ~/.gnupg keyring is never
+# exposed (T1.6). The per-kennel gpg-agent instance is launched separately
+# (§7.4.7); until then the shim binds whatever is at `real` (skip-missing).
 [[unix.allow]]
-name = "ssh-agent"
-real = "/run/kennel/<kennel>/ssh-agent.sock"
-shim = "~/.ssh/agent.sock"
-env = "SSH_AUTH_SOCK"
-reason = "git-over-SSH via a per-kennel agent, not the user's"
+name = "gpg-agent"
+real = "~/.gnupg/kennels/<kennel>/S.gpg-agent"
+shim = "~/.gnupg/S.gpg-agent"
+reason = "sign git commits/tags via a per-kennel gpg-agent, not the user's"
 
 
 # --- Lifecycle --------------------------------------------------------------

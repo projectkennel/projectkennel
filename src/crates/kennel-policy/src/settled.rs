@@ -346,6 +346,51 @@ pub struct SshKnownHostPin {
     pub key: String,
 }
 
+/// The per-kennel `AF_UNIX` socket shims `kenneld` realises (`docs/design/07-4-afunix.md` §7.4).
+///
+/// Like [`SshRuntime`], a *service* input rather than enforcement: `kenneld` binds
+/// each granted host socket into the kennel's constructed view at its shim path and
+/// sets any named env var, so the application finds its socket at the standard path.
+/// What is *not* bound in is structurally absent (default-deny). Abstract-namespace
+/// connections are denied unconditionally by the always-on Landlock scope (ABI 6+,
+/// §7.4.3), so they are not represented here. Carried in the signed settled policy
+/// (so it is signed and per-instance-substituted) but kept out of the enforcement
+/// core; omitted from the canonical form when empty, so a no-`[unix]` policy signs
+/// exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnixRuntime {
+    /// The granted socket shims — one bind mount each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sockets: Vec<UnixSocket>,
+}
+
+impl UnixRuntime {
+    /// Whether there is nothing to realise (no granted socket).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.sockets.is_empty()
+    }
+}
+
+/// One granted `AF_UNIX` socket shim: a real host socket bound into the kennel's view.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnixSocket {
+    /// A logical name (audit / `--dry-run` output).
+    pub name: String,
+    /// The real host socket path (may carry per-instance placeholders, `~`, or
+    /// `$XDG_RUNTIME_DIR`, resolved by `kenneld` at spawn).
+    pub real: String,
+    /// The path the socket is bound at inside the kennel's view (where the
+    /// application looks).
+    pub shim: String,
+    /// An environment variable to set to the shim path inside the kennel (e.g.
+    /// `WAYLAND_DISPLAY`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+}
+
 /// `skip_serializing_if` helper: a `false` bool is omitted from the canonical form.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(b: &bool) -> bool {
@@ -419,6 +464,11 @@ pub struct SettledPolicy {
     /// the canonical form when empty, so a no-SSH policy signs exactly as before.
     #[serde(default, skip_serializing_if = "SshRuntime::is_empty")]
     pub ssh: SshRuntime,
+    /// The per-kennel `AF_UNIX` socket shims (§7.4). A table like [`ssh`](Self::ssh) and
+    /// declared after it; omitted from the canonical form when empty, so a no-`[unix]`
+    /// policy signs exactly as before.
+    #[serde(default, skip_serializing_if = "UnixRuntime::is_empty")]
+    pub unix: UnixRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

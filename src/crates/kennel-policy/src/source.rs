@@ -954,8 +954,14 @@ mod tests {
         assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("github.com")));
         assert!(net.allow.iter().all(|a| !is_blank(a.reason.as_deref())), "every allow has a reason");
         let unix = pol.unix.expect("unix");
-        let agent = unix.allow.iter().find(|a| a.name.as_deref() == Some("ssh-agent")).expect("ssh-agent");
-        assert_eq!(agent.env.as_deref(), Some("SSH_AUTH_SOCK"));
+        // The shim grants a per-kennel gpg-agent (a non-SSH agent socket). SSH is
+        // NOT shimmed — it goes through the §7.8 bastion via the [ssh] section.
+        let agent = unix.allow.iter().find(|a| a.name.as_deref() == Some("gpg-agent")).expect("gpg-agent");
+        assert_eq!(agent.shim.as_deref(), Some("~/.gnupg/S.gpg-agent"));
+        assert!(
+            !unix.allow.iter().any(|a| a.name.as_deref() == Some("ssh-agent") || a.env.as_deref() == Some("SSH_AUTH_SOCK")),
+            "no ssh-agent shim — SSH is a destination-blind oracle, routed via the bastion"
+        );
     }
 
     #[test]

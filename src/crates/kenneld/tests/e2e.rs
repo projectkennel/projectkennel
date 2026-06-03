@@ -127,6 +127,7 @@ fn minimal_policy() -> SettledPolicy {
             resolved_artifacts: Vec::new(),
         },
         ssh: kennel_policy::SshRuntime::default(),
+        unix: kennel_policy::UnixRuntime::default(),
     }
 }
 

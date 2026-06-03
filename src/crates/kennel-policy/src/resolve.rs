@@ -538,7 +538,7 @@ mod tests {
         assert!(allow.iter().any(|a| a.contains("git")), "ai-coding-strict tool present");
         assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("github.com")));
         let unix = eff.unix.as_ref().expect("unix");
-        assert!(unix.allow.iter().any(|u| u.name.as_deref() == Some("ssh-agent")));
+        assert!(unix.allow.iter().any(|u| u.name.as_deref() == Some("gpg-agent")));
 
         // Provenance records the folded parent.
         assert_eq!(resolved.chain.len(), 1);
