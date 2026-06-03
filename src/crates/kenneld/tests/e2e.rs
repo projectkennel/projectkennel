@@ -280,10 +280,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
         etc: Some(EtcSetup {
             staging_dir: etc_base.join("etc-1"),
             hostname: "e2e".to_owned(),
-            username: "root".to_owned(),
             uid: 0,
             gid: 0,
-            home: PathBuf::from("/root"),
+            // The in-kennel shim $HOME (matches the view), never the operator's home.
+            home: PathBuf::from("/run/kennel/e2e"),
         }),
         view_root: Some(view_root.clone()),
         audit_path: Some(audit_path.clone()),
@@ -330,6 +330,12 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     } else {
         "&& ! test -e /dev/mem "
     };
+    // Clause (7): identity masking — the synthetic /etc/passwd + /etc/group present
+    // the workload's uid/gid as `kennel`, and the passwd home is the in-kennel $HOME,
+    // so no operator login name or real home leaks (`id`/`getpwuid`).
+    let id_clause = "&& grep -q '^kennel:' /etc/passwd \
+         && grep -q '^kennel:' /etc/group \
+         && ! grep -q '/home/' /etc/passwd ";
     let mut workload = Command::new("/bin/sh");
     workload.arg("-c").arg(format!(
         "grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts \
@@ -338,6 +344,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
          {ssh_clause} \
          {unix_clause} \
          {dev_clause} \
+         {id_clause} \
          && sleep 2",
     ));
     let kennel = start(&helper, spec, &mut workload).expect("start kennel");

@@ -191,13 +191,14 @@ pub struct EtcSetup {
     pub staging_dir: PathBuf,
     /// The kennel's hostname (its runtime name).
     pub hostname: String,
-    /// The synthetic account name for the workload's uid.
-    pub username: String,
     /// The workload's uid.
     pub uid: u32,
     /// The workload's gid.
     pub gid: u32,
-    /// The workload's home directory.
+    /// The workload's in-kennel home (the shim `$HOME`).
+    ///
+    /// Written as the `passwd` home field — never the operator's real home, which the
+    /// synthetic `/etc` masks along with the account name (`kennel`).
     pub home: PathBuf,
 }
 
@@ -509,7 +510,6 @@ fn bring_up<P: Privileged>(
     if let Some(etc) = etc {
         let params = crate::etc::EtcParams {
             hostname: &etc.hostname,
-            username: &etc.username,
             uid: etc.uid,
             gid: etc.gid,
             home: &etc.home,

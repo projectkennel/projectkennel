@@ -45,6 +45,8 @@ fn build_identity() -> Result<Identity, String> {
     let scope = kennel_privhelper::alloc::load(uid).ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
     let cgroup_base = kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
     let gid = kennel_syscall::unistd::real_gid();
+    // Host-side only: the SSH bastion's AuthorizedKeysCommandUser. The kennel's own
+    // synthetic /etc/passwd masks the account name to `kennel` (kenneld::etc).
     let username = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
     let proxy = Some(ProxySetup {
         binary: PathBuf::from(proxy::DEFAULT_NETPROXY_BIN),

@@ -33,19 +33,27 @@ use std::path::{Path, PathBuf};
 pub const FILES: &[&str] =
     &["hosts", "resolv.conf", "nsswitch.conf", "services", "protocols", "passwd", "group", "host.conf"];
 
+/// The masked account/group name the workload's uid and gid resolve to inside a kennel.
+///
+/// A constant, never the real login name: `getpwuid`/`getgrgid` (and so `id`,
+/// `whoami`, `ls -l`) report `kennel`, not the operator's identity. The uid/gid
+/// *numbers* are unchanged (they must match the host inodes of bind-mounted files);
+/// only the name is masked.
+pub const ACCOUNT_NAME: &str = "kennel";
+
 /// What the synthetic `/etc` is rendered from: the kennel's network identity and
 /// the workload's credentials.
 #[derive(Debug, Clone)]
 pub struct EtcParams<'a> {
     /// The kennel's hostname (its runtime name).
     pub hostname: &'a str,
-    /// The synthetic account name for the workload's uid.
-    pub username: &'a str,
     /// The workload's uid.
     pub uid: u32,
     /// The workload's gid.
     pub gid: u32,
-    /// The workload's home directory (the `passwd` entry; the shim view).
+    /// The workload's in-kennel home directory — the constructed shim `$HOME`, *not*
+    /// the operator's real home (which would re-leak the identity the [`ACCOUNT_NAME`]
+    /// mask hides). The `passwd` entry's home field.
     pub home: &'a Path,
     /// The kennel's primary IPv4 address, if it has one.
     pub v4: Option<Ipv4Addr>,
@@ -110,31 +118,39 @@ pub const fn nsswitch_conf() -> &'static str {
      netgroup:   files\n"
 }
 
-/// `/etc/passwd` — `root`, the kennel's own uid, and `nobody`.
+/// `/etc/passwd` — `root`, the kennel's own uid (as the masked [`ACCOUNT_NAME`]), and
+/// `nobody`.
 ///
 /// Synthetic — the host's users are not leaked — but enough for
-/// `getpwuid(geteuid())` to resolve the home/shell/name a shell or tool expects.
+/// `getpwuid(geteuid())` to resolve the home/shell/name a shell or tool expects. The
+/// workload's uid resolves to `kennel`, not the operator's login name, and its home
+/// is the in-kennel shim `$HOME`, so `id`/`whoami`/`getpwuid` reveal no host identity.
 #[must_use]
 pub fn passwd(p: &EtcParams<'_>) -> String {
     format!(
         "root:x:0:0:root:/root:/usr/sbin/nologin\n\
          {user}:x:{uid}:{gid}:Kennel user:{home}:/bin/sh\n\
          nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
-        user = p.username,
+        user = ACCOUNT_NAME,
         uid = p.uid,
         gid = p.gid,
         home = p.home.display(),
     )
 }
 
-/// `/etc/group`: `root`, the kennel's own gid, and `nogroup`.
+/// `/etc/group`: `root`, the kennel's own gid (as the masked [`ACCOUNT_NAME`]), and
+/// `nogroup`.
+///
+/// The workload's gid resolves to `kennel`. Inherited *supplementary* gids are not
+/// listed here, so they appear in `id` as bare numbers; dropping them entirely is the
+/// group-isolation hardening (needs privilege/userns, §7.2.8).
 #[must_use]
 pub fn group(p: &EtcParams<'_>) -> String {
     format!(
         "root:x:0:\n\
-         {user}:x:{gid}:\n\
+         {grp}:x:{gid}:\n\
          nogroup:x:65534:\n",
-        user = p.username,
+        grp = ACCOUNT_NAME,
         gid = p.gid,
     )
 }
@@ -261,10 +277,9 @@ mod tests {
     fn params() -> EtcParams<'static> {
         EtcParams {
             hostname: "agent",
-            username: "dev",
             uid: 1000,
             gid: 1000,
-            home: Path::new("/home/dev"),
+            home: Path::new("/run/kennel/agent/home"),
             v4: Some(Ipv4Addr::new(127, 0, 144, 17)),
             v6: "fd00:0:1:1::1".parse().expect("v6"),
         }
@@ -286,11 +301,22 @@ mod tests {
     }
 
     #[test]
-    fn passwd_has_the_kennel_uid_and_no_host_users() {
+    fn passwd_masks_the_account_and_leaks_no_host_identity() {
         let pw = passwd(&params());
-        assert!(pw.contains("dev:x:1000:1000:Kennel user:/home/dev:/bin/sh"));
+        // The uid resolves to `kennel`, with the in-kennel home — never the real login
+        // name or the operator's home directory.
+        assert!(pw.contains("kennel:x:1000:1000:Kennel user:/run/kennel/agent/home:/bin/sh"), "got {pw}");
+        assert!(!pw.contains("dev"), "no real username leaks");
+        assert!(!pw.contains("/home/"), "no real home leaks");
         assert!(pw.contains("root:x:0:0:"));
         assert!(pw.contains("nobody:x:65534:"));
+    }
+
+    #[test]
+    fn group_masks_the_gid_name() {
+        let g = group(&params());
+        assert!(g.contains("kennel:x:1000:"), "the gid resolves to `kennel`: {g}");
+        assert!(!g.contains("dev"), "no real group/user name leaks");
     }
 
     #[test]

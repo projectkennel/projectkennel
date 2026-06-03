@@ -69,11 +69,15 @@ pub trait PolicyLoader {
 pub struct Identity {
     /// The user's real uid.
     pub uid: u32,
-    /// The user's real gid (for the synthetic `/etc/passwd`/`group`).
+    /// The user's real gid.
     pub gid: u32,
-    /// The user's account name (for the synthetic `/etc/passwd`/`group`).
+    /// The user's account name. Used host-side only — the SSH bastion's
+    /// `AuthorizedKeysCommandUser` (§7.8.7). It is **not** written into the kennel's
+    /// synthetic `/etc/passwd`, which masks the account name to `kennel` (`crate::etc`).
     pub username: String,
-    /// The user's home directory (`<home>` substitution).
+    /// The user's home directory (`<home>` substitution). Never written into the
+    /// kennel's synthetic `/etc/passwd` — the workload's home there is the shim
+    /// `$HOME`.
     pub home: PathBuf,
     /// The user's reserved scope (tag, ULA GID, namespace).
     pub scope: ReservedScope,
@@ -441,10 +445,11 @@ where
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
         staging_dir: base.join(format!("etc-{ctx}")),
         hostname: req.kennel.clone(),
-        username: id.username.clone(),
         uid: id.uid,
         gid: id.gid,
-        home: id.home.clone(),
+        // The synthetic /etc/passwd home is the in-kennel shim $HOME, not the
+        // operator's real home (which would re-leak the masked identity, §7.2.x).
+        home: shim_root.clone(),
     });
     let spec = crate::Spec {
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
