@@ -10,7 +10,7 @@ Policy describes kernel-level constraints (which files, which network destinatio
 
 ## Status
 
-Pre-release; unversioned. The threat catalogue and design document (v0.1) are publishable, and the **reference runtime and policy compiler are implemented** — not just designed.
+Pre-release; the binaries are unversioned. The threat catalogue ([v0.3](docs/design/THREATS.md)) and the design document (v0.1) are publishable, and the **reference runtime and policy compiler are implemented** — not just designed.
 
 Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/BUILD-ENV.md)) — **the full vertical runs unprivileged**, proven end-to-end as the ordinary operator with no `sudo`:
 
@@ -18,11 +18,11 @@ Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/B
 - **Identity:** the workload's account and groups are masked to `kennel`; inherited supplementary groups drop to the overflow gid by default, and a policy-granted group is re-granted through the privhelper's `gid_map` write.
 - **Egress & IPC:** a per-kennel SOCKS5/HTTP proxy with a cgroup-BPF fail-closed allowlist and a per-kennel JSONL audit log; an `AF_UNIX` socket shim; and a per-user SSH re-origination bastion (the workload holds no key or agent socket).
 - **The privhelper** (file caps `cap_net_admin,cap_sys_admin,cap_setgid`, never `sudo`): the loopback addresses, the egress-BPF attach, and the `gid_map` write — and nothing else.
-- **The `kennel` CLI:** `compile` (resolve a source policy + its templates into a signed, byte-pinned settled policy), `validate`, `sign`, `run`, `stop`, `list` — with end-to-end ed25519 trust (templates, fragments, and the settled artefact) and a `kennel.lock` byte-pin.
+- **The `kennel` CLI:** `compile` (resolve a source policy + its templates into a signed, byte-pinned settled policy), `validate`, `sign`, `run`, `stop`, `list` — with end-to-end ed25519 trust (templates, fragments, and the settled artefact) and a `kennel.lock` byte-pin. The shipped [templates](templates/) are signed under the maintainer key `kennel-maint-2026` (verify with `kennel validate --require-signed` against [keys/](keys/)).
 
 On distributions that restrict unprivileged user namespaces (Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), an AppArmor profile grants `userns` to the kenneld binary ([dist/apparmor/kenneld](dist/apparmor/kenneld)) — the AppArmor counterpart of the privhelper's file capabilities, a one-time install step.
 
-Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): the journald/syslog/stdout audit sinks and a unified audit writer (a per-kennel file sink exists), the IPC version handshake, the Rust `kennel-checksum-verify` (a shell witness exists), and container-runtime integration. The shipped templates are not yet signed by a maintainer key.
+Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): the unified audit writer plus the journald/syslog/stdout sinks and the `[audit]` policy section (a per-kennel file sink and the proxy's per-request JSONL records run today), per-kennel `[unix]` service launching (§7.4.7), and the Rust `kennel-checksum-verify` (a dependency-free shell verifier runs today).
 
 ## What is here
 
@@ -53,5 +53,5 @@ One exception: the BPF programs under [bpf/](src/bpf/) (the `*.bpf.c` sources an
 ## Contact and links
 
 - **Repository:** <https://github.com/projectkennel/projectkennel>
-- **Contact:** *[TBD]*
-- **Canonical THREATS.md:** *[TBD]*
+- **Security contact:** security@projectkennel.org (see [SECURITY.md](.github/SECURITY.md))
+- **Canonical THREATS.md:** <https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md>
