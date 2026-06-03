@@ -110,17 +110,16 @@ describe these read as roadmap.
     `kenneld` via `Loaded.ssh`. This is the path the still-unbuilt `[unix]` runtime
     will reuse.
 
-  **Still owed** — three separable pieces, in the order they unblock each other.
-  None is built blind: each can be validated (the first two without root).
-  1. **`kennel-netproxy` host-loopback services** (`[[net.loopback.host_services]]`,
-     §7.3) — *designed but not implemented*. `decide_request` evaluates deny before
-     allow, and the host-loopback range is invariant-denied, so a loopback bastion is
-     unreachable today. The bastion's `127.0.0.1:<port>` must be a sanctioned
-     allow-exception checked ahead of the deny (matched on the literal resolved
-     address, so no rebinding risk). The e2e proves the chain works with
-     `accept_private_resolved` + open mode as the stand-in; constrained kennels need
-     this. Self-contained, unit-testable in `kennel-netproxy`.
-  2. **The spawn-path assembly** in `spawn_workload` (guarded on non-empty
+  - **`kennel-netproxy` host-loopback services** — *built*. The proxy now reads
+    `[[net.host_services]]` (a list of exact `addr:port` literals) and reaches them
+    despite the host-loopback invariant deny, via an allow-exception checked ahead of
+    the deny-before-allow ruleset (`Proxy::with_host_services`); the match is on the
+    literal destination address only (never a resolved name), so there is no
+    rebinding surface. Unit-tested: a host service connects through a loopback deny,
+    a non-host-service loopback port stays denied, and the config parses.
+
+  **Still owed** — two separable pieces.
+  1. **The spawn-path assembly** in `spawn_workload` (guarded on non-empty
      `Loaded.ssh`): mint a synthetic key per grant (`kenneld::ssh::mint_synthetic_key`),
      materialise the synthetic `~/.ssh` into the constructed-view `$HOME` (a
      `kenneld::ssh::materialize` wired like the synthetic `/etc`), register each edge
@@ -131,7 +130,7 @@ describe these read as roadmap.
      defaults chosen: the bastion's loopback port (kenneld-allocated) and the
      host-side agent socket (`$SSH_AUTH_SOCK` of the daemon's session). Validate with
      a root e2e (bastion + agent + destination in a confined kennel).
-  3. **The root-owned `AuthorizedKeysCommand` helper** + a control-protocol message:
+  2. **The root-owned `AuthorizedKeysCommand` helper** + a control-protocol message:
      `kennel-sshd`'s AKC queries `kenneld` for the live forced-command bindings
      rather than reading a static file (the production key source; the static
      `AuthorizedKeysFile` is already supported and is what the e2e drives).

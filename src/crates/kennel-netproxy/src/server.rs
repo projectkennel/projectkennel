@@ -71,6 +71,11 @@ pub struct Proxy<W, R> {
     /// space (RFC1918 / ULA / loopback / ...). Default posture is `false`; set
     /// only for a kennel that legitimately reaches internal services by name.
     accept_private_resolved: bool,
+    /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.3): exact
+    /// `addr:port` literals the kennel may reach *despite* the host-loopback
+    /// invariant deny — e.g. the SSH bastion (§7.8.4). Matched only against a literal
+    /// destination address (never a resolved name), so there is no rebinding surface.
+    host_services: Vec<SocketAddr>,
     audit: Mutex<W>,
 }
 
@@ -96,8 +101,23 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
             ruleset,
             resolver,
             accept_private_resolved,
+            host_services: Vec::new(),
             audit: Mutex::new(audit),
         }
+    }
+
+    /// Add the sanctioned host-loopback services this proxy may reach despite the
+    /// host-loopback invariant deny (`[[net.host_services]]`, §7.3 — the SSH bastion
+    /// is one). A builder so [`new`](Self::new) stays a simple `const fn`.
+    #[must_use]
+    pub fn with_host_services(mut self, host_services: Vec<SocketAddr>) -> Self {
+        self.host_services = host_services;
+        self
+    }
+
+    /// Whether `addr:port` is a configured host service (exact literal match).
+    fn is_host_service(&self, addr: IpAddr, port: u16) -> bool {
+        self.host_services.iter().any(|hs| hs.ip() == addr && hs.port() == port)
     }
 
     /// Accept connections on `listener` forever, handling each on its own thread.
@@ -335,6 +355,17 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
         port: u16,
         transport: Transport,
     ) -> Result<(TcpStream, Option<IpAddr>), ConnectError> {
+        // Sanctioned host-loopback services (the SSH bastion, §7.8.4) are an explicit
+        // allow-exception, checked ahead of the ruleset's deny-before-allow: a literal
+        // bastion address would otherwise be caught by the host-loopback invariant
+        // deny. Only an exact literal `addr:port` match qualifies — never a name.
+        if let Destination::Addr(addr) = dest {
+            if self.is_host_service(*addr, port) {
+                let stream = TcpStream::connect((*addr, port))
+                    .map_err(|_| ConnectError::Failed("connect-refused"))?;
+                return Ok((stream, Some(*addr)));
+            }
+        }
         match self.ruleset.decide_request(dest, port, transport) {
             RequestDecision::Deny(reason) => Err(ConnectError::Denied(deny_token(reason))),
             RequestDecision::Allow => match dest {
@@ -489,7 +520,7 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::allow::{Cidr, Matcher, NetMode, Rule, RuleProtocol};
+    use crate::allow::{Cidr, DenyMatcher, DenyRule, Matcher, NetMode, Rule, RuleProtocol};
     use crate::dns::ResolveError;
     use std::collections::HashMap;
     use std::net::Ipv4Addr;
@@ -626,6 +657,68 @@ mod tests {
 
         drop(client);
         let _ = echo_handle.join();
+    }
+
+    #[test]
+    fn a_host_service_is_reachable_despite_a_loopback_deny() {
+        // The bastion case (§7.8.4): the host-loopback range is invariant-denied, but
+        // a configured host service is an explicit allow-exception checked first.
+        let (echo, echo_handle) = echo_server();
+        let echo_port = echo.port();
+        // Open mode, but loopback is denied — without the host-service exception the
+        // literal 127.0.0.1 would be refused.
+        let ruleset = Ruleset {
+            mode: NetMode::Open,
+            allow: vec![],
+            deny: vec![DenyRule {
+                matcher: DenyMatcher::Cidr(Cidr::new("127.0.0.0".parse().expect("a"), 8).expect("c")),
+                ports: vec![],
+            }],
+        };
+        let proxy = Arc::new(
+            Proxy::new(ruleset, no_resolver(), false, io::sink())
+                .with_host_services(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, echo_port))]),
+        );
+        let proxy_addr = serve_one(proxy);
+
+        let mut client = TcpStream::connect(proxy_addr).expect("connect proxy");
+        socks5_greet(&mut client);
+        client.write_all(&socks5_request_v4(Ipv4Addr::LOCALHOST, echo_port)).expect("request");
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).expect("connect reply");
+        assert_eq!(reply.get(..2), Some([0x05, 0x00].as_slice()), "host service reachable despite the deny");
+        client.write_all(b"ping").expect("send");
+        let mut got = [0u8; 4];
+        client.read_exact(&mut got).expect("echo");
+        assert_eq!(&got, b"ping");
+        drop(client);
+        let _ = echo_handle.join();
+    }
+
+    #[test]
+    fn a_non_host_service_loopback_port_stays_denied() {
+        // Only the exact configured addr:port is excepted; a different loopback port
+        // is still caught by the deny (the exception is not a blanket loopback open).
+        let ruleset = Ruleset {
+            mode: NetMode::Open,
+            allow: vec![],
+            deny: vec![DenyRule {
+                matcher: DenyMatcher::Cidr(Cidr::new("127.0.0.0".parse().expect("a"), 8).expect("c")),
+                ports: vec![],
+            }],
+        };
+        let proxy = Arc::new(
+            Proxy::new(ruleset, no_resolver(), false, io::sink())
+                .with_host_services(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 7022))]),
+        );
+        let proxy_addr = serve_one(proxy);
+        let mut client = TcpStream::connect(proxy_addr).expect("connect proxy");
+        socks5_greet(&mut client);
+        // Ask for a *different* loopback port than the host service (7022).
+        client.write_all(&socks5_request_v4(Ipv4Addr::LOCALHOST, 9)).expect("request");
+        let mut reply = [0u8; 2];
+        client.read_exact(&mut reply).expect("reply");
+        assert_ne!(reply.get(1), Some(&0x00), "a non-host-service loopback port is refused");
     }
 
     #[test]

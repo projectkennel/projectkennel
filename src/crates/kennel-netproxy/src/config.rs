@@ -67,6 +67,9 @@ pub struct ProxyConfig {
     pub ruleset: Ruleset,
     /// Whether a name may connect to a resolved special-use address.
     pub accept_private_resolved: bool,
+    /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.3): exact
+    /// `addr:port` literals reachable despite the host-loopback invariant deny.
+    pub host_services: Vec<SocketAddr>,
     /// Where to write the JSON Lines audit stream; `None` means stderr.
     pub audit_log: Option<PathBuf>,
 }
@@ -154,6 +157,17 @@ struct RawNet {
     allow: Vec<RawAllow>,
     #[serde(default)]
     deny: Vec<RawDeny>,
+    #[serde(default)]
+    host_services: Vec<RawHostService>,
+}
+
+/// `[[net.host_services]]` — a sanctioned host-loopback service (§7.3).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHostService {
+    /// The exact `addr:port` literal (e.g. `127.0.0.1:7022`) reachable despite the
+    /// host-loopback invariant deny.
+    addr: String,
 }
 
 #[derive(Deserialize)]
@@ -226,10 +240,21 @@ impl RawConfig {
             .into_iter()
             .map(RawDeny::into_rule)
             .collect::<Result<Vec<_>, _>>()?;
+        let host_services = self
+            .net
+            .host_services
+            .iter()
+            .map(|hs| {
+                hs.addr.parse::<SocketAddr>().map_err(|_| {
+                    ConfigError::Invalid(format!("host_services addr is not `ip:port`: `{}`", hs.addr))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ProxyConfig {
             listen,
             ruleset: Ruleset { mode, allow, deny },
             accept_private_resolved: self.accept_private_resolved,
+            host_services,
             audit_log: self.audit_log,
         })
     }
@@ -349,6 +374,22 @@ name = ".tracker.example"
             cfg.ruleset.deny.first().map(|r| &r.matcher),
             Some(&DenyMatcher::Name(".tracker.example".to_owned()))
         );
+    }
+
+    #[test]
+    fn parses_host_services_into_socket_addrs() {
+        let cfg = from_toml_str(
+            "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"constrained\"\n[[net.host_services]]\naddr=\"127.0.0.1:7022\"\n",
+        )
+        .expect("valid host_services config");
+        assert_eq!(cfg.host_services, vec!["127.0.0.1:7022".parse::<SocketAddr>().expect("addr")]);
+        // No [[net.host_services]] ⇒ empty (the common case).
+        assert!(from_toml_str(VALID).expect("valid").host_services.is_empty());
+        // A malformed addr is rejected.
+        assert!(from_toml_str(
+            "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"open\"\n[[net.host_services]]\naddr=\"not-an-addr\"\n"
+        )
+        .is_err());
     }
 
     #[test]
