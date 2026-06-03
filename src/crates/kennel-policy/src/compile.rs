@@ -99,6 +99,9 @@ pub fn compile(
     chain.extend(include_links);
 
     let tcv = effective.threat_catalogue_version.clone().unwrap_or_default();
+    // The `[ssh]` section is source-only (dropped in translate); validate it here,
+    // on the resolved policy, while the cross-referenced `net.allow` is still visible.
+    crate::ssh::validate(&effective)?;
     let translated = translate(&effective, install)?;
     assemble(name, &translated, &chain, &tcv, install, compiler_version)
 }
@@ -154,6 +157,7 @@ pub fn compile_leaf(
         .clone()
         .or_else(|| effective.threat_catalogue_version.clone())
         .unwrap_or_default();
+    crate::ssh::validate(&effective)?;
     let translated = translate(&effective, install)?;
     assemble(name, &translated, &chain, &tcv, install, compiler_version)
 }

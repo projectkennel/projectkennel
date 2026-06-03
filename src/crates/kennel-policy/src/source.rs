@@ -5,8 +5,8 @@
 //! This is the **input** to `kennel compile`: a template or leaf policy as authored
 //! in TOML (`docs/architecture/02-2-config-schema.md`, `docs/design/05-templates.md`). It is the
 //! rich, human-facing surface — every resource section (`exec`, `fs`, `net`, `unix`,
-//! `dbus`, `x11`, `env`, `cap`, `seccomp`, `proc`, `ptrace`, `signal`, `lifecycle`,
-//! `container`), identity and inheritance (`template_base`, `template_name`, `name`,
+//! `ssh`, `dbus`, `x11`, `env`, `cap`, `seccomp`, `proc`, `ptrace`, `signal`,
+//! `lifecycle`, `container`), identity and inheritance (`template_base`, `template_name`, `name`,
 //! `include`), and signing metadata. The compiler resolves a chain of these into the
 //! flat [`crate::settled::SettledPolicy`] the runtime enforces.
 //!
@@ -87,6 +87,9 @@ pub struct SourcePolicy {
     /// `AF_UNIX` section (`[unix]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unix: Option<UnixSection>,
+    /// SSH egress section (`[ssh]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshSection>,
     /// D-Bus section (`[dbus]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbus: Option<DbusSection>,
@@ -455,6 +458,65 @@ pub struct UnixAllow {
     pub threats: Option<Threats>,
 }
 
+/// `[ssh]` — per-kennel SSH egress (source-only; `docs/design/07-8-ssh.md` §7.8).
+///
+/// Resolved and folded like [`UnixSection`] and dropped from the settled
+/// `EffectivePolicy` (`translate.rs`): its effect is realised by `kenneld`'s SSH
+/// re-origination bastion (`kennel-sshd`), the synthetic `~/.ssh`, and the egress
+/// allowlist — never by the runtime artefact. A kennel never holds a real key.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshSection {
+    /// Whether a granted key may be driven by a non-interactive (CI) kennel with no
+    /// per-use touch/confirmation. Loud and threat-tagged; default `false`. When
+    /// `true`, [`threats`](Self::threats) must carry an `exposed` tag (§7.8.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_headless: Option<bool>,
+    /// Threat tags for the section — required to carry an `exposed` tag whenever
+    /// `allow_headless = true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
+    /// `[[ssh.keys]]` — granted `(real-key, hosts)` edges. Each mints a disposable
+    /// synthetic key bound to a forced command on the bastion (§7.8.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<SshKey>,
+    /// `[[ssh.known_hosts]]` — host-key pins for granted destinations the operator's
+    /// own `known_hosts` lacks (§7.8.7). A granted host with no known key fails closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_hosts: Vec<SshKnownHost>,
+}
+
+/// One `[[ssh.keys]]` entry: a real key and the destinations it may reach.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshKey {
+    /// The user's real key, by its stable `SHA256:<base64>` (`ssh-add -l`) identity.
+    /// The key material itself lives only in the user's host-side store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Destinations this key may reach (each `⊆ net.allow` on port 22).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// Why this key/host edge is granted (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
+}
+
+/// One `[[ssh.known_hosts]]` entry: a pinned host key for a granted destination.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshKnownHost {
+    /// The destination hostname this key pins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The host key in `authorized_keys`/`known_hosts` form (`ssh-ed25519 AAAA…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
 /// `[dbus]` — session/system bus enablement.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -739,6 +801,14 @@ impl SourcePolicy {
                 let who = a.name.as_deref().or(a.real.as_deref()).unwrap_or("<unnamed>");
                 if is_blank(a.reason.as_deref()) {
                     errs.push(format!("[[unix.allow]] \"{who}\" is missing a `reason`"));
+                }
+            }
+        }
+        if let Some(ssh) = &self.ssh {
+            for k in &ssh.keys {
+                let who = k.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
+                if is_blank(k.reason.as_deref()) {
+                    errs.push(format!("[[ssh.keys]] \"{who}\" is missing a `reason`"));
                 }
             }
         }

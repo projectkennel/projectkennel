@@ -38,6 +38,7 @@ pub mod settled;
 pub mod signature;
 pub mod source;
 pub mod source_sig;
+pub mod ssh;
 pub mod translate;
 
 pub use compile::{compile, compile_leaf, seal_unsigned, Compiled};

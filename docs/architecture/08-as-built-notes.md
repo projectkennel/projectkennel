@@ -42,22 +42,41 @@ describe these read as roadmap.
   3. Every sshd-checked path (runtime dir, host key, AKC) must be on a
      safe-owned path — never world-writable `/tmp`.
 
-  **Phased plan.** (1) `kenneld` daemon-supervision for a sibling service
+  **Built so far** (the pure, host-independent layers, fully unit-tested):
+  - The **`[ssh]` source schema** — `SshSection`/`SshKey`/`SshKnownHost` in
+    `kennel-policy::source`, `fold_ssh` in `resolve.rs` (bare-set lists like
+    `[unix]`), `SshLeaf` add/remove deltas in `leaf.rs`, dropped in `translate.rs`
+    (source-only), with the §7.8.8 compile-time validators in `kennel-policy::ssh`
+    wired into `compile`/`compile_leaf`: every `fingerprint` well-formed
+    (`SHA256:<43-char base64>`), every `hosts` entry `⊆ net.allow` on port 22, and
+    `allow_headless = true` must carry a threat tag.
+  - The **synthetic `~/.ssh` generator** — `kenneld::ssh` (a sibling of `etc.rs`):
+    renders the generated read-only `config` (one bastion-routed stanza per granted
+    host, `HostKeyAlias kennel-bastion`, `IdentitiesOnly`, `StrictHostKeyChecking`)
+    and the bastion-only `known_hosts`, and `materialize`s them with `0700`/`0600`
+    modes alongside the pre-minted synthetic keys.
+  - **`kennel-ssh-reorigin`** — the unprivileged forced-command router (its own
+    std-only crate). The security-load-bearing core is pure and tested: strict
+    `--dest`/`--key` parsing (option-injection-proof), the hostname and
+    `SHA256:` grammars, `$SSH_USER_AUTH` publickey confirmation (fail-closed),
+    exact fingerprint→agent-identity selection, and outbound-`ssh` argv
+    construction (`IdentitiesOnly`, `StrictHostKeyChecking`, `--`-terminated so
+    `$SSH_ORIGINAL_COMMAND` can never be read as a flag). `main` is the thin IO
+    tail (`ssh-add` enumeration, identity-file write, `execvp ssh`).
+
+  **Still owed** (the host-coupled integration — needs root + a live `sshd`/agent
+  to validate): (1) `kenneld` daemon-supervision for a sibling service
   (start/track/reap a managed `sshd`, regenerate its state on restart) — shared
-  prerequisite with the still-unbuilt `[unix]` socket path. (2) The `[ssh]`
-  source schema (`source.rs` + `fold_ssh` in `resolve.rs`, dropped in
-  `translate.rs` like `[unix]`; compile-time validators: fingerprint well-formed,
-  `hosts ⊆ net.allow:22`, `allow_headless` loud/threat-tagged). (3) Synthetic-key
-  minting per `(real-key, host)` edge + the root-owned AKC helper that vends the
-  forced-command binding for live kennels and deregisters on teardown.
-  (4) `kennel-ssh-reorigin` (adapt the hardened forced-command pattern: strict
-  mode, `$SSH_USER_AUTH` verification, fingerprint audit, `exec ssh` to the fixed
-  dest with the selected key, `$SSH_ORIGINAL_COMMAND` forwarded). (5) The
-  synthetic `~/.ssh` generator (a sibling of `etc.rs`: per-host `config`,
-  bastion-only `known_hosts`, the synthetic key) carried in by the constructed-
-  `$HOME` pivot. (6) Reach the bastion over the existing egress proxy (one
-  allowlisted loopback port). (7) Tests: re-origination allow + the adversarial
-  denies (non-synthetic key, destination redirection, forwarding).
+  prerequisite with the still-unbuilt `[unix]` socket path. (3) Synthetic-key
+  minting per `(real-key, host)` edge (stock `ssh-keygen`, so the on-disk format is
+  exactly what the client expects) + the root-owned AKC helper that vends the
+  forced-command binding for live kennels and deregisters on teardown; and the
+  bridge that carries the resolved `[ssh]` grants from the policy into the kennel's
+  spawn params (the source-only-section→runtime path, also still-unbuilt for
+  `[unix]`). (6) Reach the bastion over the existing egress proxy (one allowlisted
+  loopback port). (7) Tests: re-origination allow + the adversarial denies
+  (non-synthetic key, destination redirection, forwarding) under `tests/ssh/`.
+  (Phases 2/4/5 above are done; the numbering follows §7.8's original plan.)
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

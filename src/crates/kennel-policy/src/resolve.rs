@@ -47,7 +47,7 @@ use crate::source::{
     self, CapSection, ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev,
     FsHome, FsProc, FsScrub, FsSection, FsTmp, LifecycleSection, NetAudit, NetBind, NetDeny,
     NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection, SourcePolicy,
-    UnixSection, X11Section,
+    SshSection, UnixSection, X11Section,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -203,6 +203,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         fs: merge(&parent.fs, &child.fs, fold_fs),
         net: merge(&parent.net, &child.net, fold_net),
         unix: merge(&parent.unix, &child.unix, fold_unix),
+        ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
         dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
         x11: merge(&parent.x11, &child.x11, fold_x11),
         proc: merge(&parent.proc, &child.proc, fold_proc),
@@ -367,6 +368,20 @@ fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
         default: or(&c.default, &p.default),
         abstract_ns: or(&c.abstract_ns, &p.abstract_ns),
         allow: if c.allow.is_empty() { p.allow.clone() } else { c.allow.clone() },
+    }
+}
+
+fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
+    SshSection {
+        allow_headless: or(&c.allow_headless, &p.allow_headless),
+        threats: or(&c.threats, &p.threats),
+        // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
+        keys: if c.keys.is_empty() { p.keys.clone() } else { c.keys.clone() },
+        known_hosts: if c.known_hosts.is_empty() {
+            p.known_hosts.clone()
+        } else {
+            c.known_hosts.clone()
+        },
     }
 }
 

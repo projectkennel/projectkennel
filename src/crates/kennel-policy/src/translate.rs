@@ -13,11 +13,11 @@
 //! # The runtime-relevant subset (02-2 §The settled policy, 08 §8.2)
 //!
 //! The settled `EffectivePolicy` carries only `net`, `fs`, `exec`, `proc`, `cap`,
-//! `seccomp`, `lifecycle`. The source-only sections (`unix`, `dbus`, `x11`, `env`,
-//! `ptrace`, `signal`, and the informational `fs.deny`/`fs.scrub`/`exec.deny`) are
-//! compile-time or shim-construction concerns and are intentionally dropped here —
+//! `seccomp`, `lifecycle`. The source-only sections (`unix`, `ssh`, `dbus`, `x11`,
+//! `env`, `ptrace`, `signal`, and the informational `fs.deny`/`fs.scrub`/`exec.deny`)
+//! are compile-time or shim-construction concerns and are intentionally dropped here —
 //! their effects are realised by other mechanisms (Landlock grant-absence, the
-//! shim builder, the env curator), not by the settled artefact.
+//! shim builder, the env curator, the SSH bastion), not by the settled artefact.
 //!
 //! # Substitution
 //!

@@ -2,7 +2,7 @@
 
 This chapter describes the Cargo workspace layout: which crates exist, what each owns, how they depend on each other, and what build-time choices they expose. The *public APIs* of each crate are in `02-6-internal-api.md`; this chapter is the structural view — how the code is cut up, not what each piece exposes.
 
-The workspace has **8 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kenneld`, and `kennel-text`. IPC, the CLI, and audit are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`), and audit is split between the BPF ringbuf drain (`kennel-bpf`) and the netproxy's JSONL formatter (`kennel-netproxy::audit`). The crate count is kept small deliberately — a wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
+The workspace has **9 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kenneld`, `kennel-text`, and `kennel-ssh-reorigin`. The last is a standalone, std-only forced-command binary the SSH bastion runs (`07-8-ssh.md` §7.8.4); it depends on no other Project Kennel crate by design — it must stay minimal and self-contained. IPC, the CLI, and audit are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`), and audit is split between the BPF ringbuf drain (`kennel-bpf`) and the netproxy's JSONL formatter (`kennel-netproxy::audit`). The crate count is kept small deliberately — a wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
 
 ---
 
@@ -29,7 +29,7 @@ kennel/
 │   ├── kennel.bpf.h                 shared helpers (UAPI-based; no vmlinux.h/CO-RE)
 │   ├── README.md                    why no CO-RE; build/inspect instructions
 │   └── HELPERS.md                   whitelist of permitted BPF helper functions
-├── crates/                          Rust workspace members (8)
+├── crates/                          Rust workspace members (9)
 │   ├── kennel-syscall/              the only unsafe-bearing crate (besides BPF FFI)
 │   ├── kennel-text/                 sanitisation helpers
 │   ├── kennel-policy/               TOML parsing, signature verification (settled-policy core)
@@ -37,6 +37,7 @@ kennel/
 │   ├── kennel-spawn/                policy → Plan → setup sequence (incl. the pivot_root view) → execve
 │   ├── kennel-netproxy/             binary + lib: SOCKS5/HTTP egress proxy (blocking, thread-per-conn)
 │   ├── kennel-privhelper/           binary + lib: privileged operations helper (wire format in src/wire.rs)
+│   ├── kennel-ssh-reorigin/         binary + lib: SSH re-origination forced command (std-only; §7.8.4)
 │   └── kenneld/                     lib + binaries: per-user supervisor (src/bin/kenneld.rs)
 │                                    and the CLI (src/bin/kennel.rs); control protocol in src/control.rs
 │       (folded in, no separate crate: IPC → kenneld::control + kennel-privhelper::wire;
@@ -50,7 +51,7 @@ kennel/
 └── architecture/, docs/, .github/, etc.
 ```
 
-Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), and `kenneld` (a library half in `src/lib.rs` providing the orchestration both binaries use, plus `src/bin/kenneld.rs` for the daemon and `src/bin/kennel.rs` for the CLI). The remaining crates are libraries (`src/lib.rs`).
+Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), `kennel-ssh-reorigin` (`src/main.rs` + a library half holding the tested re-origination core), and `kenneld` (a library half in `src/lib.rs` providing the orchestration both binaries use, plus `src/bin/kenneld.rs` for the daemon and `src/bin/kennel.rs` for the CLI). The remaining crates are libraries (`src/lib.rs`).
 
 ---
 
@@ -75,6 +76,10 @@ The workspace is acyclic and layered. Lower-level crates do not depend on higher
                     kennel-syscall
                           |
                  (libc, nix; kennel-bpf adds object)
+
+  kennel-ssh-reorigin (bin)   ← stands alone: std-only, no Project Kennel deps.
+                                The bastion's forced command must stay minimal
+                                and self-contained (§7.8.4).
 ```
 
 Rules:
@@ -140,10 +145,16 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 - `[profile.release] panic = "abort"`; `[profile.test] panic = "unwind"` per CODING-STANDARDS.md §8.5.
 - Has its own dep list distinct from the workspace: only `kennel-syscall`, `kennel-text`, `serde`. Audit events are written as JSON Lines by a small hand-rolled emitter (fixed schema — no `serde_json`). No async, no proc-macros beyond serde_derive.
 
+### `kennel-ssh-reorigin`
+
+- Binary crate with a library half; **std-only, no Project Kennel deps and no external crates** — the SSH bastion's forced command must stay minimal and auditable (`07-8-ssh.md` §7.8.4).
+- The library (`src/lib.rs`) holds the security-load-bearing core, all pure and unit-tested: strict `--dest`/`--key` parsing (option-injection-proof), the hostname and `SHA256:` grammars, `$SSH_USER_AUTH` publickey confirmation (fail-closed), exact fingerprint→agent-identity selection, and outbound-`ssh` argv construction (`--`-terminated so the attacker-controlled `$SSH_ORIGINAL_COMMAND` can never be read as a flag). `main.rs` is the thin IO tail (`ssh-add` enumeration, identity-file write, `execvp ssh`).
+- Carries no key material: only the *public* half of the selected key is written (to a `0600` temp file), the private key stays in the user's agent/token.
+
 ### `kenneld`
 
 - Library + binaries. **Sync, blocking — `serve()` accepts and spawns one thread per connection. No async runtime.**
-- Owns the in-memory kennel registry, the per-kennel orchestration (`lib.rs`), the control protocol (`control.rs`), and the audit reader for the BPF ringbuf.
+- Owns the in-memory kennel registry, the per-kennel orchestration (`lib.rs`), the control protocol (`control.rs`), the synthetic `/etc` (`etc.rs`) and synthetic `~/.ssh` (`ssh.rs`) generators, and the audit reader for the BPF ringbuf.
 
 ### CLI (folded into `kenneld` as `src/bin/kennel.rs`)
 

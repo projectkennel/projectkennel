@@ -22,7 +22,9 @@
 //! covers add/remove on the list-valued sections; the scalar `[*.override]` form is
 //! a later increment (the template chain already overrides scalars).
 
-use crate::source::{LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, UnixAllow};
+use crate::source::{
+    LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, SshKey, UnixAllow,
+};
 use crate::PolicyError;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +60,9 @@ pub struct LeafPolicy {
     /// `[unix.allow.add]` deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unix: Option<UnixLeaf>,
+    /// `[ssh.keys.add]` / `[ssh.keys.remove]` deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshLeaf>,
     /// `[exec.allow.add]` / `[exec.allow.remove]` deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecLeaf>,
@@ -183,6 +188,27 @@ pub struct UnixAllowDelta {
     pub remove: Vec<UnixAllow>,
 }
 
+/// `[ssh.keys]` leaf deltas.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshLeaf {
+    /// `[[ssh.keys.add]]` / `[[ssh.keys.remove]]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<SshKeyDelta>,
+}
+
+/// An add/remove delta over SSH key grants.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshKeyDelta {
+    /// Entries to add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<SshKey>,
+    /// Entries to remove, matched by `fingerprint`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<SshKey>,
+}
+
 /// `[exec.allow]` leaf deltas.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -272,6 +298,16 @@ impl LeafPolicy {
                 }
             }
         }
+        if let Some(ssh) = &self.ssh {
+            if let Some(d) = &ssh.keys {
+                for e in d.add.iter().chain(&d.remove) {
+                    if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+                        let who = e.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
+                        errs.push(format!("[[ssh.keys.*]] `{who}` is missing a `reason`"));
+                    }
+                }
+            }
+        }
     }
 
     /// Whether this policy is additive-only — it carries no `*.remove` deltas. An
@@ -286,7 +322,8 @@ impl LeafPolicy {
         let exec_ok = self.exec.as_ref().is_none_or(|e| path_clean(&e.allow));
         let net_ok = self.net.as_ref().is_none_or(|n| n.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
         let unix_ok = self.unix.as_ref().is_none_or(|u| u.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
-        fs_ok && exec_ok && net_ok && unix_ok
+        let ssh_ok = self.ssh.as_ref().is_none_or(|s| s.keys.as_ref().is_none_or(|k| k.remove.is_empty()));
+        fs_ok && exec_ok && net_ok && unix_ok && ssh_ok
     }
 
     /// This policy's `[[net.allow.add]]` entries (for include conflict checks).
@@ -339,6 +376,17 @@ impl LeafPolicy {
                 target.allow.retain(|e| !d.remove.iter().any(|r| unix_key(r) == unix_key(e)));
             }
         }
+        if let Some(ssh) = &self.ssh {
+            if let Some(d) = &ssh.keys {
+                let target = effective.ssh.get_or_insert_with(Default::default);
+                for entry in &d.add {
+                    if !target.keys.iter().any(|e| ssh_key(e) == ssh_key(entry)) {
+                        target.keys.push(entry.clone());
+                    }
+                }
+                target.keys.retain(|e| !d.remove.iter().any(|r| ssh_key(r) == ssh_key(e)));
+            }
+        }
         // Scalar overrides (`[*.override]`): replace only the fields the leaf sets.
         if let Some(over) = self.lifecycle.as_ref().and_then(|l| l.over.as_ref()) {
             let target = effective.lifecycle.get_or_insert_with(Default::default);
@@ -385,6 +433,11 @@ pub(crate) fn net_key(a: &NetAllow) -> &str {
 /// Unique key for a unix allow entry (name, else real).
 fn unix_key(a: &UnixAllow) -> &str {
     a.name.as_deref().or(a.real.as_deref()).unwrap_or("")
+}
+
+/// Unique key for an SSH key grant (the fingerprint).
+fn ssh_key(a: &SshKey) -> &str {
+    a.fingerprint.as_deref().unwrap_or("")
 }
 
 #[cfg(test)]

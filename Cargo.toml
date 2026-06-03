@@ -19,6 +19,7 @@ members = [
     "src/crates/kennel-syscall",
     "src/crates/kennel-text",
     "src/crates/kennel-netproxy",
+    "src/crates/kennel-ssh-reorigin",
     "src/crates/kenneld",
 ]
 
