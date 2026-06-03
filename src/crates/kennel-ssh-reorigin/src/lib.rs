@@ -247,6 +247,11 @@ pub struct Outbound<'a> {
     /// The bastion's host-side `known_hosts` for the real destinations, if one is
     /// configured; the outbound connection is verified against it.
     pub known_hosts_file: Option<&'a str>,
+    /// A `kenneld`-owned `ssh_config` for the outbound hop (`ssh -F`), if set. This
+    /// is the host-side config seam (§7.8.7): `kenneld` controls per-destination
+    /// `HostName`/`Port`/`ProxyJump` here, and the workload cannot influence it.
+    /// `None` ⇒ `ssh` uses its defaults (the destination on `:22`).
+    pub config_file: Option<&'a str>,
     /// `$SSH_ORIGINAL_COMMAND`, forwarded verbatim. `None`/empty ⇒ an interactive
     /// session (request a pty); a command ⇒ no pty.
     pub original_command: Option<&'a str>,
@@ -265,6 +270,12 @@ pub fn outbound_argv(o: &Outbound<'_>) -> Vec<String> {
     let mut argv = vec!["ssh".to_owned()];
     // Pty: force one for an interactive re-origination, suppress it for a command.
     argv.push(if interactive { "-tt" } else { "-T" }.to_owned());
+    // A kenneld-owned config (if any) is applied first; the -o options below still
+    // override it for the security-critical settings.
+    if let Some(cfg) = o.config_file {
+        argv.push("-F".to_owned());
+        argv.push(cfg.to_owned());
+    }
     argv.push("-o".to_owned());
     argv.push("IdentitiesOnly=yes".to_owned());
     argv.push("-o".to_owned());
@@ -403,9 +414,12 @@ mod tests {
             dest: "github.com",
             identity_file: "/run/kennel/id.pub",
             known_hosts_file: Some("/etc/kennel/bastion_known_hosts"),
+            config_file: Some("/run/kennel/ssh_config"),
             original_command: Some("git-receive-pack 'repo.git'"),
         };
         let argv = outbound_argv(&o);
+        assert!(argv.windows(2).any(|w| w.first().map(String::as_str) == Some("-F")
+            && w.get(1).map(String::as_str) == Some("/run/kennel/ssh_config")));
         // The command is the single trailing element, after the `--` terminator.
         assert_eq!(argv.last().map(String::as_str), Some("git-receive-pack 'repo.git'"));
         let dd = argv.iter().position(|a| a == "--").expect("-- present");
@@ -423,7 +437,7 @@ mod tests {
     #[test]
     fn outbound_argv_requests_a_pty_for_an_interactive_session() {
         for cmd in [None, Some("")] {
-            let o = Outbound { dest: "git.internal", identity_file: "/k.pub", known_hosts_file: None, original_command: cmd };
+            let o = Outbound { dest: "git.internal", identity_file: "/k.pub", known_hosts_file: None, config_file: None, original_command: cmd };
             let argv = outbound_argv(&o);
             assert!(argv.contains(&"-tt".to_owned()), "interactive ⇒ force pty");
             // No trailing command, dest is last.

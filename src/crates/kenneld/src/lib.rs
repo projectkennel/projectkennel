@@ -31,6 +31,7 @@ pub mod proxy;
 pub mod server;
 pub mod socket;
 pub mod ssh;
+pub mod sshd;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};

@@ -62,21 +62,40 @@ describe these read as roadmap.
     exact fingerprint→agent-identity selection, and outbound-`ssh` argv
     construction (`IdentitiesOnly`, `StrictHostKeyChecking`, `--`-terminated so
     `$SSH_ORIGINAL_COMMAND` can never be read as a flag). `main` is the thin IO
-    tail (`ssh-add` enumeration, identity-file write, `execvp ssh`).
+    tail (`ssh-add` enumeration, identity-file write, `execvp ssh`). The host-side
+    config seam is two `kenneld`-owned env knobs the workload cannot influence:
+    `KENNEL_SSH_KNOWN_HOSTS` (the bastion's `known_hosts` for the real
+    destinations) and `KENNEL_SSH_CONFIG` (an `ssh -F` config for per-destination
+    `HostName`/`Port`/`ProxyJump`).
+  - **The bastion config + launch** — `kenneld::sshd`: the hardened `sshd_config`
+    generator (`ExposeAuthInfo`, publickey-only, `AllowTcpForwarding no`/`PermitOpen
+    none`/`Subsystem sftp /bin/false`, the `SetEnv SSH_AUTH_SOCK=…` that hands the
+    forced command the host-side agent), the `restrict,pty,command=…`
+    `authorized_keys` line builder, host-key generation via stock `ssh-keygen`, and
+    `spawn`/reap of the managed `sshd` (mirrors `proxy.rs`). Both the static
+    `AuthorizedKeysFile` and the root-owned `AuthorizedKeysCommand` sources are
+    expressible.
+  - **End-to-end proof** — `src/tools/ssh-bastion-e2e.sh` stands up a real
+    two-hop topology with stock OpenSSH 9.6 (a bastion `sshd` + a destination
+    `sshd` + an agent) and drives the **built** `kennel-ssh-reorigin` through it,
+    asserting §7.8.9's load-bearing properties: re-origination forwards
+    `$SSH_ORIGINAL_COMMAND` to the policy-fixed destination; an injection-laden
+    command cannot redirect it or execute on the bastion; a non-synthetic key is
+    refused; a port-forward channel is denied. All four pass.
 
-  **Still owed** (the host-coupled integration — needs root + a live `sshd`/agent
-  to validate): (1) `kenneld` daemon-supervision for a sibling service
-  (start/track/reap a managed `sshd`, regenerate its state on restart) — shared
-  prerequisite with the still-unbuilt `[unix]` socket path. (3) Synthetic-key
-  minting per `(real-key, host)` edge (stock `ssh-keygen`, so the on-disk format is
-  exactly what the client expects) + the root-owned AKC helper that vends the
-  forced-command binding for live kennels and deregisters on teardown; and the
-  bridge that carries the resolved `[ssh]` grants from the policy into the kennel's
-  spawn params (the source-only-section→runtime path, also still-unbuilt for
-  `[unix]`). (6) Reach the bastion over the existing egress proxy (one allowlisted
-  loopback port). (7) Tests: re-origination allow + the adversarial denies
-  (non-synthetic key, destination redirection, forwarding) under `tests/ssh/`.
-  (Phases 2/4/5 above are done; the numbering follows §7.8's original plan.)
+  **Still owed** (the integration into a *live kennel* — needs the kennel spawn
+  path + root to validate as a whole): the supervision lifecycle wired into
+  `kenneld`'s per-kennel orchestration (start/track/reap the managed `sshd`
+  alongside the netproxy, regenerate state on restart) — sharing the sibling-service
+  prerequisite with the still-unbuilt `[unix]` socket path; synthetic-key minting
+  per `(real-key, host)` edge wired to the synthetic `~/.ssh` of a live kennel; the
+  root-owned AKC helper that vends the forced-command bindings for live kennels over
+  the control socket and deregisters on teardown; the bridge carrying the resolved
+  `[ssh]` grants from the policy into the kennel's spawn params (the
+  source-only-section→runtime path, also still-unbuilt for `[unix]`); and reaching
+  the bastion over the egress proxy (one allowlisted loopback port). (The phase
+  numbering follows §7.8's original plan; 2/4/5 and the bastion config + e2e are
+  done.)
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

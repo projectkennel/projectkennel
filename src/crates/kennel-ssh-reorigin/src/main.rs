@@ -56,11 +56,13 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Build the outbound argv and exec ssh.
     let known_hosts = std::env::var("KENNEL_SSH_KNOWN_HOSTS").ok();
+    let config_file = std::env::var("KENNEL_SSH_CONFIG").ok();
     let original = std::env::var("SSH_ORIGINAL_COMMAND").ok();
     let ssh_argv = outbound_argv(&Outbound {
         dest: &req.dest,
         identity_file: &identity_file,
         known_hosts_file: known_hosts.as_deref(),
+        config_file: config_file.as_deref(),
         original_command: original.as_deref(),
     });
 
