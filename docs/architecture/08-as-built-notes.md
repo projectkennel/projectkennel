@@ -215,6 +215,31 @@ describe these read as roadmap.
     *ssh-agent* shim was removed (SSH is the §7.8 bastion now) and replaced with a
     per-kennel gpg-agent example.
 
+- **`[[fs.dev.passthrough]]` — specific host devices** (design `07-2-filesystem.md`
+  §7.2.8) — **BUILT**. A first-class, loud way to expose a specific real host device
+  (a serial console, `/dev/ppp`, `/dev/net/tun`) to a kennel, distinct from the
+  trivial `fs.dev.allow` pseudo-device baseline. The constructed `/dev` already bound
+  arbitrary allowlisted nodes (preserving owner/group/mode, Landlock `rw`+`ioctl`,
+  parent dirs created for a subdir node); what was added is the policy surface
+  (`kennel-policy`), mirroring `[unix]`/`[ssh]`:
+  - `[[fs.dev.passthrough]]` source entries (`path`, `group`, `reason`, `threats`),
+    folded bare-set, with a `[[fs.dev.passthrough.add]]` leaf delta; `kennel-policy::dev`
+    validators (resolved policy: `path` absolute under `/dev`, no `..`; an `exposed`
+    threat tag required) plus the `reason` check; `translate` **merges** passthrough
+    paths into `DevPolicy.allow` (both bind identically at spawn — no runtime change),
+    dropping `reason`/`threats`/`group` as compile-time-only.
+  - **Access is GID, not capability** (the key design point): the device is gated by
+    its DAC group (`dialout`/`dip`/`netdev`), and the kennel reaches it only if that
+    group is in its group set; the user must already be a member. `/dev/net/tun` and
+    `/dev/ppp` are used the unprivileged way (a persistent, group-owned device), never
+    by granting `CAP_NET_ADMIN` (which in the host netns would risk egress bypass).
+  - **As built the kennel inherits the user's supplementary groups**, so a passed-through
+    device the user can already reach works; the `group` field is the audit gate and
+    the hook for the future hardening that *drops* non-granted groups (needs
+    privilege/userns) — roadmap. **Proven** in the kenneld root e2e: a confined kennel
+    granted `/dev/net/tun` (a subdir device) finds it present + openable, and a
+    non-granted device (`/dev/mem`) is absent.
+
 ## 8.2 Implementation lessons (apply these to the rest)
 
 - **The Landlock ruleset must be built *after* `pivot_root`, in the child.** A rule

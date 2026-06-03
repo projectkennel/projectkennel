@@ -232,8 +232,37 @@ Significant device categories and their treatment:
 | `/dev/hidraw*` | Deny | Raw HID; opt-in for hardware token (FIDO/U2F) workflows |
 | `/dev/loop*` | Deny | Loopback block devices; rarely needed in kennels |
 | `/dev/fuse` | Deny | FUSE mounts; rarely needed |
+| `/dev/ttyUSB*`, `/dev/ttyACM*`, `/dev/ttyS*` | Deny | Serial consoles; opt-in via `[[fs.dev.passthrough]]` (group `dialout`/`uucp`) |
+| `/dev/net/tun` | Deny | Userspace tunnels; opt-in via `[[fs.dev.passthrough]]` (persistent, group-owned) |
+| `/dev/ppp` | Deny | PPP; opt-in via `[[fs.dev.passthrough]]` (group `dip`) |
 
 Templates may enable specific device categories. The `ml-coding` template allows `/dev/nvidia*` and documents the capability expansion. The `audio-recording` template allows `/dev/snd/*`. Each grant comes with a `threats.exposed` annotation surfacing the implication (see §5).
+
+### Passing through a specific host device
+
+The baseline `fs.dev.allow` list above is the *trivial* pseudo-device set — bare paths, no documentation needed. A workload that must talk to a **specific real host device** — a serial console (`/dev/ttyUSB0`, `/dev/ttyACM0`, `/dev/ttyS0`), `/dev/ppp`, `/dev/net/tun` — declares it as a **passthrough**, which is loud: a documented `reason` and an `exposed` threat tag are both required.
+
+```toml
+[[fs.dev.passthrough]]
+path   = "/dev/ttyUSB0"
+group  = "dialout"                # the owning group that gates access (below)
+reason = "flash firmware to the board on the bench"
+threats.exposed = ["T2.x"]        # passing a device through widens the kernel attack surface
+
+[[fs.dev.passthrough]]
+path   = "/dev/net/tun"
+group  = "netdev"
+reason = "establish a userspace WireGuard tunnel"
+threats.exposed = ["T2.x"]
+```
+
+A passthrough is authored where the rest of a kennel's grants are — a leaf adds its own device with `[[fs.dev.passthrough.add]]`, folded up the template chain like `[[net.allow.add]]`. Validation (compile time, on the resolved policy): the `path` is absolute under `/dev` with no `..`, a `reason` is present, and an `exposed` threat tag is carried (`kennel-policy::dev`). A passthrough that shims an SSH agent has no special case — SSH is the §7.8 concern, not a device.
+
+**Mechanism.** A passthrough binds exactly like an `fs.dev.allow` entry: the host node is bind-mounted into the kennel's constructed `/dev` at the same path (its parent created for a subdirectory node like `/dev/net/tun`), preserving the device's owner/group/mode, and granted Landlock `read`/`write`/`ioctl` (`IOCTL_DEV`). Nothing else is in the constructed `/dev`, so a non-granted device is structurally absent (ENOENT). The reason/threats/group are compile-time documentation and are not carried into the settled artefact.
+
+**Access is GID, not capability.** These devices are gated by their DAC group — `dialout`/`uucp` for serial, `dip`/`modem` for `/dev/ppp`, `netdev` (or `0666`) for `/dev/net/tun` — not by a Linux capability. The kennel reaches a passed-through device only if the device's owning group is in the kennel's group set, and the user must already be a member of that group (the framework never grants a group the user lacks — that would be privilege escalation). `/dev/net/tun` and `/dev/ppp` are used the **unprivileged** way: a persistent device pre-created and owned by the user's group (the standard `tunctl`/`pppd` pattern), *not* by handing the workload `CAP_NET_ADMIN` to create fresh interfaces — which the kennel does not do, and which in the host network namespace would risk bypassing the egress proxy (§7.3).
+
+As built, the kennel **inherits the user's supplementary groups**, so a device the user can already reach is reachable in the kennel once its node is passed through; the `group` field records the gate for audit. Selectively *dropping* the user's non-granted supplementary groups (so the kennel holds only the groups its passthroughs name) is a hardening that needs the privilege/userns surface and is roadmap — at which point `group` becomes the re-add list. Until then, a passthrough widens the kennel's device reach but not its group set.
 
 ## 7.2.9 Sysfs and other pseudo-filesystems
 
