@@ -28,8 +28,10 @@
 pub mod plan;
 
 use std::io;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kennel_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_syscall::landlock::{AccessFs, AccessNet, Ruleset};
@@ -214,6 +216,49 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 /// Returns [`SpawnError::Syscall`] if a namespace unshare, building the ruleset,
 /// the seal, or the spawn fails. A seal failure aborts the spawn fail-closed.
 pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
+    spawn_inner(plan, command, None)
+}
+
+/// How long the `gid_map` servicer waits between cancellation checks while polling
+/// for the spawn child's ready signal.
+const HANDSHAKE_TICK_MS: i32 = 100;
+
+/// The closure kenneld supplies to write the workload's userns `gid_map` out of
+/// band: given the spawn child's pid, perform the privileged map write (drive the
+/// privhelper `set-gid-map` op) and report success/failure.
+type GidMapper<'a> = Box<dyn FnOnce(u32) -> io::Result<()> + Send + 'a>;
+
+/// Spawn `command` confined by `plan`, re-granting a supplementary group via a
+/// privileged `gid_map` handshake (§7.2.8).
+///
+/// Identical to [`spawn`] except for the unprivileged userns path: instead of
+/// writing the single-line (drop-all) `gid_map` itself, the spawn child
+/// establishes its userns with the `gid_map` deferred, signals its pid, and blocks
+/// until `map_gids` has written a multi-gid map against that pid. Because
+/// `Command::spawn` blocks the calling thread until the child execs, `map_gids` is
+/// run on a scoped servicer thread; it is given the child's pid and must perform
+/// the privileged write (kenneld drives the privhelper, which holds `CAP_SETGID` in
+/// the init userns). A `map_gids` failure aborts the spawn fail-closed: the child
+/// receives an abort ack and never execs.
+///
+/// `map_gids` is only consulted on the userns path; with a non-userns (legacy)
+/// plan this behaves exactly like [`spawn`] and `map_gids` is never called.
+///
+/// # Errors
+///
+/// As [`spawn`], plus [`SpawnError::Syscall`] carrying `map_gids`'s error if the
+/// privileged map write fails.
+pub fn spawn_with_gid_map<F>(plan: &Plan, command: &mut Command, map_gids: F) -> Result<Child, SpawnError>
+where
+    F: FnOnce(u32) -> io::Result<()> + Send,
+{
+    spawn_inner(plan, command, Some(Box::new(map_gids)))
+}
+
+/// The shared body of [`spawn`] and [`spawn_with_gid_map`]. With `mapper` `Some`
+/// and a userns plan, the spawn child defers its `gid_map` and the handshake runs;
+/// otherwise the child writes its own single-line `gid_map` and `mapper` is unused.
+fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>) -> Result<Child, SpawnError> {
     // Build the seccomp filter in the parent (allocation off the seal path). An
     // empty denylist means "no seccomp filter" (rely on Landlock + the cgroup BPF).
     let filter = if plan.seccomp_deny.is_empty() {
@@ -250,6 +295,17 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     if !use_userns && plan.namespaces.contains(Namespaces::PID) {
         kennel_syscall::namespace::unshare(Namespaces::PID).map_err(SpawnError::Syscall)?;
     }
+
+    // The deferred-gid handshake (§7.2.8) engages only on the userns path and only
+    // when a mapper is supplied (a granted supplementary group): the spawn child
+    // defers its `gid_map` for the privhelper to write. Two close-on-exec pipes
+    // carry the exchange — the child sends "ready, pid=P", then blocks for the
+    // servicer's ack. The parent retains the read end of the ready pipe and the
+    // write end of the proceed pipe (for the servicer); the child seal keeps the
+    // opposite ends.
+    let deferred_gid = use_userns && mapper.is_some();
+    let (handshake_parent, seal_ready_w, seal_proceed_r) =
+        handshake_pipes(deferred_gid).map_err(SpawnError::Syscall)?;
     // USER is established by `establish_identity_userns`, not a plain unshare, so it
     // is always excluded from the seal's unshare set. PID:
     // * userns path — kept in `seal_ns`: the seal unshares it, then forks so the
@@ -352,10 +408,29 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
             // namespace, gaining `CAP_SYS_ADMIN` *within it* so the unshares and the
             // mount/`pivot_root` need no real privilege. Map our own uid/gid 1:1,
             // read live — this is a fork of kenneld, which runs as the operator.
-            kennel_syscall::namespace::establish_identity_userns(
-                kennel_syscall::unistd::real_uid(),
-                kennel_syscall::unistd::real_gid(),
-            )?;
+            let uid = kennel_syscall::unistd::real_uid();
+            if let (Some(rw), Some(pr)) = (seal_ready_w.as_ref(), seal_proceed_r.as_ref()) {
+                // Granted-supplementary-group path (§7.2.8): establish the userns with
+                // the `gid_map` deferred, signal our pid to the servicer, and block
+                // until it has written the multi-gid map (via the privhelper, which
+                // holds `CAP_SETGID` in the init userns) and acked proceed. An abort
+                // (or a closed pipe) fails the seal closed — the workload never execs.
+                kennel_syscall::namespace::establish_userns_defer_gid_map(uid)?;
+                kennel_syscall::handshake::send_ready(rw.as_fd(), std::process::id())?;
+                match kennel_syscall::handshake::recv_ack(pr.as_fd())? {
+                    Some(kennel_syscall::handshake::ACK_PROCEED) => {}
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "gid_map handshake aborted: the servicer did not grant proceed",
+                        ))
+                    }
+                }
+            } else {
+                // Default path: the single-line identity `gid_map` drops every
+                // inherited supplementary group to the overflow gid, for free.
+                kennel_syscall::namespace::establish_identity_userns(uid, kennel_syscall::unistd::real_gid())?;
+            }
             // Unshare mount/IPC/PID here; the PID unshare only takes effect for the
             // next fork, so fork the PID-1 grandchild that runs the inner seal and
             // execs. Returns Ok in the grandchild (std then execs the workload);
@@ -374,7 +449,120 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
         }
     };
 
-    kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall)
+    match handshake_parent {
+        // No handshake: the seal writes its own gid_map (or this is the legacy path).
+        None => kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall),
+        // Deferred gid_map: service the child's pipe on a thread while the spawn
+        // blocks, so the privileged map write lands before the child proceeds.
+        Some((ready_r, proceed_w)) => {
+            let map_gids = mapper.expect("deferred_gid implies a mapper");
+            run_with_gid_map_servicer(command, seal, ready_r, proceed_w, map_gids)
+        }
+    }
+}
+
+/// The handshake pipe ends [`handshake_pipes`] hands out: the parent's
+/// `(ready-read, proceed-write)` pair (the servicer's ends), the seal's
+/// ready-write end, and the seal's proceed-read end. All `None` when no deferral.
+type HandshakePipes = (Option<(OwnedFd, OwnedFd)>, Option<OwnedFd>, Option<OwnedFd>);
+
+/// Create the two close-on-exec handshake pipes when a deferred-gid handshake is
+/// needed, returning `(parent ends, child ready-write end, child proceed-read end)`
+/// — or all-`None` when `needed` is false. The parent keeps the ready-pipe read end
+/// and the proceed-pipe write end (for the servicer); the seal keeps the opposite
+/// ends.
+///
+/// # Errors
+///
+/// The OS error if a pipe cannot be created.
+fn handshake_pipes(needed: bool) -> io::Result<HandshakePipes> {
+    if !needed {
+        return Ok((None, None, None));
+    }
+    let (ready_r, ready_w) = kennel_syscall::handshake::pipe_cloexec()?;
+    let (proceed_r, proceed_w) = kennel_syscall::handshake::pipe_cloexec()?;
+    Ok((Some((ready_r, proceed_w)), Some(ready_w), Some(proceed_r)))
+}
+
+/// Spawn `command` with `seal` while a scoped thread services the `gid_map`
+/// handshake: it reads the child's pid off `ready_r`, runs `map_gids` (the
+/// privileged write), and acks proceed/abort on `proceed_w`.
+///
+/// `Command::spawn` blocks the calling thread until the child execs, and the child
+/// will not exec until the handshake completes — hence the concurrent servicer. If
+/// the spawn itself errors (the child failed before signalling), the servicer is
+/// cancelled so it does not wait forever (the parent holds a copy of the ready
+/// pipe's write end, so EOF alone cannot wake it).
+fn run_with_gid_map_servicer<S>(
+    command: &mut Command,
+    seal: S,
+    ready_r: OwnedFd,
+    proceed_w: OwnedFd,
+    map_gids: GidMapper<'_>,
+) -> Result<Child, SpawnError>
+where
+    S: FnMut() -> io::Result<()> + Send + Sync + 'static,
+{
+    let cancel = AtomicBool::new(false);
+    let cancel_ref = &cancel;
+    std::thread::scope(|s| {
+        // The closure owns the fds (so they live for, and close at, the handshake's
+        // end) and lends borrows to the servicer.
+        let servicer = s.spawn(move || gid_map_servicer(ready_r.as_fd(), proceed_w.as_fd(), cancel_ref, map_gids));
+        let spawned = kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall);
+        if spawned.is_err() {
+            // Wake the servicer if the child never signalled (it failed early).
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let map_outcome = servicer
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("gid_map servicer thread panicked")));
+        combine_spawn_and_servicer(spawned, map_outcome)
+    })
+}
+
+/// The servicer thread body: await the child's pid, perform the privileged map
+/// write, and ack. Returns the map-write result; a `BrokenPipe` error marks "the
+/// child never signalled" (so the caller prefers the spawn error as the cause).
+fn gid_map_servicer(
+    ready_r: std::os::fd::BorrowedFd<'_>,
+    proceed_w: std::os::fd::BorrowedFd<'_>,
+    cancel: &AtomicBool,
+    map_gids: GidMapper<'_>,
+) -> io::Result<()> {
+    use kennel_syscall::handshake;
+    let Some(pid) = handshake::recv_ready_cancellable(ready_r, cancel, HANDSHAKE_TICK_MS)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "gid_map handshake: the spawn child never signalled (it failed early or the spawn was cancelled)",
+        ));
+    };
+    match map_gids(pid) {
+        Ok(()) => handshake::send_ack(proceed_w, handshake::ACK_PROCEED),
+        Err(e) => {
+            // Tell the child to abort (best-effort); it fails closed on a non-proceed ack.
+            let _ = handshake::send_ack(proceed_w, handshake::ACK_ABORT);
+            Err(e)
+        }
+    }
+}
+
+/// Combine the spawn result and the servicer result into one. A running child is
+/// success. If the spawn failed: when the servicer reports `BrokenPipe` the child
+/// failed before signalling, so the spawn error is the root cause; any other
+/// servicer error is a genuine map-write refusal and is the more informative cause.
+fn combine_spawn_and_servicer(spawned: Result<Child, SpawnError>, serviced: io::Result<()>) -> Result<Child, SpawnError> {
+    match (spawned, serviced) {
+        (Ok(child), _) => Ok(child),
+        (Err(spawn_err), Ok(())) => Err(spawn_err),
+        (Err(spawn_err), Err(map_err)) => {
+            if map_err.kind() == io::ErrorKind::BrokenPipe {
+                Err(spawn_err)
+            } else {
+                Err(SpawnError::Syscall(map_err))
+            }
+        }
+    }
 }
 
 /// Build (but do not install) a Landlock ruleset from a plan's path and port
@@ -1122,6 +1310,88 @@ mod tests {
         assert_eq!(out.trim(), "GRANTED", "the granted file is readable through the shim");
     }
 
+    /// **The `gid_map` handshake, proven unprivileged (§7.2.8).** A userns spawn goes
+    /// through [`spawn_with_gid_map`]: the child defers its `gid_map`, signals its
+    /// pid, and blocks; the servicer thread runs the mapper, which writes the child's
+    /// `gid_map`, then acks; only then does the workload exec. The mapper here writes
+    /// a single identity line for the *operator's own* gid — the one `gid_map` an
+    /// unprivileged parent is permitted to write — which stands in for the
+    /// privhelper's multi-gid write and keeps the proof root-free. The workload reads
+    /// its own `id -g`: it equals the operator gid only if the deferred map was
+    /// actually written (an empty deferred map would leave the primary gid at the
+    /// overflow gid). Skips with the precise cause where the host forbids the userns,
+    /// exactly as [`unprivileged_userns_spawn_builds_the_confined_view`].
+    #[test]
+    fn unprivileged_userns_spawn_runs_the_gid_map_handshake() {
+        use std::io::Read;
+        use std::process::Stdio;
+
+        if userns_hard_disabled() || !landlock_available() {
+            eprintln!("SKIP: unprivileged user namespaces or Landlock unavailable on this host");
+            return;
+        }
+
+        let gid = kennel_syscall::unistd::real_gid();
+        // The mapper stands in for kenneld driving the privhelper: it writes the
+        // deferred gid_map against the child's pid. A single identity line for the
+        // caller's own gid is the one an unprivileged parent may write.
+        let map_gids = move |pid: u32| std::fs::write(format!("/proc/{pid}/gid_map"), format!("{gid} {gid} 1\n"));
+
+        // A minimal userns plan: USER|MOUNT|IPC|PID with the in-place fallback view
+        // (fresh /proc + /tmp), permissive Landlock so `id` can run, no seccomp.
+        let access = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let plan = Plan {
+            namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::IPC | Namespaces::PID,
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false,
+            view: None,
+            new_root: None,
+            landlock_fs: vec![(PathBuf::from("/"), access)],
+            landlock_net: Vec::new(),
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
+            // The legacy setgroups field is unused on the userns path; the handshake
+            // carries the group grant instead.
+            supplementary_groups: None,
+        };
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("id -g")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+
+        let spawned = spawn_with_gid_map(&plan, &mut cmd, map_gids);
+        // A capability-stripped userns (Ubuntu AppArmor) surfaces as PermissionDenied
+        // from the seal's first privileged step — skip loudly, as the sibling proof does.
+        if let Err(SpawnError::Syscall(e)) = &spawned {
+            if e.kind() == io::ErrorKind::PermissionDenied && apparmor_restricts_userns() {
+                eprintln!(
+                    "SKIP: kernel.apparmor_restrict_unprivileged_userns=1 and this test binary \
+                     has no AppArmor profile granting `userns`: {e}"
+                );
+                return;
+            }
+        }
+        let mut child = spawned.expect("userns spawn with gid_map handshake");
+        let mut out = String::new();
+        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        let status = child.wait().expect("wait");
+
+        assert!(status.success(), "the workload ran (got {status:?})");
+        assert_eq!(
+            out.trim(),
+            gid.to_string(),
+            "the deferred gid_map was written by the mapper before exec, so the primary gid is the operator's, not the overflow gid"
+        );
+    }
+
     #[test]
     fn landlock_seal_blocks_an_unlisted_path() {
         if !landlock_available() {
@@ -1270,6 +1540,7 @@ mod root_tests {
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             file_binds: vec![(src.clone(), target.clone()), (src, missing)],
+            supplementary_groups: None,
         };
 
         let mut cmd = Command::new("/bin/cat");
