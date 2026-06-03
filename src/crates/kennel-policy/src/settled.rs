@@ -295,6 +295,63 @@ pub struct EffectivePolicy {
     pub lifecycle: LifecyclePolicy,
 }
 
+/// The per-kennel SSH runtime: the bastion grants `kenneld` realises (§7.8).
+///
+/// Unlike the enforcement rule sets in [`EffectivePolicy`], this is a *service*
+/// input — `kenneld` mints a synthetic key per grant, runs the bastion, and builds
+/// the kennel's synthetic `~/.ssh` from it. It is carried in the settled policy (so
+/// it is signed and per-instance-substituted) but kept out of the enforcement core.
+/// Absent (empty) for a kennel with no `[ssh]` policy — then omitted from the
+/// canonical form entirely, so a policy without SSH signs exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshRuntime {
+    /// Whether a non-interactive kennel may drive a granted key with no per-use
+    /// touch (loud, threat-tagged at compile time; §7.8.6).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_headless: bool,
+    /// The granted `(destination, real-key)` edges — one bastion forced command each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<SshGrant>,
+    /// Host-key pins for granted destinations the operator's store lacks (§7.8.7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_hosts: Vec<SshKnownHostPin>,
+}
+
+impl SshRuntime {
+    /// Whether there is nothing to realise (no grant, no pin, default headless).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        !self.allow_headless && self.grants.is_empty() && self.known_hosts.is_empty()
+    }
+}
+
+/// One granted SSH edge: a destination reachable with a specific real key.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshGrant {
+    /// The destination host (`⊆ net.allow:22`, checked at compile time).
+    pub host: String,
+    /// The real key's `SHA256:` fingerprint; the key itself lives host-side only.
+    pub fingerprint: String,
+}
+
+/// A pinned host key for a granted destination.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshKnownHostPin {
+    /// The destination hostname.
+    pub host: String,
+    /// The host key (`ssh-ed25519 AAAA…`).
+    pub key: String,
+}
+
+/// `skip_serializing_if` helper: a `false` bool is omitted from the canonical form.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Installation-specific constants baked in at compile time.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -357,6 +414,11 @@ pub struct SettledPolicy {
     pub effective_policy: EffectivePolicy,
     /// Provenance of the resolution.
     pub provenance: Provenance,
+    /// The per-kennel SSH runtime (§7.8). Declared last: it is a table, and TOML
+    /// requires the scalar/array fields above it to serialise first. Omitted from
+    /// the canonical form when empty, so a no-SSH policy signs exactly as before.
+    #[serde(default, skip_serializing_if = "SshRuntime::is_empty")]
+    pub ssh: SshRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

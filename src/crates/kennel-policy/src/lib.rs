@@ -51,7 +51,7 @@ pub use settled::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
     NetMode, NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
     ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy,
-    TmpPolicy, TtlAction,
+    SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction,
 };
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use source_sig::{sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust};
@@ -195,6 +195,7 @@ mod tests {
                     signing_key_id: "kennel-maint-2026-01".to_owned(),
                 }],
             },
+            ssh: settled::SshRuntime::default(),
         }
     }
 

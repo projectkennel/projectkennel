@@ -80,7 +80,8 @@ impl PolicyLoader for TrustStoreLoader {
         let substituted = kennel_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
         let plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home).map_err(|e| e.to_string())?;
         let net = substituted.effective_policy.net;
-        Ok(Loaded { plan, net })
+        let ssh = substituted.ssh;
+        Ok(Loaded { plan, net, ssh })
     }
 }
 

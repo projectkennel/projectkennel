@@ -42,6 +42,9 @@ pub struct Loaded {
     pub plan: Plan,
     /// The network policy the egress proxy enforces.
     pub net: NetPolicy,
+    /// The per-kennel SSH runtime (§7.8): the bastion grants `kenneld` realises.
+    /// Empty for a kennel with no `[ssh]` policy.
+    pub ssh: kennel_policy::SshRuntime,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -383,7 +386,7 @@ mod tests {
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
             };
-            Ok(Loaded { plan, net })
+            Ok(Loaded { plan, net, ssh: kennel_policy::SshRuntime::default() })
         }
     }
 

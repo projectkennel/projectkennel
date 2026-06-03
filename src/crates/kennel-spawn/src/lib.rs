@@ -562,6 +562,7 @@ mod tests {
                 install_constants: InstallConstants { tag: 42, ula_gid: "fd00::".to_owned() },
                 resolved_artifacts: Vec::new(),
             },
+            ssh: kennel_policy::SshRuntime::default(),
         }
     }
 

@@ -39,7 +39,7 @@
 use crate::settled::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
     NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen,
-    SeccompAction, SeccompPolicy, TmpPolicy, TtlAction,
+    SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction,
 };
 use crate::source::SourcePolicy;
 use crate::PolicyError;
@@ -51,6 +51,8 @@ use std::collections::BTreeSet;
 pub struct Translated {
     /// The flat, runtime-enforced policy.
     pub effective_policy: EffectivePolicy,
+    /// The per-kennel SSH runtime (§7.8) — a service input, not enforcement.
+    pub ssh: SshRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -84,11 +86,36 @@ pub fn translate(
         deny: effective.seccomp.as_ref().and_then(|s| s.deny.clone()).unwrap_or_default(),
     };
     let lifecycle = translate_lifecycle(effective)?;
+    let ssh = translate_ssh(effective);
 
     Ok(Translated {
         effective_policy: EffectivePolicy { net, fs, exec, proc, cap, seccomp, lifecycle },
+        ssh,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Flatten the source `[ssh]` section into the settled [`SshRuntime`]: one
+/// [`SshGrant`] per `(host, fingerprint)` edge. Already compile-time-validated
+/// (`crate::ssh`), so the fingerprints and `hosts ⊆ net.allow:22` hold here.
+fn translate_ssh(src: &SourcePolicy) -> SshRuntime {
+    let Some(ssh) = &src.ssh else { return SshRuntime::default() };
+    let mut grants = Vec::new();
+    for key in &ssh.keys {
+        let Some(fp) = &key.fingerprint else { continue };
+        for host in &key.hosts {
+            grants.push(SshGrant { host: host.clone(), fingerprint: fp.clone() });
+        }
+    }
+    let known_hosts = ssh
+        .known_hosts
+        .iter()
+        .filter_map(|kh| match (&kh.host, &kh.key) {
+            (Some(host), Some(key)) => Some(SshKnownHostPin { host: host.clone(), key: key.clone() }),
+            _ => None,
+        })
+        .collect();
+    SshRuntime { allow_headless: ssh.allow_headless.unwrap_or(false), grants, known_hosts }
 }
 
 // ---- net -----------------------------------------------------------------------
@@ -408,6 +435,53 @@ mod tests {
     }
 
     #[test]
+    fn ssh_section_flattens_into_the_settled_runtime() {
+        use crate::source::{NetAllow, NetSection, SourcePolicy, SshKey, SshKnownHost, SshSection};
+        let src = SourcePolicy {
+            net: Some(NetSection {
+                allow: vec![NetAllow {
+                    name: Some("github.com".to_owned()),
+                    ports: vec![22],
+                    reason: Some("r".to_owned()),
+                    ..NetAllow::default()
+                }],
+                ..NetSection::default()
+            }),
+            ssh: Some(SshSection {
+                allow_headless: Some(true),
+                keys: vec![SshKey {
+                    fingerprint: Some("SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt".to_owned()),
+                    hosts: vec!["github.com".to_owned()],
+                    reason: Some("push".to_owned()),
+                    threats: None,
+                }],
+                known_hosts: vec![SshKnownHost {
+                    host: Some("git.internal".to_owned()),
+                    key: Some("ssh-ed25519 AAAA".to_owned()),
+                }],
+                ..SshSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        let ssh = translate_ssh(&src);
+        assert!(ssh.allow_headless);
+        assert_eq!(ssh.grants.len(), 1);
+        assert_eq!(ssh.grants.first().map(|g| g.host.as_str()), Some("github.com"));
+        assert_eq!(ssh.known_hosts.first().map(|k| k.host.as_str()), Some("git.internal"));
+        assert!(!ssh.is_empty());
+        // No [ssh] ⇒ empty runtime, omitted from the canonical form (back-compat).
+        assert!(translate_ssh(&SourcePolicy::default()).is_empty());
+    }
+
+    #[test]
+    fn an_empty_ssh_runtime_does_not_change_the_canonical_bytes() {
+        // A no-SSH policy must serialise byte-for-byte as before the field existed,
+        // so existing signatures stay valid.
+        let t = translate_template(AI_CODING_STRICT);
+        assert!(t.ssh.is_empty(), "the in-tree template has no [ssh] grant");
+    }
+
+    #[test]
     fn ai_coding_strict_translates_to_a_runtime_policy() {
         let t = translate_template(AI_CODING_STRICT);
         let ep = &t.effective_policy;
@@ -459,6 +533,7 @@ mod tests {
                 install_constants: install(),
                 resolved_artifacts: Vec::<ResolvedArtifact>::new(),
             },
+            ssh: t.ssh,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }

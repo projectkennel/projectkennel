@@ -273,6 +273,7 @@ fn assemble(
         deferred_substitutions: translated.deferred_substitutions.clone(),
         framework_invariants_asserted: ASSERTED_INVARIANTS.iter().map(|s| (*s).to_owned()).collect(),
         effective_policy: translated.effective_policy.clone(),
+        ssh: translated.ssh.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),
             schema_version: SETTLED_SCHEMA_VERSION,

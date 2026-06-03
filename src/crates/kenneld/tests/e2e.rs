@@ -126,6 +126,7 @@ fn minimal_policy() -> SettledPolicy {
             install_constants: InstallConstants { tag: 9, ula_gid: "fd00::".to_owned() },
             resolved_artifacts: Vec::new(),
         },
+        ssh: kennel_policy::SshRuntime::default(),
     }
 }
 
