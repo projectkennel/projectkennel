@@ -105,7 +105,7 @@ fn minimal_policy() -> SettledPolicy {
                 ],
                 write: Vec::new(),
                 tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
-                dev: DevPolicy { allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()] },
+                dev: DevPolicy { allow: dev_allow() },
             },
             exec: ExecPolicy {
                 deny_setuid: true,
@@ -133,7 +133,22 @@ fn minimal_policy() -> SettledPolicy {
     }
 }
 
+/// The constructed `/dev` allowlist: the pseudo-device baseline plus a real
+/// host-device **passthrough** (`/dev/net/tun`, §7.2.8) when the host has it — a
+/// device in a `/dev` *subdirectory*, exercising the parent-dir creation + bind that
+/// `[[fs.dev.passthrough]]` produces (translate merges passthrough paths into this
+/// same allowlist). `/dev/net/tun` is `0666`, so `open()` succeeds without any
+/// capability or group — only `TUNSETIFF` would need more, which is out of scope here.
+fn dev_allow() -> Vec<String> {
+    let mut v = vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()];
+    if Path::new("/dev/net/tun").exists() {
+        v.push("/dev/net/tun".to_owned());
+    }
+    v
+}
+
 #[test]
+#[allow(clippy::too_many_lines)] // one cohesive end-to-end scenario: view + /etc + ssh + unix + dev
 fn full_vertical_brings_up_and_tears_down_a_kennel() {
     // Provision uid 0's allocation (tag 9, gid ...01, namespace kennel-root).
     std::fs::create_dir_all("/etc/kennel").expect("mkdir /etc/kennel");
@@ -304,6 +319,17 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let unix_clause = "&& test -S \"$HOME/kennel-unix.sock\" \
          && ! test -e \"$HOME/kennel-not-granted.sock\" \
          && test \"$(python3 -c \"import socket,os;s=socket.socket(socket.AF_UNIX);s.connect(os.environ['HOME']+'/kennel-unix.sock');s.sendall(b'ping');print(s.recv(16).decode(),end='')\")\" = pong ";
+    // Clause (6): device passthrough (§7.2.8) — the granted /dev/net/tun is present as
+    // a char device in its subdir AND openable (O_RDWR), while a non-granted device
+    // (/dev/mem) is absent from the constructed /dev (default-deny). Skips the tun
+    // checks if the host has no /dev/net/tun (then it was not granted either).
+    let dev_clause = if Path::new("/dev/net/tun").exists() {
+        "&& test -c /dev/net/tun \
+         && python3 -c \"import os;os.close(os.open('/dev/net/tun',os.O_RDWR))\" \
+         && ! test -e /dev/mem "
+    } else {
+        "&& ! test -e /dev/mem "
+    };
     let mut workload = Command::new("/bin/sh");
     workload.arg("-c").arg(format!(
         "grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts \
@@ -311,6 +337,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
          && ! test -e \"$HOME/kennel-e2e/secret\" \
          {ssh_clause} \
          {unix_clause} \
+         {dev_clause} \
          && sleep 2",
     ));
     let kennel = start(&helper, spec, &mut workload).expect("start kennel");
