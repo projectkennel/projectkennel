@@ -244,12 +244,17 @@ describe these read as roadmap.
   grants; by default **none** — every inherited host group is dropped — closing the
   leak the identity masking left (where `id` showed the operator's group memberships
   as bare numbers).
-  - **Mechanism in the privileged seal**, not a privhelper rewrite: `setgroups` needs
-    `CAP_SETGID` and must run before `no_new_privs`, so it sits in the spawn seal right
-    beside the namespace `unshare` (which already needs `CAP_SYS_ADMIN`) — the seal is
-    the privileged-spawn context, of which the privhelper is the umbrella source.
-    `Plan.supplementary_groups: Option<Vec<u32>>` drives it (`Some([])` ⇒ drop all;
-    `None` ⇒ inherit, the unprivileged/non-kenneld path).
+  - **Mechanism — superseded by the unprivileged userns spawn.** The default drop-all
+    is now **free**: an unprivileged user namespace maps only the primary gid (an
+    unprivileged `gid_map` is limited to the single effective gid), so every inherited
+    supplementary group collapses to the overflow gid (`nogroup`) inside the kennel — no
+    `setgroups` call. `setgroups` is in fact *denied* once the userns is established, so
+    the old "`setgroups` in the privileged seal" mechanism only applies to the legacy
+    no-userns path (`Plan.supplementary_groups`, kept for the root tests). **Re-granting
+    a specific group** (the §7.2.8 device-passthrough case) cannot be done unprivileged;
+    it needs a narrow **privhelper `gid_map` operation** (the privhelper holds
+    `CAP_SETGID` and writes the workload's `gid_map`) — decided, to be built. See
+    the spawn flow in design §8.3 and the user-namespace prerequisite in §8.2.
   - **Policy + resolution**: `[identity].groups` (names) → `SettledPolicy.identity:
     IdentityRuntime`, mirroring `ssh`/`unix`; `translate_identity` unions the explicit
     list with every `[[fs.dev.passthrough]].group`. `kennel-policy::dev`-style

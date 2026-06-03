@@ -38,12 +38,15 @@ Project Kennel requires the following kernel features, with version requirements
 | Mount namespace | 2.6.x | Universal |
 | PID namespace | 3.8 | Universal |
 | Network namespace | 2.6.x | Universal (used optionally) |
-| User namespace | 3.8 | Used for some advanced configurations |
+| User namespace | 3.8 | **The unprivileged-spawn foundation.** Identity-mapped (the operator's real uid/gid 1:1, no subuid), it grants `CAP_SYS_ADMIN` *inside the namespace* so an unprivileged kenneld can unshare a mount/PID namespace and `mount`/`pivot_root` with no real privilege (the bubblewrap-equivalent mechanism). Established first in the spawn seal. |
+| PID namespace (via userns) | 3.8 | The workload is PID 1 of a fresh PID namespace, reached by a second fork after the userns+PID unshare (the only way to both be PID 1 and mount a fresh `/proc` unprivileged). |
 | `PR_SET_NO_NEW_PRIVS` | 3.5 | Universal |
-| AppArmor | Distribution-dependent | Fallback only, below Landlock ABI 6 |
+| AppArmor | Distribution-dependent | Below-ABI-6 abstract-AF_UNIX/signal fallback. **Also a deploy prerequisite** where the distro restricts unprivileged user namespaces (next paragraph). |
 | `legacy_tiocsti` sysctl | 6.2 | Defaults safe on newer kernels |
 
 Recommended minimum: kernel 6.10 (Landlock ABI 5, the project floor). On 6.12+ (ABI 6) Landlock scoping comes into play and abstract-AF_UNIX/signal isolation is enforced natively rather than via the seccomp/AppArmor fallback; the development and CI box runs 6.17 (ABI 7). Project Kennel refuses to apply policies that require unavailable features and reports clearly which features are missing.
+
+**Unprivileged user namespaces must be permitted.** The spawn rests on an unprivileged user namespace (above). Some hardened distributions restrict this by default: Ubuntu 23.10+/24.04 ship `kernel.apparmor_restrict_unprivileged_userns=1`, under which `unshare(CLONE_NEWUSER)` *succeeds* but the process holds **no capabilities** in the new namespace — the first `/proc/self/setgroups`/uid_map/gid_map write returns `EACCES` and the sandbox cannot be built. The remedy, and the supported deployment posture, is an AppArmor profile granting `userns` to the kenneld binary (`dist/apparmor/kenneld`, attached to `/usr/libexec/kennel/kenneld`); it restores the capability for kenneld alone without relaxing the host-wide restriction. This is the AppArmor counterpart of the privhelper's file capabilities (`07-paths.md`) — a one-time install step, not a runtime concern. Where the sysctl is `0` or absent, no profile is needed. kenneld surfaces a clear diagnostic (naming the sysctl and the profile) rather than failing obscurely if the capability is absent.
 
 ## 8.3 The spawn flow
 
@@ -90,25 +93,39 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    On ABI 6+ kernels this is unnecessary — the scoping bits added to the
    Landlock ruleset (step 8l) cover it natively.
 
-8. Fork:
-   parent: wait, manage lifecycle, audit
-   child:
-     a. Enter cgroup (write own pid to cgroup.procs)
-     b. unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC)
+8. Fork (the unprivileged spawn — no real privilege below):
+   parent (kenneld): wait, manage lifecycle, audit
+   child A (the forked child):
+     a. Enter cgroup (write own pid to cgroup.procs) — with the host
+        credentials, before the user namespace; membership inherits to B
+     b. Establish the identity-mapped user namespace:
+        unshare(CLONE_NEWUSER); setgroups=deny; uid_map/gid_map "<id> <id> 1"
+        (now holds CAP_SYS_ADMIN *within* the namespace)
+     c. unshare(CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWPID)
         (network namespace optional, depending on policy)
-     c. mount --make-rslave / (detach from host propagation)
-     d. Construct shim view: bind-mount granted paths
-     e. Bind-mount shim over real $HOME and $XDG_RUNTIME_DIR
-     f. Mount private tmpfs at /tmp
-     g. Mount /proc with hidepid=2
-     h. Curate environment per env.* policy
-     i. Set PR_SET_NO_NEW_PRIVS
-     j. Drop capabilities per cap.* policy
-     k. Apply seccomp filter
-     l. Apply Landlock ruleset, including ABI-6 scoping
+     d. Fork again → child B is PID 1 of the new PID namespace.
+        A closes its inherited fds (≥3) and becomes a tiny init: reaps B,
+        exits with B's status (so kenneld observes the workload's exit).
+   child B (PID 1; this is where the seal completes and the workload runs):
+     e. mount --make-rprivate / (detach from host propagation)
+     f. Construct shim view: fresh tmpfs root; bind-mount granted paths
+        (granted ~ paths remapped beneath the shim $HOME)
+     g. Synthetic /etc; constructed /dev; mount private tmpfs at /tmp
+     h. Mount /proc with hidepid=2 (permitted because B is PID 1 of its ns)
+     i. pivot_root into the new root; detach the old one
+     j. Curate environment per env.* policy
+     k. Set PR_SET_NO_NEW_PRIVS
+     l. Apply seccomp filter
+     m. Apply Landlock ruleset, including ABI-6 scoping
         (SCOPE_ABSTRACT_UNIX_SOCKET + SCOPE_SIGNAL) where the kernel
         supports it (final step before exec; ruleset is sealed)
-     m. execve(command)
+     n. execve(command)
+
+   Supplementary groups: an unprivileged gid_map maps only the primary gid, so
+   every inherited host group collapses to the overflow gid (`nogroup`) — default
+   drop-all, for free. Re-granting a specific group (§7.2.8 device passthrough)
+   needs the privhelper to write the gid_map (it holds CAP_SETGID), since an
+   unprivileged process cannot map a second gid.
 
 9. Parent process supervises the kennel:
    - Reaps zombies
