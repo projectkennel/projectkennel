@@ -126,12 +126,26 @@ mod tests {
         unshare(Namespaces::empty()).expect("no-op unshare");
     }
 
-    /// **The foundational premise, proven UNPRIVILEGED (no sudo, plain `cargo test`):**
-    /// a normal user can build a mount namespace by first establishing an
-    /// identity-mapped user namespace. Without the userns, `unshare(MOUNT)` is `EPERM`
-    /// for an unprivileged caller; with it, it succeeds — which is how an unprivileged
-    /// `kenneld` constructs the sandbox. Skips where the distro disables unprivileged
-    /// user namespaces (`kernel.unprivileged_userns_clone=0` / `user.max_user_namespaces=0`).
+    /// **The foundational premise:** a normal user builds a mount namespace by first
+    /// establishing an identity-mapped user namespace — without the userns,
+    /// `unshare(MOUNT)` is `EPERM` for an unprivileged caller; with it, it succeeds,
+    /// which is how an unprivileged `kenneld` constructs the sandbox.
+    ///
+    /// The host must **permit** unprivileged user namespaces *with capabilities*. Two
+    /// host policies break this, and the test reports each precisely instead of a
+    /// blanket pass:
+    /// * `kernel.unprivileged_userns_clone=0` / `user.max_user_namespaces=0` — the
+    ///   `unshare(CLONE_NEWUSER)` itself is refused.
+    /// * `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+/24.04
+    ///   default) — the unshare *succeeds* but the process holds **no capabilities**
+    ///   in the new userns, so the first `/proc/self/setgroups`/map write is `EACCES`.
+    ///   Production needs an `AppArmor` profile granting `userns` to the kenneld binary
+    ///   (an install step), or the admin relaxes the sysctl.
+    ///
+    /// Where the mechanism is unavailable the test **skips with the precise cause**;
+    /// it asserts success only where the host actually permits it. A skip is not a
+    /// proof — `cargo test` cannot demonstrate the unprivileged spawn on a host that
+    /// forbids it.
     #[test]
     fn identity_userns_grants_an_unprivileged_mount_namespace() {
         let uid = crate::unistd::real_uid();
@@ -140,26 +154,41 @@ mod tests {
         // _exit()s — it never returns into the test harness.
         match unsafe { nix::unistd::fork() }.expect("fork") {
             nix::unistd::ForkResult::Child => {
-                let code = match establish_identity_userns(uid, gid) {
-                    // With the userns established, the mount namespace is unprivileged.
-                    Ok(()) => i32::from(unshare(Namespaces::MOUNT | Namespaces::IPC).is_err()) * 2,
-                    // userns unshare/map refused — almost always a distro lockdown, not
-                    // a code defect; reported separately so the parent can skip.
-                    Err(_) => 3,
+                // Distinguish "userns refused outright" (4) from "userns created but
+                // capability-stripped — the AppArmor case" (5) from success/mount-fail.
+                let code = if unshare(Namespaces::USER).is_err() {
+                    4
+                } else if std::fs::write("/proc/self/setgroups", "deny").is_err() {
+                    5
+                } else {
+                    let _ = std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"));
+                    let _ = std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"));
+                    i32::from(unshare(Namespaces::MOUNT | Namespaces::IPC).is_err()) * 2
                 };
                 // SAFETY: _exit ends the child without Drop/atexit glue.
                 unsafe { libc::_exit(code) };
             }
             nix::unistd::ForkResult::Parent { child } => {
                 let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
-                if matches!(status, nix::sys::wait::WaitStatus::Exited(_, 3)) {
-                    eprintln!("SKIP: unprivileged user namespaces appear disabled on this host");
-                    return;
+                let aa = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+                    .unwrap_or_default();
+                match status {
+                    nix::sys::wait::WaitStatus::Exited(_, 4) => {
+                        eprintln!("SKIP: unprivileged user namespaces are disabled on this host");
+                    }
+                    nix::sys::wait::WaitStatus::Exited(_, 5) => {
+                        eprintln!(
+                            "SKIP: userns created but capability-stripped — \
+                             kernel.apparmor_restrict_unprivileged_userns={} (needs an \
+                             AppArmor profile granting `userns`, or the sysctl relaxed)",
+                            aa.trim()
+                        );
+                    }
+                    other => assert!(
+                        matches!(other, nix::sys::wait::WaitStatus::Exited(_, 0)),
+                        "unprivileged userns→mount-namespace failed (2 = mount EPERM): {other:?}"
+                    ),
                 }
-                assert!(
-                    matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
-                    "unprivileged userns→mount-namespace failed (2 = mount EPERM): {status:?}"
-                );
             }
         }
     }

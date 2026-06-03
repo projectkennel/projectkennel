@@ -1,0 +1,40 @@
+# AppArmor profile: permit kenneld to use unprivileged user namespaces.
+#
+# Why this exists
+# ---------------
+# kenneld runs as an ordinary user and builds each workload's sandbox (mount
+# namespace, mount(2), pivot_root, the constructed view) by first establishing an
+# identity-mapped *user namespace* — the bubblewrap-equivalent mechanism that
+# grants CAP_SYS_ADMIN *inside that namespace* so none of the sandbox construction
+# needs real privilege (docs/architecture/01-process-model.md; the spawn seal in
+# kennel-spawn establishes it via kennel_syscall::namespace::establish_identity_userns).
+#
+# Ubuntu 23.10+/24.04 ship `kernel.apparmor_restrict_unprivileged_userns=1`: under
+# it, `unshare(CLONE_NEWUSER)` SUCCEEDS but the process holds NO capabilities in the
+# new namespace (the first /proc/self/setgroups or uid_map/gid_map write is EACCES),
+# so the unprivileged spawn cannot proceed. Granting the kenneld binary the `userns`
+# permission via this profile restores the capability for kenneld *specifically*,
+# without weakening the host-wide restriction for every other binary.
+#
+# This is a deployment prerequisite on hardened distros, the AppArmor counterpart of
+# the privhelper's file capabilities (docs/architecture/07-paths.md). On hosts that
+# do not restrict unprivileged user namespaces, the profile is harmless.
+#
+# Install
+# -------
+#   install -m 0644 dist/apparmor/kenneld /etc/apparmor.d/kenneld
+#   apparmor_parser -r -W /etc/apparmor.d/kenneld
+#
+# The attachment path must match the installed kenneld binary
+# (docs/architecture/07-paths.md: /usr/libexec/kennel/kenneld). Distributions that
+# relocate via KENNEL_LIBEXEC_DIR must adjust the path below to match.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile kenneld /usr/libexec/kennel/kenneld flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides.
+  include if exists <local/kenneld>
+}

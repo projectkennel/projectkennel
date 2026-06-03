@@ -179,14 +179,25 @@ pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Res
 ///
 /// # Namespaces
 ///
-/// `CLONE_NEWPID` is unshared in the **parent** before the `Command` fork, so the
-/// workload becomes PID 1 of a fresh PID namespace (the flag only affects future
-/// children, not the caller). The caller must therefore treat `spawn` as having
-/// fork semantics for its own subsequent children. The remaining namespaces
-/// (mount, IPC) are unshared in the **child seal** — doing them in the parent
-/// would isolate the caller itself. Unsharing any namespace needs privilege
-/// (`CAP_SYS_ADMIN`); an unprivileged caller should pass a plan with no
-/// namespaces (the Landlock + seccomp seal is still unprivileged).
+/// Two regimes, selected by whether the plan unshares `USER`:
+///
+/// * **Unprivileged (the production target):** the seal establishes an
+///   identity-mapped **user namespace** first ([`establish_identity_userns`]),
+///   gaining `CAP_SYS_ADMIN` *within it*, then unshares mount/IPC and builds the
+///   view — all with no real privilege. PID-as-PID-1 needs a fork after the PID
+///   unshare (a separate double-fork increment), so `PID` is not applied on this
+///   path yet.
+/// * **Legacy privileged (root tests, under-sudo bring-up):** with no `USER` in
+///   the plan, `CLONE_NEWPID` is unshared in the **parent** before the `Command`
+///   fork so the workload becomes PID 1 (the flag only affects future children);
+///   the caller must treat `spawn` as having fork semantics for its own subsequent
+///   children. Mount/IPC are unshared in the child seal. Each unshare needs real
+///   `CAP_SYS_ADMIN`.
+///
+/// An unprivileged caller that wants neither path can pass a plan with no
+/// namespaces (the Landlock + seccomp seal is unprivileged on its own).
+///
+/// [`establish_identity_userns`]: kennel_syscall::namespace::establish_identity_userns
 ///
 /// # Scope
 ///
@@ -229,12 +240,22 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
         Some(build_ruleset(&plan.landlock_fs, &plan.landlock_net, false).map_err(SpawnError::Syscall)?)
     };
 
-    // PID namespace: unshare in the parent so the next fork lands the workload as
-    // PID 1 of a new namespace. Mount/IPC are deferred to the seal.
-    if plan.namespaces.contains(Namespaces::PID) {
+    // The unprivileged path (the production target): a plan that unshares USER
+    // builds the sandbox via a **user namespace** established in the seal, which
+    // grants `CAP_SYS_ADMIN` *inside it* so the mount-namespace work needs no real
+    // privilege. The legacy privileged path (no USER — the root tests, the
+    // under-sudo bring-up) keeps the parent-side PID unshare so the next fork lands
+    // the workload as PID 1.
+    let use_userns = plan.namespaces.contains(Namespaces::USER);
+    if !use_userns && plan.namespaces.contains(Namespaces::PID) {
         kennel_syscall::namespace::unshare(Namespaces::PID).map_err(SpawnError::Syscall)?;
     }
-    let seal_ns = plan.namespaces & !Namespaces::PID;
+    // USER is established by `establish_identity_userns` (not a plain unshare), so
+    // it is excluded from the seal's unshare set. PID on the userns path needs a
+    // fork *after* its unshare to take effect (the double-fork increment); it is
+    // excluded here so it is never a silent no-op. On the legacy path PID was just
+    // unshared in the parent above.
+    let seal_ns = plan.namespaces & !(Namespaces::USER | Namespaces::PID);
 
     // Captured by the seal closure (clones keep it `'static`).
     let cgroup_join = plan.cgroup_join.then(|| plan.cgroup.clone());
@@ -253,6 +274,19 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
         // before Landlock seals (which would otherwise deny the write).
         if let Some(cgroup) = &cgroup_join {
             join_cgroup(cgroup)?;
+        }
+        // The unprivileged foundation: establish an identity-mapped user namespace
+        // FIRST (before the cgroup-relative work is sealed off), which grants
+        // `CAP_SYS_ADMIN` *within it* so the mount-namespace unshare and the
+        // mount/`pivot_root` below need no real privilege. Map our own uid/gid 1:1,
+        // read live — the seal runs in a fork of kenneld, which runs as the operator,
+        // so `getuid`/`getgid` are exactly the identity to preserve. Done after the
+        // cgroup join, which must run with the host credentials in the host cgroupfs.
+        if use_userns {
+            kennel_syscall::namespace::establish_identity_userns(
+                kennel_syscall::unistd::real_uid(),
+                kennel_syscall::unistd::real_gid(),
+            )?;
         }
         // Namespaces next; mounts need the mount ns.
         if !seal_ns.is_empty() {
@@ -276,12 +310,24 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
                 apply_file_binds(&file_binds)?;
             }
         }
-        // Drop the inherited host supplementary groups to exactly the policy-granted
-        // set (§7.2) — privileged (CAP_SETGID), like the namespace unshare above, and
-        // done before no_new_privs. `None` leaves the inherited set untouched (the
-        // unprivileged / non-kenneld path); `Some([])` drops all supplementary groups.
-        if let Some(groups) = &supplementary_groups {
-            kennel_syscall::unistd::set_supplementary_groups(groups)?;
+        // Drop the inherited host supplementary groups (§7.2). Two regimes:
+        //
+        // * Legacy privileged path (no USER ns): an explicit `setgroups` to the
+        //   granted set — `None` leaves the set untouched, `Some([])` drops all.
+        //
+        // * Unprivileged userns path: `setgroups` is **denied** by the kernel once
+        //   the userns is established (`/proc/self/setgroups` = `deny`, required
+        //   before the gid_map). The single-line gid_map maps only the primary gid,
+        //   so every inherited supplementary group already collapses to the overflow
+        //   gid (`nogroup`) inside the kennel — default drop-all, for free. Calling
+        //   `setgroups` here would `EPERM`. Re-granting a *specific* supplementary
+        //   group under a userns needs privilege the workload does not have (an
+        //   unprivileged gid_map is limited to the single effective gid); that is a
+        //   separate decision, tracked, not silently attempted here.
+        if !use_userns {
+            if let Some(groups) = &supplementary_groups {
+                kennel_syscall::unistd::set_supplementary_groups(groups)?;
+            }
         }
         // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
         kennel_syscall::process::set_no_new_privs()?;
@@ -896,6 +942,148 @@ mod tests {
 
     fn landlock_available() -> bool {
         kennel_syscall::landlock::abi_version().is_ok()
+    }
+
+    /// Whether the host *forbids* an unprivileged user namespace outright
+    /// (`kernel.unprivileged_userns_clone=0` / `user.max_user_namespaces=0`) — the
+    /// case where `unshare(CLONE_NEWUSER)` itself fails, distinct from Ubuntu's
+    /// capability-stripping restriction (which lets the unshare succeed but denies
+    /// the maps with `EACCES`; that one we detect from the spawn error so a loaded
+    /// `AppArmor` `userns` profile is correctly observed as "usable").
+    fn userns_hard_disabled() -> bool {
+        let off = |p: &str| std::fs::read_to_string(p).is_ok_and(|s| s.trim() == "0");
+        off("/proc/sys/kernel/unprivileged_userns_clone") || off("/proc/sys/user/max_user_namespaces")
+    }
+
+    /// Whether `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+/24.04)
+    /// is in force — the restriction a per-binary `AppArmor` `userns` profile lifts.
+    fn apparmor_restricts_userns() -> bool {
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|s| s.trim() == "1")
+    }
+
+    /// **The foundational premise for the full spawn UNPRIVILEGED:** an ordinary
+    /// user builds the complete constructed view — fresh tmpfs root, host binds,
+    /// synthetic `/dev`, a fresh `/proc`, private `/tmp`, then `pivot_root` — and
+    /// runs a Landlock+seccomp-sealed workload via an identity-mapped user namespace,
+    /// with no real privilege. The workload reads a granted `~/…` path through the
+    /// shim and finds a non-granted sibling's *name* absent (ENOENT, not merely
+    /// denied).
+    ///
+    /// `#[ignore]` until two things land (verified by standalone probes 2026-06-03):
+    /// 1. **The userns double-fork primitive.** The constructed view mounts a fresh
+    ///    `/proc`, which the kernel permits only inside a **PID namespace**
+    ///    (`mount proc` is `EPERM` without one). PID-as-PID-1 needs a fork *after*
+    ///    `unshare(CLONE_NEWPID)`, which `Command`/`pre_exec` cannot express — so this
+    ///    plan's `USER|MOUNT|IPC` seal (no double-fork) cannot complete the view yet.
+    /// 2. **A loaded `AppArmor` `userns` profile** for this test binary (production
+    ///    ships `dist/apparmor/kenneld`); under Ubuntu's
+    ///    `apparmor_restrict_unprivileged_userns=1` the userns is otherwise
+    ///    capability-stripped. Run: load a profile over `target/debug/deps/kennel_spawn-*`,
+    ///    then `cargo test -p kennel-spawn -- --ignored unprivileged_userns_spawn`.
+    #[test]
+    #[ignore = "needs the userns double-fork primitive (PID ns for /proc) + a loaded AppArmor userns profile"]
+    fn unprivileged_userns_spawn_builds_the_confined_view() {
+        use std::io::Read;
+        use std::process::Stdio;
+
+        if userns_hard_disabled() {
+            eprintln!("SKIP: unprivileged user namespaces are disabled on this host");
+            return;
+        }
+        if !landlock_available() {
+            eprintln!("SKIP: kernel without Landlock");
+            return;
+        }
+
+        // Stage outside the in-kennel /tmp (the seal tmpfs-mounts it): a private
+        // base under the system temp dir, with the granted/secret sources and the
+        // fresh-root scaffold as siblings (the new root is a tmpfs, so its content
+        // comes only from binds whose sources live outside it).
+        let base = std::env::temp_dir().join(format!("kennel-userns-spawn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real_home = base.join("home");
+        let granted = real_home.join("granted");
+        let secret = real_home.join("secret");
+        std::fs::create_dir_all(&granted).expect("mkdir granted");
+        std::fs::create_dir_all(&secret).expect("mkdir secret");
+        std::fs::write(granted.join("file"), "GRANTED\n").expect("write granted");
+        std::fs::write(secret.join("file"), "SECRET\n").expect("write secret");
+        let new_root = base.join("root");
+        std::fs::create_dir_all(&new_root).expect("mkdir new_root");
+
+        let shim_root = PathBuf::from("/khome");
+        let ro = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let sys = ["/usr", "/bin", "/lib", "/lib64"];
+        let mut binds: Vec<BindMount> = sys
+            .iter()
+            .map(|d| BindMount { source: PathBuf::from(*d), target: PathBuf::from(*d), writable: false })
+            .collect();
+        binds.push(BindMount { source: granted, target: shim_root.join("granted"), writable: false });
+
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> = sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
+        landlock_fs.push((shim_root.clone(), ro));
+        landlock_fs.push((shim_root.join("granted"), ro));
+
+        let plan = Plan {
+            namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::IPC,
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false, // isolate the userns/view proof from cgroup delegation
+            view: Some(ShimView {
+                shim_root: shim_root.clone(),
+                binds,
+                dev_allow: Vec::new(),
+                tmp_size_mib: 64,
+                tmp_mode: "0700".to_owned(),
+                proc_hidepid: false,
+            }),
+            new_root: Some(new_root),
+            landlock_fs,
+            landlock_net: Vec::new(),
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+            file_binds: Vec::new(),
+            supplementary_groups: None,
+        };
+
+        // Granted file readable through $HOME; the non-granted sibling's name absent;
+        // and /proc is live (a fresh procfs mounted in the user+mount namespace).
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("HOME", &shim_root)
+            .arg("-c")
+            .arg(r#"cat "$HOME/granted/file" && ! test -e "$HOME/secret" && test -r /proc/self/status"#)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+
+        let spawned = spawn(&plan, &mut cmd);
+        // A userns that was created but capability-stripped surfaces as PermissionDenied
+        // from the seal's first privileged step. Not a code defect — this binary has no
+        // AppArmor profile granting `userns` (production ships dist/apparmor/kenneld; load
+        // an equivalent over the test binary to run this proof). Skip, loudly.
+        if let Err(SpawnError::Syscall(e)) = &spawned {
+            if e.kind() == io::ErrorKind::PermissionDenied && apparmor_restricts_userns() {
+                let _ = std::fs::remove_dir_all(&base);
+                eprintln!(
+                    "SKIP: kernel.apparmor_restrict_unprivileged_userns=1 and this test binary \
+                     has no AppArmor profile granting `userns` (load one over \
+                     target/debug/deps/kennel_spawn-* to run this proof): {e}"
+                );
+                return;
+            }
+        }
+        let mut child = spawned.expect("unprivileged userns spawn");
+        let mut out = String::new();
+        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        let status = child.wait().expect("wait");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(status.success(), "granted readable, secret name absent, /proc live (got {status:?})");
+        assert_eq!(out.trim(), "GRANTED", "the granted file is readable through the shim");
     }
 
     #[test]
