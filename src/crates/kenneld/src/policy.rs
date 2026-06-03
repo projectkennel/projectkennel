@@ -81,7 +81,8 @@ impl PolicyLoader for TrustStoreLoader {
         let plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home).map_err(|e| e.to_string())?;
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
-        Ok(Loaded { plan, net, ssh })
+        let unix = substituted.unix;
+        Ok(Loaded { plan, net, ssh, unix })
     }
 }
 

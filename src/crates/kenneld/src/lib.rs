@@ -235,6 +235,28 @@ pub struct Spec {
     /// host-service to allow, and the in-kennel connector to bind in. Empty
     /// ([`SshPrep::default`]) for a kennel with no `[ssh]` grant.
     pub ssh: SshPrep,
+    /// The prepared `AF_UNIX` socket shims (§7.4): host sockets to bind into the view
+    /// at their shim paths, plus any env vars to set. Empty ([`UnixPrep::default`])
+    /// for a kennel with no `[unix]` grant.
+    pub unix: UnixPrep,
+}
+
+/// The `AF_UNIX` socket shims prepared for one kennel (§7.4).
+///
+/// Built by `crate::server::Shared::prepare_unix` (path placeholders resolved) and
+/// consumed by the bring-up: each granted host socket is bind-mounted into the
+/// constructed view at its shim path so the application finds it where it expects,
+/// and any named env var is set to that in-kennel path. What is not bound in is
+/// structurally absent (default-deny); abstract-namespace connections are denied by
+/// the always-on Landlock scope regardless.
+#[derive(Debug, Default, Clone)]
+pub struct UnixPrep {
+    /// `(host socket source, in-view absolute target)` pairs. Bound (not copied —
+    /// a socket cannot be copied) into the view at the target, read-only.
+    pub socket_binds: Vec<(PathBuf, PathBuf)>,
+    /// `(env var, value)` pairs set on the workload — the in-kennel shim path the
+    /// application reads (e.g. `WAYLAND_DISPLAY`).
+    pub env: Vec<(String, String)>,
 }
 
 /// The SSH egress prepared for one kennel (§7.8).
@@ -363,7 +385,7 @@ struct Provision {
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
 pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root, audit_path, ssh } = spec;
+    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root, audit_path, ssh, unix } = spec;
     let mut state = Provision::default();
 
     match bring_up(
@@ -378,6 +400,7 @@ pub fn start<P: Privileged>(privileged: &P, spec: Spec, command: &mut Command) -
         view_root.as_deref(),
         audit_path.as_deref(),
         &ssh,
+        &unix,
         command,
         &mut state,
     ) {
@@ -419,6 +442,7 @@ fn bring_up<P: Privileged>(
     view_root: Option<&Path>,
     audit_path: Option<&Path>,
     ssh: &SshPrep,
+    unix: &UnixPrep,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<Child, Error> {
@@ -522,6 +546,12 @@ fn bring_up<P: Privileged>(
         command.env("KENNEL_SOCKS_PROXY", proxy_addr.to_string());
     }
 
+    // 3c-unix. AF_UNIX socket shims (§7.4): bind each granted socket into the view at
+    //     its shim path, set env vars, and grant Landlock. The shim model needs the
+    //     constructed view (a mount namespace), so it engages only when pivoting.
+    let unix_pivoting = view_root.is_some() && plan.view.is_some();
+    apply_unix_shims(plan, unix, command, unix_pivoting);
+
     // 3d. constructed-view wiring (§7.2.5). When the plan carries a shim view and
     //     the daemon gave us a staging mountpoint: point HOME at the shim root,
     //     add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
@@ -563,6 +593,37 @@ fn bring_up<P: Privileged>(
     // 4. spawn the workload into this cgroup (it joins itself in the seal).
     plan.cgroup = cgroup.to_path_buf();
     kennel_spawn::spawn(plan, command).map_err(Error::Spawn)
+}
+
+/// Apply the `AF_UNIX` socket shims (§7.4): bind each granted host socket into the
+/// constructed view at its shim path (a real bind mount — a socket cannot be copied
+/// like the `file_binds` path, so unlike the synthetic `~/.ssh` it rides
+/// `view.binds`), set the env vars the application reads (e.g. `WAYLAND_DISPLAY`),
+/// and grant Landlock on each shim path and its parent so the workload can reach and
+/// connect to it.
+///
+/// A no-op unless `pivoting`: the shim model is structural isolation via a mount
+/// namespace + `pivot_root`, so without the constructed view there is nothing to
+/// bind into (`08 §8.1`).
+fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivoting: bool) {
+    use kennel_syscall::landlock::AccessFs;
+    if unix.socket_binds.is_empty() || !pivoting {
+        return;
+    }
+    for (var, val) in &unix.env {
+        command.env(var, val);
+    }
+    for (_src, target) in &unix.socket_binds {
+        if let Some(parent) = target.parent() {
+            plan.landlock_fs.push((parent.to_path_buf(), AccessFs::READ_FILE | AccessFs::READ_DIR));
+        }
+        plan.landlock_fs.push((target.clone(), AccessFs::READ_FILE | AccessFs::WRITE_FILE));
+    }
+    if let Some(view) = plan.view.as_mut() {
+        for (source, target) in &unix.socket_binds {
+            view.binds.push(kennel_spawn::BindMount { source: source.clone(), target: target.clone(), writable: false });
+        }
+    }
 }
 
 /// Map a helper response into the orchestration result: a non-`Ok` status is an
@@ -720,6 +781,7 @@ mod tests {
             view_root: None,
             audit_path: None,
             ssh: SshPrep::default(),
+            unix: UnixPrep::default(),
         }
     }
 

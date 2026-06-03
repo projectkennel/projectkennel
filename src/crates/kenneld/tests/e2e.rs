@@ -14,7 +14,9 @@
 
 #![cfg(feature = "root-tests")]
 
+use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -27,7 +29,7 @@ use kennel_policy::{
 use kennel_privhelper::validate::ReservedScope;
 use kennel_spawn::{prepare, RuntimeSubstitutions};
 use kennel_syscall::namespace::Namespaces;
-use kenneld::{start, EtcSetup, HelperClient, ProxySetup, Spec};
+use kenneld::{start, EtcSetup, HelperClient, ProxySetup, Spec, UnixPrep};
 
 /// Locate a binary built alongside this test (`target/<profile>/<name>`).
 fn sibling_binary(name: &str) -> PathBuf {
@@ -226,6 +228,32 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
         socks_connect_bin: Some(socks_bin.clone()),
     };
 
+    // Prepare an AF_UNIX socket shim (§7.4): a real host listener socket, bound into
+    // the kennel's view at $HOME/kennel-unix.sock, exactly as `Shared::prepare_unix`
+    // would. The workload (below) finds it there, connects, and round-trips a byte —
+    // proving the shim binds a *working* socket — while a non-granted name is absent
+    // (ENOENT). A host echo thread serves "ping" → "pong" for the connection.
+    let unix_sock = PathBuf::from(format!("/run/kenneld-e2e-unix-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&unix_sock);
+    let unix_listener = UnixListener::bind(&unix_sock).expect("bind unix listener");
+    std::thread::spawn(move || {
+        for conn in unix_listener.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            let mut buf = [0u8; 16];
+            if let Ok(n) = conn.read(&mut buf) {
+                if buf.get(..n) == Some(b"ping".as_slice()) {
+                    let _ = conn.write_all(b"pong");
+                }
+            }
+        }
+    });
+    // shim_root is /run/kennel/e2e (minimal_policy's fs.home.shim_root) — the in-view
+    // $HOME — so the socket lands at $HOME/kennel-unix.sock inside the kennel.
+    let unix_prep = UnixPrep {
+        socket_binds: vec![(unix_sock.clone(), PathBuf::from("/run/kennel/e2e/kennel-unix.sock"))],
+        env: Vec::new(),
+    };
+
     let helper = HelperClient::new(privhelper_path());
     let spec = Spec {
         cgroup: cgroup.clone(),
@@ -245,6 +273,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
         view_root: Some(view_root.clone()),
         audit_path: Some(audit_path.clone()),
         ssh: ssh_prep,
+        unix: unix_prep,
     };
 
     // The workload proves three things about the constructed view, then sleeps so
@@ -269,12 +298,19 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
          && test -n \"$KENNEL_SOCKS_PROXY\" ",
         socks = socks_bin.display(),
     );
+    // Clause (5): the AF_UNIX socket shim (§7.4) — the granted socket is present as a
+    // socket at its shim path AND actually connectable (round-trips ping→pong to the
+    // host echo listener through the bind), while a non-granted name is absent (ENOENT).
+    let unix_clause = "&& test -S \"$HOME/kennel-unix.sock\" \
+         && ! test -e \"$HOME/kennel-not-granted.sock\" \
+         && test \"$(python3 -c \"import socket,os;s=socket.socket(socket.AF_UNIX);s.connect(os.environ['HOME']+'/kennel-unix.sock');s.sendall(b'ping');print(s.recv(16).decode(),end='')\")\" = pong ";
     let mut workload = Command::new("/bin/sh");
     workload.arg("-c").arg(format!(
         "grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts \
          && test -r \"$HOME/kennel-e2e/granted/file\" \
          && ! test -e \"$HOME/kennel-e2e/secret\" \
          {ssh_clause} \
+         {unix_clause} \
          && sleep 2",
     ));
     let kennel = start(&helper, spec, &mut workload).expect("start kennel");
@@ -312,7 +348,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let status = kennel.stop(&helper).expect("stop");
     assert!(
         status.success(),
-        "the constructed view held (synthetic /etc + ~/.ssh, granted readable, sibling ENOENT) (got {status:?})"
+        "the constructed view held (synthetic /etc + ~/.ssh, granted readable, sibling ENOENT, \
+         the AF_UNIX socket shim present + connectable, a non-granted socket name absent) (got {status:?})"
     );
 
     assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
@@ -329,6 +366,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let _ = std::fs::remove_dir_all(&etc_base);
     let _ = std::fs::remove_dir_all(&home_test);
     let _ = std::fs::remove_dir_all(&ssh_stage);
+    let _ = std::fs::remove_file(&unix_sock);
     let _ = std::fs::remove_dir(&base);
 }
 

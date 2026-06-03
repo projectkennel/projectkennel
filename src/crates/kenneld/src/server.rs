@@ -46,6 +46,9 @@ pub struct Loaded {
     /// The per-kennel SSH runtime (§7.8): the bastion grants `kenneld` realises.
     /// Empty for a kennel with no `[ssh]` policy.
     pub ssh: kennel_policy::SshRuntime,
+    /// The per-kennel `AF_UNIX` socket shims (§7.4): the host sockets `kenneld` binds
+    /// into the kennel's view. Empty for a kennel with no `[unix]` policy.
+    pub unix: kennel_policy::UnixRuntime,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -235,6 +238,30 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         })
     }
 
+    /// Prepare a kennel's `AF_UNIX` socket shims (§7.4): resolve each granted socket's
+    /// real host path and its in-view shim path (filling `<kennel>`/`<uid>`/`<home>`
+    /// and expanding `~`/`$HOME`/`$XDG_RUNTIME_DIR`), and collect any env vars. The
+    /// bring-up binds each host socket into the view at its shim path; what is not
+    /// granted is structurally absent. A no-op (empty [`crate::UnixPrep`]) when the
+    /// kennel has no `[unix]` grant.
+    ///
+    /// `shim_root` is the kennel's in-view `$HOME` (the constructed-view shim root, or
+    /// the real home when there is no view); shim paths rooted at `~`/`$HOME` resolve
+    /// under it, real paths under the daemon-user's real home.
+    fn prepare_unix(&self, unix: &kennel_policy::UnixRuntime, subst: &RuntimeSubstitutions, shim_root: &Path) -> crate::UnixPrep {
+        let mut socket_binds = Vec::new();
+        let mut env = Vec::new();
+        for sock in &unix.sockets {
+            let source = resolve_path(&sock.real, subst, &self.identity.home);
+            let target = resolve_path(&sock.shim, subst, shim_root);
+            if let Some(var) = &sock.env {
+                env.push((var.clone(), target.to_string_lossy().into_owned()));
+            }
+            socket_binds.push((source, target));
+        }
+        crate::UnixPrep { socket_binds, env }
+    }
+
     /// Drop a kennel's SSH edges from the bastion on teardown (§7.8.2): a synthetic
     /// key never outlives the kennel it was minted for. Best-effort.
     fn deregister_ssh(&self, kennel: &str) {
@@ -406,6 +433,9 @@ where
         // `fail` deregisters any edges registered before the failure.
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
     };
+    // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
+    // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
+    let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
 
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
@@ -427,6 +457,7 @@ where
         view_root: id.view_base.as_ref().map(|base| base.join(format!("root-{ctx}"))),
         audit_path: id.audit_base.as_ref().map(|base| base.join(&req.kennel).join("network.jsonl")),
         ssh,
+        unix,
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
@@ -478,6 +509,28 @@ fn recv_request_with_fds(conn: &UnixStream) -> io::Result<(Request, Vec<OwnedFd>
     let body = frame.get(4..end).ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
     let request = Request::decode(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad request: {e:?}")))?;
     Ok((request, fds))
+}
+
+/// Resolve a `[unix]` socket path: fill the per-instance placeholders
+/// (`<kennel>`/`<ctx>`/`<uid>`/`<home>`) and expand a leading `~`/`$HOME` against
+/// `base_home` and `$XDG_RUNTIME_DIR`/`$UID` against the uid (§7.4). `base_home` is
+/// the real home for a `real` path, the in-view shim root for a `shim` path.
+fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> PathBuf {
+    let uid = subst.uid.to_string();
+    let s = raw
+        .replace("<kennel>", &subst.kennel)
+        .replace("<ctx>", &subst.ctx.to_string())
+        .replace("<uid>", &uid)
+        .replace("<home>", &subst.home.to_string_lossy())
+        .replace("$XDG_RUNTIME_DIR", &format!("/run/user/{uid}"))
+        .replace("$UID", &uid);
+    if s == "~" || s == "$HOME" {
+        return base_home.to_path_buf();
+    }
+    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("$HOME/")) {
+        return base_home.join(rest);
+    }
+    PathBuf::from(s)
 }
 
 /// Build the workload command from `argv`/`cwd`, wiring the passed stdio fds if
@@ -544,7 +597,12 @@ mod tests {
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
             };
-            Ok(Loaded { plan, net, ssh: kennel_policy::SshRuntime::default() })
+            Ok(Loaded {
+                plan,
+                net,
+                ssh: kennel_policy::SshRuntime::default(),
+                unix: kennel_policy::UnixRuntime::default(),
+            })
         }
     }
 
