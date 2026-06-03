@@ -146,7 +146,13 @@ allow = [
 > then `pivot_root`s in. The synthetic `/etc` is **constructed, never the host
 > `/etc` bound in**: `kenneld::etc` writes the libc/NSS files (passwd/group/hosts/
 > resolv.conf/…) scrubbed of host specifics, plus read-only binds of the vanilla
-> TLS/linker subtrees (`/etc/ssl`,`/etc/pki`,`/etc/ld.so.*`). Two invariants worth
+> TLS/linker subtrees (`/etc/ssl`,`/etc/pki`,`/etc/ld.so.*`). **Identity is masked:**
+> the synthetic `passwd`/`group` name the workload's uid and gid `kennel` (never the
+> operator's login name), with the in-kennel shim `$HOME` as the home — so `id`,
+> `whoami`, and `getpwuid` reveal no host identity. The uid/gid *numbers* are
+> unchanged (they must match the host inodes of bind-mounted files); inherited
+> *supplementary* gids still show in `id` as bare numbers, since dropping them is the
+> group-isolation hardening (§7.2.8, needs privilege/userns). Two invariants worth
 > repeating: **writable binds resolve to persistent host inodes** (work survives
 > teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is built
 > **after** `pivot_root` so its rules key on the view's inodes. kenneld sets
