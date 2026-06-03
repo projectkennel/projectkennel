@@ -13,7 +13,7 @@
 //!
 //! ```text
 //! Request (294 bytes):
-//!   0      op           u8     (1 add-addr, 2 del-addr, 5 setup-egress)
+//!   0      op           u8     (1 add-addr, 2 del-addr, 5 setup-egress, 6 set-gid-map)
 //!   1      family       u8     (4 or 6; 0 for the egress op)
 //!   2      prefix       u8
 //!   3      _reserved    u8     (0)
@@ -65,6 +65,15 @@ pub enum Op {
     /// contents. (Op byte 5; bytes 3 and 4 were the retired cgroup create/delete
     /// ops — kenneld now manages cgroups unprivileged in its delegated subtree.)
     SetupEgress,
+    /// Write a workload's user-namespace `gid_map` so it retains specific
+    /// supplementary groups (§7.2.8 device passthrough). An unprivileged process
+    /// can map only its own primary gid, so a process that needs another granted
+    /// group (e.g. `dialout`) cannot self-map it; the helper, holding `CAP_SETGID`
+    /// in the parent (init) user namespace, writes the map for it. A variable-length
+    /// [`GidMapPayload`] tail carries the target pid and the gids. **Gated** by the
+    /// helper re-checking the caller is a member of every gid and owns the target
+    /// pid — mapping a gid the user is not in would be an escalation.
+    SetGidMap,
 }
 
 impl Op {
@@ -73,6 +82,7 @@ impl Op {
             Self::AddAddr => 1,
             Self::DelAddr => 2,
             Self::SetupEgress => 5,
+            Self::SetGidMap => 6,
         }
     }
 
@@ -81,6 +91,7 @@ impl Op {
             1 => Some(Self::AddAddr),
             2 => Some(Self::DelAddr),
             5 => Some(Self::SetupEgress),
+            6 => Some(Self::SetGidMap),
             _ => None,
         }
     }
@@ -352,6 +363,66 @@ impl EgressPayload {
     }
 }
 
+/// The variable-length tail of a [`Op::SetGidMap`] request: the target process and
+/// the gids to identity-map into its user namespace.
+///
+/// Layout (appended directly after the fixed [`Request`] bytes):
+///
+/// ```text
+///   0..4    pid       u32   native-endian; the process whose userns gid_map to write
+///   4..8    n_gids    u32   native-endian
+///   8..     gids      u32 each (native-endian)
+/// ```
+///
+/// Each gid becomes one identity line (`<gid> <gid> 1`) in the written `gid_map`,
+/// so inside the kennel the workload keeps exactly these groups and the kernel sees
+/// the same real gids outside. The helper does **not** trust this list: it refuses
+/// any gid the caller is not a member of, and refuses a pid it does not own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GidMapPayload {
+    /// The target process (the workload's user-namespace owner).
+    pub pid: u32,
+    /// The gids to identity-map (primary + each granted supplementary group).
+    pub gids: Vec<u32>,
+}
+
+impl GidMapPayload {
+    /// Encode the payload tail (appended after the request bytes by the client).
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(8usize.saturating_add(self.gids.len().saturating_mul(4)));
+        b.extend_from_slice(&self.pid.to_ne_bytes());
+        b.extend_from_slice(&u32::try_from(self.gids.len()).unwrap_or(u32::MAX).to_ne_bytes());
+        for gid in &self.gids {
+            b.extend_from_slice(&gid.to_ne_bytes());
+        }
+        b
+    }
+
+    /// Decode a payload tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireError::BadLength`] if the buffer is short, the count exceeds
+    /// the defensive cap, or the gid bytes do not match the declared count.
+    pub fn decode(buf: &[u8]) -> Result<Self, WireError> {
+        let pid = buf
+            .get(0..4)
+            .and_then(|s| s.try_into().ok())
+            .map(u32::from_ne_bytes)
+            .ok_or(WireError::BadLength)?;
+        let n = read_count(buf, 4)?;
+        let span = n.checked_mul(4).ok_or(WireError::BadLength)?;
+        let region = buf.get(8..8usize.checked_add(span).ok_or(WireError::BadLength)?).ok_or(WireError::BadLength)?;
+        let mut gids = Vec::with_capacity(n);
+        for chunk in region.chunks_exact(4) {
+            let g: [u8; 4] = chunk.try_into().map_err(|_| WireError::BadLength)?;
+            gids.push(u32::from_ne_bytes(g));
+        }
+        Ok(Self { pid, gids })
+    }
+}
+
 /// A response message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Response {
@@ -487,6 +558,36 @@ mod tests {
     #[test]
     fn setup_egress_op_round_trips() {
         assert_eq!(Op::from_byte(Op::SetupEgress.to_byte()), Some(Op::SetupEgress));
+    }
+
+    #[test]
+    fn set_gid_map_op_round_trips() {
+        assert_eq!(Op::from_byte(Op::SetGidMap.to_byte()), Some(Op::SetGidMap));
+    }
+
+    #[test]
+    fn gidmap_payload_round_trips() {
+        let payload = GidMapPayload { pid: 4242, gids: vec![1000, 20, 24] };
+        let bytes = payload.encode();
+        assert_eq!(GidMapPayload::decode(&bytes), Ok(payload));
+    }
+
+    #[test]
+    fn gidmap_payload_rejects_truncated_gids() {
+        // Claim two gids but provide one.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&7u32.to_ne_bytes()); // pid
+        bytes.extend_from_slice(&2u32.to_ne_bytes()); // n_gids = 2
+        bytes.extend_from_slice(&20u32.to_ne_bytes()); // only one gid
+        assert_eq!(GidMapPayload::decode(&bytes), Err(WireError::BadLength));
+    }
+
+    #[test]
+    fn gidmap_payload_rejects_absurd_count() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&7u32.to_ne_bytes()); // pid
+        bytes.extend_from_slice(&u32::MAX.to_ne_bytes()); // n_gids = 4 billion
+        assert_eq!(GidMapPayload::decode(&bytes), Err(WireError::BadLength));
     }
 
     #[test]

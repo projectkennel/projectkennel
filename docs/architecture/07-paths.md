@@ -185,7 +185,7 @@ Machine-wide flock target for serialising privhelper invocations in degraded mod
 |---|---|---|
 | `kennel` | `/usr/bin/kennel` | The CLI; user binary, no special permissions. |
 | `kenneld` | `/usr/libexec/kennel/kenneld` | Started by systemd-user or by the CLI in degraded mode; not on `PATH`. |
-| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | Installed setuid root OR with file capabilities `cap_net_admin,cap_sys_admin=ep` (per-distribution choice). Not on `PATH`; located by absolute path from kenneld. |
+| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | Installed setuid root OR with file capabilities `cap_net_admin,cap_sys_admin,cap_setgid=ep` (per-distribution choice). `cap_setgid` is for the `set-gid-map` op — writing a workload's user-namespace `gid_map` so it keeps a granted supplementary group (§7.2.8); the other two are for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
 | `kennel-netproxy` | `/usr/libexec/kennel/kennel-netproxy` | Spawned by kenneld; not on `PATH`. |
 | `kennel-ssh-agent` | `/usr/libexec/kennel/kennel-ssh-agent` | Spawned by kenneld (when the policy enables it); not on `PATH`. |
 
