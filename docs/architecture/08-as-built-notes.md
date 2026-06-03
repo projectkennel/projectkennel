@@ -178,6 +178,43 @@ describe these read as roadmap.
   `kennel-ssh-reorigin`, `kennel-socks-connect`, and `kennel-netproxy` binaries — and
   the kenneld root e2e — the spawn-path assembly inside a confined kennel.)
 
+- **`[unix]` — the AF_UNIX socket shim** (design `07-4-afunix.md` §7.4) — **core
+  shim BUILT** (graduated from this roadmap; kept here for the build notes). A
+  kennel sees a constructed view in which only the sockets policy grants are
+  present, bound from their real host locations at the paths applications expect;
+  what is not bound in is structurally absent (default-deny), and abstract-namespace
+  connections are denied unconditionally by the always-on Landlock scope (ABI 6+,
+  §7.4.3). What is built:
+  - The **policy bridge**, mirroring `[ssh]`: the `[unix]` source schema, folding,
+    and leaf deltas already existed; added are the `kennel-policy::unix` validators
+    (on the resolved policy: refuse `default = "allow"`, `abstract = "allow"` — it
+    cannot be honoured under the always-on scope, a `[[unix.allow]]` missing
+    `real`/`shim`, and — load-bearing — any entry that shims an **SSH agent**
+    (`name = ssh-agent` / `env = SSH_AUTH_SOCK`): an exposed agent is a
+    destination-blind oracle (§7.8.1), so SSH goes through the `[ssh]` bastion, never
+    AF_UNIX), `translate_unix` → `SettledPolicy.unix: UnixRuntime` (signed,
+    per-instance-substituted, omitted from the canonical form when empty), and the
+    compile wiring.
+  - The **realization** in `kenneld`: `Loaded.unix` → `Shared::prepare_unix` resolves
+    each socket's real host path and in-view shim path (filling
+    `<kennel>`/`<uid>`/`<home>`, expanding `~`/`$HOME`/`$XDG_RUNTIME_DIR`) → the
+    bring-up's `apply_unix_shims` binds each host socket into `view.binds` at its shim
+    path. The **key difference from the `~/.ssh` shim**: a socket cannot be *copied*
+    (the `file_binds` path copies, which works for the SSH config/keys but not a
+    socket node), so it rides a real **bind mount** in the constructed view; Landlock
+    grants the shim path + parent so the workload can reach and connect.
+  - **Proven end to end** in the kenneld root e2e: a confined kennel granted a host
+    socket finds it present at its shim path, **connects through the bind** and
+    round-trips a byte to the host listener, and a non-granted socket name is absent
+    (ENOENT) — §7.4.9 items 1/5/8.
+  - **Deferred** (still roadmap): per-kennel **service launching** (§7.4.7 — kenneld
+    spawning gpg-agent/keyring instances; today the shim binds whatever is at `real`,
+    skip-missing), the `abstract = "allow"` / `[[unix.allow_abstract]]` escape hatch
+    (an ABI-gated future; the scope is all-or-nothing), and the `--dry-run`/`inspect`
+    shim output (§7.4.5). The `ai-coding-strict` template's stale per-kennel
+    *ssh-agent* shim was removed (SSH is the §7.8 bastion now) and replaced with a
+    per-kennel gpg-agent example.
+
 ## 8.2 Implementation lessons (apply these to the rest)
 
 - **The Landlock ruleset must be built *after* `pivot_root`, in the child.** A rule

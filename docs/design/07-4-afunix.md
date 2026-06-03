@@ -242,6 +242,19 @@ The shim makes per-kennel *service instances* viable for agent-shaped services. 
 
 ## 7.4.9 Test plan additions
 
+**As built.** The core shim is implemented and proven. The `[unix]` policy bridge
+(`kennel-policy`: the `unix` validators, `translate_unix` → `SettledPolicy.unix:
+UnixRuntime`, compile wiring) carries grants from the signed policy to `kenneld`,
+which resolves each socket's real and shim paths and binds the host socket into the
+constructed view at its shim path (`apply_unix_shims` → `view.binds`, a real bind
+mount — a socket cannot be copied like the synthetic `~/.ssh`). Abstract-namespace
+denial is the always-on Landlock scope (§7.4.3); SSH-agent shims are refused at
+compile time (§7.8.1). The `kenneld` root e2e covers items 1, 5, and 8: a granted
+socket is present at its shim path and **connectable** (a byte round-trips to the host
+listener), while a non-granted name is absent (ENOENT). Still roadmap: per-kennel
+service launching (§7.4.7), the `abstract = "allow"` / `allow_abstract` escape hatch,
+and the `--dry-run` shim output (§7.4.5).
+
 For each invariant, a regression test in `tests/unix/`:
 
 1. Context with `unix.allow = []` attempts `connect()` to `$XDG_RUNTIME_DIR/bus`; expect ENOENT (the shim is empty — the name is absent, not merely denied).
