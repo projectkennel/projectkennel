@@ -22,8 +22,7 @@ describe these read as roadmap.
   / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
   is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).
 
-- **`kennel-sshd` — the per-kennel SSH egress bastion** (design `07-4-afunix.md`
-  §7.4.7). A per-user managed instance of stock OpenSSH `sshd`, sibling to
+- **`kennel-sshd` — the per-kennel SSH egress bastion** (design `07-8-ssh.md` §7.8). A per-user managed instance of stock OpenSSH `sshd`, sibling to
   `kenneld`, that re-originates a kennel's SSH to policy-granted destinations
   with the user's real key (held host-side) so the workload never holds a key or
   an agent socket. The mechanism is **prototype-validated against stock OpenSSH

@@ -60,7 +60,7 @@ The full section list:
 | `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction, scrub patterns | §7.2 |
 | `[net]` and `[net.*]` | Network egress allowlist, proxy listen, loopback rules, bind rules, audit | §7.3 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling | §7.4 |
-| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); source-only, planned | §7.4.7 |
+| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); source-only, planned | §7.8 |
 | `[dbus]` | D-Bus session/system bus enablement and method filtering | §7.5 |
 | `[x11]` | X11/Wayland display server isolation | §7.6 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.7 |
