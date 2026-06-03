@@ -93,19 +93,33 @@ describe these read as roadmap.
     command cannot redirect it or execute on the bastion; a non-synthetic key is
     refused; a port-forward channel is denied. All four pass.
 
-  **Still owed** (the integration into a *live kennel* — needs the kennel spawn
-  path + root to validate as a whole): the supervision lifecycle wired into
-  `kenneld`'s per-kennel orchestration (start/track/reap the managed `sshd`
-  alongside the netproxy, regenerate state on restart) — sharing the sibling-service
-  prerequisite with the still-unbuilt `[unix]` socket path; synthetic-key minting
-  per `(real-key, host)` edge wired to the synthetic `~/.ssh` of a live kennel; the
-  root-owned AKC helper that vends the forced-command bindings for live kennels over
-  the control socket and deregisters on teardown; the bridge carrying the resolved
-  `[ssh]` grants from the policy into the kennel's spawn params (the
-  source-only-section→runtime path, also still-unbuilt for `[unix]`); and reaching
-  the bastion over the egress proxy (one allowlisted loopback port). (The phase
-  numbering follows §7.8's original plan; 2/4/5 and the bastion config + e2e are
-  done.)
+  - **The source-only→runtime bridge** — the resolved `[ssh]` grants are carried
+    into the signed settled policy (`SettledPolicy.ssh: SshRuntime`, populated by
+    `translate`, kept out of the enforcement `EffectivePolicy` and omitted from the
+    canonical form when empty so existing signatures are unaffected), and surfaced to
+    `kenneld` via `Loaded.ssh`. This is the path the still-unbuilt `[unix]` runtime
+    will reuse.
+
+  **Still owed** — one atomic, root-gated chunk in the spawn path, plus the AKC
+  helper. It needs a full kennel bring-up with a bastion in the loop to validate, so
+  it is the next thing to do *with* a root e2e, not blind:
+  1. In `spawn_workload`, for a kennel whose `Loaded.ssh` is non-empty: mint a
+     synthetic key per grant (`kenneld::ssh::mint_synthetic_key`), materialise the
+     synthetic `~/.ssh` into the constructed-view `$HOME` (a `kenneld::ssh::materialize`
+     call wired like the synthetic `/etc`), register each edge with the per-user
+     `kenneld::bastion::Bastion` (lazily starting the managed `sshd`), and add the
+     bastion's loopback port to the kennel's egress allow so the netproxy/BPF permit
+     it; deregister the kennel's edges on teardown.
+  2. The per-user `Bastion` held in `kenneld`'s `Shared` state, configured from
+     `Identity` (bastion port, the host-side agent socket).
+  3. The root-owned `AuthorizedKeysCommand` helper + a control-protocol message:
+     `kennel-sshd`'s AKC queries `kenneld` for the live forced-command bindings
+     rather than reading a static file (the production source; the static
+     `AuthorizedKeysFile` is already supported and is what the e2e drives).
+
+  (Phase numbering follows §7.8's original plan; everything except this spawn-path
+  assembly and the AKC helper is built and either unit-tested or proven end-to-end
+  by `src/tools/ssh-bastion-e2e.sh`.)
 
 ## 8.2 Implementation lessons (apply these to the rest)
 
