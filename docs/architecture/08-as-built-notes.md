@@ -107,7 +107,12 @@ describe these read as roadmap.
     root-owned (safe-path), it runs as the bastion user to reach the per-user control
     socket. Unit- and integration-tested (`tests/akc.rs` drives the real binary
     against a stand-in control server, including the no-daemon and empty-argv
-    fail-closed paths).
+    fail-closed paths), and proven **end to end against stock OpenSSH under root**
+    (`tests/akc_openssh.rs`, gated `root-tests`): a real bastion `sshd` configured with
+    the root-owned AKC authorises exactly the synthetic key bound to a live edge — it
+    runs `kennel-akc`, which queries `Bastion::authorized_keys_for` over the control
+    socket — and refuses an unregistered key. (The one privileged step is chowning the
+    AKC to root, which is precisely the privilege Project Kennel installs with.)
   - **The egress reach** — `kennel-socks-connect` (its own std-only crate): a
     kennel can `connect()` only to its egress proxy (§7.3.2) and `ssh` has no
     built-in SOCKS client, so each synthetic `~/.ssh` `config` stanza names this
