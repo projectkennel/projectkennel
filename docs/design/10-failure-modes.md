@@ -73,7 +73,7 @@ Mid-kennel failures:
 | SOCKS5 proxy crashes | All outbound traffic blocked (BPF rules still in place). Supervisor restarts proxy. Kennel's connections to the proxy fail with ECONNREFUSED during the gap. |
 | dbus-proxy crashes | Bus calls fail. Supervisor restarts. Active D-Bus connections are dropped; clients reconnect. |
 | Xwayland/Xephyr crashes | X11 apps inside die. Supervisor restarts the server; user's open applications are lost. |
-| Per-kennel ssh-agent crashes | Ssh operations fail (no agent socket). Supervisor restarts; keys must be re-added unless agent persists state. |
+| SSH egress bastion (`kennel-sshd`) crashes | SSH from kennels fails (no route out — direct `:22` stays denied). `kenneld` restarts it and regenerates its key state from the live kennels; no keys to re-add (the bastion holds none — §7.4.7). |
 | Audit log writer fails | Audit events queued in memory; if queue fills, Project Kennel chooses: drop new events (logged loudly) or block kennel (configurable per template). |
 | Real D-Bus daemon restarts on host | dbus-proxy reconnects; kennel's bus connections briefly stall. |
 | Real Wayland compositor restarts | Xwayland in the kennel loses its connection; Xwayland exits; supervisor restarts. User's X apps in the kennel are lost. |

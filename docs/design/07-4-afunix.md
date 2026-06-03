@@ -40,6 +40,8 @@ The naive approach — "Landlock deny on the real paths, allowlist specific file
 
 The shim model: the kennel sees a *constructed view* of `$HOME` and `$XDG_RUNTIME_DIR` where only the sockets the policy explicitly grants are present, by bind-mounting from real locations.
 
+> **SSH is the exception.** ssh-agent is used below as the worked example of the *general* socket-shim mechanism (which still serves gpg-agent, keyring, and the display/audio sockets), but per-kennel SSH is **not** shimmed as an agent socket — an exposed agent is a destination-blind signing oracle. SSH is routed through the re-origination bastion of §7.4.7 instead. Read the ssh-agent worked example here as illustrating the mechanism, not as the SSH design.
+
 ```
 Real layout (host view):
   ~/.ssh/unique_keys/agents/ai-coding.sock   real socket file
@@ -113,12 +115,11 @@ shim_root = "/run/kennel/<ctx>"  # auto-set
 
 # Explicit grants: real socket path → location in kennel's view
 # Real socket is bind-mounted to shim location.
-
-[[unix.allow]]
-name = "ssh-agent"
-real = "~/.ssh/unique_keys/agents/<kennel>.sock"
-shim = "~/.ssh/agent.sock"
-env = "SSH_AUTH_SOCK"           # Project Kennel sets this env var to shim path
+#
+# NB: SSH is NOT granted here. ssh-agent over the shim is a destination-blind
+# signing oracle; per-kennel SSH goes through the re-origination bastion and the
+# [ssh] section instead (§7.4.7). [[unix.allow]] is for the other agent-shaped
+# services (gpg-agent, keyring) and display/audio sockets.
 
 [[unix.allow]]
 name = "wayland"
@@ -217,32 +218,76 @@ Shim lives in `~/.cache/kennel/<ctx>/home/`. Kennel's `$HOME` points at the subd
 
 Ephemeral shim plus persistent state, both clearly separated from real `~`, both inspectable from the host side.
 
-## 7.4.7 Per-kennel services
+## 7.4.7 Per-kennel SSH: the egress bastion
 
-The shim makes per-kennel *service instances* viable. The ssh-agent case is the cleanest:
+SSH is the one per-kennel service Project Kennel does **not** hand to the workload as a socket it talks to directly. Exposing a per-kennel `ssh-agent` socket — the obvious design — gives the workload a **destination-blind signing oracle**: the ssh-agent wire protocol carries an opaque to-be-signed blob, not a hostname, so an agent (or a fingerprint-filtering broker in front of one) can bound *which key* signs but never *which host* the signature authenticates to. A hostile workload that holds the socket opens it directly, requests a signature for an allowlisted key over a challenge it crafted for an attacker-controlled host, and authenticates as the user anywhere that key is accepted — cross-host key reuse. A curated `~/.ssh/config` and fingerprint filtering constrain only the stock client the workload is free to ignore. (See the T1.6 residual in `THREATS.md`.)
+
+Per-kennel SSH is therefore routed through a **re-origination bastion**. The workload holds no real key, holds no agent socket, and cannot choose its own destination.
+
+### Topology
+
+A single per-user **`kennel-sshd`** — a managed instance of stock OpenSSH `sshd` — runs alongside `kenneld` for the session, on a loopback port. It holds no keys; it is a forced-command router whose lifecycle and key state `kenneld` owns.
+
+### The synthetic key is the destination selector
+
+For each `(real-key, host)` edge a kennel is granted (the `[ssh]` policy below), `kenneld` mints a disposable **synthetic** ed25519 keypair: the private half goes into the kennel's constructed `~/.ssh`; the public half is bound, via the bastion's `AuthorizedKeysCommand` (→ `kenneld`), to a forced command that bakes in the destination and the real-key fingerprint:
 
 ```
-Host view:
-  ~/.ssh/unique_keys/agents/
-    ai-coding.sock          ← agent process for ai-coding kennel
-    untrusted-build.sock    ← agent process for untrusted-build kennel
-    default.sock            ← your default agent
-
-ai-coding kennel view:
-  ~/.ssh/agent.sock         ← bind-mount from ai-coding.sock
-                              SSH_AUTH_SOCK points here
-                              this agent holds only ai-coding's keys
+restrict,pty,command="kennel-ssh-reorigin --dest github.com --key SHA256:<K>" <synthetic-pub>
 ```
 
-Project Kennel owns launching per-kennel agents (ssh-agent, gpg-agent, any agent-shaped service). Policy says "kennel X gets ssh-agent Y"; Project Kennel ensures Y is running before X starts, that Y's socket appears at the shim path inside X, that the env var points to it, and that Y is torn down when no kennels reference it.
+The destination is fixed by *which synthetic key authenticated* — never parsed from anything the workload sends. A workload holding `synthetic-github` can only ever reach github with key K; it cannot redirect the forced command, and a non-synthetic key is refused. There is no oracle: each synthetic key is a capability for exactly one `(host, key)` edge.
 
-This pattern generalises:
+### Re-origination
 
-- **gpg-agent per kennel**: `~/.gnupg/kennels/<ctx>/` with its own keyring, gpg-agent socket bound in as `~/.gnupg/`.
-- **D-Bus per kennel**: but proxied, not raw — see §7.5.
-- **Keyring per kennel**: `gnome-keyring-daemon` instance, isolated.
+On connection, `kennel-ssh-reorigin` (run as the user — no privilege) reads `$SSH_USER_AUTH` (sshd's `ExposeAuthInfo`) to confirm which synthetic key authenticated, then `exec`s a fresh `ssh` to the destination using the **real key from the user's own host-side store** — agent, hardware token, or `~/.ssh`; Project Kennel stores no key material — `IdentitiesOnly` to the selected fingerprint, verifying the destination against the bastion's host-side `known_hosts`. `$SSH_ORIGINAL_COMMAND` is forwarded, so `git`-over-ssh and interactive shells both work, and the real key signs against a destination the bastion chose and verified — so cross-host reuse is structurally impossible.
 
-The shim approach makes all of these tractable because application configuration doesn't change — the application looks for its socket at the standard path, Project Kennel arranges for the right socket to be there.
+### Reachability
+
+The bastion is reached over the existing per-kennel egress proxy (§7.3): its loopback port is one allowlisted destination; the kennel's `ssh` targets it and the proxy forwards. No new transport, no UDS, no helper. Direct `:22` stays denied by the egress allowlist, so the bastion is the only SSH path out.
+
+### The synthetic `~/.ssh`
+
+The kennel's constructed `~/.ssh` (tmpfs, `0700`) holds only the disposable synthetic private key(s); a generated, read-only `config` — one stanza per granted host, all `HostName`→bastion, `HostKeyAlias kennel-bastion`, `IdentityFile`→the matching synthetic key, `IdentitiesOnly yes`, `StrictHostKeyChecking yes`; and a `known_hosts` carrying only the bastion's host key (under `kennel-bastion`). Everything real is structurally absent (ENOENT): the user's keys, real `config`, real `known_hosts`, other kennels' material. This refines §7.4.6's "`config` returns ENOENT" into a generated config that leaks nothing.
+
+### Lockdown and scope
+
+`kennel-sshd`'s config and the per-key `restrict,pty` option deny everything but the forced command and a pty — `AllowTcpForwarding no`, `X11Forwarding no`, `AllowAgentForwarding no`, `Subsystem sftp /bin/false`. **SFTP, scp, and port-forwarding are out of scope for the first cut and denied; revisit later.** Per-signature gating is delegated to the user's key custody: a hardware/sk key gives touch-per-use for free; a non-interactive key is usable freely *for its granted destinations only* — there is no Project-Kennel prompt to bypass, so the `[ssh] allow_headless` flag (below) governs whether a non-interactive kennel may drive such a key at all.
+
+### Where keys and trust live
+
+- Real private keys live only in the user's host-side store; the bastion uses them, the kennel never sees them.
+- The bastion's `AuthorizedKeysCommand` helper is **root-owned** (installed in the prefix) and queries `kenneld` over its control socket; the rootless `kennel-sshd` only invokes it — OpenSSH's safe-path check rejects an AKC that is not root-owned.
+- The bastion's host-side `known_hosts` = the operator's `known_hosts` ∩ granted hosts, or an explicit `[[ssh.known_hosts]]` pin; a granted host with no known host key fails closed at `StrictHostKeyChecking`.
+
+The mechanism is validated end-to-end against stock OpenSSH 9.6 (re-origination of `git`-shape commands and interactive ptys; the destination fixed in `command=`; non-synthetic keys refused; the AKC root-ownership constraint). `kennel-sshd` is designed but not yet built — `docs/architecture/08-as-built-notes.md` §8.1 carries the roadmap and phased plan.
+
+### `[ssh]` policy (source-only)
+
+A compile-time-only section, resolved and folded like `[unix]` and dropped from the settled `EffectivePolicy`:
+
+```toml
+[ssh]
+# Whether a granted key may be used by a non-interactive (CI) kennel with no
+# per-use touch/confirmation. Loud, threat-tagged; default false.
+allow_headless = false
+
+[[ssh.keys]]
+fingerprint = "SHA256:…"        # the user's real key, by its stable `ssh-add -l` identity
+hosts       = ["github.com"]    # destinations this key may reach (⊆ net.allow on :22)
+reason      = "push to the project's github remote"
+threats     = { exposed = ["T1.6"] }
+
+[[ssh.known_hosts]]              # optional: pin a host key the operator's store lacks
+host = "git.internal"
+key  = "ssh-ed25519 AAAA…"
+```
+
+Compile-time validation: every `fingerprint` well-formed; every `hosts` entry ⊆ the kennel's `net.allow` on port 22 (otherwise a dead grant or a recon hint); `allow_headless = true` is loud and carries a threat tag.
+
+### Other per-kennel services
+
+The socket-shim pattern of §7.4.3 still serves the *non-SSH* agent-shaped services — a per-kennel `gpg-agent` (`~/.gnupg/kennels/<ctx>/`, socket bound in as `~/.gnupg/`), an isolated `gnome-keyring-daemon`, and D-Bus (proxied, not raw — §7.5). Note that `gpg-agent` carries the same blind-signing-oracle caveat as ssh-agent; constraining it to destinations/recipients is a separate, later problem, tracked as a residual.
 
 ## 7.4.8 Residuals
 
@@ -260,12 +305,12 @@ The shim approach makes all of these tractable because application configuration
 
 For each invariant, a regression test in `tests/unix/`:
 
-1. Context with `unix.allow = []` attempts `connect()` to `~/.ssh/agent.sock`; expect ENOENT (shim empty).
-2. Context with ssh-agent shim grant runs `ssh-add -l`; expect success against per-kennel agent.
+1. Context with `unix.allow = []` attempts `connect()` to `~/.ssh/agent.sock`; expect ENOENT (no agent socket is exposed under the bastion model).
+2. Context with an `[ssh]` grant for `github.com` runs `ssh -T git@github.com` (or `git ls-remote`); expect the bastion to re-originate with the granted real key. A workload that opens the bastion connection by hand and asks for a *different* destination cannot redirect it — the destination is fixed in the forced command, keyed to the synthetic key it authenticated with.
 3. Context with `unix.abstract = "deny"` connects to `\0/org/freedesktop/DBus`; expect EPERM from the Landlock abstract-unix scope (EACCES from the seccomp/AppArmor fallback below ABI 6).
 4. Context lists `$XDG_RUNTIME_DIR`; expect to see only granted entries.
-5. Context attempts `cat ~/.ssh/config`; expect ENOENT.
-6. Two kennels both granted "ssh-agent" each see their own at `~/.ssh/agent.sock`; expect each agent's `ssh-add -l` to return only its own keys.
+5. Context reads `~/.ssh/`; expect only the synthetic private key(s) and the generated read-only `config`/`known_hosts` — never the user's real keys, real `config`, or real `known_hosts`. A non-synthetic key offered to the bastion is refused.
+6. Two kennels granted different hosts each reach only their own granted host; a synthetic key minted for one kennel cannot reach the other kennel's host (each is bound by its own forced command), and neither can name or use the user's real keys.
 7. Context attempts to read `~/.gnupg/private-keys-v1.d/`; expect ENOENT.
 8. Context attempts to connect to `/var/run/docker.sock`; expect ENOENT.
 9. Context attempts to connect to abstract `\0/var/run/docker.sock`; expect EPERM from the Landlock abstract-unix scope.
