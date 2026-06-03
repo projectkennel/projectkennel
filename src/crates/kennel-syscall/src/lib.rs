@@ -57,6 +57,7 @@
 
 #![allow(unsafe_code)]
 
+pub mod handshake;
 pub mod landlock;
 pub mod listenfd;
 pub mod mount;

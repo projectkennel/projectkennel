@@ -86,12 +86,42 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
 /// An OS error if the `CLONE_NEWUSER` unshare is refused (e.g. the distro disables
 /// unprivileged user namespaces) or any `/proc/self` map write fails.
 pub fn establish_identity_userns(uid: u32, gid: u32) -> io::Result<()> {
+    establish_userns_defer_gid_map(uid)?;
+    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+    Ok(())
+}
+
+/// Establish the identity-mapped user namespace but **leave the `gid_map`
+/// unwritten**, for the granted-supplementary-group handshake (§7.2.8).
+///
+/// Unshares `CLONE_NEWUSER`, denies `setgroups`, and writes the identity `uid_map`
+/// — exactly the prefix of [`establish_identity_userns`] — but does **not** write
+/// the `gid_map`. After this returns the caller already holds `CAP_SYS_ADMIN`
+/// *within* the new namespace (the `uid_map` is what grants it), so it can unshare
+/// mount/IPC and `mount`/`pivot_root`; the `gid_map`, however, is still empty.
+///
+/// This is used when a specific supplementary group is re-granted into the kennel:
+/// an unprivileged `gid_map` can map only the caller's own primary gid, so a
+/// privileged helper (holding `CAP_SETGID` in the init userns) writes the
+/// multi-gid map against this process's pid out of band. The caller MUST complete
+/// that write — and so MUST NOT rely on group identity, nor fork the workload —
+/// before the helper has written the map (the workload would otherwise see every
+/// group, primary included, fall to the overflow gid). The single-line default
+/// (drop every supplementary group to the overflow gid, for free) is the
+/// `gid`-writing [`establish_identity_userns`] instead.
+///
+/// # Errors
+///
+/// An OS error if the `CLONE_NEWUSER` unshare is refused (e.g. the distro disables
+/// unprivileged user namespaces, or Ubuntu's `AppArmor` restriction strips the
+/// capability — the `setgroups`/`uid_map` write then fails `EACCES`).
+pub fn establish_userns_defer_gid_map(uid: u32) -> io::Result<()> {
     unshare(Namespaces::USER)?;
     // Unprivileged userns: deny setgroups before writing gid_map (a kernel rule that
     // prevents using a new userns to drop groups for a privilege check).
     std::fs::write("/proc/self/setgroups", "deny")?;
     std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
-    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+    // gid_map intentionally NOT written here — the privileged helper writes it.
     Ok(())
 }
 
@@ -187,6 +217,65 @@ mod tests {
                     other => assert!(
                         matches!(other, nix::sys::wait::WaitStatus::Exited(_, 0)),
                         "unprivileged userns→mount-namespace failed (2 = mount EPERM): {other:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The deferred-gid variant leaves the `gid_map` empty while still granting the
+    /// in-namespace capability: an unprivileged caller establishes the userns
+    /// without a `gid_map`, observes `/proc/self/gid_map` empty, and can still
+    /// `unshare(MOUNT)` — exactly the window in which the privileged helper writes
+    /// the multi-gid map (§7.2.8). Skips with the precise cause where the host
+    /// forbids the userns or strips its capabilities (the same two conditions as
+    /// [`identity_userns_grants_an_unprivileged_mount_namespace`]).
+    #[test]
+    fn defer_gid_userns_leaves_the_gid_map_empty_but_grants_the_capability() {
+        let uid = crate::unistd::real_uid();
+        // SAFETY: fork(); the child only unshares, writes its own /proc maps, reads
+        // its own gid_map, and _exit()s — it never returns into the test harness.
+        match unsafe { nix::unistd::fork() }.expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let code = if unshare(Namespaces::USER).is_err() {
+                    4
+                } else if std::fs::write("/proc/self/setgroups", "deny").is_err()
+                    || std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n")).is_err()
+                {
+                    5
+                } else {
+                    // gid_map must be empty (deferred), AND the capability present
+                    // (mount unshare succeeds). 0 = both hold; 6 = gid_map not empty;
+                    // 2 = mount unshare failed despite the userns.
+                    let gid_map = std::fs::read_to_string("/proc/self/gid_map").unwrap_or_default();
+                    if gid_map.trim().is_empty() {
+                        i32::from(unshare(Namespaces::MOUNT | Namespaces::IPC).is_err()) * 2
+                    } else {
+                        6
+                    }
+                };
+                // SAFETY: _exit ends the child without Drop/atexit glue.
+                unsafe { libc::_exit(code) };
+            }
+            nix::unistd::ForkResult::Parent { child } => {
+                let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
+                let aa = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+                    .unwrap_or_default();
+                match status {
+                    nix::sys::wait::WaitStatus::Exited(_, 4) => {
+                        eprintln!("SKIP: unprivileged user namespaces are disabled on this host");
+                    }
+                    nix::sys::wait::WaitStatus::Exited(_, 5) => {
+                        eprintln!(
+                            "SKIP: userns created but capability-stripped — \
+                             kernel.apparmor_restrict_unprivileged_userns={} (needs an \
+                             AppArmor profile granting `userns`, or the sysctl relaxed)",
+                            aa.trim()
+                        );
+                    }
+                    other => assert!(
+                        matches!(other, nix::sys::wait::WaitStatus::Exited(_, 0)),
+                        "deferred-gid userns failed (6 = gid_map not empty, 2 = mount EPERM): {other:?}"
                     ),
                 }
             }
