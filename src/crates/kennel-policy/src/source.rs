@@ -263,9 +263,41 @@ pub struct FsProc {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsDev {
-    /// Device nodes bound into the kennel's `/dev`.
+    /// The trivial pseudo-device baseline bound into the kennel's `/dev` (`/dev/null`,
+    /// `/dev/urandom`, `/dev/tty`, …) — bare paths, no documentation needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
+    /// `[[fs.dev.passthrough]]` — specific *real host devices* exposed to the kennel
+    /// (a serial console, `/dev/ppp`, `/dev/net/tun`; `docs/design/07-2-filesystem.md`
+    /// §7.2.8). Each is loud: a documented `reason` and a threat tag are required,
+    /// because passing a hardware device through widens the kernel attack surface and
+    /// its DAC group right reaches into the kennel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passthrough: Vec<DevPassthrough>,
+}
+
+/// One `[[fs.dev.passthrough]]` entry: a specific host device made available in the
+/// kennel's constructed `/dev` (§7.2.8).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevPassthrough {
+    /// The device node, an absolute path under `/dev` (e.g. `/dev/ttyUSB0`,
+    /// `/dev/net/tun`). Bound from the host, preserving its owner/group/mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The owning group that gates access (e.g. `dialout`, `modem`, `dip`). Access is
+    /// DAC: the kennel reaches the device only if this group is in its group set, and
+    /// the user must already be a member. Documentary today (the kennel inherits the
+    /// user's groups); the hook for the future hardening that drops non-granted groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Why this device is exposed (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags — required to carry an `exposed` tag (passthrough widens the
+    /// kernel attack surface and carries a group right into the kennel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
 }
 
 /// `[fs.scrub]` — credential-shaped files masked inside a granted tree.
@@ -801,6 +833,16 @@ impl SourcePolicy {
                 let who = a.name.as_deref().or(a.real.as_deref()).unwrap_or("<unnamed>");
                 if is_blank(a.reason.as_deref()) {
                     errs.push(format!("[[unix.allow]] \"{who}\" is missing a `reason`"));
+                }
+            }
+        }
+        if let Some(fs) = &self.fs {
+            if let Some(dev) = &fs.dev {
+                for d in &dev.passthrough {
+                    let who = d.path.as_deref().unwrap_or("<no-path>");
+                    if is_blank(d.reason.as_deref()) {
+                        errs.push(format!("[[fs.dev.passthrough]] \"{who}\" is missing a `reason`"));
+                    }
                 }
             }
         }

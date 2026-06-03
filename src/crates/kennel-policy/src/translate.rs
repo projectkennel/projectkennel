@@ -273,13 +273,23 @@ fn translate_fs(
         None => TmpPolicy { private: false, size_mib: DEFAULT_TMP_MIB, mode: "0700".to_owned() },
     };
 
-    let dev = DevPolicy {
-        allow: subst_each(
-            fs.dev.as_ref().and_then(|d| d.allow.as_deref()).unwrap_or_default(),
-            install,
-            deferred,
-        ),
-    };
+    // The constructed-/dev bind set: the pseudo-device baseline (`fs.dev.allow`) plus
+    // every `[[fs.dev.passthrough]]` device path (§7.2.8). Both bind identically at
+    // spawn; the passthrough's reason/threats/group are compile-time-only (validated
+    // by `crate::dev`, then dropped — like the other informational source fields).
+    let mut dev_allow = subst_each(
+        fs.dev.as_ref().and_then(|d| d.allow.as_deref()).unwrap_or_default(),
+        install,
+        deferred,
+    );
+    if let Some(d) = &fs.dev {
+        for pt in &d.passthrough {
+            if let Some(path) = &pt.path {
+                dev_allow.push(subst(path, install, deferred));
+            }
+        }
+    }
+    let dev = DevPolicy { allow: dev_allow };
 
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
@@ -535,6 +545,33 @@ mod tests {
         assert!(!unix.is_empty());
         // No [unix] ⇒ empty runtime, omitted from the canonical form.
         assert!(translate_unix(&SourcePolicy::default(), &install(), &mut deferred).is_empty());
+    }
+
+    #[test]
+    fn dev_passthrough_paths_merge_into_the_settled_dev_allowlist() {
+        use crate::source::{DevPassthrough, FsDev, FsHome, FsSection, NetSection, SourcePolicy, Threats};
+        let src = SourcePolicy {
+            net: Some(NetSection { mode: Some("none".to_owned()), ..NetSection::default() }),
+            fs: Some(FsSection {
+                home: Some(FsHome { shim_root: Some("/run/kennel/<kennel>/home".to_owned()), ..FsHome::default() }),
+                dev: Some(FsDev {
+                    allow: Some(vec!["/dev/null".to_owned()]),
+                    passthrough: vec![DevPassthrough {
+                        path: Some("/dev/net/tun".to_owned()),
+                        group: Some("netdev".to_owned()),
+                        reason: Some("vpn".to_owned()),
+                        threats: Some(Threats { exposed: vec!["T2.1".to_owned()], mitigated: vec![] }),
+                    }],
+                }),
+                ..FsSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        let dev = translate(&src, &install()).expect("translate").effective_policy.fs.dev;
+        // The pseudo-device baseline and the passthrough device both land in `allow`,
+        // which is what the spawn binds. The reason/threats/group do not survive.
+        assert!(dev.allow.iter().any(|d| d == "/dev/null"), "baseline kept");
+        assert!(dev.allow.iter().any(|d| d == "/dev/net/tun"), "passthrough device bound in");
     }
 
     #[test]

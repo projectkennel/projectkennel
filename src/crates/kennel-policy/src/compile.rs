@@ -103,6 +103,7 @@ pub fn compile(
     // on the resolved policy, while the cross-referenced `net.allow` is still visible.
     crate::ssh::validate(&effective)?;
     crate::unix::validate(&effective)?;
+    crate::dev::validate(&effective)?;
     let translated = translate(&effective, install)?;
     assemble(name, &translated, &chain, &tcv, install, compiler_version)
 }
@@ -160,6 +161,7 @@ pub fn compile_leaf(
         .unwrap_or_default();
     crate::ssh::validate(&effective)?;
     crate::unix::validate(&effective)?;
+    crate::dev::validate(&effective)?;
     let translated = translate(&effective, install)?;
     assemble(name, &translated, &chain, &tcv, install, compiler_version)
 }

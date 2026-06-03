@@ -28,6 +28,7 @@
 pub mod b64;
 pub mod canonical;
 pub mod compile;
+pub mod dev;
 pub mod error;
 pub mod invariant;
 pub mod keys;

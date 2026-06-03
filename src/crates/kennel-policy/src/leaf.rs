@@ -23,7 +23,7 @@
 //! a later increment (the template chain already overrides scalars).
 
 use crate::source::{
-    LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, SshKey, UnixAllow,
+    DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, SshKey, UnixAllow,
 };
 use crate::PolicyError;
 use serde::{Deserialize, Serialize};
@@ -128,6 +128,31 @@ pub struct FsLeaf {
     /// `[[fs.deny.add]]` / `[[fs.deny.remove]]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<PathListDelta>,
+    /// `[fs.dev]` deltas (the `[[fs.dev.passthrough.add]]` device grants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<DevLeaf>,
+}
+
+/// `[fs.dev]` leaf deltas.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevLeaf {
+    /// `[[fs.dev.passthrough.add]]` / `[[fs.dev.passthrough.remove]]` — the realistic
+    /// authoring path for a host-device grant (a leaf adds its own serial console).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passthrough: Option<DevPassthroughDelta>,
+}
+
+/// An add/remove delta over `[[fs.dev.passthrough]]` device grants.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevPassthroughDelta {
+    /// Entries to add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<DevPassthrough>,
+    /// Entries to remove, matched by `path`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<DevPassthrough>,
 }
 
 /// `[net.allow]` / `[net.deny]` leaf-and-fragment deltas.
@@ -268,6 +293,16 @@ impl LeafPolicy {
                     }
                 }
             }
+            if let Some(dev) = &fs.dev {
+                if let Some(d) = &dev.passthrough {
+                    for e in d.add.iter().chain(&d.remove) {
+                        if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+                            let who = e.path.as_deref().unwrap_or("<no-path>");
+                            errs.push(format!("[[fs.dev.passthrough.*]] `{who}` is missing a `reason`"));
+                        }
+                    }
+                }
+            }
         }
         if let Some(exec) = &self.exec {
             if let Some(d) = &exec.allow {
@@ -315,10 +350,12 @@ impl LeafPolicy {
     #[must_use]
     pub fn is_additive_only(&self) -> bool {
         let path_clean = |d: &Option<PathListDelta>| d.as_ref().is_none_or(|x| x.remove.is_empty());
-        let fs_ok = self
-            .fs
-            .as_ref()
-            .is_none_or(|f| path_clean(&f.read) && path_clean(&f.write) && path_clean(&f.deny));
+        let fs_ok = self.fs.as_ref().is_none_or(|f| {
+            path_clean(&f.read)
+                && path_clean(&f.write)
+                && path_clean(&f.deny)
+                && f.dev.as_ref().is_none_or(|d| d.passthrough.as_ref().is_none_or(|p| p.remove.is_empty()))
+        });
         let exec_ok = self.exec.as_ref().is_none_or(|e| path_clean(&e.allow));
         let net_ok = self.net.as_ref().is_none_or(|n| n.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
         let unix_ok = self.unix.as_ref().is_none_or(|u| u.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
@@ -349,6 +386,17 @@ impl LeafPolicy {
             apply_paths(&mut target.read, fs.read.as_ref());
             apply_paths(&mut target.write, fs.write.as_ref());
             apply_paths(&mut target.deny, fs.deny.as_ref());
+            if let Some(dev) = &fs.dev {
+                if let Some(d) = &dev.passthrough {
+                    let dev_target = target.dev.get_or_insert_with(Default::default);
+                    for entry in &d.add {
+                        if !dev_target.passthrough.iter().any(|e| dev_key(e) == dev_key(entry)) {
+                            dev_target.passthrough.push(entry.clone());
+                        }
+                    }
+                    dev_target.passthrough.retain(|e| !d.remove.iter().any(|r| dev_key(r) == dev_key(e)));
+                }
+            }
         }
         if let Some(exec) = &self.exec {
             let target = effective.exec.get_or_insert_with(Default::default);
@@ -440,6 +488,11 @@ fn ssh_key(a: &SshKey) -> &str {
     a.fingerprint.as_deref().unwrap_or("")
 }
 
+/// Unique key for a device passthrough entry (the device path).
+fn dev_key(a: &DevPassthrough) -> &str {
+    a.path.as_deref().unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +557,25 @@ threats.exposed = ["T1.8"]
         assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("api.anthropic.com")));
         // The inherited registry allows survive.
         assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("github.com")));
+    }
+
+    #[test]
+    fn leaf_add_grants_a_device_passthrough() {
+        let leaf = r#"
+name = "serial-ai"
+template_base = "ai-coding-strict@v1"
+[[fs.dev.passthrough.add]]
+path = "/dev/ttyUSB0"
+group = "dialout"
+reason = "flash firmware over the serial console"
+threats.exposed = ["T2.1"]
+"#;
+        let (eff, _) = effective_with_leaf(leaf);
+        let dev = eff.fs.expect("fs").dev.expect("fs.dev");
+        let pt = dev.passthrough.iter().find(|p| p.path.as_deref() == Some("/dev/ttyUSB0")).expect("device added");
+        assert_eq!(pt.group.as_deref(), Some("dialout"));
+        // The inherited pseudo-device baseline survives.
+        assert!(dev.allow.as_ref().expect("allow").iter().any(|d| d == "/dev/null"));
     }
 
     #[test]

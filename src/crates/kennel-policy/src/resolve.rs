@@ -305,7 +305,12 @@ fn fold_fs_proc(p: &FsProc, c: &FsProc) -> FsProc {
 }
 
 fn fold_fs_dev(p: &FsDev, c: &FsDev) -> FsDev {
-    FsDev { allow: or(&c.allow, &p.allow) }
+    FsDev {
+        allow: or(&c.allow, &p.allow),
+        // Bare-set: a child's non-empty passthrough list replaces the parent's (as
+        // `unix.allow`). A leaf adds individual devices via `[[fs.dev.passthrough.add]]`.
+        passthrough: if c.passthrough.is_empty() { p.passthrough.clone() } else { c.passthrough.clone() },
+    }
 }
 
 fn fold_fs_scrub(p: &FsScrub, c: &FsScrub) -> FsScrub {
