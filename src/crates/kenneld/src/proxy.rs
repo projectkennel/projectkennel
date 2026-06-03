@@ -158,16 +158,28 @@ pub fn config_toml(
     let deny: Vec<DenyToml> = net
         .deny_invariant
         .iter()
-        .map(|r| DenyToml { cidr: Some(cidr_str(r)), ports: ports_for(r.port_min, r.port_max) })
+        .map(|r| DenyToml {
+            cidr: Some(cidr_str(r)),
+            ports: ports_for(r.port_min, r.port_max),
+        })
         .collect();
-    let host_services: Vec<HostServiceToml> =
-        host_services.iter().map(|a| HostServiceToml { addr: a.to_string() }).collect();
+    let host_services: Vec<HostServiceToml> = host_services
+        .iter()
+        .map(|a| HostServiceToml {
+            addr: a.to_string(),
+        })
+        .collect();
 
     let doc = ProxyToml {
         listen: listen.iter().map(ToString::to_string).collect(),
         audit_log: audit.map(|p| p.display().to_string()),
         accept_private_resolved: false,
-        net: NetToml { mode: mode_str(net.mode), allow, deny, host_services },
+        net: NetToml {
+            mode: mode_str(net.mode),
+            allow,
+            deny,
+            host_services,
+        },
     };
     basic_toml::to_string(&doc).map_err(|e| e.to_string())
 }
@@ -224,13 +236,16 @@ mod tests {
     #[test]
     fn config_round_trips_through_the_netproxy_parser() {
         // Both a v4 and a v6 listen address (the dual-stack case).
-        let listen: Vec<SocketAddr> =
-            vec!["127.0.144.81:1080".parse().expect("v4"), "[fd00:0:1:1::1]:1080".parse().expect("v6")];
+        let listen: Vec<SocketAddr> = vec![
+            "127.0.144.81:1080".parse().expect("v4"),
+            "[fd00:0:1:1::1]:1080".parse().expect("v6"),
+        ];
         let toml = config_toml(&net(), &listen, None, &[]).expect("toml");
 
         // The netproxy's own reader must accept what we wrote, and reconstruct
         // the same ruleset — the anti-drift guarantee.
-        let cfg = kennel_netproxy::config::from_toml_str(&toml).expect("netproxy parses our config");
+        let cfg =
+            kennel_netproxy::config::from_toml_str(&toml).expect("netproxy parses our config");
         assert_eq!(cfg.listen, listen, "both listen addresses round-trip");
         assert!(cfg.audit_log.is_none());
         assert_eq!(cfg.ruleset.allow.len(), 2, "one cidr + one name allow");
@@ -248,8 +263,12 @@ mod tests {
     #[test]
     fn audit_path_is_written_when_present() {
         let listen = ["127.0.144.81:1080".parse::<SocketAddr>().expect("addr")];
-        let toml = config_toml(&net(), &listen, Some(Path::new("/run/kennel/p.jsonl")), &[]).expect("toml");
+        let toml = config_toml(&net(), &listen, Some(Path::new("/run/kennel/p.jsonl")), &[])
+            .expect("toml");
         let cfg = kennel_netproxy::config::from_toml_str(&toml).expect("parse");
-        assert_eq!(cfg.audit_log.as_deref(), Some(Path::new("/run/kennel/p.jsonl")));
+        assert_eq!(
+            cfg.audit_log.as_deref(),
+            Some(Path::new("/run/kennel/p.jsonl"))
+        );
     }
 }

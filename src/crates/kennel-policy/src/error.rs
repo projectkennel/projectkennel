@@ -45,7 +45,10 @@ impl core::fmt::Display for PolicyError {
             Self::Canonical(m) => write!(f, "canonical-form error: {m}"),
             Self::Signature(e) => write!(f, "signature: {e}"),
             Self::UnsupportedSchemaVersion { found, max } => {
-                write!(f, "settled_schema_version {found} is newer than supported maximum {max}")
+                write!(
+                    f,
+                    "settled_schema_version {found} is newer than supported maximum {max}"
+                )
             }
             Self::InvariantViolations(vs) => {
                 write!(f, "framework invariant violations:")?;

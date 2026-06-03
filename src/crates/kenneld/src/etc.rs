@@ -30,8 +30,16 @@ use std::path::{Path, PathBuf};
 
 /// The files this module renders, in a stable order. The spawn binds each over
 /// `/etc/<name>` in the kennel's mount namespace.
-pub const FILES: &[&str] =
-    &["hosts", "resolv.conf", "nsswitch.conf", "services", "protocols", "passwd", "group", "host.conf"];
+pub const FILES: &[&str] = &[
+    "hosts",
+    "resolv.conf",
+    "nsswitch.conf",
+    "services",
+    "protocols",
+    "passwd",
+    "group",
+    "host.conf",
+];
 
 /// The masked account/group name the workload's uid and gid resolve to inside a kennel.
 ///
@@ -85,7 +93,11 @@ pub fn hosts(p: &EtcParams<'_>) -> String {
     if let Some(v4) = p.v4 {
         let _ = writeln!(s, "{v4}\tlocalhost {}", p.hostname);
     }
-    let _ = writeln!(s, "{}\tlocalhost ip6-localhost ip6-loopback {}", p.v6, p.hostname);
+    let _ = writeln!(
+        s,
+        "{}\tlocalhost ip6-localhost ip6-loopback {}",
+        p.v6, p.hostname
+    );
     s
 }
 
@@ -252,7 +264,8 @@ pub fn materialize(dir: &Path, p: &EtcParams<'_>) -> io::Result<Vec<(PathBuf, Pa
     std::fs::create_dir_all(dir)?;
     let mut binds = Vec::with_capacity(FILES.len());
     for name in FILES {
-        let body = render(name, p).ok_or_else(|| io::Error::other(format!("no renderer for {name}")))?;
+        let body =
+            render(name, p).ok_or_else(|| io::Error::other(format!("no renderer for {name}")))?;
         let source = dir.join(name);
         std::fs::write(&source, body)?;
         binds.push((source, Path::new("/etc").join(name)));
@@ -279,9 +292,13 @@ pub fn essential_etc_subtrees() -> Vec<PathBuf> {
         "/etc/pki",             // Red Hat/Fedora CA store + crypto policies
         "/etc/ld.so.conf",      // dynamic-linker search configuration
         "/etc/ld.so.conf.d",
-        "/etc/ld.so.cache",     // cache; references /usr,/lib (bound at the same paths)
+        "/etc/ld.so.cache", // cache; references /usr,/lib (bound at the same paths)
     ];
-    CANDIDATES.iter().map(PathBuf::from).filter(|p| p.exists()).collect()
+    CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
 }
 
 #[cfg(test)]
@@ -303,15 +320,24 @@ mod tests {
     #[test]
     fn hosts_maps_localhost_to_the_kennel_primary() {
         let h = hosts(&params());
-        assert!(h.contains("127.0.144.17\tlocalhost agent"), "v4 localhost → primary: {h}");
-        assert!(h.contains("fd00:0:1:1::1\tlocalhost"), "v6 localhost → primary");
+        assert!(
+            h.contains("127.0.144.17\tlocalhost agent"),
+            "v4 localhost → primary: {h}"
+        );
+        assert!(
+            h.contains("fd00:0:1:1::1\tlocalhost"),
+            "v6 localhost → primary"
+        );
         assert!(!h.contains("127.0.0.1"), "the host's loopback is not used");
     }
 
     #[test]
     fn resolv_conf_points_at_the_proxy_and_fails_fast() {
         let r = resolv_conf(&params());
-        assert!(r.contains("nameserver 127.0.144.17"), "points at the primary/proxy address");
+        assert!(
+            r.contains("nameserver 127.0.144.17"),
+            "points at the primary/proxy address"
+        );
         assert!(r.contains("timeout:1"), "fails fast");
     }
 
@@ -320,7 +346,10 @@ mod tests {
         let pw = passwd(&params());
         // The uid resolves to `kennel`, with the in-kennel home — never the real login
         // name or the operator's home directory.
-        assert!(pw.contains("kennel:x:1000:1000:Kennel user:/run/kennel/agent/home:/bin/sh"), "got {pw}");
+        assert!(
+            pw.contains("kennel:x:1000:1000:Kennel user:/run/kennel/agent/home:/bin/sh"),
+            "got {pw}"
+        );
         assert!(!pw.contains("dev"), "no real username leaks");
         assert!(!pw.contains("/home/"), "no real home leaks");
         assert!(pw.contains("root:x:0:0:"));
@@ -330,7 +359,10 @@ mod tests {
     #[test]
     fn group_masks_the_gid_name() {
         let g = group(&params());
-        assert!(g.contains("kennel:x:1000:"), "the gid resolves to `kennel`: {g}");
+        assert!(
+            g.contains("kennel:x:1000:"),
+            "the gid resolves to `kennel`: {g}"
+        );
         assert!(!g.contains("dev"), "no real group/user name leaks");
     }
 
@@ -340,7 +372,10 @@ mod tests {
         let granted = [("dialout".to_owned(), 20u32), ("netdev".to_owned(), 28u32)];
         p.groups = &granted;
         let g = group(&p);
-        assert!(g.contains("dialout:x:20:kennel"), "granted group named with the kennel member: {g}");
+        assert!(
+            g.contains("dialout:x:20:kennel"),
+            "granted group named with the kennel member: {g}"
+        );
         assert!(g.contains("netdev:x:28:kennel"));
         // The primary gid is still the masked `kennel` line, not duplicated.
         assert!(g.contains("kennel:x:1000:"));
@@ -365,7 +400,11 @@ mod tests {
         assert_eq!(binds.len(), FILES.len());
         for (source, target) in &binds {
             assert!(source.exists(), "{} written", source.display());
-            assert!(target.starts_with("/etc/"), "target is under /etc: {}", target.display());
+            assert!(
+                target.starts_with("/etc/"),
+                "target is under /etc: {}",
+                target.display()
+            );
         }
         // Spot-check a rendered file on disk.
         let hosts = std::fs::read_to_string(dir.join("hosts")).expect("read hosts");

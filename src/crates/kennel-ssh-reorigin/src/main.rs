@@ -13,8 +13,8 @@ use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitCode, Stdio};
 
 use kennel_ssh_reorigin::{
-    outbound_argv, parse_args, parse_user_auth, select_identity, LoadedKey, Outbound, ReoriginError,
-    SCRUB_ENV,
+    outbound_argv, parse_args, parse_user_auth, select_identity, LoadedKey, Outbound,
+    ReoriginError, SCRUB_ENV,
 };
 
 fn main() -> ExitCode {
@@ -66,7 +66,9 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         original_command: original.as_deref(),
     });
 
-    let (program, rest) = ssh_argv.split_first().expect("outbound_argv is never empty");
+    let (program, rest) = ssh_argv
+        .split_first()
+        .expect("outbound_argv is never empty");
     let mut cmd = Command::new(program);
     cmd.args(rest);
     for var in SCRUB_ENV {
@@ -82,7 +84,10 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 /// `ssh-keygen -lf -` (robust to agent ordering). A key the agent cannot list, or an
 /// empty agent, yields an empty set — and `select_identity` then fails closed.
 fn agent_keys() -> Result<Vec<LoadedKey>, Box<dyn std::error::Error>> {
-    let listing = Command::new("ssh-add").arg("-L").stderr(Stdio::null()).output()?;
+    let listing = Command::new("ssh-add")
+        .arg("-L")
+        .stderr(Stdio::null())
+        .output()?;
     if !listing.status.success() {
         return Err(Box::new(ReoriginError::NoIdentity(
             "`ssh-add -L` failed (no agent, or no identities)".to_owned(),
@@ -96,7 +101,10 @@ fn agent_keys() -> Result<Vec<LoadedKey>, Box<dyn std::error::Error>> {
             continue;
         }
         if let Some(fp) = fingerprint_of(line)? {
-            keys.push(LoadedKey { fingerprint: fp, pubkey_line: line.to_owned() });
+            keys.push(LoadedKey {
+                fingerprint: fp,
+                pubkey_line: line.to_owned(),
+            });
         }
     }
     Ok(keys)
@@ -110,14 +118,21 @@ fn fingerprint_of(pubkey_line: &str) -> Result<Option<String>, Box<dyn std::erro
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    child.stdin.take().expect("piped stdin").write_all(pubkey_line.as_bytes())?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(pubkey_line.as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
         return Ok(None);
     }
     // Output: "<bits> SHA256:<b64> <comment> (<TYPE>)" — take the SHA256 token.
     let text = String::from_utf8_lossy(&out.stdout);
-    Ok(text.split_whitespace().find(|t| t.starts_with("SHA256:")).map(str::to_owned))
+    Ok(text
+        .split_whitespace()
+        .find(|t| t.starts_with("SHA256:"))
+        .map(str::to_owned))
 }
 
 /// Write the selected public key to a private (`0600`) temp file for `ssh -i`.
@@ -126,10 +141,17 @@ fn fingerprint_of(pubkey_line: &str) -> Result<Option<String>, Box<dyn std::erro
 /// lives under `$XDG_RUNTIME_DIR` (a user-private tmpfs) when set, else `/tmp`, and is
 /// named by pid; `ssh` reads it before any connection, so its brief lifetime is fine.
 fn write_identity(pubkey_line: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
+        || std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from,
+    );
     let path = dir.join(format!("kennel-reorigin-{}.pub", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
     writeln!(f, "{pubkey_line}")?;
     Ok(path.to_string_lossy().into_owned())
 }

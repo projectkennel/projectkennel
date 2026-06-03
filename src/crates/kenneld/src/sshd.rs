@@ -159,7 +159,12 @@ pub fn sshd_config(p: &SshdParams<'_>) -> String {
 /// `dest` and `real_fp` MUST already be policy-validated (`kennel_policy::ssh`); they
 /// are emitted verbatim inside the quoted command.
 #[must_use]
-pub fn authorized_keys_line(reorigin_bin: &Path, dest: &str, real_fp: &str, synthetic_pubkey: &str) -> String {
+pub fn authorized_keys_line(
+    reorigin_bin: &Path,
+    dest: &str,
+    real_fp: &str,
+    synthetic_pubkey: &str,
+) -> String {
     format!(
         "restrict,pty,command=\"{bin} --dest {dest} --key {key}\" {pubkey}\n",
         bin = reorigin_bin.display(),
@@ -214,7 +219,9 @@ pub fn generate_host_key(path: &Path) -> io::Result<String> {
         .stderr(Stdio::null())
         .status()?;
     if !status.success() {
-        return Err(io::Error::other("ssh-keygen failed to generate the bastion host key"));
+        return Err(io::Error::other(
+            "ssh-keygen failed to generate the bastion host key",
+        ));
     }
     let pub_line = std::fs::read_to_string(path.with_extension("pub"))?;
     Ok(pub_line.trim().to_owned())
@@ -238,9 +245,17 @@ mod tests {
 
     #[test]
     fn config_locks_down_forwarding_and_exposes_auth_info() {
-        let c = sshd_config(&params(AuthSource::File(PathBuf::from("/run/kennel/bastion/authorized_keys"))));
-        assert!(c.contains("ExposeAuthInfo yes"), "forced command needs $SSH_USER_AUTH");
-        assert!(c.contains("SetEnv SSH_AUTH_SOCK=/run/user/1000/kennel-ssh-agent.sock"), "agent reaches the forced command");
+        let c = sshd_config(&params(AuthSource::File(PathBuf::from(
+            "/run/kennel/bastion/authorized_keys",
+        ))));
+        assert!(
+            c.contains("ExposeAuthInfo yes"),
+            "forced command needs $SSH_USER_AUTH"
+        );
+        assert!(
+            c.contains("SetEnv SSH_AUTH_SOCK=/run/user/1000/kennel-ssh-agent.sock"),
+            "agent reaches the forced command"
+        );
         assert!(c.contains("ListenAddress 127.0.42.1"));
         assert!(c.contains("Port 7022"));
         for denied in [
@@ -260,7 +275,9 @@ mod tests {
 
     #[test]
     fn config_uses_a_static_file_or_root_owned_command() {
-        let file = sshd_config(&params(AuthSource::File(PathBuf::from("/safe/authorized_keys"))));
+        let file = sshd_config(&params(AuthSource::File(PathBuf::from(
+            "/safe/authorized_keys",
+        ))));
         assert!(file.contains("AuthorizedKeysFile /safe/authorized_keys"));
         assert!(!file.contains("AuthorizedKeysCommand"));
 
@@ -268,8 +285,14 @@ mod tests {
             command: PathBuf::from("/opt/kennel/bin/kennel-akc"),
             user: "root".to_owned(),
         }));
-        assert!(cmd.contains("AuthorizedKeysCommand /opt/kennel/bin/kennel-akc %t %k"), "AKC gets the offered key");
-        assert!(cmd.contains("AuthorizedKeysCommandUser root"), "AKC must be root-owned (safe-path finding)");
+        assert!(
+            cmd.contains("AuthorizedKeysCommand /opt/kennel/bin/kennel-akc %t %k"),
+            "AKC gets the offered key"
+        );
+        assert!(
+            cmd.contains("AuthorizedKeysCommandUser root"),
+            "AKC must be root-owned (safe-path finding)"
+        );
         assert!(cmd.contains("AuthorizedKeysFile none"));
     }
 
@@ -281,17 +304,30 @@ mod tests {
             "SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt",
             "ssh-ed25519 AAAASYNTHETIC synthetic-github\n",
         );
-        assert!(line.starts_with("restrict,pty,command=\""), "restrict,pty per-key option set");
+        assert!(
+            line.starts_with("restrict,pty,command=\""),
+            "restrict,pty per-key option set"
+        );
         assert!(line.contains("--dest github.com"), "destination baked in");
         assert!(line.contains("--key SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt"));
-        assert!(line.trim_end().ends_with("ssh-ed25519 AAAASYNTHETIC synthetic-github"), "the synthetic pubkey");
+        assert!(
+            line.trim_end()
+                .ends_with("ssh-ed25519 AAAASYNTHETIC synthetic-github"),
+            "the synthetic pubkey"
+        );
         assert!(line.ends_with('\n'));
     }
 
     #[test]
     fn generate_host_key_produces_a_usable_ed25519_key() {
         // Exercises stock ssh-keygen; skip if it is not installed.
-        if Command::new("ssh-keygen").arg("-?").stderr(Stdio::null()).stdout(Stdio::null()).status().is_err() {
+        if Command::new("ssh-keygen")
+            .arg("-?")
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .is_err()
+        {
             return;
         }
         let dir = std::env::temp_dir().join(format!("kenneld-sshd-hostkey-{}", std::process::id()));
@@ -300,7 +336,10 @@ mod tests {
         let key = dir.join("host_key");
         let pub_line = generate_host_key(&key).expect("generate host key");
         assert!(key.exists(), "private key written");
-        assert!(pub_line.starts_with("ssh-ed25519 "), "public line: {pub_line}");
+        assert!(
+            pub_line.starts_with("ssh-ed25519 "),
+            "public line: {pub_line}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

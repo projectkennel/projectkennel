@@ -28,7 +28,9 @@ use crate::PolicyError;
 ///
 /// Returns [`PolicyError::SourceValidation`] carrying one message per problem.
 pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
-    let Some(identity) = &policy.identity else { return Ok(()) };
+    let Some(identity) = &policy.identity else {
+        return Ok(());
+    };
     let mut errs: Vec<String> = Vec::new();
     for g in &identity.groups {
         if g.is_empty() {
@@ -50,7 +52,10 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
 /// Whether `name` is safe to render into the colon-delimited, newline-separated
 /// `/etc/group`: non-control, and free of `:` and whitespace.
 fn is_safe_group_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c != ':' && !c.is_whitespace() && !c.is_control())
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c != ':' && !c.is_whitespace() && !c.is_control())
 }
 
 #[cfg(test)]
@@ -60,7 +65,9 @@ mod tests {
 
     fn policy_with(groups: &[&str]) -> SourcePolicy {
         SourcePolicy {
-            identity: Some(IdentitySection { groups: groups.iter().map(|s| (*s).to_owned()).collect() }),
+            identity: Some(IdentitySection {
+                groups: groups.iter().map(|s| (*s).to_owned()).collect(),
+            }),
             ..SourcePolicy::default()
         }
     }

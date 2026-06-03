@@ -175,7 +175,9 @@ fn pad_field<const N: usize>(src: &[u8]) -> [u8; N] {
 fn read_string(field: &[u8]) -> Result<String, WireError> {
     let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     let bytes = field.get(..end).unwrap_or(&[]);
-    core::str::from_utf8(bytes).map(str::to_owned).map_err(|_| WireError::BadString)
+    core::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| WireError::BadString)
 }
 
 impl Request {
@@ -213,7 +215,11 @@ impl Request {
         if buf.len() != REQUEST_LEN {
             return Err(WireError::BadLength);
         }
-        let op = buf.first().copied().and_then(Op::from_byte).ok_or(WireError::BadOp)?;
+        let op = buf
+            .first()
+            .copied()
+            .and_then(Op::from_byte)
+            .ok_or(WireError::BadOp)?;
         let family = buf.get(1).copied().ok_or(WireError::BadLength)?;
         let prefix = buf.get(2).copied().ok_or(WireError::BadLength)?;
         // buf[3] is reserved (0).
@@ -228,15 +234,26 @@ impl Request {
             .ok_or(WireError::BadLength)?;
         let addr = match family {
             4 => {
-                let v4: [u8; 4] = addr16.get(..4).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+                let v4: [u8; 4] = addr16
+                    .get(..4)
+                    .and_then(|s| s.try_into().ok())
+                    .ok_or(WireError::BadLength)?;
                 IpAddr::V4(Ipv4Addr::from(v4))
             }
             6 => IpAddr::V6(Ipv6Addr::from(addr16)),
             _ => return Err(WireError::BadFamily),
         };
         let interface = read_string(buf.get(22..38).ok_or(WireError::BadLength)?)?;
-        let cgroup_path = PathBuf::from(read_string(buf.get(38..294).ok_or(WireError::BadLength)?)?);
-        Ok(Self { op, ctx, addr, prefix, interface, cgroup_path })
+        let cgroup_path =
+            PathBuf::from(read_string(buf.get(38..294).ok_or(WireError::BadLength)?)?);
+        Ok(Self {
+            op,
+            ctx,
+            addr,
+            prefix,
+            interface,
+            cgroup_path,
+        })
     }
 }
 
@@ -279,8 +296,14 @@ fn read_v4_entries(bytes: &[u8], n: usize) -> Result<(Vec<V4Entry>, usize), Wire
     let region = bytes.get(..span).ok_or(WireError::BadLength)?;
     let mut out = Vec::with_capacity(n);
     for chunk in region.chunks_exact(16) {
-        let key: [u8; 8] = chunk.get(..8).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
-        let val: [u8; 8] = chunk.get(8..16).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        let key: [u8; 8] = chunk
+            .get(..8)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(WireError::BadLength)?;
+        let val: [u8; 8] = chunk
+            .get(8..16)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(WireError::BadLength)?;
         out.push((key, val));
     }
     Ok((out, span))
@@ -293,8 +316,14 @@ fn read_v6_entries(bytes: &[u8], n: usize) -> Result<(Vec<V6Entry>, usize), Wire
     let region = bytes.get(..span).ok_or(WireError::BadLength)?;
     let mut out = Vec::with_capacity(n);
     for chunk in region.chunks_exact(28) {
-        let key: [u8; 20] = chunk.get(..20).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
-        let val: [u8; 8] = chunk.get(20..28).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        let key: [u8; 20] = chunk
+            .get(..20)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(WireError::BadLength)?;
+        let val: [u8; 8] = chunk
+            .get(20..28)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(WireError::BadLength)?;
         out.push((key, val));
     }
     Ok((out, span))
@@ -321,7 +350,12 @@ impl EgressPayload {
     pub fn encode(&self) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(&self.meta);
-        for n in [self.allow_v4.len(), self.deny_v4.len(), self.allow_v6.len(), self.deny_v6.len()] {
+        for n in [
+            self.allow_v4.len(),
+            self.deny_v4.len(),
+            self.allow_v6.len(),
+            self.deny_v6.len(),
+        ] {
             // Counts are bounded by MAX_ENTRIES on decode; encode is local data.
             b.extend_from_slice(&u32::try_from(n).unwrap_or(u32::MAX).to_ne_bytes());
         }
@@ -343,7 +377,10 @@ impl EgressPayload {
     /// Returns [`WireError::BadLength`] if the buffer is short, a count exceeds
     /// the defensive cap, or the entry bytes do not match the declared counts.
     pub fn decode(buf: &[u8]) -> Result<Self, WireError> {
-        let meta: [u8; META_LEN] = buf.get(..META_LEN).and_then(|s| s.try_into().ok()).ok_or(WireError::BadLength)?;
+        let meta: [u8; META_LEN] = buf
+            .get(..META_LEN)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(WireError::BadLength)?;
         let n_allow_v4 = read_count(buf, META_LEN)?;
         let n_deny_v4 = read_count(buf, META_LEN + 4)?;
         let n_allow_v6 = read_count(buf, META_LEN + 8)?;
@@ -353,13 +390,22 @@ impl EgressPayload {
 
         let (allow_v4, used) = read_v4_entries(rest, n_allow_v4)?;
         off = used;
-        let (deny_v4, used) = read_v4_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v4)?;
+        let (deny_v4, used) =
+            read_v4_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v4)?;
         off = off.checked_add(used).ok_or(WireError::BadLength)?;
-        let (allow_v6, used) = read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_allow_v6)?;
+        let (allow_v6, used) =
+            read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_allow_v6)?;
         off = off.checked_add(used).ok_or(WireError::BadLength)?;
-        let (deny_v6, _) = read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v6)?;
+        let (deny_v6, _) =
+            read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v6)?;
 
-        Ok(Self { meta, allow_v4, deny_v4, allow_v6, deny_v6 })
+        Ok(Self {
+            meta,
+            allow_v4,
+            deny_v4,
+            allow_v6,
+            deny_v6,
+        })
     }
 }
 
@@ -392,7 +438,11 @@ impl GidMapPayload {
     pub fn encode(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(8usize.saturating_add(self.gids.len().saturating_mul(4)));
         b.extend_from_slice(&self.pid.to_ne_bytes());
-        b.extend_from_slice(&u32::try_from(self.gids.len()).unwrap_or(u32::MAX).to_ne_bytes());
+        b.extend_from_slice(
+            &u32::try_from(self.gids.len())
+                .unwrap_or(u32::MAX)
+                .to_ne_bytes(),
+        );
         for gid in &self.gids {
             b.extend_from_slice(&gid.to_ne_bytes());
         }
@@ -413,7 +463,9 @@ impl GidMapPayload {
             .ok_or(WireError::BadLength)?;
         let n = read_count(buf, 4)?;
         let span = n.checked_mul(4).ok_or(WireError::BadLength)?;
-        let region = buf.get(8..8usize.checked_add(span).ok_or(WireError::BadLength)?).ok_or(WireError::BadLength)?;
+        let region = buf
+            .get(8..8usize.checked_add(span).ok_or(WireError::BadLength)?)
+            .ok_or(WireError::BadLength)?;
         let mut gids = Vec::with_capacity(n);
         for chunk in region.chunks_exact(4) {
             let g: [u8; 4] = chunk.try_into().map_err(|_| WireError::BadLength)?;
@@ -438,25 +490,41 @@ impl Response {
     /// A success response.
     #[must_use]
     pub const fn ok() -> Self {
-        Self { status: Status::Ok, refusal: 0, errno: 0 }
+        Self {
+            status: Status::Ok,
+            refusal: 0,
+            errno: 0,
+        }
     }
 
     /// A refusal response carrying the refusal `code`.
     #[must_use]
     pub const fn refused(code: u8) -> Self {
-        Self { status: Status::Refused, refusal: code, errno: 0 }
+        Self {
+            status: Status::Refused,
+            refusal: code,
+            errno: 0,
+        }
     }
 
     /// A protocol-error response.
     #[must_use]
     pub const fn protocol() -> Self {
-        Self { status: Status::Protocol, refusal: 0, errno: 0 }
+        Self {
+            status: Status::Protocol,
+            refusal: 0,
+            errno: 0,
+        }
     }
 
     /// An internal-error response carrying the OS `errno`.
     #[must_use]
     pub const fn internal(errno: i32) -> Self {
-        Self { status: Status::Internal, refusal: 0, errno }
+        Self {
+            status: Status::Internal,
+            refusal: 0,
+            errno,
+        }
     }
 
     /// Encode this response to its fixed-length wire bytes.
@@ -479,14 +547,22 @@ impl Response {
         if buf.len() != RESPONSE_LEN {
             return Err(WireError::BadLength);
         }
-        let status = buf.first().copied().and_then(Status::from_byte).ok_or(WireError::BadOp)?;
+        let status = buf
+            .first()
+            .copied()
+            .and_then(Status::from_byte)
+            .ok_or(WireError::BadOp)?;
         let refusal = buf.get(1).copied().ok_or(WireError::BadLength)?;
         let errno = buf
             .get(2..6)
             .and_then(|s| s.try_into().ok())
             .map(i32::from_ne_bytes)
             .ok_or(WireError::BadLength)?;
-        Ok(Self { status, refusal, errno })
+        Ok(Self {
+            status,
+            refusal,
+            errno,
+        })
     }
 }
 
@@ -557,7 +633,10 @@ mod tests {
 
     #[test]
     fn setup_egress_op_round_trips() {
-        assert_eq!(Op::from_byte(Op::SetupEgress.to_byte()), Some(Op::SetupEgress));
+        assert_eq!(
+            Op::from_byte(Op::SetupEgress.to_byte()),
+            Some(Op::SetupEgress)
+        );
     }
 
     #[test]
@@ -567,7 +646,10 @@ mod tests {
 
     #[test]
     fn gidmap_payload_round_trips() {
-        let payload = GidMapPayload { pid: 4242, gids: vec![1000, 20, 24] };
+        let payload = GidMapPayload {
+            pid: 4242,
+            gids: vec![1000, 20, 24],
+        };
         let bytes = payload.encode();
         assert_eq!(GidMapPayload::decode(&bytes), Ok(payload));
     }
@@ -592,7 +674,12 @@ mod tests {
 
     #[test]
     fn response_round_trips() {
-        for r in [Response::ok(), Response::refused(5), Response::protocol(), Response::internal(13)] {
+        for r in [
+            Response::ok(),
+            Response::refused(5),
+            Response::protocol(),
+            Response::internal(13),
+        ] {
             assert_eq!(Response::decode(&r.encode()), Ok(r));
         }
     }

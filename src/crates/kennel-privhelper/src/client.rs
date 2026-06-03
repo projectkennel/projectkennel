@@ -50,8 +50,12 @@ fn exchange(helper: &Path, bytes: &[u8]) -> io::Result<Response> {
         // `stdin` drops here, closing the helper's stdin so it sees EOF.
     }
     let out = child.wait_with_output()?;
-    Response::decode(&out.stdout)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("malformed privhelper response: {e:?}")))
+    Response::decode(&out.stdout).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed privhelper response: {e:?}"),
+        )
+    })
 }
 
 /// Load, populate, and attach the egress BPF programs to a kennel's cgroup.
@@ -62,7 +66,11 @@ fn exchange(helper: &Path, bytes: &[u8]) -> io::Result<Response> {
 /// # Errors
 ///
 /// As [`invoke`].
-pub fn setup_egress(helper: &Path, cgroup: PathBuf, payload: &EgressPayload) -> io::Result<Response> {
+pub fn setup_egress(
+    helper: &Path,
+    cgroup: PathBuf,
+    payload: &EgressPayload,
+) -> io::Result<Response> {
     let mut bytes = cgroup_request(Op::SetupEgress, cgroup).encode();
     bytes.extend_from_slice(&payload.encode());
     exchange(helper, &bytes)
@@ -80,7 +88,13 @@ pub fn setup_egress(helper: &Path, cgroup: PathBuf, payload: &EgressPayload) -> 
 /// As [`invoke`].
 pub fn set_gid_map(helper: &Path, pid: u32, gids: &[u32]) -> io::Result<Response> {
     let mut bytes = gidmap_request().encode();
-    bytes.extend_from_slice(&GidMapPayload { pid, gids: gids.to_vec() }.encode());
+    bytes.extend_from_slice(
+        &GidMapPayload {
+            pid,
+            gids: gids.to_vec(),
+        }
+        .encode(),
+    );
     exchange(helper, &bytes)
 }
 
@@ -89,8 +103,17 @@ pub fn set_gid_map(helper: &Path, pid: u32, gids: &[u32]) -> io::Result<Response
 /// # Errors
 ///
 /// As [`invoke`].
-pub fn add_address(helper: &Path, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
-    invoke(helper, &addr_request(Op::AddAddr, ctx, interface, addr, prefix))
+pub fn add_address(
+    helper: &Path,
+    ctx: u16,
+    interface: &str,
+    addr: IpAddr,
+    prefix: u8,
+) -> io::Result<Response> {
+    invoke(
+        helper,
+        &addr_request(Op::AddAddr, ctx, interface, addr, prefix),
+    )
 }
 
 /// Ask the helper to remove `addr/prefix` on `interface` for kennel `ctx`.
@@ -98,8 +121,17 @@ pub fn add_address(helper: &Path, ctx: u16, interface: &str, addr: IpAddr, prefi
 /// # Errors
 ///
 /// As [`invoke`].
-pub fn del_address(helper: &Path, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
-    invoke(helper, &addr_request(Op::DelAddr, ctx, interface, addr, prefix))
+pub fn del_address(
+    helper: &Path,
+    ctx: u16,
+    interface: &str,
+    addr: IpAddr,
+    prefix: u8,
+) -> io::Result<Response> {
+    invoke(
+        helper,
+        &addr_request(Op::DelAddr, ctx, interface, addr, prefix),
+    )
 }
 
 /// A bare `SetGidMap` request: the operation lives entirely in the appended

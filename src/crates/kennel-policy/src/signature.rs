@@ -27,7 +27,9 @@ pub enum SignatureError {
 impl core::fmt::Display for SignatureError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::UnsupportedAlgorithm(a) => write!(f, "unsupported signature algorithm `{a}` (only ed25519)"),
+            Self::UnsupportedAlgorithm(a) => {
+                write!(f, "unsupported signature algorithm `{a}` (only ed25519)")
+            }
             Self::UnknownKey(id) => write!(f, "no trusted key with key_id `{id}`"),
             Self::MalformedKey => write!(f, "malformed Ed25519 key material"),
             Self::MalformedSignature => write!(f, "malformed signature (bad Base64 or length)"),
@@ -61,14 +63,23 @@ pub struct SignatureEnvelope {
 ///
 /// Returns a [`SignatureError`] if the algorithm is unsupported, the `key_id` is
 /// unknown, the signature is malformed, or verification fails.
-pub fn verify_signature(canonical: &[u8], envelope: &SignatureEnvelope, keys: &KeySet) -> Result<(), SignatureError> {
+pub fn verify_signature(
+    canonical: &[u8],
+    envelope: &SignatureEnvelope,
+    keys: &KeySet,
+) -> Result<(), SignatureError> {
     if envelope.algorithm != "ed25519" {
-        return Err(SignatureError::UnsupportedAlgorithm(envelope.algorithm.clone()));
+        return Err(SignatureError::UnsupportedAlgorithm(
+            envelope.algorithm.clone(),
+        ));
     }
     let key = keys
         .get(&envelope.key_id)
         .ok_or_else(|| SignatureError::UnknownKey(envelope.key_id.clone()))?;
-    let sig_bytes = crate::b64::decode(envelope.signature.as_bytes()).ok_or(SignatureError::MalformedSignature)?;
-    let signature = Signature::from_slice(&sig_bytes).map_err(|_| SignatureError::MalformedSignature)?;
-    key.verify(canonical, &signature).map_err(|_| SignatureError::Verification)
+    let sig_bytes = crate::b64::decode(envelope.signature.as_bytes())
+        .ok_or(SignatureError::MalformedSignature)?;
+    let signature =
+        Signature::from_slice(&sig_bytes).map_err(|_| SignatureError::MalformedSignature)?;
+    key.verify(canonical, &signature)
+        .map_err(|_| SignatureError::Verification)
 }

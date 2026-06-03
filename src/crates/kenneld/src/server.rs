@@ -188,11 +188,16 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         ssh: &kennel_policy::SshRuntime,
         shim_root: &Path,
     ) -> Result<crate::SshPrep, String> {
-        let Some(setup) = self.identity.bastion.as_ref() else { return Ok(crate::SshPrep::default()) };
+        let Some(setup) = self.identity.bastion.as_ref() else {
+            return Ok(crate::SshPrep::default());
+        };
         if ssh.is_empty() {
             return Ok(crate::SshPrep::default());
         }
-        let mut guard = self.bastion.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .bastion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let bastion = guard.get_or_insert_with(|| {
             crate::bastion::Bastion::new(crate::bastion::BastionConfig {
                 dir: setup.dir.clone(),
@@ -210,8 +215,8 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         for grant in &ssh.grants {
             let key_file = format!("id_{}", grant.host);
             let comment = format!("kennel {kennel} -> {}", grant.host);
-            let pub_line =
-                crate::ssh::mint_synthetic_key(&staging, &key_file, &comment).map_err(|e| e.to_string())?;
+            let pub_line = crate::ssh::mint_synthetic_key(&staging, &key_file, &comment)
+                .map_err(|e| e.to_string())?;
             bastion
                 .register(crate::bastion::Edge {
                     kennel: kennel.to_owned(),
@@ -222,13 +227,21 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 .map_err(|e| e.to_string())?;
             host_files.push((grant.host.clone(), key_file));
         }
-        let host_pub = bastion.host_pub().ok_or("bastion failed to start (no host key)")?.to_owned();
+        let host_pub = bastion
+            .host_pub()
+            .ok_or("bastion failed to start (no host key)")?
+            .to_owned();
         // The bastion lock is only needed for minting + registration; release it
         // before the synthetic-config file I/O below.
         drop(guard);
 
-        let host_grants: Vec<crate::ssh::HostGrant<'_>> =
-            host_files.iter().map(|(h, k)| crate::ssh::HostGrant { host: h, key_file: k }).collect();
+        let host_grants: Vec<crate::ssh::HostGrant<'_>> = host_files
+            .iter()
+            .map(|(h, k)| crate::ssh::HostGrant {
+                host: h,
+                key_file: k,
+            })
+            .collect();
         let listen = setup.listen.to_string();
         let socks_bin = setup.socks_connect_bin.to_string_lossy().into_owned();
         let params = crate::ssh::SshParams {
@@ -239,7 +252,8 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             hosts: &host_grants,
         };
         let ssh_dir = shim_root.join(".ssh");
-        let file_binds = crate::ssh::materialize(&staging, &ssh_dir, &params).map_err(|e| e.to_string())?;
+        let file_binds =
+            crate::ssh::materialize(&staging, &ssh_dir, &params).map_err(|e| e.to_string())?;
         Ok(crate::SshPrep {
             file_binds,
             host_service: Some(SocketAddr::new(setup.listen, setup.port)),
@@ -257,7 +271,12 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// `shim_root` is the kennel's in-view `$HOME` (the constructed-view shim root, or
     /// the real home when there is no view); shim paths rooted at `~`/`$HOME` resolve
     /// under it, real paths under the daemon-user's real home.
-    fn prepare_unix(&self, unix: &kennel_policy::UnixRuntime, subst: &RuntimeSubstitutions, shim_root: &Path) -> crate::UnixPrep {
+    fn prepare_unix(
+        &self,
+        unix: &kennel_policy::UnixRuntime,
+        subst: &RuntimeSubstitutions,
+        shim_root: &Path,
+    ) -> crate::UnixPrep {
         let mut socket_binds = Vec::new();
         let mut env = Vec::new();
         for sock in &unix.sockets {
@@ -274,7 +293,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// Drop a kennel's SSH edges from the bastion on teardown (§7.8.2): a synthetic
     /// key never outlives the kennel it was minted for. Best-effort.
     fn deregister_ssh(&self, kennel: &str) {
-        let mut guard = self.bastion.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .bastion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(bastion) = guard.as_mut() {
             let _ = bastion.deregister(kennel);
         }
@@ -283,21 +305,32 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// Reserve a name and allocate its context, atomically. Returns the context,
     /// or an error response if the name is taken or the pool is exhausted.
     fn reserve(&self, name: &str) -> Result<u16, Response> {
-        let mut reg = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if reg.kennels.contains_key(name) {
-            return Err(Response::Error(format!("kennel `{name}` is already running")));
+            return Err(Response::Error(format!(
+                "kennel `{name}` is already running"
+            )));
         }
         let Some(ctx) = reg.ctx.allocate() else {
-            return Err(Response::Error("no free context (the kennel limit is reached)".to_owned()));
+            return Err(Response::Error(
+                "no free context (the kennel limit is reached)".to_owned(),
+            ));
         };
-        reg.kennels.insert(name.to_owned(), KennelMeta { ctx, pid: None });
+        reg.kennels
+            .insert(name.to_owned(), KennelMeta { ctx, pid: None });
         drop(reg);
         Ok(ctx)
     }
 
     /// Record the workload's pid once it is spawned.
     fn set_pid(&self, name: &str, pid: u32) {
-        let mut reg = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(meta) = reg.kennels.get_mut(name) {
             meta.pid = Some(pid);
         }
@@ -305,7 +338,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Deregister `name` and return its context to the pool.
     fn release(&self, name: &str, ctx: u16) {
-        let mut reg = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.kennels.remove(name);
         reg.ctx.release(ctx);
     }
@@ -314,7 +350,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// reaps and tears it down). Errors if the kennel is unknown or still starting.
     fn stop(&self, name: &str) -> Response {
         let (ctx, started) = {
-            let reg = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let reg = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match reg.kennels.get(name) {
                 Some(meta) => (meta.ctx, meta.pid.is_some()),
                 None => return Response::Error(format!("no kennel named `{name}`")),
@@ -343,15 +382,24 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     ///
     /// [`Bastion`]: crate::bastion::Bastion
     fn authorized_keys(&self, offered_key: &str) -> Response {
-        let guard = self.bastion.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let lines = guard.as_ref().map(|b| b.authorized_keys_for(offered_key)).unwrap_or_default();
+        let guard = self
+            .bastion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lines = guard
+            .as_ref()
+            .map(|b| b.authorized_keys_for(offered_key))
+            .unwrap_or_default();
         drop(guard);
         Response::AuthorizedKeys { lines }
     }
 
     /// Handle a `List`: snapshot the registry.
     fn list(&self) -> Response {
-        let reg = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let kennels: Vec<KennelInfo> = reg
             .kennels
             .iter()
@@ -371,7 +419,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 ///
 /// # Errors
 /// An OS error if accepting a connection fails.
-pub fn serve<P, L>(shared: &Arc<Shared<P, L>>, listener: &std::os::unix::net::UnixListener) -> io::Result<()>
+pub fn serve<P, L>(
+    shared: &Arc<Shared<P, L>>,
+    listener: &std::os::unix::net::UnixListener,
+) -> io::Result<()>
 where
     P: Privileged + Clone + Send + Sync + 'static,
     L: PolicyLoader + Send + Sync + 'static,
@@ -406,8 +457,12 @@ where
 
 /// Bring a kennel up, report it `Started`, block until the workload exits, tear
 /// it down, and report `Exited`.
-fn run_kennel<P, L>(shared: &Shared<P, L>, req: &StartRequest, fds: Vec<OwnedFd>, conn: &mut UnixStream)
-where
+fn run_kennel<P, L>(
+    shared: &Shared<P, L>,
+    req: &StartRequest,
+    fds: Vec<OwnedFd>,
+    conn: &mut UnixStream,
+) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
 {
@@ -473,15 +528,29 @@ where
         net: loaded.net,
         proxy: id.proxy.clone(),
         etc,
-        view_root: id.view_base.as_ref().map(|base| base.join(format!("root-{ctx}"))),
-        audit_path: id.audit_base.as_ref().map(|base| base.join(&req.kennel).join("network.jsonl")),
+        view_root: id
+            .view_base
+            .as_ref()
+            .map(|base| base.join(format!("root-{ctx}"))),
+        audit_path: id
+            .audit_base
+            .as_ref()
+            .map(|base| base.join(&req.kennel).join("network.jsonl")),
         ssh,
         unix,
     };
 
     let kennel = match start(&shared.privileged, spec, &mut command) {
         Ok(kennel) => kennel,
-        Err(e) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(e.to_string())),
+        Err(e) => {
+            return fail(
+                shared,
+                &req.kennel,
+                ctx,
+                conn,
+                &Response::Error(e.to_string()),
+            )
+        }
     };
     let pid = kennel.id();
     shared.set_pid(&req.kennel, pid);
@@ -491,7 +560,12 @@ where
     let status = kennel.stop(&shared.privileged);
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
-    let _ = control::send_response(conn, &Response::Exited { code: exit_code(&status) });
+    let _ = control::send_response(
+        conn,
+        &Response::Exited {
+            code: exit_code(&status),
+        },
+    );
 }
 
 /// Release the reservation and report an error (a bring-up step failed).
@@ -513,7 +587,10 @@ fn fail<P: Privileged + Clone, L: PolicyLoader>(
 /// or `-1` if the wait itself failed.
 fn exit_code(status: &io::Result<ExitStatus>) -> i32 {
     status.as_ref().map_or(-1, |status| {
-        status.code().or_else(|| status.signal().map(|s| 128_i32.saturating_add(s))).unwrap_or(-1)
+        status
+            .code()
+            .or_else(|| status.signal().map(|s| 128_i32.saturating_add(s)))
+            .unwrap_or(-1)
     })
 }
 
@@ -521,12 +598,22 @@ fn exit_code(status: &io::Result<ExitStatus>) -> i32 {
 fn recv_request_with_fds(conn: &UnixStream) -> io::Result<(Request, Vec<OwnedFd>)> {
     let mut buf = vec![0u8; 128 * 1024];
     let (n, fds) = kennel_syscall::scm::recv_with_fds(conn.as_fd(), &mut buf)?;
-    let frame = buf.get(..n).ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
-    let len_bytes: [u8; 4] = frame.get(..4).and_then(|s| s.try_into().ok()).ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+    let frame = buf
+        .get(..n)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+    let len_bytes: [u8; 4] = frame
+        .get(..4)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
     let len = u32::from_ne_bytes(len_bytes) as usize;
-    let end = len.checked_add(4).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-    let body = frame.get(4..end).ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
-    let request = Request::decode(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad request: {e:?}")))?;
+    let end = len
+        .checked_add(4)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    let body = frame
+        .get(4..end)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+    let request = Request::decode(body)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad request: {e:?}")))?;
     Ok((request, fds))
 }
 
@@ -560,7 +647,10 @@ fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command
     command.args(rest).current_dir(cwd);
     let mut fds = fds.into_iter();
     if let (Some(stdin), Some(stdout), Some(stderr)) = (fds.next(), fds.next(), fds.next()) {
-        command.stdin(Stdio::from(stdin)).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
+        command
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
     }
     Ok(command)
 }
@@ -601,7 +691,10 @@ mod tests {
                 cgroup_join: false,
                 view: None,
                 new_root: None,
-                landlock_fs: vec![(PathBuf::from("/"), AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE)],
+                landlock_fs: vec![(
+                    PathBuf::from("/"),
+                    AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE,
+                )],
                 landlock_net: Vec::new(),
                 seccomp_deny: Vec::new(),
                 seccomp_deny_action: Action::KillProcess,
@@ -631,7 +724,11 @@ mod tests {
     }
 
     fn shared() -> Shared<OkPriv, FakeLoader> {
-        let base = std::env::temp_dir().join(format!("kenneld-srv-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let base = std::env::temp_dir().join(format!(
+            "kenneld-srv-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).expect("base dir");
         Shared::new(
@@ -666,10 +763,16 @@ mod tests {
     #[test]
     fn stop_reports_unknown_and_still_starting() {
         let s = shared();
-        assert!(matches!(s.stop("ghost"), Response::Error(_)), "unknown kennel errors");
+        assert!(
+            matches!(s.stop("ghost"), Response::Error(_)),
+            "unknown kennel errors"
+        );
         let ctx = s.reserve("p").expect("reserve");
         // pid not yet set -> still starting.
-        assert!(matches!(s.stop("p"), Response::Error(_)), "still-starting kennel cannot be stopped");
+        assert!(
+            matches!(s.stop("p"), Response::Error(_)),
+            "still-starting kennel cannot be stopped"
+        );
         s.release("p", ctx);
     }
 
@@ -707,7 +810,10 @@ mod tests {
         };
         let line = lines.first().map(String::as_str).unwrap_or_default();
         assert_eq!(lines.len(), 1, "one matching edge");
-        assert!(line.contains("--dest github.com") && line.contains("AAAASYN_A"), "got {line}");
+        assert!(
+            line.contains("--dest github.com") && line.contains("AAAASYN_A"),
+            "got {line}"
+        );
 
         // An unknown key authorises nothing.
         let Response::AuthorizedKeys { lines } = s.authorized_keys("ssh-ed25519 UNKNOWN") else {
@@ -722,9 +828,14 @@ mod tests {
         s.reserve("a").expect("a");
         s.reserve("b").expect("b");
         s.set_pid("a", 4242);
-        let Response::Listing(mut kennels) = s.list() else { unreachable!("listing") };
+        let Response::Listing(mut kennels) = s.list() else {
+            unreachable!("listing")
+        };
         kennels.sort_by(|x, y| x.kennel.cmp(&y.kennel));
-        let summary: Vec<(&str, bool)> = kennels.iter().map(|k| (k.kennel.as_str(), k.running)).collect();
+        let summary: Vec<(&str, bool)> = kennels
+            .iter()
+            .map(|k| (k.kennel.as_str(), k.running))
+            .collect();
         // `a` has a pid (running); `b` is reserved but not yet started.
         assert_eq!(summary, [("a", true), ("b", false)]);
     }
@@ -764,7 +875,10 @@ mod tests {
         handle_connection(&s, &mut conn);
 
         let (started, exited) = client.join().expect("client thread");
-        assert!(matches!(started, Response::Started { ctx: 1, .. }), "got {started:?}");
+        assert!(
+            matches!(started, Response::Started { ctx: 1, .. }),
+            "got {started:?}"
+        );
         assert_eq!(exited, Response::Exited { code: 0 });
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -785,7 +899,10 @@ mod tests {
 
         let mut client = client;
         let started = control::recv_response(&mut client).expect("started");
-        assert!(matches!(started, Response::Started { ctx: 1, .. }), "got {started:?}");
+        assert!(
+            matches!(started, Response::Started { ctx: 1, .. }),
+            "got {started:?}"
+        );
         let exited = control::recv_response(&mut client).expect("exited");
         assert_eq!(exited, Response::Exited { code: 0 }, "true exits 0");
         // The kennel deregistered on exit.

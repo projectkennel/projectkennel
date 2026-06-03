@@ -37,10 +37,10 @@
 //! stays architecture-independent and no syscall-number table lives in this pure crate.
 
 use crate::settled::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
-    NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen,
-    SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction,
-    IdentityRuntime, UnixRuntime, UnixSocket,
+    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants,
+    LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
+    ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy,
+    TtlAction, UnixRuntime, UnixSocket,
 };
 use crate::source::SourcePolicy;
 use crate::PolicyError;
@@ -81,14 +81,22 @@ pub fn translate(
     let exec = translate_exec(effective, install, &mut deferred);
     let proc = translate_proc(effective)?;
     let cap = CapPolicy {
-        no_new_privs: effective.cap.as_ref().and_then(|c| c.no_new_privs).unwrap_or(false),
+        no_new_privs: effective
+            .cap
+            .as_ref()
+            .and_then(|c| c.no_new_privs)
+            .unwrap_or(false),
     };
     // Seccomp is a denylist by name: carry the source's denied syscalls through
     // verbatim (the spawn layer resolves names→numbers via libc). An empty deny list
     // means no filter is installed.
     let seccomp = SeccompPolicy {
         deny_action: SeccompAction::Errno,
-        deny: effective.seccomp.as_ref().and_then(|s| s.deny.clone()).unwrap_or_default(),
+        deny: effective
+            .seccomp
+            .as_ref()
+            .and_then(|s| s.deny.clone())
+            .unwrap_or_default(),
     };
     let lifecycle = translate_lifecycle(effective)?;
     let ssh = translate_ssh(effective);
@@ -96,7 +104,15 @@ pub fn translate(
     let identity = translate_identity(effective);
 
     Ok(Translated {
-        effective_policy: EffectivePolicy { net, fs, exec, proc, cap, seccomp, lifecycle },
+        effective_policy: EffectivePolicy {
+            net,
+            fs,
+            exec,
+            proc,
+            cap,
+            seccomp,
+            lifecycle,
+        },
         ssh,
         unix,
         identity,
@@ -141,7 +157,9 @@ fn translate_unix(
     install: &InstallConstants,
     deferred: &mut BTreeSet<String>,
 ) -> UnixRuntime {
-    let Some(unix) = &src.unix else { return UnixRuntime::default() };
+    let Some(unix) = &src.unix else {
+        return UnixRuntime::default();
+    };
     let sockets = unix
         .allow
         .iter()
@@ -162,23 +180,35 @@ fn translate_unix(
 /// [`SshGrant`] per `(host, fingerprint)` edge. Already compile-time-validated
 /// (`crate::ssh`), so the fingerprints and `hosts ⊆ net.allow:22` hold here.
 fn translate_ssh(src: &SourcePolicy) -> SshRuntime {
-    let Some(ssh) = &src.ssh else { return SshRuntime::default() };
+    let Some(ssh) = &src.ssh else {
+        return SshRuntime::default();
+    };
     let mut grants = Vec::new();
     for key in &ssh.keys {
         let Some(fp) = &key.fingerprint else { continue };
         for host in &key.hosts {
-            grants.push(SshGrant { host: host.clone(), fingerprint: fp.clone() });
+            grants.push(SshGrant {
+                host: host.clone(),
+                fingerprint: fp.clone(),
+            });
         }
     }
     let known_hosts = ssh
         .known_hosts
         .iter()
         .filter_map(|kh| match (&kh.host, &kh.key) {
-            (Some(host), Some(key)) => Some(SshKnownHostPin { host: host.clone(), key: key.clone() }),
+            (Some(host), Some(key)) => Some(SshKnownHostPin {
+                host: host.clone(),
+                key: key.clone(),
+            }),
             _ => None,
         })
         .collect();
-    SshRuntime { allow_headless: ssh.allow_headless.unwrap_or(false), grants, known_hosts }
+    SshRuntime {
+        allow_headless: ssh.allow_headless.unwrap_or(false),
+        grants,
+        known_hosts,
+    }
 }
 
 // ---- net -----------------------------------------------------------------------
@@ -193,7 +223,11 @@ fn translate_net(
         // `none` is "constrained with an empty allowlist" — the proxy denies all.
         Some("constrained" | "none") | None => NetMode::Constrained,
         Some("open") => NetMode::Open,
-        Some(other) => return Err(translation(format!("net.mode `{other}` is not representable"))),
+        Some(other) => {
+            return Err(translation(format!(
+                "net.mode `{other}` is not representable"
+            )))
+        }
     };
     let proxy = match net.proxy_listen_v4_address.as_deref() {
         Some(addr) => parse_proxy(addr)?,
@@ -208,16 +242,34 @@ fn translate_net(
             let (addr, prefix_len) = parse_cidr(cidr)?;
             let addr = subst(&addr, install, deferred);
             if entry.ports.is_empty() {
-                allow.push(NetRule { cidr: addr, prefix_len, port_min: 0, port_max: u16::MAX, protocol });
+                allow.push(NetRule {
+                    cidr: addr,
+                    prefix_len,
+                    port_min: 0,
+                    port_max: u16::MAX,
+                    protocol,
+                });
             } else {
                 for &p in &entry.ports {
-                    allow.push(NetRule { cidr: addr.clone(), prefix_len, port_min: p, port_max: p, protocol });
+                    allow.push(NetRule {
+                        cidr: addr.clone(),
+                        prefix_len,
+                        port_min: p,
+                        port_max: p,
+                        protocol,
+                    });
                 }
             }
         } else if let Some(name) = &entry.name {
-            allow_names.push(NameRule { name: name.clone(), ports: entry.ports.clone(), protocol });
+            allow_names.push(NameRule {
+                name: name.clone(),
+                ports: entry.ports.clone(),
+                protocol,
+            });
         } else {
-            return Err(translation("net.allow entry has neither `name` nor `cidr`".to_owned()));
+            return Err(translation(
+                "net.allow entry has neither `name` nor `cidr`".to_owned(),
+            ));
         }
     }
 
@@ -235,7 +287,13 @@ fn translate_net(
         }
     }
 
-    Ok(NetPolicy { mode, proxy, allow, allow_names, deny_invariant })
+    Ok(NetPolicy {
+        mode,
+        proxy,
+        allow,
+        allow_names,
+        deny_invariant,
+    })
 }
 
 /// Parse a `"offset:port"` proxy-listen address.
@@ -259,7 +317,9 @@ fn parse_protocol(p: Option<&str>) -> Result<Protocol, PolicyError> {
         Some("tcp") | None => Ok(Protocol::Tcp),
         Some("udp") => Ok(Protocol::Udp),
         Some("any") => Ok(Protocol::Any),
-        Some(other) => Err(translation(format!("protocol `{other}` is not tcp/udp/any"))),
+        Some(other) => Err(translation(format!(
+            "protocol `{other}` is not tcp/udp/any"
+        ))),
     }
 }
 
@@ -285,7 +345,10 @@ fn translate_fs(
 ) -> Result<FsPolicy, PolicyError> {
     let fs = src.fs.as_ref().ok_or_else(|| missing("fs"))?;
     let home = fs.home.as_ref().ok_or_else(|| missing("fs.home"))?;
-    let shim_root_raw = home.shim_root.as_deref().ok_or_else(|| missing("fs.home.shim_root"))?;
+    let shim_root_raw = home
+        .shim_root
+        .as_deref()
+        .ok_or_else(|| missing("fs.home.shim_root"))?;
     let shim_root = subst(shim_root_raw, install, deferred);
 
     let read = subst_each(fs.read.as_deref().unwrap_or_default(), install, deferred);
@@ -300,7 +363,11 @@ fn translate_fs(
             },
             mode: t.mode.clone().unwrap_or_else(|| "0700".to_owned()),
         },
-        None => TmpPolicy { private: false, size_mib: DEFAULT_TMP_MIB, mode: "0700".to_owned() },
+        None => TmpPolicy {
+            private: false,
+            size_mib: DEFAULT_TMP_MIB,
+            mode: "0700".to_owned(),
+        },
     };
 
     // The constructed-/dev bind set: the pseudo-device baseline (`fs.dev.allow`) plus
@@ -308,7 +375,10 @@ fn translate_fs(
     // spawn; the passthrough's reason/threats/group are compile-time-only (validated
     // by `crate::dev`, then dropped — like the other informational source fields).
     let mut dev_allow = subst_each(
-        fs.dev.as_ref().and_then(|d| d.allow.as_deref()).unwrap_or_default(),
+        fs.dev
+            .as_ref()
+            .and_then(|d| d.allow.as_deref())
+            .unwrap_or_default(),
         install,
         deferred,
     );
@@ -347,7 +417,11 @@ fn size_unit(t: &str) -> (&str, u32) {
 
 /// Parse a human size (`"512M"`, `"1G"`, bare = MiB) into mebibytes.
 fn parse_size_mib(s: &str) -> Result<u32, PolicyError> {
-    let bad = || translation(format!("size `{s}` is not a number with an optional M/G suffix"));
+    let bad = || {
+        translation(format!(
+            "size `{s}` is not a number with an optional M/G suffix"
+        ))
+    };
     let (num, mult) = size_unit(s.trim());
     let value = num.trim().parse::<u32>().map_err(|_| bad())?;
     value.checked_mul(mult).ok_or_else(bad)
@@ -361,9 +435,8 @@ fn translate_exec(
     deferred: &mut BTreeSet<String>,
 ) -> ExecPolicy {
     let exec = src.exec.as_ref();
-    let flag = |f: fn(&crate::source::ExecSection) -> Option<bool>| {
-        exec.and_then(f).unwrap_or(false)
-    };
+    let flag =
+        |f: fn(&crate::source::ExecSection) -> Option<bool>| exec.and_then(f).unwrap_or(false);
     ExecPolicy {
         deny_setuid: flag(|e| e.deny_setuid),
         deny_setgid: flag(|e| e.deny_setgid),
@@ -385,15 +458,30 @@ fn translate_proc(src: &SourcePolicy) -> Result<ProcPolicy, PolicyError> {
         .proc
         .as_ref()
         .and_then(|p| p.visibility.as_deref())
-        .or_else(|| src.fs.as_ref().and_then(|f| f.proc.as_ref()).and_then(|p| p.visibility.as_deref()));
+        .or_else(|| {
+            src.fs
+                .as_ref()
+                .and_then(|f| f.proc.as_ref())
+                .and_then(|p| p.visibility.as_deref())
+        });
     match visibility {
         Some("self") | None => {}
-        Some(other) => return Err(translation(format!("proc.visibility `{other}` is not `self`"))),
+        Some(other) => {
+            return Err(translation(format!(
+                "proc.visibility `{other}` is not `self`"
+            )))
+        }
     }
     let hidepid = src.proc.as_ref().and_then(|p| p.hidepid).or_else(|| {
-        src.fs.as_ref().and_then(|f| f.proc.as_ref()).and_then(|p| p.hidepid)
+        src.fs
+            .as_ref()
+            .and_then(|f| f.proc.as_ref())
+            .and_then(|p| p.hidepid)
     });
-    Ok(ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: hidepid.unwrap_or(false) })
+    Ok(ProcPolicy {
+        visibility: ProcVisibility::SelfOnly,
+        hidepid: hidepid.unwrap_or(false),
+    })
 }
 
 fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyError> {
@@ -405,9 +493,16 @@ fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyErro
     let ttl_action = match lc.and_then(|l| l.ttl_action.as_deref()) {
         Some("stop") => TtlAction::Stop,
         Some("warn") | None => TtlAction::Warn,
-        Some(other) => return Err(translation(format!("ttl_action `{other}` is not stop/warn"))),
+        Some(other) => {
+            return Err(translation(format!(
+                "ttl_action `{other}` is not stop/warn"
+            )))
+        }
     };
-    Ok(LifecyclePolicy { ttl_seconds, ttl_action })
+    Ok(LifecyclePolicy {
+        ttl_seconds,
+        ttl_action,
+    })
 }
 
 /// Split a human duration into its numeric part and a seconds multiplier.
@@ -429,7 +524,11 @@ fn duration_unit(t: &str) -> (&str, u64) {
 
 /// Parse a human duration (`"8h"`, `"30m"`, `"5s"`, `"2d"`, bare = seconds) into seconds.
 fn parse_duration_secs(s: &str) -> Result<u64, PolicyError> {
-    let bad = || translation(format!("duration `{s}` is not a number with an optional s/m/h/d suffix"));
+    let bad = || {
+        translation(format!(
+            "duration `{s}` is not a number with an optional s/m/h/d suffix"
+        ))
+    };
     let (num, mult) = duration_unit(s.trim());
     let value = num.trim().parse::<u64>().map_err(|_| bad())?;
     value.checked_mul(mult).ok_or_else(bad)
@@ -447,7 +546,11 @@ fn subst(s: &str, install: &InstallConstants, deferred: &mut BTreeSet<String>) -
 }
 
 /// Apply [`subst`] to each element of a slice.
-fn subst_each(items: &[String], install: &InstallConstants, deferred: &mut BTreeSet<String>) -> Vec<String> {
+fn subst_each(
+    items: &[String],
+    install: &InstallConstants,
+    deferred: &mut BTreeSet<String>,
+) -> Vec<String> {
     items.iter().map(|s| subst(s, install, deferred)).collect()
 }
 
@@ -470,7 +573,9 @@ fn collect_placeholders(s: &str, deferred: &mut BTreeSet<String>) {
 // ---- error helpers -------------------------------------------------------------
 
 fn missing(field: &str) -> PolicyError {
-    PolicyError::Translation(format!("required section/field `{field}` is absent from the effective policy"))
+    PolicyError::Translation(format!(
+        "required section/field `{field}` is absent from the effective policy"
+    ))
 }
 
 const fn translation(msg: String) -> PolicyError {
@@ -485,20 +590,31 @@ mod tests {
     use crate::source::parse;
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
-    const AI_CODING_STRICT: &str = include_str!("../../../../templates/ai-coding-strict/policy.toml");
+    const AI_CODING_STRICT: &str =
+        include_str!("../../../../templates/ai-coding-strict/policy.toml");
     const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
         fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
-            self.0.iter().find(|(n, v, _)| n == name && v == version).map(|(_, _, b)| b.clone())
+            self.0
+                .iter()
+                .find(|(n, v, _)| n == name && v == version)
+                .map(|(_, _, b)| b.clone())
         }
     }
     fn base_src() -> MapSource {
-        MapSource(vec![("base-confined".to_owned(), "v1".to_owned(), BASE_CONFINED.as_bytes().to_vec())])
+        MapSource(vec![(
+            "base-confined".to_owned(),
+            "v1".to_owned(),
+            BASE_CONFINED.as_bytes().to_vec(),
+        )])
     }
     fn install() -> InstallConstants {
-        InstallConstants { tag: 42, ula_gid: "fd00:abcd::".to_owned() }
+        InstallConstants {
+            tag: 42,
+            ula_gid: "fd00:abcd::".to_owned(),
+        }
     }
 
     fn translate_template(src: &str) -> Translated {
@@ -523,7 +639,9 @@ mod tests {
             ssh: Some(SshSection {
                 allow_headless: Some(true),
                 keys: vec![SshKey {
-                    fingerprint: Some("SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt".to_owned()),
+                    fingerprint: Some(
+                        "SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt".to_owned(),
+                    ),
                     hosts: vec!["github.com".to_owned()],
                     reason: Some("push".to_owned()),
                     threats: None,
@@ -539,8 +657,14 @@ mod tests {
         let ssh = translate_ssh(&src);
         assert!(ssh.allow_headless);
         assert_eq!(ssh.grants.len(), 1);
-        assert_eq!(ssh.grants.first().map(|g| g.host.as_str()), Some("github.com"));
-        assert_eq!(ssh.known_hosts.first().map(|k| k.host.as_str()), Some("git.internal"));
+        assert_eq!(
+            ssh.grants.first().map(|g| g.host.as_str()),
+            Some("github.com")
+        );
+        assert_eq!(
+            ssh.known_hosts.first().map(|k| k.host.as_str()),
+            Some("git.internal")
+        );
         assert!(!ssh.is_empty());
         // No [ssh] ⇒ empty runtime, omitted from the canonical form (back-compat).
         assert!(translate_ssh(&SourcePolicy::default()).is_empty());
@@ -571,7 +695,10 @@ mod tests {
         assert_eq!(s.shim, "~/.gnupg/S.gpg-agent");
         assert!(s.env.is_none());
         // The per-instance placeholder in `real` is recorded for runtime substitution.
-        assert!(deferred.contains("<kennel>"), "the <kennel> placeholder is deferred");
+        assert!(
+            deferred.contains("<kennel>"),
+            "the <kennel> placeholder is deferred"
+        );
         assert!(!unix.is_empty());
         // No [unix] ⇒ empty runtime, omitted from the canonical form.
         assert!(translate_unix(&SourcePolicy::default(), &install(), &mut deferred).is_empty());
@@ -579,9 +706,13 @@ mod tests {
 
     #[test]
     fn identity_unions_explicit_groups_with_device_passthrough_groups() {
-        use crate::source::{DevPassthrough, FsDev, FsSection, IdentitySection, SourcePolicy, Threats};
+        use crate::source::{
+            DevPassthrough, FsDev, FsSection, IdentitySection, SourcePolicy, Threats,
+        };
         let src = SourcePolicy {
-            identity: Some(IdentitySection { groups: vec!["plugdev".to_owned(), "dialout".to_owned()] }),
+            identity: Some(IdentitySection {
+                groups: vec!["plugdev".to_owned(), "dialout".to_owned()],
+            }),
             fs: Some(FsSection {
                 dev: Some(FsDev {
                     allow: None,
@@ -590,13 +721,19 @@ mod tests {
                             path: Some("/dev/ttyUSB0".to_owned()),
                             group: Some("dialout".to_owned()), // already listed — de-duped
                             reason: Some("serial".to_owned()),
-                            threats: Some(Threats { exposed: vec!["T2.1".to_owned()], mitigated: vec![] }),
+                            threats: Some(Threats {
+                                exposed: vec!["T2.1".to_owned()],
+                                mitigated: vec![],
+                            }),
                         },
                         DevPassthrough {
                             path: Some("/dev/net/tun".to_owned()),
                             group: Some("netdev".to_owned()), // contributed by the device
                             reason: Some("vpn".to_owned()),
-                            threats: Some(Threats { exposed: vec!["T2.1".to_owned()], mitigated: vec![] }),
+                            threats: Some(Threats {
+                                exposed: vec!["T2.1".to_owned()],
+                                mitigated: vec![],
+                            }),
                         },
                     ],
                 }),
@@ -605,49 +742,80 @@ mod tests {
             ..SourcePolicy::default()
         };
         let id = translate_identity(&src);
-        assert_eq!(id.groups, vec!["plugdev", "dialout", "netdev"], "explicit first, device groups added, de-duped");
+        assert_eq!(
+            id.groups,
+            vec!["plugdev", "dialout", "netdev"],
+            "explicit first, device groups added, de-duped"
+        );
         // No [identity] and no device groups ⇒ empty (dropped from the canonical form).
         assert!(translate_identity(&SourcePolicy::default()).is_empty());
     }
 
     #[test]
     fn dev_passthrough_paths_merge_into_the_settled_dev_allowlist() {
-        use crate::source::{DevPassthrough, FsDev, FsHome, FsSection, NetSection, SourcePolicy, Threats};
+        use crate::source::{
+            DevPassthrough, FsDev, FsHome, FsSection, NetSection, SourcePolicy, Threats,
+        };
         let src = SourcePolicy {
-            net: Some(NetSection { mode: Some("none".to_owned()), ..NetSection::default() }),
+            net: Some(NetSection {
+                mode: Some("none".to_owned()),
+                ..NetSection::default()
+            }),
             fs: Some(FsSection {
-                home: Some(FsHome { shim_root: Some("/run/kennel/<kennel>/home".to_owned()), ..FsHome::default() }),
+                home: Some(FsHome {
+                    shim_root: Some("/run/kennel/<kennel>/home".to_owned()),
+                    ..FsHome::default()
+                }),
                 dev: Some(FsDev {
                     allow: Some(vec!["/dev/null".to_owned()]),
                     passthrough: vec![DevPassthrough {
                         path: Some("/dev/net/tun".to_owned()),
                         group: Some("netdev".to_owned()),
                         reason: Some("vpn".to_owned()),
-                        threats: Some(Threats { exposed: vec!["T2.1".to_owned()], mitigated: vec![] }),
+                        threats: Some(Threats {
+                            exposed: vec!["T2.1".to_owned()],
+                            mitigated: vec![],
+                        }),
                     }],
                 }),
                 ..FsSection::default()
             }),
             ..SourcePolicy::default()
         };
-        let dev = translate(&src, &install()).expect("translate").effective_policy.fs.dev;
+        let dev = translate(&src, &install())
+            .expect("translate")
+            .effective_policy
+            .fs
+            .dev;
         // The pseudo-device baseline and the passthrough device both land in `allow`,
         // which is what the spawn binds. The reason/threats/group do not survive.
         assert!(dev.allow.iter().any(|d| d == "/dev/null"), "baseline kept");
-        assert!(dev.allow.iter().any(|d| d == "/dev/net/tun"), "passthrough device bound in");
+        assert!(
+            dev.allow.iter().any(|d| d == "/dev/net/tun"),
+            "passthrough device bound in"
+        );
     }
 
     #[test]
     fn ai_coding_strict_translates_its_unix_shim() {
         let t = translate_template(AI_CODING_STRICT);
         assert!(!t.unix.is_empty(), "the template grants a gpg-agent shim");
-        let gpg = t.unix.sockets.iter().find(|s| s.name == "gpg-agent").expect("gpg-agent socket");
+        let gpg = t
+            .unix
+            .sockets
+            .iter()
+            .find(|s| s.name == "gpg-agent")
+            .expect("gpg-agent socket");
         assert_eq!(gpg.shim, "~/.gnupg/S.gpg-agent");
         // <kennel> in the real path is deferred to the runtime.
         assert!(gpg.real.contains("<kennel>"));
         assert!(t.deferred_substitutions.iter().any(|p| p == "<kennel>"));
         // SSH is never a unix shim.
-        assert!(!t.unix.sockets.iter().any(|s| s.env.as_deref() == Some("SSH_AUTH_SOCK")));
+        assert!(!t
+            .unix
+            .sockets
+            .iter()
+            .any(|s| s.env.as_deref() == Some("SSH_AUTH_SOCK")));
     }
 
     #[test]
@@ -664,9 +832,21 @@ mod tests {
         let ep = &t.effective_policy;
 
         assert_eq!(ep.net.mode, NetMode::Constrained);
-        assert!(ep.net.allow_names.iter().any(|n| n.name == "github.com" && n.ports == vec![22, 443]));
-        assert!(ep.net.deny_invariant.iter().any(|r| r.cidr == "169.254.169.254" && r.prefix_len == 32));
-        assert!(ep.net.deny_invariant.iter().any(|r| r.cidr == "fd00:ec2::254" && r.prefix_len == 128));
+        assert!(ep
+            .net
+            .allow_names
+            .iter()
+            .any(|n| n.name == "github.com" && n.ports == vec![22, 443]));
+        assert!(ep
+            .net
+            .deny_invariant
+            .iter()
+            .any(|r| r.cidr == "169.254.169.254" && r.prefix_len == 32));
+        assert!(ep
+            .net
+            .deny_invariant
+            .iter()
+            .any(|r| r.cidr == "fd00:ec2::254" && r.prefix_len == 128));
 
         assert!(ep.fs.home_shadow);
         assert_eq!(ep.fs.shim_root, "/run/kennel/<kennel>/home");
@@ -687,7 +867,10 @@ mod tests {
 
         // The per-instance placeholder is deferred, not the install constants.
         assert!(t.deferred_substitutions.iter().any(|p| p == "<kennel>"));
-        assert!(!t.deferred_substitutions.iter().any(|p| p == "<tag>" || p == "<gid>"));
+        assert!(!t
+            .deferred_substitutions
+            .iter()
+            .any(|p| p == "<tag>" || p == "<gid>"));
     }
 
     #[test]
@@ -722,9 +905,15 @@ mod tests {
         let t = translate_template(UNTRUSTED_BUILD);
         let net = &t.effective_policy.net;
         assert_eq!(net.mode, NetMode::Constrained, "none => constrained");
-        assert!(net.allow.is_empty() && net.allow_names.is_empty(), "no egress permitted");
+        assert!(
+            net.allow.is_empty() && net.allow_names.is_empty(),
+            "no egress permitted"
+        );
         // Invariant denies still propagate.
-        assert!(net.deny_invariant.iter().any(|r| r.cidr == "10.0.0.0" && r.prefix_len == 8));
+        assert!(net
+            .deny_invariant
+            .iter()
+            .any(|r| r.cidr == "10.0.0.0" && r.prefix_len == 8));
         // 2h TTL, stop.
         assert_eq!(t.effective_policy.lifecycle.ttl_seconds, Some(7_200));
         assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Stop);
@@ -755,9 +944,18 @@ mod tests {
 
     #[test]
     fn cidr_split_handles_prefix_and_bare_forms() {
-        assert_eq!(parse_cidr("10.0.0.0/8").expect("v4"), ("10.0.0.0".to_owned(), 8));
-        assert_eq!(parse_cidr("169.254.169.254").expect("bare v4"), ("169.254.169.254".to_owned(), 32));
-        assert_eq!(parse_cidr("fd00:ec2::254").expect("bare v6"), ("fd00:ec2::254".to_owned(), 128));
+        assert_eq!(
+            parse_cidr("10.0.0.0/8").expect("v4"),
+            ("10.0.0.0".to_owned(), 8)
+        );
+        assert_eq!(
+            parse_cidr("169.254.169.254").expect("bare v4"),
+            ("169.254.169.254".to_owned(), 32)
+        );
+        assert_eq!(
+            parse_cidr("fd00:ec2::254").expect("bare v6"),
+            ("fd00:ec2::254".to_owned(), 128)
+        );
         assert!(parse_cidr("10.0.0.0/999").is_err());
     }
 

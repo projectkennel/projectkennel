@@ -213,14 +213,17 @@ struct RawDeny {
 impl RawConfig {
     fn validate(self) -> Result<ProxyConfig, ConfigError> {
         if self.listen.is_empty() {
-            return Err(ConfigError::Invalid("listen must give at least one socket address".to_owned()));
+            return Err(ConfigError::Invalid(
+                "listen must give at least one socket address".to_owned(),
+            ));
         }
         let listen = self
             .listen
             .iter()
             .map(|s| {
-                s.parse::<SocketAddr>()
-                    .map_err(|_| ConfigError::Invalid(format!("listen is not a socket address: `{s}`")))
+                s.parse::<SocketAddr>().map_err(|_| {
+                    ConfigError::Invalid(format!("listen is not a socket address: `{s}`"))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mode = match self.net.mode {
@@ -246,7 +249,10 @@ impl RawConfig {
             .iter()
             .map(|hs| {
                 hs.addr.parse::<SocketAddr>().map_err(|_| {
-                    ConfigError::Invalid(format!("host_services addr is not `ip:port`: `{}`", hs.addr))
+                    ConfigError::Invalid(format!(
+                        "host_services addr is not `ip:port`: `{}`",
+                        hs.addr
+                    ))
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -361,7 +367,10 @@ name = ".tracker.example"
     #[test]
     fn parses_a_valid_config() {
         let cfg = from_toml_str(VALID).expect("valid config");
-        assert_eq!(cfg.listen, vec!["127.42.7.1:1080".parse::<SocketAddr>().expect("addr")]);
+        assert_eq!(
+            cfg.listen,
+            vec!["127.42.7.1:1080".parse::<SocketAddr>().expect("addr")]
+        );
         assert!(!cfg.accept_private_resolved);
         assert_eq!(cfg.ruleset.mode, NetMode::Constrained);
         assert_eq!(cfg.ruleset.allow.len(), 2);
@@ -382,9 +391,15 @@ name = ".tracker.example"
             "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"constrained\"\n[[net.host_services]]\naddr=\"127.0.0.1:7022\"\n",
         )
         .expect("valid host_services config");
-        assert_eq!(cfg.host_services, vec!["127.0.0.1:7022".parse::<SocketAddr>().expect("addr")]);
+        assert_eq!(
+            cfg.host_services,
+            vec!["127.0.0.1:7022".parse::<SocketAddr>().expect("addr")]
+        );
         // No [[net.host_services]] ⇒ empty (the common case).
-        assert!(from_toml_str(VALID).expect("valid").host_services.is_empty());
+        assert!(from_toml_str(VALID)
+            .expect("valid")
+            .host_services
+            .is_empty());
         // A malformed addr is rejected.
         assert!(from_toml_str(
             "listen=[\"127.0.0.1:1\"]\n[net]\nmode=\"open\"\n[[net.host_services]]\naddr=\"not-an-addr\"\n"
@@ -452,7 +467,10 @@ name = ".tracker.example"
     #[test]
     fn empty_listen_is_invalid() {
         let toml = "listen=[]\n[net]\nmode=\"open\"\n";
-        assert!(matches!(from_toml_str(toml), Err(ConfigError::Invalid(_))), "at least one listen address required");
+        assert!(
+            matches!(from_toml_str(toml), Err(ConfigError::Invalid(_))),
+            "at least one listen address required"
+        );
     }
 
     #[test]

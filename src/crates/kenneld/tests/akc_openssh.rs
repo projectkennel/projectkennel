@@ -43,7 +43,9 @@ type SharedBastion = Arc<Mutex<Bastion>>;
 
 #[test]
 fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
-    let Some(login_user) = preflight() else { return };
+    let Some(login_user) = preflight() else {
+        return;
+    };
 
     // Stage on an exec, root-owned, world-traversable filesystem: the AKC binary and
     // the forced-command script must be executable (rules out noexec /run), every
@@ -83,12 +85,18 @@ fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port,
         agent_sock: None,
-        akc: Some(Akc { command: akc, user: "root".to_owned() }),
+        akc: Some(Akc {
+            command: akc,
+            user: "root".to_owned(),
+        }),
     })));
     let host_pub = register_edge(&bastion, &synthetic_pub, real_fp);
 
     spawn_responder(&sock, &bastion);
-    assert!(wait_listening(port), "the bastion sshd did not come up (privsep/config?)");
+    assert!(
+        wait_listening(port),
+        "the bastion sshd did not come up (privsep/config?)"
+    );
 
     // The client pins the bastion host key (as the synthetic ~/.ssh/known_hosts would)
     // and logs in as the ordinary user — the forced command runs there.
@@ -100,7 +108,8 @@ fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
     let authorised = ok.status.success() && ok_out.contains("AKC_OK");
 
     let denied = run_client(&stage, "rogue", port, &known_hosts, &login_user);
-    let rogue_refused = !denied.status.success() && !String::from_utf8_lossy(&denied.stdout).contains("AKC_OK");
+    let rogue_refused =
+        !denied.status.success() && !String::from_utf8_lossy(&denied.stdout).contains("AKC_OK");
 
     // Teardown before asserting, so a failure still cleans up.
     bastion.lock().expect("lock").stop();
@@ -114,7 +123,10 @@ fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
         ok.status,
         String::from_utf8_lossy(&ok.stderr),
     );
-    assert!(rogue_refused, "an unregistered (rogue) key must be refused — the AKC vends no line for it");
+    assert!(
+        rogue_refused,
+        "an unregistered (rogue) key must be refused — the AKC vends no line for it"
+    );
 }
 
 /// Check every precondition; return the ordinary login user, or `None` (printing a
@@ -133,12 +145,18 @@ fn preflight() -> Option<String> {
     }
     // The bastion sshd and forced command run as the user (its config denies root
     // login); under `sudo -E` that is $SUDO_USER.
-    let login_user = std::env::var_os("SUDO_USER")?.to_string_lossy().into_owned();
+    let login_user = std::env::var_os("SUDO_USER")?
+        .to_string_lossy()
+        .into_owned();
     if login_user == "root" {
         eprintln!("SKIP: $SUDO_USER is root; need an ordinary user to log in as");
         return None;
     }
-    if !Command::new("id").arg("sshd").status().is_ok_and(|s| s.success()) {
+    if !Command::new("id")
+        .arg("sshd")
+        .status()
+        .is_ok_and(|s| s.success())
+    {
         eprintln!("SKIP: the `sshd` privilege-separation user is absent");
         return None;
     }
@@ -160,11 +178,18 @@ fn preflight() -> Option<String> {
 /// safe-path check demands of an `AuthorizedKeysCommand`. Returns its path.
 fn install_root_owned_akc(stage: &Path) -> PathBuf {
     let src = sibling_binary("kennel-akc");
-    assert!(src.exists(), "build kennel-akc: cargo build -p kenneld --bin kennel-akc");
+    assert!(
+        src.exists(),
+        "build kennel-akc: cargo build -p kenneld --bin kennel-akc"
+    );
     let dst = stage.join("bin/kennel-akc");
     std::fs::copy(&src, &dst).expect("install kennel-akc");
     chmod(&dst, 0o755);
-    assert_eq!(owner_uid(&dst), 0, "the AKC binary must be root-owned for sshd's safe-path check");
+    assert_eq!(
+        owner_uid(&dst),
+        0,
+        "the AKC binary must be root-owned for sshd's safe-path check"
+    );
     dst
 }
 
@@ -192,7 +217,9 @@ fn spawn_responder(sock: &Path, bastion: &SharedBastion) {
     std::thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(mut conn) = conn else { continue };
-            let Ok(Request::AuthorizedKeys { key }) = control::recv_request(&mut conn) else { continue };
+            let Ok(Request::AuthorizedKeys { key }) = control::recv_request(&mut conn) else {
+                continue;
+            };
             let lines = bastion.lock().expect("lock").authorized_keys_for(&key);
             let _ = control::send_response(&mut conn, &Response::AuthorizedKeys { lines });
         }
@@ -201,14 +228,27 @@ fn spawn_responder(sock: &Path, bastion: &SharedBastion) {
 
 /// One client login: offers only `identity`, pins the bastion host key, logs in as
 /// `login_user` (the forced command runs there).
-fn run_client(stage: &Path, identity: &str, port: u16, known_hosts: &Path, login_user: &str) -> Output {
+fn run_client(
+    stage: &Path,
+    identity: &str,
+    port: u16,
+    known_hosts: &Path,
+    login_user: &str,
+) -> Output {
     Command::new("ssh")
         .args(["-F", "none", "-p", &port.to_string()])
         .args(["-o", "IdentitiesOnly=yes", "-i"])
         .arg(stage.join(identity))
         .args(["-o", "StrictHostKeyChecking=yes", "-o"])
         .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
-        .args(["-o", "BatchMode=yes", "-l", login_user, "127.0.0.1", "anything"])
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-l",
+            login_user,
+            "127.0.0.1",
+            "anything",
+        ])
         .output()
         .expect("run ssh")
 }
@@ -217,16 +257,27 @@ fn run_client(stage: &Path, identity: &str, port: u16, known_hosts: &Path, login
 
 fn sibling_binary(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
-    exe.parent().and_then(Path::parent).expect("profile dir").join(name)
+    exe.parent()
+        .and_then(Path::parent)
+        .expect("profile dir")
+        .join(name)
 }
 
 fn have(path: &str) -> bool {
     Path::new(path).exists()
-        || Command::new("sh").arg("-c").arg(format!("command -v {path}")).status().is_ok_and(|s| s.success())
+        || Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {path}"))
+            .status()
+            .is_ok_and(|s| s.success())
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").expect("bind :0").local_addr().expect("addr").port()
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind :0")
+        .local_addr()
+        .expect("addr")
+        .port()
 }
 
 fn chmod(path: &Path, mode: u32) {
@@ -240,7 +291,10 @@ fn owner_uid(path: &Path) -> u32 {
 
 /// `ssh-keygen` an ed25519 key at `path`; return its public-key line.
 fn keygen(path: &Path, comment: &str) -> String {
-    std::fs::read_to_string(keygen_path(path, comment).with_extension("pub")).expect("read pub").trim().to_owned()
+    std::fs::read_to_string(keygen_path(path, comment).with_extension("pub"))
+        .expect("read pub")
+        .trim()
+        .to_owned()
 }
 
 /// As [`keygen`] but returns the public-key *path* (`<path>.pub`).
@@ -256,8 +310,16 @@ fn keygen_path(path: &Path, comment: &str) -> PathBuf {
 
 /// The `SHA256:` fingerprint of the key whose private half is at `path`.
 fn fingerprint(path: &Path) -> String {
-    let out = Command::new("ssh-keygen").arg("-lf").arg(path.with_extension("pub")).output().expect("fingerprint");
-    let fp = String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1).unwrap_or_default().to_owned();
+    let out = Command::new("ssh-keygen")
+        .arg("-lf")
+        .arg(path.with_extension("pub"))
+        .output()
+        .expect("fingerprint");
+    let fp = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
     assert!(fp.starts_with("SHA256:"), "fingerprint: {fp}");
     fp
 }

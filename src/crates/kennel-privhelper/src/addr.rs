@@ -37,7 +37,9 @@ pub fn loopback_v6(gid: [u8; 5], ctx: u16, host: u64) -> Ipv6Addr {
     let [g0, g1, g2, g3, g4] = gid;
     let [c0, c1] = ctx.to_be_bytes();
     let [h0, h1, h2, h3, h4, h5, h6, h7] = host.to_be_bytes();
-    Ipv6Addr::from([0xfd, g0, g1, g2, g3, g4, c0, c1, h0, h1, h2, h3, h4, h5, h6, h7])
+    Ipv6Addr::from([
+        0xfd, g0, g1, g2, g3, g4, c0, c1, h0, h1, h2, h3, h4, h5, h6, h7,
+    ])
 }
 
 #[cfg(test)]
@@ -54,7 +56,12 @@ mod tests {
 
         // The address the forward builder produces must pass reverse validation.
         let scope = ReservedScope::new(9, [0, 0, 0, 0, 1], "kennel-x");
-        let req = AddrRequest { ctx: 5, interface: "lo".to_owned(), addr: IpAddr::V4(addr), prefix: V4_PREFIX };
+        let req = AddrRequest {
+            ctx: 5,
+            interface: "lo".to_owned(),
+            addr: IpAddr::V4(addr),
+            prefix: V4_PREFIX,
+        };
         assert!(validate_addr(&req, &scope).is_ok());
     }
 
@@ -68,7 +75,12 @@ mod tests {
         assert_eq!(&addr.octets()[6..8], &[0x01, 0x02]);
 
         let scope = ReservedScope::new(9, gid, "kennel-x");
-        let req = AddrRequest { ctx: 0x0102, interface: "lo".to_owned(), addr: IpAddr::V6(addr), prefix: V6_PREFIX };
+        let req = AddrRequest {
+            ctx: 0x0102,
+            interface: "lo".to_owned(),
+            addr: IpAddr::V6(addr),
+            prefix: V6_PREFIX,
+        };
         assert!(validate_addr(&req, &scope).is_ok());
     }
 
@@ -77,7 +89,15 @@ mod tests {
         // tag and host beyond their fields must not bleed into neighbours.
         let addr = loopback_v4(0xFFFF, 0, 0xFF);
         let scope = ReservedScope::new(0x0FFF, [0; 5], "k");
-        let req = AddrRequest { ctx: 0, interface: "lo".to_owned(), addr: IpAddr::V4(addr), prefix: V4_PREFIX };
-        assert!(validate_addr(&req, &scope).is_ok(), "masked tag should match TAG_MAX scope");
+        let req = AddrRequest {
+            ctx: 0,
+            interface: "lo".to_owned(),
+            addr: IpAddr::V4(addr),
+            prefix: V4_PREFIX,
+        };
+        assert!(
+            validate_addr(&req, &scope).is_ok(),
+            "masked tag should match TAG_MAX scope"
+        );
     }
 }

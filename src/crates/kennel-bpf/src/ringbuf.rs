@@ -68,7 +68,11 @@ impl<'fd> RingBuffer<'fd> {
             return Err(invalid("bad page size"));
         }
         let producer_len = page_size
-            .checked_add(data_size.checked_mul(2).ok_or_else(|| invalid("size overflow"))?)
+            .checked_add(
+                data_size
+                    .checked_mul(2)
+                    .ok_or_else(|| invalid("size overflow"))?,
+            )
             .ok_or_else(|| invalid("size overflow"))?;
 
         // SAFETY: a fresh anonymous request (addr NULL) for `page_size` bytes of
@@ -87,8 +91,8 @@ impl<'fd> RingBuffer<'fd> {
         if consumer == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
-        let consumer = NonNull::new(consumer.cast::<u8>())
-            .ok_or_else(|| invalid("mmap returned null"))?;
+        let consumer =
+            NonNull::new(consumer.cast::<u8>()).ok_or_else(|| invalid("mmap returned null"))?;
 
         // SAFETY: as above, for the producer page + double-mapped data at offset
         // `page_size`. On failure we must munmap the consumer page we already hold.
@@ -109,8 +113,8 @@ impl<'fd> RingBuffer<'fd> {
             unsafe { libc::munmap(consumer.as_ptr().cast(), page_size) };
             return Err(err);
         }
-        let producer = NonNull::new(producer.cast::<u8>())
-            .ok_or_else(|| invalid("mmap returned null"))?;
+        let producer =
+            NonNull::new(producer.cast::<u8>()).ok_or_else(|| invalid("mmap returned null"))?;
         // SAFETY: `producer` is valid for `producer_len >= page_size` bytes, so
         // `producer + page_size` (the data area start) is within the mapping.
         let data = unsafe { NonNull::new_unchecked(producer.as_ptr().add(page_size)) };
@@ -187,8 +191,8 @@ impl<'fd> RingBuffer<'fd> {
             if len & BUSY_BIT != 0 {
                 break; // producer still committing this record
             }
-            let sample_len = usize::try_from(len & LEN_MASK)
-                .map_err(|_| invalid("sample length overflow"))?;
+            let sample_len =
+                usize::try_from(len & LEN_MASK).map_err(|_| invalid("sample length overflow"))?;
             // The sample (header + payload) must fit inside one ring's worth of the
             // double map starting at `off`.
             let need = HDR_SZ
@@ -204,7 +208,8 @@ impl<'fd> RingBuffer<'fd> {
                 // SAFETY: `start + sample_len <= off + data_size`, within the
                 // double-mapped data area; the bytes are committed (BUSY clear) and
                 // read-only for the lifetime of this borrow.
-                let sample = unsafe { slice::from_raw_parts(self.data.as_ptr().add(start), sample_len) };
+                let sample =
+                    unsafe { slice::from_raw_parts(self.data.as_ptr().add(start), sample_len) };
                 f(sample);
                 delivered = delivered.saturating_add(1);
             }

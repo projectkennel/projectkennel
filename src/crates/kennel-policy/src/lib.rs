@@ -29,8 +29,8 @@ pub mod b64;
 pub mod canonical;
 pub mod compile;
 pub mod dev;
-pub mod identity;
 pub mod error;
+pub mod identity;
 pub mod invariant;
 pub mod keys;
 pub mod leaf;
@@ -46,20 +46,23 @@ pub mod unix;
 
 pub use compile::{compile, compile_leaf, seal_unsigned, Compiled};
 pub use error::PolicyError;
-pub use leaf::{parse as parse_leaf, LeafPolicy};
-pub use lock::{LockEntry, Lockfile};
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
-pub use settled::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
-    NetMode, NameRule, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
-    ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy,
-    IdentityRuntime, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
-};
+pub use leaf::{parse as parse_leaf, LeafPolicy};
+pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
-pub use source_sig::{sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust};
+pub use settled::{
+    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants,
+    LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
+    Provenance, ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy,
+    SignedSettledPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
+    UnixSocket,
+};
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
+pub use source_sig::{
+    sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
+};
 pub use translate::{translate, Translated};
 
 /// The newest `settled_schema_version` this build accepts.
@@ -97,7 +100,10 @@ pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, Poli
 /// # Errors
 ///
 /// Returns [`PolicyError::Canonical`] if the body cannot be serialised.
-pub fn sign_settled(policy: &SettledPolicy, key: &SigningKey) -> Result<SignedSettledPolicy, PolicyError> {
+pub fn sign_settled(
+    policy: &SettledPolicy,
+    key: &SigningKey,
+) -> Result<SignedSettledPolicy, PolicyError> {
     let canonical = canonical::canonical_bytes(policy)?;
     let sig = key.sign(&canonical);
     let envelope = SignatureEnvelope {
@@ -158,7 +164,11 @@ mod tests {
                     shim_root: "/run/kennel/ai-coding".to_owned(),
                     read: vec!["/usr".to_owned()],
                     write: vec!["/run/kennel/ai-coding/home".to_owned()],
-                    tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
+                    tmp: TmpPolicy {
+                        private: true,
+                        size_mib: 512,
+                        mode: "0700".to_owned(),
+                    },
                     dev: DevPolicy {
                         allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
                     },
@@ -170,7 +180,10 @@ mod tests {
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
                 },
-                proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
+                proc: ProcPolicy {
+                    visibility: ProcVisibility::SelfOnly,
+                    hidepid: true,
+                },
                 cap: CapPolicy { no_new_privs: true },
                 seccomp: SeccompPolicy {
                     deny_action: SeccompAction::Errno,
@@ -210,7 +223,8 @@ mod tests {
 
     fn keyset_for(key: &SigningKey) -> KeySet {
         let mut ks = KeySet::new();
-        ks.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+        ks.insert(key.key_id(), &key.public_key_bytes())
+            .expect("insert");
         ks
     }
 
@@ -228,19 +242,34 @@ mod tests {
         let key = signing_key();
         let mut policy = sample_policy();
         policy.effective_policy.net.allow_names = vec![
-            NameRule { name: "api.example.com".to_owned(), ports: vec![443], protocol: Protocol::Tcp },
-            NameRule { name: ".internal.example".to_owned(), ports: Vec::new(), protocol: Protocol::Any },
+            NameRule {
+                name: "api.example.com".to_owned(),
+                ports: vec![443],
+                protocol: Protocol::Tcp,
+            },
+            NameRule {
+                name: ".internal.example".to_owned(),
+                ports: Vec::new(),
+                protocol: Protocol::Any,
+            },
         ];
 
         // The name rules survive a sign → serialise → verify round trip…
         let doc = sign_settled(&policy, &key).expect("sign");
         let bytes = to_bytes(&doc).expect("serialise");
         let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
-        assert_eq!(verified.effective_policy.net.allow_names, policy.effective_policy.net.allow_names);
+        assert_eq!(
+            verified.effective_policy.net.allow_names,
+            policy.effective_policy.net.allow_names
+        );
 
         // …and they are inside the signed canonical form (tampering breaks it).
-        let canon = String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
-        assert!(canon.contains("api.example.com"), "name rule is in the canonical form");
+        let canon =
+            String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(
+            canon.contains("api.example.com"),
+            "name rule is in the canonical form"
+        );
 
         let mut tampered = doc;
         if let Some(rule) = tampered.policy.effective_policy.net.allow_names.first_mut() {
@@ -248,16 +277,27 @@ mod tests {
         }
         let bytes = to_bytes(&tampered).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
-        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+        assert!(
+            matches!(err, PolicyError::Signature(SignatureError::Verification)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn fs_tmp_dev_and_proc_hidepid_round_trip_and_are_signature_bound() {
         let key = signing_key();
         let mut policy = sample_policy();
-        policy.effective_policy.fs.tmp = TmpPolicy { private: true, size_mib: 256, mode: "0750".to_owned() };
+        policy.effective_policy.fs.tmp = TmpPolicy {
+            private: true,
+            size_mib: 256,
+            mode: "0750".to_owned(),
+        };
         policy.effective_policy.fs.dev = DevPolicy {
-            allow: vec!["/dev/null".to_owned(), "/dev/zero".to_owned(), "/dev/tty".to_owned()],
+            allow: vec![
+                "/dev/null".to_owned(),
+                "/dev/zero".to_owned(),
+                "/dev/tty".to_owned(),
+            ],
         };
         policy.effective_policy.proc.hidepid = true;
 
@@ -265,47 +305,82 @@ mod tests {
         let doc = sign_settled(&policy, &key).expect("sign");
         let bytes = to_bytes(&doc).expect("serialise");
         let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
-        assert_eq!(verified.effective_policy.fs.tmp, policy.effective_policy.fs.tmp);
-        assert_eq!(verified.effective_policy.fs.dev, policy.effective_policy.fs.dev);
+        assert_eq!(
+            verified.effective_policy.fs.tmp,
+            policy.effective_policy.fs.tmp
+        );
+        assert_eq!(
+            verified.effective_policy.fs.dev,
+            policy.effective_policy.fs.dev
+        );
         assert!(verified.effective_policy.proc.hidepid);
 
         // They are inside the signed canonical form: tampering with the device
         // allowlist (e.g. smuggling in /dev/mem) breaks the signature.
-        let canon = String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
-        assert!(canon.contains("size_mib") && canon.contains("/dev/tty"), "new fields are in the canonical form");
+        let canon =
+            String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(
+            canon.contains("size_mib") && canon.contains("/dev/tty"),
+            "new fields are in the canonical form"
+        );
 
         let mut tampered = doc;
-        tampered.policy.effective_policy.fs.dev.allow.push("/dev/mem".to_owned());
+        tampered
+            .policy
+            .effective_policy
+            .fs
+            .dev
+            .allow
+            .push("/dev/mem".to_owned());
         let bytes = to_bytes(&tampered).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
-        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+        assert!(
+            matches!(err, PolicyError::Signature(SignatureError::Verification)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn proxy_listen_round_trips_and_is_signature_bound() {
         let key = signing_key();
         let mut policy = sample_policy();
-        policy.effective_policy.net.proxy = ProxyListen { offset: 3, port: 8443 };
+        policy.effective_policy.net.proxy = ProxyListen {
+            offset: 3,
+            port: 8443,
+        };
 
         let doc = sign_settled(&policy, &key).expect("sign");
         let bytes = to_bytes(&doc).expect("serialise");
         let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
-        assert_eq!(verified.effective_policy.net.proxy, ProxyListen { offset: 3, port: 8443 });
+        assert_eq!(
+            verified.effective_policy.net.proxy,
+            ProxyListen {
+                offset: 3,
+                port: 8443
+            }
+        );
 
         // Tampering with the resolved offset/port breaks the signature.
         let mut tampered = doc;
         tampered.policy.effective_policy.net.proxy.port = 1080;
         let bytes = to_bytes(&tampered).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
-        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+        assert!(
+            matches!(err, PolicyError::Signature(SignatureError::Verification)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn an_empty_allow_names_is_omitted_from_the_canonical_form() {
         // The skip-if-empty keeps a name-free policy's bytes identical to before
         // the field existed, so existing signatures stay valid.
-        let canon = String::from_utf8(canonical::canonical_bytes(&sample_policy()).expect("canon")).expect("utf8");
-        assert!(!canon.contains("allow_names"), "empty allow_names must not serialise");
+        let canon = String::from_utf8(canonical::canonical_bytes(&sample_policy()).expect("canon"))
+            .expect("utf8");
+        assert!(
+            !canon.contains("allow_names"),
+            "empty allow_names must not serialise"
+        );
     }
 
     #[test]
@@ -317,7 +392,10 @@ mod tests {
         let b = canonical::canonical_bytes(&p).expect("canon b");
         assert_eq!(a, b, "canonical form must be deterministic");
         let text = String::from_utf8(a).expect("utf8");
-        assert!(!text.contains("[signature]"), "signature must not be in the canonical form");
+        assert!(
+            !text.contains("[signature]"),
+            "signature must not be in the canonical form"
+        );
     }
 
     #[test]
@@ -328,7 +406,10 @@ mod tests {
         doc.policy.effective_policy.net.mode = NetMode::Open;
         let bytes = to_bytes(&doc).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("must reject");
-        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+        assert!(
+            matches!(err, PolicyError::Signature(SignatureError::Verification)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -338,7 +419,10 @@ mod tests {
         let bytes = to_bytes(&doc).expect("serialise");
         let empty = KeySet::new();
         let err = verify_settled(&bytes, &empty).expect_err("must reject");
-        assert!(matches!(err, PolicyError::Signature(SignatureError::UnknownKey(_))), "got {err:?}");
+        assert!(
+            matches!(err, PolicyError::Signature(SignatureError::UnknownKey(_))),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -349,7 +433,10 @@ mod tests {
         // A different keypair registered under the same key_id.
         let imposter = SigningKey::from_seed("kennel-maint-2026-01", &[9u8; 32]).expect("seed");
         let err = verify_settled(&bytes, &keyset_for(&imposter)).expect_err("must reject");
-        assert!(matches!(err, PolicyError::Signature(SignatureError::Verification)), "got {err:?}");
+        assert!(
+            matches!(err, PolicyError::Signature(SignatureError::Verification)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -374,6 +461,9 @@ mod tests {
         let doc = sign_settled(&p, &key).expect("sign");
         let bytes = to_bytes(&doc).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("must reject");
-        assert!(matches!(err, PolicyError::UnsupportedSchemaVersion { .. }), "got {err:?}");
+        assert!(
+            matches!(err, PolicyError::UnsupportedSchemaVersion { .. }),
+            "got {err:?}"
+        );
     }
 }

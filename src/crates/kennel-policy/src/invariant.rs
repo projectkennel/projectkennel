@@ -18,7 +18,10 @@ pub struct InvariantViolation {
 
 impl InvariantViolation {
     fn new(id: &'static str, detail: impl Into<String>) -> Self {
-        Self { id, detail: detail.into() }
+        Self {
+            id,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -48,15 +51,24 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
         v.push(InvariantViolation::new("exec.deny_setcap", "must be true"));
     }
     if !ep.exec.deny_writable {
-        v.push(InvariantViolation::new("exec.deny_writable", "must be true"));
+        v.push(InvariantViolation::new(
+            "exec.deny_writable",
+            "must be true",
+        ));
     }
     if !ep.fs.home_shadow {
-        v.push(InvariantViolation::new("fs.home.shadow", "the home shim is mandatory"));
+        v.push(InvariantViolation::new(
+            "fs.home.shadow",
+            "the home shim is mandatory",
+        ));
     }
     if !ep.fs.shim_root.starts_with(SHIM_ROOT_PREFIX) {
         v.push(InvariantViolation::new(
             "fs.home.shim_root",
-            format!("must be under {SHIM_ROOT_PREFIX}, got `{}`", ep.fs.shim_root),
+            format!(
+                "must be under {SHIM_ROOT_PREFIX}, got `{}`",
+                ep.fs.shim_root
+            ),
         ));
     }
     // net.mode is structurally constrained to constrained|open (no

@@ -43,8 +43,13 @@ pub enum SocksError {
 impl fmt::Display for SocksError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HostTooLong(n) => write!(f, "destination host is {n} bytes, exceeds SOCKS5's 255"),
-            Self::BadMethod(m) => write!(f, "proxy selected unsupported auth method 0x{m:02x} (want no-auth)"),
+            Self::HostTooLong(n) => {
+                write!(f, "destination host is {n} bytes, exceeds SOCKS5's 255")
+            }
+            Self::BadMethod(m) => write!(
+                f,
+                "proxy selected unsupported auth method 0x{m:02x} (want no-auth)"
+            ),
             Self::BadReply => write!(f, "malformed SOCKS5 reply from the proxy"),
             Self::Refused(c) => write!(f, "proxy refused CONNECT with SOCKS5 reply code 0x{c:02x}"),
         }
@@ -108,8 +113,8 @@ pub const fn check_method_selection(reply: [u8; 2]) -> Result<(), SocksError> {
 #[must_use]
 pub const fn reply_tail_len(atyp: u8, domain_len_byte: u8) -> Option<usize> {
     match atyp {
-        0x01 => Some(6),                                          // IPv4 (4) + port (2)
-        0x04 => Some(18),                                         // IPv6 (16) + port (2)
+        0x01 => Some(6),                                            // IPv4 (4) + port (2)
+        0x04 => Some(18),                                           // IPv6 (16) + port (2)
         0x03 => Some((domain_len_byte as usize).saturating_add(3)), // len byte + domain + port
         _ => None,
     }
@@ -165,7 +170,10 @@ mod tests {
     #[test]
     fn an_overlong_host_is_rejected() {
         let long = "a".repeat(256);
-        assert_eq!(connect_request(&long, 22), Err(SocksError::HostTooLong(256)));
+        assert_eq!(
+            connect_request(&long, 22),
+            Err(SocksError::HostTooLong(256))
+        );
         // 255 is the boundary that still fits.
         assert!(connect_request(&"a".repeat(255), 22).is_ok());
     }
@@ -173,16 +181,34 @@ mod tests {
     #[test]
     fn method_selection_requires_no_auth() {
         assert!(check_method_selection([0x05, 0x00]).is_ok());
-        assert_eq!(check_method_selection([0x05, 0x02]), Err(SocksError::BadMethod(0x02)));
-        assert_eq!(check_method_selection([0x05, 0xff]), Err(SocksError::BadMethod(0xff)));
-        assert_eq!(check_method_selection([0x04, 0x00]), Err(SocksError::BadReply));
+        assert_eq!(
+            check_method_selection([0x05, 0x02]),
+            Err(SocksError::BadMethod(0x02))
+        );
+        assert_eq!(
+            check_method_selection([0x05, 0xff]),
+            Err(SocksError::BadMethod(0xff))
+        );
+        assert_eq!(
+            check_method_selection([0x04, 0x00]),
+            Err(SocksError::BadReply)
+        );
     }
 
     #[test]
     fn reply_header_distinguishes_success_refusal_and_garbage() {
-        assert_eq!(check_reply_header(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0]), Ok(0x01));
-        assert_eq!(check_reply_header(&[0x05, 0x02, 0x00, 0x01]), Err(SocksError::Refused(0x02)));
-        assert_eq!(check_reply_header(&[0x04, 0x00, 0x00, 0x01]), Err(SocksError::BadReply));
+        assert_eq!(
+            check_reply_header(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0]),
+            Ok(0x01)
+        );
+        assert_eq!(
+            check_reply_header(&[0x05, 0x02, 0x00, 0x01]),
+            Err(SocksError::Refused(0x02))
+        );
+        assert_eq!(
+            check_reply_header(&[0x04, 0x00, 0x00, 0x01]),
+            Err(SocksError::BadReply)
+        );
         assert_eq!(check_reply_header(&[0x05]), Err(SocksError::BadReply));
     }
 

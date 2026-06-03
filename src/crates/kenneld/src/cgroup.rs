@@ -25,8 +25,12 @@ const KENNEL_PREFIX: &str = "kennel-";
 /// if it has no cgroup v2 (`0::…`) line (the host is not cgroup-v2-unified).
 pub fn self_cgroup() -> io::Result<PathBuf> {
     let content = std::fs::read_to_string("/proc/self/cgroup")?;
-    parse_self_cgroup(&content)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no cgroup v2 line in /proc/self/cgroup"))
+    parse_self_cgroup(&content).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no cgroup v2 line in /proc/self/cgroup",
+        )
+    })
 }
 
 /// Parse the unified-hierarchy (`0::<path>`) line out of `/proc/self/cgroup`
@@ -78,20 +82,28 @@ mod tests {
         let content = "0::/user.slice/user-1000.slice/user@1000.service/kenneld.service\n";
         assert_eq!(
             parse_self_cgroup(content),
-            Some(PathBuf::from("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/kenneld.service"))
+            Some(PathBuf::from(
+                "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/kenneld.service"
+            ))
         );
     }
 
     #[test]
     fn root_cgroup_resolves_to_the_mount() {
-        assert_eq!(parse_self_cgroup("0::/\n"), Some(PathBuf::from(CGROUP_MOUNT)));
+        assert_eq!(
+            parse_self_cgroup("0::/\n"),
+            Some(PathBuf::from(CGROUP_MOUNT))
+        );
     }
 
     #[test]
     fn picks_the_v2_line_among_v1_lines() {
         // A hybrid /proc/self/cgroup: v1 controller lines, then the unified line.
         let content = "2:cpu,cpuacct:/foo\n1:name=systemd:/bar\n0::/baz\n";
-        assert_eq!(parse_self_cgroup(content), Some(PathBuf::from("/sys/fs/cgroup/baz")));
+        assert_eq!(
+            parse_self_cgroup(content),
+            Some(PathBuf::from("/sys/fs/cgroup/baz"))
+        );
     }
 
     #[test]
@@ -114,7 +126,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         kill_cgroup(&dir).expect("write cgroup.kill");
-        assert_eq!(std::fs::read_to_string(dir.join("cgroup.kill")).expect("read"), "1");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cgroup.kill")).expect("read"),
+            "1"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

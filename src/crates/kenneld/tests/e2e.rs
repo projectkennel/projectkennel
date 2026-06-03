@@ -33,14 +33,14 @@ use std::process::Command;
 use std::time::Duration;
 
 use kennel_policy::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy, NetMode, NetPolicy,
-    NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction, SeccompPolicy, SettledPolicy, SigningKey,
-    TmpPolicy, TtlAction,
+    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
+    NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
+    SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
 };
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_spawn::{prepare, RuntimeSubstitutions};
-use kenneld::{start, EtcSetup, Error, HelperClient, Privileged, ProxySetup, Spec, UnixPrep};
+use kenneld::{start, Error, EtcSetup, HelperClient, Privileged, ProxySetup, Spec, UnixPrep};
 
 /// The operator's allocation, matching the `/etc/kennel/subkennel` line the runner
 /// provisions for the test uid: `<uid>:42:0000000002:kennel-dev`.
@@ -63,14 +63,22 @@ fn sibling_binary(name: &str) -> PathBuf {
 /// runtime skip when the first privileged op fails.
 fn privhelper_path() -> PathBuf {
     let path = sibling_binary("kennel-privhelper");
-    assert!(path.exists(), "privhelper not found at {} — run src/tools/unprivileged-e2e.sh", path.display());
+    assert!(
+        path.exists(),
+        "privhelper not found at {} — run src/tools/unprivileged-e2e.sh",
+        path.display()
+    );
     path
 }
 
 /// The netproxy binary; built by the runner (`cargo build -p kennel-netproxy`).
 fn netproxy_path() -> PathBuf {
     let path = sibling_binary("kennel-netproxy");
-    assert!(path.exists(), "netproxy not found at {} — run src/tools/unprivileged-e2e.sh", path.display());
+    assert!(
+        path.exists(),
+        "netproxy not found at {} — run src/tools/unprivileged-e2e.sh",
+        path.display()
+    );
     path
 }
 
@@ -102,7 +110,9 @@ fn own_cgroup_base() -> Option<PathBuf> {
 /// group (then the test proves default drop-all instead).
 fn pick_granted_group() -> Option<u32> {
     let primary = kennel_syscall::unistd::real_gid();
-    kennel_syscall::unistd::supplementary_groups().into_iter().find(|&g| g != primary)
+    kennel_syscall::unistd::supplementary_groups()
+        .into_iter()
+        .find(|&g| g != primary)
 }
 
 /// Whether something accepts TCP connections at `addr`, retried briefly to let the
@@ -154,7 +164,11 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                     format!("{}/kennel-e2e/granted", home.display()),
                 ],
                 write: Vec::new(),
-                tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
+                tmp: TmpPolicy {
+                    private: true,
+                    size_mib: 512,
+                    mode: "0700".to_owned(),
+                },
                 dev: DevPolicy { allow: dev_allow() },
             },
             exec: ExecPolicy {
@@ -164,10 +178,19 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 deny_writable: true,
                 allow: Vec::new(),
             },
-            proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
+            proc: ProcPolicy {
+                visibility: ProcVisibility::SelfOnly,
+                hidepid: true,
+            },
             cap: CapPolicy { no_new_privs: true },
-            seccomp: SeccompPolicy { deny_action: SeccompAction::Errno, deny: Vec::new() },
-            lifecycle: LifecyclePolicy { ttl_seconds: None, ttl_action: TtlAction::Warn },
+            seccomp: SeccompPolicy {
+                deny_action: SeccompAction::Errno,
+                deny: Vec::new(),
+            },
+            lifecycle: LifecyclePolicy {
+                ttl_seconds: None,
+                ttl_action: TtlAction::Warn,
+            },
         },
         provenance: Provenance {
             compiler_version: "0.0.0".to_owned(),
@@ -175,7 +198,10 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             threat_catalogue_version: "0.1".to_owned(),
             leaf_policy_sha256: "00".to_owned(),
             invariant_set_sha256: "00".to_owned(),
-            install_constants: InstallConstants { tag: 9, ula_gid: "fd00::".to_owned() },
+            install_constants: InstallConstants {
+                tag: 9,
+                ula_gid: "fd00::".to_owned(),
+            },
             resolved_artifacts: Vec::new(),
         },
         ssh: kennel_policy::SshRuntime::default(),
@@ -200,7 +226,10 @@ fn dev_allow() -> Vec<String> {
 fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let uid = kennel_syscall::unistd::real_uid();
     let gid = kennel_syscall::unistd::real_gid();
-    assert_ne!(uid, 0, "this is the UNPRIVILEGED vertical — run it as the operator, not root (see the runner)");
+    assert_ne!(
+        uid, 0,
+        "this is the UNPRIVILEGED vertical — run it as the operator, not root (see the runner)"
+    );
 
     // Prerequisite 1: the operator must have an /etc/kennel/subkennel allocation
     // matching TEST_* (the runner provisions it). Without it the privhelper has no
@@ -241,7 +270,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let signed = kennel_policy::sign_settled(&minimal_policy(&home), &key).expect("sign");
     let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
     let mut keys = kennel_policy::KeySet::new();
-    keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
+    keys.insert(key.key_id(), &key.public_key_bytes())
+        .expect("trust key");
 
     let subst = RuntimeSubstitutions {
         ctx,
@@ -255,7 +285,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     // override (unlike the legacy root scenario) — PID is unshared inside the seal's
     // child, never in this harness, so the harness's own forks are undisturbed.
     assert!(
-        plan.namespaces.contains(kennel_syscall::namespace::Namespaces::USER),
+        plan.namespaces
+            .contains(kennel_syscall::namespace::Namespaces::USER),
         "the production plan unshares a user namespace (the unprivileged foundation)"
     );
 
@@ -285,10 +316,16 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
 
     // Best-effort: clear any leftover loopback addresses a prior interrupted run left
     // (via the privhelper — unprivileged `ip addr del` cannot).
-    let v4 = loopback_v4(scope.tag(), u8::try_from(ctx).expect("ctx fits u8 for a v4 kennel"), kenneld::PROXY_HOST);
+    let v4 = loopback_v4(
+        scope.tag(),
+        u8::try_from(ctx).expect("ctx fits u8 for a v4 kennel"),
+        kenneld::PROXY_HOST,
+    );
     let v6 = loopback_v6(scope.ula_gid(), ctx, u64::from(kenneld::PROXY_HOST));
     let _ = helper.del_address(ctx, "lo", v4.into(), V4_PREFIX);
-    let _ = Command::new("pkill").args(["-x", "kennel-netproxy"]).output();
+    let _ = Command::new("pkill")
+        .args(["-x", "kennel-netproxy"])
+        .output();
 
     // The granted ~ subdir (with a file) and a non-granted sibling, under the real
     // home. In the view the granted path remaps beneath the shim root; the sibling
@@ -302,13 +339,22 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
 
     // SSH egress (§7.8): mint a synthetic key + ~/.ssh, exactly as
     // `Shared::register_ssh` does, and hand it to the bring-up via `Spec.ssh`.
-    let synth_pub =
-        kenneld::ssh::mint_synthetic_key(&ssh_stage, "id_github.com", "e2e synthetic").expect("mint synthetic");
-    assert!(synth_pub.starts_with("ssh-ed25519 "), "minted a synthetic ed25519 key");
+    let synth_pub = kenneld::ssh::mint_synthetic_key(&ssh_stage, "id_github.com", "e2e synthetic")
+        .expect("mint synthetic");
+    assert!(
+        synth_pub.starts_with("ssh-ed25519 "),
+        "minted a synthetic ed25519 key"
+    );
     let socks_bin = sibling_binary("kennel-socks-connect");
-    assert!(socks_bin.exists(), "build kennel-socks-connect (the runner does)");
+    assert!(
+        socks_bin.exists(),
+        "build kennel-socks-connect (the runner does)"
+    );
     let bastion_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey";
-    let host_grants = [kenneld::ssh::HostGrant { host: "github.com", key_file: "id_github.com" }];
+    let host_grants = [kenneld::ssh::HostGrant {
+        host: "github.com",
+        key_file: "id_github.com",
+    }];
     let socks_str = socks_bin.to_string_lossy().into_owned();
     let ssh_params = kenneld::ssh::SshParams {
         bastion_host: "127.0.0.1",
@@ -318,7 +364,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         hosts: &host_grants,
     };
     let ssh_dir = PathBuf::from("/run/kennel/e2e/.ssh");
-    let ssh_binds = kenneld::ssh::materialize(&ssh_stage, &ssh_dir, &ssh_params).expect("materialise ~/.ssh");
+    let ssh_binds =
+        kenneld::ssh::materialize(&ssh_stage, &ssh_dir, &ssh_params).expect("materialise ~/.ssh");
     let ssh_prep = kenneld::SshPrep {
         file_binds: ssh_binds,
         host_service: Some("127.0.0.1:8031".parse().expect("addr")),
@@ -340,7 +387,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         }
     });
     let unix_prep = UnixPrep {
-        socket_binds: vec![(unix_sock.clone(), PathBuf::from("/run/kennel/e2e/kennel-unix.sock"))],
+        socket_binds: vec![(
+            unix_sock.clone(),
+            PathBuf::from("/run/kennel/e2e/kennel-unix.sock"),
+        )],
         env: Vec::new(),
     };
 
@@ -350,7 +400,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         scope,
         plan,
         net: minimal_policy(&home).effective_policy.net,
-        proxy: Some(ProxySetup { binary: netproxy_path(), config_dir: proxy_cfg.clone() }),
+        proxy: Some(ProxySetup {
+            binary: netproxy_path(),
+            config_dir: proxy_cfg.clone(),
+        }),
         etc: Some(EtcSetup {
             staging_dir: etc_base.join("etc-1"),
             hostname: "e2e".to_owned(),
@@ -360,7 +413,9 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             uid,
             gid,
             home: PathBuf::from("/run/kennel/e2e"),
-            groups: granted.map(|g| vec![(GRANTED_GROUP_NAME.to_owned(), g)]).unwrap_or_default(),
+            groups: granted
+                .map(|g| vec![(GRANTED_GROUP_NAME.to_owned(), g)])
+                .unwrap_or_default(),
         }),
         view_root: Some(view_root.clone()),
         audit_path: Some(audit_path.clone()),
@@ -374,29 +429,52 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let started = start(&helper, spec, &mut workload);
     // Prerequisite skips, never a false pass:
     if let Some(reason) = userns_skip_reason(&started) {
-        cleanup_paths(&[&proxy_cfg, &etc_base, &view_root, &ssh_stage], &home_test, &unix_sock);
+        cleanup_paths(
+            &[&proxy_cfg, &etc_base, &view_root, &ssh_stage],
+            &home_test,
+            &unix_sock,
+        );
         let _ = std::fs::remove_dir(&base);
         eprintln!("SKIP: {reason}");
         return;
     }
     if let Some(reason) = privhelper_skip_reason(&started) {
-        cleanup_paths(&[&proxy_cfg, &etc_base, &view_root, &ssh_stage], &home_test, &unix_sock);
+        cleanup_paths(
+            &[&proxy_cfg, &etc_base, &view_root, &ssh_stage],
+            &home_test,
+            &unix_sock,
+        );
         let _ = std::fs::remove_dir(&base);
         eprintln!("SKIP: {reason}");
         return;
     }
     let kennel = started.expect("start kennel");
-    assert!(cgroup.is_dir(), "the kennel cgroup should exist while running");
+    assert!(
+        cgroup.is_dir(),
+        "the kennel cgroup should exist while running"
+    );
 
     // The loopback v4 address (127 | tag | ctx | host 1) should be present.
-    assert!(lo_has(&v4.to_string()), "the kennel's loopback address {v4} should be added");
+    assert!(
+        lo_has(&v4.to_string()),
+        "the kennel's loopback address {v4} should be added"
+    );
     let proxy_addr = format!("{v4}:1080");
-    assert!(listening(&proxy_addr), "the egress proxy should be listening on {proxy_addr}");
+    assert!(
+        listening(&proxy_addr),
+        "the egress proxy should be listening on {proxy_addr}"
+    );
     let proxy_addr6 = format!("[{v6}]:1080");
-    assert!(listening(&proxy_addr6), "the egress proxy should be listening on {proxy_addr6}");
+    assert!(
+        listening(&proxy_addr6),
+        "the egress proxy should be listening on {proxy_addr6}"
+    );
     let proxy_config = proxy_cfg.join(format!("proxy-{ctx}.toml"));
     assert!(proxy_config.exists(), "the proxy config should be written");
-    assert!(audit_path.parent().is_some_and(Path::exists), "the audit log directory should be created");
+    assert!(
+        audit_path.parent().is_some_and(Path::exists),
+        "the audit log directory should be created"
+    );
 
     let status = kennel.stop(&helper).expect("stop");
     assert!(
@@ -406,12 +484,28 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     );
 
     assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
-    assert!(!lo_has(&v4.to_string()), "the loopback address should be removed on teardown");
-    assert!(!quick_connect(&proxy_addr), "the proxy should be killed on teardown");
-    assert!(!view_root.exists(), "the view staging mountpoint should be removed on teardown");
-    assert!(audit_base.exists(), "the audit log directory should survive teardown");
+    assert!(
+        !lo_has(&v4.to_string()),
+        "the loopback address should be removed on teardown"
+    );
+    assert!(
+        !quick_connect(&proxy_addr),
+        "the proxy should be killed on teardown"
+    );
+    assert!(
+        !view_root.exists(),
+        "the view staging mountpoint should be removed on teardown"
+    );
+    assert!(
+        audit_base.exists(),
+        "the audit log directory should survive teardown"
+    );
 
-    cleanup_paths(&[&proxy_cfg, &etc_base, &audit_base, &ssh_stage], &home_test, &unix_sock);
+    cleanup_paths(
+        &[&proxy_cfg, &etc_base, &audit_base, &ssh_stage],
+        &home_test,
+        &unix_sock,
+    );
     let _ = std::fs::remove_dir(&base);
 }
 
@@ -477,8 +571,9 @@ fn userns_skip_reason(started: &Result<kenneld::Kennel, Error>) -> Option<String
     let Err(Error::Spawn(kennel_spawn::SpawnError::Syscall(e))) = started else {
         return None;
     };
-    let restricted = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-        .is_ok_and(|s| s.trim() == "1");
+    let restricted =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|s| s.trim() == "1");
     if e.kind() == std::io::ErrorKind::PermissionDenied && restricted {
         Some(format!(
             "userns created but capability-stripped — kernel.apparmor_restrict_unprivileged_userns=1 and \
@@ -511,7 +606,10 @@ fn subkennel_has_line(uid: u32) -> bool {
 
 /// Whether `addr` appears on the loopback interface.
 fn lo_has(addr: &str) -> bool {
-    let out = Command::new("ip").args(["addr", "show", "dev", "lo"]).output().expect("run ip");
+    let out = Command::new("ip")
+        .args(["addr", "show", "dev", "lo"])
+        .output()
+        .expect("run ip");
     String::from_utf8_lossy(&out.stdout).contains(addr)
 }
 

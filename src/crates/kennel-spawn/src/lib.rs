@@ -132,7 +132,10 @@ fn reject_leftover(field: &str, value: &str) -> Result<(), SpawnError> {
 ///
 /// Returns [`SpawnError::UnsubstitutedPlaceholder`] if a path field still
 /// contains a `<…>` token after substitution.
-pub fn substitute(policy: &SettledPolicy, subst: &RuntimeSubstitutions) -> Result<SettledPolicy, SpawnError> {
+pub fn substitute(
+    policy: &SettledPolicy,
+    subst: &RuntimeSubstitutions,
+) -> Result<SettledPolicy, SpawnError> {
     let mut p = policy.clone();
     let fs = &mut p.effective_policy.fs;
 
@@ -162,7 +165,11 @@ pub fn substitute(policy: &SettledPolicy, subst: &RuntimeSubstitutions) -> Resul
 ///
 /// Returns [`SpawnError::Policy`] if verification fails, or
 /// [`SpawnError::UnsubstitutedPlaceholder`] if a placeholder is unresolved.
-pub fn prepare(bytes: &[u8], keys: &KeySet, subst: &RuntimeSubstitutions) -> Result<Plan, SpawnError> {
+pub fn prepare(
+    bytes: &[u8],
+    keys: &KeySet,
+    subst: &RuntimeSubstitutions,
+) -> Result<Plan, SpawnError> {
     let verified = kennel_policy::verify_settled(bytes, keys)?;
     let substituted = substitute(&verified, subst)?;
     Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
@@ -247,7 +254,11 @@ type GidMapper<'a> = Box<dyn FnOnce(u32) -> io::Result<()> + Send + 'a>;
 ///
 /// As [`spawn`], plus [`SpawnError::Syscall`] carrying `map_gids`'s error if the
 /// privileged map write fails.
-pub fn spawn_with_gid_map<F>(plan: &Plan, command: &mut Command, map_gids: F) -> Result<Child, SpawnError>
+pub fn spawn_with_gid_map<F>(
+    plan: &Plan,
+    command: &mut Command,
+    map_gids: F,
+) -> Result<Child, SpawnError>
 where
     F: FnOnce(u32) -> io::Result<()> + Send,
 {
@@ -257,7 +268,14 @@ where
 /// The shared body of [`spawn`] and [`spawn_with_gid_map`]. With `mapper` `Some`
 /// and a userns plan, the spawn child defers its `gid_map` and the handshake runs;
 /// otherwise the child writes its own single-line `gid_map` and `mapper` is unused.
-fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>) -> Result<Child, SpawnError> {
+// allow: one cohesive seal builder — the pre-fork captures, the two seal closures,
+// and the dispatch belong together; splitting them would scatter the post-fork contract.
+#[allow(clippy::too_many_lines)]
+fn spawn_inner(
+    plan: &Plan,
+    command: &mut Command,
+    mapper: Option<GidMapper<'_>>,
+) -> Result<Child, SpawnError> {
     // Build the seccomp filter in the parent (allocation off the seal path). An
     // empty denylist means "no seccomp filter" (rely on Landlock + the cgroup BPF).
     let filter = if plan.seccomp_deny.is_empty() {
@@ -270,8 +288,9 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
     // namespace, a policy-derived view, and a runtime staging root. Without all
     // three we keep the in-place fallback seal (fresh `/proc` + private `/tmp` +
     // single-file shadow binds), which is also the unprivileged/no-namespace path.
-    let pivoting =
-        plan.namespaces.contains(Namespaces::MOUNT) && plan.view.is_some() && plan.new_root.is_some();
+    let pivoting = plan.namespaces.contains(Namespaces::MOUNT)
+        && plan.view.is_some()
+        && plan.new_root.is_some();
 
     // Build the Landlock ruleset in the parent ONLY when not pivoting: there the
     // granted paths resolve to the host inodes the child still sees. When
@@ -281,7 +300,10 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
     let mut parent_ruleset = if pivoting {
         None
     } else {
-        Some(build_ruleset(&plan.landlock_fs, &plan.landlock_net, false).map_err(SpawnError::Syscall)?)
+        Some(
+            build_ruleset(&plan.landlock_fs, &plan.landlock_net, false)
+                .map_err(SpawnError::Syscall)?,
+        )
     };
 
     // The unprivileged path (production): a plan that unshares USER builds the
@@ -427,7 +449,10 @@ fn spawn_inner(plan: &Plan, command: &mut Command, mapper: Option<GidMapper<'_>>
             } else {
                 // Default path: the single-line identity `gid_map` drops every
                 // inherited supplementary group to the overflow gid, for free.
-                kennel_syscall::namespace::establish_identity_userns(uid, kennel_syscall::unistd::real_gid())?;
+                kennel_syscall::namespace::establish_identity_userns(
+                    uid,
+                    kennel_syscall::unistd::real_gid(),
+                )?;
             }
             // Unshare mount/IPC/PID here; the PID unshare only takes effect for the
             // next fork, so fork the PID-1 grandchild that runs the inner seal and
@@ -506,8 +531,11 @@ where
     std::thread::scope(|s| {
         // The closure owns the fds (so they live for, and close at, the handshake's
         // end) and lends borrows to the servicer.
-        let servicer = s.spawn(move || gid_map_servicer(ready_r.as_fd(), proceed_w.as_fd(), cancel_ref, map_gids));
-        let spawned = kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall);
+        let servicer = s.spawn(move || {
+            gid_map_servicer(ready_r.as_fd(), proceed_w.as_fd(), cancel_ref, map_gids)
+        });
+        let spawned =
+            kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall);
         if spawned.is_err() {
             // Wake the servicer if the child never signalled (it failed early).
             cancel.store(true, Ordering::Relaxed);
@@ -549,7 +577,10 @@ fn gid_map_servicer(
 /// success. If the spawn failed: when the servicer reports `BrokenPipe` the child
 /// failed before signalling, so the spawn error is the root cause; any other
 /// servicer error is a genuine map-write refusal and is the more informative cause.
-fn combine_spawn_and_servicer(spawned: Result<Child, SpawnError>, serviced: io::Result<()>) -> Result<Child, SpawnError> {
+fn combine_spawn_and_servicer(
+    spawned: Result<Child, SpawnError>,
+    serviced: io::Result<()>,
+) -> Result<Child, SpawnError> {
     match (spawned, serviced) {
         (Ok(child), _) => Ok(child),
         (Err(spawn_err), Ok(())) => Err(spawn_err),
@@ -568,7 +599,11 @@ fn combine_spawn_and_servicer(spawned: Result<Child, SpawnError>, serviced: io::
 /// constructed view — is skipped rather than failing the build; a grant for a
 /// path the view does not contain is vacuous. The seal builds with `skip_missing`
 /// after `pivot_root`; the fallback path builds in the parent without it.
-fn build_ruleset(fs: &[(PathBuf, AccessFs)], net: &[(u16, AccessNet)], skip_missing: bool) -> io::Result<Ruleset> {
+fn build_ruleset(
+    fs: &[(PathBuf, AccessFs)],
+    net: &[(u16, AccessNet)],
+    skip_missing: bool,
+) -> io::Result<Ruleset> {
     let mut ruleset = Ruleset::new()?;
     for (path, access) in fs {
         match ruleset.allow_path(path, *access) {
@@ -597,7 +632,11 @@ fn build_ruleset(fs: &[(PathBuf, AccessFs)], net: &[(u16, AccessNet)], skip_miss
 /// old root.
 ///
 /// [`make_root_private`]: kennel_syscall::mount::make_root_private
-fn build_view_and_pivot(view: &ShimView, new_root: &Path, file_binds: &[(PathBuf, PathBuf)]) -> io::Result<()> {
+fn build_view_and_pivot(
+    view: &ShimView,
+    new_root: &Path,
+    file_binds: &[(PathBuf, PathBuf)],
+) -> io::Result<()> {
     use kennel_syscall::mount;
 
     // Map an absolute in-kennel path to its staging location under `new_root`.
@@ -739,7 +778,8 @@ pub fn attach_egress(
         let l = kennel_bpf::load_program(elf, spec, kennel_bpf::KENNEL_MAPS)
             .map_err(SpawnError::Syscall)?;
         populate_egress_maps(&l, plan)?;
-        l.attach(cgroup, spec.attach_type).map_err(SpawnError::Syscall)?;
+        l.attach(cgroup, spec.attach_type)
+            .map_err(SpawnError::Syscall)?;
         loaded.push(l);
     }
     Ok(loaded)
@@ -752,27 +792,40 @@ fn populate_egress_maps(loaded: &kennel_bpf::Loaded, plan: &Plan) -> Result<(), 
 
     if loaded.maps.contains_key("kennel_meta_map") {
         loaded
-            .update_map("kennel_meta_map", &0u32.to_ne_bytes(), &plan.bpf_meta, BPF_ANY)
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &plan.bpf_meta,
+                BPF_ANY,
+            )
             .map_err(SpawnError::Syscall)?;
     }
     if loaded.maps.contains_key("allow_v4") {
         for (key, value) in &plan.bpf_allow_v4 {
-            loaded.update_map("allow_v4", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+            loaded
+                .update_map("allow_v4", key, value, BPF_ANY)
+                .map_err(SpawnError::Syscall)?;
         }
     }
     if loaded.maps.contains_key("deny_v4") {
         for (key, value) in &plan.bpf_deny_v4 {
-            loaded.update_map("deny_v4", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+            loaded
+                .update_map("deny_v4", key, value, BPF_ANY)
+                .map_err(SpawnError::Syscall)?;
         }
     }
     if loaded.maps.contains_key("allow_v6") {
         for (key, value) in &plan.bpf_allow_v6 {
-            loaded.update_map("allow_v6", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+            loaded
+                .update_map("allow_v6", key, value, BPF_ANY)
+                .map_err(SpawnError::Syscall)?;
         }
     }
     if loaded.maps.contains_key("deny_v6") {
         for (key, value) in &plan.bpf_deny_v6 {
-            loaded.update_map("deny_v6", key, value, BPF_ANY).map_err(SpawnError::Syscall)?;
+            loaded
+                .update_map("deny_v6", key, value, BPF_ANY)
+                .map_err(SpawnError::Syscall)?;
         }
     }
     Ok(())
@@ -802,25 +855,64 @@ mod tests {
                     mode: NetMode::Constrained,
                     proxy: kennel_policy::ProxyListen::default(),
                     allow: vec![
-                        NetRule { cidr: "93.184.216.0".to_owned(), prefix_len: 24, port_min: 443, port_max: 443, protocol: Protocol::Tcp },
-                        NetRule { cidr: "10.1.0.0".to_owned(), prefix_len: 16, port_min: 1024, port_max: 2048, protocol: Protocol::Tcp },
+                        NetRule {
+                            cidr: "93.184.216.0".to_owned(),
+                            prefix_len: 24,
+                            port_min: 443,
+                            port_max: 443,
+                            protocol: Protocol::Tcp,
+                        },
+                        NetRule {
+                            cidr: "10.1.0.0".to_owned(),
+                            prefix_len: 16,
+                            port_min: 1024,
+                            port_max: 2048,
+                            protocol: Protocol::Tcp,
+                        },
                     ],
                     allow_names: Vec::new(),
-                    deny_invariant: vec![NetRule { cidr: "169.254.169.254".to_owned(), prefix_len: 32, port_min: 0, port_max: 65535, protocol: Protocol::Any }],
+                    deny_invariant: vec![NetRule {
+                        cidr: "169.254.169.254".to_owned(),
+                        prefix_len: 32,
+                        port_min: 0,
+                        port_max: 65535,
+                        protocol: Protocol::Any,
+                    }],
                 },
                 fs: FsPolicy {
                     home_shadow: true,
                     shim_root: "/run/kennel/<kennel>".to_owned(),
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
-                    tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
-                    dev: DevPolicy { allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()] },
+                    tmp: TmpPolicy {
+                        private: true,
+                        size_mib: 512,
+                        mode: "0700".to_owned(),
+                    },
+                    dev: DevPolicy {
+                        allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
+                    },
                 },
-                exec: ExecPolicy { deny_setuid: true, deny_setgid: true, deny_setcap: true, deny_writable: true, allow: vec!["/usr/bin/python3".to_owned()] },
-                proc: ProcPolicy { visibility: ProcVisibility::SelfOnly, hidepid: true },
+                exec: ExecPolicy {
+                    deny_setuid: true,
+                    deny_setgid: true,
+                    deny_setcap: true,
+                    deny_writable: true,
+                    allow: vec!["/usr/bin/python3".to_owned()],
+                },
+                proc: ProcPolicy {
+                    visibility: ProcVisibility::SelfOnly,
+                    hidepid: true,
+                },
                 cap: CapPolicy { no_new_privs: true },
-                seccomp: SeccompPolicy { deny_action: SeccompAction::Errno, deny: vec!["bpf".to_owned(), "userfaultfd".to_owned()] },
-                lifecycle: LifecyclePolicy { ttl_seconds: None, ttl_action: TtlAction::Warn },
+                seccomp: SeccompPolicy {
+                    deny_action: SeccompAction::Errno,
+                    deny: vec!["bpf".to_owned(), "userfaultfd".to_owned()],
+                },
+                lifecycle: LifecyclePolicy {
+                    ttl_seconds: None,
+                    ttl_action: TtlAction::Warn,
+                },
             },
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),
@@ -828,7 +920,10 @@ mod tests {
                 threat_catalogue_version: "0.1".to_owned(),
                 leaf_policy_sha256: "00".to_owned(),
                 invariant_set_sha256: "00".to_owned(),
-                install_constants: InstallConstants { tag: 42, ula_gid: "fd00::".to_owned() },
+                install_constants: InstallConstants {
+                    tag: 42,
+                    ula_gid: "fd00::".to_owned(),
+                },
                 resolved_artifacts: Vec::new(),
             },
             ssh: kennel_policy::SshRuntime::default(),
@@ -851,8 +946,14 @@ mod tests {
     fn substitution_fills_placeholders() {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
         assert_eq!(p.effective_policy.fs.shim_root, "/run/kennel/ai-coding");
-        assert_eq!(p.effective_policy.fs.read, vec!["/usr".to_owned(), "/home/dev/.config".to_owned()]);
-        assert_eq!(p.effective_policy.fs.write, vec!["/run/kennel/ai-coding/home".to_owned()]);
+        assert_eq!(
+            p.effective_policy.fs.read,
+            vec!["/usr".to_owned(), "/home/dev/.config".to_owned()]
+        );
+        assert_eq!(
+            p.effective_policy.fs.write,
+            vec!["/run/kennel/ai-coding/home".to_owned()]
+        );
     }
 
     #[test]
@@ -883,8 +984,13 @@ mod tests {
         assert!(plan.cgroup_join, "policy-derived plans enter their cgroup");
 
         // Landlock: a read rule for each read path, a write rule for each write.
-        assert!(plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)));
-        assert!(plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/run/kennel/ai-coding/home") && acc.contains(AccessFs::WRITE_FILE)));
+        assert!(plan
+            .landlock_fs
+            .iter()
+            .any(|(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)));
+        assert!(plan.landlock_fs.iter().any(|(path, acc)| path
+            == &PathBuf::from("/run/kennel/ai-coding/home")
+            && acc.contains(AccessFs::WRITE_FILE)));
 
         // Landlock net: only the single-port (443) TCP rule; the 1024-2048 range
         // is left to BPF.
@@ -933,27 +1039,47 @@ mod tests {
         // set and is never bound from the host (but still gets a Landlock rule).
         let mut p = policy_with_placeholders();
         p.effective_policy.fs.read.push("/etc/ssl".to_owned());
-        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
-        let view = plan.view.as_ref().expect("a policy-derived plan carries a view");
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        let view = plan
+            .view
+            .as_ref()
+            .expect("a policy-derived plan carries a view");
         assert_eq!(view.shim_root, PathBuf::from("/run/kennel/ai-coding"));
 
         assert!(
-            view.binds.iter().any(|b| b.source == Path::new("/usr") && b.target == Path::new("/usr") && !b.writable),
+            view.binds.iter().any(|b| b.source == Path::new("/usr")
+                && b.target == Path::new("/usr")
+                && !b.writable),
             "system path bound at its own location, read-only"
         );
         assert!(
-            view.binds.iter().any(|b|
-                b.source == Path::new("/home/dev/.config")
+            view.binds
+                .iter()
+                .any(|b| b.source == Path::new("/home/dev/.config")
                     && b.target == Path::new("/run/kennel/ai-coding/.config")
                     && !b.writable),
             "home path remapped beneath shim_root"
         );
-        assert!(!view.binds.iter().any(|b| b.source.starts_with("/etc")), "no /etc bind: it is constructed");
         assert!(
-            plan.landlock_fs.iter().any(|(path, _)| path == &PathBuf::from("/etc/ssl")),
+            !view.binds.iter().any(|b| b.source.starts_with("/etc")),
+            "no /etc bind: it is constructed"
+        );
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, _)| path == &PathBuf::from("/etc/ssl")),
             "the constructed /etc still gets a Landlock rule"
         );
-        assert_eq!(view.dev_allow, vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/urandom")]);
+        assert_eq!(
+            view.dev_allow,
+            vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/urandom")]
+        );
         assert!(view.proc_hidepid);
     }
 
@@ -961,11 +1087,19 @@ mod tests {
     fn dev_nodes_get_landlock_read_write_ioctl() {
         // Allowlisted devices are Landlock-granted read+write+ioctl (so device
         // ioctls work on them), not merely made visible in the constructed /dev.
-        let plan = Plan::from_policy(&substitute(&policy_with_placeholders(), &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &substitute(&policy_with_placeholders(), &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         let want = AccessFs::READ_FILE | AccessFs::WRITE_FILE | AccessFs::IOCTL_DEV;
         for dev in ["/dev/null", "/dev/urandom"] {
             assert!(
-                plan.landlock_fs.iter().any(|(p, a)| p == Path::new(dev) && *a == want),
+                plan.landlock_fs
+                    .iter()
+                    .any(|(p, a)| p == Path::new(dev) && *a == want),
                 "{dev} should carry a read+write+ioctl Landlock rule"
             );
         }
@@ -976,15 +1110,28 @@ mod tests {
         // The work an agent writes must outlive the kennel: a writable grant under
         // the real $HOME binds onto the real host inode, not the ephemeral tmpfs.
         let mut p = policy_with_placeholders();
-        p.effective_policy.fs.write.push("<home>/projects/foo".to_owned());
-        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        p.effective_policy
+            .fs
+            .write
+            .push("<home>/projects/foo".to_owned());
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         let view = plan.view.as_ref().expect("view");
         let bind = view
             .binds
             .iter()
             .find(|b| b.target == Path::new("/run/kennel/ai-coding/projects/foo"))
             .expect("remapped writable bind");
-        assert_eq!(bind.source, PathBuf::from("/home/dev/projects/foo"), "writes resolve to the persistent host path");
+        assert_eq!(
+            bind.source,
+            PathBuf::from("/home/dev/projects/foo"),
+            "writes resolve to the persistent host path"
+        );
         assert!(bind.writable);
     }
 
@@ -993,8 +1140,13 @@ mod tests {
         // A non-octal mode would inject extra comma-separated tmpfs mount options.
         let mut p = policy_with_placeholders();
         p.effective_policy.fs.tmp.mode = "0700,size=10G".to_owned();
-        let err = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev"))
-            .expect_err("must reject");
+        let err = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect_err("must reject");
         assert!(matches!(err, SpawnError::InvalidPolicy(_)), "got {err:?}");
     }
 
@@ -1003,9 +1155,17 @@ mod tests {
         for bad in ["/etc/shadow", "/dev/../etc/shadow", "/dev"] {
             let mut p = policy_with_placeholders();
             p.effective_policy.fs.dev.allow = vec![bad.to_owned()];
-            let err = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev"))
-                .expect_err("must reject");
-            assert!(matches!(err, SpawnError::InvalidPolicy(_)), "{bad} should be rejected, got {err:?}");
+            let err = Plan::from_policy(
+                &substitute(&p, &subst()).expect("subst"),
+                7,
+                "kennel-dev",
+                Path::new("/home/dev"),
+            )
+            .expect_err("must reject");
+            assert!(
+                matches!(err, SpawnError::InvalidPolicy(_)),
+                "{bad} should be rejected, got {err:?}"
+            );
         }
     }
 
@@ -1019,7 +1179,13 @@ mod tests {
             port_max: 443,
             protocol: Protocol::Tcp,
         });
-        let plan = Plan::from_policy(&substitute(&p, &subst()).expect("subst"), 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
 
         // The two original rules stay v4; the new one lands in v6.
         assert_eq!(plan.bpf_allow_v4.len(), 2);
@@ -1027,7 +1193,10 @@ mod tests {
         let (key, value) = plan.bpf_allow_v6.first().expect("v6 entry");
         // lpm_v6_key: prefixlen (4 bytes) then the 16 address octets.
         assert_eq!(key.get(0..4), Some(&48u32.to_ne_bytes()[..]));
-        let octets = "2606:2800:220::".parse::<std::net::Ipv6Addr>().expect("v6").octets();
+        let octets = "2606:2800:220::"
+            .parse::<std::net::Ipv6Addr>()
+            .expect("v6")
+            .octets();
         assert_eq!(key.get(4..20), Some(&octets[..]));
         let want_val = {
             let [a, b] = 443u16.to_ne_bytes();
@@ -1047,7 +1216,11 @@ mod tests {
         let mut plan = fixture_plan();
         let v4: std::net::Ipv4Addr = "127.0.144.1".parse().expect("v4");
         let v6: std::net::Ipv6Addr = "fd00:0:0:42::1".parse().expect("v6");
-        plan.stamp_proxy(&ProxyEndpoint { v4: Some(v4), v6, port: 1080 });
+        plan.stamp_proxy(&ProxyEndpoint {
+            v4: Some(v4),
+            v6,
+            port: 1080,
+        });
 
         // proxy_addr_v4 @8 (network order = the octets).
         assert_eq!(plan.bpf_meta.get(8..12), Some(&v4.octets()[..]));
@@ -1068,7 +1241,11 @@ mod tests {
         let before_v6 = plan.bpf_allow_v6.len();
         let v4: std::net::Ipv4Addr = "127.0.144.1".parse().expect("v4");
         let v6: std::net::Ipv6Addr = "fd00:0:0:42::1".parse().expect("v6");
-        plan.stamp_proxy(&ProxyEndpoint { v4: Some(v4), v6, port: 1080 });
+        plan.stamp_proxy(&ProxyEndpoint {
+            v4: Some(v4),
+            v6,
+            port: 1080,
+        });
 
         // Exactly one entry appended to each trie; the policy rules are preserved.
         assert_eq!(plan.bpf_allow_v4.len(), before_v4 + 1);
@@ -1098,7 +1275,11 @@ mod tests {
         let mut plan = fixture_plan();
         let before_v4 = plan.bpf_allow_v4.len();
         let v6: std::net::Ipv6Addr = "fd00:0:0:42::1".parse().expect("v6");
-        plan.stamp_proxy(&ProxyEndpoint { v4: None, v6, port: 1080 });
+        plan.stamp_proxy(&ProxyEndpoint {
+            v4: None,
+            v6,
+            port: 1080,
+        });
 
         // No v4 entry added, and proxy_addr_v4 in meta stays zero.
         assert_eq!(plan.bpf_allow_v4.len(), before_v4, "no v4 proxy entry");
@@ -1141,7 +1322,10 @@ mod tests {
             cgroup_join: false, // these tests join manually / isolate other layers
             view: None,
             new_root: None,
-            landlock_fs: read_dirs.iter().map(|d| (PathBuf::from(*d), access)).collect(),
+            landlock_fs: read_dirs
+                .iter()
+                .map(|d| (PathBuf::from(*d), access))
+                .collect(),
             landlock_net: Vec::new(),
             seccomp_deny: Vec::new(), // empty => no seccomp, isolating the Landlock check
             seccomp_deny_action: Action::KillProcess,
@@ -1170,7 +1354,8 @@ mod tests {
     /// `AppArmor` `userns` profile is correctly observed as "usable").
     fn userns_hard_disabled() -> bool {
         let off = |p: &str| std::fs::read_to_string(p).is_ok_and(|s| s.trim() == "0");
-        off("/proc/sys/kernel/unprivileged_userns_clone") || off("/proc/sys/user/max_user_namespaces")
+        off("/proc/sys/kernel/unprivileged_userns_clone")
+            || off("/proc/sys/user/max_user_namespaces")
     }
 
     /// Whether `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+/24.04)
@@ -1202,6 +1387,8 @@ mod tests {
     /// the view mount a fresh `/proc`.
     ///
     /// [`fork_into_pid1`]: kennel_syscall::spawn::fork_into_pid1
+    // allow: one cohesive end-to-end proof (stage the view, spawn, assert), kept whole.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn unprivileged_userns_spawn_builds_the_confined_view() {
         use std::io::Read;
@@ -1237,11 +1424,20 @@ mod tests {
         let sys = ["/usr", "/bin", "/lib", "/lib64"];
         let mut binds: Vec<BindMount> = sys
             .iter()
-            .map(|d| BindMount { source: PathBuf::from(*d), target: PathBuf::from(*d), writable: false })
+            .map(|d| BindMount {
+                source: PathBuf::from(*d),
+                target: PathBuf::from(*d),
+                writable: false,
+            })
             .collect();
-        binds.push(BindMount { source: granted, target: shim_root.join("granted"), writable: false });
+        binds.push(BindMount {
+            source: granted,
+            target: shim_root.join("granted"),
+            writable: false,
+        });
 
-        let mut landlock_fs: Vec<(PathBuf, AccessFs)> = sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> =
+            sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
         landlock_fs.push((shim_root.clone(), ro));
         landlock_fs.push((shim_root.join("granted"), ro));
 
@@ -1300,12 +1496,24 @@ mod tests {
         }
         let mut child = spawned.expect("unprivileged userns spawn");
         let mut out = String::new();
-        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
         let status = child.wait().expect("wait");
         let _ = std::fs::remove_dir_all(&base);
 
-        assert!(status.success(), "granted readable, secret name absent, /proc live (got {status:?})");
-        assert_eq!(out.trim(), "GRANTED", "the granted file is readable through the shim");
+        assert!(
+            status.success(),
+            "granted readable, secret name absent, /proc live (got {status:?})"
+        );
+        assert_eq!(
+            out.trim(),
+            "GRANTED",
+            "the granted file is readable through the shim"
+        );
     }
 
     /// **The `gid_map` handshake, proven unprivileged (§7.2.8).** A userns spawn goes
@@ -1333,7 +1541,9 @@ mod tests {
         // The mapper stands in for kenneld driving the privhelper: it writes the
         // deferred gid_map against the child's pid. A single identity line for the
         // caller's own gid is the one an unprivileged parent may write.
-        let map_gids = move |pid: u32| std::fs::write(format!("/proc/{pid}/gid_map"), format!("{gid} {gid} 1\n"));
+        let map_gids = move |pid: u32| {
+            std::fs::write(format!("/proc/{pid}/gid_map"), format!("{gid} {gid} 1\n"))
+        };
 
         // A minimal userns plan: USER|MOUNT|IPC|PID with the in-place fallback view
         // (fresh /proc + /tmp), permissive Landlock so `id` can run, no seccomp.
@@ -1379,7 +1589,12 @@ mod tests {
         }
         let mut child = spawned.expect("userns spawn with gid_map handshake");
         let mut out = String::new();
-        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
         let status = child.wait().expect("wait");
 
         assert!(status.success(), "the workload ran (got {status:?})");
@@ -1494,14 +1709,23 @@ mod root_tests {
             .read_to_string(&mut out)
             .expect("read stdout");
         let status = child.wait().expect("wait");
-        assert!(status.success(), "the shell should have run (got {status:?})");
+        assert!(
+            status.success(),
+            "the shell should have run (got {status:?})"
+        );
 
         let out = out.trim();
         let (pid, nproc) = out.split_once(':').unwrap_or(("", ""));
-        assert_eq!(pid, "1", "in a new PID namespace the workload is PID 1 (got {out:?})");
+        assert_eq!(
+            pid, "1",
+            "in a new PID namespace the workload is PID 1 (got {out:?})"
+        );
         let nproc: usize = nproc.parse().unwrap_or(usize::MAX);
         // Host /proc would show hundreds; the isolated namespace shows a handful.
-        assert!(nproc < 20, "fresh /proc should show only the namespace's processes (saw {nproc})");
+        assert!(
+            nproc < 20,
+            "fresh /proc should show only the namespace's processes (saw {nproc})"
+        );
     }
 
     #[test]
@@ -1519,8 +1743,10 @@ mod root_tests {
         let missing = dir.join("does-not-exist");
 
         let access = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
-        let mut landlock_fs: Vec<(PathBuf, AccessFs)> =
-            ["/usr", "/bin", "/lib", "/lib64"].iter().map(|d| (PathBuf::from(*d), access)).collect();
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> = ["/usr", "/bin", "/lib", "/lib64"]
+            .iter()
+            .map(|d| (PathBuf::from(*d), access))
+            .collect();
         landlock_fs.push((dir.clone(), access));
         let plan = Plan {
             namespaces: Namespaces::MOUNT, // mount ns only: no parent PID unshare
@@ -1542,13 +1768,27 @@ mod root_tests {
         };
 
         let mut cmd = Command::new("/bin/cat");
-        cmd.arg(&target).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.arg(&target)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         let mut child = spawn(&plan, &mut cmd).expect("spawn");
         let mut out = String::new();
-        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
         let status = child.wait().expect("wait");
-        assert!(status.success(), "cat should run (got {status:?}); the missing target must be skipped");
-        assert_eq!(out.trim(), "SYNTHETIC", "the bound synthetic file shadows the target");
+        assert!(
+            status.success(),
+            "cat should run (got {status:?}); the missing target must be skipped"
+        );
+        assert_eq!(
+            out.trim(),
+            "SYNTHETIC",
+            "the bound synthetic file shadows the target"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1576,13 +1816,22 @@ mod root_tests {
         let sys = ["/usr", "/bin", "/lib", "/lib64"];
         let mut binds: Vec<BindMount> = sys
             .iter()
-            .map(|d| BindMount { source: PathBuf::from(*d), target: PathBuf::from(*d), writable: false })
+            .map(|d| BindMount {
+                source: PathBuf::from(*d),
+                target: PathBuf::from(*d),
+                writable: false,
+            })
             .collect();
         // The one granted ~ path, remapped beneath the shim root.
-        binds.push(BindMount { source: granted, target: shim_root.join("granted"), writable: false });
+        binds.push(BindMount {
+            source: granted,
+            target: shim_root.join("granted"),
+            writable: false,
+        });
 
         // Landlock rules reference the post-pivot targets (built in the seal).
-        let mut landlock_fs: Vec<(PathBuf, AccessFs)> = sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> =
+            sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
         landlock_fs.push((shim_root.clone(), ro));
         landlock_fs.push((shim_root.join("granted"), ro));
 
@@ -1622,12 +1871,24 @@ mod root_tests {
             .stderr(Stdio::null());
         let mut child = spawn(&plan, &mut cmd).expect("spawn");
         let mut out = String::new();
-        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
         let status = child.wait().expect("wait");
         let _ = std::fs::remove_dir_all(&base);
 
-        assert!(status.success(), "granted path readable and non-granted name absent (got {status:?})");
-        assert_eq!(out.trim(), "GRANTED", "the granted file is readable through the shim");
+        assert!(
+            status.success(),
+            "granted path readable and non-granted name absent (got {status:?})"
+        );
+        assert_eq!(
+            out.trim(),
+            "GRANTED",
+            "the granted file is readable through the shim"
+        );
     }
 
     use std::net::TcpListener;
@@ -1725,8 +1986,14 @@ mod root_tests {
             denied = !connect_from_cgroup(cg, port);
         });
 
-        assert!(allowed, "connect to an allowlisted destination should be permitted");
-        assert!(denied, "connect with an empty allowlist should be denied (fail closed)");
+        assert!(
+            allowed,
+            "connect to an allowlisted destination should be permitted"
+        );
+        assert!(
+            denied,
+            "connect with an empty allowlist should be denied (fail closed)"
+        );
     }
 
     #[test]
@@ -1761,11 +2028,21 @@ mod root_tests {
         };
 
         let mut cmd = Command::new("/bin/cat");
-        cmd.arg("/proc/self/cgroup").stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.arg("/proc/self/cgroup")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         let mut child = spawn(&plan, &mut cmd).expect("spawn");
         let mut out = String::new();
-        child.stdout.take().expect("piped stdout").read_to_string(&mut out).expect("read stdout");
-        assert!(child.wait().expect("wait").success(), "the workload should have run");
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
+        assert!(
+            child.wait().expect("wait").success(),
+            "the workload should have run"
+        );
 
         assert!(
             out.contains(name),

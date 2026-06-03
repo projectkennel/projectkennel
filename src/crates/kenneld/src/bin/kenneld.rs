@@ -41,9 +41,13 @@ fn run() -> Result<(), String> {
 /// Build the user's identity from kernel-trusted sources.
 fn build_identity() -> Result<Identity, String> {
     let uid = kennel_syscall::unistd::real_uid();
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
-    let scope = kennel_privhelper::alloc::load(uid).ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
-    let cgroup_base = kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set")?;
+    let scope = kennel_privhelper::alloc::load(uid)
+        .ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
+    let cgroup_base =
+        kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
     let gid = kennel_syscall::unistd::real_gid();
     // Host-side only: the SSH bastion's AuthorizedKeysCommandUser. The kennel's own
     // synthetic /etc/passwd masks the account name to `kennel` (kenneld::etc).
@@ -57,8 +61,8 @@ fn build_identity() -> Result<Identity, String> {
     // The per-kennel network audit log persists across runs, so it lives under
     // the state home (not the volatile runtime dir): ~/.local/state/kennel/<kennel>/
     // network.jsonl (§7.3.4), honouring $XDG_STATE_HOME when set.
-    let state_home = std::env::var_os("XDG_STATE_HOME")
-        .map_or_else(|| home.join(".local/state"), PathBuf::from);
+    let state_home =
+        std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), PathBuf::from);
     let audit_base = Some(state_home.join("kennel"));
     // The per-user SSH bastion (§7.8): one managed kennel-sshd for the session, on a
     // host-loopback port derived from the user's tag (so two users' daemons do not
@@ -80,5 +84,17 @@ fn build_identity() -> Result<Identity, String> {
             user: username.clone(),
         }),
     });
-    Ok(Identity { uid, gid, username, home, scope, cgroup_base, proxy, etc_base, view_base, audit_base, bastion })
+    Ok(Identity {
+        uid,
+        gid,
+        username,
+        home,
+        scope,
+        cgroup_base,
+        proxy,
+        etc_base,
+        view_base,
+        audit_base,
+        bastion,
+    })
 }

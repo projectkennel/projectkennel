@@ -105,13 +105,19 @@ pub fn parse_args(args: &[String]) -> Result<Request, ReoriginError> {
             other => return Err(ReoriginError::Args(format!("unknown argument `{other}`"))),
         };
         if slot.is_some() {
-            return Err(ReoriginError::Args(format!("`{flag}` given more than once")));
+            return Err(ReoriginError::Args(format!(
+                "`{flag}` given more than once"
+            )));
         }
-        let value = it.next().ok_or_else(|| ReoriginError::Args(format!("`{flag}` needs a value")))?;
+        let value = it
+            .next()
+            .ok_or_else(|| ReoriginError::Args(format!("`{flag}` needs a value")))?;
         // A value that looks like a flag is almost certainly an injection attempt or a
         // missing operand — refuse rather than let it bind as the next option.
         if value.starts_with('-') {
-            return Err(ReoriginError::Args(format!("`{flag}` value `{value}` looks like a flag")));
+            return Err(ReoriginError::Args(format!(
+                "`{flag}` value `{value}` looks like a flag"
+            )));
         }
         *slot = Some(value.clone());
     }
@@ -151,7 +157,10 @@ pub fn validate_dest(host: &str) -> Result<(), ReoriginError> {
         if label.starts_with('-') || label.ends_with('-') {
             return bad("has a label with a leading or trailing hyphen");
         }
-        if !label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+        if !label
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
             return bad("has a label with a character outside [A-Za-z0-9-]");
         }
     }
@@ -170,7 +179,11 @@ pub fn validate_fingerprint(fp: &str) -> Result<(), ReoriginError> {
     let b64 = fp
         .strip_prefix("SHA256:")
         .ok_or_else(|| ReoriginError::Key(format!("not a `SHA256:` fingerprint: `{fp}`")))?;
-    if b64.len() != 43 || !b64.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/') {
+    if b64.len() != 43
+        || !b64
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
+    {
         return Err(ReoriginError::Key(format!("malformed digest in `{fp}`")));
     }
     Ok(())
@@ -205,9 +218,14 @@ pub fn parse_user_auth(contents: &str) -> Result<AuthInfo, ReoriginError> {
         let (Some(key_type), Some(key_blob)) = (f.next(), f.next()) else {
             continue;
         };
-        return Ok(AuthInfo { key_type: key_type.to_owned(), key_blob: key_blob.to_owned() });
+        return Ok(AuthInfo {
+            key_type: key_type.to_owned(),
+            key_blob: key_blob.to_owned(),
+        });
     }
-    Err(ReoriginError::Auth("no `publickey` line in $SSH_USER_AUTH".to_owned()))
+    Err(ReoriginError::Auth(
+        "no `publickey` line in $SSH_USER_AUTH".to_owned(),
+    ))
 }
 
 /// One public key loaded in the agent: its fingerprint and its full public-key line.
@@ -234,7 +252,9 @@ pub fn select_identity<'a>(loaded: &'a [LoadedKey], want: &str) -> Result<&'a st
         .iter()
         .find(|k| k.fingerprint == want)
         .map(|k| k.pubkey_line.as_str())
-        .ok_or_else(|| ReoriginError::NoIdentity(format!("fingerprint `{want}` is not loaded in the agent")))
+        .ok_or_else(|| {
+            ReoriginError::NoIdentity(format!("fingerprint `{want}` is not loaded in the agent"))
+        })
 }
 
 /// Inputs for building the outbound `ssh` argv.
@@ -336,16 +356,29 @@ mod tests {
 
     #[test]
     fn rejects_unknown_duplicate_and_missing_flags() {
-        assert!(matches!(parse_args(&args(&["--evil", "x"])), Err(ReoriginError::Args(_))));
-        assert!(matches!(parse_args(&args(&["--dest", "a.com", "--dest", "b.com"])), Err(ReoriginError::Args(_))));
-        assert!(matches!(parse_args(&args(&["--dest"])), Err(ReoriginError::Args(_))));
-        assert!(matches!(parse_args(&args(&["--key", K])), Err(ReoriginError::Args(_)))); // no --dest
+        assert!(matches!(
+            parse_args(&args(&["--evil", "x"])),
+            Err(ReoriginError::Args(_))
+        ));
+        assert!(matches!(
+            parse_args(&args(&["--dest", "a.com", "--dest", "b.com"])),
+            Err(ReoriginError::Args(_))
+        ));
+        assert!(matches!(
+            parse_args(&args(&["--dest"])),
+            Err(ReoriginError::Args(_))
+        ));
+        assert!(matches!(
+            parse_args(&args(&["--key", K])),
+            Err(ReoriginError::Args(_))
+        )); // no --dest
     }
 
     #[test]
     fn rejects_a_value_that_looks_like_a_flag() {
         // An option-injection attempt: --dest -oProxyCommand=...
-        let err = parse_args(&args(&["--dest", "-oProxyCommand=evil", "--key", K])).expect_err("inject");
+        let err =
+            parse_args(&args(&["--dest", "-oProxyCommand=evil", "--key", K])).expect_err("inject");
         assert!(matches!(err, ReoriginError::Args(_)));
     }
 
@@ -353,20 +386,26 @@ mod tests {
     fn dest_grammar_rejects_injection_and_smuggling() {
         for bad in [
             "",
-            "-evil",                       // leading hyphen
-            "a b.com",                     // whitespace
-            "host;rm -rf",                 // shell metachar
-            "user@host",                   // user smuggling
-            "host:22",                     // port smuggling
-            "a..b.com",                    // empty label
-            "-a.com",                      // label leading hyphen
-            "a-.com",                      // label trailing hyphen
-            "evil$(whoami)",               // command substitution
-            "a/b",                         // path
+            "-evil",         // leading hyphen
+            "a b.com",       // whitespace
+            "host;rm -rf",   // shell metachar
+            "user@host",     // user smuggling
+            "host:22",       // port smuggling
+            "a..b.com",      // empty label
+            "-a.com",        // label leading hyphen
+            "a-.com",        // label trailing hyphen
+            "evil$(whoami)", // command substitution
+            "a/b",           // path
         ] {
             assert!(validate_dest(bad).is_err(), "expected `{bad}` rejected");
         }
-        for good in ["github.com", "git.internal", "a", "x1-y2.example.co.uk", "host123"] {
+        for good in [
+            "github.com",
+            "git.internal",
+            "a",
+            "x1-y2.example.co.uk",
+            "host123",
+        ] {
             assert!(validate_dest(good).is_ok(), "expected `{good}` accepted");
         }
     }
@@ -374,8 +413,16 @@ mod tests {
     #[test]
     fn fingerprint_grammar_matches_the_policy_layer() {
         assert!(validate_fingerprint(K).is_ok());
-        for bad in ["github-key", "MD5:aa:bb", "SHA256:tooshort", "SHA256:has=pad+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"] {
-            assert!(validate_fingerprint(bad).is_err(), "expected `{bad}` rejected");
+        for bad in [
+            "github-key",
+            "MD5:aa:bb",
+            "SHA256:tooshort",
+            "SHA256:has=pad+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        ] {
+            assert!(
+                validate_fingerprint(bad).is_err(),
+                "expected `{bad}` rejected"
+            );
         }
     }
 
@@ -386,26 +433,48 @@ mod tests {
         assert_eq!(info.key_blob, "AAAABlob");
         // Fail closed: no publickey method present.
         assert!(matches!(parse_user_auth(""), Err(ReoriginError::Auth(_))));
-        assert!(matches!(parse_user_auth("password\n"), Err(ReoriginError::Auth(_))));
-        assert!(matches!(parse_user_auth("keyboard-interactive\n"), Err(ReoriginError::Auth(_))));
+        assert!(matches!(
+            parse_user_auth("password\n"),
+            Err(ReoriginError::Auth(_))
+        ));
+        assert!(matches!(
+            parse_user_auth("keyboard-interactive\n"),
+            Err(ReoriginError::Auth(_))
+        ));
     }
 
     #[test]
     fn user_auth_reads_publickey_among_multiple_methods() {
-        let info = parse_user_auth("keyboard-interactive\npublickey ssh-ed25519 AAAABlob\n").expect("pk");
+        let info =
+            parse_user_auth("keyboard-interactive\npublickey ssh-ed25519 AAAABlob\n").expect("pk");
         assert_eq!(info.key_blob, "AAAABlob");
     }
 
     #[test]
     fn identity_selection_is_exact() {
         let loaded = vec![
-            LoadedKey { fingerprint: "SHA256:other".to_owned(), pubkey_line: "ssh-ed25519 OTHER".to_owned() },
-            LoadedKey { fingerprint: K.to_owned(), pubkey_line: "ssh-ed25519 WANTED real@host".to_owned() },
+            LoadedKey {
+                fingerprint: "SHA256:other".to_owned(),
+                pubkey_line: "ssh-ed25519 OTHER".to_owned(),
+            },
+            LoadedKey {
+                fingerprint: K.to_owned(),
+                pubkey_line: "ssh-ed25519 WANTED real@host".to_owned(),
+            },
         ];
-        assert_eq!(select_identity(&loaded, K).expect("found"), "ssh-ed25519 WANTED real@host");
+        assert_eq!(
+            select_identity(&loaded, K).expect("found"),
+            "ssh-ed25519 WANTED real@host"
+        );
         // A key not loaded fails closed — no fallback to a different key.
-        assert!(matches!(select_identity(&loaded, "SHA256:absent"), Err(ReoriginError::NoIdentity(_))));
-        assert!(matches!(select_identity(&[], K), Err(ReoriginError::NoIdentity(_))));
+        assert!(matches!(
+            select_identity(&loaded, "SHA256:absent"),
+            Err(ReoriginError::NoIdentity(_))
+        ));
+        assert!(matches!(
+            select_identity(&[], K),
+            Err(ReoriginError::NoIdentity(_))
+        ));
     }
 
     #[test]
@@ -418,17 +487,30 @@ mod tests {
             original_command: Some("git-receive-pack 'repo.git'"),
         };
         let argv = outbound_argv(&o);
-        assert!(argv.windows(2).any(|w| w.first().map(String::as_str) == Some("-F")
-            && w.get(1).map(String::as_str) == Some("/run/kennel/ssh_config")));
+        assert!(argv
+            .windows(2)
+            .any(|w| w.first().map(String::as_str) == Some("-F")
+                && w.get(1).map(String::as_str) == Some("/run/kennel/ssh_config")));
         // The command is the single trailing element, after the `--` terminator.
-        assert_eq!(argv.last().map(String::as_str), Some("git-receive-pack 'repo.git'"));
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("git-receive-pack 'repo.git'")
+        );
         let dd = argv.iter().position(|a| a == "--").expect("-- present");
-        assert_eq!(argv.get(dd + 1).map(String::as_str), Some("github.com"), "dest right after --");
+        assert_eq!(
+            argv.get(dd + 1).map(String::as_str),
+            Some("github.com"),
+            "dest right after --"
+        );
         assert!(argv.iter().any(|a| a == "IdentitiesOnly=yes"));
         assert!(argv.iter().any(|a| a == "StrictHostKeyChecking=yes"));
-        assert!(argv.windows(2).any(|w| w.first().map(String::as_str) == Some("-i")
-            && w.get(1).map(String::as_str) == Some("/run/kennel/id.pub")));
-        assert!(argv.iter().any(|a| a == "UserKnownHostsFile=/etc/kennel/bastion_known_hosts"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w.first().map(String::as_str) == Some("-i")
+                && w.get(1).map(String::as_str) == Some("/run/kennel/id.pub")));
+        assert!(argv
+            .iter()
+            .any(|a| a == "UserKnownHostsFile=/etc/kennel/bastion_known_hosts"));
         // A command suppresses the pty.
         assert!(argv.contains(&"-T".to_owned()));
         assert!(!argv.contains(&"-tt".to_owned()));
@@ -437,7 +519,13 @@ mod tests {
     #[test]
     fn outbound_argv_requests_a_pty_for_an_interactive_session() {
         for cmd in [None, Some("")] {
-            let o = Outbound { dest: "git.internal", identity_file: "/k.pub", known_hosts_file: None, config_file: None, original_command: cmd };
+            let o = Outbound {
+                dest: "git.internal",
+                identity_file: "/k.pub",
+                known_hosts_file: None,
+                config_file: None,
+                original_command: cmd,
+            };
             let argv = outbound_argv(&o);
             assert!(argv.contains(&"-tt".to_owned()), "interactive ⇒ force pty");
             // No trailing command, dest is last.
@@ -449,6 +537,9 @@ mod tests {
     fn scrub_env_keeps_the_agent_socket() {
         assert!(SCRUB_ENV.contains(&"SSH_ORIGINAL_COMMAND"));
         assert!(SCRUB_ENV.contains(&"SSH_USER_AUTH"));
-        assert!(!SCRUB_ENV.contains(&"SSH_AUTH_SOCK"), "the agent socket must survive to sign host-side");
+        assert!(
+            !SCRUB_ENV.contains(&"SSH_AUTH_SOCK"),
+            "the agent socket must survive to sign host-side"
+        );
     }
 }

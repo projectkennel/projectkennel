@@ -82,8 +82,10 @@ impl Lockfile {
     /// signature does not match.
     pub fn verify_against(&self, previous: &Self) -> Result<(), PolicyError> {
         for entry in &self.entries {
-            if let Some(prev) =
-                previous.entries.iter().find(|p| p.name == entry.name && p.version == entry.version)
+            if let Some(prev) = previous
+                .entries
+                .iter()
+                .find(|p| p.name == entry.name && p.version == entry.version)
             {
                 if prev.signature != entry.signature {
                     return Err(PolicyError::LockMismatch(format!(
@@ -112,7 +114,9 @@ impl Lockfile {
     ///
     /// Returns [`PolicyError::Canonical`] if serialisation fails.
     pub fn to_bytes(&self) -> Result<Vec<u8>, PolicyError> {
-        basic_toml::to_string(self).map(String::into_bytes).map_err(|e| PolicyError::Canonical(e.to_string()))
+        basic_toml::to_string(self)
+            .map(String::into_bytes)
+            .map_err(|e| PolicyError::Canonical(e.to_string()))
     }
 }
 
@@ -131,7 +135,10 @@ mod tests {
 
     #[test]
     fn from_chain_round_trips_through_toml() {
-        let lock = Lockfile::from_chain(&[link("base-confined", "AAAA"), link("ai-coding-strict", "BBBB")]);
+        let lock = Lockfile::from_chain(&[
+            link("base-confined", "AAAA"),
+            link("ai-coding-strict", "BBBB"),
+        ]);
         let bytes = lock.to_bytes().expect("serialise");
         let back = Lockfile::parse(&bytes).expect("parse");
         assert_eq!(lock, back);
@@ -157,13 +164,20 @@ mod tests {
     fn first_use_reference_is_accepted() {
         let prev = Lockfile::default();
         let now = Lockfile::from_chain(&[link("base-confined", "AAAA")]);
-        assert!(now.verify_against(&prev).is_ok(), "no prior pin = trust-on-first-use");
+        assert!(
+            now.verify_against(&prev).is_ok(),
+            "no prior pin = trust-on-first-use"
+        );
     }
 
     #[test]
     fn dropped_reference_does_not_block() {
-        let prev = Lockfile::from_chain(&[link("base-confined", "AAAA"), link("corp-egress", "CCCC")]);
+        let prev =
+            Lockfile::from_chain(&[link("base-confined", "AAAA"), link("corp-egress", "CCCC")]);
         let now = Lockfile::from_chain(&[link("base-confined", "AAAA")]);
-        assert!(now.verify_against(&prev).is_ok(), "no longer using corp-egress is fine");
+        assert!(
+            now.verify_against(&prev).is_ok(),
+            "no longer using corp-egress is fine"
+        );
     }
 }

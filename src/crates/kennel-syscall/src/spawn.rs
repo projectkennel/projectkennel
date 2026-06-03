@@ -167,7 +167,10 @@ mod tests {
         ]);
         let mut child = spawn_sealed(&mut cmd, crate::process::set_no_new_privs).expect("spawn");
         let status = child.wait().expect("wait");
-        assert!(status.success(), "no_new_privs should be set in the execed child");
+        assert!(
+            status.success(),
+            "no_new_privs should be set in the execed child"
+        );
     }
 
     #[test]
@@ -187,7 +190,11 @@ mod tests {
         cmd.args(["-c", "exit 7"]);
         let mut child = spawn_sealed(&mut cmd, || Ok(())).expect("spawn");
         let status = child.wait().expect("wait");
-        assert_eq!(status.code(), Some(7), "the program should have run and exited 7");
+        assert_eq!(
+            status.code(),
+            Some(7),
+            "the program should have run and exited 7"
+        );
     }
 
     #[test]
@@ -206,7 +213,11 @@ mod tests {
         };
         let mut child = spawn_sealed(&mut cmd, seal).expect("spawn with double-fork");
         let status = child.wait().expect("wait");
-        assert_eq!(status.code(), Some(7), "workload exit code must propagate A←B←kenneld");
+        assert_eq!(
+            status.code(),
+            Some(7),
+            "workload exit code must propagate A←B←kenneld"
+        );
     }
 
     #[test]
@@ -219,7 +230,8 @@ mod tests {
             let mut inner = || Err(io::Error::from_raw_os_error(libc::EPERM));
             super::fork_into_pid1(&mut inner)
         };
-        let err = spawn_sealed(&mut cmd, seal).expect_err("a failing inner seal must abort the spawn");
+        let err =
+            spawn_sealed(&mut cmd, seal).expect_err("a failing inner seal must abort the spawn");
         assert_eq!(err.raw_os_error(), Some(libc::EPERM));
     }
 }

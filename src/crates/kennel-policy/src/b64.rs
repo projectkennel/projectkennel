@@ -57,7 +57,8 @@ pub fn decode(input: &[u8]) -> Option<Vec<u8>> {
 /// Encode bytes as a Base64 string (with `=` padding).
 #[must_use]
 pub fn encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().wrapping_add(2).wrapping_div(3).wrapping_mul(4));
+    let mut out =
+        String::with_capacity(input.len().wrapping_add(2).wrapping_div(3).wrapping_mul(4));
     let mut acc: u32 = 0;
     let mut nbits: u32 = 0;
     for &b in input {
@@ -110,7 +111,10 @@ mod tests {
     fn round_trip_all_byte_values() {
         let bytes: Vec<u8> = (0..=255u8).collect();
         let encoded = encode(&bytes);
-        assert_eq!(decode(encoded.as_bytes()).as_deref(), Some(bytes.as_slice()));
+        assert_eq!(
+            decode(encoded.as_bytes()).as_deref(),
+            Some(bytes.as_slice())
+        );
     }
 
     #[test]

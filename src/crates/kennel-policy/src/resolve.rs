@@ -45,9 +45,9 @@
 
 use crate::source::{
     self, CapSection, ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev,
-    FsHome, FsProc, FsScrub, FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit, NetBind,
-    NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection,
-    SourcePolicy, SshSection, UnixSection, X11Section,
+    FsHome, FsProc, FsScrub, FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit,
+    NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection,
+    SignalSection, SourcePolicy, SshSection, UnixSection, X11Section,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -101,7 +101,10 @@ pub struct ResolvedChain {
 /// `source`, forms a cycle, or the chain exceeds [`MAX_CHAIN_DEPTH`];
 /// [`PolicyError::Parse`] if an ancestor is unparseable; or
 /// [`PolicyError::SourceValidation`] if an ancestor fails validation.
-pub fn resolve(entry: &SourcePolicy, source: &dyn TemplateSource) -> Result<ResolvedChain, PolicyError> {
+pub fn resolve(
+    entry: &SourcePolicy,
+    source: &dyn TemplateSource,
+) -> Result<ResolvedChain, PolicyError> {
     resolve_verified(entry, source, &Trust::dev())
 }
 
@@ -131,7 +134,9 @@ pub fn resolve_verified(
         let (name, version) = split_reference(&reference)?;
         let key = format!("{name}@{version}");
         if seen.iter().any(|s| s == &key) {
-            return Err(PolicyError::Resolution(format!("cycle detected at `{key}`")));
+            return Err(PolicyError::Resolution(format!(
+                "cycle detected at `{key}`"
+            )));
         }
         if parents.len() >= MAX_CHAIN_DEPTH {
             return Err(PolicyError::Resolution(format!(
@@ -146,7 +151,12 @@ pub fn resolve_verified(
         parent.validate()?;
         let signing_key_id = trust.check(&name, &parent)?;
         let signature = parent.signature.as_ref().map(|e| e.signature.clone());
-        links.push(ChainLink { name, version, signing_key_id, signature });
+        links.push(ChainLink {
+            name,
+            version,
+            signing_key_id,
+            signature,
+        });
         parents.push(parent.clone());
         current = parent;
     }
@@ -170,12 +180,16 @@ pub fn resolve_verified(
     acc.signature = None;
 
     links.reverse(); // root-first for provenance
-    Ok(ResolvedChain { effective: acc, chain: links })
+    Ok(ResolvedChain {
+        effective: acc,
+        chain: links,
+    })
 }
 
 /// Split and validate a versioned reference into `(name, version)`.
 pub(crate) fn split_reference(reference: &str) -> Result<(String, String), PolicyError> {
-    let bad = |d: String| PolicyError::Resolution(format!("`template_base` = \"{reference}\": {d}"));
+    let bad =
+        |d: String| PolicyError::Resolution(format!("`template_base` = \"{reference}\": {d}"));
     let (name, version) = reference
         .split_once('@')
         .ok_or_else(|| bad("missing `@version` (expected `<name>@v<ver>`)".to_owned()))?;
@@ -286,7 +300,11 @@ fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
     FsHome {
         shadow: or(&c.shadow, &p.shadow),
         shim_root: or(&c.shim_root, &p.shim_root),
-        sanitise: if c.sanitise.is_empty() { p.sanitise.clone() } else { c.sanitise.clone() },
+        sanitise: if c.sanitise.is_empty() {
+            p.sanitise.clone()
+        } else {
+            c.sanitise.clone()
+        },
     }
 }
 
@@ -310,7 +328,11 @@ fn fold_fs_dev(p: &FsDev, c: &FsDev) -> FsDev {
         allow: or(&c.allow, &p.allow),
         // Bare-set: a child's non-empty passthrough list replaces the parent's (as
         // `unix.allow`). A leaf adds individual devices via `[[fs.dev.passthrough.add]]`.
-        passthrough: if c.passthrough.is_empty() { p.passthrough.clone() } else { c.passthrough.clone() },
+        passthrough: if c.passthrough.is_empty() {
+            p.passthrough.clone()
+        } else {
+            c.passthrough.clone()
+        },
     }
 }
 
@@ -329,7 +351,11 @@ fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
         proxy_listen_v4_address: or(&c.proxy_listen_v4_address, &p.proxy_listen_v4_address),
         proxy_listen_v6_address: or(&c.proxy_listen_v6_address, &p.proxy_listen_v6_address),
         // Bare-set: a child's non-empty allow list replaces the parent's.
-        allow: if c.allow.is_empty() { p.allow.clone() } else { c.allow.clone() },
+        allow: if c.allow.is_empty() {
+            p.allow.clone()
+        } else {
+            c.allow.clone()
+        },
         deny: merge(&p.deny, &c.deny, fold_net_deny),
         bind: merge(&p.bind, &c.bind, fold_net_bind),
         ipv6: merge(&p.ipv6, &c.ipv6, fold_net_ipv6),
@@ -359,7 +385,9 @@ fn fold_net_bind(p: &NetBind, c: &NetBind) -> NetBind {
 }
 
 fn fold_net_ipv6(p: &NetIpv6, c: &NetIpv6) -> NetIpv6 {
-    NetIpv6 { force_v6only: or(&c.force_v6only, &p.force_v6only) }
+    NetIpv6 {
+        force_v6only: or(&c.force_v6only, &p.force_v6only),
+    }
 }
 
 fn fold_net_audit(p: &NetAudit, c: &NetAudit) -> NetAudit {
@@ -373,14 +401,22 @@ fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
     UnixSection {
         default: or(&c.default, &p.default),
         abstract_ns: or(&c.abstract_ns, &p.abstract_ns),
-        allow: if c.allow.is_empty() { p.allow.clone() } else { c.allow.clone() },
+        allow: if c.allow.is_empty() {
+            p.allow.clone()
+        } else {
+            c.allow.clone()
+        },
     }
 }
 
 fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
     // Bare-set: a child's non-empty group list replaces the parent's.
     IdentitySection {
-        groups: if c.groups.is_empty() { p.groups.clone() } else { c.groups.clone() },
+        groups: if c.groups.is_empty() {
+            p.groups.clone()
+        } else {
+            c.groups.clone()
+        },
     }
 }
 
@@ -389,7 +425,11 @@ fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
         allow_headless: or(&c.allow_headless, &p.allow_headless),
         threats: or(&c.threats, &p.threats),
         // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
-        keys: if c.keys.is_empty() { p.keys.clone() } else { c.keys.clone() },
+        keys: if c.keys.is_empty() {
+            p.keys.clone()
+        } else {
+            c.keys.clone()
+        },
         known_hosts: if c.known_hosts.is_empty() {
             p.known_hosts.clone()
         } else {
@@ -406,7 +446,9 @@ fn fold_dbus(p: &DbusSection, c: &DbusSection) -> DbusSection {
 }
 
 fn fold_dbus_bus(p: &DbusBus, c: &DbusBus) -> DbusBus {
-    DbusBus { enabled: or(&c.enabled, &p.enabled) }
+    DbusBus {
+        enabled: or(&c.enabled, &p.enabled),
+    }
 }
 
 fn fold_x11(p: &X11Section, c: &X11Section) -> X11Section {
@@ -484,7 +526,11 @@ fn fold_container(p: &ContainerSection, c: &ContainerSection) -> ContainerSectio
         } else {
             c.published_ports.clone()
         },
-        volumes: if c.volumes.is_empty() { p.volumes.clone() } else { c.volumes.clone() },
+        volumes: if c.volumes.is_empty() {
+            p.volumes.clone()
+        } else {
+            c.volumes.clone()
+        },
     }
 }
 
@@ -494,7 +540,8 @@ mod tests {
     use crate::source::parse;
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
-    const AI_CODING_STRICT: &str = include_str!("../../../../templates/ai-coding-strict/policy.toml");
+    const AI_CODING_STRICT: &str =
+        include_str!("../../../../templates/ai-coding-strict/policy.toml");
     const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
 
     /// An in-memory [`TemplateSource`] backed by `(name, version) -> bytes`.
@@ -505,7 +552,8 @@ mod tests {
             Self(Vec::new())
         }
         fn with(mut self, name: &str, version: &str, bytes: &[u8]) -> Self {
-            self.0.push((name.to_owned(), version.to_owned(), bytes.to_vec()));
+            self.0
+                .push((name.to_owned(), version.to_owned(), bytes.to_vec()));
             self
         }
     }
@@ -538,7 +586,10 @@ mod tests {
         assert_eq!(cap.no_new_privs, Some(true), "no_new_privs inherited");
         let exec = eff.exec.as_ref().expect("exec");
         let deny = exec.deny.as_ref().expect("exec.deny inherited");
-        assert!(deny.iter().any(|d| d == "/usr/bin/sudo"), "base deny inherited");
+        assert!(
+            deny.iter().any(|d| d == "/usr/bin/sudo"),
+            "base deny inherited"
+        );
         let net = eff.net.as_ref().expect("net");
         let nd = net.deny.as_ref().expect("net.deny");
         assert!(
@@ -548,15 +599,27 @@ mod tests {
 
         // Set by ai-coding-strict (replaces base's empty allow / adds its own).
         let allow = exec.allow.as_ref().expect("exec.allow set");
-        assert!(allow.iter().any(|a| a.contains("git")), "ai-coding-strict tool present");
-        assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("github.com")));
+        assert!(
+            allow.iter().any(|a| a.contains("git")),
+            "ai-coding-strict tool present"
+        );
+        assert!(net
+            .allow
+            .iter()
+            .any(|a| a.name.as_deref() == Some("github.com")));
         let unix = eff.unix.as_ref().expect("unix");
-        assert!(unix.allow.iter().any(|u| u.name.as_deref() == Some("gpg-agent")));
+        assert!(unix
+            .allow
+            .iter()
+            .any(|u| u.name.as_deref() == Some("gpg-agent")));
 
         // Provenance records the folded parent.
         assert_eq!(resolved.chain.len(), 1);
         let root = resolved.chain.first().expect("root link");
-        assert_eq!((root.name.as_str(), root.version.as_str()), ("base-confined", "v1"));
+        assert_eq!(
+            (root.name.as_str(), root.version.as_str()),
+            ("base-confined", "v1")
+        );
     }
 
     #[test]
@@ -564,7 +627,11 @@ mod tests {
         let entry = parse(UNTRUSTED_BUILD.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &base_source()).expect("resolve");
         let net = resolved.effective.net.as_ref().expect("net");
-        assert_eq!(net.mode.as_deref(), Some("none"), "child scalar overrides parent");
+        assert_eq!(
+            net.mode.as_deref(),
+            Some("none"),
+            "child scalar overrides parent"
+        );
         // The invariant denies still propagate even though mode is none.
         let nd = net.deny.as_ref().expect("net.deny");
         assert!(nd.invariant.iter().any(|d| d.cidr == "10.0.0.0/8"));
@@ -575,7 +642,10 @@ mod tests {
         let entry = parse(BASE_CONFINED.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &MapSource::new()).expect("resolve");
         assert!(resolved.chain.is_empty(), "root has no parents");
-        assert_eq!(resolved.effective.template_name.as_deref(), Some("base-confined"));
+        assert_eq!(
+            resolved.effective.template_name.as_deref(),
+            Some("base-confined")
+        );
     }
 
     #[test]
@@ -598,9 +668,22 @@ mod tests {
         let child = "template_name = \"c\"\ntemplate_base = \"p@v1\"\n[[net.deny.invariant]]\ncidr = \"192.168.0.0/16\"\nreason = \"rfc1918\"\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
-        let nd = resolved.effective.net.as_ref().expect("net").deny.as_ref().expect("deny");
-        assert!(nd.invariant.iter().any(|d| d.cidr == "10.0.0.0/8"), "parent invariant kept");
-        assert!(nd.invariant.iter().any(|d| d.cidr == "192.168.0.0/16"), "child invariant added");
+        let nd = resolved
+            .effective
+            .net
+            .as_ref()
+            .expect("net")
+            .deny
+            .as_ref()
+            .expect("deny");
+        assert!(
+            nd.invariant.iter().any(|d| d.cidr == "10.0.0.0/8"),
+            "parent invariant kept"
+        );
+        assert!(
+            nd.invariant.iter().any(|d| d.cidr == "192.168.0.0/16"),
+            "child invariant added"
+        );
     }
 
     #[test]
@@ -619,7 +702,10 @@ mod tests {
             .with("a", "v1", a.as_bytes())
             .with("b", "v1", b.as_bytes());
         let err = resolve(&parse(a.as_bytes()).expect("parse"), &src).expect_err("cycle must fail");
-        assert!(matches!(err, PolicyError::Resolution(_)), "expected Resolution, got {err}");
+        assert!(
+            matches!(err, PolicyError::Resolution(_)),
+            "expected Resolution, got {err}"
+        );
         if let PolicyError::Resolution(m) = err {
             assert!(m.contains("cycle"), "message names the cycle: {m}");
         }
@@ -642,7 +728,10 @@ mod tests {
         let entry = "template_name = \"t0\"\ntemplate_base = \"t1@v1\"\n";
         let err = resolve(&parse(entry.as_bytes()).expect("parse"), &src)
             .expect_err("over-deep chain must fail");
-        assert!(matches!(err, PolicyError::Resolution(_)), "expected Resolution, got {err}");
+        assert!(
+            matches!(err, PolicyError::Resolution(_)),
+            "expected Resolution, got {err}"
+        );
         if let PolicyError::Resolution(m) = err {
             assert!(m.contains("depth"), "message names the depth bound: {m}");
         }
@@ -656,10 +745,16 @@ mod tests {
         let err = resolve(&parse(entry.as_bytes()).expect("parse"), &base_source())
             .expect_err("malformed ref must fail");
         assert!(
-            matches!(err, PolicyError::SourceValidation(_) | PolicyError::Resolution(_)),
+            matches!(
+                err,
+                PolicyError::SourceValidation(_) | PolicyError::Resolution(_)
+            ),
             "got {err}"
         );
-        assert!(err.to_string().contains("version must start"), "explains why: {err}");
+        assert!(
+            err.to_string().contains("version must start"),
+            "explains why: {err}"
+        );
     }
 
     #[test]

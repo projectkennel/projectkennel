@@ -88,19 +88,28 @@ impl<'a> Trust<'a> {
     /// Require every ancestor to be signed and verify against `keys`.
     #[must_use]
     pub const fn require(keys: &'a KeySet) -> Self {
-        Self { keys: Some(keys), mode: SignatureMode::Require }
+        Self {
+            keys: Some(keys),
+            mode: SignatureMode::Require,
+        }
     }
 
     /// Allow unsigned ancestors; verify any present signature against `keys` (if any).
     #[must_use]
     pub const fn allow_unsigned(keys: Option<&'a KeySet>) -> Self {
-        Self { keys, mode: SignatureMode::AllowUnsigned }
+        Self {
+            keys,
+            mode: SignatureMode::AllowUnsigned,
+        }
     }
 
     /// The development default: no trust store, unsigned artefacts permitted.
     #[must_use]
     pub const fn dev() -> Self {
-        Self { keys: None, mode: SignatureMode::AllowUnsigned }
+        Self {
+            keys: None,
+            mode: SignatureMode::AllowUnsigned,
+        }
     }
 
     /// Whether this context requires signatures ([`SignatureMode::Require`]).
@@ -118,7 +127,11 @@ impl<'a> Trust<'a> {
     /// Returns [`PolicyError::Resolution`] when [`SignatureMode::Require`] and the
     /// artefact is unsigned or no trust store is configured, or
     /// [`PolicyError::Signature`] when a present signature fails to verify.
-    pub fn check<T: Signable>(&self, name: &str, policy: &T) -> Result<Option<String>, PolicyError> {
+    pub fn check<T: Signable>(
+        &self,
+        name: &str,
+        policy: &T,
+    ) -> Result<Option<String>, PolicyError> {
         match (policy.signature(), self.keys) {
             (Some(env), Some(keys)) => {
                 let canonical = policy.canonical_bytes()?;
@@ -127,14 +140,20 @@ impl<'a> Trust<'a> {
             }
             (Some(_), None) => {
                 if self.mode == SignatureMode::Require {
-                    Err(require_err(name, "no trust store is configured to verify its signature"))
+                    Err(require_err(
+                        name,
+                        "no trust store is configured to verify its signature",
+                    ))
                 } else {
                     Ok(None) // signed, but dev mode with no keys: nothing to check against
                 }
             }
             (None, _) => {
                 if self.mode == SignatureMode::Require {
-                    Err(require_err(name, "it is unsigned and signatures are required"))
+                    Err(require_err(
+                        name,
+                        "it is unsigned and signatures are required",
+                    ))
                 } else {
                     Ok(None)
                 }
@@ -152,7 +171,9 @@ impl<'a> Trust<'a> {
 pub fn canonical_leaf(leaf: &LeafPolicy) -> Result<Vec<u8>, PolicyError> {
     let mut bare = leaf.clone();
     bare.signature = None;
-    basic_toml::to_string(&bare).map(String::into_bytes).map_err(|e| PolicyError::Canonical(e.to_string()))
+    basic_toml::to_string(&bare)
+        .map(String::into_bytes)
+        .map_err(|e| PolicyError::Canonical(e.to_string()))
 }
 
 /// Sign a fragment ([`LeafPolicy`]), returning a copy with its `[signature]` set.
@@ -185,7 +206,9 @@ fn require_err(name: &str, why: &str) -> PolicyError {
 pub fn canonical_source(policy: &SourcePolicy) -> Result<Vec<u8>, PolicyError> {
     let mut bare = policy.clone();
     bare.signature = None;
-    basic_toml::to_string(&bare).map(String::into_bytes).map_err(|e| PolicyError::Canonical(e.to_string()))
+    basic_toml::to_string(&bare)
+        .map(String::into_bytes)
+        .map_err(|e| PolicyError::Canonical(e.to_string()))
 }
 
 /// Sign a source artefact, returning a copy with its `[signature]` set.
@@ -247,7 +270,8 @@ mod tests {
     fn keypair() -> (SigningKey, KeySet) {
         let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
         let mut ks = KeySet::new();
-        ks.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+        ks.insert(key.key_id(), &key.public_key_bytes())
+            .expect("insert");
         (key, ks)
     }
 
@@ -256,7 +280,10 @@ mod tests {
         let (key, ks) = keypair();
         let pol = parse(BASE_CONFINED.as_bytes()).expect("parse");
         let signed = sign_source(&pol, &key).expect("sign");
-        assert_eq!(verify_self(&signed, &ks).expect("verify"), "kennel-maint-2026");
+        assert_eq!(
+            verify_self(&signed, &ks).expect("verify"),
+            "kennel-maint-2026"
+        );
     }
 
     #[test]
@@ -266,7 +293,10 @@ mod tests {
         let mut signed = sign_source(&pol, &key).expect("sign");
         // Mutate a substantive field after signing.
         signed.threat_catalogue_version = Some("tampered".to_owned());
-        assert!(verify_self(&signed, &ks).is_err(), "tamper must fail verification");
+        assert!(
+            verify_self(&signed, &ks).is_err(),
+            "tamper must fail verification"
+        );
     }
 
     #[test]
@@ -274,19 +304,26 @@ mod tests {
         let (_key, ks) = keypair();
         let pol = parse(BASE_CONFINED.as_bytes()).expect("parse"); // unsigned
         let trust = Trust::require(&ks);
-        assert!(trust.check("base-confined", &pol).is_err(), "Require refuses unsigned");
+        assert!(
+            trust.check("base-confined", &pol).is_err(),
+            "Require refuses unsigned"
+        );
     }
 
     #[test]
     fn dev_mode_allows_unsigned() {
         let pol = parse(BASE_CONFINED.as_bytes()).expect("parse");
-        assert_eq!(Trust::dev().check("base-confined", &pol).expect("dev ok"), None);
+        assert_eq!(
+            Trust::dev().check("base-confined", &pol).expect("dev ok"),
+            None
+        );
     }
 
     #[test]
     fn require_mode_verifies_a_present_signature() {
         let (key, ks) = keypair();
-        let signed = sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
+        let signed =
+            sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
         let trust = Trust::require(&ks);
         assert_eq!(
             trust.check("base-confined", &signed).expect("verify"),
@@ -304,7 +341,9 @@ mod tests {
         let signed = sign_leaf(&frag, &key).expect("sign fragment");
         // Verified via the generic Signable path that includes use.
         assert_eq!(
-            Trust::require(&ks).check("corp-egress", &signed).expect("verify"),
+            Trust::require(&ks)
+                .check("corp-egress", &signed)
+                .expect("verify"),
             Some("kennel-maint-2026".to_owned())
         );
         // Tampering after signing is caught.
@@ -316,11 +355,16 @@ mod tests {
     #[test]
     fn wrong_key_is_rejected_in_require_mode() {
         let (key, _ks) = keypair();
-        let signed = sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
+        let signed =
+            sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
         // A trust store that does not contain the signer.
         let other = SigningKey::from_seed("other", &[9u8; 32]).expect("key");
         let mut ks = KeySet::new();
-        ks.insert(other.key_id(), &other.public_key_bytes()).expect("insert");
-        assert!(Trust::require(&ks).check("base-confined", &signed).is_err(), "unknown signer rejected");
+        ks.insert(other.key_id(), &other.public_key_bytes())
+            .expect("insert");
+        assert!(
+            Trust::require(&ks).check("base-confined", &signed).is_err(),
+            "unknown signer rejected"
+        );
     }
 }

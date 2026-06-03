@@ -68,7 +68,9 @@ pub fn perform(
         // SetupEgress needs the variable payload; without it the request is malformed.
         // The scope still gates *whether* the caller may act (the None check above);
         // the cgroup itself is gated by directory ownership inside perform_egress.
-        Op::SetupEgress => egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload)),
+        Op::SetupEgress => {
+            egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload))
+        }
         // SetGidMap likewise carries a variable payload. The scope gates *whether*
         // the caller may act; the gids are gated by membership and the pid by
         // ownership, inside perform_set_gid_map.
@@ -184,7 +186,12 @@ fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::i
     use kennel_bpf::sys::BPF_ANY;
 
     if loaded.maps.contains_key("kennel_meta_map") {
-        loaded.update_map("kennel_meta_map", &0u32.to_ne_bytes(), &payload.meta, BPF_ANY)?;
+        loaded.update_map(
+            "kennel_meta_map",
+            &0u32.to_ne_bytes(),
+            &payload.meta,
+            BPF_ANY,
+        )?;
     }
     if loaded.maps.contains_key("allow_v4") {
         for (key, value) in &payload.allow_v4 {
@@ -242,4 +249,3 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
         Err(e) => Response::internal(errno_of(&e)),
     }
 }
-

@@ -121,7 +121,10 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
         } else if let Ok(addr) = r.cidr.parse::<Ipv6Addr>() {
             v6.push((lpm_v6_key(addr.octets(), r.prefix_len), value));
         } else {
-            return Err(SpawnError::InvalidPolicy(format!("invalid CIDR address `{}`", r.cidr)));
+            return Err(SpawnError::InvalidPolicy(format!(
+                "invalid CIDR address `{}`",
+                r.cidr
+            )));
         }
     }
     Ok((v4, v6))
@@ -229,7 +232,8 @@ pub struct ShimView {
 /// the real `$HOME` moves beneath `shim_root`; any other absolute path keeps its
 /// own location in the new root.
 fn remap_target(path: &Path, home: &Path, shim_root: &Path) -> PathBuf {
-    path.strip_prefix(home).map_or_else(|_| path.to_path_buf(), |rel| shim_root.join(rel))
+    path.strip_prefix(home)
+        .map_or_else(|_| path.to_path_buf(), |rel| shim_root.join(rel))
 }
 
 /// Whether `path` is served by the constructed synthetic `/etc` (and so is *not*
@@ -329,7 +333,12 @@ impl Plan {
     /// Returns [`SpawnError::InvalidPolicy`] if a network rule's CIDR is not a
     /// valid IPv4 or IPv6 address, if `fs.tmp.mode` is not octal digits, or if an
     /// `fs.dev.allow` entry is not a device path under `/dev`.
-    pub fn from_policy(policy: &SettledPolicy, ctx: u16, namespace: &str, home: &Path) -> Result<Self, SpawnError> {
+    pub fn from_policy(
+        policy: &SettledPolicy,
+        ctx: u16,
+        namespace: &str,
+        home: &Path,
+    ) -> Result<Self, SpawnError> {
         let ep = &policy.effective_policy;
 
         // The unprivileged spawn: USER establishes the identity-mapped user
@@ -352,13 +361,29 @@ impl Plan {
         // (on the constructed `/etc`) but no bind (it is built, not bound).
         let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
         let mut binds: Vec<BindMount> = Vec::new();
-        let grants = ep.fs.read.iter().map(|p| (p, false)).chain(ep.fs.write.iter().map(|p| (p, true)));
+        let grants = ep
+            .fs
+            .read
+            .iter()
+            .map(|p| (p, false))
+            .chain(ep.fs.write.iter().map(|p| (p, true)));
         for (path_str, writable) in grants {
             let source = PathBuf::from(path_str.as_str());
             let target = remap_target(&source, home, &shim_root);
-            landlock_fs.push((target.clone(), if writable { write_access() } else { read_access() }));
+            landlock_fs.push((
+                target.clone(),
+                if writable {
+                    write_access()
+                } else {
+                    read_access()
+                },
+            ));
             if !is_constructed_etc(&source) {
-                binds.push(BindMount { source, target, writable });
+                binds.push(BindMount {
+                    source,
+                    target,
+                    writable,
+                });
             }
         }
 
@@ -466,11 +491,18 @@ impl Plan {
         // The proxy speaks TCP (SOCKS5 / HTTP CONNECT). Host-order port on a
         // single-port range; the `KENNEL_ALLOW_FLAG_PROXY` flag marks it as the
         // proxy entry for the audit and for any program that distinguishes it.
-        let value = allow_entry(endpoint.port, endpoint.port, Protocol::Tcp, KENNEL_ALLOW_FLAG_PROXY);
+        let value = allow_entry(
+            endpoint.port,
+            endpoint.port,
+            Protocol::Tcp,
+            KENNEL_ALLOW_FLAG_PROXY,
+        );
         if let Some(v4) = endpoint.v4 {
-            self.bpf_allow_v4.push((lpm_v4_key(v4.octets(), HOST_PREFIX_V4), value));
+            self.bpf_allow_v4
+                .push((lpm_v4_key(v4.octets(), HOST_PREFIX_V4), value));
         }
-        self.bpf_allow_v6.push((lpm_v6_key(endpoint.v6.octets(), HOST_PREFIX_V6), value));
+        self.bpf_allow_v6
+            .push((lpm_v6_key(endpoint.v6.octets(), HOST_PREFIX_V6), value));
     }
 
     /// Build the seccomp filter this plan describes. Pure — the filter is not

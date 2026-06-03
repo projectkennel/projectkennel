@@ -39,7 +39,14 @@ fn main() {
         let obj = Path::new(&out_dir).join(format!("{name}.o"));
         // Same flags as the loader's verified test: UAPI headers, BPF target, no CO-RE.
         let status = Command::new("clang")
-            .args(["-O2", "-Wall", "-target", "bpf", "-D__TARGET_ARCH_x86", "-c"])
+            .args([
+                "-O2",
+                "-Wall",
+                "-target",
+                "bpf",
+                "-D__TARGET_ARCH_x86",
+                "-c",
+            ])
             .arg("-I")
             .arg(&bpf_dir)
             .args(["-I/usr/include", "-I/usr/include/x86_64-linux-gnu"])
@@ -48,7 +55,11 @@ fn main() {
             .arg(&obj)
             .status()
             .expect("run clang");
-        assert!(status.success(), "clang failed to compile {}", src.display());
+        assert!(
+            status.success(),
+            "clang failed to compile {}",
+            src.display()
+        );
         entries.push((name, obj));
     }
 

@@ -124,12 +124,20 @@ pub fn recv_ack(fd: BorrowedFd<'_>) -> io::Result<Option<u8>> {
 /// # Errors
 ///
 /// The OS error if `poll`/`read` fails for a reason other than `EINTR` or EOF.
-pub fn recv_ready_cancellable(fd: BorrowedFd<'_>, cancel: &AtomicBool, tick_ms: i32) -> io::Result<Option<u32>> {
+pub fn recv_ready_cancellable(
+    fd: BorrowedFd<'_>,
+    cancel: &AtomicBool,
+    tick_ms: i32,
+) -> io::Result<Option<u32>> {
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         // SAFETY: `&mut pfd` points at one valid, initialised `pollfd`; `nfds = 1`
         // matches the single element. `poll` only reads `fd`/`events` and writes
         // `revents`. `tick_ms` is a plain timeout.
@@ -233,7 +241,11 @@ mod tests {
         assert_eq!(pid, Some(4242), "the servicer reads A's pid");
         send_ack(proceed_w.as_fd(), ACK_PROCEED).expect("send ack");
 
-        assert_eq!(a.join().expect("join"), Some(ACK_PROCEED), "A receives the proceed ack");
+        assert_eq!(
+            a.join().expect("join"),
+            Some(ACK_PROCEED),
+            "A receives the proceed ack"
+        );
     }
 
     #[test]
@@ -262,6 +274,10 @@ mod tests {
         // the caller treats as abort.
         let (proceed_r, proceed_w) = pipe_cloexec().expect("pipe");
         drop(proceed_w);
-        assert_eq!(recv_ack(proceed_r.as_fd()).expect("recv"), None, "EOF is a None ack");
+        assert_eq!(
+            recv_ack(proceed_r.as_fd()).expect("recv"),
+            None,
+            "EOF is a None ack"
+        );
     }
 }

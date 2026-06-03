@@ -799,13 +799,18 @@ impl SourcePolicy {
                 errs.push("artefact sets both `template_name` and `name`; a file is either a template or a leaf, not both".to_owned());
             }
             (false, false) => {
-                errs.push("artefact sets neither `template_name` (templates) nor `name` (leaf policies)".to_owned());
+                errs.push(
+                    "artefact sets neither `template_name` (templates) nor `name` (leaf policies)"
+                        .to_owned(),
+                );
             }
             _ => {}
         }
         // A leaf policy must name a parent template; only the root template may omit it.
         if self.is_leaf() && self.template_base.is_none() {
-            errs.push("leaf policy has no `template_base`; every leaf derives from a template".to_owned());
+            errs.push(
+                "leaf policy has no `template_base`; every leaf derives from a template".to_owned(),
+            );
         }
     }
 
@@ -836,7 +841,11 @@ impl SourcePolicy {
     fn check_reasons(&self, errs: &mut Vec<String>) {
         if let Some(net) = &self.net {
             for a in &net.allow {
-                let who = a.name.as_deref().or(a.cidr.as_deref()).unwrap_or("<unnamed>");
+                let who = a
+                    .name
+                    .as_deref()
+                    .or(a.cidr.as_deref())
+                    .unwrap_or("<unnamed>");
                 if is_blank(a.reason.as_deref()) {
                     errs.push(format!("[[net.allow]] \"{who}\" is missing a `reason`"));
                 }
@@ -844,14 +853,21 @@ impl SourcePolicy {
             if let Some(deny) = &net.deny {
                 for d in &deny.invariant {
                     if is_blank(d.reason.as_deref()) {
-                        errs.push(format!("[[net.deny.invariant]] \"{}\" is missing a `reason`", d.cidr));
+                        errs.push(format!(
+                            "[[net.deny.invariant]] \"{}\" is missing a `reason`",
+                            d.cidr
+                        ));
                     }
                 }
             }
         }
         if let Some(unix) = &self.unix {
             for a in &unix.allow {
-                let who = a.name.as_deref().or(a.real.as_deref()).unwrap_or("<unnamed>");
+                let who = a
+                    .name
+                    .as_deref()
+                    .or(a.real.as_deref())
+                    .unwrap_or("<unnamed>");
                 if is_blank(a.reason.as_deref()) {
                     errs.push(format!("[[unix.allow]] \"{who}\" is missing a `reason`"));
                 }
@@ -862,7 +878,9 @@ impl SourcePolicy {
                 for d in &dev.passthrough {
                     let who = d.path.as_deref().unwrap_or("<no-path>");
                     if is_blank(d.reason.as_deref()) {
-                        errs.push(format!("[[fs.dev.passthrough]] \"{who}\" is missing a `reason`"));
+                        errs.push(format!(
+                            "[[fs.dev.passthrough]] \"{who}\" is missing a `reason`"
+                        ));
                     }
                 }
             }
@@ -878,12 +896,18 @@ impl SourcePolicy {
         if let Some(c) = &self.container {
             for p in &c.published_ports {
                 if is_blank(p.reason.as_deref()) {
-                    errs.push(format!("[[container.published_ports]] {} is missing a `reason`", p.container_port));
+                    errs.push(format!(
+                        "[[container.published_ports]] {} is missing a `reason`",
+                        p.container_port
+                    ));
                 }
             }
             for v in &c.volumes {
                 if is_blank(v.reason.as_deref()) {
-                    errs.push(format!("[[container.volumes]] \"{}\" is missing a `reason`", v.container));
+                    errs.push(format!(
+                        "[[container.volumes]] \"{}\" is missing a `reason`",
+                        v.container
+                    ));
                 }
             }
         }
@@ -945,7 +969,8 @@ mod tests {
     use super::*;
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
-    const AI_CODING_STRICT: &str = include_str!("../../../../templates/ai-coding-strict/policy.toml");
+    const AI_CODING_STRICT: &str =
+        include_str!("../../../../templates/ai-coding-strict/policy.toml");
     const PACKAGE_INSTALL: &str = include_str!("../../../../templates/package-install/policy.toml");
     const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
     const INSPECT_ONLY: &str = include_str!("../../../../templates/inspect-only/policy.toml");
@@ -965,11 +990,21 @@ mod tests {
     fn every_in_tree_template_parses_and_validates() {
         for (name, src) in ALL_TEMPLATES {
             let parsed = parse(src.as_bytes());
-            assert!(parsed.is_ok(), "template {name} failed to parse: {parsed:?}");
+            assert!(
+                parsed.is_ok(),
+                "template {name} failed to parse: {parsed:?}"
+            );
             let pol = parsed.expect("checked ok above");
             let validated = pol.validate();
-            assert!(validated.is_ok(), "template {name} failed to validate: {validated:?}");
-            assert_eq!(pol.template_name.as_deref(), Some(*name), "template {name} name");
+            assert!(
+                validated.is_ok(),
+                "template {name} failed to validate: {validated:?}"
+            );
+            assert_eq!(
+                pol.template_name.as_deref(),
+                Some(*name),
+                "template {name} name"
+            );
             assert!(!pol.is_leaf(), "template {name} must not be a leaf");
         }
     }
@@ -989,11 +1024,15 @@ mod tests {
         let net = pol.net.expect("net section");
         let deny = net.deny.expect("net.deny");
         assert!(
-            deny.invariant.iter().any(|d| d.cidr == "169.254.169.254/32"),
+            deny.invariant
+                .iter()
+                .any(|d| d.cidr == "169.254.169.254/32"),
             "cloud-metadata deny present"
         );
         assert!(
-            deny.invariant.iter().all(|d| !is_blank(d.reason.as_deref())),
+            deny.invariant
+                .iter()
+                .all(|d| !is_blank(d.reason.as_deref())),
             "every invariant deny has a reason"
         );
     }
@@ -1014,15 +1053,29 @@ mod tests {
     fn ai_coding_strict_carries_its_net_allow_and_unix_agent() {
         let pol = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
         let net = pol.net.expect("net");
-        assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("github.com")));
-        assert!(net.allow.iter().all(|a| !is_blank(a.reason.as_deref())), "every allow has a reason");
+        assert!(net
+            .allow
+            .iter()
+            .any(|a| a.name.as_deref() == Some("github.com")));
+        assert!(
+            net.allow.iter().all(|a| !is_blank(a.reason.as_deref())),
+            "every allow has a reason"
+        );
         let unix = pol.unix.expect("unix");
         // The shim grants a per-kennel gpg-agent (a non-SSH agent socket). SSH is
         // NOT shimmed — it goes through the §7.8 bastion via the [ssh] section.
-        let agent = unix.allow.iter().find(|a| a.name.as_deref() == Some("gpg-agent")).expect("gpg-agent");
+        let agent = unix
+            .allow
+            .iter()
+            .find(|a| a.name.as_deref() == Some("gpg-agent"))
+            .expect("gpg-agent");
         assert_eq!(agent.shim.as_deref(), Some("~/.gnupg/S.gpg-agent"));
         assert!(
-            !unix.allow.iter().any(|a| a.name.as_deref() == Some("ssh-agent") || a.env.as_deref() == Some("SSH_AUTH_SOCK")),
+            !unix
+                .allow
+                .iter()
+                .any(|a| a.name.as_deref() == Some("ssh-agent")
+                    || a.env.as_deref() == Some("SSH_AUTH_SOCK")),
             "no ssh-agent shim — SSH is a destination-blind oracle, routed via the bastion"
         );
     }
@@ -1042,19 +1095,28 @@ mod tests {
         assert_eq!(c.allow_privileged, Some(false));
         assert_eq!(c.allow_pid_host, Some(false));
         assert!(c.published_ports.iter().any(|p| p.container_port == 5432));
-        assert!(c.published_ports.iter().all(|p| !is_blank(p.reason.as_deref())));
+        assert!(c
+            .published_ports
+            .iter()
+            .all(|p| !is_blank(p.reason.as_deref())));
     }
 
     #[test]
     fn unknown_top_level_key_is_rejected() {
         let src = "template_name = \"x\"\nbogus_key = 1\n";
-        assert!(parse(src.as_bytes()).is_err(), "deny_unknown_fields rejects bogus_key");
+        assert!(
+            parse(src.as_bytes()).is_err(),
+            "deny_unknown_fields rejects bogus_key"
+        );
     }
 
     #[test]
     fn unknown_key_in_known_section_is_rejected() {
         let src = "template_name = \"x\"\n[cap]\nno_new_privs = true\nnope = 1\n";
-        assert!(parse(src.as_bytes()).is_err(), "deny_unknown_fields rejects nested unknown");
+        assert!(
+            parse(src.as_bytes()).is_err(),
+            "deny_unknown_fields rejects nested unknown"
+        );
     }
 
     #[test]
@@ -1062,7 +1124,9 @@ mod tests {
         let src = "name = \"myproj\"\n";
         let pol = parse(src.as_bytes()).expect("parse");
         assert!(pol.is_leaf());
-        let err = pol.validate().expect_err("leaf with no template_base must fail");
+        let err = pol
+            .validate()
+            .expect_err("leaf with no template_base must fail");
         assert!(matches!(err, PolicyError::SourceValidation(_)));
     }
 
@@ -1070,7 +1134,10 @@ mod tests {
     fn artefact_with_both_identities_is_rejected() {
         let src = "template_name = \"t\"\nname = \"n\"\ntemplate_base = \"base-confined@v1\"\n";
         let pol = parse(src.as_bytes()).expect("parse");
-        assert!(pol.validate().is_err(), "template_name + name is incoherent");
+        assert!(
+            pol.validate().is_err(),
+            "template_name + name is incoherent"
+        );
     }
 
     #[test]
@@ -1079,16 +1146,26 @@ mod tests {
                    [[net.allow]]\nname = \"evil.example\"\nports = [443]\n";
         let pol = parse(src.as_bytes()).expect("parse");
         let err = pol.validate().expect_err("missing reason must fail");
-        assert!(matches!(err, PolicyError::SourceValidation(_)), "expected SourceValidation, got {err}");
+        assert!(
+            matches!(err, PolicyError::SourceValidation(_)),
+            "expected SourceValidation, got {err}"
+        );
         if let PolicyError::SourceValidation(ms) = err {
-            assert!(ms.iter().any(|m| m.contains("evil.example") && m.contains("reason")));
+            assert!(ms
+                .iter()
+                .any(|m| m.contains("evil.example") && m.contains("reason")));
         }
     }
 
     #[test]
     fn malformed_versioned_reference_is_rejected() {
         // `@4` lacks the leading `v`; the name `Bad` has an uppercase letter.
-        let cases = ["base-confined@4", "Bad@v1", "base-confined@v1.2.3.4", "base-confined@v"];
+        let cases = [
+            "base-confined@4",
+            "Bad@v1",
+            "base-confined@v1.2.3.4",
+            "base-confined@v",
+        ];
         for case in cases {
             let src = format!("name = \"n\"\ntemplate_base = \"{case}\"\n");
             let pol = parse(src.as_bytes()).expect("parse");
@@ -1106,7 +1183,10 @@ mod tests {
                    include = [\"corp-egress@v2\", \"corp-egress@v2\"]\n";
         let pol = parse(src.as_bytes()).expect("parse");
         let err = pol.validate().expect_err("duplicate include must fail");
-        assert!(matches!(err, PolicyError::SourceValidation(_)), "expected SourceValidation, got {err}");
+        assert!(
+            matches!(err, PolicyError::SourceValidation(_)),
+            "expected SourceValidation, got {err}"
+        );
         if let PolicyError::SourceValidation(ms) = err {
             assert!(ms.iter().any(|m| m.contains("duplicated")));
         }

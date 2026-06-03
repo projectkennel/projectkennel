@@ -64,7 +64,11 @@ mod tests {
     #[test]
     fn socket_path_is_under_the_runtime_dir() {
         let path = socket_path();
-        assert!(path.ends_with("kennel/control.sock"), "got {}", path.display());
+        assert!(
+            path.ends_with("kennel/control.sock"),
+            "got {}",
+            path.display()
+        );
     }
 
     #[test]

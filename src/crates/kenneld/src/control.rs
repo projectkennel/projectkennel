@@ -187,7 +187,9 @@ impl<'a> Reader<'a> {
             return Err(WireError::TooLarge);
         }
         let bytes = self.take(n)?;
-        core::str::from_utf8(bytes).map(str::to_owned).map_err(|_| WireError::BadString)
+        core::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| WireError::BadString)
     }
 
     fn strings(&mut self) -> Result<Vec<String>, WireError> {
@@ -242,7 +244,9 @@ impl Request {
                 argv: r.strings()?,
                 cwd: PathBuf::from(r.string()?),
             })),
-            2 => Ok(Self::Stop { kennel: r.string()? }),
+            2 => Ok(Self::Stop {
+                kennel: r.string()?,
+            }),
             3 => Ok(Self::List),
             4 => Ok(Self::AuthorizedKeys { key: r.string()? }),
             _ => Err(WireError::BadTag),
@@ -295,7 +299,10 @@ impl Response {
     pub fn decode(body: &[u8]) -> Result<Self, WireError> {
         let mut r = Reader::new(body);
         match r.u8()? {
-            0 => Ok(Self::Started { ctx: r.u16()?, pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX) }),
+            0 => Ok(Self::Started {
+                ctx: r.u16()?,
+                pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+            }),
             1 => Ok(Self::Stopped),
             2 => {
                 let n = r.u32_len()?;
@@ -315,7 +322,9 @@ impl Response {
             }
             3 => Ok(Self::Exited { code: r.i32()? }),
             4 => Ok(Self::Error(r.string()?)),
-            5 => Ok(Self::AuthorizedKeys { lines: r.strings()? }),
+            5 => Ok(Self::AuthorizedKeys {
+                lines: r.strings()?,
+            }),
             _ => Err(WireError::BadTag),
         }
     }
@@ -328,7 +337,8 @@ impl Response {
 /// # Errors
 /// An OS error if the write fails, or if `body` exceeds [`u32::MAX`].
 pub fn write_frame<W: Write>(w: &mut W, body: &[u8]) -> io::Result<()> {
-    let len = u32::try_from(body.len()).map_err(|_| io::Error::other("control message too large"))?;
+    let len =
+        u32::try_from(body.len()).map_err(|_| io::Error::other("control message too large"))?;
     w.write_all(&len.to_ne_bytes())?;
     w.write_all(body)
 }
@@ -342,7 +352,10 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     r.read_exact(&mut len_buf)?;
     let len = u32::from_ne_bytes(len_buf) as usize;
     if len > MAX_MESSAGE {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "control frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "control frame too large",
+        ));
     }
     let mut body = vec![0u8; len];
     r.read_exact(&mut body)?;
@@ -363,7 +376,8 @@ pub fn send_request<W: Write>(w: &mut W, request: &Request) -> io::Result<()> {
 /// An OS error on read failure, or `InvalidData` if the body is malformed.
 pub fn recv_request<R: Read>(r: &mut R) -> io::Result<Request> {
     let body = read_frame(r)?;
-    Request::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad request: {e:?}")))
+    Request::decode(&body)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad request: {e:?}")))
 }
 
 /// Send a response as a framed message.
@@ -380,7 +394,8 @@ pub fn send_response<W: Write>(w: &mut W, response: &Response) -> io::Result<()>
 /// An OS error on read failure, or `InvalidData` if the body is malformed.
 pub fn recv_response<R: Read>(r: &mut R) -> io::Result<Response> {
     let body = read_frame(r)?;
-    Response::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad response: {e:?}")))
+    Response::decode(&body)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad response: {e:?}")))
 }
 
 #[cfg(test)]
@@ -406,20 +421,28 @@ mod tests {
         round_trip_request(&Request::Start(StartRequest {
             policy: PathBuf::from("/etc/kennel/policies/ai-coding.policy"),
             kennel: "ai-coding".to_owned(),
-            argv: vec!["python3".to_owned(), "agent.py".to_owned(), "--flag".to_owned()],
+            argv: vec![
+                "python3".to_owned(),
+                "agent.py".to_owned(),
+                "--flag".to_owned(),
+            ],
             cwd: PathBuf::from("/home/dev/project"),
         }));
     }
 
     #[test]
     fn stop_and_list_requests_round_trip() {
-        round_trip_request(&Request::Stop { kennel: "ai-coding".to_owned() });
+        round_trip_request(&Request::Stop {
+            kennel: "ai-coding".to_owned(),
+        });
         round_trip_request(&Request::List);
     }
 
     #[test]
     fn authorized_keys_messages_round_trip() {
-        round_trip_request(&Request::AuthorizedKeys { key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5".to_owned() });
+        round_trip_request(&Request::AuthorizedKeys {
+            key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5".to_owned(),
+        });
         round_trip_request(&Request::AuthorizedKeys { key: String::new() });
         round_trip_response(&Response::AuthorizedKeys { lines: Vec::new() });
         round_trip_response(&Response::AuthorizedKeys {
@@ -437,8 +460,18 @@ mod tests {
         round_trip_response(&Response::Exited { code: 0 });
         round_trip_response(&Response::Error("no such kennel".to_owned()));
         round_trip_response(&Response::Listing(vec![
-            KennelInfo { kennel: "ai-coding".to_owned(), ctx: 7, pid: 4242, running: true },
-            KennelInfo { kennel: "build".to_owned(), ctx: 8, pid: 99, running: false },
+            KennelInfo {
+                kennel: "ai-coding".to_owned(),
+                ctx: 7,
+                pid: 4242,
+                running: true,
+            },
+            KennelInfo {
+                kennel: "build".to_owned(),
+                ctx: 8,
+                pid: 99,
+                running: false,
+            },
         ]));
     }
 

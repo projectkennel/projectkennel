@@ -32,7 +32,9 @@ fn main() -> ExitCode {
 fn run(host: &str, port_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     let proxy = std::env::var("KENNEL_SOCKS_PROXY")
         .map_err(|_| io::Error::other("$KENNEL_SOCKS_PROXY is not set"))?;
-    let port: u16 = port_str.parse().map_err(|_| io::Error::other(format!("bad port `{port_str}`")))?;
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| io::Error::other(format!("bad port `{port_str}`")))?;
 
     let mut sock = TcpStream::connect(&proxy)?;
     // SOCKS5 greeting → method selection (must be no-auth).
@@ -52,7 +54,9 @@ fn run(host: &str, port_str: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut len = [0u8; 1];
         sock.read_exact(&mut len)?;
         let [len_byte] = len;
-        reply_tail_len(atyp, len_byte).ok_or("bad SOCKS5 reply address type")?.saturating_sub(1)
+        reply_tail_len(atyp, len_byte)
+            .ok_or("bad SOCKS5 reply address type")?
+            .saturating_sub(1)
     } else {
         reply_tail_len(atyp, 0).ok_or("bad SOCKS5 reply address type")?
     };
@@ -86,7 +90,10 @@ fn splice(sock: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Copy `reader → writer`, flushing after every chunk so a line-buffered writer
 /// (stdout) forwards binary data immediately. Returns when the reader hits EOF.
-fn pump_flushing<R: io::Read, W: Write>(mut reader: R, mut writer: W) -> Result<(), Box<dyn std::error::Error>> {
+fn pump_flushing<R: io::Read, W: Write>(
+    mut reader: R,
+    mut writer: W,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 16384];
     loop {
         let n = reader.read(&mut buf)?;

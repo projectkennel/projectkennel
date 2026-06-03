@@ -17,7 +17,7 @@
 
 use std::io;
 
-use nix::unistd::{getegid, getgroups, geteuid, getgid, getuid, setgroups, Gid, Group};
+use nix::unistd::{getegid, geteuid, getgid, getgroups, getuid, setgroups, Gid, Group};
 
 /// The effective user ID of the calling process (`geteuid(2)`).
 #[must_use]
@@ -51,7 +51,9 @@ pub fn real_gid() -> u32 {
 /// granted (the root seal could otherwise over-grant, §7.2).
 #[must_use]
 pub fn supplementary_groups() -> Vec<u32> {
-    getgroups().map(|gids| gids.iter().map(|g| g.as_raw()).collect()).unwrap_or_default()
+    getgroups()
+        .map(|gids| gids.iter().map(|g| g.as_raw()).collect())
+        .unwrap_or_default()
 }
 
 /// The GID of the group named `name` (`getgrnam(3)` via NSS), or `None` if no such

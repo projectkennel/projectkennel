@@ -52,8 +52,13 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .map(TcpListener::bind)
         .collect::<io::Result<Vec<_>>>()?;
     let proxy = Arc::new(
-        Proxy::new(cfg.ruleset, SystemResolver, cfg.accept_private_resolved, audit)
-            .with_host_services(cfg.host_services),
+        Proxy::new(
+            cfg.ruleset,
+            SystemResolver,
+            cfg.accept_private_resolved,
+            audit,
+        )
+        .with_host_services(cfg.host_services),
     );
     proxy.serve_all(listeners)?;
     Ok(())

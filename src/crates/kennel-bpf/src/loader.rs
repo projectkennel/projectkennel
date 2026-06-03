@@ -533,12 +533,15 @@ mod root_tests {
 
         let mut samples: Vec<Vec<u8>> = Vec::new();
         let _ = rb.poll(1000);
-        rb.consume(|s| samples.push(s.to_vec())).expect("consume ringbuf");
+        rb.consume(|s| samples.push(s.to_vec()))
+            .expect("consume ringbuf");
 
         let _ = std::fs::remove_dir(cg);
 
         assert!(denied, "precondition: the connect should have been denied");
-        let ev = samples.first().expect("expected an audit event after connect");
+        let ev = samples
+            .first()
+            .expect("expected an audit event after connect");
         assert!(ev.len() >= 48, "event too short: {} bytes", ev.len());
         // audit_hdr: magic @0 (LE u32), kind @6 (LE u16). See bpf/audit_events.h.
         let magic = u32::from_le_bytes(
@@ -555,8 +558,16 @@ mod root_tests {
         assert_eq!(kind, 1, "AUDIT_NET_CONNECT_DENY");
         // audit_payload_connect starts at offset 40 (hdr is 40 bytes).
         assert_eq!(ev.get(40), Some(&2u8), "family AF_INET");
-        assert_eq!(ev.get(42..44), Some(&[0x00, 0x09][..]), "port 9, network order");
-        assert_eq!(ev.get(44..48), Some(&[127u8, 0, 0, 1][..]), "addr 127.0.0.1");
+        assert_eq!(
+            ev.get(42..44),
+            Some(&[0x00, 0x09][..]),
+            "port 9, network order"
+        );
+        assert_eq!(
+            ev.get(44..48),
+            Some(&[127u8, 0, 0, 1][..]),
+            "addr 127.0.0.1"
+        );
     }
 
     #[test]

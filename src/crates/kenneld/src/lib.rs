@@ -119,13 +119,25 @@ pub trait Privileged {
     ///
     /// # Errors
     /// An OS error if the helper cannot be invoked or its response is malformed.
-    fn add_address(&self, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response>;
+    fn add_address(
+        &self,
+        ctx: u16,
+        interface: &str,
+        addr: IpAddr,
+        prefix: u8,
+    ) -> io::Result<Response>;
 
     /// Remove `addr/prefix` on `interface` for kennel `ctx`.
     ///
     /// # Errors
     /// As [`add_address`](Self::add_address).
-    fn del_address(&self, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response>;
+    fn del_address(
+        &self,
+        ctx: u16,
+        interface: &str,
+        addr: IpAddr,
+        prefix: u8,
+    ) -> io::Result<Response>;
 
     /// Load, populate, and attach the egress BPF programs to `cgroup`.
     ///
@@ -152,23 +164,39 @@ pub struct HelperClient {
 impl HelperClient {
     /// Use the privhelper at `helper`.
     pub fn new(helper: impl Into<PathBuf>) -> Self {
-        Self { helper: helper.into() }
+        Self {
+            helper: helper.into(),
+        }
     }
 
     /// Use the privhelper at its installed location
     /// ([`kennel_privhelper::client::DEFAULT_HELPER`]).
     #[must_use]
     pub fn installed() -> Self {
-        Self { helper: kennel_privhelper::client::default_helper_path().to_path_buf() }
+        Self {
+            helper: kennel_privhelper::client::default_helper_path().to_path_buf(),
+        }
     }
 }
 
 impl Privileged for HelperClient {
-    fn add_address(&self, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
+    fn add_address(
+        &self,
+        ctx: u16,
+        interface: &str,
+        addr: IpAddr,
+        prefix: u8,
+    ) -> io::Result<Response> {
         kennel_privhelper::client::add_address(&self.helper, ctx, interface, addr, prefix)
     }
 
-    fn del_address(&self, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> io::Result<Response> {
+    fn del_address(
+        &self,
+        ctx: u16,
+        interface: &str,
+        addr: IpAddr,
+        prefix: u8,
+    ) -> io::Result<Response> {
         kennel_privhelper::client::del_address(&self.helper, ctx, interface, addr, prefix)
     }
 
@@ -414,8 +442,24 @@ struct Provision {
 /// # Errors
 /// Returns [`Error`] at the first failing step (filesystem, a refused/failed
 /// privileged operation, or the spawn).
-pub fn start<P: Privileged + Sync>(privileged: &P, spec: Spec, command: &mut Command) -> Result<Kennel, Error> {
-    let Spec { cgroup, ctx, scope, mut plan, net, proxy, etc, view_root, audit_path, ssh, unix } = spec;
+pub fn start<P: Privileged + Sync>(
+    privileged: &P,
+    spec: Spec,
+    command: &mut Command,
+) -> Result<Kennel, Error> {
+    let Spec {
+        cgroup,
+        ctx,
+        scope,
+        mut plan,
+        net,
+        proxy,
+        etc,
+        view_root,
+        audit_path,
+        ssh,
+        unix,
+    } = spec;
     let mut state = Provision::default();
 
     match bring_up(
@@ -459,6 +503,9 @@ pub fn start<P: Privileged + Sync>(privileged: &P, spec: Spec, command: &mut Com
 }
 
 /// The bring-up steps, recording provisioning into `state` as it goes.
+// allow: one ordered bring-up sequence (cgroup, addresses, egress, proxy, /etc, ssh,
+// unix, view, spawn) whose steps share `state` for the reverse-order unwind.
+#[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 fn bring_up<P: Privileged + Sync>(
     privileged: &P,
@@ -487,11 +534,17 @@ fn bring_up<P: Privileged + Sync>(
     let port = net.proxy.port;
     if let Ok(c) = u8::try_from(ctx) {
         let addr = loopback_v4(scope.tag(), c, offset);
-        expect_ok("add_address v4", privileged.add_address(ctx, LOOPBACK, addr.into(), V4_PREFIX))?;
+        expect_ok(
+            "add_address v4",
+            privileged.add_address(ctx, LOOPBACK, addr.into(), V4_PREFIX),
+        )?;
         state.v4 = Some(addr);
     }
     let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
-    expect_ok("add_address v6", privileged.add_address(ctx, LOOPBACK, addr6.into(), V6_PREFIX))?;
+    expect_ok(
+        "add_address v6",
+        privileged.add_address(ctx, LOOPBACK, addr6.into(), V6_PREFIX),
+    )?;
     state.v6 = Some(addr6);
 
     // Stamp the egress proxy into the plan before deriving the BPF payload: this
@@ -499,7 +552,11 @@ fn bring_up<P: Privileged + Sync>(
     // records the proxy in kennel_meta). Without it the BPF would deny every
     // connect, the proxy included, so no egress could flow. `state.v4` is the
     // proxy's v4 address (absent for a v6-only kennel); `addr6` its v6.
-    plan.stamp_proxy(&ProxyEndpoint { v4: state.v4, v6: addr6, port });
+    plan.stamp_proxy(&ProxyEndpoint {
+        v4: state.v4,
+        v6: addr6,
+        port,
+    });
 
     // 3. egress BPF (privileged: load + attach in the helper).
     let payload = EgressPayload {
@@ -525,8 +582,9 @@ fn bring_up<P: Privileged + Sync>(
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let config = crate::proxy::config_toml(net, &listen, audit_path, ssh.host_service.as_slice())
-            .map_err(Error::ProxyConfig)?;
+        let config =
+            crate::proxy::config_toml(net, &listen, audit_path, ssh.host_service.as_slice())
+                .map_err(Error::ProxyConfig)?;
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
         std::fs::write(&config_path, config)?;
@@ -565,7 +623,8 @@ fn bring_up<P: Privileged + Sync>(
             }
         }
         for dir in ssh_dirs {
-            plan.landlock_fs.push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
+            plan.landlock_fs
+                .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
         }
         plan.file_binds.extend(ssh.file_binds.iter().cloned());
         // The connector connects to the kennel's own proxy address.
@@ -591,7 +650,11 @@ fn bring_up<P: Privileged + Sync>(
     if view_root.is_some() {
         if let Some(view) = plan.view.as_mut() {
             for sub in crate::etc::essential_etc_subtrees() {
-                view.binds.push(kennel_spawn::BindMount { source: sub.clone(), target: sub, writable: false });
+                view.binds.push(kennel_spawn::BindMount {
+                    source: sub.clone(),
+                    target: sub,
+                    writable: false,
+                });
             }
             // Bind the SOCKS connector in at its own path (read-only) so the synthetic
             // ssh config's ProxyCommand can exec it.
@@ -608,7 +671,8 @@ fn bring_up<P: Privileged + Sync>(
         if let Some(bin) = &ssh.socks_connect_bin {
             if plan.view.is_some() {
                 use kennel_syscall::landlock::AccessFs;
-                plan.landlock_fs.push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+                plan.landlock_fs
+                    .push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
             }
         }
     }
@@ -635,7 +699,11 @@ fn bring_up<P: Privileged + Sync>(
 /// [`kennel_spawn::spawn_with_gid_map`]. Otherwise (default drop-all on the userns
 /// path, or the privileged path) the plain [`kennel_spawn::spawn`] is used and
 /// the helper is not consulted.
-fn spawn_workload<P: Privileged + Sync>(privileged: &P, plan: &Plan, command: &mut Command) -> Result<Child, Error> {
+fn spawn_workload<P: Privileged + Sync>(
+    privileged: &P,
+    plan: &Plan,
+    command: &mut Command,
+) -> Result<Child, Error> {
     use kennel_syscall::namespace::Namespaces;
 
     let granted = plan.supplementary_groups.as_deref().unwrap_or(&[]);
@@ -651,7 +719,9 @@ fn spawn_workload<P: Privileged + Sync>(privileged: &P, plan: &Plan, command: &m
         if response.status == Status::Ok {
             Ok(())
         } else {
-            Err(io::Error::other(format!("privhelper refused the gid_map write: {response:?}")))
+            Err(io::Error::other(format!(
+                "privhelper refused the gid_map write: {response:?}"
+            )))
         }
     };
     kennel_spawn::spawn_with_gid_map(plan, command, map_gids).map_err(Error::Spawn)
@@ -690,13 +760,21 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
     }
     for (_src, target) in &unix.socket_binds {
         if let Some(parent) = target.parent() {
-            plan.landlock_fs.push((parent.to_path_buf(), AccessFs::READ_FILE | AccessFs::READ_DIR));
+            plan.landlock_fs.push((
+                parent.to_path_buf(),
+                AccessFs::READ_FILE | AccessFs::READ_DIR,
+            ));
         }
-        plan.landlock_fs.push((target.clone(), AccessFs::READ_FILE | AccessFs::WRITE_FILE));
+        plan.landlock_fs
+            .push((target.clone(), AccessFs::READ_FILE | AccessFs::WRITE_FILE));
     }
     if let Some(view) = plan.view.as_mut() {
         for (source, target) in &unix.socket_binds {
-            view.binds.push(kennel_spawn::BindMount { source: source.clone(), target: target.clone(), writable: false });
+            view.binds.push(kennel_spawn::BindMount {
+                source: source.clone(),
+                target: target.clone(),
+                writable: false,
+            });
         }
     }
 }
@@ -761,10 +839,10 @@ fn teardown<P: Privileged>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use kennel_syscall::landlock::AccessFs;
     use kennel_syscall::namespace::Namespaces;
     use kennel_syscall::seccomp::Action;
+    use std::sync::Mutex;
 
     /// A recording [`Privileged`] fake: logs each call and can be set to fail at a
     /// chosen operation, so the bring-up order and its unwind are observable
@@ -800,7 +878,11 @@ mod tests {
         }
         /// The egress payload captured at the last `setup_egress` call.
         fn egress(&self) -> EgressPayload {
-            self.egress.lock().expect("egress lock").clone().expect("setup_egress was called")
+            self.egress
+                .lock()
+                .expect("egress lock")
+                .clone()
+                .expect("setup_egress was called")
         }
         /// The gids captured at the last `set_gid_map` call, if any.
         fn gid_map(&self) -> Option<Vec<u32>> {
@@ -809,10 +891,22 @@ mod tests {
     }
 
     impl Privileged for FakePriv {
-        fn add_address(&self, _ctx: u16, _iface: &str, addr: IpAddr, _prefix: u8) -> io::Result<Response> {
+        fn add_address(
+            &self,
+            _ctx: u16,
+            _iface: &str,
+            addr: IpAddr,
+            _prefix: u8,
+        ) -> io::Result<Response> {
             Ok(self.answer(if addr.is_ipv4() { "add v4" } else { "add v6" }))
         }
-        fn del_address(&self, _ctx: u16, _iface: &str, addr: IpAddr, _prefix: u8) -> io::Result<Response> {
+        fn del_address(
+            &self,
+            _ctx: u16,
+            _iface: &str,
+            addr: IpAddr,
+            _prefix: u8,
+        ) -> io::Result<Response> {
             Ok(self.answer(if addr.is_ipv4() { "del v4" } else { "del v6" }))
         }
         fn setup_egress(&self, _cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
@@ -847,7 +941,10 @@ mod tests {
             cgroup_join: false,
             view: None,
             new_root: None,
-            landlock_fs: vec![(PathBuf::from("/"), AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE)],
+            landlock_fs: vec![(
+                PathBuf::from("/"),
+                AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE,
+            )],
             landlock_net: Vec::new(),
             seccomp_deny: Vec::new(),
             seccomp_deny_action: Action::KillProcess,
@@ -889,9 +986,21 @@ mod tests {
         let _ = std::fs::remove_dir(&cgroup);
         let fake = FakePriv::new(None);
 
-        let kennel = start(&fake, spec(cgroup.clone(), 5), &mut Command::new("/bin/true")).expect("start");
-        assert!(cgroup.is_dir(), "the cgroup directory should have been created");
-        assert_eq!(fake.log(), ["add v4", "add v6", "setup_egress"], "bring-up order");
+        let kennel = start(
+            &fake,
+            spec(cgroup.clone(), 5),
+            &mut Command::new("/bin/true"),
+        )
+        .expect("start");
+        assert!(
+            cgroup.is_dir(),
+            "the cgroup directory should have been created"
+        );
+        assert_eq!(
+            fake.log(),
+            ["add v4", "add v6", "setup_egress"],
+            "bring-up order"
+        );
 
         let status = kennel.stop(&fake).expect("stop");
         assert!(status.success(), "the trivial workload should exit 0");
@@ -900,7 +1009,10 @@ mod tests {
             ["add v4", "add v6", "setup_egress", "del v6", "del v4"],
             "teardown removes addresses in reverse"
         );
-        assert!(!cgroup.exists(), "the cgroup directory should have been removed");
+        assert!(
+            !cgroup.exists(),
+            "the cgroup directory should have been removed"
+        );
     }
 
     #[test]
@@ -911,14 +1023,25 @@ mod tests {
         // rolled back, and the cgroup removed; the workload must not spawn.
         let fake = FakePriv::new(Some("setup_egress"));
 
-        let err = start(&fake, spec(cgroup.clone(), 5), &mut Command::new("/bin/true")).expect_err("must fail");
-        assert!(matches!(&err, Error::Privileged { op, .. } if *op == "setup_egress"), "got {err:?}");
+        let err = start(
+            &fake,
+            spec(cgroup.clone(), 5),
+            &mut Command::new("/bin/true"),
+        )
+        .expect_err("must fail");
+        assert!(
+            matches!(&err, Error::Privileged { op, .. } if *op == "setup_egress"),
+            "got {err:?}"
+        );
         assert_eq!(
             fake.log(),
             ["add v4", "add v6", "setup_egress", "del v6", "del v4"],
             "a mid-sequence failure unwinds the addresses"
         );
-        assert!(!cgroup.exists(), "the cgroup directory should have been removed on unwind");
+        assert!(
+            !cgroup.exists(),
+            "the cgroup directory should have been removed on unwind"
+        );
     }
 
     #[test]
@@ -939,17 +1062,37 @@ mod tests {
         let want_v6 = loopback_v6([0, 0, 0, 0, 1], 5, u64::from(PROXY_HOST));
 
         let (key_v4, val_v4) = payload.allow_v4.first().expect("a v4 proxy entry");
-        assert_eq!(key_v4.get(4..8), Some(&want_v4.octets()[..]), "proxy v4 host key");
+        assert_eq!(
+            key_v4.get(4..8),
+            Some(&want_v4.octets()[..]),
+            "proxy v4 host key"
+        );
         assert_eq!(val_v4.get(5), Some(&0x01u8), "KENNEL_ALLOW_FLAG_PROXY set");
-        assert_eq!(val_v4.get(0..2), Some(&PROXY_PORT.to_ne_bytes()[..]), "proxy port (host order)");
+        assert_eq!(
+            val_v4.get(0..2),
+            Some(&PROXY_PORT.to_ne_bytes()[..]),
+            "proxy port (host order)"
+        );
 
         let (key_v6, val_v6) = payload.allow_v6.first().expect("a v6 proxy entry");
-        assert_eq!(key_v6.get(4..20), Some(&want_v6.octets()[..]), "proxy v6 host key");
+        assert_eq!(
+            key_v6.get(4..20),
+            Some(&want_v6.octets()[..]),
+            "proxy v6 host key"
+        );
         assert_eq!(val_v6.get(5), Some(&0x01u8), "KENNEL_ALLOW_FLAG_PROXY set");
 
         // The meta carries the proxy port (network order, offset 12) and v6 (16).
-        assert_eq!(payload.meta.get(12..14), Some(&PROXY_PORT.to_be_bytes()[..]), "meta proxy_port");
-        assert_eq!(payload.meta.get(16..32), Some(&want_v6.octets()[..]), "meta proxy_addr_v6");
+        assert_eq!(
+            payload.meta.get(12..14),
+            Some(&PROXY_PORT.to_be_bytes()[..]),
+            "meta proxy_port"
+        );
+        assert_eq!(
+            payload.meta.get(16..32),
+            Some(&want_v6.octets()[..]),
+            "meta proxy_addr_v6"
+        );
     }
 
     #[test]
@@ -959,7 +1102,10 @@ mod tests {
         let fake = FakePriv::new(None);
 
         let mut s = spec(cgroup, 5);
-        s.net.proxy = kennel_policy::ProxyListen { offset: 2, port: 8080 };
+        s.net.proxy = kennel_policy::ProxyListen {
+            offset: 2,
+            port: 8080,
+        };
         let kennel = start(&fake, s, &mut Command::new("/bin/true")).expect("start");
         let payload = fake.egress();
         kennel.stop(&fake).expect("stop");
@@ -968,9 +1114,21 @@ mod tests {
         // (8080), not the 1/1080 default.
         let want_v4 = loopback_v4(9, 5, 2);
         let (key_v4, val_v4) = payload.allow_v4.first().expect("v4 proxy entry");
-        assert_eq!(key_v4.get(4..8), Some(&want_v4.octets()[..]), "v4 key at offset 2");
-        assert_eq!(val_v4.get(0..2), Some(&8080u16.to_ne_bytes()[..]), "proxy port from policy");
-        assert_eq!(payload.meta.get(12..14), Some(&8080u16.to_be_bytes()[..]), "meta proxy_port from policy");
+        assert_eq!(
+            key_v4.get(4..8),
+            Some(&want_v4.octets()[..]),
+            "v4 key at offset 2"
+        );
+        assert_eq!(
+            val_v4.get(0..2),
+            Some(&8080u16.to_ne_bytes()[..]),
+            "proxy port from policy"
+        );
+        assert_eq!(
+            payload.meta.get(12..14),
+            Some(&8080u16.to_be_bytes()[..]),
+            "meta proxy_port from policy"
+        );
     }
 
     #[test]
@@ -985,7 +1143,10 @@ mod tests {
         // `/bin/true` stands in for the netproxy: it exits at once, which is fine
         // for asserting the config is written and the launch/teardown plumbing
         // works (a real proxy is exercised by the root e2e).
-        s.proxy = Some(ProxySetup { binary: PathBuf::from("/bin/true"), config_dir: dir.clone() });
+        s.proxy = Some(ProxySetup {
+            binary: PathBuf::from("/bin/true"),
+            config_dir: dir.clone(),
+        });
         s.net.allow_names = vec![kennel_policy::NameRule {
             name: "api.example.com".to_owned(),
             ports: vec![443],
@@ -996,7 +1157,10 @@ mod tests {
         // The per-kennel config was written and carries the policy's name rule.
         let cfg = std::fs::read_to_string(dir.join("proxy-5.toml")).expect("config written");
         assert!(cfg.contains("listen"), "config has a listen address");
-        assert!(cfg.contains("api.example.com"), "config carries the by-name allow rule");
+        assert!(
+            cfg.contains("api.example.com"),
+            "config carries the by-name allow rule"
+        );
 
         kennel.stop(&fake).expect("stop");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1020,10 +1184,19 @@ mod tests {
         let _ = std::fs::remove_dir(&cgroup);
         let fake = FakePriv::new(None);
 
-        let kennel = start(&fake, spec(cgroup, 300), &mut Command::new("/bin/true")).expect("start");
-        assert_eq!(fake.log(), ["add v6", "setup_egress"], "no v4 for a high ctx");
+        let kennel =
+            start(&fake, spec(cgroup, 300), &mut Command::new("/bin/true")).expect("start");
+        assert_eq!(
+            fake.log(),
+            ["add v6", "setup_egress"],
+            "no v4 for a high ctx"
+        );
         kennel.stop(&fake).expect("stop");
-        assert_eq!(fake.log(), ["add v6", "setup_egress", "del v6"], "teardown removes only v6");
+        assert_eq!(
+            fake.log(),
+            ["add v6", "setup_egress", "del v6"],
+            "teardown removes only v6"
+        );
     }
 
     #[test]
@@ -1033,10 +1206,17 @@ mod tests {
         // workload keeps a sane primary group), the granted gids follow.
         let got = gid_map_set(&[4242, 7]);
         assert_eq!(got.first(), Some(&real), "real gid first");
-        assert!(got.contains(&4242) && got.contains(&7), "granted gids preserved");
+        assert!(
+            got.contains(&4242) && got.contains(&7),
+            "granted gids preserved"
+        );
         assert_eq!(got.len(), 3, "no spurious entries");
         // A granted gid equal to the real gid is not duplicated.
-        assert_eq!(gid_map_set(&[real, 99]), vec![real, 99], "deduped, order-preserving");
+        assert_eq!(
+            gid_map_set(&[real, 99]),
+            vec![real, 99],
+            "deduped, order-preserving"
+        );
     }
 
     /// Whether the host forbids an unprivileged user namespace outright (the
@@ -1044,7 +1224,8 @@ mod tests {
     /// capability-stripping restriction (detected from the spawn error below).
     fn userns_hard_disabled() -> bool {
         let off = |p: &str| std::fs::read_to_string(p).is_ok_and(|s| s.trim() == "0");
-        off("/proc/sys/kernel/unprivileged_userns_clone") || off("/proc/sys/user/max_user_namespaces")
+        off("/proc/sys/kernel/unprivileged_userns_clone")
+            || off("/proc/sys/user/max_user_namespaces")
     }
 
     /// Whether `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+/24.04).
@@ -1109,7 +1290,10 @@ mod tests {
             cgroup_join: false,
             view: None,
             new_root: None,
-            landlock_fs: vec![(PathBuf::from("/"), AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE)],
+            landlock_fs: vec![(
+                PathBuf::from("/"),
+                AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE,
+            )],
             landlock_net: Vec::new(),
             seccomp_deny: Vec::new(),
             seccomp_deny_action: Action::KillProcess,

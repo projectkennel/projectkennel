@@ -10,7 +10,8 @@ use kennel_privhelper::wire::{Op, Request, Response, Status};
 /// Send `req` to a fresh privhelper process (via the client) and return its
 /// response — exercising `client::invoke` against the real binary.
 fn run(req: &Request) -> Response {
-    client::invoke(Path::new(env!("CARGO_BIN_EXE_kennel-privhelper")), req).expect("invoke privhelper")
+    client::invoke(Path::new(env!("CARGO_BIN_EXE_kennel-privhelper")), req)
+        .expect("invoke privhelper")
 }
 
 fn cgroup_request(op: Op, path: &str) -> Request {
@@ -29,7 +30,11 @@ fn an_unallocated_user_is_refused() {
     // The test user has no /etc/kennel/subkennel allocation, so every operation
     // is refused before any privileged syscall — no privilege needed to verify.
     let resp = run(&cgroup_request(Op::AddAddr, ""));
-    assert_eq!(resp.status, Status::Refused, "an unallocated user must be refused");
+    assert_eq!(
+        resp.status,
+        Status::Refused,
+        "an unallocated user must be refused"
+    );
 }
 
 // --- Privileged tests. Run as root (uid 0); they provision uid 0's allocation. ---
@@ -59,7 +64,6 @@ fn v4(tag: u16, ctx: u16, host: u8) -> std::net::Ipv4Addr {
     std::net::Ipv4Addr::from(0x7F00_0000 | suffix)
 }
 
-
 #[cfg(feature = "root-tests")]
 #[test]
 fn adds_and_removes_an_in_scope_loopback_address() {
@@ -73,17 +77,32 @@ fn adds_and_removes_an_in_scope_loopback_address() {
     req.prefix = 28;
     req.interface = "lo".to_owned();
 
-    assert_eq!(run(&req).status, Status::Ok, "in-scope address add should succeed");
-    assert!(lo_has(&addr_str), "the loopback alias {addr_str} should be present");
+    assert_eq!(
+        run(&req).status,
+        Status::Ok,
+        "in-scope address add should succeed"
+    );
+    assert!(
+        lo_has(&addr_str),
+        "the loopback alias {addr_str} should be present"
+    );
 
     req.op = Op::DelAddr;
-    assert_eq!(run(&req).status, Status::Ok, "address removal should succeed");
+    assert_eq!(
+        run(&req).status,
+        Status::Ok,
+        "address removal should succeed"
+    );
     assert!(!lo_has(&addr_str), "the loopback alias should be gone");
 
     // An out-of-scope address (wrong tag) must be refused, no syscall.
     req.op = Op::AddAddr;
     req.addr = v4(1, 5, 1).into(); // tag 1 != 9
-    assert_eq!(run(&req).status, Status::Refused, "out-of-scope address must be refused");
+    assert_eq!(
+        run(&req).status,
+        Status::Refused,
+        "out-of-scope address must be refused"
+    );
 }
 
 /// Build a `/32` `allow_v4` LPM entry permitting any port to `addr` (network
@@ -132,7 +151,12 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
         deny_v6: Vec::new(),
     };
     let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
-    assert_eq!(resp.status, Status::Ok, "egress setup should load+attach all programs (errno {})", resp.errno);
+    assert_eq!(
+        resp.status,
+        Status::Ok,
+        "egress setup should load+attach all programs (errno {})",
+        resp.errno
+    );
 
     // Removing the cgroup detaches the programs.
     std::fs::remove_dir(&cgroup).expect("remove cgroup");
@@ -151,9 +175,17 @@ fn egress_to_a_cgroup_not_owned_by_caller_is_refused() {
     std::fs::create_dir(&cgroup).expect("create cgroup");
     std::os::unix::fs::chown(&cgroup, Some(12345), None).expect("chown to foreign uid");
 
-    let resp = client::setup_egress(helper, cgroup.clone(), &empty_payload()).expect("invoke setup_egress");
-    assert_eq!(resp.status, Status::Refused, "a cgroup not owned by the caller must be refused");
-    assert_eq!(resp.refusal, REFUSAL_CGROUP_NOT_OWNED, "refusal should name the ownership boundary");
+    let resp = client::setup_egress(helper, cgroup.clone(), &empty_payload())
+        .expect("invoke setup_egress");
+    assert_eq!(
+        resp.status,
+        Status::Refused,
+        "a cgroup not owned by the caller must be refused"
+    );
+    assert_eq!(
+        resp.refusal, REFUSAL_CGROUP_NOT_OWNED,
+        "refusal should name the ownership boundary"
+    );
 
     std::fs::remove_dir(&cgroup).expect("remove cgroup");
 }

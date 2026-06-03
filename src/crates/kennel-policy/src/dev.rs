@@ -33,7 +33,9 @@ use crate::PolicyError;
 ///
 /// Returns [`PolicyError::SourceValidation`] carrying one message per problem.
 pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
-    let Some(dev) = policy.fs.as_ref().and_then(|fs| fs.dev.as_ref()) else { return Ok(()) };
+    let Some(dev) = policy.fs.as_ref().and_then(|fs| fs.dev.as_ref()) else {
+        return Ok(());
+    };
     let mut errs: Vec<String> = Vec::new();
 
     for entry in &dev.passthrough {
@@ -68,7 +70,10 @@ fn is_dev_path(p: &str) -> bool {
 
 /// Whether the entry carries an `exposed` threat tag.
 fn has_exposed_tag(entry: &DevPassthrough) -> bool {
-    entry.threats.as_ref().is_some_and(|t| !t.exposed.is_empty())
+    entry
+        .threats
+        .as_ref()
+        .is_some_and(|t| !t.exposed.is_empty())
 }
 
 #[cfg(test)]
@@ -78,7 +83,13 @@ mod tests {
 
     fn policy_with(passthrough: Vec<DevPassthrough>) -> SourcePolicy {
         SourcePolicy {
-            fs: Some(FsSection { dev: Some(FsDev { allow: None, passthrough }), ..FsSection::default() }),
+            fs: Some(FsSection {
+                dev: Some(FsDev {
+                    allow: None,
+                    passthrough,
+                }),
+                ..FsSection::default()
+            }),
             ..SourcePolicy::default()
         }
     }
@@ -88,7 +99,10 @@ mod tests {
             path: Some(path.to_owned()),
             group: Some("dialout".to_owned()),
             reason: Some("flash firmware over the serial console".to_owned()),
-            threats: tagged.then(|| Threats { exposed: vec!["T2.1".to_owned()], mitigated: vec![] }),
+            threats: tagged.then(|| Threats {
+                exposed: vec!["T2.1".to_owned()],
+                mitigated: vec![],
+            }),
         }
     }
 
@@ -107,14 +121,18 @@ mod tests {
     #[test]
     fn an_untagged_passthrough_is_refused() {
         let err = validate(&policy_with(vec![entry("/dev/ttyUSB0", false)])).expect_err("refused");
-        assert!(matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("threat tag"))));
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("threat tag")))
+        );
     }
 
     #[test]
     fn a_path_outside_dev_or_with_dotdot_is_refused() {
         for bad in ["/etc/shadow", "/dev/../etc/shadow", "relative"] {
             let err = validate(&policy_with(vec![entry(bad, true)])).expect_err("refused");
-            assert!(matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("under `/dev`"))));
+            assert!(
+                matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("under `/dev`")))
+            );
         }
     }
 
@@ -123,6 +141,8 @@ mod tests {
         let mut e = entry("/dev/ttyUSB0", true);
         e.path = None;
         let err = validate(&policy_with(vec![e])).expect_err("refused");
-        assert!(matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("missing a `path`"))));
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("missing a `path`")))
+        );
     }
 }

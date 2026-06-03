@@ -52,7 +52,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
 /// `kennel run <policy> <name> -- <argv...>`
 fn run(args: &[String]) -> Result<ExitCode, String> {
     // policy, name, then "--", then the command.
-    let sep = args.iter().position(|a| a == "--").ok_or("run needs `-- <cmd...>`")?;
+    let sep = args
+        .iter()
+        .position(|a| a == "--")
+        .ok_or("run needs `-- <cmd...>`")?;
     let head = args.get(..sep).unwrap_or(&[]);
     let command = args.get(sep.saturating_add(1)..).unwrap_or(&[]);
     let [policy, name] = head else {
@@ -79,7 +82,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
 
     // First the daemon confirms the launch, then (when the workload exits) the code.
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-        Response::Started { ctx, pid } => eprintln!("kennel `{name}` started (ctx {ctx}, pid {pid})"),
+        Response::Started { ctx, pid } => {
+            eprintln!("kennel `{name}` started (ctx {ctx}, pid {pid})");
+        }
         Response::Error(message) => return Err(message),
         other => return Err(format!("unexpected response: {other:?}")),
     }
@@ -96,7 +101,13 @@ fn stop(args: &[String]) -> Result<ExitCode, String> {
         return Err("usage: kennel stop <name>".to_owned());
     };
     let mut conn = connect()?;
-    send(&conn, &Request::Stop { kennel: name.clone() }, &[])?;
+    send(
+        &conn,
+        &Request::Stop {
+            kennel: name.clone(),
+        },
+        &[],
+    )?;
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
         Response::Stopped => {
             eprintln!("kennel `{name}` stopped");
@@ -133,15 +144,20 @@ fn list() -> Result<ExitCode, String> {
 fn connect() -> Result<UnixStream, String> {
     let path = socket::socket_path();
     UnixStream::connect(&path).map_err(|e| {
-        format!("cannot reach kenneld at {} ({e}); is the kenneld.socket user unit enabled?", path.display())
+        format!(
+            "cannot reach kenneld at {} ({e}); is the kenneld.socket user unit enabled?",
+            path.display()
+        )
     })
 }
 
 /// Send `request` (with any `fds`) as one framed `SCM_RIGHTS` message.
 fn send(conn: &UnixStream, request: &Request, fds: &[BorrowedFd<'_>]) -> Result<(), String> {
     let mut framed = Vec::new();
-    control::write_frame(&mut framed, &request.encode()).map_err(|e| format!("encoding request: {e}"))?;
-    kennel_syscall::scm::send_with_fds(conn.as_fd(), &framed, fds).map_err(|e| format!("sending request: {e}"))?;
+    control::write_frame(&mut framed, &request.encode())
+        .map_err(|e| format!("encoding request: {e}"))?;
+    kennel_syscall::scm::send_with_fds(conn.as_fd(), &framed, fds)
+        .map_err(|e| format!("sending request: {e}"))?;
     Ok(())
 }
 
@@ -180,6 +196,8 @@ impl TemplateSource for FsTemplateSource {
 /// Resolves a source policy fully and writes a settled policy. Stateless: it never
 /// contacts the daemon. Exit codes follow `02-1-cli.md` (3 = validation/resolution,
 /// 6 = signature).
+// allow: one cohesive arg-parse + compile + write/sign sequence for the CLI subcommand.
+#[allow(clippy::too_many_lines)]
 fn compile(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_path: Option<&str> = None;
     let mut output_path: Option<PathBuf> = None;
@@ -223,7 +241,9 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         return Err("--key and --unsigned are mutually exclusive".to_owned());
     }
     if key_path.is_none() && !unsigned {
-        return Err("provide --key <path> to sign, or --unsigned for a development build".to_owned());
+        return Err(
+            "provide --key <path> to sign, or --unsigned for a development build".to_owned(),
+        );
     }
     add_default_template_dirs(&mut template_dirs);
 
@@ -231,8 +251,13 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
 
     // Installation constants are fixed at install time; until an install-config
     // reader exists they take the documented defaults (tag 42, ULA fd00::).
-    let install = InstallConstants { tag: 42, ula_gid: "fd00::".to_owned() };
-    let source = FsTemplateSource { dirs: template_dirs };
+    let install = InstallConstants {
+        tag: 42,
+        ula_gid: "fd00::".to_owned(),
+    };
+    let source = FsTemplateSource {
+        dirs: template_dirs,
+    };
     let version = env!("CARGO_PKG_VERSION");
 
     // Build the trust context: `--require-signed` refuses unsigned templates and
@@ -271,7 +296,10 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
                 return Ok(ExitCode::from(6));
             }
         }
-        let lock_bytes = compiled.lock.to_bytes().map_err(|e| format!("lockfile: {e}"))?;
+        let lock_bytes = compiled
+            .lock
+            .to_bytes()
+            .map_err(|e| format!("lockfile: {e}"))?;
         std::fs::write(&lock_path, &lock_bytes)
             .map_err(|e| format!("writing {}: {e}", lock_path.display()))?;
     }
@@ -285,14 +313,21 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     let out_bytes = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
 
-    let note = if unsigned { " (unsigned development build)" } else { "" };
+    let note = if unsigned {
+        " (unsigned development build)"
+    } else {
+        ""
+    };
     eprintln!("compiled `{}` -> {}{note}", policy.name, out.display());
     Ok(ExitCode::SUCCESS)
 }
 
 /// The `<name>.lock` path beside the settled output.
 fn lock_path_for(output: &Path, name: &str) -> PathBuf {
-    output.parent().unwrap_or_else(|| Path::new(".")).join(format!("{name}.lock"))
+    output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{name}.lock"))
 }
 
 /// Compile policy `bytes` (a template/direct policy parses as a `SourcePolicy`; a
@@ -328,20 +363,28 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--require-signed" => require_signed = true,
-            "--template-dir" => template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into()),
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
             "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             value if policy_path.is_none() => policy_path = Some(value),
             _ => return Err("only one <policy> may be given".to_owned()),
         }
     }
-    let policy_path = policy_path.ok_or("usage: kennel validate <policy> [--template-dir D] [--require-signed]")?;
+    let policy_path = policy_path
+        .ok_or("usage: kennel validate <policy> [--template-dir D] [--require-signed]")?;
     add_default_template_dirs(&mut template_dirs);
     add_default_trust_dirs(&mut trust_dirs);
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
-    let install = InstallConstants { tag: 42, ula_gid: "fd00::".to_owned() };
-    let source = FsTemplateSource { dirs: template_dirs };
+    let install = InstallConstants {
+        tag: 42,
+        ula_gid: "fd00::".to_owned(),
+    };
+    let source = FsTemplateSource {
+        dirs: template_dirs,
+    };
     let keys = load_trust_store(&trust_dirs)?;
     let trust = if require_signed {
         kennel_policy::Trust::require(&keys)
@@ -394,7 +437,9 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
         format!("{path} is not a signable source template/fragment ({e}); leaf policies may stay unsigned")
     })?;
     if policy.signature.is_some() {
-        return Err(format!("{path} already carries a [signature]; remove it before re-signing"));
+        return Err(format!(
+            "{path} already carries a [signature]; remove it before re-signing"
+        ));
     }
 
     let key = load_signing_key(key_path)?;
@@ -445,7 +490,9 @@ fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
 
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
 fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
-    let dir = Path::new(policy_path).parent().unwrap_or_else(|| Path::new("."));
+    let dir = Path::new(policy_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
     dir.join(format!("{name}.settled.toml"))
 }
 
@@ -462,15 +509,19 @@ fn add_default_trust_dirs(dirs: &mut Vec<PathBuf>) {
 fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_policy::KeySet, String> {
     let mut keys = kennel_policy::KeySet::new();
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("pub") {
                 continue;
             }
-            let Some(key_id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-            let contents =
-                std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+            let Some(key_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|e| format!("reading {}: {e}", path.display()))?;
             keys.insert_b64(key_id, contents.trim())
                 .map_err(|e| format!("key {}: {e}", path.display()))?;
         }

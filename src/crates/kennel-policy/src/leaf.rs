@@ -23,7 +23,8 @@
 //! a later increment (the template chain already overrides scalars).
 
 use crate::source::{
-    DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, SshKey, UnixAllow,
+    DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, SshKey,
+    UnixAllow,
 };
 use crate::PolicyError;
 use serde::{Deserialize, Serialize};
@@ -284,7 +285,11 @@ impl LeafPolicy {
     fn check_reasons(&self, errs: &mut Vec<String>) {
         let path_blank = |e: &PathEntry| e.reason.as_deref().is_none_or(|r| r.trim().is_empty());
         if let Some(fs) = &self.fs {
-            for (label, delta) in [("fs.read", &fs.read), ("fs.write", &fs.write), ("fs.deny", &fs.deny)] {
+            for (label, delta) in [
+                ("fs.read", &fs.read),
+                ("fs.write", &fs.write),
+                ("fs.deny", &fs.deny),
+            ] {
                 if let Some(d) = delta {
                     for e in d.add.iter().chain(&d.remove) {
                         if path_blank(e) {
@@ -298,7 +303,9 @@ impl LeafPolicy {
                     for e in d.add.iter().chain(&d.remove) {
                         if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
                             let who = e.path.as_deref().unwrap_or("<no-path>");
-                            errs.push(format!("[[fs.dev.passthrough.*]] `{who}` is missing a `reason`"));
+                            errs.push(format!(
+                                "[[fs.dev.passthrough.*]] `{who}` is missing a `reason`"
+                            ));
                         }
                     }
                 }
@@ -308,7 +315,10 @@ impl LeafPolicy {
             if let Some(d) = &exec.allow {
                 for e in d.add.iter().chain(&d.remove) {
                     if path_blank(e) {
-                        errs.push(format!("[[exec.allow.*]] `{}` is missing a `reason`", e.path));
+                        errs.push(format!(
+                            "[[exec.allow.*]] `{}` is missing a `reason`",
+                            e.path
+                        ));
                     }
                 }
             }
@@ -317,7 +327,11 @@ impl LeafPolicy {
             if let Some(d) = &net.allow {
                 for e in d.add.iter().chain(&d.remove) {
                     if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
-                        let who = e.name.as_deref().or(e.cidr.as_deref()).unwrap_or("<unnamed>");
+                        let who = e
+                            .name
+                            .as_deref()
+                            .or(e.cidr.as_deref())
+                            .unwrap_or("<unnamed>");
                         errs.push(format!("[[net.allow.*]] `{who}` is missing a `reason`"));
                     }
                 }
@@ -327,7 +341,11 @@ impl LeafPolicy {
             if let Some(d) = &unix.allow {
                 for e in d.add.iter().chain(&d.remove) {
                     if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
-                        let who = e.name.as_deref().or(e.real.as_deref()).unwrap_or("<unnamed>");
+                        let who = e
+                            .name
+                            .as_deref()
+                            .or(e.real.as_deref())
+                            .unwrap_or("<unnamed>");
                         errs.push(format!("[[unix.allow.*]] `{who}` is missing a `reason`"));
                     }
                 }
@@ -354,25 +372,42 @@ impl LeafPolicy {
             path_clean(&f.read)
                 && path_clean(&f.write)
                 && path_clean(&f.deny)
-                && f.dev.as_ref().is_none_or(|d| d.passthrough.as_ref().is_none_or(|p| p.remove.is_empty()))
+                && f.dev
+                    .as_ref()
+                    .is_none_or(|d| d.passthrough.as_ref().is_none_or(|p| p.remove.is_empty()))
         });
         let exec_ok = self.exec.as_ref().is_none_or(|e| path_clean(&e.allow));
-        let net_ok = self.net.as_ref().is_none_or(|n| n.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
-        let unix_ok = self.unix.as_ref().is_none_or(|u| u.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
-        let ssh_ok = self.ssh.as_ref().is_none_or(|s| s.keys.as_ref().is_none_or(|k| k.remove.is_empty()));
+        let net_ok = self
+            .net
+            .as_ref()
+            .is_none_or(|n| n.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
+        let unix_ok = self
+            .unix
+            .as_ref()
+            .is_none_or(|u| u.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
+        let ssh_ok = self
+            .ssh
+            .as_ref()
+            .is_none_or(|s| s.keys.as_ref().is_none_or(|k| k.remove.is_empty()));
         fs_ok && exec_ok && net_ok && unix_ok && ssh_ok
     }
 
     /// This policy's `[[net.allow.add]]` entries (for include conflict checks).
     #[must_use]
     pub fn net_allow_adds(&self) -> &[NetAllow] {
-        self.net.as_ref().and_then(|n| n.allow.as_ref()).map_or(&[], |a| a.add.as_slice())
+        self.net
+            .as_ref()
+            .and_then(|n| n.allow.as_ref())
+            .map_or(&[], |a| a.add.as_slice())
     }
 
     /// This policy's fragment-declared invariant denies (`[[net.deny.invariant]]`).
     #[must_use]
     pub fn invariant_denies(&self) -> &[NetDenyRule] {
-        self.net.as_ref().and_then(|n| n.deny.as_ref()).map_or(&[], |d| d.invariant.as_slice())
+        self.net
+            .as_ref()
+            .and_then(|n| n.deny.as_ref())
+            .map_or(&[], |d| d.invariant.as_slice())
     }
 
     /// Apply this leaf's deltas to the folded effective policy, in place.
@@ -390,11 +425,17 @@ impl LeafPolicy {
                 if let Some(d) = &dev.passthrough {
                     let dev_target = target.dev.get_or_insert_with(Default::default);
                     for entry in &d.add {
-                        if !dev_target.passthrough.iter().any(|e| dev_key(e) == dev_key(entry)) {
+                        if !dev_target
+                            .passthrough
+                            .iter()
+                            .any(|e| dev_key(e) == dev_key(entry))
+                        {
                             dev_target.passthrough.push(entry.clone());
                         }
                     }
-                    dev_target.passthrough.retain(|e| !d.remove.iter().any(|r| dev_key(r) == dev_key(e)));
+                    dev_target
+                        .passthrough
+                        .retain(|e| !d.remove.iter().any(|r| dev_key(r) == dev_key(e)));
                 }
             }
         }
@@ -410,7 +451,9 @@ impl LeafPolicy {
                         target.allow.push(entry.clone());
                     }
                 }
-                target.allow.retain(|e| !d.remove.iter().any(|r| net_key(r) == net_key(e)));
+                target
+                    .allow
+                    .retain(|e| !d.remove.iter().any(|r| net_key(r) == net_key(e)));
             }
         }
         if let Some(unix) = &self.unix {
@@ -421,7 +464,9 @@ impl LeafPolicy {
                         target.allow.push(entry.clone());
                     }
                 }
-                target.allow.retain(|e| !d.remove.iter().any(|r| unix_key(r) == unix_key(e)));
+                target
+                    .allow
+                    .retain(|e| !d.remove.iter().any(|r| unix_key(r) == unix_key(e)));
             }
         }
         if let Some(ssh) = &self.ssh {
@@ -432,7 +477,9 @@ impl LeafPolicy {
                         target.keys.push(entry.clone());
                     }
                 }
-                target.keys.retain(|e| !d.remove.iter().any(|r| ssh_key(r) == ssh_key(e)));
+                target
+                    .keys
+                    .retain(|e| !d.remove.iter().any(|r| ssh_key(r) == ssh_key(e)));
             }
         }
         // Scalar overrides (`[*.override]`): replace only the fields the leaf sets.
@@ -445,7 +492,12 @@ impl LeafPolicy {
                 target.ttl_action.clone_from(&over.ttl_action);
             }
         }
-        if let Some(over) = self.net.as_ref().and_then(|n| n.audit.as_ref()).and_then(|a| a.over.as_ref()) {
+        if let Some(over) = self
+            .net
+            .as_ref()
+            .and_then(|n| n.audit.as_ref())
+            .and_then(|a| a.over.as_ref())
+        {
             let net = effective.net.get_or_insert_with(Default::default);
             let target = net.audit.get_or_insert_with(Default::default);
             if over.log_path.is_some() {
@@ -500,18 +552,30 @@ mod tests {
     use crate::source::parse as parse_source;
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
-    const AI_CODING_STRICT: &str = include_str!("../../../../templates/ai-coding-strict/policy.toml");
+    const AI_CODING_STRICT: &str =
+        include_str!("../../../../templates/ai-coding-strict/policy.toml");
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
         fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
-            self.0.iter().find(|(n, v, _)| n == name && v == version).map(|(_, _, b)| b.clone())
+            self.0
+                .iter()
+                .find(|(n, v, _)| n == name && v == version)
+                .map(|(_, _, b)| b.clone())
         }
     }
     fn src() -> MapSource {
         MapSource(vec![
-            ("base-confined".to_owned(), "v1".to_owned(), BASE_CONFINED.as_bytes().to_vec()),
-            ("ai-coding-strict".to_owned(), "v1".to_owned(), AI_CODING_STRICT.as_bytes().to_vec()),
+            (
+                "base-confined".to_owned(),
+                "v1".to_owned(),
+                BASE_CONFINED.as_bytes().to_vec(),
+            ),
+            (
+                "ai-coding-strict".to_owned(),
+                "v1".to_owned(),
+                AI_CODING_STRICT.as_bytes().to_vec(),
+            ),
         ])
     }
 
@@ -549,14 +613,35 @@ threats.exposed = ["T1.8"]
     fn leaf_add_grants_project_paths_and_api() {
         let (eff, _) = effective_with_leaf(PROJECT_LEAF);
         let fs = eff.fs.expect("fs");
-        assert!(fs.read.as_ref().expect("read").iter().any(|p| p == "~/projects/myproj/**"));
-        assert!(fs.write.as_ref().expect("write").iter().any(|p| p == "~/projects/myproj/**"));
+        assert!(fs
+            .read
+            .as_ref()
+            .expect("read")
+            .iter()
+            .any(|p| p == "~/projects/myproj/**"));
+        assert!(fs
+            .write
+            .as_ref()
+            .expect("write")
+            .iter()
+            .any(|p| p == "~/projects/myproj/**"));
         // The inherited system read paths survive.
-        assert!(fs.read.as_ref().expect("read").iter().any(|p| p == "/usr/**"));
+        assert!(fs
+            .read
+            .as_ref()
+            .expect("read")
+            .iter()
+            .any(|p| p == "/usr/**"));
         let net = eff.net.expect("net");
-        assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("api.anthropic.com")));
+        assert!(net
+            .allow
+            .iter()
+            .any(|a| a.name.as_deref() == Some("api.anthropic.com")));
         // The inherited registry allows survive.
-        assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("github.com")));
+        assert!(net
+            .allow
+            .iter()
+            .any(|a| a.name.as_deref() == Some("github.com")));
     }
 
     #[test]
@@ -572,10 +657,19 @@ threats.exposed = ["T2.1"]
 "#;
         let (eff, _) = effective_with_leaf(leaf);
         let dev = eff.fs.expect("fs").dev.expect("fs.dev");
-        let pt = dev.passthrough.iter().find(|p| p.path.as_deref() == Some("/dev/ttyUSB0")).expect("device added");
+        let pt = dev
+            .passthrough
+            .iter()
+            .find(|p| p.path.as_deref() == Some("/dev/ttyUSB0"))
+            .expect("device added");
         assert_eq!(pt.group.as_deref(), Some("dialout"));
         // The inherited pseudo-device baseline survives.
-        assert!(dev.allow.as_ref().expect("allow").iter().any(|d| d == "/dev/null"));
+        assert!(dev
+            .allow
+            .as_ref()
+            .expect("allow")
+            .iter()
+            .any(|d| d == "/dev/null"));
     }
 
     #[test]
@@ -589,8 +683,18 @@ reason = "this workflow does not use github"
 "#;
         let (eff, _) = effective_with_leaf(leaf);
         let net = eff.net.expect("net");
-        assert!(!net.allow.iter().any(|a| a.name.as_deref() == Some("github.com")), "github removed");
-        assert!(net.allow.iter().any(|a| a.name.as_deref() == Some("pypi.org")), "others remain");
+        assert!(
+            !net.allow
+                .iter()
+                .any(|a| a.name.as_deref() == Some("github.com")),
+            "github removed"
+        );
+        assert!(
+            net.allow
+                .iter()
+                .any(|a| a.name.as_deref() == Some("pypi.org")),
+            "others remain"
+        );
     }
 
     #[test]
@@ -604,7 +708,13 @@ ports = [443]
 reason = "already inherited; should not duplicate"
 "#;
         let (eff, _) = effective_with_leaf(leaf);
-        let n = eff.net.expect("net").allow.iter().filter(|a| a.name.as_deref() == Some("github.com")).count();
+        let n = eff
+            .net
+            .expect("net")
+            .allow
+            .iter()
+            .filter(|a| a.name.as_deref() == Some("github.com"))
+            .count();
         assert_eq!(n, 1, "no duplicate github.com");
     }
 
@@ -625,7 +735,11 @@ level = "full"
         assert_eq!(lc.ttl.as_deref(), Some("2h"), "ttl overridden");
         assert_eq!(lc.ttl_action.as_deref(), Some("stop"), "action overridden");
         let audit = eff.net.expect("net").audit.expect("audit");
-        assert_eq!(audit.level.as_deref(), Some("full"), "audit level overridden");
+        assert_eq!(
+            audit.level.as_deref(),
+            Some("full"),
+            "audit level overridden"
+        );
         // The log_path the leaf did not set is inherited.
         assert!(audit.log_path.is_some(), "unset override field inherits");
     }

@@ -105,7 +105,12 @@ impl Bastion {
     /// Create the (stopped) bastion state for `config`.
     #[must_use]
     pub const fn new(config: BastionConfig) -> Self {
-        Self { config, edges: Vec::new(), child: None, host_pub: None }
+        Self {
+            config,
+            edges: Vec::new(),
+            child: None,
+            host_pub: None,
+        }
     }
 
     /// Whether the managed `sshd` is currently running.
@@ -132,7 +137,14 @@ impl Bastion {
     pub fn render_authorized_keys(&self) -> String {
         self.edges
             .iter()
-            .map(|e| sshd::authorized_keys_line(&self.config.reorigin_bin, &e.dest, &e.real_fp, &e.synthetic_pub))
+            .map(|e| {
+                sshd::authorized_keys_line(
+                    &self.config.reorigin_bin,
+                    &e.dest,
+                    &e.real_fp,
+                    &e.synthetic_pub,
+                )
+            })
             .collect()
     }
 
@@ -145,11 +157,20 @@ impl Bastion {
     /// key (and any malformed input) authorises nothing and the bastion refuses it.
     #[must_use]
     pub fn authorized_keys_for(&self, offered_key: &str) -> Vec<String> {
-        let Some(offered) = key_id(offered_key) else { return Vec::new() };
+        let Some(offered) = key_id(offered_key) else {
+            return Vec::new();
+        };
         self.edges
             .iter()
             .filter(|e| key_id(&e.synthetic_pub) == Some(offered))
-            .map(|e| sshd::authorized_keys_line(&self.config.reorigin_bin, &e.dest, &e.real_fp, &e.synthetic_pub))
+            .map(|e| {
+                sshd::authorized_keys_line(
+                    &self.config.reorigin_bin,
+                    &e.dest,
+                    &e.real_fp,
+                    &e.synthetic_pub,
+                )
+            })
             .collect()
     }
 
@@ -174,7 +195,11 @@ impl Bastion {
     ///
     /// An OS error if the daemon cannot be started or the key files cannot be written.
     pub fn register(&mut self, edge: Edge) -> io::Result<()> {
-        if !self.edges.iter().any(|e| e.synthetic_pub == edge.synthetic_pub) {
+        if !self
+            .edges
+            .iter()
+            .any(|e| e.synthetic_pub == edge.synthetic_pub)
+        {
             self.edges.push(edge);
         }
         self.start_if_needed()?;
@@ -241,7 +266,10 @@ impl Bastion {
         // Production vends keys through the root-owned AKC (querying this running
         // daemon); the file source is the prototype/e2e fallback.
         let auth = match &self.config.akc {
-            Some(akc) => AuthSource::Command { command: akc.command.clone(), user: akc.user.clone() },
+            Some(akc) => AuthSource::Command {
+                command: akc.command.clone(),
+                user: akc.user.clone(),
+            },
             None => AuthSource::File(self.config.authorized_keys()),
         };
         let params = SshdParams {
@@ -260,7 +288,10 @@ impl Bastion {
             self.write_authorized_keys()?;
         }
 
-        self.child = Some(sshd::spawn(Path::new(sshd::DEFAULT_SSHD_BIN), &config_path)?);
+        self.child = Some(sshd::spawn(
+            Path::new(sshd::DEFAULT_SSHD_BIN),
+            &config_path,
+        )?);
         Ok(())
     }
 }
@@ -299,7 +330,12 @@ mod tests {
     }
 
     fn edge(kennel: &str, dest: &str, fp: &str, pubkey: &str) -> Edge {
-        Edge { kennel: kennel.into(), dest: dest.into(), real_fp: fp.into(), synthetic_pub: pubkey.into() }
+        Edge {
+            kennel: kennel.into(),
+            dest: dest.into(),
+            real_fp: fp.into(),
+            synthetic_pub: pubkey.into(),
+        }
     }
 
     const FP_A: &str = "SHA256:AAAa1EZ7oO0qfsA5OSDosRRaFD9evYHhSlcrDPTVoZw";
@@ -309,23 +345,31 @@ mod tests {
     fn render_authorized_keys_is_one_forced_command_line_per_edge() {
         let mut b = Bastion::new(config());
         // Inject edges directly (bypassing start) to test the pure rendering.
-        b.edges.push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
-        b.edges.push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
+        b.edges
+            .push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
+        b.edges
+            .push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
         let ak = b.render_authorized_keys();
         let lines: Vec<&str> = ak.lines().collect();
         assert_eq!(lines.len(), 2);
         let l0 = lines.first().copied().unwrap_or_default();
         let l1 = lines.get(1).copied().unwrap_or_default();
         assert!(l0.contains("--dest github.com") && l0.contains(FP_A) && l0.contains("AAAASYN_A"));
-        assert!(l1.contains("--dest git.internal") && l1.contains(FP_B) && l1.contains("AAAASYN_B"));
-        assert!(lines.iter().all(|l| l.starts_with("restrict,pty,command=\"")));
+        assert!(
+            l1.contains("--dest git.internal") && l1.contains(FP_B) && l1.contains("AAAASYN_B")
+        );
+        assert!(lines
+            .iter()
+            .all(|l| l.starts_with("restrict,pty,command=\"")));
     }
 
     #[test]
     fn authorized_keys_for_matches_the_offered_key_ignoring_comment() {
         let mut b = Bastion::new(config());
-        b.edges.push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
-        b.edges.push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
+        b.edges
+            .push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
+        b.edges
+            .push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
 
         // Offered exactly as sshd hands the AKC: "<type> <base64>", no comment.
         let lines = b.authorized_keys_for("ssh-ed25519 AAAASYN_A");
@@ -335,9 +379,14 @@ mod tests {
         assert!(l.contains("--dest github.com") && l.contains(FP_A) && l.contains("AAAASYN_A"));
 
         // The other edge by its own key.
-        assert!(b.authorized_keys_for("ssh-ed25519 AAAASYN_B").first().is_some_and(|l| l.contains("git.internal")));
+        assert!(b
+            .authorized_keys_for("ssh-ed25519 AAAASYN_B")
+            .first()
+            .is_some_and(|l| l.contains("git.internal")));
         // A non-synthetic / unknown key authorises nothing (the bastion refuses it).
-        assert!(b.authorized_keys_for("ssh-ed25519 NOTASYNTHETICKEY").is_empty());
+        assert!(b
+            .authorized_keys_for("ssh-ed25519 NOTASYNTHETICKEY")
+            .is_empty());
         // Malformed input (no base64 field) is fail-closed too.
         assert!(b.authorized_keys_for("ssh-ed25519").is_empty());
         assert!(b.authorized_keys_for("").is_empty());
@@ -359,8 +408,10 @@ mod tests {
     #[test]
     fn deregister_drops_only_the_named_kennels_edges() {
         let mut b = Bastion::new(config());
-        b.edges.push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
-        b.edges.push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
+        b.edges
+            .push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
+        b.edges
+            .push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
         // No daemon running, dir absent → deregister just prunes the edges.
         b.deregister("ka").expect("deregister");
         assert_eq!(b.edges().len(), 1);

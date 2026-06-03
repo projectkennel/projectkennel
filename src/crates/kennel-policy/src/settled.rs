@@ -132,7 +132,10 @@ pub struct ProxyListen {
 impl Default for ProxyListen {
     /// The documented default: offset 1 (the kennel's primary address), port 1080.
     fn default() -> Self {
-        Self { offset: 1, port: 1080 }
+        Self {
+            offset: 1,
+            port: 1080,
+        }
     }
 }
 

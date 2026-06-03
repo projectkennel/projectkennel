@@ -28,7 +28,9 @@
 use crate::leaf::LeafPolicy;
 use crate::lock::Lockfile;
 use crate::resolve::{resolve_verified, ChainLink, TemplateSource};
-use crate::settled::{InstallConstants, Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy};
+use crate::settled::{
+    InstallConstants, Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy,
+};
 use crate::signature::SignatureEnvelope;
 use crate::source::SourcePolicy;
 use crate::source_sig::Trust;
@@ -98,7 +100,10 @@ pub fn compile(
     let include_links = apply_includes(&mut effective, &include_refs, source, trust)?;
     chain.extend(include_links);
 
-    let tcv = effective.threat_catalogue_version.clone().unwrap_or_default();
+    let tcv = effective
+        .threat_catalogue_version
+        .clone()
+        .unwrap_or_default();
     // The `[ssh]` section is source-only (dropped in translate); validate it here,
     // on the resolved policy, while the cross-referenced `net.allow` is still visible.
     crate::ssh::validate(&effective)?;
@@ -193,7 +198,9 @@ fn apply_includes(
     for reference in includes {
         let (name, version) = split_reference(reference)?;
         let bytes = source.fetch(&name, &version).ok_or_else(|| {
-            PolicyError::Resolution(format!("include `{name}@{version}` not found in the search path"))
+            PolicyError::Resolution(format!(
+                "include `{name}@{version}` not found in the search path"
+            ))
         })?;
         let fragment = crate::leaf::parse(&bytes)?;
 
@@ -277,7 +284,10 @@ fn assemble(
         settled_schema_version: SETTLED_SCHEMA_VERSION,
         name,
         deferred_substitutions: translated.deferred_substitutions.clone(),
-        framework_invariants_asserted: ASSERTED_INVARIANTS.iter().map(|s| (*s).to_owned()).collect(),
+        framework_invariants_asserted: ASSERTED_INVARIANTS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
         effective_policy: translated.effective_policy.clone(),
         ssh: translated.ssh.clone(),
         unix: translated.unix.clone(),
@@ -295,7 +305,10 @@ fn assemble(
 
     // Defence in depth: assert now what the runtime will re-assert at spawn.
     crate::invariant::validate(&policy).map_err(PolicyError::InvariantViolations)?;
-    Ok(Compiled { policy, lock: Lockfile::from_chain(chain) })
+    Ok(Compiled {
+        policy,
+        lock: Lockfile::from_chain(chain),
+    })
 }
 
 /// Seal a settled policy without a signature (development use only).
@@ -324,24 +337,37 @@ mod tests {
     use crate::{sign_settled, to_bytes, verify_settled};
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
-    const AI_CODING_STRICT: &str = include_str!("../../../../templates/ai-coding-strict/policy.toml");
+    const AI_CODING_STRICT: &str =
+        include_str!("../../../../templates/ai-coding-strict/policy.toml");
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
         fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
-            self.0.iter().find(|(n, v, _)| n == name && v == version).map(|(_, _, b)| b.clone())
+            self.0
+                .iter()
+                .find(|(n, v, _)| n == name && v == version)
+                .map(|(_, _, b)| b.clone())
         }
     }
     fn src() -> MapSource {
-        MapSource(vec![("base-confined".to_owned(), "v1".to_owned(), BASE_CONFINED.as_bytes().to_vec())])
+        MapSource(vec![(
+            "base-confined".to_owned(),
+            "v1".to_owned(),
+            BASE_CONFINED.as_bytes().to_vec(),
+        )])
     }
     fn install() -> InstallConstants {
-        InstallConstants { tag: 42, ula_gid: "fd00:abcd::".to_owned() }
+        InstallConstants {
+            tag: 42,
+            ula_gid: "fd00:abcd::".to_owned(),
+        }
     }
 
     fn compile_ai() -> SettledPolicy {
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
-        compile(&entry, &src(), &Trust::dev(), &install(), "test-0.0.0").expect("compile").policy
+        compile(&entry, &src(), &Trust::dev(), &install(), "test-0.0.0")
+            .expect("compile")
+            .policy
     }
 
     #[test]
@@ -351,8 +377,15 @@ mod tests {
         assert_eq!(p.name, "ai-coding-strict");
         assert_eq!(p.provenance.compiler_version, "test-0.0.0");
         assert_eq!(p.provenance.install_constants.tag, 42);
-        assert!(p.provenance.resolved_artifacts.iter().any(|a| a.name == "base-confined" && a.version == "v1"));
-        assert!(p.framework_invariants_asserted.iter().any(|i| i == "cap.no_new_privs"));
+        assert!(p
+            .provenance
+            .resolved_artifacts
+            .iter()
+            .any(|a| a.name == "base-confined" && a.version == "v1"));
+        assert!(p
+            .framework_invariants_asserted
+            .iter()
+            .any(|i| i == "cap.no_new_privs"));
         assert!(p.deferred_substitutions.iter().any(|d| d == "<kennel>"));
     }
 
@@ -364,7 +397,8 @@ mod tests {
         let bytes = to_bytes(&doc).expect("serialise");
 
         let mut keys = KeySet::new();
-        keys.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+        keys.insert(key.key_id(), &key.public_key_bytes())
+            .expect("insert");
         let verified = verify_settled(&bytes, &keys).expect("verify");
         assert_eq!(verified.name, "ai-coding-strict");
     }
@@ -374,23 +408,44 @@ mod tests {
         use crate::source_sig::sign_source;
         let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
         let mut ks = KeySet::new();
-        ks.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+        ks.insert(key.key_id(), &key.public_key_bytes())
+            .expect("insert");
         // Sign base-confined and serve the signed bytes.
-        let signed = sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
-        let signed_bytes = basic_toml::to_string(&signed).expect("serialise").into_bytes();
-        let source = MapSource(vec![("base-confined".to_owned(), "v1".to_owned(), signed_bytes)]);
+        let signed =
+            sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
+        let signed_bytes = basic_toml::to_string(&signed)
+            .expect("serialise")
+            .into_bytes();
+        let source = MapSource(vec![(
+            "base-confined".to_owned(),
+            "v1".to_owned(),
+            signed_bytes,
+        )]);
 
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
         let compiled = compile(&entry, &source, &Trust::require(&ks), &install(), "v")
             .expect("compile with signed ancestor");
         assert!(
-            compiled.policy.provenance.resolved_artifacts.iter().any(|a| a.signing_key_id == "kennel-maint-2026"),
+            compiled
+                .policy
+                .provenance
+                .resolved_artifacts
+                .iter()
+                .any(|a| a.signing_key_id == "kennel-maint-2026"),
             "the verified signing key is recorded in provenance"
         );
         // The lockfile pins the signed ancestor with its signature.
-        let locked = compiled.lock.entries.iter().find(|e| e.name == "base-confined").expect("locked");
+        let locked = compiled
+            .lock
+            .entries
+            .iter()
+            .find(|e| e.name == "base-confined")
+            .expect("locked");
         assert_eq!(locked.signing_key_id, "kennel-maint-2026");
-        assert!(!locked.signature.is_empty(), "the signature commitment is recorded");
+        assert!(
+            !locked.signature.is_empty(),
+            "the signature commitment is recorded"
+        );
     }
 
     #[test]
@@ -406,11 +461,23 @@ mod tests {
 
     fn source_with_fragments(frags: &[(&str, &str)]) -> MapSource {
         let mut v = vec![
-            ("base-confined".to_owned(), "v1".to_owned(), BASE_CONFINED.as_bytes().to_vec()),
-            ("ai-coding-strict".to_owned(), "v1".to_owned(), AI_CODING_STRICT.as_bytes().to_vec()),
+            (
+                "base-confined".to_owned(),
+                "v1".to_owned(),
+                BASE_CONFINED.as_bytes().to_vec(),
+            ),
+            (
+                "ai-coding-strict".to_owned(),
+                "v1".to_owned(),
+                AI_CODING_STRICT.as_bytes().to_vec(),
+            ),
         ];
         for (name, body) in frags {
-            v.push(((*name).to_owned(), "v1".to_owned(), body.as_bytes().to_vec()));
+            v.push((
+                (*name).to_owned(),
+                "v1".to_owned(),
+                body.as_bytes().to_vec(),
+            ));
         }
         MapSource(v)
     }
@@ -423,11 +490,25 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled = compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect("compile");
+        let compiled =
+            compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect("compile");
         let names = &compiled.policy.effective_policy.net.allow_names;
-        assert!(names.iter().any(|n| n.name == "proxy.corp.example"), "fragment host added");
-        assert!(names.iter().any(|n| n.name == "github.com"), "inherited host kept");
-        assert!(compiled.lock.entries.iter().any(|e| e.name == "corp-egress"), "include lock-pinned");
+        assert!(
+            names.iter().any(|n| n.name == "proxy.corp.example"),
+            "fragment host added"
+        );
+        assert!(
+            names.iter().any(|n| n.name == "github.com"),
+            "inherited host kept"
+        );
+        assert!(
+            compiled
+                .lock
+                .entries
+                .iter()
+                .any(|e| e.name == "corp-egress"),
+            "include lock-pinned"
+        );
     }
 
     #[test]
@@ -439,7 +520,8 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"frag-a@v1\", \"frag-b@v1\"]\n",
         )
         .expect("parse leaf");
-        let err = compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect_err("conflict");
+        let err =
+            compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect_err("conflict");
         assert!(matches!(err, PolicyError::IncludeConflict(_)), "got {err}");
     }
 
@@ -451,10 +533,19 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-deny@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled = compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect("compile");
+        let compiled =
+            compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect("compile");
         let denies = &compiled.policy.effective_policy.net.deny_invariant;
-        assert!(denies.iter().any(|r| r.cidr == "203.0.113.0" && r.prefix_len == 24), "fragment invariant added");
-        assert!(denies.iter().any(|r| r.cidr == "169.254.169.254"), "base invariants still present");
+        assert!(
+            denies
+                .iter()
+                .any(|r| r.cidr == "203.0.113.0" && r.prefix_len == 24),
+            "fragment invariant added"
+        );
+        assert!(
+            denies.iter().any(|r| r.cidr == "169.254.169.254"),
+            "base invariants still present"
+        );
     }
 
     #[test]
@@ -463,7 +554,9 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[net.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"r\"\n",
         )
         .expect("parse leaf");
-        let err = leaf.validate().expect_err("leaf invariant must be rejected");
+        let err = leaf
+            .validate()
+            .expect_err("leaf invariant must be rejected");
         if let PolicyError::SourceValidation(ms) = err {
             assert!(ms.iter().any(|m| m.contains("invariant")));
         }
@@ -501,11 +594,14 @@ mod tests {
         use crate::source_sig::{sign_leaf, sign_source};
         let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
         let mut ks = KeySet::new();
-        ks.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+        ks.insert(key.key_id(), &key.public_key_bytes())
+            .expect("insert");
 
         // Sign the chain (base-confined, ai-coding-strict) and the fragment.
         let to_bytes = |p: &crate::source::SourcePolicy| {
-            basic_toml::to_string(&sign_source(p, &key).expect("sign")).expect("ser").into_bytes()
+            basic_toml::to_string(&sign_source(p, &key).expect("sign"))
+                .expect("ser")
+                .into_bytes()
         };
         let frag = crate::leaf::parse(
             b"name = \"corp-egress\"\n[[net.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
@@ -515,8 +611,16 @@ mod tests {
             .expect("ser")
             .into_bytes();
         let source = MapSource(vec![
-            ("base-confined".to_owned(), "v1".to_owned(), to_bytes(&parse(BASE_CONFINED.as_bytes()).expect("p"))),
-            ("ai-coding-strict".to_owned(), "v1".to_owned(), to_bytes(&parse(AI_CODING_STRICT.as_bytes()).expect("p"))),
+            (
+                "base-confined".to_owned(),
+                "v1".to_owned(),
+                to_bytes(&parse(BASE_CONFINED.as_bytes()).expect("p")),
+            ),
+            (
+                "ai-coding-strict".to_owned(),
+                "v1".to_owned(),
+                to_bytes(&parse(AI_CODING_STRICT.as_bytes()).expect("p")),
+            ),
             ("corp-egress".to_owned(), "v1".to_owned(), signed_frag),
         ]);
         let leaf = crate::leaf::parse(
@@ -525,9 +629,23 @@ mod tests {
         .expect("parse leaf");
         let compiled = compile_leaf(&leaf, &source, &Trust::require(&ks), &install(), "v")
             .expect("signed chain + signed fragment verifies under require");
-        assert!(compiled.policy.effective_policy.net.allow_names.iter().any(|n| n.name == "proxy.corp"));
-        let locked = compiled.lock.entries.iter().find(|e| e.name == "corp-egress").expect("locked");
-        assert_eq!(locked.signing_key_id, "kennel-maint-2026", "fragment key recorded in the lock");
+        assert!(compiled
+            .policy
+            .effective_policy
+            .net
+            .allow_names
+            .iter()
+            .any(|n| n.name == "proxy.corp"));
+        let locked = compiled
+            .lock
+            .entries
+            .iter()
+            .find(|e| e.name == "corp-egress")
+            .expect("locked");
+        assert_eq!(
+            locked.signing_key_id, "kennel-maint-2026",
+            "fragment key recorded in the lock"
+        );
     }
 
     #[test]
@@ -539,6 +657,9 @@ mod tests {
         assert!(!bytes.is_empty());
         // It parses back as a document, but verify_settled rejects the "none" alg.
         let keys = KeySet::new();
-        assert!(verify_settled(&bytes, &keys).is_err(), "unsigned is not verifiable");
+        assert!(
+            verify_settled(&bytes, &keys).is_err(),
+            "unsigned is not verifiable"
+        );
     }
 }

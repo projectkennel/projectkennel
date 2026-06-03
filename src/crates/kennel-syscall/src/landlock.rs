@@ -489,7 +489,10 @@ mod tests {
             AccessNet::BIND_TCP | AccessNet::CONNECT_TCP
         );
         assert_eq!(supported_scope(5), Scope::empty()); // scoping is ABI 6
-        assert_eq!(supported_scope(6), Scope::ABSTRACT_UNIX_SOCKET | Scope::SIGNAL);
+        assert_eq!(
+            supported_scope(6),
+            Scope::ABSTRACT_UNIX_SOCKET | Scope::SIGNAL
+        );
     }
 
     /// Build and install a ruleset (`create_ruleset` + `add_rule`) without sealing —
@@ -558,16 +561,23 @@ mod tests {
     fn abstract_addr(name: &[u8]) -> (libc::sockaddr_un, libc::socklen_t) {
         // SAFETY: sockaddr_un is plain-old-data; an all-zero value is valid.
         let mut sun: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-        sun.sun_family = libc::sa_family_t::try_from(libc::AF_UNIX).expect("AF_UNIX fits sa_family_t");
+        sun.sun_family =
+            libc::sa_family_t::try_from(libc::AF_UNIX).expect("AF_UNIX fits sa_family_t");
         // SAFETY: `sun_path` is `[c_char; N]`; c_char and u8 share a 1-byte POD
         // layout, so a u8 slice aliasing the same storage is sound for a byte copy.
         // The abstract namespace is NUL-prefixed, so the name starts at index 1.
-        let path: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(sun.sun_path.as_mut_ptr().cast::<u8>(), sun.sun_path.len()) };
+        let path: &mut [u8] = unsafe {
+            std::slice::from_raw_parts_mut(
+                sun.sun_path.as_mut_ptr().cast::<u8>(),
+                sun.sun_path.len(),
+            )
+        };
         if let Some(dst) = path.get_mut(1..=name.len()) {
             dst.copy_from_slice(name);
         }
-        let raw_len = size_of::<libc::sa_family_t>().saturating_add(1).saturating_add(name.len());
+        let raw_len = size_of::<libc::sa_family_t>()
+            .saturating_add(1)
+            .saturating_add(name.len());
         let len = libc::socklen_t::try_from(raw_len).expect("addr len fits");
         (sun, len)
     }
@@ -595,10 +605,24 @@ mod tests {
         let listener = unsafe {
             let l = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
             assert!(l >= 0, "socket: {}", io::Error::last_os_error());
-            assert_eq!(libc::bind(l, addr_ptr, addrlen), 0, "bind abstract: {}", io::Error::last_os_error());
-            assert_eq!(libc::listen(l, 1), 0, "listen: {}", io::Error::last_os_error());
+            assert_eq!(
+                libc::bind(l, addr_ptr, addrlen),
+                0,
+                "bind abstract: {}",
+                io::Error::last_os_error()
+            );
+            assert_eq!(
+                libc::listen(l, 1),
+                0,
+                "listen: {}",
+                io::Error::last_os_error()
+            );
             let c = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-            assert_eq!(libc::connect(c, addr_ptr, addrlen), 0, "control connect should reach it");
+            assert_eq!(
+                libc::connect(c, addr_ptr, addrlen),
+                0,
+                "control connect should reach it"
+            );
             libc::close(c);
             l
         };
@@ -636,7 +660,12 @@ mod tests {
 
     /// Child body for the scoping test: seal `rs`, then `connect` the pre-created
     /// `client_fd` to the abstract address. Returns the exit code (0 = EACCES).
-    fn scope_child_verdict(rs: Ruleset, client_fd: RawFd, addr: *const libc::sockaddr, addrlen: libc::socklen_t) -> i32 {
+    fn scope_child_verdict(
+        rs: Ruleset,
+        client_fd: RawFd,
+        addr: *const libc::sockaddr,
+        addrlen: libc::socklen_t,
+    ) -> i32 {
         if rs.restrict_current_process().is_err() {
             return 3;
         }
@@ -667,8 +696,14 @@ mod tests {
         if abi < 5 {
             return; // IOCTL_DEV is ABI 5+: skip
         }
-        assert!(ioctl_denied_under(false), "a device ioctl without an IOCTL_DEV grant must be denied");
-        assert!(!ioctl_denied_under(true), "a device ioctl with an IOCTL_DEV grant must clear Landlock");
+        assert!(
+            ioctl_denied_under(false),
+            "a device ioctl without an IOCTL_DEV grant must be denied"
+        );
+        assert!(
+            !ioctl_denied_under(true),
+            "a device ioctl with an IOCTL_DEV grant must clear Landlock"
+        );
     }
 
     /// Seal a ruleset granting `/dev/null` read+write (+ `IOCTL_DEV` iff
@@ -682,7 +717,8 @@ mod tests {
         if grant_ioctl {
             access |= AccessFs::IOCTL_DEV;
         }
-        rs.allow_path(Path::new("/dev/null"), access).expect("allow /dev/null");
+        rs.allow_path(Path::new("/dev/null"), access)
+            .expect("allow /dev/null");
         let devnull = std::ffi::CString::new("/dev/null").expect("cstring");
 
         // SAFETY: fork(); the child does only async-signal-safe work (Landlock
@@ -714,7 +750,12 @@ mod tests {
         if fd < 0 {
             return 2; // open should be permitted (READ_FILE granted)
         }
-        let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         // SAFETY: ioctl on a valid fd with a writable winsize out-param.
         let r = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, std::ptr::from_mut(&mut ws)) };
         let errno = io::Error::last_os_error().raw_os_error();

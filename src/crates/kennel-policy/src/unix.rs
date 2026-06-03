@@ -41,7 +41,9 @@ use crate::PolicyError;
 ///
 /// Returns [`PolicyError::SourceValidation`] carrying one message per problem.
 pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
-    let Some(unix) = &policy.unix else { return Ok(()) };
+    let Some(unix) = &policy.unix else {
+        return Ok(());
+    };
     let mut errs: Vec<String> = Vec::new();
 
     match unix.default.as_deref() {
@@ -65,16 +67,27 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
     }
 
     for a in &unix.allow {
-        let who = a.name.as_deref().or(a.real.as_deref()).unwrap_or("(unnamed)");
+        let who = a
+            .name
+            .as_deref()
+            .or(a.real.as_deref())
+            .unwrap_or("(unnamed)");
         if a.real.as_deref().unwrap_or("").is_empty() {
-            errs.push(format!("[[unix.allow]] `{who}` is missing `real` (the host socket path to bind)"));
+            errs.push(format!(
+                "[[unix.allow]] `{who}` is missing `real` (the host socket path to bind)"
+            ));
         }
         if a.shim.as_deref().unwrap_or("").is_empty() {
-            errs.push(format!("[[unix.allow]] `{who}` is missing `shim` (the in-view path to bind it at)"));
+            errs.push(format!(
+                "[[unix.allow]] `{who}` is missing `shim` (the in-view path to bind it at)"
+            ));
         }
         // SSH must not be shimmed as an agent socket — it is a destination-blind
         // signing oracle (§7.8.1). Route SSH via the [ssh] section and the bastion.
-        let shims_ssh = a.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("ssh-agent"))
+        let shims_ssh = a
+            .name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case("ssh-agent"))
             || a.env.as_deref() == Some("SSH_AUTH_SOCK");
         if shims_ssh {
             errs.push(format!(
@@ -98,7 +111,10 @@ mod tests {
     use crate::source::{UnixAllow, UnixSection};
 
     fn policy_with(unix: UnixSection) -> SourcePolicy {
-        SourcePolicy { unix: Some(unix), ..SourcePolicy::default() }
+        SourcePolicy {
+            unix: Some(unix),
+            ..SourcePolicy::default()
+        }
     }
 
     fn allow(name: &str, real: &str, shim: &str) -> UnixAllow {
@@ -121,33 +137,53 @@ mod tests {
         let unix = UnixSection {
             default: Some("deny".to_owned()),
             abstract_ns: Some("deny".to_owned()),
-            allow: vec![allow("gpg-agent", "~/.gnupg/kennels/<kennel>/S.gpg-agent", "~/.gnupg/S.gpg-agent")],
+            allow: vec![allow(
+                "gpg-agent",
+                "~/.gnupg/kennels/<kennel>/S.gpg-agent",
+                "~/.gnupg/S.gpg-agent",
+            )],
         };
         validate(&policy_with(unix)).expect("valid");
     }
 
     #[test]
     fn default_allow_is_refused() {
-        let unix = UnixSection { default: Some("allow".to_owned()), ..UnixSection::default() };
+        let unix = UnixSection {
+            default: Some("allow".to_owned()),
+            ..UnixSection::default()
+        };
         let err = validate(&policy_with(unix)).expect_err("refused");
-        assert!(matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("default-deny"))));
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("default-deny")))
+        );
     }
 
     #[test]
     fn abstract_allow_is_refused_as_unsupported() {
-        let unix = UnixSection { abstract_ns: Some("allow".to_owned()), ..UnixSection::default() };
+        let unix = UnixSection {
+            abstract_ns: Some("allow".to_owned()),
+            ..UnixSection::default()
+        };
         let err = validate(&policy_with(unix)).expect_err("refused");
-        assert!(matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("Landlock scope"))));
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("Landlock scope")))
+        );
     }
 
     #[test]
     fn a_missing_real_or_shim_is_refused() {
         let unix = UnixSection {
-            allow: vec![UnixAllow { name: Some("x".to_owned()), reason: Some("r".to_owned()), ..UnixAllow::default() }],
+            allow: vec![UnixAllow {
+                name: Some("x".to_owned()),
+                reason: Some("r".to_owned()),
+                ..UnixAllow::default()
+            }],
             ..UnixSection::default()
         };
         let err = validate(&policy_with(unix)).expect_err("refused");
-        let PolicyError::SourceValidation(m) = err else { unreachable!() };
+        let PolicyError::SourceValidation(m) = err else {
+            unreachable!()
+        };
         assert!(m.iter().any(|s| s.contains("missing `real`")));
         assert!(m.iter().any(|s| s.contains("missing `shim`")));
     }
@@ -155,19 +191,30 @@ mod tests {
     #[test]
     fn an_ssh_agent_shim_is_refused_by_name() {
         let unix = UnixSection {
-            allow: vec![allow("ssh-agent", "/run/kennel/<kennel>/ssh-agent.sock", "~/.ssh/agent.sock")],
+            allow: vec![allow(
+                "ssh-agent",
+                "/run/kennel/<kennel>/ssh-agent.sock",
+                "~/.ssh/agent.sock",
+            )],
             ..UnixSection::default()
         };
         let err = validate(&policy_with(unix)).expect_err("refused");
-        assert!(matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("destination-blind"))));
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("destination-blind")))
+        );
     }
 
     #[test]
     fn an_ssh_auth_sock_env_is_refused() {
         let mut a = allow("custom", "/run/x.sock", "~/.ssh/agent.sock");
         a.env = Some("SSH_AUTH_SOCK".to_owned());
-        let unix = UnixSection { allow: vec![a], ..UnixSection::default() };
+        let unix = UnixSection {
+            allow: vec![a],
+            ..UnixSection::default()
+        };
         let err = validate(&policy_with(unix)).expect_err("refused");
-        assert!(matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("destination-blind"))));
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("destination-blind")))
+        );
     }
 }

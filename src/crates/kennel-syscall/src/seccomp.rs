@@ -151,7 +151,11 @@ mod tests {
     #[test]
     fn syscall_names_resolve_to_libc_numbers() {
         assert_eq!(syscall_number("bpf"), Some(libc::SYS_bpf));
-        assert_eq!(syscall_number("umount"), Some(libc::SYS_umount2), "umount aliases umount2");
+        assert_eq!(
+            syscall_number("umount"),
+            Some(libc::SYS_umount2),
+            "umount aliases umount2"
+        );
         assert_eq!(syscall_number("umount2"), Some(libc::SYS_umount2));
         assert_eq!(syscall_number("definitely_not_a_syscall"), None);
     }

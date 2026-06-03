@@ -43,10 +43,16 @@ mod tests {
 
     #[test]
     fn terminate_stops_a_child() {
-        let mut child = Command::new("/bin/sleep").arg("60").spawn().expect("spawn sleep");
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
         terminate(child.id()).expect("send SIGTERM");
         let status = child.wait().expect("wait");
-        assert!(!status.success(), "the signalled sleep should not exit successfully");
+        assert!(
+            !status.success(),
+            "the signalled sleep should not exit successfully"
+        );
     }
 
     #[test]

@@ -114,7 +114,11 @@ pub fn config(p: &SshParams<'_>) -> String {
 /// key it needs and the only one it is allowed to trust.
 #[must_use]
 pub fn known_hosts(p: &SshParams<'_>) -> String {
-    format!("{alias} {key}\n", alias = BASTION_ALIAS, key = p.bastion_host_key.trim())
+    format!(
+        "{alias} {key}\n",
+        alias = BASTION_ALIAS,
+        key = p.bastion_host_key.trim()
+    )
 }
 
 /// Render the file named `name` (one of [`FILES`]) for `p`, or `None` for an
@@ -152,7 +156,8 @@ pub fn materialize(
 
     let mut binds = Vec::with_capacity(FILES.len().saturating_add(p.hosts.len()));
     for name in FILES {
-        let body = render(name, p).ok_or_else(|| io::Error::other(format!("no renderer for {name}")))?;
+        let body =
+            render(name, p).ok_or_else(|| io::Error::other(format!("no renderer for {name}")))?;
         let source = dir.join(name);
         std::fs::write(&source, body)?;
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))?;
@@ -213,7 +218,9 @@ pub fn mint_synthetic_key(dir: &Path, key_file: &str, comment: &str) -> io::Resu
         .stderr(Stdio::null())
         .status()?;
     if !status.success() {
-        return Err(io::Error::other(format!("ssh-keygen failed to mint synthetic key `{key_file}`")));
+        return Err(io::Error::other(format!(
+            "ssh-keygen failed to mint synthetic key `{key_file}`"
+        )));
     }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     Ok(std::fs::read_to_string(&pub_path)?.trim().to_owned())
@@ -230,8 +237,14 @@ mod tests {
             bastion_host_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey",
             socks_connect_bin: "/opt/kennel/bin/kennel-socks-connect",
             hosts: &[
-                HostGrant { host: "github.com", key_file: "id_github.com" },
-                HostGrant { host: "git.internal", key_file: "id_git.internal" },
+                HostGrant {
+                    host: "github.com",
+                    key_file: "id_github.com",
+                },
+                HostGrant {
+                    host: "git.internal",
+                    key_file: "id_git.internal",
+                },
             ],
         }
     }
@@ -241,12 +254,19 @@ mod tests {
         let c = config(&params());
         assert!(c.contains("Host github.com\n"), "github stanza present");
         assert!(c.contains("Host git.internal\n"), "internal stanza present");
-        assert!(c.contains("HostName 127.0.42.1"), "routed to the bastion host");
+        assert!(
+            c.contains("HostName 127.0.42.1"),
+            "routed to the bastion host"
+        );
         assert!(c.contains("Port 7022"), "routed to the bastion port");
         // Each stanza pins the alias, its own synthetic key, and locks the client down.
         assert_eq!(c.matches("HostKeyAlias kennel-bastion").count(), 2);
         // Each stanza routes through the SOCKS connector (the kennel reaches only its proxy).
-        assert_eq!(c.matches("ProxyCommand /opt/kennel/bin/kennel-socks-connect %h %p").count(), 2);
+        assert_eq!(
+            c.matches("ProxyCommand /opt/kennel/bin/kennel-socks-connect %h %p")
+                .count(),
+            2
+        );
         assert!(c.contains("IdentityFile ~/.ssh/id_github.com"));
         assert!(c.contains("IdentityFile ~/.ssh/id_git.internal"));
         assert_eq!(c.matches("IdentitiesOnly yes").count(), 2);
@@ -255,16 +275,25 @@ mod tests {
 
     #[test]
     fn no_grant_yields_a_header_only_config_with_no_routes() {
-        let p = SshParams { hosts: &[], ..params() };
+        let p = SshParams {
+            hosts: &[],
+            ..params()
+        };
         let c = config(&p);
         assert!(!c.contains("Host "), "no host stanza: {c}");
-        assert!(c.starts_with("# Project Kennel"), "still a valid, commented file");
+        assert!(
+            c.starts_with("# Project Kennel"),
+            "still a valid, commented file"
+        );
     }
 
     #[test]
     fn known_hosts_pins_only_the_bastion_under_the_alias() {
         let kh = known_hosts(&params());
-        assert_eq!(kh, "kennel-bastion ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey\n");
+        assert_eq!(
+            kh,
+            "kennel-bastion ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey\n"
+        );
         // No real hostname ever appears — the kennel trusts only the bastion.
         assert!(!kh.contains("github"), "no real host key leaked");
     }
@@ -282,8 +311,10 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mk dir");
         // Pretend kenneld already minted the two synthetic keys.
         for kf in ["id_github.com", "id_git.internal"] {
-            std::fs::write(dir.join(kf), b"-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n").expect("mint");
-            std::fs::set_permissions(dir.join(kf), std::fs::Permissions::from_mode(0o644)).expect("chmod");
+            std::fs::write(dir.join(kf), b"-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n")
+                .expect("mint");
+            std::fs::set_permissions(dir.join(kf), std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
         }
 
         let ssh_dir = Path::new("/home/dev/.ssh");
@@ -291,29 +322,60 @@ mod tests {
 
         // config + known_hosts + 2 keys.
         assert_eq!(binds.len(), 4);
-        let dir_mode = std::fs::metadata(&dir).expect("stat dir").permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(&dir)
+            .expect("stat dir")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(dir_mode, 0o700, "the ~/.ssh dir is private");
         for (source, target) in &binds {
             assert!(source.exists(), "{} written", source.display());
-            assert!(target.starts_with(ssh_dir), "target under ~/.ssh: {}", target.display());
-            let mode = std::fs::metadata(source).expect("stat").permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "{} clamped to 0600 (even the pre-minted key)", source.display());
+            assert!(
+                target.starts_with(ssh_dir),
+                "target under ~/.ssh: {}",
+                target.display()
+            );
+            let mode = std::fs::metadata(source)
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{} clamped to 0600 (even the pre-minted key)",
+                source.display()
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn mint_synthetic_key_writes_a_private_key_and_returns_its_public_line() {
-        if Command::new("ssh-keygen").arg("-?").stderr(Stdio::null()).stdout(Stdio::null()).status().is_err() {
+        if Command::new("ssh-keygen")
+            .arg("-?")
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .is_err()
+        {
             return; // ssh-keygen not installed
         }
         let dir = std::env::temp_dir().join(format!("kenneld-mint-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let pub_line = mint_synthetic_key(&dir, "id_github.com", "kennel synthetic github").expect("mint");
-        assert!(pub_line.starts_with("ssh-ed25519 "), "public line: {pub_line}");
+        let pub_line =
+            mint_synthetic_key(&dir, "id_github.com", "kennel synthetic github").expect("mint");
+        assert!(
+            pub_line.starts_with("ssh-ed25519 "),
+            "public line: {pub_line}"
+        );
         let priv_path = dir.join("id_github.com");
         assert!(priv_path.exists(), "private key written");
-        let mode = std::fs::metadata(&priv_path).expect("stat").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&priv_path)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, "private key is 0600");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -323,7 +385,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kenneld-ssh-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // No keys minted — materialize must refuse rather than bind a nonexistent key.
-        let err = materialize(&dir, Path::new("/home/dev/.ssh"), &params()).expect_err("missing key");
+        let err =
+            materialize(&dir, Path::new("/home/dev/.ssh"), &params()).expect_err("missing key");
         assert!(err.to_string().contains("was not minted"), "got: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }

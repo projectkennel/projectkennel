@@ -112,7 +112,12 @@ pub fn mount_special(fstype: &str, target: &Path) -> io::Result<()> {
 /// # Errors
 ///
 /// Returns the OS error if the mount fails.
-pub fn mount_tmpfs(target: &Path, size_mib: Option<u32>, mode: Option<&str>, allow_dev: bool) -> io::Result<()> {
+pub fn mount_tmpfs(
+    target: &Path,
+    size_mib: Option<u32>,
+    mode: Option<&str>,
+    allow_dev: bool,
+) -> io::Result<()> {
     let mut opts: Vec<String> = Vec::new();
     if let Some(s) = size_mib {
         opts.push(format!("size={s}M"));
@@ -125,7 +130,14 @@ pub fn mount_tmpfs(target: &Path, size_mib: Option<u32>, mode: Option<&str>, all
     if !allow_dev {
         flags |= MsFlags::MS_NODEV;
     }
-    nix::mount::mount(Some("tmpfs"), target, Some("tmpfs"), flags, Some(data.as_str())).map_err(map_err)
+    nix::mount::mount(
+        Some("tmpfs"),
+        target,
+        Some("tmpfs"),
+        flags,
+        Some(data.as_str()),
+    )
+    .map_err(map_err)
 }
 
 /// Mount a fresh `proc` at `target` (`nosuid,nodev`), with `hidepid=2` when
@@ -137,8 +149,14 @@ pub fn mount_tmpfs(target: &Path, size_mib: Option<u32>, mode: Option<&str>, all
 /// Returns the OS error if the mount fails.
 pub fn mount_proc(target: &Path, hidepid: bool) -> io::Result<()> {
     let data = if hidepid { "hidepid=2" } else { "" };
-    nix::mount::mount(Some("proc"), target, Some("proc"), MsFlags::MS_NOSUID | MsFlags::MS_NODEV, Some(data))
-        .map_err(map_err)
+    nix::mount::mount(
+        Some("proc"),
+        target,
+        Some("proc"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some(data),
+    )
+    .map_err(map_err)
 }
 
 /// `pivot_root(new_root, put_old)`: make `new_root` the process's root,

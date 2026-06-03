@@ -29,9 +29,16 @@ pub const MAX_FDS: usize = 8;
 // The CMSG_DATA fd payload is written via copy_nonoverlapping, which does not
 // require the destination pointer to be aligned.
 #[allow(clippy::cast_ptr_alignment)]
-pub fn send_with_fds(sock: BorrowedFd<'_>, data: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+pub fn send_with_fds(
+    sock: BorrowedFd<'_>,
+    data: &[u8],
+    fds: &[BorrowedFd<'_>],
+) -> io::Result<usize> {
     if data.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "SCM_RIGHTS needs at least one data byte"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SCM_RIGHTS needs at least one data byte",
+        ));
     }
     if fds.len() > MAX_FDS {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many fds"));
@@ -43,7 +50,10 @@ pub fn send_with_fds(sock: BorrowedFd<'_>, data: &[u8], fds: &[BorrowedFd<'_>]) 
 
     // SAFETY: a zeroed iovec/msghdr is a valid all-zero structure; we then set
     // the fields. `data` is read-only here (sendmsg only reads it).
-    let mut iov = libc::iovec { iov_base: data.as_ptr().cast::<libc::c_void>().cast_mut(), iov_len: data.len() };
+    let mut iov = libc::iovec {
+        iov_base: data.as_ptr().cast::<libc::c_void>().cast_mut(),
+        iov_len: data.len(),
+    };
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = std::ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
@@ -70,13 +80,23 @@ pub fn send_with_fds(sock: BorrowedFd<'_>, data: &[u8], fds: &[BorrowedFd<'_>]) 
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
             (*cmsg).cmsg_len = libc::CMSG_LEN(u32::try_from(payload_len).unwrap_or(0)) as _;
-            std::ptr::copy_nonoverlapping(raw.as_ptr(), libc::CMSG_DATA(cmsg).cast::<RawFd>(), raw.len());
+            std::ptr::copy_nonoverlapping(
+                raw.as_ptr(),
+                libc::CMSG_DATA(cmsg).cast::<RawFd>(),
+                raw.len(),
+            );
         }
     }
 
     // SAFETY: `msg` is fully initialised and describes valid buffers; sendmsg
     // reads them and returns the byte count or -1.
-    let n = unsafe { libc::sendmsg(sock.as_raw_fd(), std::ptr::from_ref(&msg), libc::MSG_NOSIGNAL) };
+    let n = unsafe {
+        libc::sendmsg(
+            sock.as_raw_fd(),
+            std::ptr::from_ref(&msg),
+            libc::MSG_NOSIGNAL,
+        )
+    };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -96,7 +116,10 @@ pub fn send_with_fds(sock: BorrowedFd<'_>, data: &[u8], fds: &[BorrowedFd<'_>]) 
 pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize, Vec<OwnedFd>)> {
     // SAFETY: zeroed iovec/msghdr is valid; we set the fields to describe `buf`
     // and the control buffer below.
-    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast::<libc::c_void>(), iov_len: buf.len() };
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr().cast::<libc::c_void>(),
+        iov_len: buf.len(),
+    };
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = std::ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
@@ -111,12 +134,21 @@ pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize,
     // SAFETY: `msg` describes valid writable buffers; recvmsg fills them and
     // returns the data byte count or -1. MSG_CMSG_CLOEXEC marks received fds
     // close-on-exec so they do not leak through the workload's execve.
-    let n = unsafe { libc::recvmsg(sock.as_raw_fd(), std::ptr::from_mut(&mut msg), libc::MSG_CMSG_CLOEXEC) };
+    let n = unsafe {
+        libc::recvmsg(
+            sock.as_raw_fd(),
+            std::ptr::from_mut(&mut msg),
+            libc::MSG_CMSG_CLOEXEC,
+        )
+    };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "control data truncated (too many fds)"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "control data truncated (too many fds)",
+        ));
     }
 
     let mut fds = Vec::new();
@@ -125,12 +157,20 @@ pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize,
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(std::ptr::from_ref(&msg)) };
     while !cmsg.is_null() {
         // SAFETY: `cmsg` is a valid cmsghdr inside `control`.
-        let (level, ctype, len) = unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len as usize) };
+        let (level, ctype, len) = unsafe {
+            (
+                (*cmsg).cmsg_level,
+                (*cmsg).cmsg_type,
+                (*cmsg).cmsg_len as usize,
+            )
+        };
         if level == libc::SOL_SOCKET && ctype == libc::SCM_RIGHTS {
             // SAFETY: CMSG_LEN(0) is the header size; the remainder is the fd payload.
             let header = unsafe { libc::CMSG_LEN(0) as usize };
             let payload = len.saturating_sub(header);
-            let count = payload.checked_div(std::mem::size_of::<RawFd>()).unwrap_or(0);
+            let count = payload
+                .checked_div(std::mem::size_of::<RawFd>())
+                .unwrap_or(0);
             // SAFETY: CMSG_DATA points at `payload` valid bytes holding `count`
             // RawFds the kernel just installed; we read them out one at a time and
             // take ownership via OwnedFd (so each is closed exactly once).
@@ -171,13 +211,18 @@ mod tests {
 
         // Write through the received fd; it must land in the same file.
         let mut received: std::fs::File = fds.into_iter().next().expect("one fd").into();
-        received.write_all(b"hello from the other side").expect("write via received fd");
+        received
+            .write_all(b"hello from the other side")
+            .expect("write via received fd");
         received.flush().expect("flush");
 
         file.rewind().expect("rewind");
         let mut contents = String::new();
         file.read_to_string(&mut contents).expect("read original");
-        assert_eq!(contents, "hello from the other side", "the received fd refers to the same file");
+        assert_eq!(
+            contents, "hello from the other side",
+            "the received fd refers to the same file"
+        );
     }
 
     #[test]

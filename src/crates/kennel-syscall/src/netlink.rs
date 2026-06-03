@@ -79,7 +79,13 @@ pub fn del_address(ifindex: u32, addr: IpAddr, prefix_len: u8) -> io::Result<()>
 }
 
 /// Build and send one `RTM_*ADDR` request, returning the kernel's ack result.
-fn request(rtm_type: u16, flags: u16, ifindex: u32, addr: IpAddr, prefix_len: u8) -> io::Result<()> {
+fn request(
+    rtm_type: u16,
+    flags: u16,
+    ifindex: u32,
+    addr: IpAddr,
+    prefix_len: u8,
+) -> io::Result<()> {
     // `ifa_scope`: 127/8 lives at host scope, everything else at universe scope.
     let (family, octets, scope): (u8, Vec<u8>, u8) = match addr {
         IpAddr::V4(a) => {
@@ -88,7 +94,11 @@ fn request(rtm_type: u16, flags: u16, ifindex: u32, addr: IpAddr, prefix_len: u8
             } else {
                 libc::RT_SCOPE_UNIVERSE
             };
-            (u8::try_from(libc::AF_INET).unwrap_or(2), a.octets().to_vec(), scope)
+            (
+                u8::try_from(libc::AF_INET).unwrap_or(2),
+                a.octets().to_vec(),
+                scope,
+            )
         }
         IpAddr::V6(a) => (
             u8::try_from(libc::AF_INET6).unwrap_or(10),
@@ -116,7 +126,8 @@ fn build_addr_msg(
     // address attributes.
     let mut body: Vec<u8> = vec![family, prefix_len, 0u8, scope];
     body.extend_from_slice(&ifindex.to_ne_bytes());
-    let rta_len = u16::try_from(addr.len().wrapping_add(4)).map_err(|_| invalid("address too long"))?;
+    let rta_len =
+        u16::try_from(addr.len().wrapping_add(4)).map_err(|_| invalid("address too long"))?;
     for rta_type in [IFA_LOCAL, IFA_ADDRESS] {
         body.extend_from_slice(&rta_len.to_ne_bytes());
         body.extend_from_slice(&rta_type.to_ne_bytes());
@@ -242,7 +253,9 @@ mod root_tests {
 
         // Adding the same v4 again must conflict (NLM_F_EXCL).
         assert_eq!(
-            add_address(lo, v4, 24).expect_err("re-add should fail").raw_os_error(),
+            add_address(lo, v4, 24)
+                .expect_err("re-add should fail")
+                .raw_os_error(),
             Some(libc::EEXIST)
         );
 

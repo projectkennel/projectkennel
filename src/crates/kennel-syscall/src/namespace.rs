@@ -200,8 +200,10 @@ mod tests {
             }
             nix::unistd::ForkResult::Parent { child } => {
                 let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
-                let aa = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-                    .unwrap_or_default();
+                let aa = std::fs::read_to_string(
+                    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+                )
+                .unwrap_or_default();
                 match status {
                     nix::sys::wait::WaitStatus::Exited(_, 4) => {
                         eprintln!("SKIP: unprivileged user namespaces are disabled on this host");
@@ -259,8 +261,10 @@ mod tests {
             }
             nix::unistd::ForkResult::Parent { child } => {
                 let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
-                let aa = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-                    .unwrap_or_default();
+                let aa = std::fs::read_to_string(
+                    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+                )
+                .unwrap_or_default();
                 match status {
                     nix::sys::wait::WaitStatus::Exited(_, 4) => {
                         eprintln!("SKIP: unprivileged user namespaces are disabled on this host");

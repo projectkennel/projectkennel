@@ -37,22 +37,30 @@ impl CtxAllocator {
     /// An allocator over `1..=MAX_V4_CTX` (ctx 0 reserved for the default context).
     #[must_use]
     pub const fn new() -> Self {
-        Self { used: BTreeSet::new(), max: MAX_V4_CTX }
+        Self {
+            used: BTreeSet::new(),
+            max: MAX_V4_CTX,
+        }
     }
 
     /// An allocator whose highest value is `max` (still skipping ctx 0). Useful in
     /// tests and for v6-only ranges beyond the 8-bit v4 field.
     #[must_use]
     pub const fn with_max(max: u16) -> Self {
-        Self { used: BTreeSet::new(), max }
+        Self {
+            used: BTreeSet::new(),
+            max,
+        }
     }
 
     /// Allocate the lowest free `ctx`, or `None` if the range is exhausted.
     pub fn allocate(&mut self) -> Option<u16> {
         // Skip the reserved default context; scan upward for the first gap.
-        (DEFAULT_CTX.checked_add(1)?..=self.max).find(|c| !self.used.contains(c)).inspect(|&c| {
-            self.used.insert(c);
-        })
+        (DEFAULT_CTX.checked_add(1)?..=self.max)
+            .find(|c| !self.used.contains(c))
+            .inspect(|&c| {
+                self.used.insert(c);
+            })
     }
 
     /// Mark `ctx` as in use (e.g. reusing a name's previous context). Returns

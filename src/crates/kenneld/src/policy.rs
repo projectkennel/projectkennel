@@ -51,8 +51,12 @@ impl TrustStoreLoader {
                 continue;
             };
             let contents = std::fs::read_to_string(&path)?;
-            keys.insert_b64(key_id, contents.trim())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad key {key_id}: {e:?}")))?;
+            keys.insert_b64(key_id, contents.trim()).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("bad key {key_id}: {e:?}"),
+                )
+            })?;
         }
         Ok(Self { keys })
     }
@@ -72,13 +76,16 @@ impl TrustStoreLoader {
 
 impl PolicyLoader for TrustStoreLoader {
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("cannot read policy {}: {e}", path.display()))?;
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("cannot read policy {}: {e}", path.display()))?;
         // Verify + substitute once; derive both artefacts from the one policy
         // (the same steps `kennel_spawn::prepare` runs, kept open here so the net
         // section is available to configure the egress proxy).
-        let verified = kennel_policy::verify_settled(&bytes, &self.keys).map_err(|e| e.to_string())?;
+        let verified =
+            kennel_policy::verify_settled(&bytes, &self.keys).map_err(|e| e.to_string())?;
         let substituted = kennel_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
-        let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home).map_err(|e| e.to_string())?;
+        let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
+            .map_err(|e| e.to_string())?;
         // Resolve the policy's supplementary groups to GIDs and membership-check them
         // (§7.2): kenneld runs as the operator, so a group the operator is not in is
         // refused — the privileged seal could otherwise over-grant. The kennel always
@@ -88,7 +95,13 @@ impl PolicyLoader for TrustStoreLoader {
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
-        Ok(Loaded { plan, net, ssh, unix, groups })
+        Ok(Loaded {
+            plan,
+            net,
+            ssh,
+            unix,
+            groups,
+        })
     }
 }
 
@@ -172,7 +185,9 @@ mod tests {
     #[test]
     fn load_reports_a_missing_policy_file() {
         let loader = TrustStoreLoader::from_keys(KeySet::new());
-        let err = loader.load(Path::new("/nonexistent/policy"), &subst()).expect_err("must fail");
+        let err = loader
+            .load(Path::new("/nonexistent/policy"), &subst())
+            .expect_err("must fail");
         assert!(err.contains("cannot read policy"), "got {err}");
     }
 
@@ -183,10 +198,14 @@ mod tests {
         std::fs::write(&policy, b"this is not a signed policy").expect("write");
         let key = SigningKey::from_seed("maint-2026", &[7u8; 32]).expect("key");
         let mut keys = KeySet::new();
-        keys.insert(key.key_id(), &key.public_key_bytes()).expect("insert");
+        keys.insert(key.key_id(), &key.public_key_bytes())
+            .expect("insert");
 
         let loader = TrustStoreLoader::from_keys(keys);
-        assert!(loader.load(&policy, &subst()).is_err(), "garbage must not verify");
+        assert!(
+            loader.load(&policy, &subst()).is_err(),
+            "garbage must not verify"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

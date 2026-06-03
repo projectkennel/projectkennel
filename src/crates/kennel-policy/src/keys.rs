@@ -29,7 +29,11 @@ impl KeySet {
     ///
     /// Returns [`SignatureError::MalformedKey`] if `key_bytes` is not a valid
     /// 32-byte Ed25519 public key.
-    pub fn insert(&mut self, key_id: impl Into<String>, key_bytes: &[u8]) -> Result<(), SignatureError> {
+    pub fn insert(
+        &mut self,
+        key_id: impl Into<String>,
+        key_bytes: &[u8],
+    ) -> Result<(), SignatureError> {
         let pk = PublicKey::from_slice(key_bytes).map_err(|_| SignatureError::MalformedKey)?;
         self.keys.push((key_id.into(), pk));
         Ok(())
@@ -41,7 +45,11 @@ impl KeySet {
     ///
     /// Returns [`SignatureError::MalformedKey`] if the Base64 is invalid or does
     /// not decode to a 32-byte key.
-    pub fn insert_b64(&mut self, key_id: impl Into<String>, key_b64: &str) -> Result<(), SignatureError> {
+    pub fn insert_b64(
+        &mut self,
+        key_id: impl Into<String>,
+        key_b64: &str,
+    ) -> Result<(), SignatureError> {
         let bytes = crate::b64::decode(key_b64.as_bytes()).ok_or(SignatureError::MalformedKey)?;
         self.insert(key_id, &bytes)
     }
@@ -49,7 +57,10 @@ impl KeySet {
     /// Look up a trusted public key by its `key_id`.
     #[must_use]
     pub fn get(&self, key_id: &str) -> Option<&PublicKey> {
-        self.keys.iter().find(|(id, _)| id == key_id).map(|(_, pk)| pk)
+        self.keys
+            .iter()
+            .find(|(id, _)| id == key_id)
+            .map(|(_, pk)| pk)
     }
 
     /// Number of keys in the store.

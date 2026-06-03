@@ -71,7 +71,11 @@ impl ReservedScope {
     /// loader validates it).
     #[must_use]
     pub fn new(tag: u16, ula_gid: [u8; 5], namespace: impl Into<String>) -> Self {
-        Self { tag: tag & TAG_MAX, ula_gid, namespace: namespace.into() }
+        Self {
+            tag: tag & TAG_MAX,
+            ula_gid,
+            namespace: namespace.into(),
+        }
     }
 
     /// The user's resource namespace (the cgroup/interface name prefix).
@@ -159,7 +163,10 @@ impl std::fmt::Display for Refusal {
                 )
             }
             Self::GidNotMember { gid } => {
-                write!(f, "caller is not a member of group {gid}, so it may not be mapped")
+                write!(
+                    f,
+                    "caller is not a member of group {gid}, so it may not be mapped"
+                )
             }
             Self::EmptyGidMap => write!(f, "gid_map request carried no gids"),
         }
@@ -217,8 +224,8 @@ pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Ref
             let suffix = full & 0x00FF_FFFF;
             let addr_tag = u16::try_from(suffix.wrapping_shr(12) & 0x0FFF).unwrap_or(u16::MAX);
             let addr_ctx = suffix.wrapping_shr(4) & 0xFF; // 0..=255
-            // A v4-enabled kennel has ctx <= 255; a larger ctx can have no v4
-            // address, so the comparison against the 8-bit field fails it.
+                                                          // A v4-enabled kennel has ctx <= 255; a larger ctx can have no v4
+                                                          // address, so the comparison against the 8-bit field fails it.
             if in_loopback && addr_tag == scope.tag && u32::from(req.ctx) == addr_ctx {
                 Ok(())
             } else {
@@ -344,7 +351,10 @@ mod tests {
     fn v4_wrong_prefix_is_refused() {
         assert_eq!(
             validate_addr(&addr_req(5, "lo", v4(TAG, 5, 1), 24), &scope()),
-            Err(Refusal::BadPrefix { expected: 28, got: 24 })
+            Err(Refusal::BadPrefix {
+                expected: 28,
+                got: 24
+            })
         );
     }
 
@@ -352,7 +362,10 @@ mod tests {
     fn v6_wrong_prefix_is_refused() {
         assert_eq!(
             validate_addr(&addr_req(5, "lo", v6(GID, 5, 1), 128), &scope()),
-            Err(Refusal::BadPrefix { expected: 64, got: 128 })
+            Err(Refusal::BadPrefix {
+                expected: 64,
+                got: 128
+            })
         );
     }
 
@@ -406,7 +419,9 @@ mod tests {
 
     #[test]
     fn v6_wrong_gid_is_out_of_scope() {
-        let IpAddr::V6(v6addr) = v6(GID, 5, 1) else { unreachable!() };
+        let IpAddr::V6(v6addr) = v6(GID, 5, 1) else {
+            unreachable!()
+        };
         let mut o = v6addr.octets();
         o[3] = 0xff; // corrupt a gid byte
         let a = IpAddr::V6(Ipv6Addr::from(o));
@@ -456,7 +471,10 @@ mod tests {
     fn overlong_interface_is_refused() {
         // "kennel-" (7) + 9 chars = 16 > 15
         assert_eq!(
-            validate_addr(&addr_req(5, "kennel-toolongid", v4(TAG, 5, 1), 28), &scope()),
+            validate_addr(
+                &addr_req(5, "kennel-toolongid", v4(TAG, 5, 1), 28),
+                &scope()
+            ),
             Err(Refusal::InterfaceNameTooLong)
         );
     }

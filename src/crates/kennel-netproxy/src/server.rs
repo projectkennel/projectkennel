@@ -117,7 +117,9 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
 
     /// Whether `addr:port` is a configured host service (exact literal match).
     fn is_host_service(&self, addr: IpAddr, port: u16) -> bool {
-        self.host_services.iter().any(|hs| hs.ip() == addr && hs.port() == port)
+        self.host_services
+            .iter()
+            .any(|hs| hs.ip() == addr && hs.port() == port)
     }
 
     /// Accept connections on `listener` forever, handling each on its own thread.
@@ -164,7 +166,9 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
             })
             .collect();
         for handle in handles {
-            handle.join().map_err(|_| io::Error::other("listener thread panicked"))??;
+            handle
+                .join()
+                .map_err(|_| io::Error::other("listener thread panicked"))??;
         }
         Ok(())
     }
@@ -671,7 +675,9 @@ mod tests {
             mode: NetMode::Open,
             allow: vec![],
             deny: vec![DenyRule {
-                matcher: DenyMatcher::Cidr(Cidr::new("127.0.0.0".parse().expect("a"), 8).expect("c")),
+                matcher: DenyMatcher::Cidr(
+                    Cidr::new("127.0.0.0".parse().expect("a"), 8).expect("c"),
+                ),
                 ports: vec![],
             }],
         };
@@ -683,10 +689,16 @@ mod tests {
 
         let mut client = TcpStream::connect(proxy_addr).expect("connect proxy");
         socks5_greet(&mut client);
-        client.write_all(&socks5_request_v4(Ipv4Addr::LOCALHOST, echo_port)).expect("request");
+        client
+            .write_all(&socks5_request_v4(Ipv4Addr::LOCALHOST, echo_port))
+            .expect("request");
         let mut reply = [0u8; 10];
         client.read_exact(&mut reply).expect("connect reply");
-        assert_eq!(reply.get(..2), Some([0x05, 0x00].as_slice()), "host service reachable despite the deny");
+        assert_eq!(
+            reply.get(..2),
+            Some([0x05, 0x00].as_slice()),
+            "host service reachable despite the deny"
+        );
         client.write_all(b"ping").expect("send");
         let mut got = [0u8; 4];
         client.read_exact(&mut got).expect("echo");
@@ -703,7 +715,9 @@ mod tests {
             mode: NetMode::Open,
             allow: vec![],
             deny: vec![DenyRule {
-                matcher: DenyMatcher::Cidr(Cidr::new("127.0.0.0".parse().expect("a"), 8).expect("c")),
+                matcher: DenyMatcher::Cidr(
+                    Cidr::new("127.0.0.0".parse().expect("a"), 8).expect("c"),
+                ),
                 ports: vec![],
             }],
         };
@@ -715,10 +729,16 @@ mod tests {
         let mut client = TcpStream::connect(proxy_addr).expect("connect proxy");
         socks5_greet(&mut client);
         // Ask for a *different* loopback port than the host service (7022).
-        client.write_all(&socks5_request_v4(Ipv4Addr::LOCALHOST, 9)).expect("request");
+        client
+            .write_all(&socks5_request_v4(Ipv4Addr::LOCALHOST, 9))
+            .expect("request");
         let mut reply = [0u8; 2];
         client.read_exact(&mut reply).expect("reply");
-        assert_ne!(reply.get(1), Some(&0x00), "a non-host-service loopback port is refused");
+        assert_ne!(
+            reply.get(1),
+            Some(&0x00),
+            "a non-host-service loopback port is refused"
+        );
     }
 
     #[test]
@@ -728,7 +748,12 @@ mod tests {
         // a completed SOCKS5 greeting (method-selection reply) proves the listener
         // was accepted and handled. socks5_greet sets a 5s read timeout, so a
         // listener that is not served fails rather than hangs.
-        let proxy = Arc::new(Proxy::new(allow_cidr("127.0.0.0", 8, 9), no_resolver(), false, io::sink()));
+        let proxy = Arc::new(Proxy::new(
+            allow_cidr("127.0.0.0", 8, 9),
+            no_resolver(),
+            false,
+            io::sink(),
+        ));
         let l1 = TcpListener::bind("127.0.0.1:0").expect("bind l1");
         let a1 = l1.local_addr().expect("a1");
         let l2 = TcpListener::bind("127.0.0.1:0").expect("bind l2");

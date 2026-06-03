@@ -17,8 +17,10 @@
 use std::io::{Read as _, Write as _};
 use std::process::ExitCode;
 
+use kennel_privhelper::wire::{
+    EgressPayload, GidMapPayload, Op, Request, Response, Status, REQUEST_LEN,
+};
 use kennel_privhelper::{alloc, exec};
-use kennel_privhelper::wire::{EgressPayload, GidMapPayload, Op, Request, Response, Status, REQUEST_LEN};
 
 fn main() -> ExitCode {
     let mut buf = Vec::new();
@@ -51,7 +53,12 @@ fn main() -> ExitCode {
     };
     // The caller's real UID is the trusted identity; look up its allocation.
     let scope = alloc::load(kennel_syscall::unistd::real_uid());
-    respond(exec::perform(&request, egress.as_ref(), gidmap.as_ref(), scope.as_ref()))
+    respond(exec::perform(
+        &request,
+        egress.as_ref(),
+        gidmap.as_ref(),
+        scope.as_ref(),
+    ))
 }
 
 /// Write the response and map its status to the process exit code (matching the

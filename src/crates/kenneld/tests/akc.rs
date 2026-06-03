@@ -25,9 +25,19 @@ fn kennel_akc_queries_kenneld_and_prints_the_forced_command_line() {
     let server = std::thread::spawn(move || {
         let (mut conn, _) = listener.accept().expect("accept");
         let req = control::recv_request(&mut conn).expect("recv request");
-        assert_eq!(req, Request::AuthorizedKeys { key: "ssh-ed25519 AAAASYN".to_owned() });
-        control::send_response(&mut conn, &Response::AuthorizedKeys { lines: vec![WANT.to_owned()] })
-            .expect("send response");
+        assert_eq!(
+            req,
+            Request::AuthorizedKeys {
+                key: "ssh-ed25519 AAAASYN".to_owned()
+            }
+        );
+        control::send_response(
+            &mut conn,
+            &Response::AuthorizedKeys {
+                lines: vec![WANT.to_owned()],
+            },
+        )
+        .expect("send response");
     });
 
     let out = Command::new(env!("CARGO_BIN_EXE_kennel-akc"))
@@ -37,8 +47,16 @@ fn kennel_akc_queries_kenneld_and_prints_the_forced_command_line() {
         .expect("run kennel-akc");
 
     server.join().expect("server thread");
-    assert!(out.status.success(), "akc should exit 0 (status {:?})", out.status);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), WANT, "the forced-command line is printed verbatim");
+    assert!(
+        out.status.success(),
+        "akc should exit 0 (status {:?})",
+        out.status
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        WANT,
+        "the forced-command line is printed verbatim"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -60,7 +78,12 @@ fn kennel_akc_fails_closed_when_no_daemon_is_listening() {
 #[test]
 fn kennel_akc_fails_closed_on_empty_argv() {
     // No key offered at all ⇒ refuse before even connecting.
-    let out = Command::new(env!("CARGO_BIN_EXE_kennel-akc")).output().expect("run kennel-akc");
-    assert!(!out.status.success(), "must fail closed with no key offered");
+    let out = Command::new(env!("CARGO_BIN_EXE_kennel-akc"))
+        .output()
+        .expect("run kennel-akc");
+    assert!(
+        !out.status.success(),
+        "must fail closed with no key offered"
+    );
     assert!(out.stdout.is_empty());
 }
