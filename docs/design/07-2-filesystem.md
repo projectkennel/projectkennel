@@ -150,9 +150,11 @@ allow = [
 > the synthetic `passwd`/`group` name the workload's uid and gid `kennel` (never the
 > operator's login name), with the in-kennel shim `$HOME` as the home — so `id`,
 > `whoami`, and `getpwuid` reveal no host identity. The uid/gid *numbers* are
-> unchanged (they must match the host inodes of bind-mounted files); inherited
-> *supplementary* gids still show in `id` as bare numbers, since dropping them is the
-> group-isolation hardening (§7.2.8, needs privilege/userns). Two invariants worth
+> unchanged (they must match the host inodes of bind-mounted files). **Supplementary
+> groups are policy-defined** (`[identity].groups`, §7.2.8): the privileged seal
+> `setgroups` to exactly the granted set — by default *none*, dropping every inherited
+> host group — and each granted group is named in the synthetic `/etc/group`, so `id`
+> shows names, not the operator's full group memberships as bare numbers. Two invariants worth
 > repeating: **writable binds resolve to persistent host inodes** (work survives
 > teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is built
 > **after** `pivot_root` so its rules key on the view's inodes. kenneld sets
@@ -268,7 +270,14 @@ A passthrough is authored where the rest of a kennel's grants are — a leaf add
 
 **Access is GID, not capability.** These devices are gated by their DAC group — `dialout`/`uucp` for serial, `dip`/`modem` for `/dev/ppp`, `netdev` (or `0666`) for `/dev/net/tun` — not by a Linux capability. The kennel reaches a passed-through device only if the device's owning group is in the kennel's group set, and the user must already be a member of that group (the framework never grants a group the user lacks — that would be privilege escalation). `/dev/net/tun` and `/dev/ppp` are used the **unprivileged** way: a persistent device pre-created and owned by the user's group (the standard `tunctl`/`pppd` pattern), *not* by handing the workload `CAP_NET_ADMIN` to create fresh interfaces — which the kennel does not do, and which in the host network namespace would risk bypassing the egress proxy (§7.3).
 
-As built, the kennel **inherits the user's supplementary groups**, so a device the user can already reach is reachable in the kennel once its node is passed through; the `group` field records the gate for audit. Selectively *dropping* the user's non-granted supplementary groups (so the kennel holds only the groups its passthroughs name) is a hardening that needs the privilege/userns surface and is roadmap — at which point `group` becomes the re-add list. Until then, a passthrough widens the kennel's device reach but not its group set.
+The kennel carries **only the groups policy grants**: the privileged spawn seal `setgroups` to exactly the set named by `[identity].groups` plus every passthrough `group` (default: none — all inherited host groups are dropped), and `kenneld` refuses any group the operator is not a member of (the root seal could otherwise over-grant). So a passthrough's `group` both unlocks the device's DAC *and* is the group carried into the kennel; it is named in the synthetic `/etc/group`, so `id` resolves it by name. The standalone form, for non-device group access (e.g. group-owned files) or to be explicit:
+
+```toml
+# Supplementary groups the kennel retains (resolved to GIDs, membership-checked).
+# A [[fs.dev.passthrough]].group is added automatically.
+[identity]
+groups = ["dialout", "plugdev"]
+```
 
 ## 7.2.9 Sysfs and other pseudo-filesystems
 

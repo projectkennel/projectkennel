@@ -233,12 +233,34 @@ describe these read as roadmap.
     group is in its group set; the user must already be a member. `/dev/net/tun` and
     `/dev/ppp` are used the unprivileged way (a persistent, group-owned device), never
     by granting `CAP_NET_ADMIN` (which in the host netns would risk egress bypass).
-  - **As built the kennel inherits the user's supplementary groups**, so a passed-through
-    device the user can already reach works; the `group` field is the audit gate and
-    the hook for the future hardening that *drops* non-granted groups (needs
-    privilege/userns) — roadmap. **Proven** in the kenneld root e2e: a confined kennel
-    granted `/dev/net/tun` (a subdir device) finds it present + openable, and a
-    non-granted device (`/dev/mem`) is absent.
+  - The `group` is carried into the kennel's group set via the `[identity]` mechanism
+    below (it is added automatically), and named in the synthetic `/etc/group`.
+    **Proven** in the kenneld root e2e: a confined kennel granted `/dev/net/tun` (a
+    subdir device) finds it present + openable, and a non-granted device (`/dev/mem`)
+    is absent.
+
+- **`[identity].groups` — supplementary-group isolation** (design `07-2-filesystem.md`
+  §7.2) — **BUILT**. The kennel carries only the supplementary Unix groups policy
+  grants; by default **none** — every inherited host group is dropped — closing the
+  leak the identity masking left (where `id` showed the operator's group memberships
+  as bare numbers).
+  - **Mechanism in the privileged seal**, not a privhelper rewrite: `setgroups` needs
+    `CAP_SETGID` and must run before `no_new_privs`, so it sits in the spawn seal right
+    beside the namespace `unshare` (which already needs `CAP_SYS_ADMIN`) — the seal is
+    the privileged-spawn context, of which the privhelper is the umbrella source.
+    `Plan.supplementary_groups: Option<Vec<u32>>` drives it (`Some([])` ⇒ drop all;
+    `None` ⇒ inherit, the unprivileged/non-kenneld path).
+  - **Policy + resolution**: `[identity].groups` (names) → `SettledPolicy.identity:
+    IdentityRuntime`, mirroring `ssh`/`unix`; `translate_identity` unions the explicit
+    list with every `[[fs.dev.passthrough]].group`. `kennel-policy::dev`-style
+    validation rejects names with `:`/whitespace/control chars (synthetic-`/etc/group`
+    injection). `kenneld` resolves each name to a GID and **membership-checks** it —
+    refusing any group the operator is not in (the root seal could otherwise
+    over-grant: escalation) — sets `plan.supplementary_groups`, and names the granted
+    groups in `/etc/group` so `id` shows names.
+  - **Proven** in the kenneld root e2e: the workload's supplementary set is dropped to
+    exactly the one granted gid (`id -G` has two entries incl. `12345`), resolved by
+    name (`id -Gn` shows `kennelgrp`) via the synthetic `/etc/group`.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 
