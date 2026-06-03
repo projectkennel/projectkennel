@@ -67,6 +67,16 @@ describe these read as roadmap.
     `KENNEL_SSH_KNOWN_HOSTS` (the bastion's `known_hosts` for the real
     destinations) and `KENNEL_SSH_CONFIG` (an `ssh -F` config for per-destination
     `HostName`/`Port`/`ProxyJump`).
+  - **The bastion key-state manager** — `kenneld::bastion`: `kenneld` owns one
+    per-user `kennel-sshd` for the session and tracks the granted
+    `(synthetic-key → dest, real-key)` edges across all the user's kennels. It
+    renders the bastion's `authorized_keys` from the edge set (one
+    `restrict,pty,command=…` line each), mints the disposable synthetic key per edge
+    (`kenneld::ssh::mint_synthetic_key`, stock `ssh-keygen`), lazily starts the
+    daemon on the first edge and stops it when the last kennel deregisters, and tags
+    edges by owning kennel so a teardown drops exactly its grants. (Edge-bookkeeping
+    and `authorized_keys` rendering are unit-tested; the live start/stop reuses the
+    proven `sshd` spawn.)
   - **The bastion config + launch** — `kenneld::sshd`: the hardened `sshd_config`
     generator (`ExposeAuthInfo`, publickey-only, `AllowTcpForwarding no`/`PermitOpen
     none`/`Subsystem sftp /bin/false`, the `SetEnv SSH_AUTH_SOCK=…` that hands the

@@ -27,6 +27,7 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// The `HostKeyAlias` the bastion's host key is pinned under.
 ///
@@ -168,6 +169,49 @@ pub fn materialize(
     Ok(binds)
 }
 
+/// `ssh-keygen`'s public-key path for a private-key `path`: `<path>.pub`, appended
+/// (not `Path::with_extension`, which would mangle a name like `id_github.com`).
+fn pub_path_of(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf().into_os_string();
+    p.push(".pub");
+    PathBuf::from(p)
+}
+
+/// Mint a disposable synthetic ed25519 keypair into `dir` as `key_file` (private)
+/// and `key_file.pub`, returning the public-key line (§7.8.3).
+///
+/// The private half goes into the kennel's constructed `~/.ssh` (this `dir`); the
+/// returned public line is what the bastion binds to a forced command in its
+/// `authorized_keys` (`crate::bastion`). Minting with stock `ssh-keygen` keeps the
+/// on-disk format exactly what `ssh` expects and hand-rolls no key serialisation. A
+/// pre-existing key at the path is removed first — these are disposable, one per
+/// `(real-key, host)` edge, regenerated freely.
+///
+/// # Errors
+///
+/// An OS error if `ssh-keygen` cannot run, exits non-zero, or its `.pub` is unreadable.
+pub fn mint_synthetic_key(dir: &Path, key_file: &str, comment: &str) -> io::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(key_file);
+    // ssh-keygen writes the public half at "<path>.pub" — append, never
+    // `with_extension` (a key_file like "id_github.com" has a misleading extension).
+    let pub_path = pub_path_of(&path);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&pub_path);
+    let status = Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-C", comment, "-f"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("ssh-keygen failed to mint synthetic key `{key_file}`")));
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(std::fs::read_to_string(&pub_path)?.trim().to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +289,22 @@ mod tests {
             let mode = std::fs::metadata(source).expect("stat").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{} clamped to 0600 (even the pre-minted key)", source.display());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mint_synthetic_key_writes_a_private_key_and_returns_its_public_line() {
+        if Command::new("ssh-keygen").arg("-?").stderr(Stdio::null()).stdout(Stdio::null()).status().is_err() {
+            return; // ssh-keygen not installed
+        }
+        let dir = std::env::temp_dir().join(format!("kenneld-mint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pub_line = mint_synthetic_key(&dir, "id_github.com", "kennel synthetic github").expect("mint");
+        assert!(pub_line.starts_with("ssh-ed25519 "), "public line: {pub_line}");
+        let priv_path = dir.join("id_github.com");
+        assert!(priv_path.exists(), "private key written");
+        let mode = std::fs::metadata(&priv_path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "private key is 0600");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
