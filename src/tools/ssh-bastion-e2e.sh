@@ -39,12 +39,13 @@ STAGE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 [ -d "$STAGE" ] && [ -w "$STAGE" ] || { echo "no usable XDG_RUNTIME_DIR ($STAGE); run in a user session" >&2; exit 2; }
 WORK="$(mktemp -d "$STAGE/kennel-ssh-e2e.XXXXXX")"
 chmod 700 "$WORK"
-BASTION_PID="" DEST_PID="" AGENT_PID=""
+BASTION_PID="" DEST_PID="" AGENT_PID="" NETPROXY_PID=""
 
 cleanup() {
-    [ -n "$BASTION_PID" ] && kill "$BASTION_PID" 2>/dev/null || true
-    [ -n "$DEST_PID" ]    && kill "$DEST_PID"    2>/dev/null || true
-    [ -n "$AGENT_PID" ]   && kill "$AGENT_PID"   2>/dev/null || true
+    [ -n "$BASTION_PID" ]  && kill "$BASTION_PID"  2>/dev/null || true
+    [ -n "$DEST_PID" ]     && kill "$DEST_PID"     2>/dev/null || true
+    [ -n "$AGENT_PID" ]    && kill "$AGENT_PID"    2>/dev/null || true
+    [ -n "$NETPROXY_PID" ] && kill "$NETPROXY_PID" 2>/dev/null || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -232,6 +233,43 @@ case "$BANNER" in
     SSH-*) fail "forwarded channel reached the destination (forwarding not denied)" ;;
     *)     pass "forwarding channel refused — no data reached the destination" ;;
 esac
+
+echo
+echo "=== 5. full egress chain: ssh -> kennel-socks-connect -> netproxy (SOCKS5) -> bastion ==="
+# The real topology (§7.3/§7.8.4): a kennel can only reach its egress proxy, so its
+# ssh uses kennel-socks-connect (shipped, no nc needed) as a ProxyCommand to SOCKS5
+# through the proxy to the bastion (one allowlisted host-loopback service). Prove the
+# whole chain with the real kennel-netproxy and kennel-socks-connect binaries.
+NETPROXY="$REPO_ROOT/target/debug/kennel-netproxy"
+SOCKS_CONNECT="$REPO_ROOT/target/debug/kennel-socks-connect"
+if [ -x "$NETPROXY" ] && [ -x "$SOCKS_CONNECT" ]; then
+    PROXY_PORT="$(free_port)"
+    # Open mode + accept_private_resolved so the proxy forwards to the loopback
+    # bastion (in production this is a narrow [[net.loopback.host_services]] allow).
+    cat >"$WORK/netproxy.toml" <<EOF
+listen = ["127.0.0.1:$PROXY_PORT"]
+accept_private_resolved = true
+[net]
+mode = "open"
+EOF
+    "$NETPROXY" "$WORK/netproxy.toml" >"$WORK/netproxy.log" 2>&1 &
+    NETPROXY_PID=$!
+    for _ in $(seq 1 50); do 2>/dev/null >/dev/tcp/127.0.0.1/"$PROXY_PORT" && break; sleep 0.1; done
+
+    OUT="$(KENNEL_SOCKS_PROXY="127.0.0.1:$PROXY_PORT" timeout 20 ssh -F none \
+        -o IdentitiesOnly=yes -i "$WORK/synthetic" \
+        -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORK/client_known_hosts" \
+        -o BatchMode=yes \
+        -o "ProxyCommand=$SOCKS_CONNECT %h %p" \
+        -p "$BASTION_PORT" 127.0.0.1 "git-upload-pack 'via/proxy.git'" 2>"$WORK/c5.err" || true)"
+    kill "$NETPROXY_PID" 2>/dev/null || true
+    echo "    client saw: $OUT"
+    echo "$OUT" | grep -q "DEST_REACHED" || { cat "$WORK/c5.err" "$WORK/netproxy.log" >&2; fail "did not reach the destination through the proxy chain"; }
+    echo "$OUT" | grep -q "cmd=\[git-upload-pack 'via/proxy.git'\]" || fail "command not forwarded through the chain"
+    pass "ssh reached the bastion through kennel-socks-connect + netproxy and re-originated"
+else
+    echo "  SKIP: netproxy/socks-connect binaries not built"
+fi
 
 echo
 echo "ALL CHECKS PASSED — the re-origination bastion behaves as 07-8-ssh.md §7.8 specifies."

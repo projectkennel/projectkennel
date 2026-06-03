@@ -85,13 +85,23 @@ describe these read as roadmap.
     `spawn`/reap of the managed `sshd` (mirrors `proxy.rs`). Both the static
     `AuthorizedKeysFile` and the root-owned `AuthorizedKeysCommand` sources are
     expressible.
-  - **End-to-end proof** — `src/tools/ssh-bastion-e2e.sh` stands up a real
-    two-hop topology with stock OpenSSH 9.6 (a bastion `sshd` + a destination
-    `sshd` + an agent) and drives the **built** `kennel-ssh-reorigin` through it,
-    asserting §7.8.9's load-bearing properties: re-origination forwards
-    `$SSH_ORIGINAL_COMMAND` to the policy-fixed destination; an injection-laden
-    command cannot redirect it or execute on the bastion; a non-synthetic key is
-    refused; a port-forward channel is denied. All four pass.
+  - **The egress reach** — `kennel-socks-connect` (its own std-only crate): a
+    kennel can `connect()` only to its egress proxy (§7.3.2) and `ssh` has no
+    built-in SOCKS client, so each synthetic `~/.ssh` `config` stanza names this
+    binary as its `ProxyCommand`; it SOCKS5s through the proxy (`$KENNEL_SOCKS_PROXY`)
+    to the bastion (reached as a host-loopback service, §7.3). The synthetic config
+    generator emits the `ProxyCommand` line. *Design decision:* the bastion is
+    reached via the existing `[[net.loopback.host_services]]` allow, and a shipped
+    SOCKS connector (not a dependency on `nc`) bridges `ssh` to the proxy.
+  - **End-to-end proof** — `src/tools/ssh-bastion-e2e.sh` stands up a real topology
+    with stock OpenSSH 9.6 (a bastion `sshd` + a destination `sshd` + an agent) and
+    drives the **built** binaries through it, asserting §7.8.9's load-bearing
+    properties: re-origination forwards `$SSH_ORIGINAL_COMMAND` to the policy-fixed
+    destination; an injection-laden command cannot redirect it or execute on the
+    bastion; a non-synthetic key is refused; a port-forward channel is denied; and
+    the **full egress chain** — `ssh` → `kennel-socks-connect` → the real
+    `kennel-netproxy` (SOCKS5) → bastion → re-origination — reaches the destination.
+    All five pass.
 
   - **The source-only→runtime bridge** — the resolved `[ssh]` grants are carried
     into the signed settled policy (`SettledPolicy.ssh: SshRuntime`, populated by

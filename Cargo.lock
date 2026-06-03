@@ -69,6 +69,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-socks-connect"
+version = "0.1.0"
+
+[[package]]
 name = "kennel-spawn"
 version = "0.1.0"
 dependencies = [
