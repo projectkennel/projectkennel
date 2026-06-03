@@ -250,14 +250,19 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     if !use_userns && plan.namespaces.contains(Namespaces::PID) {
         kennel_syscall::namespace::unshare(Namespaces::PID).map_err(SpawnError::Syscall)?;
     }
-    // USER is established by `establish_identity_userns` (not a plain unshare), so
-    // it is excluded from the seal's unshare set. PID on the userns path needs a
-    // fork *after* its unshare to take effect (the double-fork increment); it is
-    // excluded here so it is never a silent no-op. On the legacy path PID was just
-    // unshared in the parent above.
-    let seal_ns = plan.namespaces & !(Namespaces::USER | Namespaces::PID);
+    // USER is established by `establish_identity_userns`, not a plain unshare, so it
+    // is always excluded from the seal's unshare set. PID:
+    // * userns path — kept in `seal_ns`: the seal unshares it, then forks so the
+    //   grandchild is PID 1 (the only way to make the workload PID 1 *and* let it
+    //   mount `/proc`; see `kennel_syscall::spawn::fork_into_pid1`).
+    // * legacy path — already unshared in the parent above, so excluded here.
+    let seal_ns = if use_userns {
+        plan.namespaces & !Namespaces::USER
+    } else {
+        plan.namespaces & !(Namespaces::USER | Namespaces::PID)
+    };
 
-    // Captured by the seal closure (clones keep it `'static`).
+    // Captured by the seal closures (clones keep them `'static`).
     let cgroup_join = plan.cgroup_join.then(|| plan.cgroup.clone());
     let file_binds = plan.file_binds.clone();
     let view = plan.view.clone();
@@ -265,34 +270,19 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
     let landlock_fs = plan.landlock_fs.clone();
     let landlock_net = plan.landlock_net.clone();
     let supplementary_groups = plan.supplementary_groups.clone();
+    let does_mount = seal_ns.contains(Namespaces::MOUNT);
 
-    let seal = move || -> io::Result<()> {
-        // Join the cgroup first, before any namespace/mount change: the BPF
-        // attached to it only governs processes that are members, and cgroup
-        // membership inherits across the upcoming exec and any fork. The write
-        // happens while still in the host mount namespace (cgroupfs visible) and
-        // before Landlock seals (which would otherwise deny the write).
-        if let Some(cgroup) = &cgroup_join {
-            join_cgroup(cgroup)?;
-        }
-        // The unprivileged foundation: establish an identity-mapped user namespace
-        // FIRST (before the cgroup-relative work is sealed off), which grants
-        // `CAP_SYS_ADMIN` *within it* so the mount-namespace unshare and the
-        // mount/`pivot_root` below need no real privilege. Map our own uid/gid 1:1,
-        // read live — the seal runs in a fork of kenneld, which runs as the operator,
-        // so `getuid`/`getgid` are exactly the identity to preserve. Done after the
-        // cgroup join, which must run with the host credentials in the host cgroupfs.
-        if use_userns {
-            kennel_syscall::namespace::establish_identity_userns(
-                kennel_syscall::unistd::real_uid(),
-                kennel_syscall::unistd::real_gid(),
-            )?;
-        }
-        // Namespaces next; mounts need the mount ns.
-        if !seal_ns.is_empty() {
-            kennel_syscall::namespace::unshare(seal_ns)?;
-        }
-        if seal_ns.contains(Namespaces::MOUNT) {
+    // The **inner seal** — the irreversible confinement that must run in the process
+    // that ultimately `execve`s the workload: mount/`pivot_root`, the group drop
+    // (legacy path only), `no_new_privs`, seccomp, Landlock. On the userns path it
+    // runs in the PID-1 grandchild (B, via [`fork_into_pid1`]); on the legacy path it
+    // runs inline in the forked child. It must NOT join the cgroup or touch the
+    // user/mount/PID namespaces — those are done once, in the outer seal, before the
+    // PID-1 fork, so B inherits them.
+    //
+    // [`fork_into_pid1`]: kennel_syscall::spawn::fork_into_pid1
+    let mut inner_seal = move || -> io::Result<()> {
+        if does_mount {
             // Detach mount propagation from the host first (`MS_PRIVATE` — stronger
             // than the `MS_SLAVE` of §7.2.10: no propagation in either direction).
             kennel_syscall::mount::make_root_private()?;
@@ -300,6 +290,7 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
                 // The constructed view: build a fresh root, bind the granted paths
                 // into it, construct the synthetic `/etc` + `/dev` + `/proc` +
                 // `/tmp`, then `pivot_root` so non-granted path *names* are absent.
+                // The fresh `/proc` mount is why this runs as PID 1 on the userns path.
                 build_view_and_pivot(v, root, &file_binds)?;
             } else {
                 // Fallback (no view/staging): in-place fresh `/proc` + private
@@ -321,9 +312,8 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
         //   so every inherited supplementary group already collapses to the overflow
         //   gid (`nogroup`) inside the kennel — default drop-all, for free. Calling
         //   `setgroups` here would `EPERM`. Re-granting a *specific* supplementary
-        //   group under a userns needs privilege the workload does not have (an
-        //   unprivileged gid_map is limited to the single effective gid); that is a
-        //   separate decision, tracked, not silently attempted here.
+        //   group under a userns needs the privhelper (an unprivileged gid_map is
+        //   limited to the single effective gid); that is handled out of band.
         if !use_userns {
             if let Some(groups) = &supplementary_groups {
                 kennel_syscall::unistd::set_supplementary_groups(groups)?;
@@ -343,6 +333,45 @@ pub fn spawn(plan: &Plan, command: &mut Command) -> Result<Child, SpawnError> {
             None => build_ruleset(&landlock_fs, &landlock_net, true)?,
         };
         rs.restrict_current_process()
+    };
+
+    // The **outer seal** runs in the child std forks. It does the once-only setup
+    // that the workload inherits — cgroup join, the user namespace, the
+    // mount/IPC/PID unshares — then hands off to the inner seal.
+    let seal = move || -> io::Result<()> {
+        // Join the cgroup first, before any namespace/mount change: the BPF attached
+        // to it only governs members, and cgroup membership inherits across the
+        // upcoming PID-1 fork and the exec. The write happens with the host
+        // credentials, in the host mount namespace (cgroupfs visible), before the
+        // user namespace or Landlock could deny it.
+        if let Some(cgroup) = &cgroup_join {
+            join_cgroup(cgroup)?;
+        }
+        if use_userns {
+            // The unprivileged foundation: establish an identity-mapped user
+            // namespace, gaining `CAP_SYS_ADMIN` *within it* so the unshares and the
+            // mount/`pivot_root` need no real privilege. Map our own uid/gid 1:1,
+            // read live — this is a fork of kenneld, which runs as the operator.
+            kennel_syscall::namespace::establish_identity_userns(
+                kennel_syscall::unistd::real_uid(),
+                kennel_syscall::unistd::real_gid(),
+            )?;
+            // Unshare mount/IPC/PID here; the PID unshare only takes effect for the
+            // next fork, so fork the PID-1 grandchild that runs the inner seal and
+            // execs. Returns Ok in the grandchild (std then execs the workload);
+            // never returns in this process, which reaps the grandchild and exits.
+            if !seal_ns.is_empty() {
+                kennel_syscall::namespace::unshare(seal_ns)?;
+            }
+            kennel_syscall::spawn::fork_into_pid1(&mut inner_seal)
+        } else {
+            // Legacy privileged path: PID was unshared in the parent, so the child
+            // std forked is already in the new PID namespace. No second fork.
+            if !seal_ns.is_empty() {
+                kennel_syscall::namespace::unshare(seal_ns)?;
+            }
+            inner_seal()
+        }
     };
 
     kennel_syscall::spawn::spawn_sealed(command, seal).map_err(SpawnError::Syscall)
@@ -970,19 +999,21 @@ mod tests {
     /// shim and finds a non-granted sibling's *name* absent (ENOENT, not merely
     /// denied).
     ///
-    /// `#[ignore]` until two things land (verified by standalone probes 2026-06-03):
-    /// 1. **The userns double-fork primitive.** The constructed view mounts a fresh
-    ///    `/proc`, which the kernel permits only inside a **PID namespace**
-    ///    (`mount proc` is `EPERM` without one). PID-as-PID-1 needs a fork *after*
-    ///    `unshare(CLONE_NEWPID)`, which `Command`/`pre_exec` cannot express — so this
-    ///    plan's `USER|MOUNT|IPC` seal (no double-fork) cannot complete the view yet.
-    /// 2. **A loaded `AppArmor` `userns` profile** for this test binary (production
-    ///    ships `dist/apparmor/kenneld`); under Ubuntu's
-    ///    `apparmor_restrict_unprivileged_userns=1` the userns is otherwise
-    ///    capability-stripped. Run: load a profile over `target/debug/deps/kennel_spawn-*`,
-    ///    then `cargo test -p kennel-spawn -- --ignored unprivileged_userns_spawn`.
+    /// Runs wherever the host permits an unprivileged user namespace *with
+    /// capabilities*; otherwise it **skips with the precise cause** (never a false
+    /// pass). Two host conditions cause a skip:
+    /// * userns hard-disabled (`unprivileged_userns_clone=0` / `max_user_namespaces=0`);
+    /// * Ubuntu's `apparmor_restrict_unprivileged_userns=1` with no `AppArmor`
+    ///   profile granting `userns` to this binary (the userns is then
+    ///   capability-stripped — surfaces as `PermissionDenied` from the seal).
+    ///
+    /// To run it under the restriction, load a profile over
+    /// `target/debug/deps/kennel_spawn-*` (production ships `dist/apparmor/kenneld`
+    /// for the real binary). The PID-1 grandchild ([`fork_into_pid1`]) is what lets
+    /// the view mount a fresh `/proc`.
+    ///
+    /// [`fork_into_pid1`]: kennel_syscall::spawn::fork_into_pid1
     #[test]
-    #[ignore = "needs the userns double-fork primitive (PID ns for /proc) + a loaded AppArmor userns profile"]
     fn unprivileged_userns_spawn_builds_the_confined_view() {
         use std::io::Read;
         use std::process::Stdio;
@@ -1026,7 +1057,9 @@ mod tests {
         landlock_fs.push((shim_root.join("granted"), ro));
 
         let plan = Plan {
-            namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::IPC,
+            // PID is included: the seal unshares it and forks the PID-1 grandchild,
+            // which is what lets the constructed view mount a fresh /proc.
+            namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::IPC | Namespaces::PID,
             cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
             cgroup_join: false, // isolate the userns/view proof from cgroup delegation
             view: Some(ShimView {

@@ -24,6 +24,92 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 
+/// Fork once more inside the seal so the workload becomes **PID 1** of the new PID
+/// namespace, then run `seal` in that grandchild.
+///
+/// # Why a second fork is mandatory
+///
+/// `unshare(CLONE_NEWPID)` only places *future children* of the unsharing process
+/// into the new PID namespace — the unsharing process itself stays in the old one.
+/// So the process that unshared `PID` is not PID 1, and the kernel refuses to mount
+/// a fresh `proc` from outside a PID namespace it owns (`mount("proc", …)` is
+/// `EPERM`). To get a workload that is PID 1 *and* can mount `/proc`, the unsharing
+/// process (call it **A**) must fork again; the grandchild (**B**) is PID 1 of the
+/// new namespace and is where the rest of the seal (mount/`pivot_root`, Landlock,
+/// seccomp) and the `execve` happen.
+///
+/// This is the bubblewrap/crun model. It is called from inside a `pre_exec` hook
+/// (so this is already the forked child A); after it returns `Ok(())` in B, the
+/// caller's `pre_exec` returns and std `execve`s the workload **in B**. In A it
+/// **never returns** — A becomes a minimal init that reaps B and `_exit`s with B's
+/// status, so kenneld (which holds a [`Child`] for A) observes the workload's exit.
+///
+/// # The fd handshake
+///
+/// std reports a `pre_exec` failure to the parent over an internal close-on-exec
+/// pipe: the parent reads until every write end is closed (EOF ⇒ the child execed
+/// successfully). A inherits a copy of that write end. If A kept it open while
+/// waiting on the long-lived B, the parent would block on the read forever — a
+/// deadlock. So **A closes every fd ≥ 3** (its copy of the pipe, nothing else it
+/// needs — the workload's stdio are 0/1/2) before waiting. B keeps its copy, so a
+/// seal failure in B is still reported (B writes the errno and `_exit`s), and a
+/// success closes B's copy on `execve` ⇒ the parent sees EOF.
+///
+/// # Errors
+///
+/// Returns the OS error if the inner `fork` fails (in A; B then never starts), or
+/// whatever `seal` returns in B. A never returns to the caller.
+pub fn fork_into_pid1<F>(seal: &mut F) -> io::Result<()>
+where
+    F: FnMut() -> io::Result<()>,
+{
+    // SAFETY: we are already in the forked, single-threaded child A (inside a
+    // pre_exec hook). `fork()` here creates B; both branches use only
+    // async-signal-safe calls (close_range/waitpid/_exit) until B runs `seal`,
+    // which is the same constrained post-fork environment pre_exec already imposes.
+    match unsafe { libc::fork() } {
+        -1 => Err(io::Error::last_os_error()),
+        0 => {
+            // B: PID 1 of the new PID namespace. Run the seal; on Ok the caller's
+            // pre_exec returns and std execve()s the workload here.
+            seal()
+        }
+        b => {
+            // A: relinquish the workload's fds (incl. our copy of std's CLOEXEC
+            // error pipe — see the fd handshake above), then act as a tiny init:
+            // reap B and exit with its status. Never returns to the caller.
+            // SAFETY: close_range/waitpid/_exit are async-signal-safe; A holds no
+            // resources it must drop, and _exit skips atexit/Drop deliberately.
+            unsafe {
+                libc::close_range(3, libc::c_uint::MAX, 0);
+            }
+            let mut status: libc::c_int = 0;
+            loop {
+                // SAFETY: waitpid on our own child B into a local; retried on EINTR.
+                let r = unsafe { libc::waitpid(b, &raw mut status, 0) };
+                if r == b {
+                    break;
+                }
+                if r == -1 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    break;
+                }
+            }
+            let code = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                // Mirror the shell's 128+signal convention so a killed workload is
+                // distinguishable from a clean exit.
+                128_i32.saturating_add(libc::WTERMSIG(status))
+            } else {
+                0
+            };
+            // SAFETY: end A without running Drop/atexit (which belong to kenneld's
+            // address space, shared by fork).
+            unsafe { libc::_exit(code) };
+        }
+    }
+}
+
 /// Spawn `command`, running `seal` in the forked child immediately before
 /// `execve`.
 ///
@@ -102,5 +188,38 @@ mod tests {
         let mut child = spawn_sealed(&mut cmd, || Ok(())).expect("spawn");
         let status = child.wait().expect("wait");
         assert_eq!(status.code(), Some(7), "the program should have run and exited 7");
+    }
+
+    #[test]
+    fn fork_into_pid1_propagates_the_workload_exit_status() {
+        // The double-fork primitive, exercised WITHOUT a user/PID namespace (so it
+        // needs no privilege): the seal forks a grandchild B that execs the workload;
+        // the intermediate A reaps B and exits with B's status. The parent (this
+        // test's `Child`) must observe the *workload's* exit code, propagated through
+        // A — proving both the status relay and the fd handshake (a spawn that did
+        // not close A's pipe copy would deadlock here instead of returning).
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "exit 7"]);
+        let seal = || {
+            let mut inner = || Ok(());
+            super::fork_into_pid1(&mut inner)
+        };
+        let mut child = spawn_sealed(&mut cmd, seal).expect("spawn with double-fork");
+        let status = child.wait().expect("wait");
+        assert_eq!(status.code(), Some(7), "workload exit code must propagate A←B←kenneld");
+    }
+
+    #[test]
+    fn fork_into_pid1_aborts_when_the_inner_seal_fails() {
+        // An inner-seal failure in B must abort fail-closed: B reports the errno over
+        // std's pipe and never execs, so no program runs and the spawn errors.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "exit 0"]);
+        let seal = || {
+            let mut inner = || Err(io::Error::from_raw_os_error(libc::EPERM));
+            super::fork_into_pid1(&mut inner)
+        };
+        let err = spawn_sealed(&mut cmd, seal).expect_err("a failing inner seal must abort the spawn");
+        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
     }
 }
