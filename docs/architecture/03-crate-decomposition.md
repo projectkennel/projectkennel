@@ -39,7 +39,7 @@ kennel/
 │   ├── kennel-privhelper/           binary + lib: privileged operations helper (wire format in src/wire.rs)
 │   ├── kennel-ssh-reorigin/         binary + lib: SSH re-origination forced command (std-only; §7.8.4)
 │   ├── kennel-socks-connect/        binary + lib: SOCKS5 stdio connector for ssh ProxyCommand (std-only; §7.8.4)
-│   └── kenneld/                     lib + binaries: per-user supervisor (src/bin/kenneld.rs)
+│   └── kenneld/                     lib + binaries: per-user supervisor (src/bin/kenneld.rs), CLI (kennel.rs), bastion AKC (kennel-akc.rs)
 │                                    and the CLI (src/bin/kennel.rs); control protocol in src/control.rs
 │       (folded in, no separate crate: IPC → kenneld::control + kennel-privhelper::wire;
 │        CLI → kenneld/src/bin/kennel.rs; audit → kennel-bpf ringbuf + kennel-netproxy::audit)
@@ -52,7 +52,7 @@ kennel/
 └── architecture/, docs/, .github/, etc.
 ```
 
-Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), `kennel-ssh-reorigin` (`src/main.rs` + a library half holding the tested re-origination core), `kennel-socks-connect` (`src/main.rs` + a library half holding the tested SOCKS5 wire codec), and `kenneld` (a library half in `src/lib.rs` providing the orchestration both binaries use, plus `src/bin/kenneld.rs` for the daemon and `src/bin/kennel.rs` for the CLI). The remaining crates are libraries (`src/lib.rs`).
+Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), `kennel-ssh-reorigin` (`src/main.rs` + a library half holding the tested re-origination core), `kennel-socks-connect` (`src/main.rs` + a library half holding the tested SOCKS5 wire codec), and `kenneld` (a library half in `src/lib.rs` providing the orchestration its binaries share, plus `src/bin/kenneld.rs` for the daemon, `src/bin/kennel.rs` for the CLI, and `src/bin/kennel-akc.rs` for the SSH bastion's root-owned `AuthorizedKeysCommand`, which reuses `kenneld::control` to query the daemon — §7.8.7). The remaining crates are libraries (`src/lib.rs`).
 
 ---
 

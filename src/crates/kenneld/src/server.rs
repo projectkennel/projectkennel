@@ -115,6 +115,11 @@ pub struct BastionSetup {
     /// handed to the forced command so it can sign the outbound hop. `None` ⇒ the
     /// helper finds no key and fails closed.
     pub agent_sock: Option<PathBuf>,
+    /// The root-owned `AuthorizedKeysCommand` the bastion vends keys through
+    /// (production, §7.8.7): it queries this running daemon for the live bindings,
+    /// so no `authorized_keys` file is written. `None` falls back to a static
+    /// user-owned file (the prototype/e2e source).
+    pub akc: Option<crate::bastion::Akc>,
 }
 
 /// Registry metadata for one kennel (the workload itself is owned by the
@@ -183,6 +188,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 listen: setup.listen,
                 port: setup.port,
                 agent_sock: setup.agent_sock.clone(),
+                akc: setup.akc.clone(),
             })
         });
 
@@ -287,6 +293,20 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         )
     }
 
+    /// Handle an `AuthorizedKeys` query (§7.8.7): the bastion's root-owned
+    /// `AuthorizedKeysCommand` (`kennel-akc`) asks for the forced-command line(s)
+    /// bound to an offered public key. The answer comes from the live [`Bastion`]
+    /// edges — the verified, in-memory source of truth — never a file on disk. Empty
+    /// (the bastion then refuses the key) when no bastion runs or no edge matches.
+    ///
+    /// [`Bastion`]: crate::bastion::Bastion
+    fn authorized_keys(&self, offered_key: &str) -> Response {
+        let guard = self.bastion.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lines = guard.as_ref().map(|b| b.authorized_keys_for(offered_key)).unwrap_or_default();
+        drop(guard);
+        Response::AuthorizedKeys { lines }
+    }
+
     /// Handle a `List`: snapshot the registry.
     fn list(&self) -> Response {
         let reg = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -337,6 +357,7 @@ where
         Request::Start(req) => return run_kennel(shared, &req, fds, conn),
         Request::Stop { kennel } => shared.stop(&kennel),
         Request::List => shared.list(),
+        Request::AuthorizedKeys { key } => shared.authorized_keys(&key),
     };
     let _ = control::send_response(conn, &response);
 }
@@ -568,6 +589,49 @@ mod tests {
         // pid not yet set -> still starting.
         assert!(matches!(s.stop("p"), Response::Error(_)), "still-starting kennel cannot be stopped");
         s.release("p", ctx);
+    }
+
+    #[test]
+    fn authorized_keys_vends_the_forced_command_line_from_live_edges() {
+        use crate::bastion::{Bastion, BastionConfig, Edge};
+
+        let s = shared();
+        // No bastion yet ⇒ any key authorises nothing (the AKC then refuses it).
+        let Response::AuthorizedKeys { lines } = s.authorized_keys("ssh-ed25519 ANY") else {
+            unreachable!("authorized_keys response")
+        };
+        assert!(lines.is_empty(), "no bastion ⇒ no authorised keys");
+
+        // Stand up a bastion with one live edge (no sshd) and query it as the AKC would.
+        let mut bastion = Bastion::new(BastionConfig {
+            dir: PathBuf::from("/run/user/1000/kennel-bastion"),
+            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-ssh-reorigin"),
+            listen: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            port: 7022,
+            agent_sock: None,
+            akc: None,
+        });
+        bastion.push_edge_for_test(Edge {
+            kennel: "ka".to_owned(),
+            dest: "github.com".to_owned(),
+            real_fp: "SHA256:AAAa1EZ7oO0qfsA5OSDosRRaFD9evYHhSlcrDPTVoZw".to_owned(),
+            synthetic_pub: "ssh-ed25519 AAAASYN_A ka".to_owned(),
+        });
+        *s.bastion.lock().expect("bastion lock") = Some(bastion);
+
+        // The offered key (comment-free, as sshd's %t %k) returns exactly its binding.
+        let Response::AuthorizedKeys { lines } = s.authorized_keys("ssh-ed25519 AAAASYN_A") else {
+            unreachable!("authorized_keys response")
+        };
+        let line = lines.first().map(String::as_str).unwrap_or_default();
+        assert_eq!(lines.len(), 1, "one matching edge");
+        assert!(line.contains("--dest github.com") && line.contains("AAAASYN_A"), "got {line}");
+
+        // An unknown key authorises nothing.
+        let Response::AuthorizedKeys { lines } = s.authorized_keys("ssh-ed25519 UNKNOWN") else {
+            unreachable!("authorized_keys response")
+        };
+        assert!(lines.is_empty(), "unknown key ⇒ refused");
     }
 
     #[test]

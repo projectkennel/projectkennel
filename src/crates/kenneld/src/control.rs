@@ -33,6 +33,15 @@ pub enum Request {
     },
     /// List the running kennels.
     List,
+    /// Ask for the SSH bastion's forced-command `authorized_keys` line(s) bound to
+    /// an offered public key (§7.8.7). The bastion's root-owned
+    /// `AuthorizedKeysCommand` (`kennel-akc`) makes this query on each auth; the
+    /// daemon answers from its live, verified edge state — there is no file.
+    AuthorizedKeys {
+        /// The offered public key as `"<type> <base64>"` (sshd's `%t %k`); the
+        /// comment is ignored on lookup.
+        key: String,
+    },
 }
 
 /// The payload of a [`Request::Start`].
@@ -70,6 +79,13 @@ pub enum Response {
     Exited {
         /// The workload's exit code (or `128 + signal`).
         code: i32,
+    },
+    /// The forced-command `authorized_keys` line(s) for an offered key (the answer
+    /// to [`Request::AuthorizedKeys`]); empty when no edge matches (the bastion
+    /// then refuses the key).
+    AuthorizedKeys {
+        /// One `restrict,pty,command=…` line per matching edge.
+        lines: Vec<String>,
     },
     /// The request failed; the string is a human-readable reason.
     Error(String),
@@ -205,6 +221,10 @@ impl Request {
                 put_str(&mut b, kennel);
             }
             Self::List => put_u8(&mut b, 3),
+            Self::AuthorizedKeys { key } => {
+                put_u8(&mut b, 4);
+                put_str(&mut b, key);
+            }
         }
         b
     }
@@ -224,6 +244,7 @@ impl Request {
             })),
             2 => Ok(Self::Stop { kennel: r.string()? }),
             3 => Ok(Self::List),
+            4 => Ok(Self::AuthorizedKeys { key: r.string()? }),
             _ => Err(WireError::BadTag),
         }
     }
@@ -254,6 +275,10 @@ impl Response {
             Self::Exited { code } => {
                 put_u8(&mut b, 3);
                 b.extend_from_slice(&code.to_ne_bytes());
+            }
+            Self::AuthorizedKeys { lines } => {
+                put_u8(&mut b, 5);
+                put_strs(&mut b, lines);
             }
             Self::Error(message) => {
                 put_u8(&mut b, 4);
@@ -290,6 +315,7 @@ impl Response {
             }
             3 => Ok(Self::Exited { code: r.i32()? }),
             4 => Ok(Self::Error(r.string()?)),
+            5 => Ok(Self::AuthorizedKeys { lines: r.strings()? }),
             _ => Err(WireError::BadTag),
         }
     }
@@ -389,6 +415,18 @@ mod tests {
     fn stop_and_list_requests_round_trip() {
         round_trip_request(&Request::Stop { kennel: "ai-coding".to_owned() });
         round_trip_request(&Request::List);
+    }
+
+    #[test]
+    fn authorized_keys_messages_round_trip() {
+        round_trip_request(&Request::AuthorizedKeys { key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5".to_owned() });
+        round_trip_request(&Request::AuthorizedKeys { key: String::new() });
+        round_trip_response(&Response::AuthorizedKeys { lines: Vec::new() });
+        round_trip_response(&Response::AuthorizedKeys {
+            lines: vec![
+                "restrict,pty,command=\"/opt/kennel/bin/kennel-ssh-reorigin --dest github.com --key SHA256:AAA\" ssh-ed25519 AAAASYN ka\n".to_owned(),
+            ],
+        });
     }
 
     #[test]

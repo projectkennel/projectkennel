@@ -120,12 +120,13 @@ pub fn sshd_config(p: &SshdParams<'_>) -> String {
             let _ = write!(s, "\nAuthorizedKeysFile {}\n", path.display());
         }
         AuthSource::Command { command, user } => {
-            // The forced command and destination live in the per-key options the AKC
-            // emits; the helper is root-owned (the safe-path finding).
+            // Hand the helper the offered key as `%t %k` (type + base64 blob); it asks
+            // kenneld for that key's forced-command line. The helper is root-owned (the
+            // safe-path finding); the bindings live in the daemon, not a file.
             let _ = write!(
                 s,
                 "\nAuthorizedKeysFile none\n\
-                 AuthorizedKeysCommand {}\n\
+                 AuthorizedKeysCommand {} %t %k\n\
                  AuthorizedKeysCommandUser {user}\n",
                 command.display(),
             );
@@ -267,7 +268,7 @@ mod tests {
             command: PathBuf::from("/opt/kennel/bin/kennel-akc"),
             user: "root".to_owned(),
         }));
-        assert!(cmd.contains("AuthorizedKeysCommand /opt/kennel/bin/kennel-akc"));
+        assert!(cmd.contains("AuthorizedKeysCommand /opt/kennel/bin/kennel-akc %t %k"), "AKC gets the offered key");
         assert!(cmd.contains("AuthorizedKeysCommandUser root"), "AKC must be root-owned (safe-path finding)");
         assert!(cmd.contains("AuthorizedKeysFile none"));
     }
