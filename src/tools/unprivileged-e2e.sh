@@ -80,6 +80,11 @@ fi
 sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel
 
 echo "== AppArmor userns profile over the test binary (sudo) =="
+# flags=(unconfined) { userns, } mirrors the production dist/apparmor/kenneld: the
+# profile only GRANTS userns. An enforcing profile cannot work here — the spawn sets
+# no-new-privs before exec'ing the workload, under which AppArmor denies every profile
+# transition (so the workload could only inherit, gaining the sandbox's mount/userns/
+# sys_admin). See dist/apparmor/kenneld for the full rationale.
 cat > "$AA_PROFILE_FILE" <<EOF
 abi <abi/4.0>,
 include <tunables/global>

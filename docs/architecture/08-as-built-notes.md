@@ -294,6 +294,17 @@ describe these read as roadmap.
   more restrictive (a read-only grant never wants `suid`/`dev`); a source without those
   flags (the root fs under `/usr`) is unaffected, so an executable bind stays executable.
   The lesson generalises: under a userns, a remount may only *add* restrictions.
+- **The kenneld `AppArmor` profile is `flags=(unconfined)` by necessity, not laziness.**
+  Its only job is to grant `userns` under Ubuntu's restriction (the capability
+  counterpart of the privhelper's file-caps). An *enforcing* profile is unworkable: the
+  forked spawn child shares the profile and needs `userns`/`mount`/`pivot_root`/
+  `sys_admin` to build the sandbox, then sets `PR_SET_NO_NEW_PRIVS` (seccomp requires it)
+  and execs the arbitrary workload — and under no-new-privs the kernel denies *every*
+  AppArmor exec transition (verified: `Ux`→unconfined and even `Cx`/`Px`→stricter both
+  give `apparmor="DENIED" … info="no new privs"`). That leaves only `ix` for the workload,
+  which would inherit kenneld's `mount`/`userns`/`sys_admin` — worse than unconfined. The
+  workload is confined by Landlock + seccomp + namespaces, not AppArmor; confining it via
+  AppArmor would need runtime `aa_change_onexec` (a v2 question). See `dist/apparmor/kenneld`.
 - **A skip is not a proof — and `cargo test` hides the skip.** The userns-dependent
   spawn proofs `eprintln!` their precise skip cause, but a *passing* libtest captures
   stdout/stderr, so a silent skip reads as a green `ok`. Confirm the real run with
