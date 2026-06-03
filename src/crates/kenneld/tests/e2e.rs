@@ -194,6 +194,37 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     std::fs::write(home_test.join("granted/file"), "OK\n").expect("write granted file");
     std::fs::write(home_test.join("secret/file"), "SECRET\n").expect("write secret file");
 
+    // Prepare an SSH egress for the kennel (§7.8): mint a synthetic key and
+    // materialise a synthetic ~/.ssh, exactly as `Shared::register_ssh` does, then
+    // hand it to the bring-up via `Spec.ssh`. The workload below verifies it landed
+    // in the constructed view. (The bastion's re-origination itself is proven
+    // separately by `src/tools/ssh-bastion-e2e.sh`; this checks the spawn-path
+    // assembly: the synthetic ~/.ssh, the connector bind, and $KENNEL_SOCKS_PROXY.)
+    let ssh_stage = PathBuf::from(format!("/run/kenneld-e2e-ssh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ssh_stage);
+    let synth_pub =
+        kenneld::ssh::mint_synthetic_key(&ssh_stage, "id_github.com", "e2e synthetic").expect("mint synthetic");
+    assert!(synth_pub.starts_with("ssh-ed25519 "), "minted a synthetic ed25519 key");
+    let socks_bin = sibling_binary("kennel-socks-connect");
+    assert!(socks_bin.exists(), "build kennel-socks-connect: cargo build -p kennel-socks-connect");
+    let bastion_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey";
+    let host_grants = [kenneld::ssh::HostGrant { host: "github.com", key_file: "id_github.com" }];
+    let socks_str = socks_bin.to_string_lossy().into_owned();
+    let ssh_params = kenneld::ssh::SshParams {
+        bastion_host: "127.0.0.1",
+        bastion_port: 8031,
+        bastion_host_key: bastion_key,
+        socks_connect_bin: &socks_str,
+        hosts: &host_grants,
+    };
+    let ssh_dir = PathBuf::from("/run/kennel/e2e/.ssh");
+    let ssh_binds = kenneld::ssh::materialize(&ssh_stage, &ssh_dir, &ssh_params).expect("materialise ~/.ssh");
+    let ssh_prep = kenneld::SshPrep {
+        file_binds: ssh_binds,
+        host_service: Some("127.0.0.1:8031".parse().expect("addr")),
+        socks_connect_bin: Some(socks_bin.clone()),
+    };
+
     let helper = HelperClient::new(privhelper_path());
     let spec = Spec {
         cgroup: cgroup.clone(),
@@ -212,7 +243,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
         }),
         view_root: Some(view_root.clone()),
         audit_path: Some(audit_path.clone()),
-        ssh: kenneld::SshPrep::default(),
+        ssh: ssh_prep,
     };
 
     // The workload proves three things about the constructed view, then sleeps so
@@ -222,13 +253,29 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     //   2. the granted ~ path is readable through the shim ($HOME == shim root);
     //   3. the non-granted sibling's NAME is absent (ENOENT, not merely denied).
     // Any failing clause exits the shell non-zero.
+    // Clause (4): the synthetic ~/.ssh landed in the view — the generated config
+    // routes github through the bastion via the SOCKS connector ProxyCommand, the
+    // known_hosts pins only the bastion under its alias, the disposable synthetic
+    // key is present, the connector binary is bound in, and $KENNEL_SOCKS_PROXY is
+    // set to the kennel's proxy. None of this exists for a kennel without [ssh].
+    let ssh_clause = format!(
+        "&& test -f \"$HOME/.ssh/config\" \
+         && grep -q 'ProxyCommand .*kennel-socks-connect %h %p' \"$HOME/.ssh/config\" \
+         && grep -q 'HostKeyAlias kennel-bastion' \"$HOME/.ssh/config\" \
+         && grep -q '^kennel-bastion ssh-ed25519 ' \"$HOME/.ssh/known_hosts\" \
+         && test -f \"$HOME/.ssh/id_github.com\" \
+         && test -e '{socks}' \
+         && test -n \"$KENNEL_SOCKS_PROXY\" ",
+        socks = socks_bin.display(),
+    );
     let mut workload = Command::new("/bin/sh");
-    workload.arg("-c").arg(
+    workload.arg("-c").arg(format!(
         "grep -q '127.0.144.17[[:space:]]*localhost e2e' /etc/hosts \
          && test -r \"$HOME/kennel-e2e/granted/file\" \
          && ! test -e \"$HOME/kennel-e2e/secret\" \
+         {ssh_clause} \
          && sleep 2",
-    );
+    ));
     let kennel = start(&helper, spec, &mut workload).expect("start kennel");
     assert!(cgroup.is_dir(), "the kennel cgroup should exist while running");
 
@@ -258,9 +305,14 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
 
     // Wait for the workload to finish and tear everything down (incl. the proxy).
     // success ⇒ inside the kennel: synthetic /etc/hosts present, the granted ~ path
-    // readable through the shim, and the non-granted sibling's name absent (ENOENT).
+    // readable through the shim, the non-granted sibling's name absent (ENOENT), and
+    // the synthetic ~/.ssh laid in (config via the SOCKS connector, bastion-pinned
+    // known_hosts, the synthetic key) with $KENNEL_SOCKS_PROXY set (§7.8).
     let status = kennel.stop(&helper).expect("stop");
-    assert!(status.success(), "the constructed view held (synthetic /etc, granted readable, sibling ENOENT) (got {status:?})");
+    assert!(
+        status.success(),
+        "the constructed view held (synthetic /etc + ~/.ssh, granted readable, sibling ENOENT) (got {status:?})"
+    );
 
     assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
     assert!(!lo_has(v4), "the loopback address should be removed on teardown");
@@ -275,6 +327,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel() {
     let _ = std::fs::remove_dir_all(&proxy_cfg);
     let _ = std::fs::remove_dir_all(&etc_base);
     let _ = std::fs::remove_dir_all(&home_test);
+    let _ = std::fs::remove_dir_all(&ssh_stage);
     let _ = std::fs::remove_dir(&base);
 }
 

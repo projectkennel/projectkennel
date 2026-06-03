@@ -500,6 +500,19 @@ fn bring_up<P: Privileged>(
     //     synthetic config's ProxyCommand SOCKS5s through it to the bastion (§7.8.4).
     //     Empty for a kennel with no [ssh] grant, so nothing changes for it.
     if !ssh.file_binds.is_empty() {
+        // Grant Landlock read on the synthetic ~/.ssh dir(s): the files are copied
+        // into the view like the synthetic /etc, but unlike /etc the home subtree is
+        // not in `fs.read`, so without this `ssh` is denied reading its own config.
+        use kennel_syscall::landlock::AccessFs;
+        let mut ssh_dirs = std::collections::BTreeSet::new();
+        for (_src, target) in &ssh.file_binds {
+            if let Some(parent) = target.parent() {
+                ssh_dirs.insert(parent.to_path_buf());
+            }
+        }
+        for dir in ssh_dirs {
+            plan.landlock_fs.push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
+        }
         plan.file_binds.extend(ssh.file_binds.iter().cloned());
         // The connector connects to the kennel's own proxy address.
         let proxy_addr = state.v4.map_or_else(
