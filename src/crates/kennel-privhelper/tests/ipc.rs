@@ -89,7 +89,7 @@ fn adds_and_removes_an_in_scope_loopback_address() {
 /// Build a `/32` `allow_v4` LPM entry permitting any port to `addr` (network
 /// order). Key/value layouts match `bpf/maps.h`.
 #[cfg(feature = "root-tests")]
-fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
+const fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
     let [a, b, c, d] = addr;
     let [p0, p1, p2, p3] = 32u32.to_ne_bytes(); // prefixlen
     let key = [p0, p1, p2, p3, a, b, c, d];
@@ -102,7 +102,7 @@ fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
 
 /// An empty `EgressPayload` (no map entries) — enough to exercise load + attach.
 #[cfg(feature = "root-tests")]
-fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
+const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
     kennel_privhelper::wire::EgressPayload {
         meta: [0u8; kennel_privhelper::wire::META_LEN],
         allow_v4: Vec::new(),

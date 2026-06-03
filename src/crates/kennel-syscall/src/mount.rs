@@ -54,23 +54,34 @@ pub fn bind(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
 }
 
 /// Remount an existing (bind) mount read-only
-/// (`MS_BIND | MS_REMOUNT | MS_RDONLY`).
+/// (`MS_BIND | MS_REMOUNT | MS_RDONLY`), **preserving the mount's locked flags**.
 ///
 /// A bind mount must be remounted to apply `MS_RDONLY`; bind + this is the
-/// read-only-grant idiom.
+/// read-only-grant idiom. Inside an unprivileged user namespace the kernel
+/// forbids a remount from *clearing* the `nosuid`/`nodev`/`noexec` flags that are
+/// locked on the underlying superblock — a bind of a file from a `nosuid,nodev`
+/// mount (e.g. `$XDG_RUNTIME_DIR`, a systemd `tmpfs`) would otherwise fail with
+/// `EPERM`. We therefore read the target's current flags (`statvfs`) and carry the
+/// locked ones into the remount. This both fixes the unprivileged case and is
+/// strictly more restrictive (a read-only grant never wants `suid`/`dev`); a
+/// source without those flags (e.g. the root fs under `/usr`) is unaffected, so an
+/// executable bind stays executable.
 ///
 /// # Errors
 ///
-/// Returns the OS error if `target` is not a mount point or the remount fails.
+/// Returns the OS error if `target` is not a mount point, its flags cannot be
+/// read, or the remount fails.
 pub fn remount_readonly(target: &Path) -> io::Result<()> {
-    nix::mount::mount(
-        None::<&Path>,
-        target,
-        None::<&Path>,
-        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
-        None::<&Path>,
-    )
-    .map_err(map_err)
+    use nix::sys::statvfs::{statvfs, FsFlags};
+
+    let current = statvfs(target).map_err(map_err)?.flags();
+    let mut flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY;
+    // Preserve the flags the kernel locks on a userns-visible mount; clearing any
+    // of them in a remount is EPERM inside an unprivileged user namespace.
+    flags.set(MsFlags::MS_NOSUID, current.contains(FsFlags::ST_NOSUID));
+    flags.set(MsFlags::MS_NODEV, current.contains(FsFlags::ST_NODEV));
+    flags.set(MsFlags::MS_NOEXEC, current.contains(FsFlags::ST_NOEXEC));
+    nix::mount::mount(None::<&Path>, target, None::<&Path>, flags, None::<&Path>).map_err(map_err)
 }
 
 /// Mount a special filesystem (`proc`, `sysfs`, `tmpfs`, …) at `target` with the
