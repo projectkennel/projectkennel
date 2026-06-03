@@ -22,19 +22,24 @@ describe these read as roadmap.
   / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
   is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).
 
-- **`kennel-sshd` — the per-kennel SSH egress bastion** (design `07-8-ssh.md` §7.8). A per-user managed instance of stock OpenSSH `sshd`, sibling to
-  `kenneld`, that re-originates a kennel's SSH to policy-granted destinations
-  with the user's real key (held host-side) so the workload never holds a key or
-  an agent socket. The mechanism is **prototype-validated against stock OpenSSH
-  9.6** — forced-command re-origination carries `git`-shape commands and
-  interactive ptys; the destination is fixed in `command=` (keyed to the
-  authenticated synthetic key) so the workload cannot redirect it; a
-  non-synthetic key is refused; `$SSH_USER_AUTH` (`ExposeAuthInfo`) exposes which
-  synthetic key authenticated. Three findings constrain the build:
-  1. The `AuthorizedKeysCommand` helper must be **root-owned** (OpenSSH's
-     safe-path check rejects an AKC owned by the unprivileged sshd-running user),
-     so `install.sh` ships it root-owned in the prefix and it queries `kenneld`
-     over the control socket; the rootless `kennel-sshd` only invokes it.
+- **`kennel-sshd` — the per-kennel SSH egress bastion** (design `07-8-ssh.md` §7.8) — **BUILT** (it graduated from this roadmap; kept here for its build
+  notes and the findings that shaped it). A per-user managed instance of stock
+  OpenSSH `sshd`, sibling to `kenneld`, that re-originates a kennel's SSH to
+  policy-granted destinations with the user's real key (held host-side) so the
+  workload never holds a key or an agent socket. The mechanism is **validated end
+  to end against stock OpenSSH 9.6** (see the proof note below) — forced-command
+  re-origination carries `git`-shape commands and interactive ptys; the destination
+  is fixed in `command=` (keyed to the authenticated synthetic key) so the workload
+  cannot redirect it; a non-synthetic key is refused; `$SSH_USER_AUTH`
+  (`ExposeAuthInfo`) exposes which synthetic key authenticated. Three findings
+  shaped the build:
+  1. An `AuthorizedKeysCommand` must be **root-owned** (OpenSSH's safe-path check
+     rejects an AKC owned by the unprivileged sshd-running user). The build sidesteps
+     this: the per-user `kennel-sshd` runs as the user, so it uses a static
+     `AuthorizedKeysFile` owned by that user on a `0700` path (which the safe-path
+     check accepts), rewritten live by `Bastion` as kennels come and go. A root-owned
+     AKC variant remains available (`kenneld::sshd::AuthSource::Command`) for a future
+     model where the bastion runs as a different user.
   2. `restrict,pty` is the per-key option set (denies forwarding/X11/agent/
      user-rc, keeps a tty); combined with the `Match` block (`AllowTcpForwarding
      no`, `Subsystem sftp /bin/false`) this makes SFTP/scp/port-forwarding
@@ -118,27 +123,37 @@ describe these read as roadmap.
     rebinding surface. Unit-tested: a host service connects through a loopback deny,
     a non-host-service loopback port stays denied, and the config parses.
 
-  **Still owed** — two separable pieces.
-  1. **The spawn-path assembly** in `spawn_workload` (guarded on non-empty
-     `Loaded.ssh`): mint a synthetic key per grant (`kenneld::ssh::mint_synthetic_key`),
-     materialise the synthetic `~/.ssh` into the constructed-view `$HOME` (a
-     `kenneld::ssh::materialize` wired like the synthetic `/etc`), register each edge
-     with the per-user `kenneld::bastion::Bastion` (lazily starting the managed
-     `sshd`), add the bastion as a host service to the kennel's proxy config (1), and
-     set `$KENNEL_SOCKS_PROXY` in the kennel env; deregister on teardown. Needs the
-     per-user `Bastion` in `Shared`, configured from `Identity` — which needs two
-     defaults chosen: the bastion's loopback port (kenneld-allocated) and the
-     host-side agent socket (`$SSH_AUTH_SOCK` of the daemon's session). Validate with
-     a root e2e (bastion + agent + destination in a confined kennel).
-  2. **The root-owned `AuthorizedKeysCommand` helper** + a control-protocol message:
-     `kennel-sshd`'s AKC queries `kenneld` for the live forced-command bindings
-     rather than reading a static file (the production key source; the static
-     `AuthorizedKeysFile` is already supported and is what the e2e drives).
+  - **The spawn-path assembly** — *built and proven in a real kennel*. When a kennel's
+    `Loaded.ssh` is non-empty, `kenneld` (`server.rs::register_ssh` →
+    `lib.rs::bring_up`): mints a synthetic key per grant, registers each edge with the
+    per-user `Bastion` (lazily starting `kennel-sshd`), materialises the synthetic
+    `~/.ssh` into the constructed-view `$HOME` (laid in like the synthetic `/etc`,
+    with a Landlock read grant on the `~/.ssh` dir), binds `kennel-socks-connect` into
+    the view with a Landlock execute grant, sets `$KENNEL_SOCKS_PROXY` to the kennel's
+    proxy address, and adds the bastion as a `[[net.host_services]]` entry in the
+    proxy config; teardown (and any bring-up failure) deregisters the kennel's edges.
+    The per-user `Bastion` lives in `Shared`, configured from `Identity` (bastion
+    loopback addr + tag-derived port + `$SSH_AUTH_SOCK`). The kenneld root e2e
+    (`tests/e2e.rs`) brings a confined kennel up with an `[ssh]` grant and the
+    workload verifies — inside the sandbox (namespaces, pivot_root view, BPF,
+    Landlock) — that its synthetic `~/.ssh` (connector `ProxyCommand`, bastion-pinned
+    `known_hosts`, the synthetic key), the bound connector, and `$KENNEL_SOCKS_PROXY`
+    are all present.
 
-  (Phase numbering follows §7.8's original plan; everything except these three is
-  built and either unit-tested or proven end-to-end by `src/tools/ssh-bastion-e2e.sh`,
-  which drives the real `kennel-ssh-reorigin`, `kennel-socks-connect`, and
-  `kennel-netproxy` binaries against stock OpenSSH 9.6.)
+  **Optional refinement, not required.** Production *may* later vend keys through an
+  `AuthorizedKeysCommand` that queries `kenneld` over the control socket (root-owned,
+  per the safe-path finding). It is **not** needed for the per-user bastion as built:
+  `kennel-sshd` runs as the user, so a static `AuthorizedKeysFile` owned by that user
+  on a `0700` path passes sshd's safe-path check, and `Bastion` rewrites it live as
+  kennels come and go (sshd re-reads it per authentication). The AKC variant is
+  already expressible in `kenneld::sshd` (`AuthSource::Command`) for a future model
+  where the bastion runs as a different user.
+
+  (Phase numbering follows §7.8's original plan; the per-kennel SSH egress is now
+  built end to end and proven by both `src/tools/ssh-bastion-e2e.sh` — the bastion
+  re-origination + full egress chain against stock OpenSSH 9.6, driving the real
+  `kennel-ssh-reorigin`, `kennel-socks-connect`, and `kennel-netproxy` binaries — and
+  the kenneld root e2e — the spawn-path assembly inside a confined kennel.)
 
 ## 8.2 Implementation lessons (apply these to the rest)
 
