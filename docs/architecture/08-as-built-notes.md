@@ -252,9 +252,18 @@ describe these read as roadmap.
     the old "`setgroups` in the privileged seal" mechanism only applies to the legacy
     no-userns path (`Plan.supplementary_groups`, kept for the root tests). **Re-granting
     a specific group** (the §7.2.8 device-passthrough case) cannot be done unprivileged;
-    it needs a narrow **privhelper `gid_map` operation** (the privhelper holds
-    `CAP_SETGID` and writes the workload's `gid_map`) — decided, to be built. See
-    the spawn flow in design §8.3 and the user-namespace prerequisite in §8.2.
+    it needs the narrow **privhelper `set-gid-map` operation** (the privhelper holds
+    `CAP_SETGID` in the init userns and writes the workload's `gid_map`) — **BUILT**. The
+    spawn-time handshake is **design (a), kenneld-side**: child A establishes the userns
+    with the `gid_map` *deferred* (`namespace::establish_userns_defer_gid_map` — unshare
+    USER, `setgroups=deny`, `uid_map`, but **not** `gid_map`), signals its pid down a
+    pipe, and blocks; because `Command::spawn` blocks the calling thread until A execs, a
+    scoped servicer thread inside `kennel_spawn::spawn_with_gid_map` reads the pid, calls
+    the privhelper, and acks — only then does A fork the PID-1 grandchild and exec. The
+    servicer polls the pipe with a cancel flag (the parent keeps a copy of the write end
+    alive in `Command`'s stored `pre_exec` closure, so EOF cannot be relied on). `kenneld`
+    drives it from `bring_up`/`spawn_workload`, mapping `dedupe(real_gid + granted gids)`.
+    See the spawn flow in design §8.3 and the user-namespace prerequisite in §8.2.
   - **Policy + resolution**: `[identity].groups` (names) → `SettledPolicy.identity:
     IdentityRuntime`, mirroring `ssh`/`unix`; `translate_identity` unions the explicit
     list with every `[[fs.dev.passthrough]].group`. `kennel-policy::dev`-style
@@ -263,12 +272,35 @@ describe these read as roadmap.
     refusing any group the operator is not in (the root seal could otherwise
     over-grant: escalation) — sets `plan.supplementary_groups`, and names the granted
     groups in `/etc/group` so `id` shows names.
-  - **Proven** in the kenneld root e2e: the workload's supplementary set is dropped to
-    exactly the one granted gid (`id -G` has two entries incl. `12345`), resolved by
-    name (`id -Gn` shows `kennelgrp`) via the synthetic `/etc/group`.
+  - **Proven** in the kenneld **unprivileged** e2e (`tests/e2e.rs`, run off sudo via
+    `src/tools/unprivileged-e2e.sh`): a real supplementary group the operator holds is
+    re-granted through the `set-gid-map` handshake and is present inside (`id -G` shows
+    its gid, `id -Gn` shows `kennelgrp` via the synthetic `/etc/group`), while every
+    other supplementary gid folds to the overflow gid (`nogroup`/65534) — the
+    userns-correct isolation invariant (every gid is the primary, the overflow, or the
+    granted one). The legacy no-userns root path's `setgroups`-to-exactly-`{12345}` is
+    retained for the privileged unit/root tests, but the production proof is the
+    unprivileged vertical.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 
+- **A read-only bind remount must preserve the source's locked flags inside a userns.**
+  `mount(MS_BIND|MS_REMOUNT|MS_RDONLY)` that *clears* a flag locked on the source
+  superblock (`nosuid`/`nodev`/`noexec`) is `EPERM` in an unprivileged user namespace —
+  it only worked on the legacy root path, where clearing locked flags is allowed. A bind
+  of a file from a `nosuid,nodev` mount (e.g. the `AF_UNIX` socket whose source lives on
+  the `$XDG_RUNTIME_DIR` tmpfs) failed until `mount::remount_readonly` learned to
+  `statvfs` the target and carry the locked flags into the remount. This is also strictly
+  more restrictive (a read-only grant never wants `suid`/`dev`); a source without those
+  flags (the root fs under `/usr`) is unaffected, so an executable bind stays executable.
+  The lesson generalises: under a userns, a remount may only *add* restrictions.
+- **A skip is not a proof — and `cargo test` hides the skip.** The userns-dependent
+  spawn proofs `eprintln!` their precise skip cause, but a *passing* libtest captures
+  stdout/stderr, so a silent skip reads as a green `ok`. Confirm the real run with
+  `--nocapture` (or the runner), and on Ubuntu (`apparmor_restrict_unprivileged_userns=1`)
+  the binary needs an `AppArmor` `userns` profile or the proof skips. The production proof
+  is the off-sudo runner `src/tools/unprivileged-e2e.sh`, which sets that up; relaxing the
+  host sysctl is refused (security-weakening) and not the remedy.
 - **The Landlock ruleset must be built *after* `pivot_root`, in the child.** A rule
   opens an `O_PATH` fd at build time and is keyed to that inode. Bind mounts preserve
   inodes (so system/home/dev rules match a parent-built ruleset), but the constructed

@@ -1,6 +1,6 @@
 # Handoff — unprivileged spawn (user namespace) work stream
 
-_Last updated: 2026-06-03. Branch: `master`. Pick up from here in a fresh session._
+_Last updated: 2026-06-04. Branch: `master`. Pick up from here in a fresh session._
 
 ## The one thing not to get wrong
 
@@ -11,106 +11,109 @@ unsharing a **user namespace** (`CLONE_NEWUSER`, identity-mapped — the operato
 real uid/gid 1:1, no subuid), which grants `CAP_SYS_ADMIN` *inside that namespace*.
 This is the bubblewrap mechanism. The privhelper (file-caps, never sudo) does only
 the host-global ops a userns can't reach: `add-addr`/`del-addr`/`setup-egress` and
-now `set-gid-map`.
+`set-gid-map`.
 
-A prior session claimed this was "proven" when the proof was a **silent test skip** —
-`establish_identity_userns` was actually failing the whole time. Do not repeat that:
-a skip is not a proof; tests must report the precise reason they don't run.
+**A skip is not a proof, and `cargo test` hides skips.** The userns-dependent
+proofs `eprintln!` their precise skip cause, but a *passing* libtest captures
+stdout/stderr, so a silent skip reads as a green `ok`. Always confirm a real run
+with `--nocapture` (or the runner). On Ubuntu (`apparmor_restrict_unprivileged_userns=1`)
+the spawn binary needs an `AppArmor` `userns` profile or the userns is created but
+capability-stripped; without the profile every userns proof skips.
 
-## State: done this session (6 commits on `master`)
+## State: the two remaining action items are DONE this session (4 commits on `master`)
 
 | Commit | What |
 |---|---|
-| `b2552e5` | `kennel_syscall::namespace::establish_identity_userns` (unshare USER, setgroups=deny, identity uid/gid maps) |
-| `b99eb57` | Corrected the false-proof; userns-first seal (branch on `USER`); shipped `dist/apparmor/kenneld` |
-| `b43e687` | `kennel_syscall::spawn::fork_into_pid1` (double-fork) — **full unprivileged spawn proven end-to-end, no sudo** |
-| `2ea21e5` | Corpus aligned: userns-as-core mechanism + AppArmor prerequisite + as-built spawn flow (design §8.2/§8.3, arch §8) |
-| `c06e988` | `Plan::from_policy` emits `USER \| MOUNT \| PID \| IPC` (production on the userns path); `cgroup.kill` lifecycle (`terminate`, server `stop`) |
-| `97c1c33` | Privhelper `set-gid-map` op (wire + security gates + client + tests + docs) |
+| `e00ca04` | `kennel_syscall::handshake` pipe primitive + `namespace::establish_userns_defer_gid_map` (userns with the `gid_map` deferred) |
+| `f9d4fe9` | `kennel_spawn::spawn_with_gid_map` — the deferred-gid handshake, design (a): scoped servicer thread services A's pid pipe while `Command::spawn` blocks |
+| `7298365` | `kenneld`: `Privileged::set_gid_map` + `HelperClient` impl + `bring_up`/`spawn_workload` wiring (userns + granted group → handshake); `FakePriv` made `Sync` |
+| `1687fc9` | The **unprivileged off-sudo e2e** (`kenneld tests/e2e.rs` rewritten to the userns path) + `src/tools/unprivileged-e2e.sh`; **`mount::remount_readonly` locked-flags fix** |
 
-All workspace lib tests green (10 crates). The full-spawn proof is
-`kennel-spawn` `tests::unprivileged_userns_spawn_builds_the_confined_view`.
+All 413 workspace lib tests green; `cargo clippy --workspace --all-targets --all-features -D warnings` clean (incl. the `bpf-egress` privhelper).
+
+### 1. Spawn-time gid_map handshake — DONE (design (a), kenneld-side)
+
+Re-granting a supplementary group on the userns path (§7.2.8): child A establishes
+the userns with the `gid_map` **deferred** (`establish_userns_defer_gid_map`: unshare
+USER + `setgroups=deny` + `uid_map`, **not** `gid_map`), signals its pid down a pipe,
+and blocks. Because `Command::spawn` blocks the calling thread until A execs, a scoped
+**servicer thread** inside `kennel_spawn::spawn_with_gid_map` reads the pid, calls the
+privhelper `set-gid-map` (it holds `CAP_SETGID` in the init userns), and acks — only
+then does A fork the PID-1 grandchild and exec. The servicer polls the pipe with an
+`AtomicBool` cancel flag, *not* EOF (the parent keeps a copy of the write end alive in
+`Command`'s stored `pre_exec` closure). `kenneld::spawn_workload` builds the mapper from
+`dedupe(real_gid + plan.supplementary_groups)`; a `set-gid-map` refusal fails the spawn
+closed. Default drop-all (no granted group) still needs none of this — the single-line
+`gid_map` collapses every other group to the overflow gid for free.
+
+### 2. e2e off sudo — DONE
+
+`kenneld tests/e2e.rs` is rewritten to the production userns path and runs as the
+ordinary operator. It derives uid/home/namespace, the delegated cgroup
+(`/proc/self/cgroup`), the reserved scope and the loopback addresses from the live
+environment; keeps `USER|MOUNT|IPC|PID`; re-grants a real supplementary group via the
+handshake; and asserts **userns-correct** group isolation (every supplementary gid is
+the primary, the overflow gid, or the granted one — the legacy `id -G | wc -w == 2`
+does not hold once unmapped groups fold to `nogroup`). Missing prerequisites skip with
+the precise cause.
+
+Run it: **`src/tools/unprivileged-e2e.sh`**. It does the one-time host setup
+(build + `setcap cap_net_admin,cap_sys_admin,cap_setgid=ep` the privhelper, provision
+an `/etc/kennel/subkennel` line for the uid, load an `AppArmor` `userns` profile over
+the test binary) and runs the test under `systemd-run --user --scope -p Delegate=yes`
+(for a writable delegated cgroup). Proven on 6.17: view + synthetic `/etc` + `~/.ssh` +
+`AF_UNIX` shim + `/dev/net/tun` passthrough + the gid_map-handshake group grant, all
+unprivileged.
 
 ## Load-bearing facts established (verified, not assumed)
 
-- **Ubuntu 23.10+/24.04 ship `kernel.apparmor_restrict_unprivileged_userns=1`.**
-  Under it `unshare(CLONE_NEWUSER)` *succeeds* but the process holds **no
-  capabilities** in the new userns — the first `/proc/self/setgroups` write is
-  `EACCES`. Remedy = an AppArmor profile granting `userns` to the kenneld binary
-  (`dist/apparmor/kenneld`). Do **not** relax the host sysctl (security-weakening;
-  the auto-classifier refuses it anyway).
-- **`mount proc` is `EPERM` without a PID namespace.** So the workload must be PID 1
-  of its own pidns — reached by a fork *after* `unshare(CLONE_NEWPID)` (the
-  double-fork). This is why `fork_into_pid1` exists; PID-as-PID-1 is not deferrable.
+- **The off-sudo proof needs four host prerequisites** (the runner sets all up): the
+  privhelper with file-caps; an `/etc/kennel/subkennel` allocation for the operator's
+  uid; an `AppArmor` `userns` profile over the spawn binary (Ubuntu restriction); and a
+  **writable delegated cgroup** — a plain login `session-NNN.scope` is root-owned, so the
+  test is re-executed under `systemd-run --user --scope -p Delegate=yes` (which delegates
+  the scope subtree). Where any is missing the test skips with that precise cause.
+- **A userns RO bind remount may only ADD restrictions.** `mount(MS_BIND|MS_REMOUNT|
+  MS_RDONLY)` that clears a flag locked on the source superblock (`nosuid`/`nodev`/
+  `noexec`) is `EPERM` inside an unprivileged userns. Binding the `AF_UNIX` socket (source
+  on the `nosuid,nodev` `$XDG_RUNTIME_DIR` tmpfs) failed until `mount::remount_readonly`
+  learned to `statvfs` the target and carry the locked flags into the remount. This only
+  ever worked on the legacy root path, where clearing locked flags is allowed.
+- **`apparmor_restrict_unprivileged_userns=1`**: the `flags=(unconfined) { userns, }`
+  per-binary profile grants the new userns full caps (the map writes succeed). An
+  *unconfined* process instead transitions to the stock cap-denying `unprivileged_userns`
+  profile on `unshare`. Relaxing the sysctl is refused (security-weakening) and is not the
+  remedy; the production analogue is `dist/apparmor/kenneld` over the real daemon.
 - **An unprivileged `gid_map` maps only the caller's own primary gid** (`man 7
-  user_namespaces` rule 5). So default group-drop is free (every unmapped group →
-  overflow gid `nogroup`), but **re-granting** a specific supplementary group needs
-  the privhelper (`cap_setgid`) to write a multi-gid map — hence the `set-gid-map` op.
-- The double-fork makes kenneld's `Child` handle the **intermediate init**, not the
-  workload, so kill-by-pid leaks the workload → both forced-kill paths use
-  `cgroup.kill` (`kenneld::cgroup::kill_cgroup`). `stop()`/`try_finished()` stay
-  correct because the init propagates the workload's exit status.
-
-## How to re-run the end-to-end unprivileged proof (no sudo in the spawn)
-
-```sh
-cargo test -p kennel-spawn --lib --no-run
-BIN=$(ls -t target/debug/deps/kennel_spawn-* | grep -v '\.d$' | head -1)
-cat > /tmp/kst.aa <<EOF
-abi <abi/4.0>,
-include <tunables/global>
-profile kennel_spawn_test $(pwd)/$BIN flags=(unconfined) { userns, }
-EOF
-sudo apparmor_parser -r -W /tmp/kst.aa     # one-time host setup, additive (not weakening)
-"$BIN" unprivileged_userns_spawn_builds_the_confined_view --nocapture
-sudo apparmor_parser -R /tmp/kst.aa; rm /tmp/kst.aa   # clean up
-```
-With the profile loaded it asserts (granted path readable, secret name absent,
-`/proc` live); without it, it **skips with the precise cause** (never a false pass).
+  user_namespaces`), so re-granting a *specific* supplementary group needs the
+  privhelper's multi-gid write — hence the handshake.
 
 ## Remaining work (next session)
 
-### 1. Spawn-time gid_map handshake — the hard half of the gid_map op
-The privhelper `set-gid-map` op is built and tested; what's missing is calling it at
-the right moment in the spawn. An unprivileged process can map only its own primary
-gid, so the privhelper must run in the **init userns** (where it has `cap_setgid`)
-against the spawn child's pid, **after** the child created its userns and **before**
-the workload uses the group. Two designs (pick one):
+The two action items from the previous handoff are complete. Open follow-ons:
 
-- **(a) kenneld-side**: child A creates the userns (writes `uid_map` + `setgroups=deny`,
-  but NOT `gid_map`), sends "ready, pid=P" down a pipe and blocks; kenneld — on a
-  thread, because `Command::spawn` blocks until A execs — calls
-  `kennel_privhelper::client::set_gid_map(P, gids)`, then unblocks A.
-- **(b) in-spawn helper**: A pre-forks H *before* `unshare(USER)` (so H stays in the
-  init userns); A creates the userns and signals H; H execs the privhelper (which
-  then has `cap_setgid` over A's userns) to write the map; H signals A to continue.
-  Keeps it all in `kennel-spawn` (no kenneld threading) but is delicate post-fork
-  pipe plumbing and needs the privhelper path threaded into the seal.
-
-Only needed for **re-granting** a supplementary group (e.g. `dialout` device
-passthrough). Default-drop-all needs none of it.
-
-### 2. e2e off sudo
-`src/crates/kenneld/tests/e2e.rs` is a ~400-line root scenario that overrides
-`plan.namespaces = MOUNT` and uses the legacy `setgroups`. To run it as the ordinary
-user it needs: uid = real user, home = real home, namespace from the user's
-`/etc/kennel/subkennel`, a **writable delegated cgroup** (the dev box runs in a
-`session-NNN.scope`, so this likely needs `systemd-run --user` to get into
-`user@<uid>.service`), the privhelper installed with file-caps
-(`sudo setcap cap_net_admin,cap_sys_admin,cap_setgid=ep …` — one-time), the AppArmor
-`userns` profile loaded, and the group assertion changed to default-drop (or the
-gid_map handshake from task 1 for the granted case).
+- **CI/runner for the off-sudo e2e.** `src/tools/unprivileged-e2e.sh` uses `sudo` for the
+  one-time setcap/subkennel/AppArmor steps and `systemd-run --user`. Wiring this into CI
+  needs a runner with a systemd user session, AppArmor, and the ability to setcap — decide
+  the CI shape (privileged setup stage + unprivileged test stage).
+- **kennel-sshd §7.8.9 regression tests** — the only minor item left on the SSH stream
+  (separate from this work).
 
 ## Key files
 
-- Spawn primitive: `src/crates/kennel-syscall/src/spawn.rs` (`fork_into_pid1`),
-  `src/crates/kennel-syscall/src/namespace.rs` (`establish_identity_userns`).
-- Seal split (outer/inner, branch on `USER`): `src/crates/kennel-spawn/src/lib.rs`.
-- Plan namespaces: `src/crates/kennel-spawn/src/plan.rs` (`from_policy`).
-- Lifecycle: `src/crates/kenneld/src/cgroup.rs` (`kill_cgroup`),
-  `src/crates/kenneld/src/lib.rs` (`Instance::terminate`),
-  `src/crates/kenneld/src/server.rs` (`stop`).
-- Privhelper op: `src/crates/kennel-privhelper/src/{wire,validate,exec,client}.rs`.
+- Handshake primitive: `src/crates/kennel-syscall/src/handshake.rs`;
+  deferred userns: `src/crates/kennel-syscall/src/namespace.rs`
+  (`establish_userns_defer_gid_map`).
+- Spawn handshake: `src/crates/kennel-spawn/src/lib.rs`
+  (`spawn_with_gid_map`, `run_with_gid_map_servicer`, `gid_map_servicer`).
+- kenneld wiring: `src/crates/kenneld/src/lib.rs` (`Privileged::set_gid_map`,
+  `spawn_workload`, `gid_map_set`).
+- Privhelper op: `src/crates/kennel-privhelper/src/{wire,validate,exec,client}.rs`
+  (`set-gid-map`).
+- RO remount fix: `src/crates/kennel-syscall/src/mount.rs` (`remount_readonly`).
+- Off-sudo e2e + runner: `src/crates/kenneld/tests/e2e.rs`,
+  `src/tools/unprivileged-e2e.sh`.
 - Deploy artifact: `dist/apparmor/kenneld`.
-- Corpus: design `08-enforcement-architecture.md` §8.2/§8.3; architecture
-  `07-paths.md`, `02-4-ipc.md`, `08-as-built-notes.md`.
+- Corpus: architecture `08-as-built-notes.md` (§8.1 identity groups, §8.2 lessons),
+  `02-4-ipc.md` (set-gid-map), `07-paths.md` (`cap_setgid`); design
+  `08-enforcement-architecture.md` §8.2/§8.3.
