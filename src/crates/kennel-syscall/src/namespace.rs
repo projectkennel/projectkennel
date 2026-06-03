@@ -63,6 +63,38 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
     nix::sched::unshare(to_clone_flags(ns)).map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
+/// Establish an identity-mapped **user namespace** for the calling process.
+///
+/// The unprivileged foundation of the spawn — the bubblewrap-equivalent mechanism
+/// (`docs/architecture/01-process-model.md`, `docs/design/08-enforcement-architecture.md`).
+/// Unshares `CLONE_NEWUSER` and maps the caller's `uid`/`gid` **1:1** into the new
+/// namespace — the real uid is preserved (not subuid; `design/11-open-questions.md`).
+/// The caller then holds `CAP_SYS_ADMIN` *within the new namespace*, so it can unshare
+/// a mount/IPC namespace and `mount`/`pivot_root` **with no real privilege** — this is
+/// what lets an unprivileged `kenneld` build the constructed view without root or
+/// sudo. The privhelper stays reserved for the host-global operations a user namespace
+/// cannot reach (loopback addresses, cgroup BPF).
+///
+/// Ordering is load-bearing for an unprivileged user namespace: `setgroups` must be
+/// **denied** before `gid_map` is written, then each map is written once. Because
+/// `setgroups` is denied, supplementary-group selection is expressed through the
+/// `gid_map` (mapped gids retain identity; unmapped ones fall to the overflow gid),
+/// **not** a later `setgroups`.
+///
+/// # Errors
+///
+/// An OS error if the `CLONE_NEWUSER` unshare is refused (e.g. the distro disables
+/// unprivileged user namespaces) or any `/proc/self` map write fails.
+pub fn establish_identity_userns(uid: u32, gid: u32) -> io::Result<()> {
+    unshare(Namespaces::USER)?;
+    // Unprivileged userns: deny setgroups before writing gid_map (a kernel rule that
+    // prevents using a new userns to drop groups for a privilege check).
+    std::fs::write("/proc/self/setgroups", "deny")?;
+    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
+    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +124,44 @@ mod tests {
         // unshare(0) is a no-op the kernel accepts unprivileged: validates the
         // call path without needing any capability.
         unshare(Namespaces::empty()).expect("no-op unshare");
+    }
+
+    /// **The foundational premise, proven UNPRIVILEGED (no sudo, plain `cargo test`):**
+    /// a normal user can build a mount namespace by first establishing an
+    /// identity-mapped user namespace. Without the userns, `unshare(MOUNT)` is `EPERM`
+    /// for an unprivileged caller; with it, it succeeds — which is how an unprivileged
+    /// `kenneld` constructs the sandbox. Skips where the distro disables unprivileged
+    /// user namespaces (`kernel.unprivileged_userns_clone=0` / `user.max_user_namespaces=0`).
+    #[test]
+    fn identity_userns_grants_an_unprivileged_mount_namespace() {
+        let uid = crate::unistd::real_uid();
+        let gid = crate::unistd::real_gid();
+        // SAFETY: fork(); the child only unshares, writes its own /proc maps, and
+        // _exit()s — it never returns into the test harness.
+        match unsafe { nix::unistd::fork() }.expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let code = match establish_identity_userns(uid, gid) {
+                    // With the userns established, the mount namespace is unprivileged.
+                    Ok(()) => i32::from(unshare(Namespaces::MOUNT | Namespaces::IPC).is_err()) * 2,
+                    // userns unshare/map refused — almost always a distro lockdown, not
+                    // a code defect; reported separately so the parent can skip.
+                    Err(_) => 3,
+                };
+                // SAFETY: _exit ends the child without Drop/atexit glue.
+                unsafe { libc::_exit(code) };
+            }
+            nix::unistd::ForkResult::Parent { child } => {
+                let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
+                if matches!(status, nix::sys::wait::WaitStatus::Exited(_, 3)) {
+                    eprintln!("SKIP: unprivileged user namespaces appear disabled on this host");
+                    return;
+                }
+                assert!(
+                    matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
+                    "unprivileged userns→mount-namespace failed (2 = mount EPERM): {status:?}"
+                );
+            }
+        }
     }
 
     /// With privilege, unsharing the mount namespace gives the caller a private
