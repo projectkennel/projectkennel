@@ -24,6 +24,19 @@ On distributions that restrict unprivileged user namespaces (Ubuntu's `kernel.ap
 
 Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): the unified audit writer plus the journald/syslog/stdout sinks and the `[audit]` policy section (a per-kennel file sink and the proxy's per-request JSONL records run today), per-kennel `[unix]` service launching (§7.4.7), and the Rust `kennel-checksum-verify` (a dependency-free shell verifier runs today).
 
+## SSH egress: double-blind re-origination
+
+The most distinctive mechanism, and the hardest part of confining a workload that does real work — an agent or a build needs to `git push`/`pull` or `ssh` to a few hosts, with selected keys.
+
+The obvious grant is to forward an `ssh-agent` socket into the sandbox. It is a **destination-blind signing oracle**: the agent protocol signs an opaque blob, *not* a hostname, so a workload holding the socket can have an allowlisted key sign a challenge it crafted for an *attacker-chosen* host and authenticate as the user anywhere that key is accepted (cross-host key reuse). A curated `~/.ssh/config` constrains only the client the workload is free to bypass.
+
+Project Kennel routes SSH through a per-user **re-origination bastion** (a stock OpenSSH `sshd` running forced commands only) so that **both ends of the dangerous (key × destination) pairing are blinded**:
+
+- **The workload is blind to the credential.** Its constructed `~/.ssh` holds only a *disposable synthetic* ed25519 key — never a real key, never an agent socket. The real key never enters the kennel; it stays in the user's host-side store (agent, hardware token, or `~/.ssh`).
+- **The credential cannot be aimed by the workload.** *Which synthetic key authenticates is the destination selector*: the bastion's forced command bakes in the `(host, real-key-fingerprint)` edge, so `kennel-ssh-reorigin` re-originates a fresh `ssh` with the real key — `IdentitiesOnly`, host-key-verified — to **exactly that host and no other**. The workload cannot redirect it, cannot choose a destination, and a non-synthetic key is refused.
+
+A synthetic key is thus a capability for exactly one `(host, key)` edge: `git push` to a granted host just works, with **zero key material in the sandbox and no signing oracle to abuse**. Validated end-to-end against stock OpenSSH 9.6 (design [§7.8](docs/design/07-8-ssh.md); [`kennel-ssh-reorigin`](src/crates/kennel-ssh-reorigin/)). We have not found this double-blind arrangement — workload blind to the key, key unaimable by the workload — in another sandbox or SSH-confinement design.
+
 ## Size
 
 A rough sense of scale — far more specification than code, and the code that exists is small and mostly safe. (SLOC = lines of code excluding comments and blanks, via `tokei`; prose via `wc -w`. A snapshot that drifts.)
