@@ -108,6 +108,8 @@ Statically-linked binaries don't need the lib grant, but Project Kennel cannot i
 
 Combined with `deny_setuid` and `deny_setgid` in the exec policy, this is belt-and-braces: the policy refuses to execute setuid binaries, and even if a setuid binary somehow gets executed, it does not gain the uid. Either alone is sufficient; both together are defence in depth.
 
+As built, the `deny_setuid` / `deny_setgid` flags are enforced *structurally*, not by a per-file mode-bit check at exec time: every mount the kennel constructs is `MS_NOSUID` (`kennel-syscall::mount`), so setuid/setgid bits in the constructed view never take effect, and `no_new_privs` is set besides — so even a setuid binary reached some other way gains no privilege. `deny_setcap`'s file-capability case is likewise covered by `no_new_privs`, which makes file capabilities inert on `execve`. The flags are therefore framework invariants realised by the seal's mount construction and `no_new_privs`, rather than by inspecting each binary's bits.
+
 `no_new_privs` is set unconditionally and cannot be disabled via policy. Project Kennel's invariants prohibit any policy from setting `no_new_privs = false`. This is non-negotiable; a confinement framework that allowed disabling `no_new_privs` would be misnamed.
 
 ## 7.1.9 Summary

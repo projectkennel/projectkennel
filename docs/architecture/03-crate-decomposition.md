@@ -2,7 +2,7 @@
 
 This chapter describes the Cargo workspace layout: which crates exist, what each owns, how they depend on each other, and what build-time choices they expose. The *public APIs* of each crate are in `02-6-internal-api.md`; this chapter is the structural view — how the code is cut up, not what each piece exposes.
 
-The workspace has **10 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kenneld`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. The last two are standalone, std-only SSH helpers (`07-8-ssh.md` §7.8.4) that depend on no other Project Kennel crate by design — they must stay minimal and self-contained: `kennel-ssh-reorigin` is the bastion's re-origination forced command, and `kennel-socks-connect` is the `ssh` `ProxyCommand` that SOCKS5s through the egress proxy to reach the bastion. IPC, the CLI, and audit are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`), and audit is split between the BPF ringbuf drain (`kennel-bpf`) and the netproxy's JSONL formatter (`kennel-netproxy::audit`). The crate count is kept small deliberately — a wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
+The workspace has **12 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kenneld`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. `kennel-audit` is a first-class crate — the unified audit writer (the canonical event, one sanitisation pass, per-class level filtering, and the `Sink` fan-out). `kennel-config` is a first-class crate too — the layered deployment/user configuration (`system.toml` / `config.toml` cascades) that keeps install paths out of the binaries. The last two crates are standalone, std-only SSH helpers (`07-8-ssh.md` §7.8.4) that depend on no other Project Kennel crate by design — they must stay minimal and self-contained: `kennel-ssh-reorigin` is the bastion's re-origination forced command, and `kennel-socks-connect` is the `ssh` `ProxyCommand` that SOCKS5s through the egress proxy to reach the bastion. The CLI and the control/wire IPC are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, and the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`). A wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
 
 ---
 
@@ -29,11 +29,13 @@ kennel/
 │   ├── kennel.bpf.h                 shared helpers (UAPI-based; no vmlinux.h/CO-RE)
 │   ├── README.md                    why no CO-RE; build/inspect instructions
 │   └── HELPERS.md                   whitelist of permitted BPF helper functions
-├── crates/                          Rust workspace members (10)
+├── crates/                          Rust workspace members (12)
 │   ├── kennel-syscall/              the only unsafe-bearing crate (besides BPF FFI)
 │   ├── kennel-text/                 sanitisation helpers
 │   ├── kennel-policy/               TOML parsing, signature verification (settled-policy core)
 │   ├── kennel-bpf/                  hand-rolled bpf(2) loader (object for ELF), .o, ringbuf reader
+│   ├── kennel-audit/               unified audit writer: event, sanitise pass, levels, Sink fan-out
+│   ├── kennel-config/              layered deployment/user config (system.toml / config.toml cascades)
 │   ├── kennel-spawn/                policy → Plan → setup sequence (incl. the pivot_root view) → execve
 │   ├── kennel-netproxy/             binary + lib: SOCKS5/HTTP egress proxy (blocking, thread-per-conn)
 │   ├── kennel-privhelper/           binary + lib: privileged operations helper (wire format in src/wire.rs)
@@ -42,7 +44,7 @@ kennel/
 │   └── kenneld/                     lib + binaries: per-user supervisor (src/bin/kenneld.rs), CLI (kennel.rs), bastion AKC (kennel-akc.rs)
 │                                    and the CLI (src/bin/kennel.rs); control protocol in src/control.rs
 │       (folded in, no separate crate: IPC → kenneld::control + kennel-privhelper::wire;
-│        CLI → kenneld/src/bin/kennel.rs; audit → kennel-bpf ringbuf + kennel-netproxy::audit)
+│        CLI → kenneld/src/bin/kennel.rs. Audit IS its own crate: kennel-audit.)
 ├── tools/
 │   ├── install-hooks.sh             git hooks installer
 │   ├── verify-checksums.sh          shell checksum-manifest verifier
@@ -58,7 +60,7 @@ Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3.
 
 ## Dependency direction
 
-The workspace is acyclic and layered. Lower-level crates do not depend on higher-level ones. The control, CLI, and audit layers are folded into kenneld and the functional crates rather than carved out separately:
+The workspace is acyclic and layered. Lower-level crates do not depend on higher-level ones. The control protocol and the CLI are folded into kenneld rather than carved out separately; audit is its own crate (`kennel-audit`) and config its own (`kennel-config`):
 
 ```
         kenneld (lib + bin kenneld + bin kennel)   kennel-netproxy (bin)
@@ -117,9 +119,15 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 - Builds with no I/O (file reading is the caller's responsibility); takes `&[u8]` for parsing.
 - Has fuzz targets for the parser and the resolver.
 
+### `kennel-config`
+
+- Pure, I/O-light layered configuration (`#![forbid(unsafe_code)]`). No install-specific path is baked into a binary; deployment paths (privhelper, helper binaries, the daemon's trust store) come from TOML resolved through a cascade with compiled-in fallbacks.
+- Two trust levels, two files, two search paths: `Deployment` (`system.toml`) is integrity-sensitive and resolved from **root-owned** dirs only (`/usr/lib/kennel` then `/etc/kennel`, never `~/.config`, no env override); `User` (`config.toml`) is convenience for the CLI (template/key search dirs) and resolved from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`.
+- A higher layer overrides a lower one per key; anything left unset falls back to the compiled defaults (`trust_dir` → `/etc/kennel/keys`, helpers → `/usr/libexec/kennel/<name>`).
+
 ### Audit (`kennel-audit`)
 
-`kennel-audit` (`#![forbid(unsafe_code)]`) is the unified writer: the canonical `AuditEvent`, one `kennel-text` sanitisation pass, per-class level filtering, and a `Sink` trait fanning each event out to the file, stdout, syslog, and (feature `audit-journald`) journald sinks. The journald sink and the UUIDv7's randomness are the only parts needing FFI/`unsafe`; they live in `kennel-syscall` (`journal`, `random`). kenneld builds the writer from the settled `AuditRuntime` and emits lifecycle events through it; see `02-3-audit-schema.md` for the schema. Not yet routed through the writer: the BPF events (still drained from the kernel ring buffer by `kennel-bpf::ringbuf`, drops on full) and the egress proxy's per-request records (`kennel-netproxy::audit`, schema-forward-compatible) — a roadmap remnant.
+`kennel-audit` (`#![forbid(unsafe_code)]`) is the unified writer: the canonical `Event`, one `kennel-text` sanitisation pass, per-class level filtering, and a `Sink` trait fanning each event out to the file, stdout, syslog, and (feature `audit-journald`) journald sinks. The journald sink and the UUIDv7's randomness are the only parts needing FFI/`unsafe`; they live in `kennel-syscall` (`journal`, `random`). kenneld builds the writer from the settled `AuditRuntime` and emits lifecycle events through it; the egress proxy builds its own writer from the per-kennel proxy config and emits each `net.egress` record through it (`kennel-netproxy::audit` → `kennel_audit::Writer`). See `02-3-audit-schema.md` for the schema. Not yet routed through the writer: the BPF events (still drained from the kernel ring buffer by `kennel-bpf::ringbuf`, drops on full) — a roadmap remnant.
 
 ### `kennel-bpf`
 
@@ -146,7 +154,7 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 
 - Binary crate. Sync, no async runtime.
 - `[profile.release] panic = "abort"`; `[profile.test] panic = "unwind"` per CODING-STANDARDS.md §8.5.
-- Has its own dep list distinct from the workspace: only `kennel-syscall`, `kennel-text`, `serde`. Audit events are written as JSON Lines by a small hand-rolled emitter (fixed schema — no `serde_json`). No async, no proc-macros beyond serde_derive.
+- Has its own dep list distinct from the workspace, kept deliberately small: `kennel-syscall`, and an *optional* `kennel-bpf` pulled in only under the `bpf-egress` feature (which also drags in clang at build time for the embedded `.o`). A plain build of the helper links neither `kennel-bpf` nor clang. No `serde`, no `serde_json` — the wire format is fixed-size packed structs hand-packed field-by-field (`src/wire.rs`). No async, no proc-macros.
 
 ### `kennel-ssh-reorigin`
 

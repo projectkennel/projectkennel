@@ -38,8 +38,11 @@ Each boundary is described in its own section below. The descriptions follow a c
 
 **Validator.** `kennel-privhelper`'s `validate` module. For each operation:
 
-- `addr-add` / `addr-remove`: the `addr` must fall within the caller's per-kennel loopback subnet — IPv4 laid out `127 | tag(12) | ctx(8) | host(4)` (a **/28**) or IPv6 `0xfd | gid(40) | ctx(16) | host(64)` (a **/64**), where `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`) and `ctx` is the value in the request. The helper reconstructs the embedded `tag`/`ctx` from the address and refuses anything outside the caller's scope. The `interface` must be `lo` or a per-kennel dummy interface named `kennel-<id>`. The `prefix` is fixed at 28 (IPv4) or 64 (IPv6); any other value is refused.
-- `cgroup-create` / `cgroup-delete`: the `path` must start with `/sys/fs/cgroup/kennel/` and contain no `..` components or symlinks. The cgroup must be empty before delete.
+- `add-addr` / `del-addr`: the `addr` must fall within the caller's per-kennel loopback subnet — IPv4 laid out `127 | tag(12) | ctx(8) | host(4)` (a **/28**) or IPv6 `0xfd | gid(40) | ctx(16) | host(64)` (a **/64**), where `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`) and `ctx` is the value in the request. The helper reconstructs the embedded `tag`/`ctx` from the address and refuses anything outside the caller's scope. The `interface` must be `lo` or a per-kennel dummy interface named `kennel-<id>`. The `prefix` is fixed at 28 (IPv4) or 64 (IPv6); any other value is refused.
+- `setup-egress`: the request carries the target cgroup `path`; the helper requires it to start with the kennel cgroup root, reject `..`/symlink components, and — the cross-user check — confirm the caller actually **owns** that cgroup before it loads and attaches the egress BPF to it. The map contents (the kennel's own egress allowlist) are not scope-validated: the caller already controls them; the cgroup path is the boundary.
+- `set-gid-map`: the helper refuses any gid the caller is **not** a member of and any target pid the caller does **not** own, then writes the identity `gid_map` for that pid (it holds `CAP_SETGID` in the init userns; an unprivileged process cannot self-map a group it lacks). Mapping a group the user is not in would be an escalation, so this gating is the boundary.
+
+There is **no** cgroup-create / cgroup-delete operation: the privhelper neither creates nor deletes cgroups. kenneld creates and removes the per-kennel cgroup itself, unprivileged, in its systemd-delegated subtree; the privhelper's only cgroup interaction is the ownership-checked `setup-egress` attach onto a cgroup kenneld already made.
 
 The validator rejects out-of-scope requests with the `out-of-scope` error code; nothing happens at the privileged syscall level.
 
@@ -158,7 +161,7 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 
 ## 7. Untrusted client → kenneld socket
 
-**What crosses.** A `connect()` to `/run/user/<uid>/kennel/kenneld.sock` from any process on the system.
+**What crosses.** A `connect()` to `/run/user/<uid>/kennel/control.sock` from any process on the system.
 
 **Trusted side.** The socket file's owner-and-mode (user-owned, mode 0600) limits who can connect at the filesystem layer. kenneld additionally checks `SO_PEERCRED` to verify the connecting process's UID matches kenneld's own.
 

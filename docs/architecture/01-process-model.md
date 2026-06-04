@@ -22,10 +22,10 @@ Per-user daemon, socket-activated by `systemd --user` on the first `kennel run` 
 
 Responsibilities:
 
-- **Kennel lifecycle.** Each `kennel run` is one kennel. kenneld brings it up — allocates a context byte, invokes the privhelper for the loopback addresses and cgroup, writes the proxy config, launches `kennel-netproxy`, performs the spawn sequence — and tears it down immediately when the workload exits. There is no grace period, no draining state, and no per-kennel reference counting; one workload is one kennel, with its own proxy, addresses, cgroup, and constructed view.
+- **Kennel lifecycle.** Each `kennel run` is one kennel. kenneld brings it up — allocates a context byte, creates the per-kennel cgroup in its delegated subtree, invokes the privhelper for the loopback addresses and the egress-BPF attach, writes the proxy config, launches `kennel-netproxy`, performs the spawn sequence — and tears it down immediately when the workload exits. There is no grace period, no draining state, and no per-kennel reference counting; one workload is one kennel, with its own proxy, addresses, cgroup, and constructed view.
 - **Spawning the workload.** kenneld runs the spawn sequence (`kennel-spawn`) on the CLI's behalf, attaching the workload to the stdio descriptors the CLI passed over `SCM_RIGHTS`.
 - **Audit drain.** The BPF ringbuf reader drains kernel audit events; per-kennel JSONL files live under `~/.local/state/kennel/<kennel>/` (the egress proxy writes the network log, kenneld wires its path).
-- **Privhelper mediation.** kenneld issues the privhelper invocations (loopback address, cgroup creation) during a kennel's bring-up and teardown.
+- **Privhelper mediation.** kenneld issues the privhelper invocations (loopback address add/del, egress-BPF setup, and the gid-map write when a group is granted) during a kennel's bring-up and teardown. kenneld creates and removes the cgroup itself.
 
 Runs as the user.
 
@@ -33,16 +33,18 @@ Runs as the user.
 
 Small binary, target size approximately 500 lines of Rust plus the `kennel-syscall` dependency. Installed setuid root *or* with file capabilities `cap_net_admin,cap_sys_admin=ep`. File capabilities are preferred where supported; setuid is the fallback.
 
-Operations:
+Operations — exactly four (the `Op` enum in `kennel-privhelper::wire`):
 
-- Add a per-kennel IPv4 address to loopback or a per-kennel dummy interface.
-- Add a per-kennel IPv6 ULA address.
-- Remove the addresses on kennel teardown.
-- Create a cgroup under `/sys/fs/cgroup/kennel/<kennel>/` if cgroup v2 delegation is not pre-configured for the user (a fallback path; modern systemd configurations pre-delegate).
+- **add-addr** — add a per-kennel loopback address (IPv4 in the kennel's `/28`, or IPv6 ULA in its `/64`).
+- **del-addr** — remove a per-kennel address on kennel teardown.
+- **setup-egress** — load, populate, and attach the egress BPF programs to the kennel's cgroup (the cgroup path is in the request; the helper validates the caller owns it).
+- **set-gid-map** — write a workload's user-namespace `gid_map` so it retains a granted supplementary group the unprivileged caller cannot self-map (§7.2.8); gated on the caller being a member of every gid and owning the target pid.
 
-Refuses anything outside the per-kennel address allocations — each kennel's IPv4 `/28` (laid out `127 | tag(12) | ctx(8) | host(4)`) and IPv6 `/64` (`0xfd | gid(40) | ctx(16) | host(64)`) — and outside the `kennel/` cgroup hierarchy. The validation is performed before any privileged syscall and rejects with a structured error if the request is out of scope. The `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`); `ctx` is allocated per kennel by kenneld and passed in the request.
+The privhelper does **not** create or delete cgroups. kenneld creates and removes the per-kennel cgroup itself, unprivileged, within its systemd-delegated cgroup subtree; the privhelper only *attaches* the egress BPF to an already-created cgroup it confirms the caller owns.
 
-**Invocation model:** short-lived per operation. The caller `exec()`s `kennel-privhelper`, the helper reads a structured request from stdin, validates it, performs the operation, writes a response to stdout, and exits. There is no long-running privileged daemon. This bounds the privileged process's exposure to the duration of a single operation.
+Refuses anything outside the per-kennel address allocations — each kennel's IPv4 `/28` (laid out `127 | tag(12) | ctx(8) | host(4)`) and IPv6 `/64` (`0xfd | gid(40) | ctx(16) | host(64)`) — and any cgroup the caller does not own, any gid the caller is not in, and any pid the caller does not own. The validation is performed before any privileged syscall and rejects with a structured error if the request is out of scope. The `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`); `ctx` is allocated per kennel by kenneld and passed in the request.
+
+**Invocation model:** short-lived per operation. The caller `exec()`s `kennel-privhelper`, the helper reads a fixed-layout request from stdin, validates it, performs the one operation, writes a response to stdout, and exits. There is no long-running privileged daemon. This bounds the privileged process's exposure to the duration of a single operation.
 
 A future revision may replace this with a long-running daemon owning the same capabilities, addressed over a privileged socket. The trade is fewer exec invocations against continuous privileged exposure. The current implementation is the conservative choice; see `04-trust-boundaries.md` for the rationale.
 
@@ -128,7 +130,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    +----------------------------------------------------------------------+
    | User-side processes                                                  |
    |                                                                      |
-   |   kennel (CLI)  ----->  /run/user/<uid>/kennel/kenneld.sock          |
+   |   kennel (CLI)  ----->  /run/user/<uid>/kennel/control.sock          |
    |                              ^                                       |
    |                              | (control protocol)                    |
    |                              |                                       |
@@ -178,9 +180,9 @@ Notes on the diagram:
 The full lifecycle is in `05-state-and-supervision.md`. The summary:
 
 - **kenneld** is socket-activated on the first `kennel run` and persists for the user session. It is the longest-lived Kennel process.
-- **`kennel run`** asks kenneld to start a kennel. kenneld allocates a context byte, invokes the privhelper to add the loopback addresses and create the cgroup, writes the proxy config and launches `kennel-netproxy`, then performs the spawn sequence. The workload's PID lands in the kennel's cgroup.
+- **`kennel run`** asks kenneld to start a kennel. kenneld allocates a context byte, creates the cgroup in its delegated subtree, invokes the privhelper to add the loopback addresses and attach the egress BPF, writes the proxy config and launches `kennel-netproxy`, then performs the spawn sequence. The workload's PID lands in the kennel's cgroup.
 - **The workload** runs as a child of kenneld. The CLI holds its connection open for the workload's lifetime; the audit log captures lifecycle events.
-- **When the workload exits**, kenneld tears the kennel down immediately: reaps the proxy, invokes the privhelper to remove the loopback addresses, deletes the cgroup, and discards the constructed view. There is no grace window and no daemon sharing by name — a second `kennel run` is a separate kennel.
+- **When the workload exits**, kenneld tears the kennel down immediately: reaps the proxy, invokes the privhelper to remove the loopback addresses, deletes the cgroup it created, and discards the constructed view. There is no grace window and no daemon sharing by name — a second `kennel run` is a separate kennel.
 - **`kennel-privhelper`** invocations are stateless and synchronous: exec'd, read request, perform, respond, exit. The privhelper retains no state between invocations.
 
 ---
@@ -195,10 +197,10 @@ Coordination across concurrent requests *inside* kenneld is internal:
 - Each kennel is `starting` until its workload is launched, then `running`; it is removed from the registry when the workload exits and teardown completes. There is no `draining` state and no reference counting — one workload is one kennel.
 - The registry mutex is not held across the slow bring-up work (privhelper invocation, proxy launch, spawn); the registry records the kennel before that work begins and updates it after.
 
-Cross-process exclusion uses `flock`:
+Cross-process exclusion:
 
-- `/run/user/<uid>/kennel/kenneld.lock` — exclusive, one kenneld per user.
-- `/run/kennel/privhelper.lock` — exclusive across the machine, serialising privhelper invocations.
+- One kenneld per user is provided by systemd socket activation (it owns the single bound `control.sock` listener), not a lock file.
+- `/run/kennel/privhelper.lock` — an exclusive `flock` across the machine, serialising privhelper invocations.
 
 Full state and the lockfile inventory are in `05-state-and-supervision.md`.
 

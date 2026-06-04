@@ -73,12 +73,14 @@ Per-user runtime state. Created by kenneld at startup; cleaned at logout.
 
 ```
 /run/user/<uid>/kennel/
-├── kenneld.sock                     CLI ↔ kenneld control socket
-├── kenneld.lock                     flock target: one kenneld per user
-└── kenneld.pid                      kenneld's own PID (single line)
+├── control.sock                     CLI ↔ kenneld control socket
+├── proxy/                           per-kennel netproxy config (proxy-<ctx>.toml)
+├── etc/  root/  bastion/            staged synthetic /etc, view roots, SSH bastion
 ```
 
 Owner: user. Mode: directory `0700`, files `0600` (the socket too).
+
+Single-instance-per-user is provided by systemd socket activation (it owns the one bound listener), not a lock file: there is no `kenneld.lock` and no `kenneld.pid` (`05-state-and-supervision.md`).
 
 `/run/user/<uid>/` is provided by `pam_systemd` on systemd systems (tmpfs, cleaned on logout). On non-systemd systems, kenneld creates `/run/user/<uid>/kennel/` itself with the appropriate mode and removes it on graceful shutdown.
 
@@ -88,7 +90,6 @@ Per-kennel runtime state. Created by kenneld; cleaned immediately when the workl
 
 ```
 /run/kennel/<id>/
-├── proxy.sock                       netproxy listen socket (SOCKS5; user-facing)
 ├── proxy.ctl                        kenneld → netproxy control socket
 ├── proxy.pid                        netproxy's PID
 ├── ssh-agent.sock                   ssh-agent socket (shim-mounted into workload's $HOME)
@@ -96,11 +97,12 @@ Per-kennel runtime state. Created by kenneld; cleaned immediately when the workl
 ├── dbus-proxy.sock                  dbus-proxy socket (shim-mounted)
 ├── dbus-proxy.ctl
 ├── dbus-proxy.pid
-├── kennel.lock                      flock target: per-kennel exclusion (rare; guards concurrent bring-up of one kennel)
 └── kennel.json                      current kennel metadata (uuid, ctx, policy_hash)
 ```
 
 Owner: user. Mode: directory `0700`, files `0600`.
+
+The per-kennel egress proxy does **not** listen on a Unix socket in this directory. It listens on a **TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64` (IPv6) address at the policy-given offset and port (offset 1, port 1080 by default), e.g. `127.<…>:1080`. The address is computed from the kennel's tag/ctx (`07-3-network.md` §7.3.2) and carried in the signed policy (`net.proxy`); kenneld writes it into the per-kennel `proxy-<ctx>.toml` as the proxy's `listen` address. `proxy.ctl` above is the separate kenneld → netproxy control socket; there is no `proxy.sock` listen socket.
 
 Note: `/run/kennel/` itself (without the `<id>` suffix) is owned by root, mode `0755`, so that kennels from different users can coexist (each user's kennel directory is under `/run/kennel/<id>` with `<id>` being globally unique, but the user's per-kennel directories are user-owned).
 
@@ -247,7 +249,7 @@ Paths in policies may use placeholders that are resolved at policy-load time. Th
 Each path's mode and ownership are part of its security contract. The most-load-bearing:
 
 - **`~/.local/state/kennel/<kennel>/`** mode `0700`: the workload (running as the same UID) is denied access because the shim does not bind-mount this directory into the workload's view. The mode is belt-and-braces.
-- **`/run/user/<uid>/kennel/kenneld.sock`** mode `0600`: only the owning user may connect. kenneld additionally validates via `SO_PEERCRED` (boundary 7 in `04-trust-boundaries.md`).
+- **`/run/user/<uid>/kennel/control.sock`** mode `0600`: only the owning user may connect. kenneld additionally validates via `SO_PEERCRED` (boundary 7 in `04-trust-boundaries.md`).
 - **`/sys/fs/bpf/kennel/<id>/`** mode `0750` group `kennel-readers`: operators in `kennel-readers` may inspect maps with `bpftool`; the workload (not in `kennel-readers`, and with no view onto `/sys/fs/bpf`) cannot modify them.
 - **`/etc/kennel/keys/*.pub`** mode `0644`: public keys; world-readable is fine. Private keys are not in this tree.
 - **`kennel-privhelper`** setuid root OR file capabilities: a compromise of the calling process (kenneld) does not automatically gain privilege; the privhelper validates every request per `04-trust-boundaries.md` boundary 1.

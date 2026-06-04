@@ -31,7 +31,7 @@ For a full workspace build:
 
 1. **Vendor verification.** `tools/verify-checksums` (and its shell twin) confirm `src/vendor/` matches `CHECKSUMS.toml` and `Cargo.lock`.
 2. **BPF compilation.** `kennel-bpf`'s `build.rs` invokes clang against `bpf/*.bpf.c`, producing `*.bpf.o` files in `OUT_DIR`. Each `.bpf.c` includes `<linux/bpf.h>` (kernel UAPI) and `bpf/maps.h`; **no** `vmlinux.h`, no CO-RE relocations. The `.o` is embedded into the crate; map references are left as ELF relocations the loader resolves at load time.
-3. **Rust compilation.** `cargo build --workspace` builds every crate. The workspace is eight crates: `kennel-syscall`, `kennel-text`, `kennel-policy`, `kennel-bpf`, `kennel-netproxy`, `kennel-privhelper`, `kennel-spawn`, and `kenneld` (which also produces the `kennel` CLI binary alongside the `kenneld` daemon, in its `src/bin/`). Order is computed by Cargo from `[workspace.dependencies]`; the lower-layer crates (`kennel-syscall`, `kennel-text`) are built before higher layers (`kennel-spawn`, `kenneld`).
+3. **Rust compilation.** `cargo build --workspace` builds every crate. The workspace is twelve crates: `kennel-syscall`, `kennel-text`, `kennel-policy`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-netproxy`, `kennel-privhelper`, `kennel-spawn`, `kennel-ssh-reorigin`, `kennel-socks-connect`, and `kenneld` (which also produces the `kennel` CLI binary alongside the `kenneld` daemon, in its `src/bin/`). Order is computed by Cargo from `[workspace.dependencies]`; the lower-layer crates (`kennel-syscall`, `kennel-text`) are built before higher layers (`kennel-spawn`, `kenneld`).
 4. **Binary stripping** (release only). `strip = "symbols"` in the release profile; separately, debug-info binaries are produced under `target/release-with-debuginfo/` for distributions that want a parallel `.debug` package.
 5. **Reproducibility check** (release-build CI only). The release builds twice on two different runners; output hashes must match.
 
@@ -116,26 +116,19 @@ Kernel matrix (subject to change in `BUILD-ENV.md`):
 
 ## CI jobs
 
-The full set of CI jobs that gate a PR (CODING-STANDARDS.md §14):
+`.github/workflows/ci.yml` defines **five jobs**, each a sequence of steps on a hosted `ubuntu-latest` runner. The jobs and their steps:
 
-| Job | Runtime budget | Required for merge |
-|---|---|---|
-| `fmt` | 30 s | yes |
-| `clippy` (default features) | 5 min | yes |
-| `clippy` (all features) | 5 min | yes |
-| `test` (default features, unprivileged) | 5 min | yes |
-| `test` (`--no-default-features`) | 5 min | yes |
-| `test` (`root-tests`, privileged runner) | 10 min | yes |
-| `build-offline-frozen-locked` | 5 min | yes |
-| `verify-checksums-rust` | 30 s | yes |
-| `verify-checksums-shell` | 30 s | yes (must agree with the Rust verifier) |
-| `cargo-deny` | 1 min | yes |
-| `cargo-audit` | 1 min | yes |
-| `cargo-vet` | 1 min | yes |
-| `docs` (cargo doc --no-deps, `-D warnings`) | 3 min | yes |
-| `fuzz-smoke` (`cargo test -p kennel-fuzz`) | 10 min | yes |
-| `bpf-verifier-matrix` (per-kernel) | 15 min | yes |
-| `reproducible-build` (release-track only) | 30 min | yes for release tags |
+| Job | Steps |
+|---|---|
+| `rust` | `cargo fmt --all -- --check`; `cargo clippy --all-targets --all-features -D warnings`; `cargo test --all-features`; `cargo test --no-default-features`; `cargo build --offline --frozen --locked`; `cargo doc --no-deps` (`RUSTDOCFLAGS=-D warnings`). |
+| `bpf-compile` | Compile every `bpf/*.bpf.c` program against the kernel UAPI with `clang -Wall -Wextra -Werror -target bpf` (the compile-regression gate; the verifier-load matrix is owed, see below). |
+| `fuzz` | Clippy and `cargo test` the separate `src/fuzz/` workspace, `--offline --locked` (the no-panic corpus across every untrusted-input parser). |
+| `supply-chain` | Install the pinned, hash-verified `cargo-deny`/`-audit`/`-vet` binaries, then `cargo deny --all-features check`, `cargo audit --deny warnings`, `cargo vet --locked`. |
+| `tooling` | The shell checksum witness (`tools/verify-checksums.sh`) and the hook/tool shell tests. |
+
+The `rust` job folds what would otherwise be separate fmt/clippy/test/build/doc jobs into one runner's step sequence; a step failure fails the job. All five jobs gate a PR.
+
+Owed, and **not** yet in CI (tracked in the workflow header): the Rust checksum verifier twin (needs `sha2`, §5.5.1), the reproducible-build double-build (needs the release image), the BPF verifier-load matrix on custom-kernel runners (the `bpf-compile` job is the hosted-runner compile part), and a privileged `root-tests` runner. CI must not claim to run a check it does not.
 
 CI is configured in `.github/workflows/`. The configuration is reviewed under the same discipline as code (CODING-STANDARDS.md §14).
 

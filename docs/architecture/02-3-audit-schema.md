@@ -104,7 +104,9 @@ Event-specific fields extend the envelope; see §Event types.
 
 ## Event types
 
-The catalogue below names every event the project currently emits. Field lists are non-exhaustive — each sink representation in the sink sections describes the full field mapping for that sink.
+The catalogue below names every event in the schema. Field lists are non-exhaustive — each sink representation in the sink sections describes the full field mapping for that sink.
+
+As-built: the events emitted today are the **lifecycle** events (kenneld), the **network/egress** events (the per-kennel netproxy and the cgroup BPF), and the **`priv.*`** events (the privhelper). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively); they are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
 
 ### Network (`resource: "net"`)
 

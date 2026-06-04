@@ -113,21 +113,22 @@ Project Kennel supports this without prescribing it. The mechanisms are policy i
 
 ## 9.7 Time-bounded kennels
 
-Some kennels should not be long-lived. An ad-hoc "inspect this repo" or "install this one tool" kennel should expire automatically. Policy supports a TTL:
+Some kennels should not be long-lived. An ad-hoc "inspect this repo" or "install this one tool" kennel should expire automatically. Policy carries a TTL:
 
 ```toml
 [lifecycle]
-ttl = "2h"           # kennel auto-exits after this duration
-ttl_action = "exit"  # "exit" | "warn" | "renew"
+ttl = "2h"           # the kennel's time-to-live
+ttl_action = "stop"  # "stop" | "warn"
 ```
 
-Reaches the TTL, Project Kennel either:
+On reaching the TTL, the action selects what happens:
 
-- `exit`: terminates the kennel cleanly (SIGTERM, then SIGKILL after grace).
-- `warn`: logs a warning, asks the user to renew, continues.
-- `renew`: prompts the user via the user's session (notification or terminal) for confirmation to extend.
+- `stop`: terminate the kennel cleanly (SIGTERM, then SIGKILL after grace).
+- `warn`: leave the workload running and emit an audit event only.
 
-Default is `exit` for templates that don't override.
+Default is `warn` for policies that don't override.
+
+**Status: TTL runtime enforcement is not yet built (roadmap).** `ttl` and `ttl_action` parse, translate to `ttl_seconds` / `ttl_action`, and are carried (signed) in the settled policy, but nothing in `kenneld`/`kennel-spawn` reads `ttl_seconds` to arm a timer or take the action — the TTL is recorded, not yet armed. The two actions and their semantics below describe the intended behaviour.
 
 Time-bounded kennels address T1.10 (long-lived workload capability creep). A `package-install` kennel with a 30-minute TTL cannot accumulate capability over months because it cannot exist for months. Users who need long-lived kennels use templates without TTLs (`ai-coding-strict` has none); the explicit non-TTL is itself a documented choice.
 
@@ -215,7 +216,7 @@ This is the one place runtime deliberately repeats compile-time work. It is wort
 
 ### Two operating modes
 
-**Local development.** A developer iterating on a policy does not want a manual compile step in the edit-run loop. `kennel run` of a source policy auto-compiles in memory when no fresh settled artefact exists, signs the result (and records the lockfile pins), marks it a development build, and runs it. Staleness is detected by comparing the settled policy's provenance (the recorded inputs) against the current source; a changed input triggers recompilation. The loop stays tight; the developer rarely types `kennel compile` explicitly.
+**Local development.** A developer iterating on a policy compiles it and runs the result. `kennel compile` resolves the source, signs it (and records the lockfile pins), and writes a settled artefact; `kennel run` then verifies and spawns that artefact. The spawn path requires a pre-settled, signed policy — `kenneld` and `kennel-spawn` load a policy only through `verify_settled`, with no resolution code on the spawn path — so `kennel run` does not compile a source policy in memory: compilation is the explicit, separate step that produces the artefact `run` consumes.
 
 **Fleet / attested deployment.** An organisation compiles policies centrally — in CI, on infrastructure that holds the templates, the fragments, the lockfiles, and the signing key — and pushes *only the signed settled policies* to developer workstations. The workstation need not have the templates, the lockfile, or even the resolution code paths exercised. `kennel run` verifies the organisation's signature on the settled policy, re-asserts framework invariants, and spawns. The runtime trust surface on the workstation is reduced to a single signature verification against a pinned key.
 
