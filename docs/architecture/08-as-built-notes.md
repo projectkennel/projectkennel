@@ -11,30 +11,29 @@ Real design intent, not dead ideas; simply not implemented yet. The chapters tha
 describe these read as roadmap.
 
 - **The run environment** (`07-7-other.md` §7.7.2 / §7.7.2a, `07-1-exec.md` §7.1.6) —
-  **mostly BUILT (2026-06-04); the env-leak gap is closed.** The workload no longer
-  inherits kenneld's environment: the spawn `env_clear`s and **synthesises `envp` from
-  policy** — `PATH` (from `[exec].path`), `USER`/`LOGNAME` (the masked `kennel`
-  account), `SHELL` (`[exec].shell`), `HOME` (the shim home), then the fixed
-  `[env].set` vars (substituted; the legacy `[env].pass`/`deny` curation fields are
-  ignored — synthesis supersedes them, the parent's environment is never a source).
-  Carried in the settled policy as `EnvRuntime` + `ExecPolicy.path`/`shell`; applied
-  in `kenneld::server::run_kennel` to the workload `Command`. **`[exec].shell`**
-  (default `/bin/sh`, compile error if not in a non-empty `exec.allow`) sets the
-  synthetic-`passwd` `pw_shell` and `$SHELL`. **System rc is BUILT**: `/etc/profile`
-  and `/etc/bash.bashrc` are in the synthetic `/etc` — minimal, read-only, rebuilt
-  each spawn (never a persistence surface).
-  **Remaining (not built):** seeding **user** dotfiles (`~/.bashrc`, `~/.profile`,
-  `~/.config/…`) into the kennel's own `$HOME` from built-in defaults + an optional
-  `[fs.home].template`, and the **`[fs.home].persist` opt-in** (OFF by default —
-  reconstruct each spawn; a policy names the paths that survive runs, where the
-  persistent-`~/.bashrc` re-execution trade-off is taken). This piece is deferred
-  because it reworks the kennel `$HOME` from today's persistent writable bind into a
-  reconstructed-by-default surface, which touches the constructed-view / `pivot_root`
-  lifecycle in `kennel-spawn` (the proven unprivileged-spawn path) and wants that work
-  stream's root-e2e validation rather than a hasty change. The design is fixed
-  (§7.7.2a); the runtime approach is for kenneld to write the synthesised dotfiles into
-  the home each spawn (overwrite = reconstruct) and skip the paths named in
-  `[fs.home].persist`.
+  **BUILT (2026-06-04); the env-leak gap is closed.** The workload no longer inherits
+  kenneld's environment: the spawn `env_clear`s and **synthesises `envp` from policy**
+  — `PATH` (from `[exec].path`), `USER`/`LOGNAME` (the masked `kennel` account),
+  `SHELL` (`[exec].shell`), `HOME` (the shim home), then the fixed `[env].set` vars
+  (substituted; the legacy `[env].pass`/`deny` curation fields are ignored — synthesis
+  supersedes them, the parent's environment is never a source). Carried in the settled
+  policy as `EnvRuntime` + `ExecPolicy.path`/`shell`; applied in
+  `kenneld::server::run_kennel` to the workload `Command`. **`[exec].shell`** (default
+  `/bin/sh`, compile error if not in a non-empty `exec.allow`) sets the
+  synthetic-`passwd` `pw_shell` and `$SHELL`. **rc files are BUILT**, both levels:
+  system rc (`/etc/profile`, `/etc/bash.bashrc`) in the synthetic `/etc`, and **user
+  dotfiles** (`~/.bashrc`, `~/.profile`) synthesised into the kennel home via the same
+  `file_binds` path the synthetic `~/.ssh` uses (with a Landlock read grant on the
+  home). Because the view root is a fresh tmpfs copied each spawn, the dotfiles are
+  reconstructed every run and a workload's edits never persist — no self-poisoning
+  surface, the design's safe default. **`[fs.home].persist` is BUILT**: a home-relative
+  path named there is skipped by the dotfile seeder (not reconstructed), so a writable
+  home grant for it survives — OFF by default, per-path, unioned up the template chain,
+  carried in `FsPolicy.home_persist`. Only the compile-time **`template` file-loading**
+  (`[env].template`, `[fs.home].template` — seed values/dotfiles from a
+  policy-referenced file pinned at compile) is unbuilt: a convenience over the inline
+  `[env].set` / built-in dotfile defaults that work today, needing the same compiler
+  file-input plumbing as the `audit.toml` defaults.
 
 - **The unified audit writer + sinks** (`02-3-audit-schema.md`) — **BUILT** (it
   graduated from this roadmap; kept here for the remnants still owed). The
