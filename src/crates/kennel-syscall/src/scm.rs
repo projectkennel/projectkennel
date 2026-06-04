@@ -18,6 +18,41 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 /// The largest number of fds [`recv_with_fds`] will accept in one message.
 pub const MAX_FDS: usize = 8;
 
+/// The connected peer's uid on an `AF_UNIX` socket (`SO_PEERCRED`).
+///
+/// kenneld calls this to reject any control-socket client whose uid is not the
+/// user the daemon serves — defence-in-depth behind the socket's `0600` mode
+/// (`04-trust-boundaries.md` boundary 7). The kernel stamps the credentials at
+/// `connect(2)` time, so they cannot be spoofed by the peer.
+///
+/// # Errors
+/// An OS error if `getsockopt(SO_PEERCRED)` fails (e.g. not a connected
+/// `AF_UNIX` socket).
+pub fn peer_uid(sock: BorrowedFd<'_>) -> io::Result<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).unwrap_or(0);
+    // SAFETY: `getsockopt` writes a `libc::ucred` of `len` bytes into `cred` and
+    // the actual length back into `len`; both outlive the call, and `sock` is a
+    // valid borrowed fd for the duration.
+    let rc = unsafe {
+        libc::getsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
+            std::ptr::addr_of_mut!(len),
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(cred.uid)
+}
+
 /// Send `data` (at least one byte) over `sock`, attaching `fds` as an
 /// `SCM_RIGHTS` control message. Returns the number of data bytes sent.
 ///
@@ -247,5 +282,16 @@ mod tests {
             .expect("create temp file");
         let _ = std::fs::remove_file(&path); // unlink; the fd keeps it alive
         file
+    }
+
+    #[test]
+    fn peer_uid_reports_the_connected_peer() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+        // Both ends of a socketpair belong to this process, so the peer uid is
+        // our own real uid.
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        let uid = peer_uid(a.as_fd()).expect("SO_PEERCRED");
+        assert_eq!(uid, crate::unistd::real_uid());
     }
 }

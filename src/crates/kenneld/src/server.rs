@@ -445,6 +445,22 @@ where
 {
     for conn in listener.incoming() {
         let mut conn = conn?;
+        // Boundary 7 (04-trust-boundaries.md): only the user this daemon serves
+        // may drive the control socket. The kernel stamps SO_PEERCRED at connect,
+        // so this cannot be spoofed; it is defence-in-depth behind the socket's
+        // 0600 mode. Reject (close without a wire exchange) anything else.
+        let served = shared.identity.uid;
+        match kennel_syscall::scm::peer_uid(conn.as_fd()) {
+            Ok(uid) if uid == served => {}
+            Ok(uid) => {
+                eprintln!("kenneld: rejected control connection from uid {uid} (serves {served})");
+                continue;
+            }
+            Err(e) => {
+                eprintln!("kenneld: rejecting control connection (peer-cred check failed: {e})");
+                continue;
+            }
+        }
         let shared = Arc::clone(shared);
         std::thread::spawn(move || handle_connection(&shared, &mut conn));
     }
