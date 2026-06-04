@@ -485,6 +485,19 @@ pub enum AuditSinkKind {
     Stdout,
 }
 
+impl AuditSinkKind {
+    /// The stable lowercase token (matches the policy and proxy-config spelling).
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Journald => "journald",
+            Self::Syslog => "syslog",
+            Self::Stdout => "stdout",
+        }
+    }
+}
+
 /// File-sink tuning carried in the settled policy. Every field is optional; an
 /// unset field means kenneld applies the `02-3` default. All-unset is "empty"
 /// and omitted from the canonical form.

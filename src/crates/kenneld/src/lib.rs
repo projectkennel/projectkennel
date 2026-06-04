@@ -271,12 +271,13 @@ pub struct Spec {
     /// (or a view-less plan) keeps the in-place fallback seal. kenneld creates it
     /// at bring-up and removes it at teardown.
     pub view_root: Option<PathBuf>,
-    /// Where the egress proxy writes its JSONL audit log
-    /// (`~/.local/state/kennel/<kennel>/network.jsonl`, §7.3.4), or `None` to
-    /// leave it on stderr. kenneld creates the parent directory at bring-up; the
-    /// log persists across runs (it is *not* removed at teardown — it is audit
-    /// data). Ignored when no proxy runs.
-    pub audit_path: Option<PathBuf>,
+    /// The unified-audit context for the egress proxy (the `[audit]` block, §02-3):
+    /// the kennel name, the shared `kennel_uuid`, the per-kennel state dir
+    /// (`~/.local/state/kennel/<kennel>/`, where `network.jsonl` lands), and the
+    /// sinks/levels. kenneld creates the dir at bring-up; the logs persist across
+    /// runs (not removed at teardown — they are audit data). `None` (or no proxy)
+    /// leaves the proxy logging egress to stdout.
+    pub proxy_audit: Option<crate::proxy::ProxyAudit>,
     /// The prepared SSH egress (§7.8): the synthetic `~/.ssh` binds, the bastion
     /// host-service to allow, and the in-kennel connector to bind in. Empty
     /// ([`SshPrep::default`]) for a kennel with no `[ssh]` grant.
@@ -457,7 +458,7 @@ pub fn start<P: Privileged + Sync>(
         proxy,
         etc,
         view_root,
-        audit_path,
+        proxy_audit,
         ssh,
         unix,
     } = spec;
@@ -473,7 +474,7 @@ pub fn start<P: Privileged + Sync>(
         proxy.as_ref(),
         etc.as_ref(),
         view_root.as_deref(),
-        audit_path.as_deref(),
+        proxy_audit.as_ref(),
         &ssh,
         &unix,
         command,
@@ -518,7 +519,7 @@ fn bring_up<P: Privileged + Sync>(
     proxy: Option<&ProxySetup>,
     etc: Option<&EtcSetup>,
     view_root: Option<&Path>,
-    audit_path: Option<&Path>,
+    proxy_audit: Option<&crate::proxy::ProxyAudit>,
     ssh: &SshPrep,
     unix: &UnixPrep,
     command: &mut Command,
@@ -576,15 +577,13 @@ fn bring_up<P: Privileged + Sync>(
     //     configured (unit tests).
     if let Some(setup) = proxy {
         let listen = proxy_listen(state.v4, addr6, port);
-        // The per-kennel audit log persists across runs; create its directory but
-        // never remove it at teardown (it is audit data, not scratch).
-        if let Some(audit) = audit_path {
-            if let Some(parent) = audit.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+        // The per-kennel audit dir persists across runs; create it but never
+        // remove it at teardown (it is audit data, not scratch).
+        if let Some(audit) = proxy_audit {
+            std::fs::create_dir_all(&audit.dir)?;
         }
         let config =
-            crate::proxy::config_toml(net, &listen, audit_path, ssh.host_service.as_slice())
+            crate::proxy::config_toml(net, &listen, proxy_audit, ssh.host_service.as_slice())
                 .map_err(Error::ProxyConfig)?;
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
@@ -975,7 +974,7 @@ mod tests {
             proxy: None,
             etc: None,
             view_root: None,
-            audit_path: None,
+            proxy_audit: None,
             ssh: SshPrep::default(),
             unix: UnixPrep::default(),
         }

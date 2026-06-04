@@ -2,17 +2,15 @@
 //!
 //! kenneld constructs the `kennel-audit` writer from the settled
 //! [`AuditRuntime`] and records lifecycle events through it (`02-3`).
-//! kenneld is one audit *source* (daemon and kennel lifecycle); the netproxy,
-//! the privhelper, and the BPF programs are the others. The writer applies the
-//! sinks and per-class levels the policy selected, falling back to the `02-3`
-//! defaults (file sink, summary/denies-only levels) for anything the policy left
-//! unset.
+//! kenneld is one userspace audit *source* (daemon and kennel lifecycle); the
+//! netproxy is the other. Sink/writer assembly is shared via
+//! [`kennel_audit::build`]; kenneld maps the settled runtime onto it.
 
 use std::path::Path;
 
+use kennel_audit::build::{writer, SinkConfig};
 use kennel_audit::{
-    Event, FileSink, Level, Levels, Outcome, Resource, Sink, Source, StdoutSink, SyslogSink,
-    TimeoutSink, Value, Writer, WriterContext,
+    Event, Level, Levels, Outcome, Resource, SinkKind, Source, Value, Writer, WriterContext,
 };
 use kennel_policy::{AuditRuntime, AuditSinkKind};
 
@@ -32,17 +30,44 @@ pub fn kennel_uuid() -> String {
     kennel_audit::format_uuid_v7(ms, rand)
 }
 
-/// Build the writer for a kennel: its sinks and per-class levels from `runtime`,
-/// its file sink rooted at `state_dir`, stamped with `name` and a fresh
-/// `kennel_uuid`.
+/// Build the writer for a kennel from the settled `runtime`.
+///
+/// Its sinks and per-class levels come from `runtime`, its file sink is rooted at
+/// `state_dir`, and it is stamped with `name` and `kennel_uuid`. The caller
+/// supplies `kennel_uuid` so the per-kennel egress proxy (a separate process) can
+/// be given the same id and its events correlate with these.
 #[must_use]
-pub fn build_writer(name: &str, state_dir: &Path, runtime: &AuditRuntime) -> Writer {
+pub fn build_writer(
+    name: &str,
+    state_dir: &Path,
+    runtime: &AuditRuntime,
+    kennel_uuid: String,
+) -> Writer {
     let ctx = WriterContext {
         kennel: name.to_owned(),
-        kennel_uuid: kennel_uuid(),
-        host: hostname(),
+        kennel_uuid,
+        host: kennel_audit::hostname(),
     };
-    Writer::new(ctx, levels_from(runtime), sinks_from(runtime, state_dir))
+    let cfg = SinkConfig {
+        kinds: runtime.sinks.iter().map(|k| sink_kind(*k)).collect(),
+        dir: state_dir.to_path_buf(),
+        rotate_at_bytes: runtime.file.rotate_at_bytes,
+        retain_count: runtime
+            .file
+            .retain_count
+            .and_then(|n| usize::try_from(n).ok()),
+        syslog_facility: runtime.syslog_facility.clone(),
+    };
+    writer(ctx, levels_from(runtime), &cfg)
+}
+
+const fn sink_kind(kind: AuditSinkKind) -> SinkKind {
+    match kind {
+        AuditSinkKind::File => SinkKind::File,
+        AuditSinkKind::Stdout => SinkKind::Stdout,
+        AuditSinkKind::Syslog => SinkKind::Syslog,
+        AuditSinkKind::Journald => SinkKind::Journald,
+    }
 }
 
 fn levels_from(runtime: &AuditRuntime) -> Levels {
@@ -67,94 +92,6 @@ fn levels_from(runtime: &AuditRuntime) -> Levels {
 
 fn parse_level(token: Option<&str>) -> Option<Level> {
     token.and_then(Level::parse)
-}
-
-fn sinks_from(runtime: &AuditRuntime, state_dir: &Path) -> Vec<Box<dyn Sink>> {
-    // An unset sink list means the 02-3 default: the file sink.
-    let kinds = if runtime.sinks.is_empty() {
-        vec![AuditSinkKind::File]
-    } else {
-        runtime.sinks.clone()
-    };
-    let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
-    for kind in kinds {
-        match kind {
-            AuditSinkKind::File => {
-                let retain = runtime
-                    .file
-                    .retain_count
-                    .and_then(|n| usize::try_from(n).ok());
-                match FileSink::new(
-                    state_dir.to_path_buf(),
-                    runtime.file.rotate_at_bytes,
-                    retain,
-                ) {
-                    Ok(sink) => push_buffered(&mut sinks, Box::new(sink)),
-                    Err(e) => eprintln!("kennel-audit: file sink unavailable: {e}"),
-                }
-            }
-            AuditSinkKind::Stdout => push_buffered(&mut sinks, Box::new(StdoutSink)),
-            AuditSinkKind::Syslog => {
-                let facility = facility_code(runtime.syslog_facility.as_deref());
-                match SyslogSink::new(std::path::PathBuf::from("/dev/log"), facility) {
-                    Ok(sink) => push_buffered(&mut sinks, Box::new(sink)),
-                    Err(e) => eprintln!("kennel-audit: syslog sink unavailable: {e}"),
-                }
-            }
-            AuditSinkKind::Journald => push_journald(&mut sinks),
-        }
-    }
-    sinks
-}
-
-/// Wrap a sink so a slow or stuck backend bounds the writer's latency to a
-/// channel hand-off rather than the sink's I/O (`02-3` per-sink timeout).
-fn push_buffered(sinks: &mut Vec<Box<dyn Sink>>, inner: Box<dyn Sink>) {
-    sinks.push(Box::new(TimeoutSink::new(inner)));
-}
-
-#[cfg(feature = "audit-journald")]
-fn push_journald(sinks: &mut Vec<Box<dyn Sink>>) {
-    push_buffered(sinks, Box::new(kennel_audit::JournaldSink::new()));
-}
-
-#[cfg(not(feature = "audit-journald"))]
-fn push_journald(_sinks: &mut [Box<dyn Sink>]) {
-    eprintln!("kennel-audit: journald sink requested but kenneld was built without audit-journald");
-}
-
-/// Map an RFC 5424 facility name to its code; default `user` (1).
-fn facility_code(name: Option<&str>) -> u8 {
-    match name {
-        Some("kern") => 0,
-        Some("mail") => 2,
-        Some("daemon") => 3,
-        Some("auth") => 4,
-        Some("syslog") => 5,
-        Some("lpr") => 6,
-        Some("news") => 7,
-        Some("uucp") => 8,
-        Some("cron") => 9,
-        Some("authpriv") => 10,
-        Some("ftp") => 11,
-        Some("local0") => 16,
-        Some("local1") => 17,
-        Some("local2") => 18,
-        Some("local3") => 19,
-        Some("local4") => 20,
-        Some("local5") => 21,
-        Some("local6") => 22,
-        Some("local7") => 23,
-        // "user" and anything unrecognised (already validated at compile time).
-        _ => 1,
-    }
-}
-
-/// The machine hostname for the envelope `host` field, from
-/// `/proc/sys/kernel/hostname`; `localhost` if unreadable.
-fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map_or_else(|_| "localhost".to_owned(), |s| s.trim().to_owned())
 }
 
 /// `lifecycle.kennel-start`: the workload was spawned (`started_pid`).
@@ -219,27 +156,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_runtime_yields_the_file_sink() {
-        let dir = std::env::temp_dir().join(format!("kenneld-audit-{}", std::process::id()));
-        let sinks = sinks_from(&AuditRuntime::default(), &dir);
-        assert_eq!(sinks.len(), 1);
-        assert_eq!(sinks.first().map(|s| s.name()), Some("file"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn facilities_map_to_codes() {
-        assert_eq!(facility_code(Some("local0")), 16);
-        assert_eq!(facility_code(Some("daemon")), 3);
-        assert_eq!(facility_code(None), 1);
-        assert_eq!(facility_code(Some("nonsense")), 1);
-    }
-
-    #[test]
     fn writer_emits_a_lifecycle_event_to_a_file_sink() {
         let dir = std::env::temp_dir().join(format!("kenneld-audit-life-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let writer = build_writer("ai-coding", &dir, &AuditRuntime::default());
+        let writer = build_writer(
+            "ai-coding",
+            &dir,
+            &AuditRuntime::default(),
+            "test-uuid".to_owned(),
+        );
         assert!(writer.emit(&kennel_start(4242, 7)));
         // Sinks are buffered (TimeoutSink); dropping the writer joins the worker
         // so the event is flushed to the file before we read it.
@@ -250,6 +175,7 @@ mod tests {
             "{body}"
         );
         assert!(body.contains(r#""kennel":"ai-coding""#));
+        assert!(body.contains(r#""kennel_uuid":"test-uuid""#));
         assert!(body.contains(r#""started_pid":4242"#));
         let _ = std::fs::remove_dir_all(&dir);
     }

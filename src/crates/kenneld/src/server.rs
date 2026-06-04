@@ -461,6 +461,9 @@ where
 
 /// Bring a kennel up, report it `Started`, block until the workload exits, tear
 /// it down, and report `Exited`.
+// allow: one linear request lifecycle (reserve, load, ssh/unix/audit prep, spawn,
+// block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.
+#[allow(clippy::too_many_lines)]
 fn run_kennel<P, L>(
     shared: &Shared<P, L>,
     req: &StartRequest,
@@ -513,6 +516,29 @@ fn run_kennel<P, L>(
     // The audit runtime (§02-3): captured before `loaded` is consumed below, so the
     // writer can be built once start succeeds. Empty for a no-`[audit]` policy.
     let audit_runtime = loaded.audit.clone();
+    // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
+    // egress proxy's writer so their events correlate. The per-kennel state dir is
+    // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
+    let kennel_uuid = crate::audit::kennel_uuid();
+    let state_dir = shared
+        .identity
+        .audit_base
+        .as_ref()
+        .map(|base| base.join(&req.kennel));
+    let proxy_audit = state_dir.as_ref().map(|dir| crate::proxy::ProxyAudit {
+        kennel: req.kennel.clone(),
+        kennel_uuid: kennel_uuid.clone(),
+        dir: dir.clone(),
+        sinks: audit_runtime
+            .sinks
+            .iter()
+            .map(|k| k.token().to_owned())
+            .collect(),
+        network_level: audit_runtime.network_level.clone(),
+        syslog_facility: audit_runtime.syslog_facility.clone(),
+        rotate_at_bytes: audit_runtime.file.rotate_at_bytes,
+        retain_count: audit_runtime.file.retain_count,
+    });
 
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
@@ -539,10 +565,7 @@ fn run_kennel<P, L>(
             .view_base
             .as_ref()
             .map(|base| base.join(format!("root-{ctx}"))),
-        audit_path: id
-            .audit_base
-            .as_ref()
-            .map(|base| base.join(&req.kennel).join("network.jsonl")),
+        proxy_audit,
         ssh,
         unix,
     };
@@ -561,11 +584,11 @@ fn run_kennel<P, L>(
     };
     let pid = kennel.id();
     shared.set_pid(&req.kennel, pid);
-    // Construct the per-kennel audit writer and record the start (§02-3). The
-    // file sink lives in the per-kennel state dir (where `network.jsonl` also
-    // lives); with no state dir configured, audit is simply not recorded.
-    let audit = shared.identity.audit_base.as_ref().map(|base| {
-        crate::audit::build_writer(&req.kennel, &base.join(&req.kennel), &audit_runtime)
+    // Construct the per-kennel audit writer (kenneld's lifecycle source) and record
+    // the start (§02-3), sharing the run's `kennel_uuid` with the proxy. With no
+    // state dir configured, audit is simply not recorded.
+    let audit = state_dir.as_ref().map(|dir| {
+        crate::audit::build_writer(&req.kennel, dir, &audit_runtime, kennel_uuid.clone())
     });
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::kennel_start(pid, ctx));

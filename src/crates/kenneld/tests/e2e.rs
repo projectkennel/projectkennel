@@ -419,7 +419,16 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
                 .unwrap_or_default(),
         }),
         view_root: Some(view_root.clone()),
-        audit_path: Some(audit_path.clone()),
+        proxy_audit: Some(kenneld::proxy::ProxyAudit {
+            kennel: "e2e".to_owned(),
+            kennel_uuid: "e2e-uuid".to_owned(),
+            dir: audit_base.join("e2e"),
+            sinks: Vec::new(),
+            network_level: None,
+            syslog_facility: None,
+            rotate_at_bytes: None,
+            retain_count: None,
+        }),
         ssh: ssh_prep,
         unix: unix_prep,
     };

@@ -51,6 +51,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::allow::{Cidr, DenyMatcher, DenyRule, Matcher, NetMode, Rule, RuleProtocol, Ruleset};
+use kennel_audit::{Level, SinkKind};
 
 /// Largest config file the proxy will read. A policy config is small; this bounds
 /// the read against a runaway or hostile file (§10.2).
@@ -70,8 +71,38 @@ pub struct ProxyConfig {
     /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.3): exact
     /// `addr:port` literals reachable despite the host-loopback invariant deny.
     pub host_services: Vec<SocketAddr>,
-    /// Where to write the JSON Lines audit stream; `None` means stderr.
+    /// Where to write the JSON Lines audit stream when no `[audit]` block is
+    /// given; `None` means stdout. The legacy/standalone single-file sink.
     pub audit_log: Option<PathBuf>,
+    /// The unified-audit context `kenneld` supplies (`[audit]`): the kennel name
+    /// and shared `kennel_uuid`, the sinks, and the per-kennel state dir. `None`
+    /// for a standalone proxy, which falls back to [`audit_log`](Self::audit_log).
+    pub audit: Option<AuditConfig>,
+}
+
+/// The `[audit]` block: the unified-audit context for the proxy's writer.
+///
+/// It lets the proxy's `net.egress` events reach the same sinks (and carry the
+/// same `kennel_uuid`) as `kenneld`'s lifecycle events. Fully validated at parse.
+#[derive(Clone, Debug)]
+pub struct AuditConfig {
+    /// The kennel name (envelope `kennel`).
+    pub kennel: String,
+    /// The shared per-instance `kennel_uuid` (so egress events correlate with
+    /// `kenneld`'s lifecycle events for the same run).
+    pub kennel_uuid: String,
+    /// The per-kennel state dir the file sink writes `network.jsonl` to.
+    pub dir: PathBuf,
+    /// The active sinks (validated tokens).
+    pub sinks: Vec<SinkKind>,
+    /// The `net` audit level (the only class the proxy emits).
+    pub network_level: Option<Level>,
+    /// The syslog facility name (default `user`).
+    pub syslog_facility: Option<String>,
+    /// File-sink rotation threshold in bytes.
+    pub rotate_at_bytes: Option<u64>,
+    /// File-sink retained-rotation count.
+    pub retain_count: Option<usize>,
 }
 
 /// A configuration error.
@@ -147,6 +178,63 @@ struct RawConfig {
     #[serde(default)]
     accept_private_resolved: bool,
     net: RawNet,
+    #[serde(default)]
+    audit: Option<RawAudit>,
+}
+
+/// `[audit]` — the unified-audit context (kenneld writes it; standalone configs
+/// may omit it and use `audit_log`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAudit {
+    kennel: String,
+    kennel_uuid: String,
+    dir: PathBuf,
+    #[serde(default)]
+    sinks: Vec<String>,
+    #[serde(default)]
+    network_level: Option<String>,
+    #[serde(default)]
+    syslog_facility: Option<String>,
+    #[serde(default)]
+    rotate_at_bytes: Option<u64>,
+    #[serde(default)]
+    retain_count: Option<u64>,
+}
+
+impl RawAudit {
+    fn validate(self) -> Result<AuditConfig, ConfigError> {
+        let sinks = self
+            .sinks
+            .iter()
+            .map(|s| {
+                SinkKind::parse(s).ok_or_else(|| {
+                    ConfigError::Invalid(format!(
+                        "audit sink `{s}` is not file/stdout/syslog/journald"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let network_level = match &self.network_level {
+            None => None,
+            Some(l) => Some(Level::parse(l).ok_or_else(|| {
+                ConfigError::Invalid(format!("audit network_level `{l}` is not a valid level"))
+            })?),
+        };
+        let retain_count = self
+            .retain_count
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+        Ok(AuditConfig {
+            kennel: self.kennel,
+            kennel_uuid: self.kennel_uuid,
+            dir: self.dir,
+            sinks,
+            network_level,
+            syslog_facility: self.syslog_facility,
+            rotate_at_bytes: self.rotate_at_bytes,
+            retain_count,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -256,12 +344,17 @@ impl RawConfig {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let audit = match self.audit {
+            Some(raw) => Some(raw.validate()?),
+            None => None,
+        };
         Ok(ProxyConfig {
             listen,
             ruleset: Ruleset { mode, allow, deny },
             accept_private_resolved: self.accept_private_resolved,
             host_services,
             audit_log: self.audit_log,
+            audit,
         })
     }
 }

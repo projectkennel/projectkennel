@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod build;
 pub mod event;
 pub mod render;
 pub mod sinks;
@@ -31,6 +32,7 @@ pub mod journald;
 #[cfg(feature = "audit-journald")]
 pub mod message_ids;
 
+pub use build::{facility_code, hostname, SinkConfig, SinkKind};
 pub use event::{Event, Level, Outcome, Resource, Source, Value};
 pub use render::{Record, Rendered};
 pub use sinks::{FileSink, StdoutSink, SyslogSink};

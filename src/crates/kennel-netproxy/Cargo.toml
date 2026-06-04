@@ -12,6 +12,13 @@ repository.workspace = true
 [dependencies]
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
+# The unified audit writer (02-3): egress records emit through it, so they reach
+# the same sinks (file/stdout/syslog/journald) the policy selected.
+kennel-audit = { path = "../kennel-audit" }
+
+[features]
+# Build the journald audit sink (links libsystemd via kennel-audit).
+audit-journald = ["kennel-audit/audit-journald"]
 
 [lints]
 workspace = true

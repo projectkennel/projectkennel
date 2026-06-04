@@ -17,11 +17,35 @@
 //! round-trips it back through `kennel_netproxy::config`.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use kennel_policy::{NameRule, NetMode, NetPolicy, NetRule, Protocol};
 use serde::Serialize;
+
+/// The unified-audit context kenneld hands the proxy (the config's `[audit]` block).
+///
+/// It lets the proxy's `net.egress` events reach the same sinks — and carry the
+/// same `kennel_uuid` — as kenneld's own lifecycle events (`02-3`).
+#[derive(Clone, Debug)]
+pub struct ProxyAudit {
+    /// The kennel name (envelope `kennel`).
+    pub kennel: String,
+    /// The shared per-instance `kennel_uuid`.
+    pub kennel_uuid: String,
+    /// The per-kennel state dir the file sink writes `network.jsonl` to.
+    pub dir: PathBuf,
+    /// The active sink tokens (`file`/`stdout`/`syslog`/`journald`).
+    pub sinks: Vec<String>,
+    /// The `net` audit level, if the policy set one.
+    pub network_level: Option<String>,
+    /// The syslog facility, if the policy set one.
+    pub syslog_facility: Option<String>,
+    /// The file-sink rotation threshold, if set.
+    pub rotate_at_bytes: Option<u64>,
+    /// The file-sink retained-rotation count, if set.
+    pub retain_count: Option<u64>,
+}
 
 /// The installed `kennel-netproxy` binary (companion to kenneld under
 /// `/opt/kennel/bin`, per the packaging plan).
@@ -38,6 +62,27 @@ struct ProxyToml {
     audit_log: Option<String>,
     accept_private_resolved: bool,
     net: NetToml,
+    // A table, so declared after the scalars and `net`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit: Option<AuditToml>,
+}
+
+/// The `[audit]` block (mirrors `kennel_netproxy::config`'s reader).
+#[derive(Serialize)]
+struct AuditToml {
+    kennel: String,
+    kennel_uuid: String,
+    dir: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sinks: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    syslog_facility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotate_at_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retain_count: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -134,8 +179,8 @@ fn allow_from_name(rule: &NameRule) -> AllowToml {
 /// Build the proxy's TOML config from the policy's network section.
 ///
 /// `listen` is the address(es) the proxy should bind — a dual-stack kennel passes
-/// both its v4 and v6 loopback addresses; `audit` is an optional audit-log path
-/// (`None` ⇒ the proxy logs to stderr).
+/// both its v4 and v6 loopback addresses; `audit` is the optional `[audit]`
+/// block (the unified-audit context; `None` ⇒ the proxy logs egress to stdout).
 ///
 /// The allowlist is the union of the policy's by-address (`net.allow`) and
 /// by-name (`net.allow_names`) rules; the denylist is the invariant deny CIDRs,
@@ -149,7 +194,7 @@ fn allow_from_name(rule: &NameRule) -> AllowToml {
 pub fn config_toml(
     net: &NetPolicy,
     listen: &[SocketAddr],
-    audit: Option<&Path>,
+    audit: Option<&ProxyAudit>,
     host_services: &[SocketAddr],
 ) -> Result<String, String> {
     let mut allow: Vec<AllowToml> = net.allow.iter().map(allow_from_cidr).collect();
@@ -172,7 +217,8 @@ pub fn config_toml(
 
     let doc = ProxyToml {
         listen: listen.iter().map(ToString::to_string).collect(),
-        audit_log: audit.map(|p| p.display().to_string()),
+        // kenneld supplies the `[audit]` block, not the legacy single-file path.
+        audit_log: None,
         accept_private_resolved: false,
         net: NetToml {
             mode: mode_str(net.mode),
@@ -180,6 +226,16 @@ pub fn config_toml(
             deny,
             host_services,
         },
+        audit: audit.map(|a| AuditToml {
+            kennel: a.kennel.clone(),
+            kennel_uuid: a.kennel_uuid.clone(),
+            dir: a.dir.display().to_string(),
+            sinks: a.sinks.clone(),
+            network_level: a.network_level.clone(),
+            syslog_facility: a.syslog_facility.clone(),
+            rotate_at_bytes: a.rotate_at_bytes,
+            retain_count: a.retain_count,
+        }),
     };
     basic_toml::to_string(&doc).map_err(|e| e.to_string())
 }
@@ -261,14 +317,32 @@ mod tests {
     }
 
     #[test]
-    fn audit_path_is_written_when_present() {
+    fn audit_block_round_trips_through_the_netproxy_parser() {
         let listen = ["127.0.144.81:1080".parse::<SocketAddr>().expect("addr")];
-        let toml = config_toml(&net(), &listen, Some(Path::new("/run/kennel/p.jsonl")), &[])
-            .expect("toml");
+        let audit = ProxyAudit {
+            kennel: "ai-coding".to_owned(),
+            kennel_uuid: "01HZX".to_owned(),
+            dir: PathBuf::from("/run/kennel/ai-coding"),
+            sinks: vec!["file".to_owned(), "journald".to_owned()],
+            network_level: Some("full".to_owned()),
+            syslog_facility: None,
+            rotate_at_bytes: Some(64 * 1024 * 1024),
+            retain_count: Some(8),
+        };
+        let toml = config_toml(&net(), &listen, Some(&audit), &[]).expect("toml");
         let cfg = kennel_netproxy::config::from_toml_str(&toml).expect("parse");
-        assert_eq!(
-            cfg.audit_log.as_deref(),
-            Some(Path::new("/run/kennel/p.jsonl"))
-        );
+        let parsed = cfg.audit.expect("audit block present");
+        assert_eq!(parsed.kennel, "ai-coding");
+        assert_eq!(parsed.kennel_uuid, "01HZX");
+        assert_eq!(parsed.dir, PathBuf::from("/run/kennel/ai-coding"));
+        assert_eq!(parsed.sinks.len(), 2, "file + journald");
+        assert_eq!(parsed.rotate_at_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(parsed.retain_count, Some(8));
+        // No [audit] ⇒ the writer falls back (legacy/standalone).
+        let none = config_toml(&net(), &listen, None, &[]).expect("toml");
+        assert!(kennel_netproxy::config::from_toml_str(&none)
+            .expect("parse")
+            .audit
+            .is_none());
     }
 }
