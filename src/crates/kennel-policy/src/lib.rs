@@ -54,8 +54,8 @@ pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
-    ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants, LifecyclePolicy, NameRule, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
+    EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants, LifecyclePolicy, NameRule,
+    NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
     ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant,
     SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
 };
@@ -180,6 +180,8 @@ mod tests {
                     deny_setcap: true,
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
+                    path: vec!["/usr/bin".to_owned()],
+                    shell: settled::default_shell(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,
@@ -216,6 +218,7 @@ mod tests {
             unix: settled::UnixRuntime::default(),
             identity: settled::IdentityRuntime::default(),
             audit: settled::AuditRuntime::default(),
+            env: settled::EnvRuntime::default(),
         }
     }
 

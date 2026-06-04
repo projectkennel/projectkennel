@@ -177,6 +177,8 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 deny_setcap: true,
                 deny_writable: true,
                 allow: Vec::new(),
+                path: Vec::new(),
+                shell: "/bin/sh".to_owned(),
             },
             proc: ProcPolicy {
                 visibility: ProcVisibility::SelfOnly,
@@ -208,6 +210,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         unix: kennel_policy::UnixRuntime::default(),
         identity: kennel_policy::IdentityRuntime::default(),
         audit: kennel_policy::AuditRuntime::default(),
+        env: kennel_policy::EnvRuntime::default(),
     }
 }
 
@@ -417,6 +420,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             groups: granted
                 .map(|g| vec![(GRANTED_GROUP_NAME.to_owned(), g)])
                 .unwrap_or_default(),
+            shell: "/bin/sh".to_owned(),
         }),
         view_root: Some(view_root.clone()),
         proxy_audit: Some(kenneld::proxy::ProxyAudit {

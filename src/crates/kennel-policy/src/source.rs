@@ -253,6 +253,11 @@ pub struct ExecSection {
     /// `PATH` search roots the resolver records for the workload's environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<Vec<String>>,
+    /// The kennel's login shell (§7.7.2a): the synthetic-`passwd` `pw_shell` and
+    /// `$SHELL`. Default `/bin/sh`; must be in [`allow`](Self::allow) when an
+    /// allowlist is enforced (compile error otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
 }
 
 /// `[fs]` and its sub-tables.

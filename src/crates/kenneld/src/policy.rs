@@ -92,10 +92,13 @@ impl PolicyLoader for TrustStoreLoader {
         // drops to exactly this set (empty ⇒ no supplementary groups at all).
         let groups = resolve_groups(&substituted.identity.groups)?;
         plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
+        let exec_path = substituted.effective_policy.exec.path.clone();
+        let shell = substituted.effective_policy.exec.shell.clone();
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
         let audit = substituted.audit;
+        let env = substituted.env;
         Ok(Loaded {
             plan,
             net,
@@ -103,6 +106,9 @@ impl PolicyLoader for TrustStoreLoader {
             unix,
             groups,
             audit,
+            env,
+            exec_path,
+            shell,
         })
     }
 }

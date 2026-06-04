@@ -18,6 +18,8 @@
 //! and verifies the canonical bytes, a fixed-field-order serialisation is
 //! reproducible without JSON's canonicalisation machinery.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Network enforcement mode. `unrestricted` is deliberately not representable
@@ -229,6 +231,25 @@ pub struct ExecPolicy {
     /// Allowlisted binaries (absolute paths). Empty means "no exec allowlist
     /// enforced beyond the deny flags".
     pub allow: Vec<String>,
+    /// `PATH` search roots, synthesised into the workload's `$PATH` (§7.1.6).
+    /// Empty ⇒ `$PATH` is not set from policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
+    /// The kennel's login shell (synthetic-`passwd` `pw_shell` and `$SHELL`,
+    /// §7.7.2a). Defaults to `/bin/sh`; must be in [`allow`](Self::allow) when an
+    /// allowlist is enforced.
+    #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
+    pub shell: String,
+}
+
+/// The default kennel login shell.
+#[must_use]
+pub fn default_shell() -> String {
+    "/bin/sh".to_owned()
+}
+
+fn is_default_shell(s: &str) -> bool {
+    s == "/bin/sh"
 }
 
 /// Procfs policy.
@@ -625,6 +646,32 @@ impl AuditRuntime {
     }
 }
 
+/// The synthesised environment (`07-7-other.md` §7.7.2).
+///
+/// The spawn clears the inherited environment and builds the workload's from
+/// scratch; `vars` are the fixed `KEY=value` pairs from `[env].set` (and, in
+/// future, a compile-time `[env].template`). `PATH`/`HOME`/`USER`/`SHELL` are
+/// synthesised separately by the spawn (from `[exec].path`/`shell` and the masked
+/// identity) and are not repeated here. A *service* input like [`AuditRuntime`]:
+/// omitted from the canonical form when empty, so a policy with no `[env].set`
+/// signs as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvRuntime {
+    /// Fixed environment variables, applied after the synthesised base. Sorted
+    /// (a `BTreeMap`) so the canonical form is deterministic.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, String>,
+}
+
+impl EnvRuntime {
+    /// Whether no environment variables are set (omitted from the canonical form).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.vars.is_empty()
+    }
+}
+
 /// The settled policy body (everything the signature covers).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -662,6 +709,11 @@ pub struct SettledPolicy {
     /// policy with no (or all-default) `[audit]` signs exactly as before.
     #[serde(default, skip_serializing_if = "AuditRuntime::is_empty")]
     pub audit: AuditRuntime,
+    /// The synthesised environment (§7.7.2). A table like [`audit`](Self::audit);
+    /// omitted from the canonical form when empty, so a policy with no `[env].set`
+    /// signs exactly as before.
+    #[serde(default, skip_serializing_if = "EnvRuntime::is_empty")]
+    pub env: EnvRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

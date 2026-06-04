@@ -58,6 +58,15 @@ pub struct Loaded {
     /// kenneld realises by constructing the `kennel-audit` writer. Empty (all
     /// defaults) for a kennel with no — or an all-default — `[audit]` section.
     pub audit: kennel_policy::AuditRuntime,
+    /// The synthesised environment (§7.7.2): the fixed `[env].set` vars the spawn
+    /// applies after clearing the inherited environment. Empty for no `[env].set`.
+    pub env: kennel_policy::EnvRuntime,
+    /// The `PATH` search roots (§7.1.6), synthesised into the workload's `$PATH`.
+    /// Empty ⇒ `$PATH` is not set from policy.
+    pub exec_path: Vec<String>,
+    /// The kennel's login shell (§7.7.2a): the synthetic-`passwd` `pw_shell` and
+    /// `$SHELL`. `/bin/sh` unless the policy set `[exec].shell`.
+    pub shell: String,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -554,6 +563,8 @@ fn run_kennel<P, L>(
         // The resolved supplementary groups, named in /etc/group (§7.2). The loader
         // already set plan.supplementary_groups to their gids (what the seal drops to).
         groups: loaded.groups.clone(),
+        // The login shell for the synthetic passwd's pw_shell field (§7.7.2a).
+        shell: loaded.shell.clone(),
     });
     let spec = crate::Spec {
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
@@ -581,6 +592,25 @@ fn run_kennel<P, L>(
         crate::audit::build_writer(&req.kennel, dir, &audit_runtime, kennel_uuid.clone())
     });
     let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_ref());
+
+    // Synthesise the workload environment from policy (§7.7.2): clear the inherited
+    // environment and build it from scratch. `PATH` (from `[exec].path`),
+    // `USER`/`LOGNAME` (the masked account), `SHELL` (`[exec].shell`), and `HOME`
+    // (the kennel's shim home) are synthesised; `[env].set` is layered on top. The
+    // parent's environment is never a source — a secret policy did not name cannot
+    // reach the workload. (`bring_up` adds `KENNEL_SOCKS_PROXY` and any unix-shim
+    // vars on top of this cleared base.)
+    command.env_clear();
+    if !loaded.exec_path.is_empty() {
+        command.env("PATH", loaded.exec_path.join(":"));
+    }
+    command.env("USER", crate::etc::ACCOUNT_NAME);
+    command.env("LOGNAME", crate::etc::ACCOUNT_NAME);
+    command.env("SHELL", &loaded.shell);
+    command.env("HOME", &shim_root);
+    for (key, value) in &loaded.env.vars {
+        command.env(key, value);
+    }
 
     let kennel = match start(&audited, spec, &mut command) {
         Ok(kennel) => kennel,
@@ -770,6 +800,9 @@ mod tests {
                 unix: kennel_policy::UnixRuntime::default(),
                 groups: Vec::new(),
                 audit: kennel_policy::AuditRuntime::default(),
+                env: kennel_policy::EnvRuntime::default(),
+                exec_path: Vec::new(),
+                shell: "/bin/sh".to_owned(),
             })
         }
     }

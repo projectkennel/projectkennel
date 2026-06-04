@@ -38,8 +38,8 @@
 
 use crate::settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
-    ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants, LifecyclePolicy, NameRule, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
+    EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants, LifecyclePolicy, NameRule,
+    NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
     SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
     UnixSocket,
 };
@@ -61,6 +61,8 @@ pub struct Translated {
     pub identity: IdentityRuntime,
     /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
     pub audit: AuditRuntime,
+    /// The synthesised environment (§7.7.2) — the fixed `[env].set` vars.
+    pub env: EnvRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -81,7 +83,7 @@ pub fn translate(
     let mut deferred = BTreeSet::new();
     let net = translate_net(effective, install, &mut deferred)?;
     let fs = translate_fs(effective, install, &mut deferred)?;
-    let exec = translate_exec(effective, install, &mut deferred);
+    let exec = translate_exec(effective, install, &mut deferred)?;
     let proc = translate_proc(effective)?;
     let cap = CapPolicy {
         no_new_privs: effective
@@ -106,6 +108,7 @@ pub fn translate(
     let unix = translate_unix(effective, install, &mut deferred);
     let identity = translate_identity(effective);
     let audit = translate_audit(effective, install, &mut deferred)?;
+    let env = translate_env(effective, install, &mut deferred);
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -121,8 +124,29 @@ pub fn translate(
         unix,
         identity,
         audit,
+        env,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Flatten the source `[env].set` into the settled [`EnvRuntime`] (§7.7.2). The
+/// environment is *synthesised* from policy, not curated from the parent: only the
+/// explicit `set` map is carried (the legacy `pass`/`deny` curation fields are
+/// ignored — there is no inheritance to filter). Values are substituted like every
+/// other policy string (install constants now; per-instance placeholders recorded
+/// in `deferred`). An empty result is omitted from the canonical form.
+fn translate_env(
+    src: &SourcePolicy,
+    install: &InstallConstants,
+    deferred: &mut BTreeSet<String>,
+) -> EnvRuntime {
+    let mut vars = std::collections::BTreeMap::new();
+    if let Some(set) = src.env.as_ref().and_then(|e| e.set.as_ref()) {
+        for (key, value) in set {
+            vars.insert(key.clone(), subst(value, install, deferred));
+        }
+    }
+    EnvRuntime { vars }
 }
 
 /// The valid per-class audit levels and the valid syslog facilities.
@@ -580,21 +604,42 @@ fn translate_exec(
     src: &SourcePolicy,
     install: &InstallConstants,
     deferred: &mut BTreeSet<String>,
-) -> ExecPolicy {
+) -> Result<ExecPolicy, PolicyError> {
     let exec = src.exec.as_ref();
     let flag =
         |f: fn(&crate::source::ExecSection) -> Option<bool>| exec.and_then(f).unwrap_or(false);
-    ExecPolicy {
+    let allow = subst_each(
+        exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
+        install,
+        deferred,
+    );
+    let path = subst_each(
+        exec.and_then(|e| e.path.as_deref()).unwrap_or_default(),
+        install,
+        deferred,
+    );
+    // The login shell (§7.7.2a): default /bin/sh, and — when an exec allowlist is
+    // enforced — it must be one of the permitted binaries, or the kennel would set
+    // a shell it then refuses to run. Caught here, at compile time.
+    let shell = exec
+        .and_then(|e| e.shell.clone())
+        .map_or_else(crate::settled::default_shell, |s| {
+            subst(&s, install, deferred)
+        });
+    if !allow.is_empty() && !allow.contains(&shell) {
+        return Err(translation(format!(
+            "[exec].shell `{shell}` is not in exec.allow (the kennel would refuse to run its own shell)"
+        )));
+    }
+    Ok(ExecPolicy {
         deny_setuid: flag(|e| e.deny_setuid),
         deny_setgid: flag(|e| e.deny_setgid),
         deny_setcap: flag(|e| e.deny_setcap),
         deny_writable: flag(|e| e.deny_writable),
-        allow: subst_each(
-            exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
-            install,
-            deferred,
-        ),
-    }
+        allow,
+        path,
+        shell,
+    })
 }
 
 // ---- proc / lifecycle ----------------------------------------------------------
@@ -936,6 +981,42 @@ mod tests {
     }
 
     #[test]
+    fn exec_shell_and_path_translate_with_allowlist_check() {
+        let src = parse(
+            b"name = \"k\"\n[exec]\nallow = [\"/bin/bash\", \"/usr/bin/git\"]\npath = [\"/usr/bin\", \"/bin\"]\nshell = \"/bin/bash\"\n",
+        )
+        .expect("parse");
+        let ep = translate_exec(&src, &install(), &mut BTreeSet::new()).expect("translate");
+        assert_eq!(ep.shell, "/bin/bash");
+        assert_eq!(ep.path, vec!["/usr/bin".to_owned(), "/bin".to_owned()]);
+
+        // A shell not in a non-empty allowlist is a compile error.
+        let bad =
+            parse(b"name = \"k\"\n[exec]\nallow = [\"/usr/bin/git\"]\nshell = \"/bin/bash\"\n")
+                .expect("parse");
+        assert!(translate_exec(&bad, &install(), &mut BTreeSet::new()).is_err());
+
+        // Default shell /bin/sh; no allowlist ⇒ no constraint.
+        let dfl = parse(b"name = \"k\"\n").expect("parse");
+        let ep2 = translate_exec(&dfl, &install(), &mut BTreeSet::new()).expect("translate");
+        assert_eq!(ep2.shell, "/bin/sh");
+        assert!(ep2.path.is_empty());
+    }
+
+    #[test]
+    fn env_set_is_synthesised_ignoring_pass_and_deny() {
+        let src = parse(
+            b"name = \"k\"\n[env]\npass = [\"FOO\"]\ndeny = [\"BAR\"]\nset = { LANG = \"C.UTF-8\", TZ = \"UTC\" }\n",
+        )
+        .expect("parse");
+        let env = translate_env(&src, &install(), &mut BTreeSet::new());
+        assert_eq!(env.vars.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert_eq!(env.vars.get("TZ").map(String::as_str), Some("UTC"));
+        // Synthesis carries only `set` — the legacy pass/deny curation is ignored.
+        assert_eq!(env.vars.len(), 2);
+    }
+
+    #[test]
     fn unix_section_flattens_into_the_settled_runtime() {
         use crate::source::{SourcePolicy, UnixAllow, UnixSection};
         let src = SourcePolicy {
@@ -1162,6 +1243,7 @@ mod tests {
             unix: t.unix,
             identity: t.identity,
             audit: t.audit,
+            env: t.env,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }

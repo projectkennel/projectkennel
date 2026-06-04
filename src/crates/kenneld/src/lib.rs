@@ -245,6 +245,9 @@ pub struct EtcSetup {
     /// so they resolve by name; these are the gids the seal `setgroups` to. Empty by
     /// default (the kennel carries no supplementary groups unless policy grants them).
     pub groups: Vec<(String, u32)>,
+    /// The kennel's login shell (§7.7.2a) — the `passwd` `pw_shell` field. `/bin/sh`
+    /// unless the policy set `[exec].shell`.
+    pub shell: String,
 }
 
 /// Everything needed to bring one kennel up.
@@ -601,6 +604,7 @@ fn bring_up<P: Privileged + Sync>(
             gid: etc.gid,
             home: &etc.home,
             groups: &etc.groups,
+            shell: &etc.shell,
             v4: state.v4,
             v6: addr6,
         };

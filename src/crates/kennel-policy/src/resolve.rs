@@ -282,6 +282,7 @@ fn fold_exec(p: &ExecSection, c: &ExecSection) -> ExecSection {
         deny_setcap: or(&c.deny_setcap, &p.deny_setcap),
         deny_writable: or(&c.deny_writable, &p.deny_writable),
         path: or(&c.path, &p.path),
+        shell: or(&c.shell, &p.shell),
     }
 }
 

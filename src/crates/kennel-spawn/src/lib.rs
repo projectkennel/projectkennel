@@ -154,6 +154,21 @@ pub fn substitute(
         *bin = substitute_str(bin, subst);
         reject_leftover("exec.allow", bin)?;
     }
+    for dir in &mut p.effective_policy.exec.path {
+        *dir = substitute_str(dir, subst);
+        reject_leftover("exec.path", dir)?;
+    }
+    {
+        let shell = &mut p.effective_policy.exec.shell;
+        *shell = substitute_str(shell, subst);
+        reject_leftover("exec.shell", shell)?;
+    }
+    // The synthesised environment (§7.7.2): substitute placeholders in the values
+    // (e.g. a HOME under `/run/kennel/<kennel>/…`); keys are fixed var names.
+    for value in p.env.vars.values_mut() {
+        *value = substitute_str(value, subst);
+        reject_leftover("env.set", value)?;
+    }
 
     Ok(p)
 }
@@ -899,6 +914,8 @@ mod tests {
                     deny_setcap: true,
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
+                    path: Vec::new(),
+                    shell: "/bin/sh".to_owned(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,
@@ -930,6 +947,7 @@ mod tests {
             unix: kennel_policy::UnixRuntime::default(),
             identity: kennel_policy::IdentityRuntime::default(),
             audit: kennel_policy::AuditRuntime::default(),
+            env: kennel_policy::EnvRuntime::default(),
         }
     }
 

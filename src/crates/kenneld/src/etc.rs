@@ -67,6 +67,9 @@ pub struct EtcParams<'a> {
     /// checked by `kenneld`, named in `/etc/group` so `id` shows names not bare
     /// numbers. These are exactly the gids the seal `setgroups` to. Empty by default.
     pub groups: &'a [(String, u32)],
+    /// The kennel's login shell (§7.7.2a): the `passwd` `pw_shell` field. `/bin/sh`
+    /// unless the policy set `[exec].shell`.
+    pub shell: &'a str,
     /// The kennel's primary IPv4 address, if it has one.
     pub v4: Option<Ipv4Addr>,
     /// The kennel's primary IPv6 address.
@@ -145,12 +148,13 @@ pub const fn nsswitch_conf() -> &'static str {
 pub fn passwd(p: &EtcParams<'_>) -> String {
     format!(
         "root:x:0:0:root:/root:/usr/sbin/nologin\n\
-         {user}:x:{uid}:{gid}:Kennel user:{home}:/bin/sh\n\
+         {user}:x:{uid}:{gid}:Kennel user:{home}:{shell}\n\
          nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
         user = ACCOUNT_NAME,
         uid = p.uid,
         gid = p.gid,
         home = p.home.display(),
+        shell = p.shell,
     )
 }
 
@@ -312,6 +316,7 @@ mod tests {
             gid: 1000,
             home: Path::new("/run/kennel/agent/home"),
             groups: &[],
+            shell: "/bin/sh",
             v4: Some(Ipv4Addr::new(127, 0, 144, 17)),
             v6: "fd00:0:1:1::1".parse().expect("v6"),
         }
