@@ -1,22 +1,23 @@
 # API surfaces — audit schema
 
 > **Scope.** The audit *event schema* below is the durable contract. The
-> multi-sink delivery layer — the `journald`/`syslog`/`stdout` sinks, the
-> centralised `kennel-audit` writer that fans one event out to several sinks, the
-> `[audit]` policy section / `audit.toml`, and the per-sink emit timeout — is the
-> **roadmap** delivery model; the sections describing it specify the target
-> design. Today the audit path is a per-kennel JSONL file sink:
+> multi-sink delivery layer is **built**: the `kennel-audit` writer fans one
+> sanitised event out to the `file`, `stdout`, `syslog`, and (feature
+> `audit-journald`) `journald` sinks, applying the per-class levels; the `[audit]`
+> policy section is parsed, validated, and carried in the signed settled policy as
+> `AuditRuntime`; and kenneld builds the writer from it and emits the `lifecycle.*`
+> events. The per-sink emit timeout and the installation-wide `audit.toml` remain
+> roadmap (`08-as-built-notes.md` §8.1).
+>
+> Two event *sources* are not yet routed through the writer; they emit the same
+> schema directly, so their records are forward-compatible:
 >
 > - BPF events are submitted to a kernel **ring buffer** (`bpf/audit_events.h`,
 >   `bpf/kennel.bpf.h`) and drained lock-free by `kennel-bpf::ringbuf`. The ring
 >   buffer drops events when full; the reader counts the drops.
 > - The egress proxy formats **one JSONL record per request** in
->   `kennel-netproxy::audit`.
-> - kenneld wires a per-kennel **file sink** at
+>   `kennel-netproxy::audit`, written to the per-kennel file
 >   `~/.local/state/kennel/<kennel>/network.jsonl`.
->
-> The event schema is identical regardless of which delivery model is in use, so
-> records written today are forward-compatible with the multi-sink model.
 
 ## Stability commitment
 

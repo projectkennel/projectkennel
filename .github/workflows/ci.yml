@@ -47,8 +47,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # clang/libbpf for the BPF compile; libsystemd-dev for the `audit-journald`
+      # feature, which the --all-features clippy/test steps link (kennel-syscall's
+      # sd_journal_sendv FFI behind kennel-audit's journald sink). The default
+      # build needs neither.
       - name: Install clang + headers
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev libsystemd-dev
       # rustup honours rust-toolchain.toml (1.95.0 + rustfmt + clippy); the
       # first cargo invocation installs the pinned toolchain and components.
       - name: Toolchain

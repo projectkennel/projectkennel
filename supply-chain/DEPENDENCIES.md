@@ -13,6 +13,12 @@ This ledger pairs with:
 
 Six direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins the shipped artefacts plus `arbitrary` (fuzz-only, §5.5-approved; used only by the non-shipped `fuzz/` crate). Further entries are added with the PR that introduces each dependency.
 
+## System libraries (linked, not vendored)
+
+These are platform C libraries linked via FFI, not crates.io dependencies — there is no `.crate` to vendor or checksum; they are vetted as the host's own packages and gated so the default build links none of them.
+
+- **libsystemd** — linked by `kennel-syscall::journal` (the `sd_journal_sendv` FFI) **only** under the `audit-journald` feature, for the `kennel-audit` journald sink. The default build does not reference it; the feature is off by default. Build-time: `libsystemd-dev`; run-time: `libsystemd` (present on every systemd host). The FFI is one non-variadic function reading caller-owned `iovec`s; see the `SAFETY` note at the call site.
+
 ## Entry format
 
 Each direct dependency gets an entry:

@@ -10,14 +10,25 @@ should shape the rest of the build, and the build/test gotchas that bite.
 Real design intent, not dead ideas; simply not implemented yet. The chapters that
 describe these read as roadmap.
 
-- **The unified audit writer + sinks** (`02-3-audit-schema.md`): the
-  journald/syslog/stdout sinks, the `[audit]` policy section / `audit.toml`, the
-  per-sink timeout, and a centralised `kennel-audit` writer. Today: BPF events
-  drain a lock-free ring buffer that drops on full (`kennel-bpf/src/ringbuf.rs`,
-  `bpf/kennel.bpf.h`); the netproxy formats one JSONL record per request
-  (`kennel-netproxy/src/audit.rs`) and owns its sink; kenneld wires a per-kennel
-  file sink (`~/.local/state/kennel/<kennel>/network.jsonl`, §7.3.4). The
-  journald/syslog sinks, the `[audit]` section, and a single writer are owed.
+- **The unified audit writer + sinks** (`02-3-audit-schema.md`) — **BUILT** (it
+  graduated from this roadmap; kept here for the remnants still owed). The
+  `kennel-audit` crate (`#![forbid(unsafe_code)]`) is the seam: the canonical
+  `AuditEvent` envelope, one `kennel-text` sanitisation pass, per-class audit-level
+  filtering (incl. `summary` first-allow dedup), and a `Sink` trait with fan-out
+  and drop-reporting. All four sinks exist — file (per-class JSONL, append-atomic,
+  rotation+retention), stdout, hand-rolled RFC 5424 syslog, and a feature-gated
+  journald sink (`sd_journal_sendv` FFI in `kennel-syscall`, feature
+  `audit-journald`). The `[audit]` policy section is parsed, folded, validated, and
+  carried in the signed settled policy as `AuditRuntime` (omitted from the canonical
+  form when empty, so existing policies sign unchanged). kenneld builds the writer
+  from it and emits the `lifecycle.*` events (`kennel-spawn`'s spawn lifecycle).
+  Still owed: routing the netproxy's egress records and the BPF/privhelper events
+  *through* the unified writer (today the netproxy formats its own
+  `network.jsonl` — schema-forward-compatible per `02-3`, and the BPF events still
+  drain `kennel-bpf/src/ringbuf.rs` directly); kernel-LSM (Landlock/AppArmor) deny
+  capture; the journald `MESSAGE_ID` registry; file-sink gzip compression
+  (`compress_after_seconds`); the installation-wide `/etc/kennel/audit.toml`; and
+  the per-sink emit timeout.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
   / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
   is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).

@@ -90,7 +90,7 @@ Rules:
 - **No cycles.** Enforced by Cargo (a cycle is a build error).
 - **No depth skipping in spirit.** A crate may depend on any layer below it, but a binary depending directly on `kennel-syscall` to bypass the safe wrappers in `kennel-spawn` is a smell that warrants a review note.
 - **`kennel-syscall` is the only `unsafe`-bearing crate** (besides `kennel-bpf` for its hand-rolled `bpf(2)` FFI surface). Every other crate carries `#![forbid(unsafe_code)]` per CODING-STANDARDS.md §4.
-- **`kennel-text` is a leaf-side utility crate** consumed by everything that emits text. It has no Project Kennel deps (only stdlib and minimal external crates). There is no `kennel-audit` crate; audit is split between the BPF ringbuf drain and the netproxy's formatter.
+- **`kennel-text` is a leaf-side utility crate** consumed by everything that emits text. It has no Project Kennel deps (only stdlib and minimal external crates). `kennel-audit` builds on it for the single sanitisation pass.
 - **`kennel-policy`** does not depend on `kennel-spawn`, `kennel-bpf`, or any binary crate. The policy module is purely functional: same input, same output, no runtime side-effects.
 
 ---
@@ -117,9 +117,9 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 - Builds with no I/O (file reading is the caller's responsibility); takes `&[u8]` for parsing.
 - Has fuzz targets for the parser and the resolver.
 
-### Audit (no `kennel-audit` crate)
+### Audit (`kennel-audit`)
 
-Audit is split between two producers: BPF events are drained from a kernel ring buffer by `kennel-bpf::ringbuf` (drops on full), and the egress proxy formats one JSONL record per request in `kennel-netproxy::audit` (the server owns the sink — a per-kennel file, wired by kenneld, or stderr). A unified audit writer + sink layer (with journald/syslog/stdout sinks behind feature flags) is a roadmap item; see `02-3-audit-schema.md` for the schema.
+`kennel-audit` (`#![forbid(unsafe_code)]`) is the unified writer: the canonical `AuditEvent`, one `kennel-text` sanitisation pass, per-class level filtering, and a `Sink` trait fanning each event out to the file, stdout, syslog, and (feature `audit-journald`) journald sinks. The journald sink and the UUIDv7's randomness are the only parts needing FFI/`unsafe`; they live in `kennel-syscall` (`journal`, `random`). kenneld builds the writer from the settled `AuditRuntime` and emits lifecycle events through it; see `02-3-audit-schema.md` for the schema. Not yet routed through the writer: the BPF events (still drained from the kernel ring buffer by `kennel-bpf::ringbuf`, drops on full) and the egress proxy's per-request records (`kennel-netproxy::audit`, schema-forward-compatible) — a roadmap remnant.
 
 ### `kennel-bpf`
 
@@ -202,7 +202,7 @@ The root `Cargo.toml` carries:
 
 ## Where to add new crates
 
-- **A new sink** for the audit stream → where the audit is produced today (the netproxy's `audit.rs`, or the BPF ringbuf reader in kenneld); a unified audit crate with sink feature flags is the roadmap home.
+- **A new sink** for the audit stream → `kennel-audit` (implement the `Sink` trait; gate any new system-library link behind a feature, as `audit-journald` does).
 - **A new BPF program** → C source in `bpf/`, loader code in `kennel-bpf`. No new crate.
 - **A new privileged operation** → a new operation type in `kennel-privhelper`. No new crate; the privhelper's scope is bounded by its review burden, not by line count.
 - **A new external integration** (e.g., an MCP server to expose audit events via MCP) → a separate binary crate `kennel-<integration>`. Adding such an integration is itself an architectural decision and needs a doc update.

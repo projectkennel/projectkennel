@@ -17,12 +17,13 @@ Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/B
 - **The spawn:** an identity-mapped user namespace, a double-fork so the workload is PID 1 of its own PID namespace, the constructed-`$HOME` view via `pivot_root` (non-granted paths are *absent*, not merely denied), a synthetic `/etc`, an allowlisted `/dev` with host-device passthrough, a fresh `/proc` + private `/tmp`, Landlock filesystem + network rules with abstract-unix/signal scoping, a seccomp denylist, `PR_SET_NO_NEW_PRIVS`, and cgroup join.
 - **Identity:** the workload's account and groups are masked to `kennel`; inherited supplementary groups drop to the overflow gid by default, and a policy-granted group is re-granted through the privhelper's `gid_map` write.
 - **Egress & IPC:** a per-kennel SOCKS5/HTTP proxy with a cgroup-BPF fail-closed allowlist and a per-kennel JSONL audit log; an `AF_UNIX` socket shim; and a per-user SSH re-origination bastion (the workload holds no key or agent socket).
+- **Audit:** a unified `kennel-audit` writer (one canonical event schema, one sanitisation pass, per-class levels) fanning out to file, stdout, syslog, and (opt-in) journald sinks; the signed `[audit]` policy section selects them, and `kenneld` emits the kennel lifecycle through it.
 - **The privhelper** (file caps `cap_net_admin,cap_sys_admin,cap_setgid`, never `sudo`): the loopback addresses, the egress-BPF attach, and the `gid_map` write — and nothing else.
 - **The `kennel` CLI:** `compile` (resolve a source policy + its templates into a signed, byte-pinned settled policy), `validate`, `sign`, `run`, `stop`, `list` — with end-to-end ed25519 trust (templates, fragments, and the settled artefact) and a `kennel.lock` byte-pin. The shipped [templates](templates/) are signed under the maintainer key `kennel-maint-2026` (verify with `kennel validate --require-signed` against [keys/](keys/)).
 
 On distributions that restrict unprivileged user namespaces (Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), an AppArmor profile grants `userns` to the kenneld binary ([dist/apparmor/kenneld](dist/apparmor/kenneld)) — the AppArmor counterpart of the privhelper's file capabilities, a one-time install step.
 
-Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): the unified audit writer plus the journald/syslog/stdout sinks and the `[audit]` policy section (a per-kennel file sink and the proxy's per-request JSONL records run today), per-kennel `[unix]` service launching (§7.4.7), and the Rust `kennel-checksum-verify` (a dependency-free shell verifier runs today).
+Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): routing the egress-proxy and BPF event sources *through* the unified audit writer (they emit the same schema directly today, so their records are forward-compatible) and kernel-LSM deny capture; per-kennel `[unix]` service launching (§7.4.7); and the Rust `kennel-checksum-verify` (a dependency-free shell verifier runs today).
 
 ## SSH egress: double-blind re-origination
 
@@ -45,11 +46,11 @@ A rough sense of scale — far more specification than code, and the code that e
 |---|---|
 | Design docs ([`docs/design/`](docs/design/), 27 files) | ≈ 65,600 words |
 | Architecture docs ([`docs/architecture/`](docs/architecture/), 15 files) | ≈ 32,500 words |
-| Implementation — Rust (10 crates, tests included) | ≈ 20,100 SLOC |
+| Implementation — Rust (11 crates, tests included) | ≈ 21,700 SLOC |
 | Implementation — BPF (C: 8 programs + 3 shared headers) | ≈ 510 SLOC |
-| `unsafe` Rust — confined to `kennel-syscall` + `kennel-bpf` | ≈ 3,020 SLOC, 97 `unsafe` blocks |
+| `unsafe` Rust — confined to `kennel-syscall` + `kennel-bpf` | ≈ 3,100 SLOC, ~100 `unsafe` blocks |
 
-The other eight crates carry `#![forbid(unsafe_code)]`: the entire `unsafe` surface — raw syscalls, the Landlock/seccomp FFI, and the hand-rolled `bpf(2)` loader — is quarantined to two crates sized to be reviewable in one sitting ([supply-chain/UNSAFE-CRATES.md](supply-chain/UNSAFE-CRATES.md)).
+The other nine crates carry `#![forbid(unsafe_code)]`: the entire `unsafe` surface — raw syscalls, the Landlock/seccomp FFI, and the hand-rolled `bpf(2)` loader — is quarantined to two crates sized to be reviewable in one sitting ([supply-chain/UNSAFE-CRATES.md](supply-chain/UNSAFE-CRATES.md)).
 
 ## What is here
 

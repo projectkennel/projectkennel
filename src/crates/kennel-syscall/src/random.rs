@@ -17,10 +17,7 @@ pub fn fill(buf: &mut [u8]) -> io::Result<()> {
     let mut filled = 0_usize;
     while filled < len {
         let remaining = len.saturating_sub(filled);
-        let ptr = buf
-            .as_mut_ptr()
-            .wrapping_add(filled)
-            .cast::<libc::c_void>();
+        let ptr = buf.as_mut_ptr().wrapping_add(filled).cast::<libc::c_void>();
         // SAFETY: `ptr` points `filled` bytes into `buf`, and `remaining` is the
         // exact number of bytes left in `buf` from there, so getrandom writes
         // only within `buf`. flags = 0 (blocking until the pool is initialised).
