@@ -39,6 +39,28 @@ pub const REFUSAL_CGROUP_NOT_OWNED: u8 = 101;
 /// the caller" — a user may only write the `gid_map` of its own process's userns.
 pub const REFUSAL_PID_NOT_OWNED: u8 = 102;
 
+/// A short, stable description of a wire refusal code.
+///
+/// For the `message` field of a `priv.refuse` audit event (`02-3`). Mirrors the
+/// `refusal_code` table and the scope/ownership constants so the audit and the
+/// helper share one source of truth; an unrecognised code (a future helper
+/// version) maps to `"refused"`.
+#[must_use]
+pub const fn refusal_message(code: u8) -> &'static str {
+    match code {
+        1 => "prefix length is wrong for the address family",
+        2 => "address is outside the reserved per-kennel subnet",
+        3 => "interface is not `lo` or a `<namespace>-<id>` dummy",
+        4 => "interface name exceeds the kernel length limit",
+        5 => "caller is not a member of a requested gid",
+        6 => "gid_map request carried no gids",
+        REFUSAL_NO_SCOPE => "helper has no configured reserved scope for this user",
+        REFUSAL_CGROUP_NOT_OWNED => "target cgroup is not owned by the caller",
+        REFUSAL_PID_NOT_OWNED => "target process is not owned by the caller",
+        _ => "refused",
+    }
+}
+
 /// `ENOSYS` on Linux — returned when a [`Op::SetupEgress`] request reaches a
 /// helper built without the `bpf-egress` feature.
 const ENOSYS: i32 = 38;
