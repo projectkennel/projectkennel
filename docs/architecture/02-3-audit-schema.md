@@ -5,19 +5,23 @@
 > sanitised event out to the `file`, `stdout`, `syslog`, and (feature
 > `audit-journald`) `journald` sinks, applying the per-class levels; the `[audit]`
 > policy section is parsed, validated, and carried in the signed settled policy as
-> `AuditRuntime`; and kenneld builds the writer from it and emits the `lifecycle.*`
-> events. The per-sink emit timeout and the installation-wide `audit.toml` remain
-> roadmap (`08-as-built-notes.md` §8.1).
+> `AuditRuntime`; kenneld builds the writer from it and emits the `lifecycle.*`
+> events; a bounded per-sink worker queue caps a stuck sink's effect on the writer;
+> and the journald sink stamps `MESSAGE_ID`. The installation-wide `audit.toml`
+> remains roadmap (`08-as-built-notes.md` §8.1).
 >
-> Two event *sources* are not yet routed through the writer; they emit the same
-> schema directly, so their records are forward-compatible:
+> **Scope: the writer unifies *userspace* sources.** Kernel-side events report
+> through the kernel's own channels, deliberately *not* through this writer:
 >
-> - BPF events are submitted to a kernel **ring buffer** (`bpf/audit_events.h`,
->   `bpf/kennel.bpf.h`) and drained lock-free by `kennel-bpf::ringbuf`. The ring
->   buffer drops events when full; the reader counts the drops.
-> - The egress proxy formats **one JSONL record per request** in
->   `kennel-netproxy::audit`, written to the per-kennel file
->   `~/.local/state/kennel/<kennel>/network.jsonl`.
+> - The cgroup **BPF programs** report via the kernel — the audit ring buffer
+>   (`bpf/audit_events.h`, `bpf/kennel.bpf.h`) and `dmesg`. Funnelling them through
+>   an unprivileged userspace writer would add privilege and TCB for no gain.
+> - **LSM denials** (Landlock/AppArmor) are the kernel's to log.
+>
+> The one remaining userspace source not yet routed through the writer is the
+> egress proxy, which formats **one JSONL record per request** in
+> `kennel-netproxy::audit` (written to `~/.local/state/kennel/<kennel>/network.jsonl`);
+> its records use the same schema, so they are forward-compatible.
 
 ## Stability commitment
 

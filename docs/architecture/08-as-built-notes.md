@@ -21,14 +21,20 @@ describe these read as roadmap.
   `audit-journald`). The `[audit]` policy section is parsed, folded, validated, and
   carried in the signed settled policy as `AuditRuntime` (omitted from the canonical
   form when empty, so existing policies sign unchanged). kenneld builds the writer
-  from it and emits the `lifecycle.*` events (`kennel-spawn`'s spawn lifecycle).
-  Still owed: routing the netproxy's egress records and the BPF/privhelper events
-  *through* the unified writer (today the netproxy formats its own
-  `network.jsonl` — schema-forward-compatible per `02-3`, and the BPF events still
-  drain `kennel-bpf/src/ringbuf.rs` directly); kernel-LSM (Landlock/AppArmor) deny
-  capture; the journald `MESSAGE_ID` registry; file-sink gzip compression
-  (`compress_after_seconds`); the installation-wide `/etc/kennel/audit.toml`; and
-  the per-sink emit timeout.
+  from it and emits the `lifecycle.*` events through it, the per-sink emit timeout
+  (a bounded worker queue, `TimeoutSink`) bounds a stuck sink's effect on the
+  writer, and the journald sink stamps `MESSAGE_ID` from the registry.
+
+  **The unified writer is for *userspace* sources.** Kernel-side events report
+  through the kernel's own channels, not this writer: the cgroup BPF programs emit
+  via the kernel (ring buffer / `dmesg`), and LSM denials (Landlock/AppArmor) are
+  the kernel's to log — funnelling them through an unprivileged userspace writer
+  would add privilege and TCB for no gain. So BPF/LSM routing is a non-goal here,
+  not a remnant. Still genuinely owed (userspace): routing the netproxy's egress
+  records and the privhelper's events *through* the writer (today the netproxy
+  formats its own `network.jsonl`, schema-forward-compatible per `02-3`); file-sink
+  gzip compression (`compress_after_seconds`, needs a vetted compression crate per
+  §5); and the installation-wide `/etc/kennel/audit.toml`.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
   / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
   is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).
