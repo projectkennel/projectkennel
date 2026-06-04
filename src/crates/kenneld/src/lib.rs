@@ -22,6 +22,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod audit;
 pub mod bastion;
 pub mod cgroup;
 pub mod control;

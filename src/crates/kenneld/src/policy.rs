@@ -95,12 +95,14 @@ impl PolicyLoader for TrustStoreLoader {
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
+        let audit = substituted.audit;
         Ok(Loaded {
             plan,
             net,
             ssh,
             unix,
             groups,
+            audit,
         })
     }
 }

@@ -54,6 +54,10 @@ pub struct Loaded {
     /// loader also sets `plan.supplementary_groups` to these gids (what the seal
     /// `setgroups` to). Empty when no group is granted (the kennel drops all).
     pub groups: Vec<(String, u32)>,
+    /// The per-kennel audit runtime (§02-3): the sinks and per-class levels
+    /// kenneld realises by constructing the `kennel-audit` writer. Empty (all
+    /// defaults) for a kennel with no — or an all-default — `[audit]` section.
+    pub audit: kennel_policy::AuditRuntime,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -506,6 +510,9 @@ fn run_kennel<P, L>(
     // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
+    // The audit runtime (§02-3): captured before `loaded` is consumed below, so the
+    // writer can be built once start succeeds. Empty for a no-`[audit]` policy.
+    let audit_runtime = loaded.audit.clone();
 
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
@@ -554,10 +561,23 @@ fn run_kennel<P, L>(
     };
     let pid = kennel.id();
     shared.set_pid(&req.kennel, pid);
+    // Construct the per-kennel audit writer and record the start (§02-3). The
+    // file sink lives in the per-kennel state dir (where `network.jsonl` also
+    // lives); with no state dir configured, audit is simply not recorded.
+    let audit = shared.identity.audit_base.as_ref().map(|base| {
+        crate::audit::build_writer(&req.kennel, &base.join(&req.kennel), &audit_runtime)
+    });
+    if let Some(writer) = &audit {
+        writer.emit(&crate::audit::kennel_start(pid, ctx));
+    }
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
     // Block until the workload exits (on its own or via `stop`), then tear down.
     let status = kennel.stop(&shared.privileged);
+    if let Some(writer) = &audit {
+        writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
+        writer.emit(&crate::audit::kennel_exit("stopped"));
+    }
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
     let _ = control::send_response(
@@ -719,6 +739,7 @@ mod tests {
                 ssh: kennel_policy::SshRuntime::default(),
                 unix: kennel_policy::UnixRuntime::default(),
                 groups: Vec::new(),
+                audit: kennel_policy::AuditRuntime::default(),
             })
         }
     }

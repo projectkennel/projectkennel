@@ -14,6 +14,9 @@ kennel-spawn = { path = "../kennel-spawn" }
 kennel-privhelper = { path = "../kennel-privhelper" }
 kennel-policy = { path = "../kennel-policy" }
 kennel-syscall = { path = "../kennel-syscall" }
+# The unified audit writer (02-3): kenneld builds it from the settled
+# AuditRuntime and emits lifecycle events through it.
+kennel-audit = { path = "../kennel-audit" }
 # Writing the per-kennel egress-proxy TOML config (kenneld writes, the netproxy
 # reads). Both already vendored (kennel-policy/kennel-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
@@ -29,6 +32,8 @@ kennel-netproxy = { path = "../kennel-netproxy" }
 # performs real privileged operations (addresses, BPF attach). Requires root and
 # the privhelper built with its bpf-egress feature.
 root-tests = ["kennel-spawn/root-tests"]
+# Build the journald audit sink (links libsystemd via kennel-syscall's FFI).
+audit-journald = ["kennel-audit/audit-journald"]
 
 [lints]
 workspace = true
