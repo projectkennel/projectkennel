@@ -58,6 +58,8 @@
 #![allow(unsafe_code)]
 
 pub mod handshake;
+#[cfg(feature = "audit-journald")]
+pub mod journal;
 pub mod landlock;
 pub mod listenfd;
 pub mod mount;
@@ -65,6 +67,7 @@ pub mod namespace;
 pub mod netlink;
 pub mod path;
 pub mod process;
+pub mod random;
 pub mod scm;
 pub mod seccomp;
 pub mod signal;
