@@ -80,6 +80,7 @@ fn build_audit_writer(cfg: &ProxyConfig) -> Writer {
             kinds: a.sinks.clone(),
             dir: a.dir.clone(),
             rotate_at_bytes: a.rotate_at_bytes,
+            compress_after_seconds: a.compress_after_seconds,
             retain_count: a.retain_count,
             syslog_facility: a.syslog_facility.clone(),
         };
@@ -106,6 +107,7 @@ fn build_audit_writer(cfg: &ProxyConfig) -> Writer {
         kinds,
         dir,
         rotate_at_bytes: None,
+        compress_after_seconds: None,
         retain_count: None,
         syslog_facility: None,
     };

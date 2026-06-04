@@ -52,6 +52,7 @@ pub fn build_writer(
         kinds: runtime.sinks.iter().map(|k| sink_kind(*k)).collect(),
         dir: state_dir.to_path_buf(),
         rotate_at_bytes: runtime.file.rotate_at_bytes,
+        compress_after_seconds: runtime.file.compress_after_seconds,
         retain_count: runtime
             .file
             .retain_count

@@ -43,6 +43,8 @@ pub struct ProxyAudit {
     pub syslog_facility: Option<String>,
     /// The file-sink rotation threshold, if set.
     pub rotate_at_bytes: Option<u64>,
+    /// The file-sink gzip-after-seconds delay, if set.
+    pub compress_after_seconds: Option<u64>,
     /// The file-sink retained-rotation count, if set.
     pub retain_count: Option<u64>,
 }
@@ -81,6 +83,8 @@ struct AuditToml {
     syslog_facility: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rotate_at_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compress_after_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retain_count: Option<u64>,
 }
@@ -234,6 +238,7 @@ pub fn config_toml(
             network_level: a.network_level.clone(),
             syslog_facility: a.syslog_facility.clone(),
             rotate_at_bytes: a.rotate_at_bytes,
+            compress_after_seconds: a.compress_after_seconds,
             retain_count: a.retain_count,
         }),
     };
@@ -327,6 +332,7 @@ mod tests {
             network_level: Some("full".to_owned()),
             syslog_facility: None,
             rotate_at_bytes: Some(64 * 1024 * 1024),
+            compress_after_seconds: Some(3600),
             retain_count: Some(8),
         };
         let toml = config_toml(&net(), &listen, Some(&audit), &[]).expect("toml");
@@ -337,6 +343,7 @@ mod tests {
         assert_eq!(parsed.dir, PathBuf::from("/run/kennel/ai-coding"));
         assert_eq!(parsed.sinks.len(), 2, "file + journald");
         assert_eq!(parsed.rotate_at_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(parsed.compress_after_seconds, Some(3600));
         assert_eq!(parsed.retain_count, Some(8));
         // No [audit] ⇒ the writer falls back (legacy/standalone).
         let none = config_toml(&net(), &listen, None, &[]).expect("toml");

@@ -101,6 +101,8 @@ pub struct AuditConfig {
     pub syslog_facility: Option<String>,
     /// File-sink rotation threshold in bytes.
     pub rotate_at_bytes: Option<u64>,
+    /// File-sink gzip-after-seconds delay.
+    pub compress_after_seconds: Option<u64>,
     /// File-sink retained-rotation count.
     pub retain_count: Option<usize>,
 }
@@ -199,6 +201,8 @@ struct RawAudit {
     #[serde(default)]
     rotate_at_bytes: Option<u64>,
     #[serde(default)]
+    compress_after_seconds: Option<u64>,
+    #[serde(default)]
     retain_count: Option<u64>,
 }
 
@@ -232,6 +236,7 @@ impl RawAudit {
             network_level,
             syslog_facility: self.syslog_facility,
             rotate_at_bytes: self.rotate_at_bytes,
+            compress_after_seconds: self.compress_after_seconds,
             retain_count,
         })
     }

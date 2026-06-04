@@ -40,6 +40,7 @@ fn io_err(sink: &'static str, context: &str, err: &std::io::Error) -> SinkError 
 pub struct FileSink {
     dir: PathBuf,
     rotate_at_bytes: Option<u64>,
+    compress_after_seconds: Option<u64>,
     retain_count: Option<usize>,
     clock: Box<dyn Clock>,
     // Serialises this process's rotation so a size-check and rename do not race
@@ -52,20 +53,23 @@ impl FileSink {
     /// Create a file sink writing under `dir` (created if absent).
     ///
     /// `rotate_at_bytes` rotates a class file once it would exceed that size;
-    /// `retain_count` keeps at most that many rotated files per class. `None`
-    /// for either disables that behaviour.
+    /// `compress_after_seconds` gzips a rotated file once it is at least that
+    /// old (lazily, at the next rotation); `retain_count` keeps at most that
+    /// many rotated files per class. `None` for any disables that behaviour.
     ///
     /// # Errors
     /// Returns the underlying error if `dir` cannot be created.
     pub fn new(
         dir: PathBuf,
         rotate_at_bytes: Option<u64>,
+        compress_after_seconds: Option<u64>,
         retain_count: Option<usize>,
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             dir,
             rotate_at_bytes,
+            compress_after_seconds,
             retain_count,
             clock: Box::new(SystemClock),
             rotate_lock: Mutex::new(()),
@@ -80,10 +84,11 @@ impl FileSink {
     pub fn with_clock(
         dir: PathBuf,
         rotate_at_bytes: Option<u64>,
+        compress_after_seconds: Option<u64>,
         retain_count: Option<usize>,
         clock: Box<dyn Clock>,
     ) -> std::io::Result<Self> {
-        let mut sink = Self::new(dir, rotate_at_bytes, retain_count)?;
+        let mut sink = Self::new(dir, rotate_at_bytes, compress_after_seconds, retain_count)?;
         sink.clock = clock;
         Ok(sink)
     }
@@ -97,25 +102,77 @@ impl FileSink {
         let Some(limit) = self.rotate_at_bytes else {
             return;
         };
-        let Ok(_guard) = self.rotate_lock.lock() else {
-            return;
+        // Scope the rotation lock: the rename and retention sweep are serialised,
+        // but the (slower, fork-exec) compression sweep runs after it is dropped.
+        let rotated = {
+            let Ok(_guard) = self.rotate_lock.lock() else {
+                return;
+            };
+            let current = std::fs::metadata(path).map_or(0, |m| m.len());
+            if current.saturating_add(incoming as u64) <= limit {
+                return;
+            }
+            let (secs, _) = self.clock.now_unix_micros();
+            let dest = self
+                .dir
+                .join(format!("{}.{secs}.jsonl", resource.file_stem()));
+            // A failed rename just means we keep appending to the live file; not
+            // fatal for audit integrity.
+            if std::fs::rename(path, &dest).is_ok() {
+                self.enforce_retention(resource);
+                true
+            } else {
+                false
+            }
         };
-        let current = std::fs::metadata(path).map_or(0, |m| m.len());
-        if current.saturating_add(incoming as u64) <= limit {
-            return;
-        }
-        let (secs, _) = self.clock.now_unix_micros();
-        let rotated = self
-            .dir
-            .join(format!("{}.{secs}.jsonl", resource.file_stem()));
-        // A failed rename just means we keep appending to the live file; not
-        // fatal for audit integrity.
-        if std::fs::rename(path, &rotated).is_ok() {
-            self.enforce_retention(resource);
+        if rotated {
+            self.maybe_compress(resource);
         }
     }
 
-    /// Delete the oldest rotated files for a class beyond `retain_count`.
+    /// Gzip rotated files for a class that are at least `compress_after_seconds`
+    /// old. Best-effort: shells out to the system `gzip(1)` on the closed,
+    /// already-rotated file (never the live append target), and degrades to
+    /// leaving the file uncompressed if `gzip` is missing, denied, or fails.
+    fn maybe_compress(&self, resource: Resource) {
+        let Some(after) = self.compress_after_seconds else {
+            return;
+        };
+        let after = i64::try_from(after).unwrap_or(i64::MAX);
+        let (now, _) = self.clock.now_unix_micros();
+        let prefix = format!("{}.", resource.file_stem());
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Only uncompressed rotated files: "<stem>.<digits>.jsonl".
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some(stamp) = rest.strip_suffix(".jsonl") else {
+                continue;
+            };
+            let Ok(ts) = stamp.parse::<i64>() else {
+                continue;
+            };
+            if now.saturating_sub(ts) < after {
+                continue;
+            }
+            let path = entry.path();
+            // Skip if a prior run already produced the .gz (gzip would refuse).
+            let mut gz = path.clone().into_os_string();
+            gz.push(".gz");
+            if Path::new(&gz).exists() {
+                continue;
+            }
+            gzip_file(&path);
+        }
+    }
+
+    /// Delete the oldest rotated files for a class beyond `retain_count`,
+    /// counting compressed (`.jsonl.gz`) and uncompressed rotations alike.
     fn enforce_retention(&self, resource: Resource) {
         let Some(keep) = self.retain_count else {
             return;
@@ -128,13 +185,14 @@ impl FileSink {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            // Match "<stem>.<digits>.jsonl"; skip the live "<stem>.jsonl".
+            // Match "<stem>.<digits>.jsonl[.gz]"; skip the live "<stem>.jsonl".
             let Some(rest) = name.strip_prefix(&prefix) else {
                 continue;
             };
-            let Some(stamp) = rest.strip_suffix(".jsonl") else {
-                continue;
-            };
+            let stamp = rest
+                .strip_suffix(".jsonl.gz")
+                .or_else(|| rest.strip_suffix(".jsonl"));
+            let Some(stamp) = stamp else { continue };
             if let Ok(ts) = stamp.parse::<i64>() {
                 rotated.push((ts, entry.path()));
             }
@@ -147,6 +205,32 @@ impl FileSink {
         for (_, path) in rotated.into_iter().take(surplus) {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+/// Compress one closed, rotated file in place with the system `gzip(1)`,
+/// producing `<path>.gz` and removing the original on success.
+///
+/// `-n` omits the original name/timestamp from the gzip header (reproducible
+/// output, no mtime leak). A spawn/exec failure or a non-zero exit leaves the
+/// file untouched and is reported once to stderr — the audit data is intact
+/// either way.
+fn gzip_file(path: &Path) {
+    match std::process::Command::new("gzip")
+        .arg("-n")
+        .arg(path)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!(
+            "kennel-audit: gzip of {} exited {}; left uncompressed",
+            path.display(),
+            status.code().unwrap_or(-1)
+        ),
+        Err(e) => eprintln!(
+            "kennel-audit: gzip of {} could not run ({e}); left uncompressed",
+            path.display()
+        ),
     }
 }
 
@@ -333,6 +417,17 @@ fn field_str<'a>(record: &'a Record, key: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use crate::event::Outcome;
+    use crate::time::Clock;
+
+    /// A monotonic test clock: each `now` call returns the next integer second,
+    /// so rotation suffixes are unique and `compress`'s "now" advances past the
+    /// rotations it sweeps.
+    struct Tick(std::sync::atomic::AtomicI64);
+    impl Clock for Tick {
+        fn now_unix_micros(&self) -> (i64, u32) {
+            (self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0)
+        }
+    }
 
     fn rec() -> Record {
         Record {
@@ -357,7 +452,7 @@ mod tests {
     fn file_sink_writes_per_class_files() {
         let dir = std::env::temp_dir().join(format!("kennel-audit-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let sink = FileSink::new(dir.clone(), None, None).expect("create");
+        let sink = FileSink::new(dir.clone(), None, None, None).expect("create");
         sink.write(&rec()).expect("write");
         let body = std::fs::read_to_string(dir.join("network.jsonl")).expect("read");
         assert!(body.contains(r#""addr":"169.254.169.254""#));
@@ -367,19 +462,13 @@ mod tests {
 
     #[test]
     fn file_sink_rotates_and_retains() {
-        use crate::time::Clock;
-        struct Tick(std::sync::atomic::AtomicI64);
-        impl Clock for Tick {
-            fn now_unix_micros(&self) -> (i64, u32) {
-                (self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0)
-            }
-        }
         let dir = std::env::temp_dir().join(format!("kennel-audit-rot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // Rotate at a tiny size, keep 2 rotated files.
         let sink = FileSink::with_clock(
             dir.clone(),
             Some(80),
+            None,
             Some(2),
             Box::new(Tick(std::sync::atomic::AtomicI64::new(1000))),
         )
@@ -401,9 +490,51 @@ mod tests {
     }
 
     #[test]
+    fn file_sink_compresses_old_rotations() {
+        // Skip where the system gzip is absent (the feature degrades gracefully).
+        if std::process::Command::new("gzip")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: no system gzip(1)");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kennel-audit-gz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Rotate at a tiny size; compress any rotation at least 0s old (i.e. as
+        // soon as a later rotation runs the sweep); keep everything.
+        let sink = FileSink::with_clock(
+            dir.clone(),
+            Some(80),
+            Some(0),
+            None,
+            Box::new(Tick(std::sync::atomic::AtomicI64::new(1000))),
+        )
+        .expect("create");
+        for _ in 0..5 {
+            sink.write(&rec()).expect("write");
+        }
+        let gz = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("network.") && n.ends_with(".jsonl.gz"))
+            })
+            .count();
+        assert!(
+            gz >= 1,
+            "expected at least one compressed rotation, found {gz}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_sink_rejects_oversize() {
         let dir = std::env::temp_dir().join(format!("kennel-audit-big-{}", std::process::id()));
-        let sink = FileSink::new(dir.clone(), None, None).expect("create");
+        let sink = FileSink::new(dir.clone(), None, None, None).expect("create");
         let big = "x".repeat(MAX_EVENT_BYTES + 1);
         let r = Record {
             resource: Resource::Fs,

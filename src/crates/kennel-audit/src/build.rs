@@ -47,6 +47,8 @@ pub struct SinkConfig {
     pub dir: PathBuf,
     /// Rotate a class file once it would exceed this many bytes (file sink).
     pub rotate_at_bytes: Option<u64>,
+    /// Gzip a rotated file once it is at least this many seconds old (file sink).
+    pub compress_after_seconds: Option<u64>,
     /// Keep at most this many rotated files per class (file sink).
     pub retain_count: Option<usize>,
     /// The syslog facility name (default `user`).
@@ -68,7 +70,12 @@ pub fn writer(ctx: WriterContext, levels: Levels, cfg: &SinkConfig) -> Writer {
     for kind in kinds {
         match kind {
             SinkKind::File => {
-                match FileSink::new(cfg.dir.clone(), cfg.rotate_at_bytes, cfg.retain_count) {
+                match FileSink::new(
+                    cfg.dir.clone(),
+                    cfg.rotate_at_bytes,
+                    cfg.compress_after_seconds,
+                    cfg.retain_count,
+                ) {
                     Ok(sink) => push_buffered(&mut sinks, Box::new(sink)),
                     Err(e) => eprintln!("kennel-audit: file sink unavailable: {e}"),
                 }
@@ -155,6 +162,7 @@ mod tests {
             kinds: Vec::new(),
             dir: dir.clone(),
             rotate_at_bytes: None,
+            compress_after_seconds: None,
             retain_count: None,
             syslog_facility: None,
         };

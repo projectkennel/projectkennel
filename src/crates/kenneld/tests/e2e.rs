@@ -427,6 +427,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             network_level: None,
             syslog_facility: None,
             rotate_at_bytes: None,
+            compress_after_seconds: None,
             retain_count: None,
         }),
         ssh: ssh_prep,

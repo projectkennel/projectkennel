@@ -537,6 +537,7 @@ fn run_kennel<P, L>(
         network_level: audit_runtime.network_level.clone(),
         syslog_facility: audit_runtime.syslog_facility.clone(),
         rotate_at_bytes: audit_runtime.file.rotate_at_bytes,
+        compress_after_seconds: audit_runtime.file.compress_after_seconds,
         retain_count: audit_runtime.file.retain_count,
     });
 
