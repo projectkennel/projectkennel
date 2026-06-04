@@ -30,11 +30,12 @@ describe these read as roadmap.
   via the kernel (ring buffer / `dmesg`), and LSM denials (Landlock/AppArmor) are
   the kernel's to log — funnelling them through an unprivileged userspace writer
   would add privilege and TCB for no gain. So BPF/LSM routing is a non-goal here,
-  not a remnant. Still genuinely owed (userspace): routing the netproxy's egress
-  records and the privhelper's events *through* the writer (today the netproxy
-  formats its own `network.jsonl`, schema-forward-compatible per `02-3`); file-sink
-  gzip compression (`compress_after_seconds`, needs a vetted compression crate per
-  §5); and the installation-wide `/etc/kennel/audit.toml`.
+  not a remnant. Both userspace sources now route through the writer — kenneld's
+  lifecycle events and the netproxy's per-request `net.egress` events (sharing one
+  `kennel_uuid` per run). Still genuinely owed (userspace): routing the
+  privhelper's events through the writer; file-sink gzip compression
+  (`compress_after_seconds`, needs a vetted compression crate per §5); and the
+  installation-wide `/etc/kennel/audit.toml`.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
   / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
   is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).

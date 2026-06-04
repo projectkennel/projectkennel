@@ -23,7 +23,7 @@ Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/B
 
 On distributions that restrict unprivileged user namespaces (Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), an AppArmor profile grants `userns` to the kenneld binary ([dist/apparmor/kenneld](dist/apparmor/kenneld)) — the AppArmor counterpart of the privhelper's file capabilities, a one-time install step.
 
-Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): routing the egress proxy's per-request records *through* the unified audit writer (they use the same schema today, so they are forward-compatible — kernel-side BPF and LSM events report via the kernel's own ring buffer / `dmesg` by design, not this writer); per-kennel `[unix]` service launching (§7.4.7); and the Rust `kennel-checksum-verify` (a dependency-free shell verifier runs today).
+Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): routing the privhelper's events through the unified audit writer (kenneld's lifecycle and the egress proxy already do; kernel-side BPF and LSM events report via the kernel's own ring buffer / `dmesg` by design, not this writer); per-kennel `[unix]` service launching (§7.4.7); and the Rust `kennel-checksum-verify` (a dependency-free shell verifier runs today).
 
 ## SSH egress: double-blind re-origination
 

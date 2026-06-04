@@ -18,10 +18,12 @@
 >   an unprivileged userspace writer would add privilege and TCB for no gain.
 > - **LSM denials** (Landlock/AppArmor) are the kernel's to log.
 >
-> The one remaining userspace source not yet routed through the writer is the
-> egress proxy, which formats **one JSONL record per request** in
-> `kennel-netproxy::audit` (written to `~/.local/state/kennel/<kennel>/network.jsonl`);
-> its records use the same schema, so they are forward-compatible.
+> Both userspace sources route through the writer: kenneld's lifecycle events,
+> and the egress proxy's per-request `net.egress` events
+> (`kennel-netproxy::audit::Record::to_event`, written to
+> `~/.local/state/kennel/<kennel>/network.jsonl` plus any other configured sink).
+> kenneld shares one `kennel_uuid` with the proxy per run, so their events
+> correlate.
 
 ## Stability commitment
 
