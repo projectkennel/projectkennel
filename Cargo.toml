@@ -16,6 +16,7 @@ members = [
     "src/crates/kennel-bpf",
     "src/crates/kennel-policy",
     "src/crates/kennel-audit",
+    "src/crates/kennel-config",
     "src/crates/kennel-spawn",
     "src/crates/kennel-syscall",
     "src/crates/kennel-text",

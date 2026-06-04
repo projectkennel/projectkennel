@@ -3,31 +3,20 @@
 //! The daemon's production [`crate::server::PolicyLoader`]. The
 //! trust store is a directory of Ed25519 public keys — one `*.pub` file per
 //! signer, the file stem its key id and the contents its base64-encoded 32-byte
-//! public key — root-managed, like `/etc/kennel/subkennel`. Default location
-//! `/etc/kennel/trust/`, overridable with `$KENNEL_TRUST_DIR` (for tests and
-//! non-standard installs). Loading a policy reads the file, verifies its single
-//! signature against the trust store, substitutes the per-instance placeholders,
-//! and translates the result into a [`Plan`] — all via
-//! [`kennel_spawn::prepare`].
+//! public key — root-managed, like `/etc/kennel/subkennel`. Its location comes
+//! from the root-owned deployment config ([`kennel_config::Deployment::trust_dir`],
+//! default `/etc/kennel/keys`) — never a user-writable or environment override,
+//! since that would let the user trust their own signing key. Loading a policy
+//! reads the file, verifies its single signature against the trust store,
+//! substitutes the per-instance placeholders, and translates the result into a
+//! [`Plan`] — all via [`kennel_spawn::prepare`].
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use kennel_policy::KeySet;
 use kennel_spawn::{Plan, RuntimeSubstitutions};
 
 use crate::server::{Loaded, PolicyLoader};
-
-/// The default trust-store directory.
-pub const DEFAULT_TRUST_DIR: &str = "/etc/kennel/trust";
-/// The environment variable that overrides the trust-store directory.
-pub const TRUST_DIR_ENV: &str = "KENNEL_TRUST_DIR";
-
-/// The configured trust-store directory: `$KENNEL_TRUST_DIR` if set, else
-/// [`DEFAULT_TRUST_DIR`].
-#[must_use]
-pub fn trust_dir() -> PathBuf {
-    std::env::var_os(TRUST_DIR_ENV).map_or_else(|| PathBuf::from(DEFAULT_TRUST_DIR), PathBuf::from)
-}
 
 /// A [`PolicyLoader`] backed by a trust store of public keys.
 pub struct TrustStoreLoader {
@@ -147,6 +136,7 @@ fn resolve_groups(names: &[String]) -> Result<Vec<(String, u32)>, String> {
 mod tests {
     use super::*;
     use kennel_policy::SigningKey;
+    use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kenneld-trust-{tag}-{}", std::process::id()));
@@ -219,13 +209,5 @@ mod tests {
             "garbage must not verify"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn trust_dir_defaults_when_unset() {
-        // env is process-global; only assert the default when the override is unset.
-        if std::env::var_os(TRUST_DIR_ENV).is_none() {
-            assert_eq!(trust_dir().as_path(), Path::new(DEFAULT_TRUST_DIR));
-        }
     }
 }

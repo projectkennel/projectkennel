@@ -13,15 +13,6 @@ use std::process::{Command, Stdio};
 
 use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
 
-/// The installed location of the setuid helper.
-pub const DEFAULT_HELPER: &str = "/opt/kennel/sbin/kennel-privhelper";
-
-/// The installed helper path.
-#[must_use]
-pub fn default_helper_path() -> &'static Path {
-    Path::new(DEFAULT_HELPER)
-}
-
 /// Invoke `helper`, send `request`, and return the decoded response.
 ///
 /// # Errors

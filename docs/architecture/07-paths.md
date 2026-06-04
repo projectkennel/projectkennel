@@ -128,14 +128,20 @@ System configuration. Installed by the package; managed by the administrator.
 │   ├── corp-policy-2026.pub
 │   └── ...
 ├── audit.toml                       installation-wide audit-sink defaults
-└── kennel.conf                      project-wide configuration (tag byte, ULA prefix, kernel-feature overrides)
+├── system.toml                      deployment paths: libexec_dir, trust_dir, sshd (admin layer)
+└── config.toml                      CLI conveniences: template/key search dirs (admin layer)
 ```
 
 Owner: root. Mode: directory `0755`, files `0644`. The `keys/` directory holds public keys only; private keys are not in this tree.
 
 In an attested deployment, `settled/` holds the signed settled policies pushed by the organisation's central compile infrastructure. The workstation enforces these directly (`02-2-config-schema.md` §The settled policy); it need not hold the `templates/`, the lockfiles, or exercise the resolver. `kennel run` verifies the settled policy's signature against a key in `keys/` and spawns.
 
-The `kennel.conf` file pins per-installation settings that are stable for the life of the installation: the path to the privhelper binary and optional overrides for kernel-feature detection (used when an environment under-reports its capabilities). The per-*user* loopback allocation — the 12-bit IPv4 `tag` and the 40-bit IPv6 ULA `gid` — is **not** here; it lives in `/etc/kennel/subkennel` (`<uid>:<tag>:<gid>:<namespace>`), and the daemon loads it from there to fill `<tag>`/`<gid>` at spawn.
+**No install path is baked into a binary.** Deployment paths — the helper-binary directory (`libexec_dir`, default `/usr/libexec/kennel`), the daemon's signing-key `trust_dir` (default `/etc/kennel/keys`), and the host `sshd` — are expressed in `system.toml`, resolved through a cascade by the `kennel-config` crate. The cascade reads lowest-priority first, a higher layer overriding a lower one **per key**, with compiled-in fallback defaults so a host with no config files still runs:
+
+* **`system.toml`** (deployment, integrity-sensitive) resolves from **root-owned dirs only** — `/usr/lib/kennel` (vendor) then `/etc/kennel` (admin). It is deliberately **not** read from the user's `~/.config`, and honours no environment override: `kenneld` runs as the user, so letting the user redirect `trust_dir` would defeat policy signing. Each helper binary defaults to `<libexec_dir>/<name>`; an explicit per-binary key overrides one.
+* **`config.toml`** (CLI conveniences — template and key *search* dirs) resolves from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`. Safe to be user-writable: it only steers where the CLI looks while authoring; the daemon re-verifies against the locked `system.toml` `trust_dir` at run.
+
+The per-*user* loopback allocation — the 12-bit IPv4 `tag` and the 40-bit IPv6 ULA `gid` — is **not** in either file; it lives in `/etc/kennel/subkennel` (`<uid>:<tag>:<gid>:<namespace>`), kernel-trusted, and the daemon loads it from there to fill `<tag>`/`<gid>` at spawn.
 
 ### `/sys/fs/cgroup/kennel/`
 

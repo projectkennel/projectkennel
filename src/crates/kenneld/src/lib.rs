@@ -163,19 +163,11 @@ pub struct HelperClient {
 }
 
 impl HelperClient {
-    /// Use the privhelper at `helper`.
+    /// Use the privhelper at `helper` (resolved from the deployment config by
+    /// the daemon; see [`kennel_config::Deployment::privhelper`]).
     pub fn new(helper: impl Into<PathBuf>) -> Self {
         Self {
             helper: helper.into(),
-        }
-    }
-
-    /// Use the privhelper at its installed location
-    /// ([`kennel_privhelper::client::DEFAULT_HELPER`]).
-    #[must_use]
-    pub fn installed() -> Self {
-        Self {
-            helper: kennel_privhelper::client::default_helper_path().to_path_buf(),
         }
     }
 }

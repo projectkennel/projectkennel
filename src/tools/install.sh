@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
 # Project Kennel installer.
 #
-# Installs the runtime binaries, the setuid privhelper, the per-user systemd
-# units, and the /etc/kennel skeleton. Two halves:
+# Installs the runtime binaries, the setuid privhelper, the vendor config, the
+# per-user systemd units, the AppArmor userns grant, and the /etc/kennel
+# skeleton. Two halves:
 #
-#   1. System install (root): binaries under <prefix> (default /opt/kennel), the
-#      privhelper setuid-root, the systemd *user* units, and the root-owned
-#      /etc/kennel directory. Run with sudo.
+#   1. System install (root): all binaries under <libexec> (default
+#      /usr/libexec/kennel, the documented non-PATH helper location, 07-paths.md),
+#      the privhelper setuid-root, the vendor deployment config under
+#      /usr/lib/kennel, the systemd *user* units, the AppArmor profile, and the
+#      root-owned /etc/kennel directory. Run with sudo.
 #   2. Per-user enable (each user, unprivileged): `systemctl --user enable --now
 #      kenneld.socket`, after an admin has provisioned that user's allocation in
 #      /etc/kennel/subkennel. The installer prints the exact command.
 #
+# No install path is baked into a binary: kenneld reads the helper-binary
+# locations and the trust store from the root-owned config cascade
+# (/usr/lib/kennel/system.toml then /etc/kennel/system.toml; kennel-config). The
+# installer writes the vendor system.toml to match where it actually installs.
+#
 # The installer does NOT fabricate the security-sensitive admin inputs
-# (/etc/kennel/subkennel allocations, /etc/kennel/scope installation constants,
-# or the trust-store public keys); it creates the directory skeleton and tells
-# the admin what to populate. See CODING-STANDARDS.md §5 and docs/architecture/07-paths.md.
+# (/etc/kennel/subkennel allocations or the trust-store public keys); it creates
+# the directory skeleton and tells the admin what to populate. See
+# CODING-STANDARDS.md §5 and docs/architecture/07-paths.md.
 #
 # Usage:
 #   sudo tools/install.sh [--prefix DIR] [--no-build] [--dry-run]
 #
-#   --prefix DIR   install root for the binaries (default: /opt/kennel)
+#   --prefix DIR   libexec dir for the binaries (default: /usr/libexec/kennel)
 #   --no-build     install the binaries already in target/release (skip cargo)
 #   --dry-run      print the actions without performing them
 #
@@ -28,16 +36,20 @@
 
 set -euo pipefail
 
-prefix="/opt/kennel"
+# The libexec dir holds every kennel binary (all non-PATH helpers located by
+# absolute path from kenneld via the config). --prefix relocates it.
+libexec="/usr/libexec/kennel"
+# Vendor (package-shipped) config dir: the lowest-priority config layer.
+vendor_dir="/usr/lib/kennel"
 do_build=1
 dry_run=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--prefix) prefix="${2:?--prefix needs a directory}"; shift 2 ;;
+		--prefix) libexec="${2:?--prefix needs a directory}"; shift 2 ;;
 		--no-build) do_build=0; shift ;;
 		--dry-run) dry_run=1; shift ;;
-		-h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+		-h|--help) sed -n '2,34p' "$0"; exit 0 ;;
 		*) echo "install.sh: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -57,15 +69,15 @@ run() {
 	fi
 }
 
-# The binaries: (source-relative-to-target/release  destination-subdir  feature-args...)
-# The privhelper is built with --features bpf-egress so live egress works
-# (CODING-STANDARDS / the bpf-egress build gotcha); it lands in sbin, setuid.
+# The unprivileged binaries kenneld locates via the config (all under libexec).
+USER_BINS="kenneld kennel kennel-netproxy kennel-ssh-reorigin kennel-socks-connect kennel-akc"
 
 build_binaries() {
 	[ "$do_build" -eq 1 ] || { echo "install.sh: --no-build, using target/release"; return 0; }
 	echo "install.sh: building release binaries (offline, frozen, locked)"
+	# -p kenneld builds the kenneld, kennel, and kennel-akc bins.
 	run cargo build --release --offline --frozen --locked \
-		-p kenneld -p kennel-netproxy
+		-p kenneld -p kennel-netproxy -p kennel-ssh-reorigin -p kennel-socks-connect
 	# The privhelper needs its BPF feature; build it separately.
 	run cargo build --release --offline --frozen --locked \
 		-p kennel-privhelper --features bpf-egress
@@ -81,29 +93,60 @@ require_root() {
 
 install_binaries() {
 	local rel="$repo_root/target/release"
-	run install -d -m 0755 "$prefix/bin" "$prefix/sbin"
+	run install -d -m 0755 "$libexec"
 	# Unprivileged binaries (mode 0755).
 	local b
-	for b in kenneld kennel kennel-netproxy; do
-		run install -m 0755 "$rel/$b" "$prefix/bin/$b"
+	for b in $USER_BINS; do
+		run install -m 0755 "$rel/$b" "$libexec/$b"
 	done
 	# The privhelper: setuid root (mode 4755, owner root). This is the one
 	# privilege boundary; everything else runs as the user.
-	run install -m 0755 -o root -g root "$rel/kennel-privhelper" "$prefix/sbin/kennel-privhelper"
-	run chmod 4755 "$prefix/sbin/kennel-privhelper"
+	run install -m 0755 -o root -g root "$rel/kennel-privhelper" "$libexec/kennel-privhelper"
+	run chmod 4755 "$libexec/kennel-privhelper"
+}
+
+install_config() {
+	# Vendor deployment + user config (the lowest-priority cascade layer). The
+	# deployment file's libexec_dir is rewritten to wherever we actually
+	# installed, so a --prefix relocation stays coherent without hand-editing.
+	run install -d -m 0755 "$vendor_dir"
+	run install -m 0644 "$repo_root/dist/config/system.toml" "$vendor_dir/system.toml"
+	run install -m 0644 "$repo_root/dist/config/config.toml" "$vendor_dir/config.toml"
+	if [ "$libexec" != "/usr/libexec/kennel" ]; then
+		run sed -i "s#^libexec_dir = .*#libexec_dir = \"$libexec\"#" "$vendor_dir/system.toml"
+	fi
 }
 
 install_units() {
 	run install -d -m 0755 "$units_dir"
 	run install -m 0644 "$repo_root/dist/systemd/kenneld.socket" "$units_dir/kenneld.socket"
 	run install -m 0644 "$repo_root/dist/systemd/kenneld.service" "$units_dir/kenneld.service"
+	if [ "$libexec" != "/usr/libexec/kennel" ]; then
+		run sed -i "s#^ExecStart=.*#ExecStart=$libexec/kenneld#" "$units_dir/kenneld.service"
+	fi
+}
+
+install_apparmor() {
+	# Grant kenneld the unprivileged-userns capability on hosts that restrict it
+	# (Ubuntu 23.10+: kernel.apparmor_restrict_unprivileged_userns=1). The profile
+	# attaches to the kenneld binary by absolute path, so it must match libexec.
+	[ -d /etc/apparmor.d ] || { echo "install.sh: no /etc/apparmor.d; skipping AppArmor profile"; return 0; }
+	run install -m 0644 "$repo_root/dist/apparmor/kenneld" /etc/apparmor.d/kenneld
+	if [ "$libexec" != "/usr/libexec/kennel" ]; then
+		run sed -i "s#/usr/libexec/kennel/kenneld#$libexec/kenneld#" /etc/apparmor.d/kenneld
+	fi
+	if command -v apparmor_parser >/dev/null 2>&1; then
+		run apparmor_parser -r -W /etc/apparmor.d/kenneld
+	else
+		echo "install.sh: apparmor_parser absent; profile staged but not loaded"
+	fi
 }
 
 install_etc_skeleton() {
-	# Root-owned configuration root. `keys/` is the runtime trust store
-	# (07-paths.md §/etc, consumed by the CLI's load_trust_store); org-specific
-	# keys and the per-user allocations are provisioned by the admin.
-	run install -d -m 0755 /etc/kennel /etc/kennel/keys /etc/kennel/policies
+	# Root-owned configuration root. `keys/` is the trust store (07-paths.md §/etc):
+	# the daemon's signing-key store (system.toml's trust_dir default) and the CLI's
+	# authoring search dir. Admin-owned; org keys and per-user allocations go here.
+	run install -d -m 0755 /etc/kennel /etc/kennel/keys /etc/kennel/templates /etc/kennel/policies
 	if [ ! -e /etc/kennel/subkennel ]; then
 		echo "install.sh: /etc/kennel/subkennel is absent — the admin must create it"
 		echo "            (one line per user: <uid>:<tag>:<gid>:<namespace>, e.g. 1000:42:0000000001:kennel-alice)"
@@ -126,28 +169,30 @@ install_keys() {
 print_next_steps() {
 	cat <<EOF
 
-Project Kennel: system install complete under $prefix.
+Project Kennel: system install complete (binaries under $libexec, config under $vendor_dir).
 
 Remaining admin steps (root):
   1. Provision /etc/kennel/subkennel with one allocation line per user:
        <uid>:<tag>:<gid>:<namespace>      e.g.  1000:42:0000000001:kennel-alice
-  2. Install the installation constants in /etc/kennel/scope (the tag + ULA GID
-     the privhelper validates against).
-  3. Add any org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
+  2. Add any org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
      (The project's own template-signing key is already installed there.)
+  3. To override a deployment path, edit /etc/kennel/system.toml (it wins over the
+     vendor $vendor_dir/system.toml, per key).
 
 Per-user enable (each user, unprivileged):
        systemctl --user enable --now kenneld.socket
 
 Verify the privhelper is setuid-root:
-       ls -l $prefix/sbin/kennel-privhelper      # expect -rwsr-xr-x root root
+       ls -l $libexec/kennel-privhelper      # expect -rwsr-xr-x root root
 EOF
 }
 
 build_binaries
 require_root
 install_binaries
+install_config
 install_units
+install_apparmor
 install_etc_skeleton
 install_keys
 [ "$dry_run" -eq 1 ] || print_next_steps

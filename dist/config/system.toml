@@ -1,0 +1,28 @@
+# Project Kennel — vendor deployment defaults (`system.toml`).
+#
+# Integrity-sensitive paths kenneld resolves at startup. This vendor copy is the
+# baseline; an admin overrides individual keys in /etc/kennel/system.toml (which
+# wins per key). It is deliberately NOT user-overridable — kenneld never reads
+# ~/.config for these, because the daemon runs as the user and letting the user
+# redirect the trust store would defeat policy signing.
+#
+# Resolution order (lowest priority first): this file, then /etc/kennel/system.toml.
+# See docs/architecture/07-paths.md and the kennel-config crate.
+
+# Directory holding kenneld's helper binaries. Each binary defaults to
+# <libexec_dir>/<name>; override an individual one with the keys below.
+libexec_dir = "/usr/libexec/kennel"
+
+# The daemon's signing-key trust store: one <key_id>.pub per trusted signer.
+trust_dir = "/etc/kennel/keys"
+
+# The host sshd the per-user SSH bastion launches.
+sshd = "/usr/sbin/sshd"
+
+# Explicit per-binary overrides (absolute paths; no ~ expansion). Uncomment to
+# relocate a single binary away from <libexec_dir>:
+# privhelper    = "/usr/libexec/kennel/kennel-privhelper"
+# netproxy      = "/usr/libexec/kennel/kennel-netproxy"
+# ssh_reorigin  = "/usr/libexec/kennel/kennel-ssh-reorigin"
+# socks_connect = "/usr/libexec/kennel/kennel-socks-connect"
+# akc           = "/usr/libexec/kennel/kennel-akc"

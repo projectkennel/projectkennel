@@ -471,12 +471,11 @@ const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
     }
 }
 
-/// Append the default template search directories (user, then system).
+/// Append the default template search directories: the user `config.toml`'s
+/// `template_dirs` if set, else the built-in default (user config dir, then
+/// system). A malformed user config falls back to the built-in default.
 fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(home).join(".config/kennel/templates"));
-    }
-    dirs.push(PathBuf::from("/etc/kennel/templates"));
+    dirs.extend(kennel_config::User::load().unwrap_or_default().template_dirs());
 }
 
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
@@ -487,12 +486,12 @@ fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
     dir.join(format!("{name}.settled.toml"))
 }
 
-/// Append the default trust-store directories (user, then system).
+/// Append the default trust-store (authoring) directories: the user
+/// `config.toml`'s `key_dirs` if set, else the built-in default (user config
+/// dir, then system). This is the CLI's *authoring* trust store; the daemon
+/// re-verifies against its own locked [`kennel_config::Deployment::trust_dir`].
 fn add_default_trust_dirs(dirs: &mut Vec<PathBuf>) {
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(home).join(".config/kennel/keys"));
-    }
-    dirs.push(PathBuf::from("/etc/kennel/keys"));
+    dirs.extend(kennel_config::User::load().unwrap_or_default().key_dirs());
 }
 
 /// Load a trust store: every `<key_id>.pub` (base64 32-byte public key) under each

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::net::{IpAddr, Ipv4Addr};
 
 use kenneld::server::{serve, BastionSetup, Identity, Shared};
-use kenneld::{policy, proxy, socket, HelperClient, ProxySetup};
+use kenneld::{policy, socket, HelperClient, ProxySetup};
 
 fn main() -> ExitCode {
     match run() {
@@ -28,18 +28,28 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let identity = build_identity()?;
-    let privileged = HelperClient::installed();
-    let loader = policy::TrustStoreLoader::from_dir(&policy::trust_dir())
-        .map_err(|e| format!("loading trust store {}: {e}", policy::trust_dir().display()))?;
+    // Deployment paths (helper binaries, the trust store) come from the
+    // root-owned config cascade — never baked in, never user-overridable
+    // (07-paths.md; kennel_config::Deployment).
+    let deployment =
+        kennel_config::Deployment::load().map_err(|e| format!("loading deployment config: {e}"))?;
+    let identity = build_identity(&deployment)?;
+    let privileged = HelperClient::new(deployment.privhelper());
+    let loader = policy::TrustStoreLoader::from_dir(deployment.trust_dir()).map_err(|e| {
+        format!(
+            "loading trust store {}: {e}",
+            deployment.trust_dir().display()
+        )
+    })?;
 
     let shared = Arc::new(Shared::new(identity, privileged, loader));
     let listener = socket::listener().map_err(|e| format!("control socket: {e}"))?;
     serve(&shared, &listener).map_err(|e| format!("serving: {e}"))
 }
 
-/// Build the user's identity from kernel-trusted sources.
-fn build_identity() -> Result<Identity, String> {
+/// Build the user's identity from kernel-trusted sources, taking the
+/// helper-binary locations from the resolved [`kennel_config::Deployment`].
+fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, String> {
     let uid = kennel_syscall::unistd::real_uid();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -53,7 +63,7 @@ fn build_identity() -> Result<Identity, String> {
     // synthetic /etc/passwd masks the account name to `kennel` (kenneld::etc).
     let username = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
     let proxy = Some(ProxySetup {
-        binary: PathBuf::from(proxy::DEFAULT_NETPROXY_BIN),
+        binary: deployment.netproxy(),
         config_dir: socket::runtime_dir().join("proxy"),
     });
     let etc_base = Some(socket::runtime_dir().join("etc"));
@@ -74,13 +84,13 @@ fn build_identity() -> Result<Identity, String> {
     // safe-path check); it runs as the bastion user so it can reach our control socket.
     let bastion = Some(BastionSetup {
         dir: socket::runtime_dir().join("bastion"),
-        reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-ssh-reorigin"),
-        socks_connect_bin: PathBuf::from("/opt/kennel/bin/kennel-socks-connect"),
+        reorigin_bin: deployment.ssh_reorigin(),
+        socks_connect_bin: deployment.socks_connect(),
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 8022_u16.saturating_add(scope.tag()),
         agent_sock: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
         akc: Some(kenneld::bastion::Akc {
-            command: PathBuf::from("/opt/kennel/bin/kennel-akc"),
+            command: deployment.akc(),
             user: username.clone(),
         }),
     });

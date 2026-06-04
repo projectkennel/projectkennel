@@ -52,6 +52,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-config"
+version = "0.1.0"
+dependencies = [
+ "basic-toml",
+ "serde",
+]
+
+[[package]]
 name = "kennel-netproxy"
 version = "0.1.0"
 dependencies = [
@@ -114,6 +122,7 @@ version = "0.1.0"
 dependencies = [
  "basic-toml",
  "kennel-audit",
+ "kennel-config",
  "kennel-netproxy",
  "kennel-policy",
  "kennel-privhelper",

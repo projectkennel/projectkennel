@@ -11,7 +11,9 @@ After=kenneld.socket
 
 [Service]
 Type=simple
-ExecStart=/opt/kennel/bin/kenneld
+# The libexec location (07-paths.md; matches the AppArmor profile attachment and
+# the kennel-config vendor default). install.sh rewrites this if relocated.
+ExecStart=/usr/libexec/kennel/kenneld
 # Confine the daemon's own filesystem footprint; it needs the runtime dir (the
 # socket), /etc/kennel (allocation + trust store), and the privhelper.
 NoNewPrivileges=no
