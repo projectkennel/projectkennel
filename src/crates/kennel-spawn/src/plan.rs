@@ -131,9 +131,37 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
 }
 
 /// The Landlock access a read-granted path subtree receives: read files and
-/// directories, and execute.
-fn read_access() -> AccessFs {
-    AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE
+/// directories, plus `EXECUTE` only in the permissive (no `exec.allow`) posture.
+///
+/// When a policy declares an `exec.allow` list, a readable path must NOT be
+/// implicitly executable — otherwise the allowlist enforces nothing (anything
+/// under a read grant could run). In that mode reads are read-only and execution
+/// is granted separately, on the allowlist plus the loader's lib dirs (§7.1).
+fn read_access(executable: bool) -> AccessFs {
+    let base = AccessFs::READ_FILE | AccessFs::READ_DIR;
+    if executable {
+        base | AccessFs::EXECUTE
+    } else {
+        base
+    }
+}
+
+/// The dynamic loader's library directories. Under Landlock these need
+/// `FS_EXECUTE`, not merely read: the loader maps `libc`/`ld.so` with
+/// `PROT_EXEC`, which Landlock gates (proven by kennel-syscall's
+/// `landlock_exec_semantics` test; this corrects design §7.1.7). They are
+/// granted `EXECUTE` wherever a read grant mounts them, so allowlisted dynamic
+/// binaries can still load their libraries.
+const LOADER_EXEC_DIRS: &[&str] = &["/usr/lib", "/lib", "/lib64", "/usr/lib64", "/usr/local/lib"];
+
+/// Strip a trailing `/**` or `/*` glob from an `exec.allow` entry, yielding the
+/// real directory (Landlock grants a subtree) or file the rule applies to.
+fn exec_glob_root(entry: &str) -> PathBuf {
+    let trimmed = entry
+        .strip_suffix("/**")
+        .or_else(|| entry.strip_suffix("/*"))
+        .unwrap_or(entry);
+    PathBuf::from(trimmed)
 }
 
 /// The Landlock access a granted device node receives: read and write the file,
@@ -333,6 +361,9 @@ impl Plan {
     /// Returns [`SpawnError::InvalidPolicy`] if a network rule's CIDR is not a
     /// valid IPv4 or IPv6 address, if `fs.tmp.mode` is not octal digits, or if an
     /// `fs.dev.allow` entry is not a device path under `/dev`.
+    // allow: one cohesive policy→plan translation (namespaces, fs view, exec gate,
+    // landlock, seccomp, BPF); splitting it would only scatter the shared locals.
+    #[allow(clippy::too_many_lines)]
     pub fn from_policy(
         policy: &SettledPolicy,
         ctx: u16,
@@ -361,6 +392,9 @@ impl Plan {
         // (on the constructed `/etc`) but no bind (it is built, not bound).
         let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
         let mut binds: Vec<BindMount> = Vec::new();
+        // A non-empty `exec.allow` switches on the execution allowlist: reads
+        // lose implicit EXECUTE, and execution is granted only where §7.1 says.
+        let exec_allowlist = !ep.exec.allow.is_empty();
         let grants = ep
             .fs
             .read
@@ -375,7 +409,7 @@ impl Plan {
                 if writable {
                     write_access()
                 } else {
-                    read_access()
+                    read_access(!exec_allowlist)
                 },
             ));
             if !is_constructed_etc(&source) {
@@ -384,6 +418,44 @@ impl Plan {
                     target,
                     writable,
                 });
+            }
+        }
+
+        // The execution gate (§7.1). With an allowlist, grant FS_EXECUTE only on
+        // the allowlisted binaries plus the loader's lib dirs (EXECUTE, not READ
+        // — the loader maps libc/ld.so PROT_EXEC, which Landlock gates). Reads
+        // dropped EXECUTE above, so nothing else can run. An empty allowlist
+        // keeps the permissive posture (reads carry EXECUTE) and adds nothing.
+        let exec_access = AccessFs::EXECUTE | AccessFs::READ_FILE;
+        if exec_allowlist {
+            for loader in LOADER_EXEC_DIRS {
+                let loader = Path::new(loader);
+                // Grant EXECUTE only where a read grant actually mounts the dir,
+                // so the Landlock rule's path exists in the constructed view.
+                let mounted = ep
+                    .fs
+                    .read
+                    .iter()
+                    .any(|r| loader.starts_with(PathBuf::from(r.as_str())));
+                if mounted {
+                    landlock_fs.push((loader.to_path_buf(), exec_access));
+                }
+            }
+            for entry in &ep.exec.allow {
+                let root = exec_glob_root(entry);
+                // deny_writable (§7.1): a writable path must never be executable.
+                if ep.exec.deny_writable
+                    && ep
+                        .fs
+                        .write
+                        .iter()
+                        .any(|w| root.starts_with(PathBuf::from(w.as_str())))
+                {
+                    return Err(SpawnError::InvalidPolicy(format!(
+                        "exec.allow `{entry}` lies under a writable path, but deny_writable is set"
+                    )));
+                }
+                landlock_fs.push((remap_target(&root, home, &shim_root), exec_access));
             }
         }
 

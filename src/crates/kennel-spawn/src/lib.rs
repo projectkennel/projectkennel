@@ -1033,11 +1033,27 @@ mod tests {
         assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));
         assert!(plan.cgroup_join, "policy-derived plans enter their cgroup");
 
-        // Landlock: a read rule for each read path, a write rule for each write.
-        assert!(plan
-            .landlock_fs
-            .iter()
-            .any(|(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)));
+        // Landlock with the exec allowlist active (exec.allow is non-empty):
+        // a read path is read-only and NOT implicitly executable; the
+        // allowlisted binary and the loader's lib dirs carry EXECUTE; writes
+        // carry write access (§7.1).
+        assert!(
+            plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr")
+                && acc.contains(AccessFs::READ_FILE)
+                && !acc.contains(AccessFs::EXECUTE)),
+            "with an exec allowlist, a read path must not be executable"
+        );
+        assert!(
+            plan.landlock_fs.iter().any(|(path, acc)| path
+                == &PathBuf::from("/usr/bin/python3")
+                && acc.contains(AccessFs::EXECUTE)),
+            "the allowlisted binary gets EXECUTE"
+        );
+        assert!(
+            plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr/lib")
+                && acc.contains(AccessFs::EXECUTE)),
+            "the loader's lib dir (covered by the /usr read grant) gets EXECUTE"
+        );
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
             == &PathBuf::from("/run/kennel/ai-coding/home")
             && acc.contains(AccessFs::WRITE_FILE)));
@@ -1080,6 +1096,51 @@ mod tests {
         };
         assert_eq!(plan.bpf_meta.get(0..4), Some(&magic[..]));
         assert_eq!(plan.bpf_meta.get(6), Some(&7u8), "ctx byte");
+    }
+
+    #[test]
+    fn empty_exec_allowlist_keeps_reads_executable() {
+        // The permissive posture (no exec.allow) is unchanged: a read path stays
+        // executable, and no separate per-binary EXECUTE rule is added.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.exec.allow.clear();
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        assert!(
+            plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr")
+                && acc.contains(AccessFs::EXECUTE)),
+            "without an exec allowlist, read paths remain executable"
+        );
+        assert!(
+            !plan
+                .landlock_fs
+                .iter()
+                .any(|(path, _)| path == &PathBuf::from("/usr/bin/python3")),
+            "no per-binary exec rule without an allowlist"
+        );
+    }
+
+    #[test]
+    fn exec_allow_under_writable_path_is_rejected_when_deny_writable() {
+        // deny_writable (§7.1): refuse to make a writable path executable.
+        let mut p = policy_with_placeholders(); // deny_writable = true
+        p.effective_policy
+            .exec
+            .allow
+            .push("/run/kennel/<kennel>/home/evil".to_owned());
+        let err = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect_err("an allowlisted binary under a writable path must be rejected");
+        assert!(matches!(err, SpawnError::InvalidPolicy(_)), "got {err:?}");
     }
 
     #[test]

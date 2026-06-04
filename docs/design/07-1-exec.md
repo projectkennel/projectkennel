@@ -91,9 +91,11 @@ This becomes the kennel's `$PATH`. Combined with `exec.allow`, Project Kennel ca
 
 ## 7.1.7 Dynamic linker and library considerations
 
-Landlock's filesystem ACL also covers reads. Project Kennel grants read access to `/usr/lib`, `/lib`, `/usr/lib64`, `/lib64`, and `/etc/ld.so.cache` by default in all templates, because every executable in `exec.allow` depends on these. Templates explicitly note this as a baseline grant.
+A dynamically-linked binary cannot run on `FS_EXECUTE` of the binary alone: the dynamic loader maps `libc`, the other shared objects, and the ELF interpreter (`ld.so`) itself with `PROT_EXEC`, and Landlock gates `mmap(PROT_EXEC)` of a file with `FS_EXECUTE` — not merely with read. (This is verified empirically by `kennel-syscall`'s `landlock_exec_semantics` regression test, which corrects an earlier draft of this section that assumed read access sufficed.)
 
-Statically-linked binaries don't need lib reads, but Project Kennel cannot inspect a binary's linkage at policy-load time without either parsing ELF or running ldd, both of which are out of scope. The unconditional lib-read grant is a small over-grant for static binaries; Project Kennel accepts this rather than introduce ELF parsing.
+So when the exec allowlist is active (see §7.1.11), Project Kennel grants **`FS_EXECUTE`** — not just read — on the loader's library directories (`/usr/lib`, `/lib`, `/lib64`, `/usr/lib64`, `/usr/local/lib`) wherever a read grant mounts them. These dirs hold shared objects rather than user-facing tools, so the over-grant is small and bounded; the binaries a policy means to gate (`/usr/bin`, `/sbin`, …) are *not* execute-granted unless listed in `exec.allow`.
+
+Statically-linked binaries don't need the lib grant, but Project Kennel cannot inspect a binary's linkage at policy-load time without either parsing ELF or running ldd, both of which are out of scope. The unconditional loader-dir grant is a small over-grant for static binaries; Project Kennel accepts this rather than introduce ELF parsing.
 
 ## 7.1.8 Interaction with `no_new_privs`
 
@@ -117,7 +119,19 @@ The combined effect of the exec policy:
 - Binaries in writable paths may not run.
 - Setuid behaviour is neutralised even if a setuid binary somehow runs.
 - `PATH` lookups find only the policy-permitted directories.
-- The dynamic linker can find libraries (because libs are readable by baseline grant).
+- The dynamic linker can load libraries (because the loader's lib dirs are execute-granted by baseline, §7.1.7).
+
+## 7.1.11 As-built: allowlist vs permissive posture, and the `deny` limitation
+
+The enforcement is keyed on whether `exec.allow` is non-empty:
+
+- **Allowlist active (`exec.allow` non-empty).** Read grants are read-only (no implicit execute); `FS_EXECUTE` is granted only on the allowlisted binaries and the loader's lib dirs (§7.1.7). Only listed binaries — and the workload's own launch command — can run. `deny_writable` is enforced here by refusing to translate a policy whose `exec.allow` lies under a writable path.
+- **Permissive (`exec.allow` empty).** Read grants keep execute (a readable path is runnable), as before. This is the posture of the base template; usable leaf templates declare an allowlist.
+
+Two limits follow from Landlock's allow-only model and are enforced/disclosed rather than papered over:
+
+- `exec.deny` cannot be *subtracted* from a Landlock allow grant. With an allowlist you express denials by **omission** (don't list the binary). The "allow `/usr/bin/*` but deny `sudo`" idiom is therefore not expressible as a directory grant minus a file; list the permitted binaries individually. (`exec.deny` is currently dropped at compile — a separate item — so settled policies carry only `allow`.)
+- In the permissive posture there is no allowlist to subtract from, so `exec.deny` is **not** Landlock-enforceable there. Denying a binary requires switching to an allowlist.
 
 ## 7.1.10 Test plan
 
