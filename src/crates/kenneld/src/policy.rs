@@ -1,6 +1,6 @@
 //! Loading and verifying policies against a trust store.
 //!
-//! The daemon's production [`PolicyLoader`](crate::server::PolicyLoader). The
+//! The daemon's production [`crate::server::PolicyLoader`]. The
 //! trust store is a directory of Ed25519 public keys — one `*.pub` file per
 //! signer, the file stem its key id and the contents its base64-encoded 32-byte
 //! public key — root-managed, like `/etc/kennel/subkennel`. Default location

@@ -5,7 +5,7 @@
 //! A user's leaf policy is mostly metadata plus *deltas* against a chosen template
 //! (`docs/design/05-templates.md` §5.2-5.3): `[[fs.read.add]]`, `[[net.allow.add]]`,
 //! `[[fs.deny.remove]]`, … Templates express direct rules (the `=` form handled by
-//! [`crate::resolve`]); leaves express add/remove deltas against the folded
+//! [`crate::resolve`](mod@crate::resolve)); leaves express add/remove deltas against the folded
 //! effective policy. The two forms cannot share one parsed type — TOML cannot hold
 //! both `fs.read = [...]` (array) and `[[fs.read.add]]` (table) under the same key —
 //! so a leaf parses into this separate [`LeafPolicy`], and [`LeafPolicy::apply`]

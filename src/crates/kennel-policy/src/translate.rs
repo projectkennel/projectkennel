@@ -2,7 +2,7 @@
 //!
 //! # Purpose
 //!
-//! The compiler stage after [`crate::resolve`]: take the effective [`SourcePolicy`]
+//! The compiler stage after [`crate::resolve`](mod@crate::resolve): take the effective [`SourcePolicy`]
 //! (rich, human-facing, every section) and produce the flat
 //! [`crate::settled::EffectivePolicy`] the runtime enforces, plus the list of
 //! per-instance placeholders the runtime must still fill

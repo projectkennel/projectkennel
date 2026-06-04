@@ -3,7 +3,7 @@
 //! Ties the pure modules together for a live connection: peek the first byte
 //! ([`protocol::detect`]), parse the handshake ([`socks5`] or [`http`]), decide
 //! against the [`Ruleset`], resolve names through the [`Resolver`] seam, connect
-//! upstream, signal the client, relay bytes, and write one [`audit`] record. One
+//! upstream, signal the client, relay bytes, and write one [`crate::audit`] record. One
 //! thread per connection, matching `kenneld`'s server and the OpenSSH bar; a
 //! proxy is bounded by policy, not by connection count.
 //!
@@ -22,7 +22,7 @@
 //!   destination, an unresolvable name, or a failed upstream connect all end the
 //!   connection without relaying, after an audit record is written.
 //! - **The handshake is time-bounded.** A client that connects and never speaks
-//!   is dropped after [`HANDSHAKE_TIMEOUT`]; the read timeout is cleared only
+//!   is dropped after `HANDSHAKE_TIMEOUT`; the read timeout is cleared only
 //!   once relaying begins, so legitimate long-lived tunnels are not cut.
 //! - **Resolved addresses are re-checked.** A name that clears the allowlist is
 //!   connected only to a resolved address that clears the deny rules

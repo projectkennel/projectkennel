@@ -346,7 +346,7 @@ pub fn write_frame<W: Write>(w: &mut W, body: &[u8]) -> io::Result<()> {
 /// Read one length-prefixed frame body.
 ///
 /// # Errors
-/// An OS error if the read fails or the frame exceeds [`MAX_MESSAGE`].
+/// An OS error if the read fails or the frame exceeds `MAX_MESSAGE`.
 pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;

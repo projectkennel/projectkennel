@@ -17,9 +17,10 @@
 //!
 //! Both halves are implemented. The runtime verification core ([`verify_settled`])
 //! is the spawn hot path. The compile-time front end is the rest: the [`source`]
-//! schema and validation, template-chain [`resolve`]ution and folding, [`leaf`]
-//! `+=`/`-=` deltas, [`translate`]ion + substitution to the settled form, ed25519
-//! [`source_sig`]nature verification, the [`lock`]file, and the [`compile`]
+//! schema and validation, template-chain [`resolve`](mod@crate::resolve)ution and
+//! folding, [`leaf`] `+=`/`-=` deltas, [`translate`](mod@crate::translate)ion +
+//! substitution to the settled form, ed25519 [`source_sig`]nature verification, the
+//! [`lock`]file, and the [`compile`](mod@crate::compile)
 //! orchestrator that ties them together. The CLI (`kennel compile`/`validate`/`sign`)
 //! drives this crate.
 

@@ -18,7 +18,7 @@ const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 /// The prefix for a per-kennel cgroup directory name (`kennel-<ctx>`).
 const KENNEL_PREFIX: &str = "kennel-";
 
-/// kenneld's own cgroup, as an absolute path under [`CGROUP_MOUNT`].
+/// kenneld's own cgroup, as an absolute path under `CGROUP_MOUNT`.
 ///
 /// # Errors
 /// Returns an OS error if `/proc/self/cgroup` cannot be read, or `InvalidData`

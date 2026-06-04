@@ -759,7 +759,7 @@ fn join_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
 /// map/program fds (and, with the program, the attachment).
 ///
 /// `objects` pairs each program spec with its compiled object bytes (from
-/// [`kennel_bpf::programs`] in production, or compiled in tests). Each program
+/// `kennel_bpf::programs` in production, or compiled in tests). Each program
 /// currently gets its own maps; sharing one map set across all programs is a
 /// later increment, so for now pass the program(s) whose maps you populate
 /// (e.g. `connect4` for the v4 egress allowlist). IPv6 maps and the bind/proxy
