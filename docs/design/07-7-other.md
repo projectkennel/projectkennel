@@ -49,53 +49,72 @@ allow_from = []             # who may signal us
 
 **Why it matters.** The parent kennel (the user's shell) typically has high-trust env vars in its environment: `AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, custom credentials. Without curation, all of these flow into the kennel.
 
-**Mechanism.** Not a kernel mechanism. The spawn tool curates the environment before `execve()` based on policy.
+**Mechanism.** Not a kernel mechanism. The spawn tool **synthesises** the workload's environment from policy and `execve`s with that built-from-scratch `envp`. It does **not** inherit the parent's environment and filter it down. The default environment is **empty**; every variable present is there because policy put it there.
+
+This is the deliberate inversion of the obvious approach. "Take the user's environment and curate the dangerous bits out" is the wrong model for the same reason a denylist is the wrong model anywhere: the parent's environment *is* the high-trust surface we are trying not to touch, and an allowlist that misses one variable leaks it. Synthesis from policy is closed by construction — a secret that policy never names cannot appear in the kennel, no matter what the parent's environment held. The user's environment is not a source of truth the spawn consults at all.
 
 **Policy primitives.**
 
 ```toml
 [env]
-# Whitelist of env vars to pass through. Everything else is dropped.
-pass = [
-    "PATH",
-    "HOME",          # Project Kennel overrides this anyway (to shim $HOME)
-    "USER",
-    "LANG",
-    "LC_*",
-    "TERM",
-    "TZ",
-    "COLORTERM",
-]
+# Optional: a file of KEY=value defaults to seed the environment from. Resolved
+# at compile time and its contents pinned into the settled policy (so the env is
+# signature-bound and reproducible, not read from disk at spawn). The shared,
+# reusable base — a team's standard locale/tooling vars — lives here; per-kennel
+# deviations go in `set`.
+template = "env/base.env"
 
-# Forced values, overriding anything inherited.
+# Forced values, layered over the template. PATH (from [exec].path, §7.1.6),
+# HOME (the shim home), USER (the masked account), and SHELL ([exec].shell) are
+# synthesised by the spawn and need not be repeated here.
 set = {
-    PATH = "/usr/bin:/bin",
-    TMPDIR = "/tmp",       # private tmpfs from §7.2
-    XDG_RUNTIME_DIR = "/run/user/<uid>",   # real, but shimmed contents per §7.4
-    SSH_AUTH_SOCK = "/home/u/.ssh/agent.sock",   # per-kennel ssh-agent
+    LANG = "C.UTF-8",
+    TZ = "UTC",
+    TMPDIR = "/tmp",        # private tmpfs from §7.2
 }
-
-# Categorical drops, even if in pass.
-deny = [
-    "SSH_AUTH_SOCK",         # use per-kennel agent, not user's
-    "GPG_AGENT_INFO",
-    "AWS_*",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GITLAB_TOKEN",
-    "NPM_TOKEN",
-    "*_TOKEN",
-    "*_SECRET",
-    "*_PASSWORD",
-    "*_API_KEY",
-]
 ```
 
-The deny list uses glob patterns and is intentionally aggressive about anything matching `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`. Users who need specific tokens passed into the kennel add them explicitly to `pass`, which makes the grant visible in the policy diff.
+There is **no `pass`-from-parent list** — the environment is built, not inherited, so there is correspondingly nothing to `deny`. The rare workload that genuinely needs a *value* carried from the invoking environment (never a secret — something dynamic like `TERM`) uses an explicit, single-variable opt-in that surfaces in the policy diff exactly as any other grant does; it is discouraged, it is per-variable, and it is never the default path.
 
-**Test plan.** Context inherits a shell with `OPENAI_API_KEY` set; kennel sees `OPENAI_API_KEY` unset. Context inherits `PATH` and `LANG`; both are present (per `pass`). Context sees `TMPDIR=/tmp` regardless of parent's setting.
+**Test plan.** A kennel whose parent shell has `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `SSH_AUTH_SOCK`, and a dozen other vars set: the kennel's `env` shows **only** the synthesised set (`PATH`/`HOME`/`USER`/`SHELL` + the template + `[env].set`), none of the parent's. Editing `[env].set` changes the kennel environment; editing the parent's environment never does.
+
+## 7.7.2a The run environment: PATH, shell, and shell-init files
+
+Once the environment is synthesised, three further pieces determine what a *shell* inside the kennel actually does. They are grouped here because together they are the workload's "run context"; individually they touch exec (§7.1) and the filesystem view (§7.2). All three follow the same principle as the environment: **synthesised from policy, reconstructed each spawn, persistent only where the policy explicitly says so.**
+
+**`$PATH`.** Set from `[exec].path`, not inherited (§7.1.6). The spawn writes it into the synthesised environment; it is the one env var the exec policy owns rather than `[env]`, because it is meaningless without the `exec.allow` allowlist it indexes into.
+
+**The login shell.** The kennel's synthetic `/etc/passwd` names a shell for the workload's uid (what `getpwuid()->pw_shell` and a bare interactive shell resolve to). It is policy-selectable:
+
+```toml
+[exec]
+# The kennel's login shell. Default "/bin/sh". Must also appear in exec.allow
+# (and on $PATH if invoked by name); the policy refuses a shell it would then
+# deny the right to execute.
+shell = "/bin/bash"
+```
+
+The selected shell sets both the `passwd` `pw_shell` field and `$SHELL`. It lives in `[exec]` (not `[env]`) because it must be an *executable the exec policy already permits* — selecting a shell that is not in `exec.allow` is a policy error caught at compile time, not a runtime surprise. The default `/bin/sh` is unchanged from today. The workload's own command still runs by direct `execve(argv)`; the shell matters only when a tool consults `pw_shell`/`$SHELL` or the workload spawns an interactive shell (an AI agent running shell commands is the common case).
+
+**Shell-init files (rc).** A shell reads init files at two levels; the kennel **synthesises both from policy** rather than copying the host's, and both are **reconstructed every spawn** unless the policy explicitly opts a path into persistence.
+
+- **System-level** (`/etc/profile`, `/etc/bash.bashrc`, `/etc/zsh/*`, `/etc/shells`): part of the **synthetic `/etc`** (§7.2.x), constructed minimal and **read-only**, reconstructed every spawn. They set a sane prompt, source the kennel `$PATH`, and otherwise do nothing. The workload cannot edit them (they are masked exactly like `passwd`/`group`), and nothing survives a run. Never a persistence surface.
+- **User-level** (`~/.bashrc`, `~/.profile`, `~/.bash_profile`, `~/.zshrc`, `~/.config/…`): **synthesised into the kennel's `$HOME` each spawn** from built-in minimal defaults and, optionally, a policy-referenced home/dotfile template (resolved and pinned at compile time, like the `[env]` template). The home belongs to the kennel — it is **not** the host user's real home, which is never exposed. By default this home is **reconstructed every spawn and not persistent**: a workload may edit its dotfiles within a run, but the edits are gone at teardown, so there is no self-poisoning surface.
+
+```toml
+[fs.home]
+# Seed the kennel home's dotfiles from this template (compile-time, pinned).
+template = "home/dev-skeleton"
+
+# Persistence is OFF by default: the home is reconstructed each spawn. Opt a
+# path (or the whole home) into a persistent writable bind only here. THIS is
+# where the self-persistence trade-off is accepted, per policy, in the diff.
+persist = ["projects", ".cache"]    # survives runs; ~/.bashrc et al. do NOT
+```
+
+**Persistence is opt-in, by policy, per path.** The default — synthesise and reconstruct — is the safe one: a persistent, workload-writable `~/.bashrc` *is* a self-persistence / re-execution vector (it runs on every future interactive shell in the kennel), so it is never the default. A policy that wants durable state names exactly which paths persist in `[fs.home].persist`; that list is the visible, diff-reviewed place the trade-off is taken. Persisting a *working* directory (`projects/`, a cache) is the common, low-risk case; persisting the *shell-init* path is possible but is a deliberate, named choice with the re-execution risk understood. Everything not named is reconstructed each run. The blast radius of any persisted dotfile is still bounded — this kennel's own future runs only, re-running as the already-confined workload under the exec allowlist + `no_new_privs` (§7.1), the synthesised environment (§7.7.2), Landlock (§7.2), and the egress allowlist (§7.3) — and an operator resets it by clearing the kennel's persistent store.
+
+**Test plan.** (1) `[exec].shell = "/bin/bash"` with `bash` in `exec.allow`: `getent passwd "$USER"` shows `/bin/bash`, `$SHELL` is `/bin/bash`. (2) `[exec].shell` naming a binary absent from `exec.allow` is a compile error. (3) `/etc/profile` exists, is read-only, and is byte-identical across two spawns. (4) With **no** `[fs.home].persist`, a workload's edit to `~/.bashrc` is **gone** on the next spawn (reconstructed). (5) With `~/.bashrc` (or its dir) named in `[fs.home].persist`, the edit **survives** — and is still absent from a different kennel's home and from the host user's real `~/.bashrc`. (6) The synthesised env and dotfiles are byte-identical for two policies that differ only in their parent shell's environment (synthesis ignores the parent).
 
 ## 7.7.3 Linux capabilities
 
