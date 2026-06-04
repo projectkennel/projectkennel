@@ -527,6 +527,17 @@ impl AuditFileConfig {
             && self.compress_after_seconds.is_none()
             && self.retain_count.is_none()
     }
+
+    /// Layer `over` onto `self`: each field `over` sets wins, the rest stay.
+    #[must_use]
+    pub fn overlay(&self, over: &Self) -> Self {
+        Self {
+            dir: over.dir.clone().or_else(|| self.dir.clone()),
+            rotate_at_bytes: over.rotate_at_bytes.or(self.rotate_at_bytes),
+            compress_after_seconds: over.compress_after_seconds.or(self.compress_after_seconds),
+            retain_count: over.retain_count.or(self.retain_count),
+        }
+    }
 }
 
 /// The per-kennel audit runtime (`02-3`): which sinks are active and any
@@ -578,6 +589,39 @@ impl AuditRuntime {
             && self.dbus_level.is_none()
             && self.syslog_facility.is_none()
             && self.file.is_empty()
+    }
+
+    /// Layer `over` onto `self`: every field `over` sets wins, the rest stay.
+    ///
+    /// kenneld combines the installation default, the per-user override, and the
+    /// per-kennel policy `[audit]` with this (`08` §8.1; precedence built-in <
+    /// `/etc/kennel/audit.toml` < `~/.config/kennel/audit.toml` < policy). A field
+    /// left unset everywhere falls through to the built-in default at writer build.
+    #[must_use]
+    pub fn overlay(&self, over: &Self) -> Self {
+        Self {
+            sinks: if over.sinks.is_empty() {
+                self.sinks.clone()
+            } else {
+                over.sinks.clone()
+            },
+            network_level: over
+                .network_level
+                .clone()
+                .or_else(|| self.network_level.clone()),
+            filesystem_level: over
+                .filesystem_level
+                .clone()
+                .or_else(|| self.filesystem_level.clone()),
+            exec_level: over.exec_level.clone().or_else(|| self.exec_level.clone()),
+            unix_level: over.unix_level.clone().or_else(|| self.unix_level.clone()),
+            dbus_level: over.dbus_level.clone().or_else(|| self.dbus_level.clone()),
+            syslog_facility: over
+                .syslog_facility
+                .clone()
+                .or_else(|| self.syslog_facility.clone()),
+            file: self.file.overlay(&over.file),
+        }
     }
 }
 

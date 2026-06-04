@@ -43,7 +43,7 @@ use crate::settled::{
     SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
     UnixSocket,
 };
-use crate::source::SourcePolicy;
+use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
 use std::collections::BTreeSet;
 
@@ -141,10 +141,19 @@ fn translate_audit(
     install: &InstallConstants,
     deferred: &mut BTreeSet<String>,
 ) -> Result<AuditRuntime, PolicyError> {
-    let Some(audit) = &src.audit else {
-        return Ok(AuditRuntime::default());
-    };
+    src.audit.as_ref().map_or_else(
+        || Ok(AuditRuntime::default()),
+        |audit| translate_audit_section(audit, install, deferred),
+    )
+}
 
+/// Translate one `[audit]` section — a policy's, or a standalone `audit.toml`
+/// defaults file — into the settled [`AuditRuntime`].
+fn translate_audit_section(
+    audit: &AuditSection,
+    install: &InstallConstants,
+    deferred: &mut BTreeSet<String>,
+) -> Result<AuditRuntime, PolicyError> {
     let mut sinks = Vec::new();
     for name in &audit.sinks {
         let kind = match name.as_str() {
@@ -207,6 +216,28 @@ fn translate_audit(
         syslog_facility,
         file,
     })
+}
+
+/// Parse a standalone `audit.toml` defaults file into an [`AuditRuntime`].
+///
+/// The file body is the `[audit]` section content at top level (`sinks`,
+/// `[file]`, `[network]`/`[filesystem]`/…), validated exactly as a policy's
+/// `[audit]` section is. For the installation-wide `/etc/kennel/audit.toml` and
+/// the per-user override (`08` §8.1). `dir` placeholders are left literal —
+/// kenneld roots the file sink at the per-kennel state dir regardless.
+///
+/// # Errors
+/// [`PolicyError::Parse`] if the TOML is malformed, or a translation error for an
+/// unknown sink/level/facility or a malformed size.
+pub fn parse_audit_defaults(toml: &str) -> Result<AuditRuntime, PolicyError> {
+    let section: AuditSection =
+        basic_toml::from_str(toml).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    let install = InstallConstants {
+        tag: 0,
+        ula_gid: String::new(),
+    };
+    let mut deferred = BTreeSet::new();
+    translate_audit_section(&section, &install, &mut deferred)
 }
 
 /// Parse a human byte size (`"64M"`, `"1G"`, `"512K"`, bare = bytes) into bytes.
@@ -848,6 +879,60 @@ mod tests {
             translate_audit_str("name=\"k\"\n[audit.file]\nrotate_at_bytes=\"big\"").is_err(),
             "bad size rejected"
         );
+    }
+
+    #[test]
+    fn audit_defaults_file_parses_the_section_body_at_top_level() {
+        // A standalone audit.toml: the [audit] body without the [audit] wrapper.
+        let rt = parse_audit_defaults(
+            r#"
+            sinks = ["journald"]
+            [network]
+            level = "full"
+            [file]
+            rotate_at_bytes = "128M"
+            compress_after_seconds = 3600
+            "#,
+        )
+        .expect("parse defaults");
+        assert_eq!(rt.sinks, vec![AuditSinkKind::Journald]);
+        assert_eq!(rt.network_level.as_deref(), Some("full"));
+        assert_eq!(rt.file.rotate_at_bytes, Some(128 * 1024 * 1024));
+        assert_eq!(rt.file.compress_after_seconds, Some(3600));
+    }
+
+    #[test]
+    fn audit_defaults_file_rejects_bad_values() {
+        assert!(parse_audit_defaults("sinks = [\"smtp\"]").is_err());
+        assert!(parse_audit_defaults("[file]\nrotate_at_bytes = \"big\"").is_err());
+        assert!(parse_audit_defaults("not = valid = toml").is_err());
+    }
+
+    #[test]
+    fn overlay_lets_the_higher_layer_win_per_field() {
+        // The defaults file uses the source `[audit]`-section shape: the facility
+        // is `[syslog] facility`, not the settled flat `syslog_facility`.
+        let base = parse_audit_defaults(
+            "sinks = [\"journald\"]\n[syslog]\nfacility = \"local0\"\n[file]\nretain_count = 8",
+        )
+        .expect("base");
+        let over = AuditRuntime {
+            network_level: Some("full".to_owned()),
+            file: AuditFileConfig {
+                retain_count: Some(2),
+                ..AuditFileConfig::default()
+            },
+            ..AuditRuntime::default()
+        };
+        let merged = base.overlay(&over);
+        // over wins where set:
+        assert_eq!(merged.network_level.as_deref(), Some("full"));
+        assert_eq!(merged.file.retain_count, Some(2));
+        // base survives where over is unset:
+        assert_eq!(merged.sinks, vec![AuditSinkKind::Journald]);
+        assert_eq!(merged.syslog_facility.as_deref(), Some("local0"));
+        // an empty `over.sinks` does not clobber the base sinks:
+        assert!(!merged.sinks.is_empty());
     }
 
     #[test]
