@@ -1,6 +1,6 @@
 //! The dependency-free sinks: JSONL file (the default), stdout, and RFC 5424
-//! syslog. The journald sink lives in [`crate::journald`] behind a feature flag
-//! because it alone needs FFI.
+//! syslog. The journald sink lives in the `journald` module behind a feature
+//! flag because it alone needs FFI.
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
