@@ -292,6 +292,9 @@ mod tests {
     #[cfg(feature = "root-tests")]
     #[test]
     fn unshare_mount_namespace_changes_the_mount_ns() {
+        if crate::unistd::skip_if_unprivileged("unshare_mount_namespace_changes_the_mount_ns") {
+            return;
+        }
         let before = std::fs::read_link("/proc/self/ns/mnt").expect("read ns link");
         // SAFETY: fork(); the child only unshares, reads a proc link, and _exit()s.
         match unsafe { nix::unistd::fork() }.expect("fork") {

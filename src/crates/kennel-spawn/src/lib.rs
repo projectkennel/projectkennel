@@ -1668,8 +1668,24 @@ mod root_tests {
     use std::io::Read;
     use std::process::{Command, Stdio};
 
+    /// Skip a privilege-requiring test with cause on an unprivileged runner (a
+    /// skip is not a proof), matching the other crates' root-tests so `cargo test
+    /// --all-features` is green for any runner while `sudo … --features
+    /// root-tests` still exercises it.
+    fn skip_if_unprivileged(test: &str) -> bool {
+        let euid = kennel_syscall::unistd::effective_uid();
+        if euid != 0 {
+            eprintln!("skipping {test}: requires root (euid={euid}) for the privileged spawn");
+            return true;
+        }
+        false
+    }
+
     #[test]
     fn pid_and_mount_namespace_isolate_the_workload() {
+        if skip_if_unprivileged("pid_and_mount_namespace_isolate_the_workload") {
+            return;
+        }
         // mount/pid/ipc isolation, Landlock allowing just enough to run a shell
         // and read /proc, no seccomp. A new PID namespace makes the shell PID 1;
         // the freshly-mounted /proc shows only the namespace's own processes.
@@ -1731,6 +1747,9 @@ mod root_tests {
 
     #[test]
     fn file_binds_shadow_targets_in_the_kennel() {
+        if skip_if_unprivileged("file_binds_shadow_targets_in_the_kennel") {
+            return;
+        }
         // Stage a synthetic file and bind it over a target (the /etc-shadow idiom).
         // Outside /tmp, which spawn covers with a fresh tmpfs. A non-existent target
         // is included to prove it is skipped rather than failing the spawn.
@@ -1796,6 +1815,9 @@ mod root_tests {
 
     #[test]
     fn pivot_root_hides_non_granted_names() {
+        if skip_if_unprivileged("pivot_root_hides_non_granted_names") {
+            return;
+        }
         // The constructed view (§7.2.5) must make a non-granted sibling's NAME
         // absent (ENOENT), not merely access-denied, while a granted path stays
         // readable through the shim. Staged outside /tmp (the seal tmpfs-mounts
@@ -1972,6 +1994,9 @@ mod root_tests {
 
     #[test]
     fn bpf_egress_enforces_the_allowlist() {
+        if skip_if_unprivileged("bpf_egress_enforces_the_allowlist") {
+            return;
+        }
         // A listener so a permitted connect *succeeds* (vs. a denied one failing
         // with EPERM) — success/failure cleanly distinguishes allow from deny.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
@@ -1999,6 +2024,9 @@ mod root_tests {
 
     #[test]
     fn spawn_joins_the_workload_into_its_cgroup() {
+        if skip_if_unprivileged("spawn_joins_the_workload_into_its_cgroup") {
+            return;
+        }
         // The workload, spawned with `cgroup_join`, should write itself into the
         // cgroup in the seal — so its /proc/self/cgroup reports that cgroup. Run
         // as root, which may write any cgroup.procs; the delegated-subtree case
