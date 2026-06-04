@@ -46,8 +46,13 @@ describe these read as roadmap.
   rotated file (best-effort, swept at the next rotation, never touching the live
   append path), so no DEFLATE codec enters the TCB — `zip`/`flate2` were weighed
   and rejected (a file at rest is `gzip(1)`'s job; flate2's `rust_backend` would
-  have added five crates, two carrying SIMD `unsafe`, for no gain). Still genuinely
-  owed (userspace): the installation-wide `/etc/kennel/audit.toml`.
+  have added five crates, two carrying SIMD `unsafe`, for no gain). The
+  installation-wide `/etc/kennel/audit.toml` and per-user `~/.config/kennel/audit.toml`
+  defaults are **BUILT**: kenneld reads both at spawn (each the `[audit]` section
+  body, validated by the policy's own audit validator) and merges them per-field
+  under the leaf policy — built-in &lt; `/etc/kennel` &lt; `~/.config` &lt; policy.
+  With that, the audit subsystem owes nothing further at the userspace level;
+  kernel-side BPF/LSM reporting via `dmesg` remains a non-goal here by design.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
   / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
   is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).

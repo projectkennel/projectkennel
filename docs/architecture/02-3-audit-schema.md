@@ -314,6 +314,8 @@ Defaults: sinks = `["file"]`, all classes at `summary` except `filesystem` which
 
 An installation-wide default lives in `/etc/kennel/audit.toml` and is inherited by every kennel unless overridden in the leaf policy. The installation default is the right place to choose `["journald"]` once; per-kennel overrides are reserved for the exceptional case.
 
+kenneld reads two defaults files at spawn — `/etc/kennel/audit.toml` (root-owned, installation-wide) and `~/.config/kennel/audit.toml` (the user's override) — each holding the `[audit]` section body at top level (`sinks`, `[network]`/`[filesystem]`/…, `[file]`, `[syslog]`), validated by exactly the policy's `[audit]` validator. They merge per-field, lowest to highest precedence: **built-in default < `/etc/kennel/audit.toml` < `~/.config/kennel/audit.toml` < the leaf policy's `[audit]`**. A missing file is skipped and a malformed one is logged and skipped, so a bad defaults file never blocks a spawn.
+
 ---
 
 ## Consumer guidance
