@@ -40,7 +40,7 @@ Why this is the right primitive:
 The kernel-level rules become trivially expressible:
 
 - `cgroup BPF inet4_connect`: allow `127.42.<ctx>.1:1080`, deny everything else.
-- `cgroup BPF inet6_connect`: allow `[fd<gid>:<tag>:<ctx>::1]:1080`, deny everything else.
+- `cgroup BPF inet6_connect`: allow the kennel's IPv6 primary (`0xfd | gid(40) | ctx(16) | host=1`) on `:1080`, deny everything else.
 - `cgroup BPF inet_sock_create`: deny `AF_PACKET`, `AF_NETLINK`, raw socket families.
 - `cgroup BPF bind`: allow loopback in the kennel's assigned range, deny elsewhere.
 

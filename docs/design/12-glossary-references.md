@@ -38,7 +38,7 @@
 
 **Landlock.** A Linux LSM available since kernel 5.13, providing unprivileged sandboxing of filesystem access. Network port restrictions since 6.7. Project Kennel's primary filesystem mechanism.
 
-**Loopback subnet, per-kennel.** The `127.<tag>.<ctx>.0/24` IPv4 range and `fd<global>:<tag>:<ctx>::/64` IPv6 ULA assigned to a kennel for its private loopback traffic. See §7.3.6.
+**Loopback subnet, per-kennel.** The IPv4 `/28` laid out `127 | tag(12) | ctx(8) | host(4)` and the IPv6 `/64` laid out `0xfd | gid(40) | ctx(16) | host(64)` assigned to a kennel for its private loopback traffic. `tag`/`gid` are the user's per-user values (from `/etc/kennel/subkennel`); `ctx` is the kennel's context. See §7.3.6.
 
 **LSM.** Linux Security Module. The kernel framework that AppArmor, SELinux, Landlock, BPF LSM, and others plug into.
 

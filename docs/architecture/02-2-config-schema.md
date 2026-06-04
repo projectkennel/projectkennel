@@ -258,9 +258,9 @@ The following placeholders are substituted at load time:
 | Placeholder | Meaning |
 |---|---|
 | `<kennel>` | The kennel's runtime ID (e.g., the kennel name for named kennels, or the generated ID for `--template` ad-hoc kennels). |
-| `<tag>` | The Project Kennel installation's tag byte (per-installation, fixed at install time). |
+| `<tag>` | The caller's 12-bit IPv4 loopback tag, from their `/etc/kennel/subkennel` allocation (per-user, fixed for that user). |
 | `<ctx>` | The kennel's allocated context byte (per-kennel, assigned at start by kenneld). |
-| `<gid>` | The IPv6 ULA `<gid>` byte for this installation (random at install time). |
+| `<gid>` | The caller's 40-bit IPv6 ULA global ID, from their `/etc/kennel/subkennel` allocation (per-user). |
 | `<uid>` | The user's UID as a decimal string. |
 
 Substitution happens once at policy resolution; the substituted values are then immutable for the lifetime of the kennel. A template that uses `<ctx>` resolves to a different concrete value for each kennel that derives from it.

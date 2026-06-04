@@ -40,7 +40,7 @@ Operations:
 - Remove the addresses on kennel teardown.
 - Create a cgroup under `/sys/fs/cgroup/kennel/<kennel>/` if cgroup v2 delegation is not pre-configured for the user (a fallback path; modern systemd configurations pre-delegate).
 
-Refuses anything outside the per-kennel address allocations — each kennel's `127.<tag>.<ctx>.0/24` for IPv4 and `fd<gid>:<tag>:<ctx>::/64` for IPv6 — and outside the `kennel/` cgroup hierarchy. The validation is performed before any privileged syscall and rejects with a structured error if the request is out of scope. The `<tag>` byte is fixed per Project Kennel installation; `<ctx>` is allocated per kennel by kenneld and passed in the request.
+Refuses anything outside the per-kennel address allocations — each kennel's IPv4 `/28` (laid out `127 | tag(12) | ctx(8) | host(4)`) and IPv6 `/64` (`0xfd | gid(40) | ctx(16) | host(64)`) — and outside the `kennel/` cgroup hierarchy. The validation is performed before any privileged syscall and rejects with a structured error if the request is out of scope. The `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`); `ctx` is allocated per kennel by kenneld and passed in the request.
 
 **Invocation model:** short-lived per operation. The caller `exec()`s `kennel-privhelper`, the helper reads a structured request from stdin, validates it, performs the operation, writes a response to stdout, and exits. There is no long-running privileged daemon. This bounds the privileged process's exposure to the duration of a single operation.
 
@@ -48,7 +48,7 @@ A future revision may replace this with a long-running daemon owning the same ca
 
 ### `kennel-netproxy` (per-kennel SOCKS5 proxy)
 
-SOCKS5 proxy enforcing the per-destination network allowlist. One instance per active kennel; concurrent kennels mean concurrent proxy processes, each listening on a different per-kennel loopback address (`127.<tag>.<ctx>.1:1080` and the corresponding IPv6 ULA).
+SOCKS5 proxy enforcing the per-destination network allowlist. One instance per active kennel; concurrent kennels mean concurrent proxy processes, each listening on a different per-kennel loopback address — the kennel's primary (host offset 1 in its `/28`) at port 1080, exposed to the workload as `$KENNEL_SOCKS_PROXY`, plus the corresponding IPv6 ULA.
 
 Reads its configuration at startup from kenneld (resolved policy fragment relevant to networking) and accepts reconfiguration via SIGHUP-triggered reload of its control socket. Writes network audit events to the kennel's audit directory.
 
@@ -143,7 +143,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |        v  (spawn sequence)                                           |
    |   Workload (in cgroup, Landlock sealed)                              |
    |        |                                                             |
-   |        +-->  127.<tag>.<ctx>.1:1080  (SOCKS5 to netproxy)            |
+   |        +-->  $KENNEL_SOCKS_PROXY (kennel primary, :1080)            |
    |        +-->  /run/kennel/<id>/ssh-agent.sock  (shim-mounted)         |
    |        +-->  /run/user/<uid>/bus  (D-Bus, via dbus-proxy)            |
    |                                                                      |
@@ -166,7 +166,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
 Notes on the diagram:
 
 - The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with the workload's stdio fds over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-4-ipc.md`.
-- The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is `127.<tag>.<ctx>.1:1080`, never the control socket.
+- The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is the kennel's primary loopback (`$KENNEL_SOCKS_PROXY` — host offset 1 in its `/28`, port 1080), never the control socket.
 - The ssh-agent socket is bind-mounted from `/run/kennel/<id>/ssh-agent.sock` into the workload's `$HOME/.ssh/agent.sock` via the shim. The workload sees only the shim path.
 - BPF programs do not push events to userspace; they write into a ringbuf. A reader in kenneld drains the ringbuf and writes JSONL events to the audit directory.
 - The privhelper is invoked by kenneld during a kennel's bring-up and teardown.

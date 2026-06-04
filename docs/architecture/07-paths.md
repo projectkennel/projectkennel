@@ -135,7 +135,7 @@ Owner: root. Mode: directory `0755`, files `0644`. The `keys/` directory holds p
 
 In an attested deployment, `settled/` holds the signed settled policies pushed by the organisation's central compile infrastructure. The workstation enforces these directly (`02-2-config-schema.md` §The settled policy); it need not hold the `templates/`, the lockfiles, or exercise the resolver. `kennel run` verifies the settled policy's signature against a key in `keys/` and spawns.
 
-The `kennel.conf` file pins per-installation settings that are stable for the life of the installation: the `<tag>` byte for IPv4 loopback allocation, the IPv6 ULA `/48` prefix, the path to the privhelper binary, optional overrides for kernel-feature detection (used when an environment under-reports its capabilities).
+The `kennel.conf` file pins per-installation settings that are stable for the life of the installation: the path to the privhelper binary and optional overrides for kernel-feature detection (used when an environment under-reports its capabilities). The per-*user* loopback allocation — the 12-bit IPv4 `tag` and the 40-bit IPv6 ULA `gid` — is **not** here; it lives in `/etc/kennel/subkennel` (`<uid>:<tag>:<gid>:<namespace>`), and the daemon loads it from there to fill `<tag>`/`<gid>` at spawn.
 
 ### `/sys/fs/cgroup/kennel/`
 
@@ -228,9 +228,9 @@ Paths in policies may use placeholders that are resolved at policy-load time. Th
 |---|---|
 | `<kennel>` | The kennel's runtime ID (e.g., `ai-coding`). |
 | `<uid>` | The user's UID as a decimal string. |
-| `<tag>` | The installation's tag byte (fixed at install time). |
+| `<tag>` | The caller's 12-bit IPv4 loopback tag, from `/etc/kennel/subkennel` (per-user). |
 | `<ctx>` | The kennel's allocated context byte (per-kennel). |
-| `<gid>` | The installation's IPv6 ULA `<gid>` byte. |
+| `<gid>` | The caller's 40-bit IPv6 ULA global ID, from `/etc/kennel/subkennel` (per-user). |
 
 `<id>` in this chapter is equivalent to `<kennel>` after substitution; the variant is used in path templates because some paths use the runtime ID even for ad-hoc kennels that do not have a user-facing name.
 

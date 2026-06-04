@@ -38,7 +38,7 @@ Each boundary is described in its own section below. The descriptions follow a c
 
 **Validator.** `kennel-privhelper`'s `validate` module. For each operation:
 
-- `addr-add` / `addr-remove`: the `addr` must fall within `127.<tag>.<ctx>.0/24` for IPv4 or `fd<gid>:<tag>:<ctx>::/64` for IPv6, where `<tag>` is the installation's fixed byte and `<ctx>` is the value in the request. The `interface` must be `lo` or a per-kennel dummy interface named `kennel-<id>`. The `prefix` is fixed at 24 (IPv4) or 64 (IPv6); any other value is refused.
+- `addr-add` / `addr-remove`: the `addr` must fall within the caller's per-kennel loopback subnet — IPv4 laid out `127 | tag(12) | ctx(8) | host(4)` (a **/28**) or IPv6 `0xfd | gid(40) | ctx(16) | host(64)` (a **/64**), where `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`) and `ctx` is the value in the request. The helper reconstructs the embedded `tag`/`ctx` from the address and refuses anything outside the caller's scope. The `interface` must be `lo` or a per-kennel dummy interface named `kennel-<id>`. The `prefix` is fixed at 28 (IPv4) or 64 (IPv6); any other value is refused.
 - `cgroup-create` / `cgroup-delete`: the `path` must start with `/sys/fs/cgroup/kennel/` and contain no `..` components or symlinks. The cgroup must be empty before delete.
 
 The validator rejects out-of-scope requests with the `out-of-scope` error code; nothing happens at the privileged syscall level.
