@@ -32,9 +32,13 @@ describe these read as roadmap.
   would add privilege and TCB for no gain. So BPF/LSM routing is a non-goal here,
   not a remnant. Both userspace sources now route through the writer — kenneld's
   lifecycle events and the netproxy's per-request `net.egress` events (sharing one
-  `kennel_uuid` per run). Still genuinely owed (userspace): routing the
-  privhelper's events through the writer; file-sink gzip compression
-  (`compress_after_seconds`, needs a vetted compression crate per §5); and the
+  `kennel_uuid` per run). File-sink gzip compression (`[audit].file.compress_after_seconds`)
+  is **BUILT**: the sink shells out to the system `gzip(1)` on the already-closed,
+  rotated file (best-effort, swept at the next rotation, never touching the live
+  append path), so no DEFLATE codec enters the TCB — `zip`/`flate2` were weighed
+  and rejected (a file at rest is `gzip(1)`'s job; flate2's `rust_backend` would
+  have added five crates, two carrying SIMD `unsafe`, for no gain). Still genuinely
+  owed (userspace): routing the privhelper's events through the writer; and the
   installation-wide `/etc/kennel/audit.toml`.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
   / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
