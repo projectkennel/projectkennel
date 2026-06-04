@@ -53,8 +53,9 @@ impl Sink for JournaldSink {
 }
 
 /// Append one canonical field as one or more `KENNEL_<UPPER>=value` entries.
-/// Arrays become repeated keys (journald allows multi-valued fields); nested
-/// values are unused by the current schema.
+/// Arrays become repeated keys (journald allows multi-valued fields); an object
+/// flattens to `KENNEL_<KEY>_<SUBKEY>=value` (journald has no nested structure),
+/// e.g. a `priv` event's `params` becomes `KENNEL_PARAMS_CTX`, `KENNEL_PARAMS_ADDR`.
 fn append_journal_fields(out: &mut Vec<String>, key: &str, value: &Rendered) {
     let name = journal_name(key);
     match value {
@@ -66,6 +67,11 @@ fn append_journal_fields(out: &mut Vec<String>, key: &str, value: &Rendered) {
         Rendered::Array(items) => {
             for item in items {
                 append_journal_fields(out, key, item);
+            }
+        }
+        Rendered::Object(entries) => {
+            for (subkey, subval) in entries {
+                append_journal_fields(out, &format!("{key}_{subkey}"), subval);
             }
         }
     }

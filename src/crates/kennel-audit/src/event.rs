@@ -34,6 +34,10 @@ pub enum Value {
     Null,
     /// An ordered array of values (e.g. a template chain).
     Array(Vec<Self>),
+    /// An ordered object of named sub-values (e.g. a privileged op's `params`).
+    /// Keys are internal literals; values are rendered (and sanitised if
+    /// untrusted) recursively.
+    Object(Vec<(&'static str, Self)>),
 }
 
 impl Value {
@@ -47,6 +51,12 @@ impl Value {
     #[must_use]
     pub fn untrusted(s: impl Into<String>) -> Self {
         Self::Untrusted(s.into())
+    }
+
+    /// An object value from ordered named fields.
+    #[must_use]
+    pub const fn object(fields: Vec<(&'static str, Self)>) -> Self {
+        Self::Object(fields)
     }
 }
 

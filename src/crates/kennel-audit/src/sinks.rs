@@ -387,7 +387,7 @@ fn sd_param_text(value: &Rendered) -> Option<String> {
         Rendered::Int(i) => Some(i.to_string()),
         Rendered::Uint(u) => Some(u.to_string()),
         Rendered::Bool(b) => Some(b.to_string()),
-        Rendered::Null | Rendered::Array(_) => None,
+        Rendered::Null | Rendered::Array(_) | Rendered::Object(_) => None,
     }
 }
 

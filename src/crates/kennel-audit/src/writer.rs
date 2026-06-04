@@ -284,6 +284,12 @@ fn render_value(value: &Value, sanitised: &mut bool) -> Rendered {
         Value::Array(items) => {
             Rendered::Array(items.iter().map(|v| render_value(v, sanitised)).collect())
         }
+        Value::Object(entries) => Rendered::Object(
+            entries
+                .iter()
+                .map(|(k, v)| (*k, render_value(v, sanitised)))
+                .collect(),
+        ),
     }
 }
 

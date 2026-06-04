@@ -29,6 +29,8 @@ pub enum Rendered {
     Null,
     /// An ordered array.
     Array(Vec<Self>),
+    /// An ordered object of named sub-values.
+    Object(Vec<(&'static str, Self)>),
 }
 
 /// One fully-rendered audit event: ordered canonical fields plus the metadata a
@@ -121,7 +123,7 @@ fn scalar_text(value: &Rendered) -> Option<String> {
         Rendered::Int(i) => Some(i.to_string()),
         Rendered::Uint(u) => Some(u.to_string()),
         Rendered::Bool(b) => Some(b.to_string()),
-        Rendered::Null | Rendered::Array(_) => None,
+        Rendered::Null | Rendered::Array(_) | Rendered::Object(_) => None,
     }
 }
 
@@ -148,6 +150,21 @@ fn push_value(out: &mut String, value: &Rendered) {
                 push_value(out, item);
             }
             out.push(']');
+        }
+        Rendered::Object(entries) => {
+            out.push('{');
+            let mut first = true;
+            for (key, val) in entries {
+                if first {
+                    first = false;
+                } else {
+                    out.push(',');
+                }
+                push_json_string(out, key);
+                out.push(':');
+                push_value(out, val);
+            }
+            out.push('}');
         }
     }
 }
@@ -234,6 +251,28 @@ mod tests {
         assert!(r
             .to_jsonl()
             .contains(r#""template_chain":["base","ai-coding-strict"]"#));
+    }
+
+    #[test]
+    fn objects_render_as_nested_json() {
+        let r = Record {
+            resource: Resource::Priv,
+            event_type: "priv.invoke",
+            outcome: Outcome::Allow,
+            fields: vec![(
+                "params",
+                Rendered::Object(vec![
+                    ("ctx", Rendered::Uint(7)),
+                    ("addr", Rendered::Str("127.0.144.81".to_owned())),
+                ]),
+            )],
+        };
+        assert!(
+            r.to_jsonl()
+                .contains(r#""params":{"ctx":7,"addr":"127.0.144.81"}"#),
+            "{}",
+            r.to_jsonl()
+        );
     }
 
     #[test]
