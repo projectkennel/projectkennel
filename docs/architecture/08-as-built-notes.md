@@ -11,27 +11,30 @@ Real design intent, not dead ideas; simply not implemented yet. The chapters tha
 describe these read as roadmap.
 
 - **The run environment** (`07-7-other.md` §7.7.2 / §7.7.2a, `07-1-exec.md` §7.1.6) —
-  **designed 2026-06-04, not built; the env synthesis is a live security gap.** The
-  `[env]` section is parsed and folded in `kennel-policy` but dropped from the settled
-  policy and **never applied at spawn**: there is no `env_clear` on the spawn path, so
-  the workload inherits kenneld's full environment plus a few additions
-  (`HOME`/`KENNEL_SOCKS_PROXY`/unix-shim vars). Owed, and prioritised because it is a
-  control. **Design direction (operator, 2026-06-04): synthesise the environment from
-  policy — do NOT curate the user's environment down.** The spawn builds `envp` from
-  scratch (empty + a policy-referenced `[env].template`, pinned at compile time, +
-  `[env].set` + the synthesised `PATH`/`HOME`/`USER`/`SHELL`); there is no
-  `pass`-from-parent list and nothing to `deny`, because the parent's environment is
-  never a source. The same principle governs the rest of the run context:
-  **`[exec].shell`** (synthetic-passwd shell + `$SHELL`, default `/bin/sh`, must be in
-  `exec.allow`); and the **shell-init/rc model** — system rc (`/etc/profile`,
-  `/etc/bash.bashrc`) synthetic + read-only + reconstructed each spawn, user rc
-  (`~/.bashrc`, `~/.config/…`) synthesised into the kennel's own `$HOME` (never the
-  host home) from built-in defaults + an optional `[fs.home].template`. **Persistence
-  is opt-in, per path, via `[fs.home].persist`** — OFF by default (reconstruct each
-  spawn, no self-poisoning surface); a policy names exactly which paths survive runs,
-  which is where the persistent-`~/.bashrc` re-execution trade-off is taken in the
-  diff. Today the synthetic `/etc` builds passwd/group/hosts/resolv.conf/
-  nsswitch.conf/services only — no rc files — and `passwd` hardcodes `/bin/sh`.
+  **mostly BUILT (2026-06-04); the env-leak gap is closed.** The workload no longer
+  inherits kenneld's environment: the spawn `env_clear`s and **synthesises `envp` from
+  policy** — `PATH` (from `[exec].path`), `USER`/`LOGNAME` (the masked `kennel`
+  account), `SHELL` (`[exec].shell`), `HOME` (the shim home), then the fixed
+  `[env].set` vars (substituted; the legacy `[env].pass`/`deny` curation fields are
+  ignored — synthesis supersedes them, the parent's environment is never a source).
+  Carried in the settled policy as `EnvRuntime` + `ExecPolicy.path`/`shell`; applied
+  in `kenneld::server::run_kennel` to the workload `Command`. **`[exec].shell`**
+  (default `/bin/sh`, compile error if not in a non-empty `exec.allow`) sets the
+  synthetic-`passwd` `pw_shell` and `$SHELL`. **System rc is BUILT**: `/etc/profile`
+  and `/etc/bash.bashrc` are in the synthetic `/etc` — minimal, read-only, rebuilt
+  each spawn (never a persistence surface).
+  **Remaining (not built):** seeding **user** dotfiles (`~/.bashrc`, `~/.profile`,
+  `~/.config/…`) into the kennel's own `$HOME` from built-in defaults + an optional
+  `[fs.home].template`, and the **`[fs.home].persist` opt-in** (OFF by default —
+  reconstruct each spawn; a policy names the paths that survive runs, where the
+  persistent-`~/.bashrc` re-execution trade-off is taken). This piece is deferred
+  because it reworks the kennel `$HOME` from today's persistent writable bind into a
+  reconstructed-by-default surface, which touches the constructed-view / `pivot_root`
+  lifecycle in `kennel-spawn` (the proven unprivileged-spawn path) and wants that work
+  stream's root-e2e validation rather than a hasty change. The design is fixed
+  (§7.7.2a); the runtime approach is for kenneld to write the synthesised dotfiles into
+  the home each spawn (overwrite = reconstruct) and skip the paths named in
+  `[fs.home].persist`.
 
 - **The unified audit writer + sinks** (`02-3-audit-schema.md`) — **BUILT** (it
   graduated from this roadmap; kept here for the remnants still owed). The
