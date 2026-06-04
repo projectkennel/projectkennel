@@ -202,6 +202,23 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     Response::ok()
 }
 
+/// Build the `struct bind_subnet` (28 bytes) the `bind4`/`bind6` programs read,
+/// from the kennel's own loopback addresses carried in `meta` (the `kennel_meta`
+/// layout: `proxy_addr_v4` at offset 8, `proxy_addr_v6` at 16). The prefixes are
+/// the per-kennel allocation widths (v4 `/28`, v6 `/64`). Returns `None` if the
+/// meta is too short to hold them (never, for a well-formed payload).
+#[cfg(feature = "bpf-egress")]
+fn bind_subnet_value(meta: &[u8]) -> Option<[u8; 28]> {
+    let v4_addr = meta.get(8..12)?;
+    let v6_addr = meta.get(16..32)?;
+    let mut value = [0u8; 28];
+    value.get_mut(0..4)?.copy_from_slice(v4_addr);
+    value.get_mut(4..8)?.copy_from_slice(&28u32.to_ne_bytes());
+    value.get_mut(8..24)?.copy_from_slice(v6_addr);
+    *value.get_mut(24)? = 64;
+    Some(value)
+}
+
 /// Write `payload` into whichever of a loaded program's egress maps it declares.
 #[cfg(feature = "bpf-egress")]
 fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::io::Result<()> {
@@ -214,6 +231,15 @@ fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::i
             &payload.meta,
             BPF_ANY,
         )?;
+    }
+    // Per-kennel bind subnet (§7.3): the INADDR_ANY/in6addr_any rewrite target
+    // for dev-server binds. The bind4/bind6 programs fail closed without it, so
+    // a workload inside the kennel cannot bind a listening socket. The kennel's
+    // own loopback addresses are already in the meta, so it derives from there.
+    if loaded.maps.contains_key("bind_subnet_map") {
+        if let Some(value) = bind_subnet_value(&payload.meta) {
+            loaded.update_map("bind_subnet_map", &0u32.to_ne_bytes(), &value, BPF_ANY)?;
+        }
     }
     if loaded.maps.contains_key("allow_v4") {
         for (key, value) in &payload.allow_v4 {
@@ -269,5 +295,28 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     match result {
         Ok(()) => Response::ok(),
         Err(e) => Response::internal(errno_of(&e)),
+    }
+}
+
+#[cfg(all(test, feature = "bpf-egress"))]
+mod tests {
+    use super::bind_subnet_value;
+
+    #[test]
+    fn bind_subnet_is_derived_from_the_meta_loopback_addresses() {
+        // kennel_meta layout: proxy_addr_v4 @8..12 (net order), proxy_addr_v6 @16..32.
+        let mut meta = [0u8; 64];
+        meta.get_mut(8..12)
+            .expect("v4 range")
+            .copy_from_slice(&[127, 42, 7, 1]);
+        meta.get_mut(16..32)
+            .expect("v6 range")
+            .copy_from_slice(&[0xfd, 0, 0, 0, 0, 0, 7, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let v = bind_subnet_value(&meta).expect("meta long enough");
+        assert_eq!(v.get(0..4), Some(&[127u8, 42, 7, 1][..]), "v4_addr");
+        assert_eq!(v.get(4..8), Some(&28u32.to_ne_bytes()[..]), "v4_prefix /28");
+        assert_eq!(v.get(8..24), meta.get(16..32), "v6_addr");
+        assert_eq!(v.get(24), Some(&64u8), "v6_prefix /64");
     }
 }
