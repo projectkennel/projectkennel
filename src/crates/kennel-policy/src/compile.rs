@@ -28,9 +28,7 @@
 use crate::leaf::LeafPolicy;
 use crate::lock::Lockfile;
 use crate::resolve::{resolve_verified, ChainLink, TemplateSource};
-use crate::settled::{
-    InstallConstants, Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy,
-};
+use crate::settled::{Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy};
 use crate::signature::SignatureEnvelope;
 use crate::source::SourcePolicy;
 use crate::source_sig::Trust;
@@ -71,8 +69,9 @@ pub struct Compiled {
 /// Resolve, translate, and assemble `entry` into a settled policy.
 ///
 /// `entry` is the most-derived source artefact (a leaf or a template); `source`
-/// supplies its ancestors; `install` carries the installation constants substituted
-/// at compile time; `compiler_version` is recorded in provenance.
+/// supplies its ancestors; `compiler_version` is recorded in provenance. All
+/// placeholders (including `<tag>`/`<gid>`) are deferred to spawn — the compiler
+/// never needs the installation's tag/gid.
 ///
 /// # Errors
 ///
@@ -82,7 +81,6 @@ pub fn compile(
     entry: &SourcePolicy,
     source: &dyn TemplateSource,
     trust: &Trust<'_>,
-    install: &InstallConstants,
     compiler_version: &str,
 ) -> Result<Compiled, PolicyError> {
     let resolved = resolve_verified(entry, source, trust)?;
@@ -110,8 +108,8 @@ pub fn compile(
     crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
-    let translated = translate(&effective, install)?;
-    assemble(name, &translated, &chain, &tcv, install, compiler_version)
+    let translated = translate(&effective)?;
+    assemble(name, &translated, &chain, &tcv, compiler_version)
 }
 
 /// Resolve, apply a leaf's deltas, translate, and assemble a settled policy.
@@ -128,7 +126,6 @@ pub fn compile_leaf(
     leaf: &LeafPolicy,
     source: &dyn TemplateSource,
     trust: &Trust<'_>,
-    install: &InstallConstants,
     compiler_version: &str,
 ) -> Result<Compiled, PolicyError> {
     leaf.validate()?;
@@ -169,8 +166,8 @@ pub fn compile_leaf(
     crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
-    let translated = translate(&effective, install)?;
-    assemble(name, &translated, &chain, &tcv, install, compiler_version)
+    let translated = translate(&effective)?;
+    assemble(name, &translated, &chain, &tcv, compiler_version)
 }
 
 /// Resolve and apply included fragments additively, in listed order.
@@ -264,7 +261,6 @@ fn assemble(
     translated: &Translated,
     chain: &[ChainLink],
     threat_catalogue_version: &str,
-    install: &InstallConstants,
     compiler_version: &str,
 ) -> Result<Compiled, PolicyError> {
     let resolved_artifacts = chain
@@ -300,7 +296,6 @@ fn assemble(
             threat_catalogue_version: threat_catalogue_version.to_owned(),
             leaf_policy_sha256: String::new(),
             invariant_set_sha256: String::new(),
-            install_constants: install.clone(),
             resolved_artifacts,
         },
     };
@@ -358,16 +353,9 @@ mod tests {
             BASE_CONFINED.as_bytes().to_vec(),
         )])
     }
-    fn install() -> InstallConstants {
-        InstallConstants {
-            tag: 42,
-            ula_gid: "fd00:abcd::".to_owned(),
-        }
-    }
-
     fn compile_ai() -> SettledPolicy {
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
-        compile(&entry, &src(), &Trust::dev(), &install(), "test-0.0.0")
+        compile(&entry, &src(), &Trust::dev(), "test-0.0.0")
             .expect("compile")
             .policy
     }
@@ -378,7 +366,6 @@ mod tests {
         assert_eq!(p.settled_schema_version, 1);
         assert_eq!(p.name, "ai-coding-strict");
         assert_eq!(p.provenance.compiler_version, "test-0.0.0");
-        assert_eq!(p.provenance.install_constants.tag, 42);
         assert!(p
             .provenance
             .resolved_artifacts
@@ -425,7 +412,7 @@ mod tests {
         )]);
 
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
-        let compiled = compile(&entry, &source, &Trust::require(&ks), &install(), "v")
+        let compiled = compile(&entry, &source, &Trust::require(&ks), "v")
             .expect("compile with signed ancestor");
         assert!(
             compiled
@@ -456,7 +443,7 @@ mod tests {
         let ks = KeySet::new();
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
         assert!(
-            compile(&entry, &src(), &Trust::require(&ks), &install(), "v").is_err(),
+            compile(&entry, &src(), &Trust::require(&ks), "v").is_err(),
             "an unsigned ancestor is refused when signatures are required"
         );
     }
@@ -492,8 +479,7 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled =
-            compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect("compile");
+        let compiled = compile_leaf(&leaf, &source, &Trust::dev(), "v").expect("compile");
         let names = &compiled.policy.effective_policy.net.allow_names;
         assert!(
             names.iter().any(|n| n.name == "proxy.corp.example"),
@@ -522,8 +508,7 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"frag-a@v1\", \"frag-b@v1\"]\n",
         )
         .expect("parse leaf");
-        let err =
-            compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect_err("conflict");
+        let err = compile_leaf(&leaf, &source, &Trust::dev(), "v").expect_err("conflict");
         assert!(matches!(err, PolicyError::IncludeConflict(_)), "got {err}");
     }
 
@@ -535,8 +520,7 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-deny@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled =
-            compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").expect("compile");
+        let compiled = compile_leaf(&leaf, &source, &Trust::dev(), "v").expect("compile");
         let denies = &compiled.policy.effective_policy.net.deny_invariant;
         assert!(
             denies
@@ -573,7 +557,7 @@ mod tests {
         )
         .expect("parse leaf");
         assert!(
-            compile_leaf(&leaf, &source, &Trust::dev(), &install(), "v").is_err(),
+            compile_leaf(&leaf, &source, &Trust::dev(), "v").is_err(),
             "an additive-only fragment cannot remove"
         );
     }
@@ -588,7 +572,7 @@ mod tests {
         )
         .expect("parse leaf");
         // An unsigned fragment must not be silently trusted when signatures are required.
-        assert!(compile_leaf(&leaf, &source, &Trust::require(&ks), &install(), "v").is_err());
+        assert!(compile_leaf(&leaf, &source, &Trust::require(&ks), "v").is_err());
     }
 
     #[test]
@@ -629,7 +613,7 @@ mod tests {
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled = compile_leaf(&leaf, &source, &Trust::require(&ks), &install(), "v")
+        let compiled = compile_leaf(&leaf, &source, &Trust::require(&ks), "v")
             .expect("signed chain + signed fragment verifies under require");
         assert!(compiled
             .policy

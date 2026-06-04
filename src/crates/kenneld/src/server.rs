@@ -499,6 +499,11 @@ fn run_kennel<P, L>(
         kennel: req.kennel.clone(),
         home: shared.identity.home.clone(),
         namespace: shared.identity.scope.namespace().to_owned(),
+        // `<tag>`/`<gid>` come from the user's reserved scope (loaded from
+        // /etc/kennel/subkennel) — the daemon is the one source of truth, so the
+        // compiler/CLI never bakes them in.
+        tag: shared.identity.scope.tag(),
+        ula_gid: shared.identity.scope.ula_gid(),
     };
 
     let loaded = match shared.loader.load(&req.policy, &subst) {

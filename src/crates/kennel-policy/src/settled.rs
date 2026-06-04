@@ -452,16 +452,6 @@ const fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Installation-specific constants baked in at compile time.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct InstallConstants {
-    /// The installation's tag byte (`<tag>`).
-    pub tag: u8,
-    /// The IPv6 ULA GID for this installation (`<gid>`).
-    pub ula_gid: String,
-}
-
 /// One resolved template or fragment that contributed to the settled policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -490,8 +480,6 @@ pub struct Provenance {
     pub leaf_policy_sha256: String,
     /// SHA-256 (hex) of the invariant set enforced at compile time.
     pub invariant_set_sha256: String,
-    /// Installation constants baked in.
-    pub install_constants: InstallConstants,
     /// The resolved templates/fragments, from the lockfile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_artifacts: Vec<ResolvedArtifact>,

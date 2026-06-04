@@ -33,8 +33,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use kennel_policy::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants, LifecyclePolicy,
-    NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
+    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
+    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
     SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
 };
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX};
@@ -201,10 +201,6 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             threat_catalogue_version: "0.1".to_owned(),
             leaf_policy_sha256: "00".to_owned(),
             invariant_set_sha256: "00".to_owned(),
-            install_constants: InstallConstants {
-                tag: 9,
-                ula_gid: "fd00::".to_owned(),
-            },
             resolved_artifacts: Vec::new(),
         },
         ssh: kennel_policy::SshRuntime::default(),
@@ -284,6 +280,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         kennel: "e2e".to_owned(),
         home: home.clone(),
         namespace: TEST_NAMESPACE.to_owned(),
+        tag: TEST_TAG,
+        ula_gid: TEST_ULA_GID,
     };
     let mut plan = prepare(&bytes, &keys, &subst).expect("verify + plan");
     // The production userns path stands as prepared: USER | MOUNT | IPC | PID. No

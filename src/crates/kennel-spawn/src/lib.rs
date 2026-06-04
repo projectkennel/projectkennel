@@ -55,6 +55,13 @@ pub struct RuntimeSubstitutions {
     /// The caller's resource namespace (from `/etc/kennel/subkennel`), under
     /// which this kennel's cgroup lives (`/sys/fs/cgroup/<namespace>/<ctx>`).
     pub namespace: String,
+    /// The installation/user tag (`<tag>`) — the 12-bit IPv4 loopback selector from
+    /// the caller's scope. A per-user value the daemon already holds; the compiler
+    /// defers it here rather than baking an install constant.
+    pub tag: u16,
+    /// The IPv6 ULA global ID (`<gid>`) — the 40 bits after `0xfd`, from the
+    /// caller's scope. Rendered as 10 lowercase hex digits.
+    pub ula_gid: [u8; 5],
 }
 
 /// Everything that can stop a spawn before exec.
@@ -108,10 +115,14 @@ impl From<PolicyError> for SpawnError {
 
 /// Replace the four deferred placeholders in `s`.
 fn substitute_str(s: &str, subst: &RuntimeSubstitutions) -> String {
+    let [g0, g1, g2, g3, g4] = subst.ula_gid;
+    let gid = format!("{g0:02x}{g1:02x}{g2:02x}{g3:02x}{g4:02x}");
     s.replace("<ctx>", &subst.ctx.to_string())
         .replace("<uid>", &subst.uid.to_string())
         .replace("<kennel>", &subst.kennel)
         .replace("<home>", &subst.home.to_string_lossy())
+        .replace("<tag>", &subst.tag.to_string())
+        .replace("<gid>", &gid)
 }
 
 /// Error if `value` still contains an unresolved `<…>` placeholder.
@@ -850,9 +861,9 @@ fn populate_egress_maps(loaded: &kennel_bpf::Loaded, plan: &Plan) -> Result<(), 
 mod tests {
     use super::*;
     use kennel_policy::{
-        CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants,
-        LifecyclePolicy, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
-        Provenance, SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
+        CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
+        NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
+        SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
     };
     use kennel_syscall::landlock::{AccessFs, AccessNet};
     use kennel_syscall::namespace::Namespaces;
@@ -938,10 +949,6 @@ mod tests {
                 threat_catalogue_version: "0.1".to_owned(),
                 leaf_policy_sha256: "00".to_owned(),
                 invariant_set_sha256: "00".to_owned(),
-                install_constants: InstallConstants {
-                    tag: 42,
-                    ula_gid: "fd00::".to_owned(),
-                },
                 resolved_artifacts: Vec::new(),
             },
             ssh: kennel_policy::SshRuntime::default(),
@@ -959,6 +966,8 @@ mod tests {
             kennel: "ai-coding".to_owned(),
             home: PathBuf::from("/home/dev"),
             namespace: "kennel-dev".to_owned(),
+            tag: 42,
+            ula_gid: [0, 0, 0, 0, 2],
         }
     }
 
@@ -973,6 +982,27 @@ mod tests {
         assert_eq!(
             p.effective_policy.fs.write,
             vec!["/run/kennel/ai-coding/home".to_owned()]
+        );
+    }
+
+    #[test]
+    fn tag_and_gid_are_filled_from_scope_at_spawn() {
+        // <tag>/<gid> are deferred by the compiler and filled here, from the
+        // RuntimeSubstitutions the daemon builds from the user's scope.
+        let mut p = policy_with_placeholders();
+        p.env
+            .vars
+            .insert("PROXY".to_owned(), "127.<tag>.<ctx>.1".to_owned());
+        p.env.vars.insert("ULA".to_owned(), "fd<gid>".to_owned());
+        let out = substitute(&p, &subst()).expect("substitute");
+        // subst(): tag 42, ctx 7, ula_gid [0,0,0,0,2].
+        assert_eq!(
+            out.env.vars.get("PROXY").map(String::as_str),
+            Some("127.42.7.1")
+        );
+        assert_eq!(
+            out.env.vars.get("ULA").map(String::as_str),
+            Some("fd0000000002")
         );
     }
 

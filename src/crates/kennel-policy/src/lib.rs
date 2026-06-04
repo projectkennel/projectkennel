@@ -54,8 +54,8 @@ pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
-    EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants, LifecyclePolicy, NameRule,
-    NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
+    EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode,
+    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
     ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant,
     SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
 };
@@ -204,10 +204,6 @@ mod tests {
                 threat_catalogue_version: "0.1".to_owned(),
                 leaf_policy_sha256: "00".to_owned(),
                 invariant_set_sha256: "00".to_owned(),
-                install_constants: InstallConstants {
-                    tag: 42,
-                    ula_gid: "fd00::".to_owned(),
-                },
                 resolved_artifacts: vec![ResolvedArtifact {
                     name: "base-confined".to_owned(),
                     version: "v3".to_owned(),
