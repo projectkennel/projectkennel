@@ -164,6 +164,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                     format!("{}/kennel-e2e/granted", home.display()),
                 ],
                 write: Vec::new(),
+                home_persist: Vec::new(),
                 tmp: TmpPolicy {
                     private: true,
                     size_mib: 512,
@@ -421,6 +422,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
                 .map(|g| vec![(GRANTED_GROUP_NAME.to_owned(), g)])
                 .unwrap_or_default(),
             shell: "/bin/sh".to_owned(),
+            home_persist: Vec::new(),
         }),
         view_root: Some(view_root.clone()),
         proxy_audit: Some(kenneld::proxy::ProxyAudit {

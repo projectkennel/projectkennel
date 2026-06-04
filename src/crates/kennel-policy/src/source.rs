@@ -303,6 +303,13 @@ pub struct FsHome {
     /// `[[fs.home.sanitise]]` — host config files copied in with secrets stripped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitise: Vec<FsHomeSanitise>,
+    /// Home-relative paths that **persist** across runs (§7.7.2a). By default the
+    /// synthesised dotfiles are reconstructed read-only each spawn (no
+    /// self-poisoning); a path named here is *not* reconstructed, so a writable
+    /// home grant for it survives. Opt-in, per path — this list is where the
+    /// persistent-`~/.bashrc` re-execution trade-off is taken, visible in the diff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub persist: Vec<String>,
 }
 
 /// One `[[fs.home.sanitise]]` entry (`docs/design/05-templates.md` §5.9).

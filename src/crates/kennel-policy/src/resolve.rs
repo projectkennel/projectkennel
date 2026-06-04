@@ -308,6 +308,7 @@ fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
         } else {
             c.sanitise.clone()
         },
+        persist: union_strings(&p.persist, &c.persist),
     }
 }
 

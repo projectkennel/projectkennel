@@ -207,6 +207,11 @@ pub struct FsPolicy {
     pub read: Vec<String>,
     /// Paths granted write access.
     pub write: Vec<String>,
+    /// Home-relative paths that persist across runs (§7.7.2a). The synthesised
+    /// dotfiles are reconstructed read-only each spawn except for the paths named
+    /// here, which the dotfile seeder skips. Empty ⇒ everything is reconstructed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home_persist: Vec<String>,
     /// Private-`/tmp` tmpfs parameters. Declared after the scalar/array fields
     /// so the canonical TOML emits this sub-table last (valid table ordering).
     pub tmp: TmpPolicy,

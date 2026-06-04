@@ -562,11 +562,14 @@ fn translate_fs(
     }
     let dev = DevPolicy { allow: dev_allow };
 
+    let home_persist = subst_each(&home.persist, install, deferred);
+
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
         shim_root,
         read,
         write,
+        home_persist,
         tmp,
         dev,
     })
@@ -1014,6 +1017,16 @@ mod tests {
         assert_eq!(env.vars.get("TZ").map(String::as_str), Some("UTC"));
         // Synthesis carries only `set` — the legacy pass/deny curation is ignored.
         assert_eq!(env.vars.len(), 2);
+    }
+
+    #[test]
+    fn fs_home_persist_carries_to_settled() {
+        let src = parse(
+            b"name = \"k\"\n[fs.home]\nshadow = true\nshim_root = \"/run/kennel/k\"\npersist = [\".bashrc\"]\n",
+        )
+        .expect("parse");
+        let fs = translate_fs(&src, &install(), &mut BTreeSet::new()).expect("translate_fs");
+        assert_eq!(fs.home_persist, vec![".bashrc".to_owned()]);
     }
 
     #[test]

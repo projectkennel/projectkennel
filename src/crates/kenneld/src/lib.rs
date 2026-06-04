@@ -248,6 +248,9 @@ pub struct EtcSetup {
     /// The kennel's login shell (§7.7.2a) — the `passwd` `pw_shell` field. `/bin/sh`
     /// unless the policy set `[exec].shell`.
     pub shell: String,
+    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
+    /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
+    pub home_persist: Vec<String>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -609,6 +612,28 @@ fn bring_up<P: Privileged + Sync>(
             v6: addr6,
         };
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
+
+        // Synthesise the user shell-init dotfiles into the kennel home (§7.7.2a):
+        // copied into the fresh view root each spawn (reconstructed, non-persistent),
+        // skipping any path in `home_persist`. Like the synthetic ~/.ssh, the home
+        // subtree is not in `fs.read`, so grant Landlock read on each dotfile's dir.
+        let dot_dir = etc.staging_dir.join("home");
+        let dot_binds =
+            crate::etc::materialize_home_dotfiles(&dot_dir, &etc.home, &etc.home_persist)?;
+        if !dot_binds.is_empty() {
+            use kennel_syscall::landlock::AccessFs;
+            let mut dot_dirs = std::collections::BTreeSet::new();
+            for (_src, target) in &dot_binds {
+                if let Some(parent) = target.parent() {
+                    dot_dirs.insert(parent.to_path_buf());
+                }
+            }
+            for dir in dot_dirs {
+                plan.landlock_fs
+                    .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
+            }
+            plan.file_binds.extend(dot_binds);
+        }
     }
 
     // 3c-ssh. Lay the synthetic ~/.ssh into the view (config, known_hosts, the

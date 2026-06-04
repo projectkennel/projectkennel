@@ -94,6 +94,7 @@ impl PolicyLoader for TrustStoreLoader {
         plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
         let exec_path = substituted.effective_policy.exec.path.clone();
         let shell = substituted.effective_policy.exec.shell.clone();
+        let home_persist = substituted.effective_policy.fs.home_persist.clone();
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
@@ -109,6 +110,7 @@ impl PolicyLoader for TrustStoreLoader {
             env,
             exec_path,
             shell,
+            home_persist,
         })
     }
 }

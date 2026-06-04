@@ -899,6 +899,7 @@ mod tests {
                     shim_root: "/run/kennel/<kennel>".to_owned(),
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
+                    home_persist: Vec::new(),
                     tmp: TmpPolicy {
                         private: true,
                         size_mib: 512,

@@ -67,6 +67,9 @@ pub struct Loaded {
     /// The kennel's login shell (§7.7.2a): the synthetic-`passwd` `pw_shell` and
     /// `$SHELL`. `/bin/sh` unless the policy set `[exec].shell`.
     pub shell: String,
+    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
+    /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
+    pub home_persist: Vec<String>,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -565,6 +568,8 @@ fn run_kennel<P, L>(
         groups: loaded.groups.clone(),
         // The login shell for the synthetic passwd's pw_shell field (§7.7.2a).
         shell: loaded.shell.clone(),
+        // Home-relative paths exempt from dotfile reconstruction (§7.7.2a).
+        home_persist: loaded.home_persist.clone(),
     });
     let spec = crate::Spec {
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
@@ -803,6 +808,7 @@ mod tests {
                 env: kennel_policy::EnvRuntime::default(),
                 exec_path: Vec::new(),
                 shell: "/bin/sh".to_owned(),
+                home_persist: Vec::new(),
             })
         }
     }
