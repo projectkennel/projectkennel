@@ -22,16 +22,20 @@ pub mod event;
 pub mod render;
 pub mod sinks;
 pub mod time;
+pub mod timeout;
 pub mod uuidv7;
 pub mod writer;
 
 #[cfg(feature = "audit-journald")]
 pub mod journald;
+#[cfg(feature = "audit-journald")]
+pub mod message_ids;
 
 pub use event::{Event, Level, Outcome, Resource, Source, Value};
 pub use render::{Record, Rendered};
 pub use sinks::{FileSink, StdoutSink, SyslogSink};
 pub use time::{format_rfc3339_micros, Clock, SystemClock};
+pub use timeout::TimeoutSink;
 pub use uuidv7::format_uuid_v7;
 pub use writer::{Levels, Sink, SinkError, Writer, WriterContext, MAX_EVENT_BYTES, SCHEMA_VERSION};
 

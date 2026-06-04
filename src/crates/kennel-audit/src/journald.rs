@@ -40,6 +40,10 @@ impl Sink for JournaldSink {
         fields.push(format!("MESSAGE={}", record.message()));
         fields.push("SYSLOG_IDENTIFIER=kennel-audit".to_owned());
         fields.push(format!("PRIORITY={}", record.outcome.severity()));
+        // MESSAGE_ID for journalctl filtering by event kind, when registered.
+        if let Some(id) = crate::message_ids::for_event(record.event_type) {
+            fields.push(format!("MESSAGE_ID={id}"));
+        }
 
         kennel_syscall::journal::sendv(&fields).map_err(|e| SinkError {
             sink: "journald",

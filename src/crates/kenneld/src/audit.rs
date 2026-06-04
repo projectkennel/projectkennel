@@ -11,8 +11,8 @@
 use std::path::Path;
 
 use kennel_audit::{
-    Event, FileSink, Level, Levels, Outcome, Resource, Sink, Source, StdoutSink, SyslogSink, Value,
-    Writer, WriterContext,
+    Event, FileSink, Level, Levels, Outcome, Resource, Sink, Source, StdoutSink, SyslogSink,
+    TimeoutSink, Value, Writer, WriterContext,
 };
 use kennel_policy::{AuditRuntime, AuditSinkKind};
 
@@ -89,15 +89,15 @@ fn sinks_from(runtime: &AuditRuntime, state_dir: &Path) -> Vec<Box<dyn Sink>> {
                     runtime.file.rotate_at_bytes,
                     retain,
                 ) {
-                    Ok(sink) => sinks.push(Box::new(sink)),
+                    Ok(sink) => push_buffered(&mut sinks, Box::new(sink)),
                     Err(e) => eprintln!("kennel-audit: file sink unavailable: {e}"),
                 }
             }
-            AuditSinkKind::Stdout => sinks.push(Box::new(StdoutSink)),
+            AuditSinkKind::Stdout => push_buffered(&mut sinks, Box::new(StdoutSink)),
             AuditSinkKind::Syslog => {
                 let facility = facility_code(runtime.syslog_facility.as_deref());
                 match SyslogSink::new(std::path::PathBuf::from("/dev/log"), facility) {
-                    Ok(sink) => sinks.push(Box::new(sink)),
+                    Ok(sink) => push_buffered(&mut sinks, Box::new(sink)),
                     Err(e) => eprintln!("kennel-audit: syslog sink unavailable: {e}"),
                 }
             }
@@ -107,9 +107,15 @@ fn sinks_from(runtime: &AuditRuntime, state_dir: &Path) -> Vec<Box<dyn Sink>> {
     sinks
 }
 
+/// Wrap a sink so a slow or stuck backend bounds the writer's latency to a
+/// channel hand-off rather than the sink's I/O (`02-3` per-sink timeout).
+fn push_buffered(sinks: &mut Vec<Box<dyn Sink>>, inner: Box<dyn Sink>) {
+    sinks.push(Box::new(TimeoutSink::new(inner)));
+}
+
 #[cfg(feature = "audit-journald")]
 fn push_journald(sinks: &mut Vec<Box<dyn Sink>>) {
-    sinks.push(Box::new(kennel_audit::JournaldSink::new()));
+    push_buffered(sinks, Box::new(kennel_audit::JournaldSink::new()));
 }
 
 #[cfg(not(feature = "audit-journald"))]
@@ -235,6 +241,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let writer = build_writer("ai-coding", &dir, &AuditRuntime::default());
         assert!(writer.emit(&kennel_start(4242, 7)));
+        // Sinks are buffered (TimeoutSink); dropping the writer joins the worker
+        // so the event is flushed to the file before we read it.
+        drop(writer);
         let body = std::fs::read_to_string(dir.join("lifecycle.jsonl")).expect("lifecycle log");
         assert!(
             body.contains(r#""event":"lifecycle.kennel-start""#),
