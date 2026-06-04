@@ -37,10 +37,11 @@
 //! stays architecture-independent and no syscall-number table lives in this pure crate.
 
 use crate::settled::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants,
-    LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
-    ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy,
-    TtlAction, UnixRuntime, UnixSocket,
+    AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
+    ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants, LifecyclePolicy, NameRule, NetMode,
+    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
+    SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
+    UnixSocket,
 };
 use crate::source::SourcePolicy;
 use crate::PolicyError;
@@ -58,6 +59,8 @@ pub struct Translated {
     pub unix: UnixRuntime,
     /// The workload's in-kennel identity (§7.2) — the supplementary groups it retains.
     pub identity: IdentityRuntime,
+    /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
+    pub audit: AuditRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -102,6 +105,7 @@ pub fn translate(
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, install, &mut deferred);
     let identity = translate_identity(effective);
+    let audit = translate_audit(effective, install, &mut deferred)?;
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -116,8 +120,120 @@ pub fn translate(
         ssh,
         unix,
         identity,
+        audit,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// The valid per-class audit levels and the valid syslog facilities.
+const AUDIT_LEVELS: [&str; 4] = ["off", "denies-only", "summary", "full"];
+const SYSLOG_FACILITIES: [&str; 20] = [
+    "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv",
+    "ftp", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7",
+];
+
+/// Flatten the source `[audit]` section into the settled [`AuditRuntime`],
+/// validating sink names, per-class levels, sizes, and the syslog facility.
+/// Only deviations from the `02-3` defaults are carried; an absent or all-default
+/// section yields the empty runtime (omitted from the canonical form).
+fn translate_audit(
+    src: &SourcePolicy,
+    install: &InstallConstants,
+    deferred: &mut BTreeSet<String>,
+) -> Result<AuditRuntime, PolicyError> {
+    let Some(audit) = &src.audit else {
+        return Ok(AuditRuntime::default());
+    };
+
+    let mut sinks = Vec::new();
+    for name in &audit.sinks {
+        let kind = match name.as_str() {
+            "file" => AuditSinkKind::File,
+            "journald" => AuditSinkKind::Journald,
+            "syslog" => AuditSinkKind::Syslog,
+            "stdout" => AuditSinkKind::Stdout,
+            other => {
+                return Err(translation(format!(
+                    "unknown audit sink `{other}` (expected file/journald/syslog/stdout)"
+                )))
+            }
+        };
+        if !sinks.contains(&kind) {
+            sinks.push(kind);
+        }
+    }
+
+    let level =
+        |class: &Option<crate::source::AuditClassSection>| -> Result<Option<String>, PolicyError> {
+            match class.as_ref().and_then(|c| c.level.as_ref()) {
+                None => Ok(None),
+                Some(l) if AUDIT_LEVELS.contains(&l.as_str()) => Ok(Some(l.clone())),
+                Some(l) => Err(translation(format!(
+                    "unknown audit level `{l}` (expected off/denies-only/summary/full)"
+                ))),
+            }
+        };
+
+    let syslog_facility = match audit.syslog.as_ref().and_then(|s| s.facility.as_ref()) {
+        None => None,
+        Some(f) if SYSLOG_FACILITIES.contains(&f.as_str()) => Some(f.clone()),
+        Some(f) => {
+            return Err(translation(format!(
+                "unknown syslog facility `{f}` (expected user/daemon/auth/local0-7/…)"
+            )))
+        }
+    };
+
+    let file = match &audit.file {
+        None => AuditFileConfig::default(),
+        Some(f) => AuditFileConfig {
+            dir: f.dir.as_ref().map(|d| subst(d, install, deferred)),
+            rotate_at_bytes: match &f.rotate_at_bytes {
+                None => None,
+                Some(s) => Some(parse_size_bytes(s)?),
+            },
+            compress_after_seconds: f.compress_after_seconds,
+            retain_count: f.retain_count,
+        },
+    };
+
+    Ok(AuditRuntime {
+        sinks,
+        network_level: level(&audit.network)?,
+        filesystem_level: level(&audit.filesystem)?,
+        exec_level: level(&audit.exec)?,
+        unix_level: level(&audit.unix)?,
+        dbus_level: level(&audit.dbus)?,
+        syslog_facility,
+        file,
+    })
+}
+
+/// Parse a human byte size (`"64M"`, `"1G"`, `"512K"`, bare = bytes) into bytes.
+fn parse_size_bytes(s: &str) -> Result<u64, PolicyError> {
+    let bad = || {
+        translation(format!(
+            "size `{s}` is not a number with an optional K/M/G suffix"
+        ))
+    };
+    let trimmed = s.trim();
+    // (suffix-pair, multiplier), largest first; bare number is bytes.
+    let units: [([char; 2], u64); 3] = [
+        (['G', 'g'], 1024 * 1024 * 1024),
+        (['M', 'm'], 1024 * 1024),
+        (['K', 'k'], 1024),
+    ];
+    let mut num = trimmed;
+    let mut mult = 1_u64;
+    for (suffix, factor) in units {
+        if let Some(stripped) = trimmed.strip_suffix(suffix) {
+            num = stripped;
+            mult = factor;
+            break;
+        }
+    }
+    let value = num.trim().parse::<u64>().map_err(|_| bad())?;
+    value.checked_mul(mult).ok_or_else(bad)
 }
 
 /// Gather the workload's retained supplementary groups (§7.2): the explicit
@@ -670,6 +786,70 @@ mod tests {
         assert!(translate_ssh(&SourcePolicy::default()).is_empty());
     }
 
+    fn translate_audit_str(src: &str) -> Result<AuditRuntime, PolicyError> {
+        let mut deferred = BTreeSet::new();
+        let parsed = parse(src.as_bytes()).expect("parse");
+        translate_audit(&parsed, &install(), &mut deferred)
+    }
+
+    #[test]
+    fn audit_section_flattens_sinks_levels_and_file() {
+        let rt = translate_audit_str(
+            r#"
+            name = "k"
+            [audit]
+            sinks = ["file", "journald", "file"]
+            [audit.network]
+            level = "full"
+            [audit.filesystem]
+            level = "off"
+            [audit.syslog]
+            facility = "local3"
+            [audit.file]
+            rotate_at_bytes = "64M"
+            retain_count = 4
+            "#,
+        )
+        .expect("translate");
+        assert_eq!(
+            rt.sinks,
+            vec![AuditSinkKind::File, AuditSinkKind::Journald],
+            "dedup preserves first-seen order"
+        );
+        assert_eq!(rt.network_level.as_deref(), Some("full"));
+        assert_eq!(rt.filesystem_level.as_deref(), Some("off"));
+        assert_eq!(rt.syslog_facility.as_deref(), Some("local3"));
+        assert_eq!(rt.file.rotate_at_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(rt.file.retain_count, Some(4));
+        assert!(!rt.is_empty());
+    }
+
+    #[test]
+    fn no_audit_section_is_empty_and_back_compatible() {
+        let rt = translate_audit_str("name = \"k\"").expect("translate");
+        assert!(
+            rt.is_empty(),
+            "absent [audit] omits from the canonical form"
+        );
+    }
+
+    #[test]
+    fn unknown_sink_level_facility_and_size_are_rejected() {
+        assert!(translate_audit_str("name=\"k\"\n[audit]\nsinks=[\"smtp\"]").is_err());
+        assert!(
+            translate_audit_str("name=\"k\"\n[audit.network]\nlevel=\"loud\"").is_err(),
+            "bad level rejected"
+        );
+        assert!(
+            translate_audit_str("name=\"k\"\n[audit.syslog]\nfacility=\"nope\"").is_err(),
+            "bad facility rejected"
+        );
+        assert!(
+            translate_audit_str("name=\"k\"\n[audit.file]\nrotate_at_bytes=\"big\"").is_err(),
+            "bad size rejected"
+        );
+    }
+
     #[test]
     fn unix_section_flattens_into_the_settled_runtime() {
         use crate::source::{SourcePolicy, UnixAllow, UnixSection};
@@ -896,6 +1076,7 @@ mod tests {
             ssh: t.ssh,
             unix: t.unix,
             identity: t.identity,
+            audit: t.audit,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }

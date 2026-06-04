@@ -44,10 +44,11 @@
 //! the `+=`/`-=` delta operators land in later increments.
 
 use crate::source::{
-    self, CapSection, ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev,
-    FsHome, FsProc, FsScrub, FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit,
-    NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection,
-    SignalSection, SourcePolicy, SshSection, UnixSection, X11Section,
+    self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, CapSection,
+    ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
+    FsScrub, FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit, NetBind, NetDeny,
+    NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection, SourcePolicy,
+    SshSection, UnixSection, X11Section,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -228,6 +229,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         seccomp: merge(&parent.seccomp, &child.seccomp, fold_seccomp),
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
         container: merge(&parent.container, &child.container, fold_container),
+        audit: merge(&parent.audit, &child.audit, fold_audit),
     }
 }
 
@@ -393,6 +395,47 @@ fn fold_net_ipv6(p: &NetIpv6, c: &NetIpv6) -> NetIpv6 {
 fn fold_net_audit(p: &NetAudit, c: &NetAudit) -> NetAudit {
     NetAudit {
         log_path: or(&c.log_path, &p.log_path),
+        level: or(&c.level, &p.level),
+    }
+}
+
+fn fold_audit(p: &AuditSection, c: &AuditSection) -> AuditSection {
+    AuditSection {
+        // Bare-set: a child's non-empty sink list replaces the parent's.
+        sinks: if c.sinks.is_empty() {
+            p.sinks.clone()
+        } else {
+            c.sinks.clone()
+        },
+        file: merge(&p.file, &c.file, fold_audit_file),
+        syslog: merge(&p.syslog, &c.syslog, fold_audit_syslog),
+        journald: or(&c.journald, &p.journald),
+        stdout: or(&c.stdout, &p.stdout),
+        network: merge(&p.network, &c.network, fold_audit_class),
+        filesystem: merge(&p.filesystem, &c.filesystem, fold_audit_class),
+        exec: merge(&p.exec, &c.exec, fold_audit_class),
+        unix: merge(&p.unix, &c.unix, fold_audit_class),
+        dbus: merge(&p.dbus, &c.dbus, fold_audit_class),
+    }
+}
+
+fn fold_audit_file(p: &AuditFileSection, c: &AuditFileSection) -> AuditFileSection {
+    AuditFileSection {
+        dir: or(&c.dir, &p.dir),
+        rotate_at_bytes: or(&c.rotate_at_bytes, &p.rotate_at_bytes),
+        compress_after_seconds: or(&c.compress_after_seconds, &p.compress_after_seconds),
+        retain_count: or(&c.retain_count, &p.retain_count),
+    }
+}
+
+fn fold_audit_syslog(p: &AuditSyslogSection, c: &AuditSyslogSection) -> AuditSyslogSection {
+    AuditSyslogSection {
+        facility: or(&c.facility, &p.facility),
+    }
+}
+
+fn fold_audit_class(p: &AuditClassSection, c: &AuditClassSection) -> AuditClassSection {
+    AuditClassSection {
         level: or(&c.level, &p.level),
     }
 }

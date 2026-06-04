@@ -120,7 +120,89 @@ pub struct SourcePolicy {
     /// Container section (`[container]`) — design-level; no runtime yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerSection>,
+    /// Audit section (`[audit]` and `[audit.*]`) — sinks and per-class levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditSection>,
 }
+
+/// `[audit]`: sink selection, per-class levels, and per-sink tuning
+/// (`docs/architecture/02-3-audit-schema.md` §Sink configuration). Levels and
+/// sink names are validated at translate time.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditSection {
+    /// Active sinks (`file`, `journald`, `syslog`, `stdout`). Default `["file"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sinks: Vec<String>,
+    /// `[audit.file]` tuning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<AuditFileSection>,
+    /// `[audit.syslog]` tuning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syslog: Option<AuditSyslogSection>,
+    /// `[audit.journald]` — no fields; present to allow the empty table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journald: Option<AuditEmptySection>,
+    /// `[audit.stdout]` — no fields; present to allow the empty table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<AuditEmptySection>,
+    /// `[audit.network]` level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<AuditClassSection>,
+    /// `[audit.filesystem]` level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem: Option<AuditClassSection>,
+    /// `[audit.exec]` level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<AuditClassSection>,
+    /// `[audit.unix]` level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix: Option<AuditClassSection>,
+    /// `[audit.dbus]` level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dbus: Option<AuditClassSection>,
+}
+
+/// `[audit.file]`: file-sink tuning.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFileSection {
+    /// Override the per-kennel directory (placeholders allowed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Rotate at this size (e.g. `"64M"`, `"1G"`; bare = bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate_at_bytes: Option<String>,
+    /// Gzip a rotated file this many seconds after rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compress_after_seconds: Option<u64>,
+    /// Keep at most this many rotated files per class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_count: Option<u64>,
+}
+
+/// `[audit.syslog]`: syslog-sink tuning.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditSyslogSection {
+    /// Syslog facility (`user`, `daemon`, `auth`, …). Default `user`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facility: Option<String>,
+}
+
+/// A `[audit.<class>]` level sub-table.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditClassSection {
+    /// One of `off`, `denies-only`, `summary`, `full`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+}
+
+/// An empty `[audit.*]` table (journald, stdout: no fields).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditEmptySection {}
 
 /// Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]

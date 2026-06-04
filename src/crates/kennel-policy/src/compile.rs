@@ -292,6 +292,7 @@ fn assemble(
         ssh: translated.ssh.clone(),
         unix: translated.unix.clone(),
         identity: translated.identity.clone(),
+        audit: translated.audit.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),
             schema_version: SETTLED_SCHEMA_VERSION,

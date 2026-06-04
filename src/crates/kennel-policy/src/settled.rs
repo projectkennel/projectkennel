@@ -471,6 +471,103 @@ pub struct Provenance {
     pub resolved_artifacts: Vec<ResolvedArtifact>,
 }
 
+/// An active audit sink (`docs/architecture/02-3-audit-schema.md` §Sinks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditSinkKind {
+    /// Per-class JSONL files under the kennel state dir (the default).
+    File,
+    /// systemd-journald (needs the `audit-journald` build of kenneld).
+    Journald,
+    /// RFC 5424 syslog to `/dev/log`.
+    Syslog,
+    /// JSONL on kenneld's stdout (container deployments).
+    Stdout,
+}
+
+/// File-sink tuning carried in the settled policy. Every field is optional; an
+/// unset field means kenneld applies the `02-3` default. All-unset is "empty"
+/// and omitted from the canonical form.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFileConfig {
+    /// Override the per-kennel directory (placeholders allowed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Rotate a class file once it would exceed this many bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate_at_bytes: Option<u64>,
+    /// Gzip a rotated file this many seconds after rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compress_after_seconds: Option<u64>,
+    /// Keep at most this many rotated files per class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_count: Option<u64>,
+}
+
+impl AuditFileConfig {
+    /// Whether nothing is overridden (kenneld uses all defaults).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.dir.is_none()
+            && self.rotate_at_bytes.is_none()
+            && self.compress_after_seconds.is_none()
+            && self.retain_count.is_none()
+    }
+}
+
+/// The per-kennel audit runtime (`02-3`): which sinks are active and any
+/// per-class level / file / syslog deviation from the defaults.
+///
+/// Like [`SshRuntime`]/[`UnixRuntime`] this is a *service* input, not
+/// enforcement: kenneld realises it by constructing the `kennel-audit` writer.
+/// A class level left unset inherits the `02-3` default (summary, or denies-only
+/// for filesystem), so only deviations are carried — an all-default policy has
+/// an empty runtime and signs exactly as a no-`[audit]` policy did before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditRuntime {
+    /// Active sinks. Empty means kenneld uses the default (`file`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sinks: Vec<AuditSinkKind>,
+    /// `net` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_level: Option<String>,
+    /// `fs` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_level: Option<String>,
+    /// `exec` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_level: Option<String>,
+    /// `unix` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_level: Option<String>,
+    /// `dbus` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dbus_level: Option<String>,
+    /// Syslog facility name (default `user`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syslog_facility: Option<String>,
+    /// File-sink tuning. A table, so declared last; omitted when empty.
+    #[serde(default, skip_serializing_if = "AuditFileConfig::is_empty")]
+    pub file: AuditFileConfig,
+}
+
+impl AuditRuntime {
+    /// Whether nothing deviates from the defaults (omitted from canonical form).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.sinks.is_empty()
+            && self.network_level.is_none()
+            && self.filesystem_level.is_none()
+            && self.exec_level.is_none()
+            && self.unix_level.is_none()
+            && self.dbus_level.is_none()
+            && self.syslog_facility.is_none()
+            && self.file.is_empty()
+    }
+}
+
 /// The settled policy body (everything the signature covers).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -503,6 +600,11 @@ pub struct SettledPolicy {
     /// form when empty, so a policy that grants no group signs exactly as before.
     #[serde(default, skip_serializing_if = "IdentityRuntime::is_empty")]
     pub identity: IdentityRuntime,
+    /// The per-kennel audit runtime (`02-3`). A table like [`ssh`](Self::ssh) and
+    /// declared after the others; omitted from the canonical form when empty, so a
+    /// policy with no (or all-default) `[audit]` signs exactly as before.
+    #[serde(default, skip_serializing_if = "AuditRuntime::is_empty")]
+    pub audit: AuditRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.
