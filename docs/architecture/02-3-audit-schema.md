@@ -132,6 +132,8 @@ The per-kennel proxy emits one `egress` record per request (`kennel-netproxy::au
 
 ### Privileged (`resource: "priv"`)
 
+The `source` is `privhelper`, but kenneld writes these on the helper's behalf: the helper is root and transient and holds no writer, so kenneld records each call at the IPC boundary (an `AuditedPrivileged` wrapper around its helper client), exactly as it records kernel/BPF-sourced events. `operation` is the wire op (`add-addr`, `del-addr`, `setup-egress`, `set-gid-map`); a refusal maps the wire refusal `code` to a human `message`. The `outcome` is `allow` for an invocation, `deny` for a policy refusal, and `error` for a protocol/syscall/IPC failure.
+
 - **`priv.invoke`** — privhelper invocation. Adds `operation`, `params` (object), `duration_ms`.
 - **`priv.refuse`** — privhelper refusal. Adds `operation`, `params`, `code`, `message`.
 
