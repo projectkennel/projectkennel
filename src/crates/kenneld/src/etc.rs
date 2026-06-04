@@ -39,6 +39,8 @@ pub const FILES: &[&str] = &[
     "passwd",
     "group",
     "host.conf",
+    "profile",
+    "bash.bashrc",
 ];
 
 /// The masked account/group name the workload's uid and gid resolve to inside a kennel.
@@ -253,9 +255,40 @@ pub fn render(name: &str, p: &EtcParams<'_>) -> Option<String> {
         "passwd" => passwd(p),
         "group" => group(p),
         "host.conf" => host_conf().to_owned(),
+        "profile" => profile().to_owned(),
+        "bash.bashrc" => bash_bashrc(p),
         _ => return None,
     };
     Some(body)
+}
+
+/// `/etc/profile` — the system-level POSIX login-shell init (§7.7.2a).
+///
+/// Synthesised, read-only, and rebuilt every spawn (never a persistence surface).
+/// It only sets a sane `umask` and sources `/etc/bash.bashrc` for bash; `PATH` and
+/// the rest of the environment are already synthesised into the workload's `envp`
+/// (§7.7.2), so this deliberately does not set them.
+#[must_use]
+pub const fn profile() -> &'static str {
+    "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Read-only; rebuilt each spawn.\n\
+     umask 022\n\
+     if [ -n \"${BASH_VERSION-}\" ] && [ -r /etc/bash.bashrc ]; then\n\
+     \t. /etc/bash.bashrc\n\
+     fi\n"
+}
+
+/// `/etc/bash.bashrc` — the system-level interactive-bash init (§7.7.2a).
+///
+/// Sets a kennel-identifying prompt so an interactive shell is visibly inside the
+/// kennel. Synthesised, read-only, rebuilt every spawn.
+#[must_use]
+pub fn bash_bashrc(p: &EtcParams<'_>) -> String {
+    format!(
+        "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Read-only; rebuilt each spawn.\n\
+         case $- in *i*) ;; *) return ;; esac\n\
+         PS1='[kennel:{host} \\w]\\$ '\n",
+        host = p.hostname,
+    )
 }
 
 /// Write the synthetic `/etc` set into `dir` (created if absent), returning the
@@ -334,6 +367,31 @@ mod tests {
             "v6 localhost → primary"
         );
         assert!(!h.contains("127.0.0.1"), "the host's loopback is not used");
+    }
+
+    #[test]
+    fn passwd_carries_the_policy_shell() {
+        // Default shell.
+        assert!(
+            passwd(&params()).contains(":/run/kennel/agent/home:/bin/sh\n"),
+            "{}",
+            passwd(&params())
+        );
+        // A policy-selected shell.
+        let mut bash = params();
+        bash.shell = "/bin/bash";
+        assert!(passwd(&bash).contains(":/bin/bash\n"), "{}", passwd(&bash));
+    }
+
+    #[test]
+    fn system_rc_files_are_synthesised() {
+        assert!(FILES.contains(&"profile") && FILES.contains(&"bash.bashrc"));
+        let prof = render("profile", &params()).expect("profile renders");
+        assert!(prof.contains("umask 022"));
+        assert!(prof.contains("/etc/bash.bashrc"), "profile sources bashrc");
+        let rc = render("bash.bashrc", &params()).expect("bashrc renders");
+        assert!(rc.contains("PS1="));
+        assert!(rc.contains("kennel:agent"), "prompt names the kennel: {rc}");
     }
 
     #[test]
