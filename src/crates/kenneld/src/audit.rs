@@ -8,7 +8,7 @@
 
 use std::io;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use kennel_audit::build::{writer, SinkConfig};
@@ -67,6 +67,72 @@ pub fn build_writer(
         syslog_facility: runtime.syslog_facility.clone(),
     };
     writer(ctx, levels_from(runtime), &cfg)
+}
+
+/// The maximum size of an `audit.toml` defaults file (a sanity guard).
+const MAX_AUDIT_TOML: u64 = 64 * 1024;
+
+/// Load the installation-wide and per-user audit defaults, overlaid.
+///
+/// Precedence (low → high): built-in &lt; `/etc/kennel/audit.toml` &lt;
+/// `~/.config/kennel/audit.toml` (`08` §8.1). The per-kennel policy `[audit]`
+/// then overlays this result. A missing file is skipped; a malformed or oversize
+/// one is reported to stderr and skipped, so a bad defaults file never blocks a
+/// spawn — the built-in defaults still apply.
+#[must_use]
+pub fn load_audit_defaults() -> AuditRuntime {
+    overlay_files(&default_paths())
+}
+
+fn overlay_files(paths: &[PathBuf]) -> AuditRuntime {
+    let mut defaults = AuditRuntime::default();
+    for path in paths {
+        let len = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!("kennel-audit: cannot stat {}: {e}", path.display());
+                continue;
+            }
+        };
+        if len > MAX_AUDIT_TOML {
+            eprintln!(
+                "kennel-audit: ignoring {} ({len} bytes exceeds the {MAX_AUDIT_TOML}-byte limit)",
+                path.display()
+            );
+            continue;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(toml) => match kennel_policy::parse_audit_defaults(&toml) {
+                Ok(rt) => defaults = defaults.overlay(&rt),
+                Err(e) => eprintln!("kennel-audit: ignoring {}: {e}", path.display()),
+            },
+            Err(e) => eprintln!("kennel-audit: cannot read {}: {e}", path.display()),
+        }
+    }
+    defaults
+}
+
+/// The defaults search path: the installation file then the per-user file (so the
+/// user's overlays the installation's). `$KENNEL_ETC_DIR` overrides `/etc/kennel`
+/// (tests/relocatable installs); the per-user file follows `$XDG_CONFIG_HOME`,
+/// else `$HOME/.config`.
+fn default_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let etc = std::env::var_os("KENNEL_ETC_DIR")
+        .map_or_else(|| PathBuf::from("/etc/kennel"), PathBuf::from);
+    paths.push(etc.join("audit.toml"));
+    if let Some(cfg) = user_config_dir() {
+        paths.push(cfg.join("kennel").join("audit.toml"));
+    }
+    paths
+}
+
+fn user_config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 }
 
 const fn sink_kind(kind: AuditSinkKind) -> SinkKind {
@@ -381,6 +447,39 @@ mod tests {
         assert!(body.contains(r#""kennel_uuid":"test-uuid""#));
         assert!(body.contains(r#""started_pid":4242"#));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_defaults_overlay_system_then_user() {
+        let base = std::env::temp_dir().join(format!("kenneld-auditdefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        let sys = base.join("etc-audit.toml");
+        let usr = base.join("user-audit.toml");
+        std::fs::write(
+            &sys,
+            "sinks = [\"journald\"]\n[syslog]\nfacility = \"local0\"\n",
+        )
+        .expect("write system");
+        std::fs::write(
+            &usr,
+            "[syslog]\nfacility = \"local5\"\n[file]\nretain_count = 3\n",
+        )
+        .expect("write user");
+
+        // System first, user second: the user file overlays the system file.
+        let rt = overlay_files(&[sys, usr]);
+        assert_eq!(rt.syslog_facility.as_deref(), Some("local5"), "user wins");
+        assert_eq!(
+            rt.sinks,
+            vec![AuditSinkKind::Journald],
+            "system sinks survive where the user file is silent"
+        );
+        assert_eq!(rt.file.retain_count, Some(3), "user-only field");
+
+        // A missing file is simply skipped (built-in defaults remain).
+        assert!(overlay_files(&[base.join("nope.toml")]).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

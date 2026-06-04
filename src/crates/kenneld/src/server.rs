@@ -513,9 +513,10 @@ fn run_kennel<P, L>(
     // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
-    // The audit runtime (§02-3): captured before `loaded` is consumed below, so the
-    // writer can be built once start succeeds. Empty for a no-`[audit]` policy.
-    let audit_runtime = loaded.audit.clone();
+    // The audit runtime (§02-3): the installation/per-user `audit.toml` defaults
+    // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
+    // ~/.config < policy). Captured before `loaded` is consumed below.
+    let audit_runtime = crate::audit::load_audit_defaults().overlay(&loaded.audit);
     // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
     // egress proxy's writer so their events correlate. The per-kennel state dir is
     // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
