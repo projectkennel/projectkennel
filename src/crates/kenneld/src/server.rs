@@ -571,7 +571,17 @@ fn run_kennel<P, L>(
         unix,
     };
 
-    let kennel = match start(&shared.privileged, spec, &mut command) {
+    // Construct the per-kennel audit writer *before* start so the privileged
+    // operations during bring-up (and any refusal) are recorded as `priv.*`
+    // events through the same writer; it shares the run's `kennel_uuid` with the
+    // proxy. With no state dir configured, audit is simply not recorded and the
+    // decorator is a transparent pass-through.
+    let audit = state_dir.as_ref().map(|dir| {
+        crate::audit::build_writer(&req.kennel, dir, &audit_runtime, kennel_uuid.clone())
+    });
+    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_ref());
+
+    let kennel = match start(&audited, spec, &mut command) {
         Ok(kennel) => kennel,
         Err(e) => {
             return fail(
@@ -585,19 +595,14 @@ fn run_kennel<P, L>(
     };
     let pid = kennel.id();
     shared.set_pid(&req.kennel, pid);
-    // Construct the per-kennel audit writer (kenneld's lifecycle source) and record
-    // the start (§02-3), sharing the run's `kennel_uuid` with the proxy. With no
-    // state dir configured, audit is simply not recorded.
-    let audit = state_dir.as_ref().map(|dir| {
-        crate::audit::build_writer(&req.kennel, dir, &audit_runtime, kennel_uuid.clone())
-    });
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::kennel_start(pid, ctx));
     }
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
     // Block until the workload exits (on its own or via `stop`), then tear down.
-    let status = kennel.stop(&shared.privileged);
+    // The audited privileged records the teardown's `del_address` refusals too.
+    let status = kennel.stop(&audited);
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
         writer.emit(&crate::audit::kennel_exit("stopped"));

@@ -6,13 +6,20 @@
 //! netproxy is the other. Sink/writer assembly is shared via
 //! [`kennel_audit::build`]; kenneld maps the settled runtime onto it.
 
+use std::io;
+use std::net::IpAddr;
 use std::path::Path;
+use std::time::Instant;
 
 use kennel_audit::build::{writer, SinkConfig};
 use kennel_audit::{
     Event, Level, Levels, Outcome, Resource, SinkKind, Source, Value, Writer, WriterContext,
 };
 use kennel_policy::{AuditRuntime, AuditSinkKind};
+use kennel_privhelper::exec::refusal_message;
+use kennel_privhelper::wire::{EgressPayload, Response, Status};
+
+use crate::Privileged;
 
 /// Generate a per-kennel `kennel_uuid` (a `UUIDv7`).
 ///
@@ -134,9 +141,204 @@ pub fn kennel_exit(reason: &'static str) -> Event {
     .field("reason", Value::str(reason))
 }
 
+/// `priv.invoke`: a privileged operation the helper performed (`02-3`).
+///
+/// `source` is `privhelper` (the originator) even though kenneld writes the
+/// line — the helper has no writer, so kenneld records on its behalf at the IPC
+/// boundary, exactly as it does for the kernel/BPF sources.
+#[must_use]
+pub fn priv_invoke(operation: &'static str, params: Value, duration_ms: u64) -> Event {
+    Event::new(
+        "priv.invoke",
+        Resource::Priv,
+        Outcome::Allow,
+        Source::Privhelper,
+    )
+    .field("operation", Value::str(operation))
+    .field("params", params)
+    .field("duration_ms", Value::Uint(duration_ms))
+}
+
+/// `priv.refuse`: a privileged operation that did not happen (`02-3`).
+///
+/// `outcome` is `deny` for a policy refusal (`Status::Refused`, `code` the wire
+/// refusal code) and `error` for a protocol/syscall/IPC failure. `message` is
+/// the project's own description (trusted text).
+#[must_use]
+pub fn priv_refuse(
+    operation: &'static str,
+    params: Value,
+    outcome: Outcome,
+    code: i64,
+    message: String,
+) -> Event {
+    Event::new("priv.refuse", Resource::Priv, outcome, Source::Privhelper)
+        .field("operation", Value::str(operation))
+        .field("params", params)
+        .field("code", Value::Int(code))
+        .field("message", Value::str(message))
+}
+
+/// A `Privileged` decorator that records each privhelper invocation through the
+/// writer as a `priv.invoke` / `priv.refuse` event (`02-3` §Privileged).
+///
+/// kenneld wraps its real [`Privileged`] in this for the spawn and teardown, so
+/// every loopback-address, egress-BPF, and `gid_map` operation — and every
+/// refusal — is audited at the one IPC boundary, without threading a writer
+/// through the bring-up sequence. With no writer (a kennel without an audit
+/// state dir) it is a transparent pass-through.
+pub struct AuditedPrivileged<'a, P> {
+    inner: &'a P,
+    writer: Option<&'a Writer>,
+}
+
+impl<'a, P> AuditedPrivileged<'a, P> {
+    /// Wrap `inner`, emitting through `writer` when one is configured.
+    #[must_use]
+    pub const fn new(inner: &'a P, writer: Option<&'a Writer>) -> Self {
+        Self { inner, writer }
+    }
+
+    /// Emit the `priv.invoke`/`priv.refuse` event for one completed call.
+    fn record(
+        &self,
+        operation: &'static str,
+        params: Value,
+        started: Instant,
+        result: &io::Result<Response>,
+    ) {
+        let Some(writer) = self.writer else { return };
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let event = match result {
+            Ok(r) => match r.status {
+                Status::Ok => priv_invoke(operation, params, duration_ms),
+                Status::Refused => priv_refuse(
+                    operation,
+                    params,
+                    Outcome::Deny,
+                    i64::from(r.refusal),
+                    refusal_message(r.refusal).to_owned(),
+                ),
+                Status::Protocol => priv_refuse(
+                    operation,
+                    params,
+                    Outcome::Error,
+                    0,
+                    "privhelper rejected the request as malformed".to_owned(),
+                ),
+                Status::Internal => priv_refuse(
+                    operation,
+                    params,
+                    Outcome::Error,
+                    i64::from(r.errno),
+                    "privileged syscall failed in the helper".to_owned(),
+                ),
+            },
+            Err(e) => priv_refuse(operation, params, Outcome::Error, -1, e.to_string()),
+        };
+        writer.emit(&event);
+    }
+}
+
+fn addr_params(ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Value {
+    Value::object(vec![
+        ("ctx", Value::Uint(u64::from(ctx))),
+        ("interface", Value::str(interface.to_owned())),
+        ("addr", Value::str(addr.to_string())),
+        ("prefix", Value::Uint(u64::from(prefix))),
+    ])
+}
+
+fn count(n: usize) -> Value {
+    Value::Uint(u64::try_from(n).unwrap_or(u64::MAX))
+}
+
+impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
+    fn add_address(
+        &self,
+        ctx: u16,
+        interface: &str,
+        addr: IpAddr,
+        prefix: u8,
+    ) -> io::Result<Response> {
+        let started = Instant::now();
+        let result = self.inner.add_address(ctx, interface, addr, prefix);
+        self.record(
+            "add-addr",
+            addr_params(ctx, interface, addr, prefix),
+            started,
+            &result,
+        );
+        result
+    }
+
+    fn del_address(
+        &self,
+        ctx: u16,
+        interface: &str,
+        addr: IpAddr,
+        prefix: u8,
+    ) -> io::Result<Response> {
+        let started = Instant::now();
+        let result = self.inner.del_address(ctx, interface, addr, prefix);
+        self.record(
+            "del-addr",
+            addr_params(ctx, interface, addr, prefix),
+            started,
+            &result,
+        );
+        result
+    }
+
+    fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
+        let started = Instant::now();
+        let result = self.inner.setup_egress(cgroup, payload);
+        let params = Value::object(vec![
+            ("cgroup", Value::str(cgroup.display().to_string())),
+            ("allow_v4", count(payload.allow_v4.len())),
+            ("deny_v4", count(payload.deny_v4.len())),
+            ("allow_v6", count(payload.allow_v6.len())),
+            ("deny_v6", count(payload.deny_v6.len())),
+        ]);
+        self.record("setup-egress", params, started, &result);
+        result
+    }
+
+    fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response> {
+        let started = Instant::now();
+        let result = self.inner.set_gid_map(pid, gids);
+        let params = Value::object(vec![
+            ("pid", Value::Uint(u64::from(pid))),
+            (
+                "gids",
+                Value::Array(gids.iter().map(|g| Value::Uint(u64::from(*g))).collect()),
+            ),
+        ]);
+        self.record("set-gid-map", params, started, &result);
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Privileged` that returns one fixed response for every operation.
+    struct FixedPriv(Response);
+    impl Privileged for FixedPriv {
+        fn add_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
+            Ok(self.0)
+        }
+        fn del_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
+            Ok(self.0)
+        }
+        fn setup_egress(&self, _: &Path, _: &EgressPayload) -> io::Result<Response> {
+            Ok(self.0)
+        }
+        fn set_gid_map(&self, _: u32, _: &[u32]) -> io::Result<Response> {
+            Ok(self.0)
+        }
+    }
 
     #[test]
     fn uuid_is_v7_shaped() {
@@ -178,6 +380,45 @@ mod tests {
         assert!(body.contains(r#""kennel":"ai-coding""#));
         assert!(body.contains(r#""kennel_uuid":"test-uuid""#));
         assert!(body.contains(r#""started_pid":4242"#));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audited_privileged_records_invoke_and_refuse() {
+        let dir = std::env::temp_dir().join(format!("kenneld-audit-priv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let writer = build_writer("ai-coding", &dir, &AuditRuntime::default(), "u7".to_owned());
+
+        // A refusal (code 2 = AddrOutOfScope) on add_address.
+        let refusing = FixedPriv(Response::refused(2));
+        let audited = AuditedPrivileged::new(&refusing, Some(&writer));
+        let addr = "127.0.0.1".parse::<IpAddr>().expect("addr");
+        let _ = audited.add_address(7, "lo", addr, 28);
+
+        // A success on set_gid_map.
+        let ok = FixedPriv(Response::ok());
+        let audited_ok = AuditedPrivileged::new(&ok, Some(&writer));
+        let _ = audited_ok.set_gid_map(1234, &[20, 44]);
+
+        // Dropping the writer joins the buffered sink so priv.jsonl is flushed.
+        drop(writer);
+        let body = std::fs::read_to_string(dir.join("priv.jsonl")).expect("priv log");
+
+        assert!(body.contains(r#""event":"priv.refuse""#), "{body}");
+        assert!(body.contains(r#""source":"privhelper""#), "{body}");
+        assert!(body.contains(r#""operation":"add-addr""#), "{body}");
+        assert!(body.contains(r#""code":2"#), "{body}");
+        assert!(body.contains("reserved per-kennel subnet"), "{body}");
+        assert!(body.contains(r#""params":{"ctx":7,"#), "{body}");
+        assert!(body.contains(r#""addr":"127.0.0.1""#), "{body}");
+
+        assert!(body.contains(r#""event":"priv.invoke""#), "{body}");
+        assert!(body.contains(r#""operation":"set-gid-map""#), "{body}");
+        assert!(
+            body.contains(r#""params":{"pid":1234,"gids":[20,44]}"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""duration_ms":"#), "{body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
