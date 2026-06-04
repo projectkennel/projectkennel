@@ -54,8 +54,12 @@ describe these read as roadmap.
   With that, the audit subsystem owes nothing further at the userspace level;
   kernel-side BPF/LSM reporting via `dmesg` remains a non-goal here by design.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
-  / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
-  is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).
+  / §5.5) — **settled, not owed.** The shell witness (`src/tools/verify-checksums.sh`,
+  system `sha256sum`) *is* the implementation and enforces the gate in CI and
+  `pre-push`; there is no functional gap. A Rust twin is contingent on the separate
+  §5.5.1 decision to vendor `sha2` (its only new dependency) — a maintainer call
+  that has not been made and need not be. Listed here for completeness, not as a
+  roadmap deliverable.
 
 - **`kennel-sshd` — the per-kennel SSH egress bastion** (design `07-8-ssh.md` §7.8) — **BUILT** (it graduated from this roadmap; kept here for its build
   notes and the findings that shaped it). A per-user managed instance of stock
