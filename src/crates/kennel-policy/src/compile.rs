@@ -64,6 +64,11 @@ pub struct Compiled {
     pub policy: SettledPolicy,
     /// The freshly-resolved lockfile (one entry per resolved reference).
     pub lock: Lockfile,
+    /// Non-fatal warnings raised during compilation — footgun grants the policy is
+    /// allowed to keep but should be loud about (e.g. shimming a real ssh-agent
+    /// socket via `[[unix.allow]]`). The caller surfaces these (the `kennel compile`
+    /// CLI prints them to stderr); they are not part of the signed artefact.
+    pub warnings: Vec<String>,
 }
 
 /// Resolve, translate, and assemble `entry` into a settled policy.
@@ -105,11 +110,11 @@ pub fn compile(
     // The `[ssh]` section is source-only (dropped in translate); validate it here,
     // on the resolved policy, while the cross-referenced `net.allow` is still visible.
     crate::ssh::validate(&effective)?;
-    crate::unix::validate(&effective)?;
+    let warnings = crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let translated = translate(&effective)?;
-    assemble(name, &translated, &chain, &tcv, compiler_version)
+    assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
 /// Resolve, apply a leaf's deltas, translate, and assemble a settled policy.
@@ -163,11 +168,11 @@ pub fn compile_leaf(
         .or_else(|| effective.threat_catalogue_version.clone())
         .unwrap_or_default();
     crate::ssh::validate(&effective)?;
-    crate::unix::validate(&effective)?;
+    let warnings = crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let translated = translate(&effective)?;
-    assemble(name, &translated, &chain, &tcv, compiler_version)
+    assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
 /// Resolve and apply included fragments additively, in listed order.
@@ -262,6 +267,7 @@ fn assemble(
     chain: &[ChainLink],
     threat_catalogue_version: &str,
     compiler_version: &str,
+    warnings: Vec<String>,
 ) -> Result<Compiled, PolicyError> {
     let resolved_artifacts = chain
         .iter()
@@ -305,6 +311,7 @@ fn assemble(
     Ok(Compiled {
         policy,
         lock: Lockfile::from_chain(chain),
+        warnings,
     })
 }
 

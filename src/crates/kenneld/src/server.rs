@@ -546,6 +546,23 @@ fn run_kennel<P, L>(
     // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
+    // Re-derive the compile-time footgun warning at spawn (§7.8.1): a policy may shim a
+    // real ssh-agent socket via `[[unix.allow]]`, which the framework permits but warns
+    // loudly about — an exposed agent is a destination-blind signing oracle. An operator
+    // who ran a pre-compiled artefact never saw the `kennel compile` warning, so emit it
+    // here too. Warned, not refused — footguns are loud, not amputated.
+    for sock in &loaded.unix.sockets {
+        let shims_ssh_agent = sock.name.eq_ignore_ascii_case("ssh-agent")
+            || sock.env.as_deref() == Some("SSH_AUTH_SOCK");
+        if shims_ssh_agent {
+            eprintln!(
+                "kenneld: warning: kennel `{}` shims an SSH agent (`{}`): an exposed agent is a \
+                 destination-blind signing oracle (§7.8.1) — any code in the kennel can sign for \
+                 any destination. The [ssh] re-origination bastion is the intended path.",
+                req.kennel, sock.name
+            );
+        }
+    }
     // The audit runtime (§02-3): the installation/per-user `audit.toml` defaults
     // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
     // ~/.config < policy). Captured before `loaded` is consumed below.

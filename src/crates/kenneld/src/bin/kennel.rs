@@ -275,6 +275,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             return Ok(ExitCode::from(policy_error_code(&e)));
         }
     };
+    print_warnings(&compiled.warnings);
     let policy = &compiled.policy;
 
     let out = output_path.unwrap_or_else(|| default_settled_path(policy_path, &policy.name));
@@ -316,6 +317,18 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     };
     eprintln!("compiled `{}` -> {}{note}", policy.name, out.display());
     Ok(ExitCode::SUCCESS)
+}
+
+/// Print compile-time policy warnings to stderr, one `kennel: warning:` line each.
+///
+/// These are footgun grants the policy is allowed to keep (e.g. shimming a real
+/// ssh-agent socket via `[[unix.allow]]`) — loud, but not fatal. `kenneld` re-derives
+/// and logs the same warnings at spawn, so an operator who skips the compile step
+/// still sees them.
+fn print_warnings(warnings: &[String]) {
+    for w in warnings {
+        eprintln!("kennel: warning: {w}");
+    }
 }
 
 /// The `<name>.lock` path beside the settled output.
@@ -385,6 +398,7 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
 
     match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
         Ok(compiled) => {
+            print_warnings(&compiled.warnings);
             eprintln!(
                 "valid: `{}` resolves cleanly ({} references, {} deferred substitutions)",
                 compiled.policy.name,

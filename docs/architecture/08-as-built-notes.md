@@ -371,11 +371,17 @@ describe these read as roadmap.
 - **Bind port policy** (`07-3-network.md`) — **partial.** `bind_subnet_map` is now
   populated so `INADDR_ANY`/in-subnet binds work, but the bind4/bind6 programs do not
   check the port; `min_port`/`allowed_ports` are not enforced. **Owed:** the BPF port check.
-- **ssh-agent footgun** (`05-templates.md` §5.9 / `07-8-ssh.md`) — **code deviates from
-  design.** The `[ssh]` bastion is the intended path, but a policy is allowed to shim a
-  real ssh-agent via `[[unix.allow]]` — the framework should **warn loudly** (validate /
-  compile / runtime), not forbid. `kennel-policy::unix` currently **hard-refuses** it.
-  **Owed:** change the refusal to a loud warning.
+- **ssh-agent footgun** (`05-templates.md` §5.9 / `07-8-ssh.md`) — **BUILT.** A policy
+  that shims a real ssh-agent via `[[unix.allow]]` (`name = "ssh-agent"` or
+  `env = "SSH_AUTH_SOCK"`) is no longer refused: the `[ssh]` bastion is the intended
+  path, but the framework now **warns loudly** rather than amputating the choice
+  (footguns are warned, not forbidden). `kennel-policy::unix::validate` returns the
+  footgun as a *warning* on its `Ok` path (the malformed-grant checks stay hard errors);
+  the warning is carried out of `compile`/`compile_leaf` on `Compiled.warnings`, printed
+  by `kennel compile`/`kennel validate` (`kennel: warning: …`), and **re-derived at
+  spawn** by `kenneld` (it inspects the realised `UnixRuntime` sockets and logs the same
+  pointer), so an operator who runs a pre-compiled artefact still sees it. Loud at
+  validate, compile, and runtime — never fatal.
 - **`kennel run` auto-compile** (`09-policy-lifecycle.md` §9.10) — **designed, not built.**
   The design's local-dev loop auto-compiles a source policy in memory; today `run` requires
   a pre-settled, signed artefact (the spawn path verifies only). **Owed:** the in-memory
