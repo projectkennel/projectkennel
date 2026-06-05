@@ -2,8 +2,8 @@
 # Project Kennel installer.
 #
 # Installs the runtime binaries, the setuid privhelper, the vendor config, the
-# per-user systemd units, the AppArmor userns grant, and the /etc/kennel
-# skeleton. Two halves:
+# per-user systemd units, the AppArmor userns grant, the /etc/kennel skeleton,
+# the maintainer trust-store key, and the signed reference templates. Two halves:
 #
 #   1. System install (root): all binaries under <libexec> (default
 #      /usr/libexec/kennel, the documented non-PATH helper location, 07-paths.md),
@@ -166,6 +166,21 @@ install_keys() {
 	fi
 }
 
+install_templates() {
+	# Ship the signed reference templates into the CLI's default template search
+	# dir (/etc/kennel/templates, per dist/config/config.toml), so a leaf that
+	# derives e.g. base-confined@v1 resolves and verifies out of the box (the
+	# maintainer public key is installed above). Org templates are added alongside.
+	[ -d "$repo_root/templates" ] || return 0
+	local d n
+	for d in "$repo_root"/templates/*/; do
+		[ -f "${d}policy.toml" ] || continue
+		n="$(basename "$d")"
+		run install -d -m 0755 "/etc/kennel/templates/$n"
+		run install -m 0644 "${d}policy.toml" "/etc/kennel/templates/$n/policy.toml"
+	done
+}
+
 print_next_steps() {
 	cat <<EOF
 
@@ -195,4 +210,5 @@ install_units
 install_apparmor
 install_etc_skeleton
 install_keys
+install_templates
 [ "$dry_run" -eq 1 ] || print_next_steps

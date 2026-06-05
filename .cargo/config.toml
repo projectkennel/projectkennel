@@ -18,3 +18,12 @@ replace-with = "vendored"
 
 [source.vendored]
 local-registry = "src/vendor"
+
+# Cross-compilation linkers. Releases ship x86_64 and aarch64 (src/tools/build-release.sh).
+# These sections are inert unless that target is actually built, so they are safe on a
+# host without the cross toolchain; `aarch64-linux-gnu-gcc` is resolved via PATH (the
+# distro `gcc-aarch64-linux-gnu`, or a vendor toolchain). The BPF objects embedded in the
+# privhelper are arch-independent cgroup-sockaddr bytecode, so the host clang builds them
+# for either target (see kennel-bpf/build.rs and 08-as-built-notes §8.3).
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

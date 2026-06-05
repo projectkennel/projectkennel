@@ -1,6 +1,8 @@
 .claude/
 /target
 **/*.rs.bk
+# Release tarballs (src/tools/build-release.sh output; rebuilt, not committed).
+/dist/release/
 # Verified CI tool binaries + download cache (tools/install-ci-tools.sh).
 /.ci-tools/
 # Private signing seeds never belong in the repo (keys/ holds *.pub only).
