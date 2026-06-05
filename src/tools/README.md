@@ -101,6 +101,14 @@ than in the files:
 |---|---|
 | `install.sh` | System installer (run with `sudo`): builds the release binaries (the privhelper with `--features bpf-egress`), installs them under `--prefix` (default `/opt/kennel`; binaries in `bin/`, the **setuid-root** privhelper in `sbin/`), installs the systemd *user* units to `/usr/lib/systemd/user/`, and creates the `/etc/kennel` skeleton. Supports `--no-build` and `--dry-run`. It does **not** fabricate the admin-provisioned security inputs (`/etc/kennel/subkennel` allocations, `/etc/kennel/scope` constants, trust-store keys) — it prints what the admin must populate, then each user runs `systemctl --user enable --now kenneld.socket`. |
 
+## Reproducible release builds (`BUILD-ENV.md` §Reproducibility, CODING-STANDARDS.md §8)
+
+| Tool | What it does |
+|---|---|
+| `reproducible-build.sh` | Builds release binaries whose bytes are a pure function of the committed tree, so two machines hash-for-hash agree. It pins `SOURCE_DATE_EPOCH` to the HEAD commit time (rustc embeds no other timestamp) and sets `--remap-path-prefix` for the three host-specific roots — the workspace → `/kennel`, the cargo home → `/cargo`, the rustup sysroot → `/rustup` — so no absolute path leaks into panic strings or debug info. (`--remap-path-prefix` is the stable stand-in for `trim-paths`, which is not yet stable on the pinned toolchain.) Builds `--locked --offline` from the vendored registry. Profile defaults to `release-with-debuginfo` (override with `KENNEL_PROFILE`). |
+
+Two cargo profiles back this (root `Cargo.toml`): `release` (stripped, `codegen-units = 1` for determinism) and **`release-with-debuginfo`** (`inherits = "release"`, `strip = "none"`, `debug = "full"`) — an optimised, reproducible build that keeps symbols for production crash symbolication. Verified: a `release-with-debuginfo` artefact built through the script carries `/kennel/src/...`, `/cargo/registry/...`, and `/rustup/...` paths and **zero** occurrences of the builder's home directory.
+
 ## Git hooks (CODING-STANDARDS.md §15)
 
 | Tool | What it does |

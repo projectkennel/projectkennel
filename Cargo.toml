@@ -74,6 +74,21 @@ arithmetic_side_effects = "deny"
 [profile.release]
 opt-level = 3
 lto = "thin"
+# `codegen-units = 1` is also a reproducibility lever: a single unit removes the
+# parallel-codegen non-determinism, so combined with the path remapping that
+# `src/tools/reproducible-build.sh` applies (`--remap-path-prefix`, the stable stand-in
+# for the still-unstable `trim-paths`) and rustc honouring `SOURCE_DATE_EPOCH`, the
+# release binaries hash identically across builders (BUILD-ENV.md §Reproducibility).
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# Production crash symbolication: a release build (optimised, and reproducible when
+# built via `src/tools/reproducible-build.sh`) that keeps full debug info instead of
+# stripping it. `inherits` carries every release setting, so it is as reproducible as
+# `release`. Build with `cargo build --profile release-with-debuginfo` (or set
+# `KENNEL_PROFILE=release-with-debuginfo` for the reproducible-build script).
+[profile.release-with-debuginfo]
+inherits = "release"
+strip = "none"
+debug = "full"
