@@ -1722,6 +1722,104 @@ mod tests {
         );
     }
 
+    /// **A `[ulimits]` cap reaches the workload (§7.2.12).** A userns spawn whose plan
+    /// carries `RLIMIT_NOFILE = 64` runs `sh -c 'ulimit -n'`; the workload reports the
+    /// limit the seal applied (after Landlock, before `execve`). Skips with the precise
+    /// cause where the host forbids the userns, exactly like the confined-view proof.
+    #[test]
+    fn unprivileged_userns_spawn_applies_a_ulimit() {
+        use kennel_syscall::process::Resource;
+        use std::io::Read;
+        use std::process::Stdio;
+
+        if userns_hard_disabled() || !landlock_available() {
+            eprintln!("SKIP: unprivileged user namespaces or Landlock unavailable on this host");
+            return;
+        }
+
+        let base =
+            std::env::temp_dir().join(format!("kennel-userns-ulimit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let new_root = base.join("root");
+        std::fs::create_dir_all(&new_root).expect("mkdir new_root");
+
+        let shim_root = PathBuf::from("/khome");
+        let ro = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let sys = ["/usr", "/bin", "/lib", "/lib64"];
+        let binds: Vec<BindMount> = sys
+            .iter()
+            .map(|d| BindMount {
+                source: PathBuf::from(*d),
+                target: PathBuf::from(*d),
+                writable: false,
+            })
+            .collect();
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> =
+            sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
+        landlock_fs.push((shim_root.clone(), ro));
+
+        let plan = Plan {
+            namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::IPC | Namespaces::PID,
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false,
+            view: Some(ShimView {
+                shim_root: shim_root.clone(),
+                binds,
+                dev_allow: Vec::new(),
+                tmp_size_mib: 64,
+                tmp_mode: "0700".to_owned(),
+                proc_hidepid: false,
+            }),
+            new_root: Some(new_root),
+            landlock_fs,
+            landlock_net: Vec::new(),
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
+            file_binds: Vec::new(),
+            supplementary_groups: None,
+            ulimits: vec![(Resource::RLIMIT_NOFILE, 64, 64)],
+        };
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("HOME", &shim_root)
+            .arg("-c")
+            .arg("ulimit -n")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+
+        let spawned = spawn(&plan, &mut cmd);
+        if let Err(SpawnError::Syscall(e)) = &spawned {
+            if e.kind() == io::ErrorKind::PermissionDenied && apparmor_restricts_userns() {
+                let _ = std::fs::remove_dir_all(&base);
+                eprintln!("SKIP: this test binary has no AppArmor profile granting `userns`: {e}");
+                return;
+            }
+        }
+        let mut child = spawned.expect("unprivileged userns spawn");
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
+        let status = child.wait().expect("wait");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(status.success(), "workload ran (got {status:?})");
+        assert_eq!(
+            out.trim(),
+            "64",
+            "the workload sees the policy's RLIMIT_NOFILE soft limit"
+        );
+    }
+
     /// **The `gid_map` handshake, proven unprivileged (§7.2.8).** A userns spawn goes
     /// through [`spawn_with_gid_map`]: the child defers its `gid_map`, signals its
     /// pid, and blocks; the servicer thread runs the mapper, which writes the child's
