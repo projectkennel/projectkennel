@@ -186,17 +186,17 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
     std::fs::remove_dir(&cgroup).expect("remove cgroup");
 }
 
-/// With a `pin_id`, the helper pins the kennel's shared maps under
-/// `/run/kennel/bpf/<id>/` (item 10 + the audit-drain prerequisite). Proves the
-/// pins land with the right modes; reopening the ringbuf to drain is the kenneld
-/// e2e. (Runs as root, so the pins are owned by root here.)
+/// With a `pin_id`, the helper pins the kennel's shared maps under the caller's
+/// XDG runtime dir `/run/user/<uid>/kennel/bpf/<id>/` (item 10 + the audit-drain
+/// prerequisite). Proves the pins land owner-only with the right modes; reopening
+/// the ringbuf to drain is the kenneld e2e. (Runs as root, so uid 0.)
 #[cfg(feature = "root-tests")]
 #[test]
-fn pins_the_shared_maps_under_run_kennel_bpf() {
+fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
     use kennel_privhelper::wire::{EgressPayload, META_LEN};
     use std::os::unix::fs::PermissionsExt as _;
 
-    if skip_if_unprivileged("pins_the_shared_maps_under_run_kennel_bpf") {
+    if skip_if_unprivileged("pins_the_shared_maps_in_the_xdg_runtime_dir") {
         return;
     }
     let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
@@ -205,11 +205,9 @@ fn pins_the_shared_maps_under_run_kennel_bpf() {
     std::fs::create_dir(&cgroup).expect("create cgroup");
 
     let pin_id = "kennel-pintest";
-    // Pins are partitioned by the caller's uid (root here, so uid 0).
+    // Pins live in the caller's XDG runtime dir (root here, so /run/user/0).
     let uid = kennel_syscall::unistd::real_uid();
-    let pin_dir = std::path::PathBuf::from("/run/kennel/bpf")
-        .join(uid.to_string())
-        .join(pin_id);
+    let pin_dir = std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf")).join(pin_id);
     let _ = std::fs::remove_dir_all(&pin_dir);
 
     let payload = EgressPayload {

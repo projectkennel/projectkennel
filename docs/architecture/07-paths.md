@@ -76,9 +76,12 @@ Per-user runtime state. Created by kenneld at startup; cleaned at logout.
 ├── control.sock                     CLI ↔ kenneld control socket
 ├── proxy/                           per-kennel netproxy config (proxy-<ctx>.toml)
 ├── etc/  root/  bastion/            staged synthetic /etc, view roots, SSH bastion
+├── bpf/                             bpffs holding the per-kennel BPF map pins (below)
 ```
 
-Owner: user. Mode: directory `0700`, files `0600` (the socket too).
+Owner: user. Mode: directory `0700`, files `0600` (the socket too). The `bpf/`
+subdirectory is a bpffs the privhelper mounts (it needs `CAP_SYS_ADMIN`); see
+[`/run/user/<uid>/kennel/bpf/<id>/`](#runuseruidkennelbpfid).
 
 Single-instance-per-user is provided by systemd socket activation (it owns the one bound listener), not a lock file: there is no `kenneld.lock` and no `kenneld.pid` (`05-state-and-supervision.md`).
 
@@ -165,16 +168,18 @@ Owner: user (kenneld creates the cgroup itself, unprivileged, within its delegat
 
 Mode and ownership follow the system's cgroup delegation policy. Modern systemd configurations delegate `/sys/fs/cgroup/user.slice/user-<uid>.slice/` to the user, and Project Kennel's `<namespace>/` subtree lives within that delegation. kenneld — not the privhelper — creates and removes the per-kennel cgroup; the privhelper only *attaches* the egress BPF to a cgroup whose ownership it re-validates against the caller's allocation.
 
-### `/run/kennel/bpf/<uid>/<id>/`
+### `/run/user/<uid>/kennel/bpf/<id>/`
 
 Per-kennel BPF map pinning, for the audit ring-buffer drain and for owner
-inspection. The privhelper mounts ONE bpffs at `/run/kennel/bpf/` (root, mode
-`0711` — traverse-only) and pins each kennel's shared map set under a path
-**partitioned by the owner's uid**:
+inspection. The pins live in the **owner's own `$XDG_RUNTIME_DIR`** — systemd's
+per-user `/run/user/<uid>/` tree (`0700`, owned by the user) — so isolation is
+*structural*, not a permissions game in a shared directory. The privhelper mounts
+a bpffs at `/run/user/<uid>/kennel/bpf/` (alongside kenneld's other per-user
+runtime state) and pins each kennel's shared map set under it:
 
 ```
-/run/kennel/bpf/                     bpffs (root, 0711 — traverse, not listable, not writable)
-└── <uid>/                           per-user dir (owner-only, 0700) — the isolation boundary
+/run/user/<uid>/                     systemd per-user runtime dir (0700, owned by the user)
+└── kennel/bpf/                      bpffs the privhelper mounts (owner-only, 0700)
     └── <id>/                        per-kennel pin dir (owner-only, 0700)
         ├── audit_ringbuf            pinned ringbuf — kenneld obj_gets + drains it
         ├── kennel_meta_map          pinned BPF maps (owner inspects with bpftool)
@@ -186,33 +191,36 @@ inspection. The privhelper mounts ONE bpffs at `/run/kennel/bpf/` (root, mode
 ```
 
 A kennel's programs share one map set (`kennel_bpf::create_maps` +
-`load_program_against`), so there is exactly one `audit_ringbuf` per kennel and
-one coherent set to pin. **Kennel is a per-user tool, and `<id>` (the kennel name)
-is unique only *within* a user** — so the pins are partitioned by the owner's
-**uid**, which the privhelper takes from its own *real* uid (it is setuid-root but
-runs for the calling user), never from the wire. The `<uid>/` dir is the isolation
-boundary: owner-only `0700`, owned by the caller. This does three things at once:
+`load_program_against`), so there is exactly one `audit_ringbuf` per kennel and one
+coherent set to pin. Because the whole `/run/user/<uid>/` tree is already private to
+the user, this design needs no shared `/run/kennel/bpf` directory, no `kennel-readers`
+group, and no `0711` hide-and-seek: another user simply cannot reach into another's
+`$XDG_RUNTIME_DIR`. It also falls out for free that:
 
-- **No collisions** — two users can both run a kennel named `dev` without clashing.
-- **No cross-user clobber** — the root privhelper only ever writes (and clears
-  stale pins) under its own caller's `<uid>/`, so it can never delete another
-  user's pins even though it is privileged.
-- **No existence disclosure** — even a *guessable* `<id>` is behind the `0700`
-  `<uid>/` dir, so another user cannot probe `…/<their-uid>/dev` to confirm a
-  kennel exists; the `0711` root (no other-read) also blocks `ls`, and (no
-  other-write) blocks squatting another user's `<uid>/` before they create it.
+- **No collisions** — each user has their own runtime dir, so two users can both run
+  a kennel named `dev` without clashing (the uid is in the path).
+- **No cross-user clobber** — the root privhelper resolves the path from its own
+  *real* uid (it is setuid-root but runs for the calling user), never the wire, so it
+  only ever writes — and clears stale pins — under the caller's own
+  `/run/user/<uid>/`. It can never touch another user's pins even though privileged.
 
-The per-kennel dir and pins are likewise owner-only (`0700`/`0600`, no OS group):
-the unprivileged kenneld `BPF_OBJ_GET`s the ring buffer to drain it and the owner
-inspects the maps with `bpftool`. Multiple users run kennels side by side, none the
-wiser of the others. kenneld removes the pin dir when its kennel exits.
+The bpffs, the per-kennel dir, and the pins are all owner-only (`0700`/`0700`/`0600`,
+no OS group): the unprivileged kenneld `BPF_OBJ_GET`s the ring buffer to drain it and
+the owner inspects the maps with `bpftool`. Multiple users run kennels side by side,
+none the wiser of the others. kenneld removes the pin dir when its kennel exits; the
+bpffs mount is cleaned up with the rest of `/run/user/<uid>/` at logout.
 
-Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, so an
-unprivileged kenneld cannot traverse it to reopen the ring buffer. `/run/kennel/`
-is already kennel's root-owned `0755` traversable runtime tree, so the pins live
-on a dedicated bpffs beneath it.
+The uid is resolved from the running user (not `$XDG_RUNTIME_DIR` in the environment)
+so the privileged helper and the unprivileged daemon agree on the path without one
+trusting the other's environment; in the standard systemd case this *is*
+`$XDG_RUNTIME_DIR/kennel/bpf`.
 
-The workload never sees this tree — the shim does not bind-mount `/run/kennel/bpf`
+Not `/sys/fs/bpf/kennel/` (the obvious bpffs): systemd mounts `/sys/fs/bpf`
+`mode=700`, so an unprivileged kenneld cannot traverse it to reopen the ring
+buffer. The owning user's `$XDG_RUNTIME_DIR` is both reachable by that user and
+private from every other, so the pins live on a bpffs there instead.
+
+The workload never sees this tree — the shim does not bind-mount the runtime bpffs
 into the kennel's view.
 
 ### `/run/kennel/privhelper.lock`
@@ -254,7 +262,7 @@ The resolver requires the *exact* `<name>@<version>`; it does not fall back to a
 | `/run/user/<uid>/kennel/` | kenneld (startup) | logout (systemd) or kenneld (graceful shutdown) | User session |
 | `/run/kennel/<id>/` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/sys/fs/cgroup/<namespace>/<ctx>/` | kenneld (unprivileged, in its delegated subtree) | kenneld (immediately on workload exit) | Kennel lifetime |
-| `/run/kennel/bpf/<uid>/<id>/` | privhelper (egress setup; pins chowned to the caller) | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/run/user/<uid>/kennel/bpf/<id>/` | privhelper (egress setup; pins chowned to the caller) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/etc/kennel/` | Package installation | Package removal | All restarts and reboots |
 | `/run/kennel/privhelper.lock` | First privhelper invocation | Reboot (tmpfs) | Reboot |
 
@@ -282,7 +290,7 @@ Each path's mode and ownership are part of its security contract. The most-load-
 
 - **`~/.local/state/kennel/<kennel>/`** mode `0700`: the workload (running as the same UID) is denied access because the shim does not bind-mount this directory into the workload's view. The mode is belt-and-braces.
 - **`/run/user/<uid>/kennel/control.sock`** mode `0600`: only the owning user may connect. kenneld additionally validates via `SO_PEERCRED` (boundary 7 in `04-trust-boundaries.md`).
-- **`/run/kennel/bpf/<uid>/<id>/`** uid-partitioned, directory `0700`, pins `0600`, **owner-only** (chowned to the caller, no shared group): the owning user's kenneld reopens the ring buffer to drain it and the owner inspects the maps with `bpftool`; the workload (with no view onto `/run/kennel/bpf`) cannot reach them. The `<uid>/` dir (`0700`) keeps per-user names non-colliding, confines the root privhelper to its own caller's subtree (no cross-user clobber), and hides even a guessable `<id>` from another user; the `0711` root blocks both listing and squatting. Kennel is per-user — there is no OS-level "readers" group; isolation is by ownership.
+- **`/run/user/<uid>/kennel/bpf/<id>/`** in the owner's private `$XDG_RUNTIME_DIR`; bpffs, per-kennel dir, and pins all **owner-only** (`0700`/`0700`/`0600`, chowned to the caller, no shared group): the owning user's kenneld reopens the ring buffer to drain it and the owner inspects the maps with `bpftool`; no other user can reach into `/run/user/<uid>/` at all. Because the path is in the user's own runtime dir (resolved from the caller's real uid, never the wire), per-user kennel names cannot collide and the root privhelper can only ever touch the caller's own subtree (no cross-user clobber). Kennel is per-user — isolation is structural, by ownership; there is no OS-level "readers" group.
 - **`/etc/kennel/keys/*.pub`** mode `0644`: public keys; world-readable is fine. Private keys are not in this tree.
 - **`kennel-privhelper`** setuid root (as installed; file capabilities a per-distribution alternative): a compromise of the calling process (kenneld) does not automatically gain privilege; the privhelper validates every request per `04-trust-boundaries.md` boundary 1.
 

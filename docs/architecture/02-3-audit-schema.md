@@ -20,7 +20,7 @@
 >   carries `comm` as untrusted (writer-sanitised), and emits canonical events
 >   **through this writer** with `source: bpf` (so a `net.bind-deny` lands in the
 >   same JSONL/syslog/journald sinks as a userspace event). The privhelper pins the
->   per-kennel ring buffer to `/run/kennel/bpf/<id>/`; the unprivileged kenneld
+>   per-kennel ring buffer in the owner's `/run/user/<uid>/kennel/bpf/<id>/`; the unprivileged kenneld
 >   reopens it with `BPF_OBJ_GET`, so the drain adds no privilege.
 > - **LSM denials** (Landlock/AppArmor) *are* the kernel's to log — they surface
 >   through the kernel's own channels (`dmesg`/auditd), not our ring buffer, so they

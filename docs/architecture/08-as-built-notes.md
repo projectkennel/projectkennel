@@ -95,7 +95,7 @@ describe these read as roadmap.
   prerequisite was resolved by the **shared-map + pin** route: the privhelper creates
   the kennel's map set once (`kennel_bpf::create_maps`) and loads every program
   against it (`load_program_against`), so there is exactly one `audit_ringbuf` per
-  kennel; it pins that buffer to `/run/kennel/bpf/<id>/audit_ringbuf` (caller-owned),
+  kennel; it pins that buffer to `/run/user/<uid>/kennel/bpf/<id>/audit_ringbuf` (owner-only),
   and the unprivileged kenneld reopens it with `BPF_OBJ_GET` (gated on bpffs inode
   permissions, *not* `CAP_BPF` — empirically confirmed under
   `unprivileged_bpf_disabled=2`). No fd-passback over the control socket was needed.

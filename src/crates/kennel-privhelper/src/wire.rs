@@ -291,11 +291,12 @@ pub struct EgressPayload {
     /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. Capped
     /// at [`MAX_BIND_PORTS`] on decode (the BPF array is fixed-size).
     pub bind_allowed_ports: Vec<u16>,
-    /// The kennel's globally-unique runtime id (`<id>` in `07-paths.md`). When
-    /// non-empty, the helper pins this kennel's BPF maps under
-    /// `/run/kennel/bpf/<id>/` (for `bpftool` inspection and the audit-ringbuf
-    /// drain). Empty ⇒ pinning disabled. The helper validates the grammar before
-    /// using it as a path component. Capped at [`MAX_PIN_ID`] bytes on decode.
+    /// The kennel's runtime id (`<id>` in `07-paths.md`; the kennel name). When
+    /// non-empty, the helper pins this kennel's BPF maps under the owner's
+    /// `/run/user/<uid>/kennel/bpf/<id>/` (for `bpftool` inspection and the
+    /// audit-ringbuf drain). Empty ⇒ pinning disabled. The helper validates the
+    /// grammar before using it as a path component. Capped at [`MAX_PIN_ID`] bytes
+    /// on decode.
     pub pin_id: String,
 }
 

@@ -162,8 +162,8 @@ fn perform_egress(req: &Request, payload: &EgressPayload) -> Response {
 ///
 /// `BPF_PROG_ATTACH` outlives this process, so the programs stay attached after
 /// the helper exits even though the program/map fds close on drop. Pinning the
-/// maps under `/run/kennel/bpf/<id>/` keeps them alive (and reachable) for the
-/// unprivileged kenneld to drain — see [`pin_kennel_maps`].
+/// maps under `/run/user/<uid>/kennel/bpf/<id>/` keeps them alive (and reachable)
+/// for the unprivileged kenneld to drain — see [`pin_kennel_maps`].
 ///
 /// The caller must own the cgroup directory (the delegation boundary): the fd is
 /// opened once and `fstat`ed, so the ownership check and the attach use the same
@@ -223,21 +223,21 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     Response::ok()
 }
 
-/// Pin this kennel's shared BPF maps under `/run/kennel/bpf/<uid>/<pin_id>/`.
+/// Pin this kennel's shared BPF maps under `/run/user/<uid>/kennel/bpf/<pin_id>/`.
 ///
 /// The pins keep the maps alive after the helper exits and reachable by the
 /// unprivileged kenneld (which `BPF_OBJ_GET`s `audit_ringbuf` to drain, and which
 /// the owning user inspects with `bpftool`).
 ///
-/// Kennel is a **per-user** tool, and `pin_id` (the kennel name) is only unique
-/// *within* a user — so the pins are partitioned by the caller's **uid**, taken
-/// from the helper's real uid (never the wire). `<uid>/` is the isolation
-/// boundary: owner-only `0700`, owned by the caller. This makes per-user names
-/// non-colliding *and* keeps this root-privileged helper from ever touching
-/// another user's subtree (it only ever writes under its own caller's `<uid>/`).
-/// The per-kennel dir and pins are likewise owner-only (`0700`/`0600`, no OS
-/// group); the shared bpffs root is `0711` — traverse-but-not-list and, crucially,
-/// **not** other-writable, so a user cannot pre-create (squat) another's `<uid>/`.
+/// Kennel is a **per-user** tool, so the pins live in the caller's own
+/// `$XDG_RUNTIME_DIR` (`/run/user/<uid>/`, which systemd creates `0700`, owned by
+/// the user). Isolation is therefore *structural* — the whole tree is already
+/// unreachable by other users — rather than permission gymnastics in a shared
+/// directory: no cross-user collision (the uid is in the path), no clobber (this
+/// root helper only ever writes under the caller's own `/run/user/<uid>/`), and no
+/// existence disclosure. The uid is the helper's **real** uid (it is setuid-root
+/// but runs for the caller), never the wire. The bpffs, the per-kennel dir, and the
+/// pins are all owner-only (`0700`/`0700`/`0600`, no OS group).
 ///
 /// All steps are best-effort: any failure simply leaves the drain/inspection
 /// unavailable for this kennel; egress enforcement is unaffected. `pin_id` empty
@@ -249,22 +249,12 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
     if pin_id.is_empty() || !valid_pin_id(pin_id) {
         return;
     }
-    let base = std::path::Path::new(PIN_ROOT);
-    if ensure_bpffs(base).is_err() {
+    let caller_uid = kennel_syscall::unistd::real_uid();
+    let base = pin_root(caller_uid);
+    if ensure_bpffs(&base, caller_uid).is_err() {
         return;
     }
-    // Per-uid partition: the caller's real uid (the helper is setuid-root but its
-    // *real* uid is the invoking user). This both prevents same-name collisions
-    // across users and confines every write below to this caller's own subtree.
-    let caller_uid = kennel_syscall::unistd::real_uid();
-    let user_root = base.join(caller_uid.to_string());
-    // Create (or reuse) the per-user dir, owner-only. A pre-existing one can only be
-    // this user's own — the 0711 root denies other users the write needed to squat it.
-    let _ = std::fs::create_dir(&user_root);
-    let _ = std::os::unix::fs::chown(&user_root, Some(caller_uid), None);
-    let _ = set_mode(&user_root, 0o700);
-
-    let dir = user_root.join(pin_id);
+    let dir = base.join(pin_id);
     // Clear any stale pins from a prior kennel of the same name (this user's own).
     let _ = clear_pin_dir(&dir);
     if std::fs::create_dir(&dir).is_err() {
@@ -286,10 +276,16 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
     }
 }
 
-/// The bpffs mount root for per-kennel BPF pins (`07-paths.md`). One bpffs serves
-/// all kennels; per-kennel pins live in `<PIN_ROOT>/<id>/`.
+/// The bpffs mount root for a user's BPF pins: `/run/user/<uid>/kennel/bpf`.
+///
+/// uid-derived (matching `kenneld::bpf_audit::pin_dir_for`) so the privileged helper
+/// and the unprivileged daemon agree without passing a path over the wire. This is
+/// `$XDG_RUNTIME_DIR/kennel/bpf` in the standard systemd case; we resolve it from
+/// the uid rather than the (scrubbed, untrusted) environment.
 #[cfg(feature = "bpf-egress")]
-const PIN_ROOT: &str = "/run/kennel/bpf";
+fn pin_root(uid: u32) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf"))
+}
 
 /// Whether `id` is a safe single path component for a pin dir: the kennel-name
 /// grammar `[a-z0-9][a-z0-9-]{0,63}` (so never `..`, never containing `/`).
@@ -308,18 +304,20 @@ fn valid_pin_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Ensure a bpffs is mounted at `base` (idempotent), mode `0711` — traverse-only,
-/// so the unprivileged kenneld of any user can reach *its own* per-kennel pin dir
-/// but no user can list (and thereby discover) another user's kennels.
+/// Ensure a bpffs is mounted at `base` (idempotent) and owned by the caller,
+/// owner-only `0700`. `base` lives inside the user's `0700` `/run/user/<uid>/`, so
+/// other users cannot reach it regardless; the chown lets the unprivileged owner
+/// reopen the pins and clean them up.
 #[cfg(feature = "bpf-egress")]
-fn ensure_bpffs(base: &std::path::Path) -> std::io::Result<()> {
+fn ensure_bpffs(base: &std::path::Path, caller_uid: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(base)?;
     if !kennel_syscall::mount::is_bpffs(base).unwrap_or(false) {
         kennel_syscall::mount::mount_bpffs(base)?;
     }
-    // Enforce traverse-only every time (cheap, root-only): self-heals a stale mode
-    // and keeps one user from listing another's pin dirs.
-    set_mode(base, 0o711)?;
+    // Hand the bpffs root to the owning user, owner-only. Enforced every time
+    // (cheap, root-only) so it self-heals a stale owner/mode.
+    let _ = std::os::unix::fs::chown(base, Some(caller_uid), None);
+    set_mode(base, 0o700)?;
     Ok(())
 }
 

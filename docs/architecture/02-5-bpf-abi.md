@@ -60,7 +60,7 @@ The loader is designed to check kernel-feature availability at attach time and r
 
 ## Maps
 
-Each kennel has its own copy of the per-kennel maps; the project-wide audit ringbuf is shared.
+Each kennel has its own map set, including its own `audit_ringbuf` (one per kennel — see §The audit ring buffer; the programs of a kennel share it, and kenneld drains it per kennel).
 
 ### Per-kennel maps
 
@@ -137,7 +137,7 @@ struct bind_subnet {
 
 The audit reader in kenneld drains it; events carry the originating kennel's `kennel_uuid` (resolved from `ctx_byte` via kenneld's in-memory registry), and route through the unified audit writer (`02-3-audit-schema.md` §Scope) with `source: bpf`.
 
-As built, there is exactly *one* `audit_ringbuf` per kennel: the privhelper creates the kennel's map set once (`kennel_bpf::create_maps`) and loads every program against it (`load_program_against`), so all of a kennel's programs share the one buffer. The privhelper pins it to `/run/kennel/bpf/<id>/audit_ringbuf` (`07-paths.md`); the unprivileged kenneld reopens it with `BPF_OBJ_GET` and drains it on a per-kennel thread (`kenneld::bpf_audit`). (The design once said "one buffer created at kenneld start"; kenneld is unprivileged and cannot create BPF maps, so the privileged helper creates and pins it instead, one per kennel, and kenneld reopens it.)
+As built, there is exactly *one* `audit_ringbuf` per kennel: the privhelper creates the kennel's map set once (`kennel_bpf::create_maps`) and loads every program against it (`load_program_against`), so all of a kennel's programs share the one buffer. The privhelper pins it to `/run/user/<uid>/kennel/bpf/<id>/audit_ringbuf` (`07-paths.md`); the unprivileged kenneld reopens it with `BPF_OBJ_GET` and drains it on a per-kennel thread (`kenneld::bpf_audit`). (The design once said "one buffer created at kenneld start"; kenneld is unprivileged and cannot create BPF maps, so the privileged helper creates and pins it instead, one per kennel, and kenneld reopens it.)
 
 Capacity is configurable per kennel via `[audit].ringbuf_bytes`, capped at 16 MiB to prevent operator misconfiguration causing memory pressure.
 
@@ -200,7 +200,7 @@ The loader's setup for one kennel:
 2. Create the per-kennel map set *once* (`create_maps`).
 3. Populate `kennel_meta`, `allow_v4`, `allow_v6`, `deny_v4`, `deny_v6`, `bind_subnet` from the resolved policy.
 4. Load every program against that shared set (`load_program_against`), attaching to the kennel's cgroup (under `/sys/fs/cgroup/<namespace>/<ctx>/`, where `<namespace>` defaults to `kennel`).
-5. Pin the shared maps under `/run/kennel/bpf/<id>/` (Map pinning, below).
+5. Pin the shared maps under `/run/user/<uid>/kennel/bpf/<id>/` (Map pinning, below).
 6. The cgroup is then ready; the workload can be moved into it.
 
 > **Status: `kennel_meta` read-only sealing not yet built (roadmap).** The attach path creates, populates, attaches, and pins the maps; it does not yet freeze `kennel_meta` against further writes (`BPF_MAP_FREEZE`). The explicit "mark `kennel_meta` read-only" step is designed but unwired.
@@ -239,11 +239,11 @@ A non-matching `abi_version` between the loader and the maps it created would in
 
 ## Map pinning and inspection
 
-Per-kennel maps are pinned under `/run/kennel/bpf/<uid>/<id>/` (`07-paths.md`), on a bpffs the privhelper mounts at `/run/kennel/bpf/` (root, `0711` — traverse-only). Kennel is a **per-user** tool and `<id>` (the kennel name) is unique only *within* a user, so the pins are partitioned by the owner's **uid** (the helper's real uid, never the wire) and are **owner-only**: `<uid>/` and the per-kennel dir are `0700`, pins `0600`, no shared OS group. The `<uid>/` dir keeps per-user names non-colliding, confines this root-privileged helper to its own caller's subtree (it can never clobber another user's pins), and hides even a guessable `<id>` from other users. This lets the unprivileged kenneld reopen the `audit_ringbuf` to drain it and the owner inspect the maps (`bpftool map dump pinned /run/kennel/bpf/1000/ai-coding/allow_v4`); the `0711` root blocks another user from listing or squatting it.
+Per-kennel maps are pinned under `/run/user/<uid>/kennel/bpf/<id>/` (`07-paths.md`) — in the owning user's `$XDG_RUNTIME_DIR`, which systemd creates `0700` and owns to that user. Kennel is a **per-user** tool, so isolation is *structural*: the whole `/run/user/<uid>/` tree is already unreachable by other users, with no shared directory, no OS group, and no permission tricks. The privhelper mounts a bpffs at `/run/user/<uid>/kennel/bpf/` and chowns it (and the per-kennel dir and pins) to the caller, owner-only `0700`/`0700`/`0600`. The path is resolved from the caller's **real** uid (the helper is setuid-root but runs for the user), never the wire, so per-user kennel names cannot collide and this root-privileged helper only ever writes under the caller's own runtime dir (no cross-user clobber). The unprivileged kenneld reopens the `audit_ringbuf` to drain it; the owner inspects the maps (`bpftool map dump pinned /run/user/1000/kennel/bpf/ai-coding/allow_v4`).
 
-Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, which an unprivileged kenneld cannot traverse to `BPF_OBJ_GET` the ring buffer. The pin step is best-effort — a pin failure degrades to "no BPF audit drain / no inspection" but never fails egress setup.
+Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, which an unprivileged kenneld cannot traverse to `BPF_OBJ_GET` the ring buffer; the user's own `$XDG_RUNTIME_DIR` is both reachable by them and private from everyone else. The pin step is best-effort — a pin failure degrades to "no BPF audit drain / no inspection" but never fails egress setup.
 
-The workload's view never includes `/run/kennel/bpf` — the constructed shim does not mount it.
+The workload's view never includes the runtime bpffs — the constructed shim does not mount it.
 
 ---
 

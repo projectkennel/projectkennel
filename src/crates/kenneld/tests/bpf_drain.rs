@@ -50,11 +50,13 @@ fn drains_a_denied_connect_event_through_the_writer() {
     let elf = kennel_bpf::programs::object("connect4").expect("embedded connect4 object");
     let prog = kennel_bpf::load_program_against(elf, spec, &maps).expect("load connect4");
 
-    // 2. Pin the shared audit_ringbuf on a bpffs, exactly as the privhelper does.
-    let bpffs = Path::new("/run/kennel/bpf");
-    std::fs::create_dir_all(bpffs).expect("mkdir /run/kennel/bpf");
-    if !kennel_syscall::mount::is_bpffs(bpffs).unwrap_or(false) {
-        kennel_syscall::mount::mount_bpffs(bpffs).expect("mount bpffs");
+    // 2. Pin the shared audit_ringbuf on a bpffs, exactly as the privhelper does —
+    //    in the caller's XDG runtime dir (root here, so /run/user/0/kennel/bpf).
+    let uid = kennel_syscall::unistd::real_uid();
+    let bpffs = std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf"));
+    std::fs::create_dir_all(&bpffs).expect("mkdir runtime bpf dir");
+    if !kennel_syscall::mount::is_bpffs(&bpffs).unwrap_or(false) {
+        kennel_syscall::mount::mount_bpffs(&bpffs).expect("mount bpffs");
     }
     let pin_dir = bpffs.join("kennel-draintest");
     let _ = std::fs::remove_dir_all(&pin_dir);

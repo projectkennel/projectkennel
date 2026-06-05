@@ -2,7 +2,7 @@
 //!
 //! The cgroup BPF programs (`bpf/*.bpf.c`) reserve-and-commit packed audit events
 //! into a per-kennel `audit_ringbuf` (`bpf/audit_events.h`). The privhelper pins
-//! that buffer under `/run/kennel/bpf/<uid>/<id>/audit_ringbuf` (`kennel-privhelper::exec`);
+//! that buffer under `/run/user/<uid>/kennel/bpf/<id>/audit_ringbuf` (`kennel-privhelper::exec`);
 //! kenneld — unprivileged — reopens it with `BPF_OBJ_GET` and drains it on a
 //! per-kennel thread, parsing each event, resolving the kennel from the event's
 //! `ctx_byte`, and emitting a canonical `02-3` event with `source: bpf` through the
@@ -324,15 +324,16 @@ fn clear_pin_dir(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-/// The per-kennel BPF pin dir for `id`: `/run/kennel/bpf/<uid>/<id>/`.
+/// The per-kennel BPF pin dir for `id`: `/run/user/<uid>/kennel/bpf/<id>/`.
 ///
-/// Partitioned by the running user's uid. Mirrors the privhelper's layout (which
-/// derives the same uid from its real uid — kenneld's uid); kenneld computes it by
-/// convention to find the ring buffer.
+/// In the owning user's `$XDG_RUNTIME_DIR` (resolved from the uid, matching the
+/// privhelper's `pin_root`, so the two agree without passing a path over the wire).
+/// `/run/user/<uid>/` is systemd's per-user `0700` runtime tree, so the pins are
+/// private structurally — no shared directory, no group, no permission tricks.
 #[must_use]
 pub fn pin_dir_for(id: &str) -> PathBuf {
     let uid = kennel_syscall::unistd::real_uid();
-    Path::new("/run/kennel/bpf").join(uid.to_string()).join(id)
+    PathBuf::from(format!("/run/user/{uid}/kennel/bpf")).join(id)
 }
 
 /// Remove a kennel's BPF pin dir without a running drain (e.g. after a bring-up
@@ -402,11 +403,11 @@ mod tests {
     }
 
     #[test]
-    fn pin_dir_is_partitioned_by_uid_under_run_kennel_bpf() {
+    fn pin_dir_is_in_the_users_xdg_runtime_dir() {
         let uid = kennel_syscall::unistd::real_uid();
         assert_eq!(
             pin_dir_for("ai-coding"),
-            PathBuf::from(format!("/run/kennel/bpf/{uid}/ai-coding"))
+            PathBuf::from(format!("/run/user/{uid}/kennel/bpf/ai-coding"))
         );
     }
 }
