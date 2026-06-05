@@ -591,17 +591,29 @@ fn translate_exec(
     let exec = src.exec.as_ref();
     let flag =
         |f: fn(&crate::source::ExecSection) -> Option<bool>| exec.and_then(f).unwrap_or(false);
-    let allow = subst_each(
+    let mut allow = subst_each(
         exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
         deferred,
     );
+    // exec.deny (§7.1.4) is composed up the chain (folded in resolve) and carried into
+    // the settled policy for audit and runtime warning. "deny evaluated before allow":
+    // a deny that exactly matches an allow entry is *subtracted* here, so Landlock never
+    // grants EXECUTE on it (the only deny the allow-only LSM can actually enforce). A
+    // deny that falls inside an allowed directory, or that is set without any allow, is
+    // advisory — `ExecPolicy::deny_warnings` flags it at compile and spawn.
+    let deny = subst_each(
+        exec.and_then(|e| e.deny.as_deref()).unwrap_or_default(),
+        deferred,
+    );
+    allow.retain(|a| !deny.contains(a));
     let path = subst_each(
         exec.and_then(|e| e.path.as_deref()).unwrap_or_default(),
         deferred,
     );
     // The login shell (§7.7.2a): default /bin/sh, and — when an exec allowlist is
     // enforced — it must be one of the permitted binaries, or the kennel would set
-    // a shell it then refuses to run. Caught here, at compile time.
+    // a shell it then refuses to run. Caught here, at compile time (after the deny
+    // subtraction, so denying your own shell is caught as the same contradiction).
     let shell = exec
         .and_then(|e| e.shell.clone())
         .map_or_else(crate::settled::default_shell, |s| subst(&s, deferred));
@@ -616,6 +628,7 @@ fn translate_exec(
         deny_setcap: flag(|e| e.deny_setcap),
         deny_writable: flag(|e| e.deny_writable),
         allow,
+        deny,
         path,
         shell,
     })
@@ -971,6 +984,50 @@ mod tests {
         let ep2 = translate_exec(&dfl, &mut BTreeSet::new()).expect("translate");
         assert_eq!(ep2.shell, "/bin/sh");
         assert!(ep2.path.is_empty());
+    }
+
+    #[test]
+    fn exec_deny_is_carried_and_exact_matches_subtracted_from_allow() {
+        // "deny evaluated before allow": an exact-match deny is removed from allow
+        // (Landlock never grants EXECUTE on it); the full deny list is carried for
+        // audit and runtime warning.
+        let src = parse(
+            b"name = \"k\"\n[exec]\nallow = [\"/usr/bin/git\", \"/usr/bin/sudo\"]\ndeny = [\"/usr/bin/sudo\", \"/usr/bin/mount\"]\nshell = \"/usr/bin/git\"\n",
+        )
+        .expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        assert_eq!(ep.allow, vec!["/usr/bin/git".to_owned()], "sudo subtracted");
+        assert_eq!(
+            ep.deny,
+            vec!["/usr/bin/sudo".to_owned(), "/usr/bin/mount".to_owned()],
+            "full deny list carried"
+        );
+        // /usr/bin/sudo was an exact allow entry now removed, and there is no glob
+        // dir grant re-exposing it ⇒ enforced by omission, no warning. /usr/bin/mount
+        // is simply never granted ⇒ also enforced, no warning.
+        assert!(ep.deny_warnings().is_empty(), "{:?}", ep.deny_warnings());
+    }
+
+    #[test]
+    fn exec_deny_inside_an_allowed_glob_dir_warns() {
+        let src = parse(
+            b"name = \"k\"\n[exec]\nallow = [\"/usr/bin/**\", \"/bin/sh\"]\ndeny = [\"/usr/bin/sudo\"]\n",
+        )
+        .expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        // The glob dir grant re-exposes sudo; Landlock cannot subtract ⇒ advisory warn.
+        let w = ep.deny_warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w.first().is_some_and(|s| s.contains("falls inside allowed directory")));
+    }
+
+    #[test]
+    fn exec_deny_without_any_allow_warns_as_advisory() {
+        let src = parse(b"name = \"k\"\n[exec]\ndeny = [\"/usr/bin/sudo\"]\n").expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        let w = ep.deny_warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w.first().is_some_and(|s| s.contains("execution is permissive")));
     }
 
     #[test]

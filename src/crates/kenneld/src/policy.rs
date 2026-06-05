@@ -81,6 +81,14 @@ impl PolicyLoader for TrustStoreLoader {
         // drops to exactly this set (empty ⇒ no supplementary groups at all).
         let groups = resolve_groups(&substituted.identity.groups)?;
         plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
+        // Re-derive the exec.deny footgun warnings at load (§7.1.4): a deny that falls
+        // inside an allowed directory, or that is set without any allow, cannot be
+        // enforced by the allow-only Landlock LSM. The `kennel compile` step already
+        // warned, but an operator running a pre-compiled artefact never saw it — emit
+        // it here too. Advisory, never fatal.
+        for w in substituted.effective_policy.exec.deny_warnings() {
+            eprintln!("kenneld: warning: {w}");
+        }
         let exec_path = substituted.effective_policy.exec.path.clone();
         let shell = substituted.effective_policy.exec.shell.clone();
         let home_persist = substituted.effective_policy.fs.home_persist.clone();

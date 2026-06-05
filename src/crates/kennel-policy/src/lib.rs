@@ -181,6 +181,7 @@ mod tests {
                     deny_setcap: true,
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
+                    deny: Vec::new(),
                     path: vec!["/usr/bin".to_owned()],
                     shell: settled::default_shell(),
                 },

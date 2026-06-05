@@ -363,11 +363,20 @@ describe these read as roadmap.
   design specifies `exit | warn | renew`; the settled `TtlAction` enum is only
   `stop | warn`. **Owed:** the enum reconciliation + the runtime reaper (SIGTERM→SIGKILL
   / prompt).
-- **`exec.deny` composition** (`07-1-exec.md` §7.1.4) — **partial.** `exec.allow` is now a
-  Landlock execution allowlist (built), but `exec.deny` is parsed and never composed up
-  the template chain, so settled policies carry only `allow`; denials work by omission.
-  **Owed:** compose `exec.deny`, and warn where a deny falls inside an allow-dir (Landlock
-  cannot subtract).
+- **`exec.deny` composition** (`07-1-exec.md` §7.1.4) — **BUILT.** `exec.deny` folds up
+  the template chain (in `resolve`) and is now carried into the settled policy
+  (`ExecPolicy.deny`, omitted from the canonical form when empty so existing signatures
+  are unchanged). "Deny evaluated before allow" is realised by **exact-match
+  subtraction** at translation: a deny that exactly equals an `allow` entry is removed
+  from `allow`, so Landlock never grants `EXECUTE` on it — the one denial the allow-only
+  LSM can truly enforce. Everything else is honest about the LSM's limit:
+  `ExecPolicy::deny_warnings()` flags a deny that **falls inside an allowed
+  directory/glob** (the dir grant re-exposes it; Landlock cannot subtract a single path)
+  and a deny set with **no `allow` at all** (exec is permissive, so the deny enforces
+  nothing). The warnings ride the same channel as the ssh-agent footgun — printed by
+  `kennel compile`/`validate` (on `Compiled.warnings`) and re-derived + logged by
+  `kenneld` at load (`policy.rs`). A deny that is simply never granted is enforced by
+  omission and warns about nothing.
 - **Bind port policy** (`07-3-network.md`) — **partial.** `bind_subnet_map` is now
   populated so `INADDR_ANY`/in-subnet binds work, but the bind4/bind6 programs do not
   check the port; `min_port`/`allowed_ports` are not enforced. **Owed:** the BPF port check.

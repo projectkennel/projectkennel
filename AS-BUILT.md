@@ -500,7 +500,12 @@ The three flags are asserted as mandatory-true invariants and carried into the s
 - **Owed:** `exec.deny` composition (H21, compiler) · bind **port** policy (H16, BPF) .
 - **Not addressed:** SSH re-origin known_hosts verification (partial finding).
 
-## Medium/low (111): NOT individually closed — open until a follow-up reconciles them per-finding.
+## Medium/low (111): CLOSED via the layered reconciliation (2026-06-05)
+Respecting DESIGN→ARCHITECTURE→CODE:
+- **64 architecture findings → as-built doc fixes** (`6429328`), verified against current code, file by file.
+- **47 design findings → NOT design edits.** Design docs were scrubbed of build-status + our-code refs (`d28b4a2`, `31134b8`); the as-built reality + code-owed went to the architecture layer (`08-as-built-notes §8.1`, `80669de`).
+
+New code-owed surfaced (documented as roadmap in the architecture docs): BPF map pinning + `kennel-readers` group; kennel-name validation (boundary 6); netproxy live-reload; kenneld draining the BPF ringbuf to the audit writer; `kennel audit` CLI; reproducible builds + `release-with-debuginfo`. Plus earlier owed: ttl enum+reaper, exec.deny composition, bind-port policy, ssh-agent warn-not-forbid, kennel-run auto-compile.
 
 ## Code owed — surfaced by the design-doc reconciliation (2026-06-05)
 The design layer is the spec; these are code deviations to reconcile (code catches up to design):

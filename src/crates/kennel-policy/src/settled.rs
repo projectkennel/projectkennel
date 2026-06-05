@@ -234,8 +234,19 @@ pub struct ExecPolicy {
     /// Refuse to exec writable files.
     pub deny_writable: bool,
     /// Allowlisted binaries (absolute paths). Empty means "no exec allowlist
-    /// enforced beyond the deny flags".
+    /// enforced beyond the deny flags". Exact-match entries named in
+    /// [`deny`](Self::deny) are already subtracted here at translation.
     pub allow: Vec<String>,
+    /// Denylisted absolute paths or globs (§7.1.4), composed up the template chain
+    /// and carried for audit and runtime warning. Landlock is allow-only and cannot
+    /// subtract a single path from a granted directory, so a deny is *enforced* only
+    /// where it removes an exact `allow` entry (done at translation) or where the
+    /// path is simply never granted; a deny that falls inside an allowed directory
+    /// (or that is set without any `allow`) is *advisory* and warned about at compile
+    /// and spawn. See [`Self::deny_warnings`]. Omitted from the canonical form when
+    /// empty, so an existing policy with no `exec.deny` signs unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
     /// `PATH` search roots, synthesised into the workload's `$PATH` (§7.1.6).
     /// Empty ⇒ `$PATH` is not set from policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -245,6 +256,58 @@ pub struct ExecPolicy {
     /// allowlist is enforced.
     #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
     pub shell: String,
+}
+
+impl ExecPolicy {
+    /// Warnings for [`deny`](Self::deny) entries that cannot be enforced by Landlock.
+    ///
+    /// Landlock grants execution; it cannot *subtract* a path from a granted
+    /// directory. Translation already removes any deny that exactly matches an
+    /// `allow` entry (that deny is enforced — the binary is simply never granted
+    /// `EXECUTE`). What remains warnable:
+    ///
+    /// - a deny that falls **inside an allowed directory/glob** (e.g. `allow =
+    ///   ["/usr/bin/**"]`, `deny = ["/usr/bin/sudo"]`): the directory grant
+    ///   re-exposes it, so the deny is advisory only; and
+    /// - **any** deny when there is **no `allow`** at all: exec is permissive, so
+    ///   Landlock is not restricting execution and the deny enforces nothing.
+    ///
+    /// A deny that is neither (a path simply never granted) is enforced by omission
+    /// and yields no warning. Returns one message per warnable deny.
+    #[must_use]
+    pub fn deny_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in &self.deny {
+            if self.allow.is_empty() {
+                out.push(format!(
+                    "exec.deny `{d}` is advisory: with no exec.allow, execution is permissive and \
+                     Landlock cannot subtract a single path — the deny enforces nothing (use exec.allow \
+                     to switch on the allowlist)"
+                ));
+            } else if let Some(dir) = self.allow.iter().find(|a| glob_covers(a, d)) {
+                out.push(format!(
+                    "exec.deny `{d}` falls inside allowed directory `{dir}`: Landlock cannot subtract a \
+                     single path from a granted directory, so this deny is advisory only"
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Whether glob/dir `allow` entry covers path `deny` (a `…/*` or `…/**` whose root is
+/// a prefix of `deny`). An exact non-glob `allow` does not "cover" — that case is
+/// handled by exact-match subtraction at translation.
+fn glob_covers(allow: &str, deny: &str) -> bool {
+    let root = allow
+        .strip_suffix("/**")
+        .or_else(|| allow.strip_suffix("/*"))
+        .or_else(|| allow.strip_suffix("**"))
+        .or_else(|| allow.strip_suffix('*'));
+    root.is_some_and(|root| {
+        let root = root.trim_end_matches('/');
+        !root.is_empty() && (deny == root || deny.starts_with(&format!("{root}/")))
+    })
 }
 
 /// The default kennel login shell.

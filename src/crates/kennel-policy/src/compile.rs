@@ -110,10 +110,11 @@ pub fn compile(
     // The `[ssh]` section is source-only (dropped in translate); validate it here,
     // on the resolved policy, while the cross-referenced `net.allow` is still visible.
     crate::ssh::validate(&effective)?;
-    let warnings = crate::unix::validate(&effective)?;
+    let mut warnings = crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let translated = translate(&effective)?;
+    warnings.extend(translated.effective_policy.exec.deny_warnings());
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
@@ -168,10 +169,11 @@ pub fn compile_leaf(
         .or_else(|| effective.threat_catalogue_version.clone())
         .unwrap_or_default();
     crate::ssh::validate(&effective)?;
-    let warnings = crate::unix::validate(&effective)?;
+    let mut warnings = crate::unix::validate(&effective)?;
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let translated = translate(&effective)?;
+    warnings.extend(translated.effective_policy.exec.deny_warnings());
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 

@@ -178,6 +178,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 deny_setcap: true,
                 deny_writable: true,
                 allow: Vec::new(),
+                deny: Vec::new(),
                 path: Vec::new(),
                 shell: "/bin/sh".to_owned(),
             },
