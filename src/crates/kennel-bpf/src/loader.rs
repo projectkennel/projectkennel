@@ -285,22 +285,22 @@ fn patch_map_fd(insns: &mut [u8], off: usize, fd: i32) -> io::Result<()> {
     Ok(())
 }
 
-/// Load `prog` from the compiled BPF object `elf`, creating (and relocating) the
-/// maps it references from `map_specs`.
-///
-/// # Errors
-///
-/// Returns an error if the ELF is malformed, a referenced map is unknown, a map
-/// cannot be created, or the program fails to load/verify (the kernel's verifier
-/// log is included in the error message).
-pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io::Result<Loaded> {
-    let file = object::File::parse(elf).map_err(other)?;
-    let section = file
-        .section_by_name(prog.section)
-        .ok_or_else(|| other(format!("no section {}", prog.section)))?;
-    let mut insns = section.data().map_err(other)?.to_vec();
+/// A program section's instruction bytes plus its map relocations as
+/// `(instruction offset, map symbol name)` pairs.
+type SectionRelocations = (Vec<u8>, Vec<(usize, String)>);
 
-    let mut maps: BTreeMap<String, OwnedFd> = BTreeMap::new();
+/// Parse `prog.section` from `elf` and gather its map relocations: the
+/// instruction bytes plus a `(instruction offset, map name)` list. The names are
+/// resolved to fds separately (created fresh, or against a shared set).
+fn section_relocations(
+    file: &object::File<'_>,
+    section_name: &str,
+) -> io::Result<SectionRelocations> {
+    let section = file
+        .section_by_name(section_name)
+        .ok_or_else(|| other(format!("no section {section_name}")))?;
+    let insns = section.data().map_err(other)?.to_vec();
+    let mut relocs = Vec::new();
     for (off, reloc) in section.relocations() {
         let RelocationTarget::Symbol(symidx) = reloc.target() else {
             continue;
@@ -310,6 +310,93 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
         if name.is_empty() {
             continue;
         }
+        let off = usize::try_from(off).map_err(|_| other("reloc offset too large"))?;
+        relocs.push((off, name.to_owned()));
+    }
+    Ok((insns, relocs))
+}
+
+/// `BPF_PROG_LOAD` `insns` as `prog`, surfacing the verifier log on failure.
+fn finish_load(prog: &ProgramSpec, insns: &[u8]) -> io::Result<OwnedFd> {
+    let mut log = vec![0u8; 64 * 1024];
+    sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut log).map_err(|e| {
+        let end = log.iter().position(|&b| b == 0).unwrap_or(0);
+        let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
+        other(format!("prog_load failed: {e}\nverifier log:\n{text}"))
+    })
+}
+
+/// Create every map in `map_specs`, returning them keyed by symbol name.
+///
+/// This is the shared-map model.
+///
+/// Create the kennel's map set once, then load
+/// each program against it with [`load_program_against`] so all programs of a
+/// kennel reference the *same* maps (one `audit_ringbuf` to drain, one coherent
+/// set to pin). Contrast [`load_program`], which mints a fresh per-program set.
+///
+/// # Errors
+///
+/// Returns the OS error if any map cannot be created (e.g. missing `CAP_BPF`).
+pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd>> {
+    let mut maps = BTreeMap::new();
+    for spec in map_specs {
+        let fd = sys::map_create(
+            spec.map_type,
+            spec.key_size,
+            spec.value_size,
+            spec.max_entries,
+            spec.map_flags,
+        )?;
+        maps.insert(spec.name.to_owned(), fd);
+    }
+    Ok(maps)
+}
+
+/// Load `prog` from `elf` against the pre-created shared `maps`.
+///
+/// Patches the program's map relocations against the shared `maps` (from
+/// [`create_maps`]). Returns just the program fd; the caller owns the shared maps
+/// (to populate, pin, and keep alive).
+///
+/// # Errors
+///
+/// Returns an error if the ELF is malformed, the program references a map absent
+/// from `maps`, or the program fails to load/verify (verifier log included).
+pub fn load_program_against(
+    elf: &[u8],
+    prog: &ProgramSpec,
+    maps: &BTreeMap<String, OwnedFd>,
+) -> io::Result<OwnedFd> {
+    let file = object::File::parse(elf).map_err(other)?;
+    let (mut insns, relocs) = section_relocations(&file, prog.section)?;
+    for (off, name) in &relocs {
+        let fd = maps
+            .get(name)
+            .ok_or_else(|| other(format!("program references map `{name}` not in the shared set")))?;
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&fd.as_fd());
+        patch_map_fd(&mut insns, *off, raw)?;
+    }
+    finish_load(prog, &insns)
+}
+
+/// Load `prog` from the compiled BPF object `elf`, minting its own maps.
+///
+/// Creates (and relocates) the maps `prog` references from `map_specs`. Each call
+/// mints its *own* maps — for the shared-map model (one map set across a kennel's
+/// programs) use [`create_maps`] plus [`load_program_against`].
+///
+/// # Errors
+///
+/// Returns an error if the ELF is malformed, a referenced map is unknown, a map
+/// cannot be created, or the program fails to load/verify (the kernel's verifier
+/// log is included in the error message).
+pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io::Result<Loaded> {
+    let file = object::File::parse(elf).map_err(other)?;
+    let (mut insns, relocs) = section_relocations(&file, prog.section)?;
+
+    let mut maps: BTreeMap<String, OwnedFd> = BTreeMap::new();
+    for (off, name) in &relocs {
         // Create the map once, then patch this instruction with its fd.
         if !maps.contains_key(name) {
             let spec = map_specs
@@ -323,21 +410,14 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
                 spec.max_entries,
                 spec.map_flags,
             )?;
-            maps.insert(name.to_owned(), fd);
+            maps.insert(name.clone(), fd);
         }
         let fd = maps.get(name).ok_or_else(|| other("map vanished"))?.as_fd();
         let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
-        let off = usize::try_from(off).map_err(|_| other("reloc offset too large"))?;
-        patch_map_fd(&mut insns, off, raw)?;
+        patch_map_fd(&mut insns, *off, raw)?;
     }
 
-    let mut log = vec![0u8; 64 * 1024];
-    let program = sys::prog_load(prog.prog_type, prog.attach_type, &insns, c"GPL", &mut log)
-        .map_err(|e| {
-            let end = log.iter().position(|&b| b == 0).unwrap_or(0);
-            let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
-            other(format!("prog_load failed: {e}\nverifier log:\n{text}"))
-        })?;
+    let program = finish_load(prog, &insns)?;
     Ok(Loaded { program, maps })
 }
 
@@ -595,6 +675,64 @@ mod root_tests {
             ev.get(44..48),
             Some(&[127u8, 0, 0, 1][..]),
             "addr 127.0.0.1"
+        );
+    }
+
+    /// The shared-map model: `create_maps` once, then load several programs
+    /// against that one set with `load_program_against`. All programs reference
+    /// the *same* `audit_ringbuf`, so a single reader over the shared map drains
+    /// the event a denied connect (via the shared-maps connect4) emits.
+    #[test]
+    fn shared_maps_drain_one_ringbuf_across_programs() {
+        if skip_if_unprivileged("shared_maps_drain_one_ringbuf_across_programs") {
+            return;
+        }
+        let maps = create_maps(KENNEL_MAPS).expect("create shared maps");
+
+        // Load connect4 and bind4 against the one shared map set.
+        let connect4 = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "connect4")
+            .expect("connect4 spec");
+        let bind4 = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "bind4")
+            .expect("bind4 spec");
+        let c4 = load_program_against(&compile_uapi("connect4"), connect4, &maps)
+            .expect("load connect4 against shared maps");
+        let _b4 = load_program_against(&compile_uapi("bind4"), bind4, &maps)
+            .expect("load bind4 against shared maps");
+
+        // Read the shared ringbuf directly from the shared map set.
+        let rb_fd = maps.get("audit_ringbuf").expect("shared audit_ringbuf");
+        let size = usize::try_from(
+            KENNEL_MAPS
+                .iter()
+                .find(|m| m.name == "audit_ringbuf")
+                .expect("ringbuf spec")
+                .max_entries,
+        )
+        .expect("ringbuf size");
+        let mut rb = crate::ringbuf::RingBuffer::new(rb_fd.as_fd(), size).expect("map shared ringbuf");
+
+        // Attach the shared-maps connect4 and trigger a denied connect.
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-shared");
+        let _ = std::fs::create_dir(cg);
+        let cgfd = std::fs::File::open(cg).expect("open cgroup");
+        sys::prog_attach_cgroup(cgfd.as_fd(), c4.as_fd(), connect4.attach_type)
+            .expect("attach shared connect4");
+        let denied = connect_denied_in_cgroup(cg);
+
+        let mut samples: Vec<Vec<u8>> = Vec::new();
+        let _ = rb.poll(1000);
+        rb.consume(|s| samples.push(s.to_vec()))
+            .expect("consume shared ringbuf");
+        let _ = std::fs::remove_dir(cg);
+
+        assert!(denied, "precondition: connect should be denied (fail closed)");
+        assert!(
+            !samples.is_empty(),
+            "the shared ringbuf should carry the denied-connect audit event"
         );
     }
 
