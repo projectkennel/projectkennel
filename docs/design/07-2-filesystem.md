@@ -165,7 +165,9 @@ allow = [
 > (or any writable `~/…` grant) binds the real host inode read-write beneath the home, and
 > only those survive. Read-only `~/…` binds stay read-only at the VFS layer regardless of
 > the home-root grant, and the write grant carries no `EXECUTE`, so `deny_writable` holds
-> (a file written into `$HOME` cannot then be run).
+> (a file written into `$HOME` cannot then be run). `[fs.home].readonly = true` is the
+> escape hatch: it suppresses the home-root grant, so only `write`-granted `~/…` paths are
+> writable and the rest of the home is read-only.
 
 The most important transformation in the filesystem policy: the kennel does not see the real `$HOME`. Project Kennel constructs a shim directory and bind-mounts the policy-granted paths from the real `$HOME` into it.
 

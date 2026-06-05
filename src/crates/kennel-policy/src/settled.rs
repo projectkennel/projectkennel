@@ -246,6 +246,13 @@ pub struct FsPolicy {
     /// here, which the dotfile seeder skips. Empty ⇒ everything is reconstructed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub home_persist: Vec<String>,
+    /// Whether the constructed `$HOME` is read-only (`[fs.home].readonly`). False (the
+    /// default) gives the home root a Landlock write grant — the workload owns its
+    /// ephemeral home; true suppresses it, so only `write`-granted `~/` paths are
+    /// writable. Omitted from the canonical form when false, so a policy without it
+    /// signs unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub home_readonly: bool,
     /// Private-`/tmp` tmpfs parameters. Declared after the scalar/array fields
     /// so the canonical TOML emits this sub-table last (valid table ordering).
     pub tmp: TmpPolicy,

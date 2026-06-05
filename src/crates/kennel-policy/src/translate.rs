@@ -684,6 +684,7 @@ fn translate_fs(
         read,
         write,
         home_persist,
+        home_readonly: home.readonly.unwrap_or(false),
         tmp,
         dev,
     })
@@ -1228,6 +1229,17 @@ mod tests {
             .expect("parse");
         let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate_fs");
         assert_eq!(fs.home_persist, vec![".bashrc".to_owned()]);
+    }
+
+    #[test]
+    fn fs_home_readonly_defaults_false_and_carries_when_set() {
+        let dflt = parse(b"name = \"k\"\n[fs.home]\nshadow = true\n").expect("parse");
+        let fs = translate_fs(&dflt, &mut BTreeSet::new()).expect("translate_fs");
+        assert!(!fs.home_readonly, "home is writable by default");
+        let ro =
+            parse(b"name = \"k\"\n[fs.home]\nshadow = true\nreadonly = true\n").expect("parse");
+        let fs = translate_fs(&ro, &mut BTreeSet::new()).expect("translate_fs");
+        assert!(fs.home_readonly, "readonly carries to the settled policy");
     }
 
     #[test]

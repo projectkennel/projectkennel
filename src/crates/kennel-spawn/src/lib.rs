@@ -926,6 +926,7 @@ mod tests {
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
                     home_persist: Vec::new(),
+                    home_readonly: false,
                     tmp: TmpPolicy {
                         private: true,
                         size_mib: 512,
@@ -1057,6 +1058,33 @@ mod tests {
         assert!(
             matches!(&err, SpawnError::UnsubstitutedPlaceholder { field, .. } if field == "fs.read"),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn home_is_writable_by_default_and_readonly_suppresses_the_grant() {
+        // shim_root for the default identity (`kennel`).
+        let home_root = PathBuf::from("/home/kennel");
+        let home_writable = |plan: &Plan| {
+            plan.landlock_fs
+                .iter()
+                .any(|(p, a)| *p == home_root && a.contains(AccessFs::WRITE_FILE))
+        };
+
+        let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        assert!(
+            home_writable(&plan),
+            "the constructed home is writable by default"
+        );
+
+        let mut ro = policy_with_placeholders();
+        ro.effective_policy.fs.home_readonly = true;
+        let ro = substitute(&ro, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&ro, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        assert!(
+            !home_writable(&plan),
+            "[fs.home].readonly suppresses the home write grant"
         );
     }
 

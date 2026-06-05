@@ -314,6 +314,13 @@ pub struct FsHome {
     /// persistent-`~/.bashrc` re-execution trade-off is taken, visible in the diff.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persist: Vec<String>,
+    /// Make the constructed `$HOME` **read-only** (default: writable). The home root
+    /// is writable by default — a non-system user owns their home — but it is a fresh
+    /// tmpfs, so writes are ephemeral. Setting this suppresses the home write grant:
+    /// only explicitly `write`-granted `~/` paths are then writable, the rest of the
+    /// home read-only. The escape hatch for a workload that must not write its home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
 }
 
 /// One `[[fs.home.sanitise]]` entry (`docs/design/05-templates.md` §5.9).

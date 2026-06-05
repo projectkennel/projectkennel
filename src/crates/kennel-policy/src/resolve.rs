@@ -322,6 +322,7 @@ fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
             c.sanitise.clone()
         },
         persist: union_strings(&p.persist, &c.persist),
+        readonly: or(&c.readonly, &p.readonly),
     }
 }
 

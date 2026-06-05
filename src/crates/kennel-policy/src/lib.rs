@@ -168,6 +168,7 @@ mod tests {
                     read: vec!["/usr".to_owned()],
                     write: vec!["/run/kennel/ai-coding/home".to_owned()],
                     home_persist: Vec::new(),
+                    home_readonly: false,
                     tmp: TmpPolicy {
                         private: true,
                         size_mib: 512,

@@ -102,7 +102,8 @@ deny = [
 # backstops on the resolved view (§7.2.3/.5). The home root is writable by default,
 # but it is a fresh tmpfs — anything written directly there is ephemeral. Persistence
 # is opt-in per path via `persist` (or a writable ~/ grant), which binds the real host
-# inode read-write beneath the home.
+# inode read-write beneath the home. Set `readonly = true` to suppress the default
+# home-write grant (only write-granted ~/ paths stay writable then).
 [fs.home]
 shadow = true
 

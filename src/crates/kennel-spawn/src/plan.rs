@@ -544,8 +544,12 @@ impl Plan {
         // read-write, beneath the home). Read-only project binds beneath the home
         // stay read-only at the VFS layer (`MS_RDONLY` remount), and `write_access()`
         // carries no `EXECUTE`, so `deny_writable` (§7.1) still holds — a file the
-        // workload writes into its home cannot be executed.
-        landlock_fs.push((shim_root.clone(), write_access()));
+        // workload writes into its home cannot be executed. `[fs.home].readonly`
+        // suppresses the grant (escape hatch), leaving only `write`-granted `~/` paths
+        // writable.
+        if !ep.fs.home_readonly {
+            landlock_fs.push((shim_root.clone(), write_access()));
+        }
 
         let view = Some(ShimView {
             shim_root,
