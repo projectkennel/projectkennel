@@ -538,13 +538,14 @@ impl Plan {
 
         // The constructed `$HOME` is writable by default (§7.2.3): grant Landlock
         // write on the home root so the workload owns its home like any ordinary
-        // user. This covers only the *fresh tmpfs* — it is ephemeral, reconstructed
+        // user. Its safety is that it is a *fresh tmpfs* — ephemeral, reconstructed
         // each spawn, so nothing written here survives unless a path is opted into
         // persistence via `[fs.home].persist` (which binds the real host inode,
         // read-write, beneath the home). Read-only project binds beneath the home
-        // stay read-only at the VFS layer (`MS_RDONLY` remount), and `write_access()`
-        // carries no `EXECUTE`, so `deny_writable` (§7.1) still holds — a file the
-        // workload writes into its home cannot be executed. `[fs.home].readonly`
+        // stay read-only at the VFS layer (`MS_RDONLY` remount). `write_access()`
+        // omits `EXECUTE` (so the home is not an `execve` target), but that is not an
+        // execution barrier — an allowlisted interpreter reads a script as data
+        // (`sh script`, `python evil.py`), needing no `EXECUTE` on it. `[fs.home].readonly`
         // suppresses the grant (escape hatch), leaving only `write`-granted `~/` paths
         // writable.
         if !ep.fs.home_readonly {

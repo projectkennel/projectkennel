@@ -164,10 +164,13 @@ allow = [
 > is **ephemeral**, gone at teardown. Persistence is opt-in — a path under `[fs.home].persist`
 > (or any writable `~/…` grant) binds the real host inode read-write beneath the home, and
 > only those survive. Read-only `~/…` binds stay read-only at the VFS layer regardless of
-> the home-root grant, and the write grant carries no `EXECUTE`, so `deny_writable` holds
-> (a file written into `$HOME` cannot then be run). `[fs.home].readonly = true` is the
-> escape hatch: it suppresses the home-root grant, so only `write`-granted `~/…` paths are
-> writable and the rest of the home is read-only.
+> the home-root grant. The write grant omits `EXECUTE`, so the home is not an `execve`
+> target — but do **not** read that as an execution barrier: an allowlisted interpreter
+> reads a script as *data* (`sh script.sh`, `python evil.py`) and needs no `EXECUTE` on it,
+> so the only thing the writable home really gives you is the ephemeral-tmpfs safety above,
+> not a guarantee that nothing in it can run. `[fs.home].readonly = true` is the escape
+> hatch: it suppresses the home-root grant, so only `write`-granted `~/…` paths are writable
+> and the rest of the home is read-only.
 
 The most important transformation in the filesystem policy: the kennel does not see the real `$HOME`. Project Kennel constructs a shim directory and bind-mounts the policy-granted paths from the real `$HOME` into it.
 
