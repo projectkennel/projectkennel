@@ -697,8 +697,8 @@ mod root_tests {
         m
     }
 
-    /// A 28-byte `bind_subnet` value: v4 `127.0.0.1//24`, v6 zero `/64`. The INADDR_ANY
-    /// rewrite target, so an allowed wildcard bind lands on the loopback.
+    /// A 28-byte `bind_subnet` value: v4 `127.0.0.1//24`, v6 zero `/64`. The
+    /// `INADDR_ANY` rewrite target, so an allowed wildcard bind lands on the loopback.
     fn bind_subnet_loopback() -> [u8; 28] {
         let mut v = [0u8; 28];
         v[0..4].copy_from_slice(&[127, 0, 0, 1]);
@@ -786,7 +786,10 @@ mod root_tests {
             low_denied = wildcard_bind_denied_in_cgroup(cg, 80);
             high_denied = wildcard_bind_denied_in_cgroup(cg, 8080);
         });
-        assert!(low_denied, "a bind to :80 below the 1024 floor must be denied");
+        assert!(
+            low_denied,
+            "a bind to :80 below the 1024 floor must be denied"
+        );
         assert!(
             !high_denied,
             "a bind to :8080 at/above the floor must be allowed"

@@ -14,7 +14,7 @@
 //! # `unsafe`
 //!
 //! Each of the three Landlock syscalls has one raw FFI site, mirroring
-//! `kennel-bpf`'s `bpf()`: [`sys_create_ruleset`] and [`sys_add_rule`] take typed
+//! `kennel-bpf`'s `bpf()`: `sys_create_ruleset` and `sys_add_rule` take typed
 //! references (so they are sound to call from safe code, leaving `abi_version` /
 //! `create_ruleset` / `add_path_rule` / `add_net_rule` `unsafe`-free), and
 //! `restrict_self` holds the third. With the `OwnedFd` adoption in

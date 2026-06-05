@@ -94,7 +94,7 @@ impl ProxyState {
 
 /// A per-kennel egress proxy.
 ///
-/// Combines the hot-swappable [`ProxyState`] (ruleset, host-services,
+/// Combines the hot-swappable `ProxyState` (ruleset, host-services,
 /// resolved-address opinion), a name resolver, and the unified audit writer. The
 /// resolver and writer are fixed for the proxy's life; the state is reloadable.
 pub struct Proxy<R> {
