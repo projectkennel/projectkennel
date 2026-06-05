@@ -391,9 +391,18 @@ describe these read as roadmap.
   `kennel compile`/`validate` (on `Compiled.warnings`) and re-derived + logged by
   `kenneld` at load (`policy.rs`). A deny that is simply never granted is enforced by
   omission and warns about nothing.
-- **Bind port policy** (`07-3-network.md`) — **partial.** `bind_subnet_map` is now
-  populated so `INADDR_ANY`/in-subnet binds work, but the bind4/bind6 programs do not
-  check the port; `min_port`/`allowed_ports` are not enforced. **Owed:** the BPF port check.
+- **Bind port policy** (`07-3-network.md` §7.3.7) — **`min_port` BUILT + kernel-proven;
+  `allowed_ports` still owed.** The `[net.bind].min_port` floor (T6, §7.3.9 item 17) now
+  flows source → `NetPolicy.bind_port_min` (translate) → the `kennel_meta` BPF map (the
+  repurposed `_pad0` slot, stamped by `kennel-spawn::plan`), and the `bind4`/`bind6`
+  programs deny any bind whose port is below it (checked before the address logic, since
+  a too-low port is refused regardless of address; `0` = no floor, opt-in). Proven
+  adversarially on the running kernel (`kennel-bpf` root test `bind4_enforces_the_min_port_floor`):
+  a wildcard bind to `:80` under a 1024 floor is denied, `:8080` is allowed, and with no
+  floor `:80` is allowed. **Still owed:** the `allowed_ports` *allowlist* (an explicit
+  set of permitted bind ports) — it cannot ride the single `_pad0` slot and needs the
+  `bind_subnet` struct (and the `EgressPayload` wire + privhelper population) extended
+  with a small port array; `min_port` is the threat-bearing control and is done.
 - **ssh-agent footgun** (`05-templates.md` §5.9 / `07-8-ssh.md`) — **BUILT.** A policy
   that shims a real ssh-agent via `[[unix.allow]]` (`name = "ssh-agent"` or
   `env = "SSH_AUTH_SOCK"`) is no longer refused: the `[ssh]` bastion is the intended

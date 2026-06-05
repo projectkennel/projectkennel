@@ -441,8 +441,13 @@ fn translate_net(
         }
     }
 
+    // The bind floor (§7.3.7): a workload bind below `min_port` is denied by the
+    // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
+    let bind_port_min = net.bind.as_ref().and_then(|b| b.min_port).unwrap_or(0);
+
     Ok(NetPolicy {
         mode,
+        bind_port_min,
         proxy,
         allow,
         allow_names,
@@ -1300,6 +1305,36 @@ mod tests {
         // 2h TTL, "stop" (the backward-compat alias for exit).
         assert_eq!(t.effective_policy.lifecycle.ttl_seconds, Some(7_200));
         assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Exit);
+    }
+
+    #[test]
+    fn net_bind_min_port_carries_into_the_settled_policy() {
+        // `[net.bind].min_port` → `NetPolicy.bind_port_min` (the BPF bind floor, §7.3.7);
+        // absent ⇒ 0 (no floor).
+        let with =
+            parse(b"name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nmin_port = 8080\n")
+                .expect("parse");
+        assert_eq!(
+            translate_net(&with, &mut BTreeSet::new())
+                .expect("translate")
+                .bind_port_min,
+            8080
+        );
+        let without = parse(b"name = \"k\"\n[net]\nmode = \"constrained\"\n").expect("parse");
+        assert_eq!(
+            translate_net(&without, &mut BTreeSet::new())
+                .expect("translate")
+                .bind_port_min,
+            0
+        );
+        // The shipped base-confined template sets the conventional 1024 floor.
+        assert_eq!(
+            translate_template(BASE_CONFINED)
+                .effective_policy
+                .net
+                .bind_port_min,
+            1024
+        );
     }
 
     #[test]

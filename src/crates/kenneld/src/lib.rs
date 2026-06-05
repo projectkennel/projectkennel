@@ -1096,6 +1096,7 @@ mod tests {
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
+                bind_port_min: 0,
             },
             proxy: None,
             etc: None,

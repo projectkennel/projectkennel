@@ -82,10 +82,21 @@ fn meta_bytes(ctx: u16) -> [u8; 64] {
     m
 }
 
+/// Stamp the `kennel_meta` `bind_port_min` field (the repurposed `_pad0` slot, offset
+/// 14, host byte order) — the lowest port a workload may `bind()` (§7.3.7). `0` leaves
+/// no floor. Read by the `bind4`/`bind6` BPF; host order because it compares against a
+/// host-order bind port on the same machine that wrote it.
+fn stamp_bind_port_min(meta: &mut [u8; 64], min_port: u16) {
+    if let Some(slot) = meta.get_mut(14..16) {
+        slot.copy_from_slice(&min_port.to_ne_bytes());
+    }
+}
+
 /// Fill the `kennel_meta` proxy fields in place from `endpoint`: `proxy_addr_v4`
 /// (offset 8), `proxy_port` (offset 12), and `proxy_addr_v6` (offset 16), all in
 /// network byte order per the C ABI (`bpf/maps.h`). A v6-only kennel leaves
-/// `proxy_addr_v4` zero. `_pad0` (offset 14) is untouched, staying zero.
+/// `proxy_addr_v4` zero. The `bind_port_min` slot (offset 14) is set separately by
+/// [`stamp_bind_port_min`].
 fn stamp_proxy_meta(meta: &mut [u8; 64], endpoint: &ProxyEndpoint) {
     let v4 = endpoint.v4.map_or([0u8; 4], |a| a.octets());
     if let Some(slot) = meta.get_mut(8..12) {
@@ -526,6 +537,11 @@ impl Plan {
         let (bpf_allow_v4, bpf_allow_v6) = encode(&ep.net.allow)?;
         let (bpf_deny_v4, bpf_deny_v6) = encode(&ep.net.deny_invariant)?;
 
+        // The bind floor (§7.3.7): stamped into the kennel_meta `bind_port_min` slot
+        // so the bind4/bind6 BPF can deny a privileged-port bind (T6).
+        let mut bpf_meta = meta_bytes(ctx);
+        stamp_bind_port_min(&mut bpf_meta, ep.net.bind_port_min);
+
         Ok(Self {
             namespaces,
             cgroup,
@@ -540,7 +556,7 @@ impl Plan {
             bpf_deny_v4,
             bpf_allow_v6,
             bpf_deny_v6,
-            bpf_meta: meta_bytes(ctx),
+            bpf_meta,
             file_binds: Vec::new(),
             supplementary_groups: None,
         })
@@ -583,5 +599,23 @@ impl Plan {
     #[must_use]
     pub fn seccomp_filter(&self) -> Filter {
         Filter::denylist(&self.seccomp_deny, self.seccomp_deny_action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_port_min_lands_in_the_meta_pad_slot() {
+        // `bind_port_min` occupies the repurposed `_pad0` slot at offset 14 (host
+        // order) and disturbs nothing else; `0` leaves the slot zero.
+        let mut meta = meta_bytes(7);
+        assert_eq!(&meta[14..16], &[0, 0], "no floor ⇒ slot stays zero");
+        stamp_bind_port_min(&mut meta, 1024);
+        assert_eq!(meta.get(14..16), Some(1024u16.to_ne_bytes().as_slice()));
+        // The ctx/magic head and the proxy region around it are untouched.
+        assert_eq!(&meta[6..8], &7u16.to_ne_bytes(), "ctx preserved");
+        assert_eq!(&meta[8..14], &[0u8; 6], "proxy v4/port slots still zero");
     }
 }

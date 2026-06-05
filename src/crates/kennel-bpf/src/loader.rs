@@ -674,4 +674,138 @@ mod root_tests {
             rc < 0 && matches!(err, Some(libc::EPERM | libc::EACCES))
         }
     }
+
+    fn load_bind4() -> Loaded {
+        let elf = compile_uapi("bind4");
+        let spec = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "bind4")
+            .expect("bind4 spec");
+        load_program(&elf, spec, KENNEL_MAPS).expect("load bind4")
+    }
+
+    /// A 64-byte `kennel_meta` value with the magic/abi head and `bind_port_min`
+    /// (offset 14, host order) set; everything else zero. Native byte order, as the
+    /// producer (`kennel-spawn::plan`) writes it.
+    fn meta_with_bind_floor(min_port: u16) -> [u8; 64] {
+        const MAGIC: u32 = 0x4B4E_454C;
+        const ABI: u16 = 1;
+        let mut m = [0u8; 64];
+        m[0..4].copy_from_slice(&MAGIC.to_ne_bytes());
+        m[4..6].copy_from_slice(&ABI.to_ne_bytes());
+        m[14..16].copy_from_slice(&min_port.to_ne_bytes());
+        m
+    }
+
+    /// A 28-byte `bind_subnet` value: v4 `127.0.0.1//24`, v6 zero `/64`. The INADDR_ANY
+    /// rewrite target, so an allowed wildcard bind lands on the loopback.
+    fn bind_subnet_loopback() -> [u8; 28] {
+        let mut v = [0u8; 28];
+        v[0..4].copy_from_slice(&[127, 0, 0, 1]);
+        v[4..8].copy_from_slice(&24u32.to_ne_bytes());
+        v[24] = 64;
+        v
+    }
+
+    /// In a child joined to `cg`, `bind()` a fresh TCP socket to `0.0.0.0:port` (which
+    /// `bind4` rewrites to the kennel loopback when it allows). Returns true if the
+    /// bind was refused by the cgroup BPF verdict (`EPERM`/`EACCES`).
+    fn wildcard_bind_denied_in_cgroup(cg: &Path, port: u16) -> bool {
+        // SAFETY: fork(); the child only joins the cgroup, binds once, and _exit()s.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            let pid = std::process::id().to_string();
+            let _ = std::fs::write(cg.join("cgroup.procs"), &pid);
+            // SAFETY: a standard socket()/bind() with a stack sockaddr_in valid for the
+            // length passed; errno is read immediately after.
+            let denied = unsafe {
+                let s = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+                let mut addr: libc::sockaddr_in = std::mem::zeroed();
+                addr.sin_family = u16::try_from(libc::AF_INET).unwrap_or(2);
+                addr.sin_port = port.to_be();
+                addr.sin_addr.s_addr = 0; // INADDR_ANY
+                let len = u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16);
+                let rc = libc::bind(s, std::ptr::from_ref(&addr).cast::<libc::sockaddr>(), len);
+                let err = io::Error::last_os_error().raw_os_error();
+                libc::close(s);
+                rc < 0 && matches!(err, Some(libc::EPERM | libc::EACCES))
+            };
+            // SAFETY: _exit without unwinding/atexit after fork.
+            unsafe { libc::_exit(i32::from(denied)) };
+        }
+        let mut status = 0;
+        // SAFETY: waitpid on our child with a valid status pointer.
+        unsafe { libc::waitpid(child, std::ptr::from_mut(&mut status), 0) };
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1
+    }
+
+    fn with_attached_bind4(cg: &Path, loaded: &Loaded, body: impl FnOnce()) {
+        let _ = std::fs::create_dir(cg);
+        let cgfd = std::fs::File::open(cg).expect("open cgroup");
+        let spec = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "bind4")
+            .expect("bind4 spec");
+        loaded
+            .attach(cgfd.as_fd(), spec.attach_type)
+            .expect("attach bind4");
+        body();
+        let _ = std::fs::remove_dir(cg);
+    }
+
+    #[test]
+    fn bind4_enforces_the_min_port_floor() {
+        if skip_if_unprivileged("bind4_enforces_the_min_port_floor") {
+            return;
+        }
+        let loaded = load_bind4();
+        loaded
+            .update_map(
+                "bind_subnet_map",
+                &0u32.to_ne_bytes(),
+                &bind_subnet_loopback(),
+                sys::BPF_ANY,
+            )
+            .expect("populate bind_subnet");
+
+        // Floor at 1024: a wildcard bind below it is denied; one at/above it is allowed
+        // (rewritten to the loopback). The denied/allowed pair is the adversarial proof
+        // (§8.3): the deny path actually denies on the running kernel.
+        loaded
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &meta_with_bind_floor(1024),
+                sys::BPF_ANY,
+            )
+            .expect("populate meta (floor 1024)");
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-bindfloor");
+        let (mut low_denied, mut high_denied) = (false, true);
+        with_attached_bind4(cg, &loaded, || {
+            low_denied = wildcard_bind_denied_in_cgroup(cg, 80);
+            high_denied = wildcard_bind_denied_in_cgroup(cg, 8080);
+        });
+        assert!(low_denied, "a bind to :80 below the 1024 floor must be denied");
+        assert!(
+            !high_denied,
+            "a bind to :8080 at/above the floor must be allowed"
+        );
+
+        // No floor (0): even :80 is allowed — the floor is opt-in.
+        loaded
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &meta_with_bind_floor(0),
+                sys::BPF_ANY,
+            )
+            .expect("populate meta (no floor)");
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-nofloor");
+        let mut denied = true;
+        with_attached_bind4(cg, &loaded, || {
+            denied = wildcard_bind_denied_in_cgroup(cg, 80);
+        });
+        assert!(!denied, "with no floor a bind to :80 must be allowed");
+    }
 }

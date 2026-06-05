@@ -153,6 +153,14 @@ impl Default for ProxyListen {
 pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
+    /// Lowest port the workload may `bind()` (`[net.bind].min_port`, §7.3.7). A bind
+    /// below this is denied by the cgroup `bind4`/`bind6` BPF — the privileged-port
+    /// protection (T6, §7.3.9 item 17). `0` means no minimum is enforced. Carried into
+    /// the `kennel_meta` BPF map (the repurposed `_pad0` slot); omitted from the
+    /// canonical form when `0`, so a policy without it signs unchanged. Declared before
+    /// the table fields so the canonical TOML emits this scalar before them.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub bind_port_min: u16,
     /// Where the egress proxy listens (offset + port within the kennel's subnet).
     #[serde(default)]
     pub proxy: ProxyListen,
@@ -169,6 +177,12 @@ pub struct NetPolicy {
     /// present; cannot be removed by any delta.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_invariant: Vec<NetRule>,
+}
+
+/// `skip_serializing_if` helper: a `u16` that is `0`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
 }
 
 /// Private-`/tmp` tmpfs parameters (§7.2.6).

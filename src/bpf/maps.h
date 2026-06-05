@@ -42,7 +42,7 @@ struct kennel_meta {
 	__u16 ctx_byte;	      /* the kennel's <ctx> */
 	__u32 proxy_addr_v4;  /* network byte order */
 	__u16 proxy_port;     /* network byte order */
-	__u16 _pad0;
+	__u16 bind_port_min;  /* host byte order; lowest bindable port (§7.3.7), 0 = no floor */
 	__u8 proxy_addr_v6[16];
 	__u8 policy_hash[32]; /* SHA-256 of the resolved policy */
 };

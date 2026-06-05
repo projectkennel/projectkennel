@@ -48,6 +48,14 @@ int kennel_bind4(struct bpf_sock_addr *ctx)
 	__u8 rewritten[16] = {};
 	__builtin_memcpy(requested, &addr, 4);
 
+	/* The bind floor (§7.3.7): a bind below `bind_port_min` is denied — the
+	 * privileged-port protection (T6). Checked before the address logic, since a
+	 * too-low port is refused regardless of which address it targets. 0 = no floor. */
+	if (meta->bind_port_min != 0 && bpf_ntohs(port_be) < meta->bind_port_min) {
+		kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET, port_be, requested, rewritten, meta);
+		return KENNEL_DENY;
+	}
+
 	if (addr == 0) { /* INADDR_ANY: rewrite to the kennel loopback */
 		ctx->user_ip4 = bs->v4_addr;
 		__builtin_memcpy(rewritten, &bs->v4_addr, 4);
