@@ -64,10 +64,10 @@ read = [
     "/sys/devices/system/cpu/**",        # processor-count detection
 ]
 
-# Write baseline: only the kennel's own state. /tmp is the private tmpfs below.
-write = [
-    "/run/kennel/<kennel>/state/**",
-]
+# Write baseline: none. The workload's writable space is the private /tmp (below);
+# a usable template or leaf grants its project write paths. base-confined is the
+# root template and is not run directly.
+write = []
 
 # Categorical denies. Most are redundant with the constructed view (the paths are
 # simply not bound in), but explicit deny is belt-and-braces against template/leaf
@@ -228,7 +228,9 @@ pass = [
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TZ",
     "COLORTERM", "TMPDIR",
 ]
-set = { PATH = "/usr/bin:/usr/local/bin:/bin", HOME = "/run/kennel/<kennel>/home", TMPDIR = "/tmp", NO_PROXY = "" }
+# PATH/HOME/USER/LOGNAME/SHELL are synthesised by the framework (HOME is
+# /home/<user>); only the extras the framework does not set are listed here.
+set = { TMPDIR = "/tmp", NO_PROXY = "" }
 deny = [
     "SSH_AUTH_SOCK", "GPG_AGENT_INFO",
     "AWS_*", "AZURE_*", "GCP_*", "GOOGLE_APPLICATION_CREDENTIALS",
@@ -259,4 +261,4 @@ deny = [
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "4T4R95kaX3E9clHiFM5ImrStERmZikw69pIFgddjGcCCM8QgW7SUMMGzSHY6RfLstgycDjsgAqaprYQ7S6+5Cg=="
+signature = "+NpeKsmBTInnwXURLis9FmsuYq13tmY/pQIXTyXKON/AAzgDM2iyrI5ySXc1huHhKHbJcFwy4YuZloYEiQhhAQ=="
