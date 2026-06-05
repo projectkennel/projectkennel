@@ -137,15 +137,14 @@ allow = [
 
 ## 7.2.5 The constructed `$HOME`
 
-> The constructed `$HOME` view is built by
-> `kennel-spawn`'s `build_view_and_pivot`, which mounts a fresh tmpfs new root, binds the
+> The constructed `$HOME` view is a fresh tmpfs new root. Project Kennel binds the
 > granted system paths in place and the granted `~/…` paths remapped beneath
 > `shim_root` (read-only unless the grant is writable), constructs `/dev` from
 > `fs.dev.allow` (nodes bind-mounted and Landlock-granted read/write/`IOCTL_DEV`),
 > mounts a fresh `/proc` with `hidepid=2` and a private `/tmp` (`fs.tmp` size/mode),
 > then `pivot_root`s in. The synthetic `/etc` is **constructed, never the host
-> `/etc` bound in**: `kenneld::etc` writes the libc/NSS files (passwd/group/hosts/
-> resolv.conf/…) scrubbed of host specifics, plus read-only binds of the vanilla
+> `/etc` bound in**: the libc/NSS files (passwd/group/hosts/
+> resolv.conf/…) are written scrubbed of host specifics, plus read-only binds of the vanilla
 > TLS/linker subtrees (`/etc/ssl`,`/etc/pki`,`/etc/ld.so.*`). **Identity is masked:**
 > the synthetic `passwd`/`group` name the workload's uid and gid `kennel` (never the
 > operator's login name), with the in-kennel shim `$HOME` as the home — so `id`,
@@ -156,9 +155,9 @@ allow = [
 > host group — and each granted group is named in the synthetic `/etc/group`, so `id`
 > shows names, not the operator's full group memberships as bare numbers. Two invariants worth
 > repeating: **writable binds resolve to persistent host inodes** (work survives
-> teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is built
-> **after** `pivot_root` so its rules key on the view's inodes. kenneld sets
-> `HOME=shim_root` and provides the new-root staging dir at bring-up.
+> teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is applied
+> **after** `pivot_root` so its rules key on the view's inodes. `$HOME` is set to
+> `shim_root`.
 
 The most important transformation in the filesystem policy: the kennel does not see the real `$HOME`. Project Kennel constructs a shim directory and bind-mounts the policy-granted paths from the real `$HOME` into it.
 
@@ -264,7 +263,7 @@ reason = "establish a userspace WireGuard tunnel"
 threats.exposed = ["T2.x"]
 ```
 
-A passthrough is authored where the rest of a kennel's grants are — a leaf adds its own device with `[[fs.dev.passthrough.add]]`, folded up the template chain like `[[net.allow.add]]`. Validation (compile time, on the resolved policy): the `path` is absolute under `/dev` with no `..`, a `reason` is present, and an `exposed` threat tag is carried (`kennel-policy::dev`). A passthrough that shims an SSH agent has no special case — SSH is the §7.8 concern, not a device.
+A passthrough is authored where the rest of a kennel's grants are — a leaf adds its own device with `[[fs.dev.passthrough.add]]`, folded up the template chain like `[[net.allow.add]]`. Validation (compile time, on the resolved policy): the `path` is absolute under `/dev` with no `..`, a `reason` is present, and an `exposed` threat tag is carried. A passthrough that shims an SSH agent has no special case — SSH is the §7.8 concern, not a device.
 
 **Mechanism.** A passthrough binds exactly like an `fs.dev.allow` entry: the host node is bind-mounted into the kennel's constructed `/dev` at the same path (its parent created for a subdirectory node like `/dev/net/tun`), preserving the device's owner/group/mode, and granted Landlock `read`/`write`/`ioctl` (`IOCTL_DEV`). Nothing else is in the constructed `/dev`, so a non-granted device is structurally absent (ENOENT). The reason/threats/group are compile-time documentation and are not carried into the settled artefact.
 

@@ -16,7 +16,7 @@ The remaining resource classes, grouped because each is smaller than the major c
 | Signal delivery | Landlock `SCOPE_SIGNAL` (ABI 6) / AppArmor `signal` rule + PID ns | PID ns blocks signals to processes not visible |
 | Capability set | `cap.bounding_set` via capset() | Drop all bounding caps |
 
-**Update — Landlock signal scoping (ABI 6, kernel 6.12+).** `LANDLOCK_SCOPE_SIGNAL` denies sending a signal to any process *outside* the sandbox domain, natively and without an AppArmor dependency. It complements the PID namespace (which already hides non-member processes, so signals can't name them) by also covering the case where a target is reachable by PID. Project Kennel enables it by default wherever the kernel reports Landlock ABI ≥ 6 (`kennel-syscall::landlock`, `Scope::SIGNAL`, set unconditionally in `Ruleset::new`); below that the AppArmor `signal` rule + PID ns remain the mechanism. Verified on 6.17 (ABI 7).
+**Landlock signal scoping (ABI 6, kernel 6.12+).** `LANDLOCK_SCOPE_SIGNAL` denies sending a signal to any process *outside* the sandbox domain, natively and without an AppArmor dependency. It complements the PID namespace (which already hides non-member processes, so signals can't name them) by also covering the case where a target is reachable by PID. Project Kennel enables it by default wherever the kernel reports Landlock ABI ≥ 6; below that the AppArmor `signal` rule + PID ns remain the mechanism.
 
 **Policy primitives.**
 

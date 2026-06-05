@@ -52,7 +52,7 @@ A small, single-purpose daemon launched per kennel:
 
 - Blocking, thread-per-connection Rust (`kennel-netproxy`). No async runtime — the same TCB bar as OpenSSH.
 - Reads the settled policy emitted by the compiler.
-- Listens on **both** the kennel's v4 and v6 loopback addresses (`Proxy::serve_all` over a listen set; kenneld passes both loopback addresses). Egress reaches the proxy symmetrically over either family.
+- Listens on **both** the kennel's v4 and v6 loopback addresses. Egress reaches the proxy symmetrically over either family.
 - Speaks SOCKS5 (well-defined, every HTTP client and most others speak it via `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`).
 - Optionally speaks HTTP CONNECT (some clients prefer it).
 - Resolves names via the OS resolver and vets the answers against the policy's name allowlist and the invariant denies before dialling.
