@@ -225,12 +225,13 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
 
 /// Pin this kennel's shared BPF maps under `/run/kennel/bpf/<pin_id>/`.
 ///
-/// The pins keep the maps alive after the helper exits and make them reachable by
-/// the unprivileged kenneld (which `BPF_OBJ_GET`s `audit_ringbuf` to drain) and by
-/// operators (`bpftool map dump`). The per-kennel dir and its pins are chowned to
-/// the **caller** — the same delegation model as the per-kennel cgroup, so kenneld
-/// can drain and clean them up — with the group set to `kennel-readers` when that
-/// group exists (read access for inspection). Modes: dir `0750`, pins `0640`.
+/// The pins keep the maps alive after the helper exits and reachable by the
+/// unprivileged kenneld (which `BPF_OBJ_GET`s `audit_ringbuf` to drain, and which
+/// the owning user inspects with `bpftool`). Kennel is a **per-user** tool: the
+/// pin dir and pins are chowned to the **caller** and made owner-only (dir `0700`,
+/// pins `0600`) — no shared OS group. Other users cannot read them, and the shared
+/// bpffs root is mode `0711` (traverse-only), so they cannot even enumerate another
+/// user's kennels.
 ///
 /// All steps are best-effort: any failure simply leaves the drain/inspection
 /// unavailable for this kennel; egress enforcement is unaffected. `pin_id` empty
@@ -252,10 +253,11 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
     if std::fs::create_dir(&dir).is_err() {
         return;
     }
+    // Owner-only, owned by the caller (the user kenneld runs as): chown the uid and
+    // leave the group untouched — there is no kennel-wide OS group by design.
     let caller_uid = kennel_syscall::unistd::real_uid();
-    let group_gid = readers_or_caller_gid();
-    let _ = std::os::unix::fs::chown(&dir, Some(caller_uid), Some(group_gid));
-    let _ = set_mode(&dir, 0o750);
+    let _ = std::os::unix::fs::chown(&dir, Some(caller_uid), None);
+    let _ = set_mode(&dir, 0o700);
 
     for (name, fd) in maps {
         let pin = dir.join(name);
@@ -265,8 +267,8 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
         if kennel_bpf::sys::obj_pin(fd.as_fd(), &cpin).is_err() {
             continue;
         }
-        let _ = std::os::unix::fs::chown(&pin, Some(caller_uid), Some(group_gid));
-        let _ = set_mode(&pin, 0o640);
+        let _ = std::os::unix::fs::chown(&pin, Some(caller_uid), None);
+        let _ = set_mode(&pin, 0o600);
     }
 }
 
@@ -292,16 +294,18 @@ fn valid_pin_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Ensure a bpffs is mounted at `base` (idempotent), with the mount root mode
-/// `0755` so the unprivileged kenneld can traverse to the per-kennel pin dirs.
+/// Ensure a bpffs is mounted at `base` (idempotent), mode `0711` — traverse-only,
+/// so the unprivileged kenneld of any user can reach *its own* per-kennel pin dir
+/// but no user can list (and thereby discover) another user's kennels.
 #[cfg(feature = "bpf-egress")]
 fn ensure_bpffs(base: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(base)?;
-    if kennel_syscall::mount::is_bpffs(base).unwrap_or(false) {
-        return Ok(());
+    if !kennel_syscall::mount::is_bpffs(base).unwrap_or(false) {
+        kennel_syscall::mount::mount_bpffs(base)?;
     }
-    kennel_syscall::mount::mount_bpffs(base)?;
-    set_mode(base, 0o755)?;
+    // Enforce traverse-only every time (cheap, root-only): self-heals a stale mode
+    // and keeps one user from listing another's pin dirs.
+    set_mode(base, 0o711)?;
     Ok(())
 }
 
@@ -319,17 +323,6 @@ fn clear_pin_dir(dir: &std::path::Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
-}
-
-/// The `kennel-readers` group gid if it exists, else the caller's real gid. The
-/// pins are owned by the caller either way; the group only widens *read* access
-/// to operators in `kennel-readers` for inspection.
-#[cfg(feature = "bpf-egress")]
-fn readers_or_caller_gid() -> u32 {
-    kennel_syscall::unistd::group_gid("kennel-readers")
-        .ok()
-        .flatten()
-        .unwrap_or_else(kennel_syscall::unistd::real_gid)
 }
 
 /// Set `path`'s permission bits to `mode` (octal).

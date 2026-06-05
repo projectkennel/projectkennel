@@ -239,9 +239,9 @@ A non-matching `abi_version` between the loader and the maps it created would in
 
 ## Map pinning and inspection
 
-Per-kennel maps are pinned under `/run/kennel/bpf/<id>/` (`07-paths.md`), on a bpffs the privhelper mounts at `/run/kennel/bpf/` (root, `0755`). The pin dir and pins are chowned to the caller (kenneld's uid — the per-kennel cgroup delegation model), dir `0750`, pins `0640`, group `kennel-readers` when that group exists. This makes the maps inspectable for debugging (`bpftool map dump pinned /run/kennel/bpf/ai-coding/allow_v4`) without exposing them to write attacks, and lets the unprivileged kenneld reopen the `audit_ringbuf` to drain it.
+Per-kennel maps are pinned under `/run/kennel/bpf/<id>/` (`07-paths.md`), on a bpffs the privhelper mounts at `/run/kennel/bpf/` (root, `0711` — traverse-only). Kennel is a **per-user** tool, so the pin dir and pins are chowned to the caller (kenneld's uid) and are **owner-only**: dir `0700`, pins `0600`, no shared OS group. This lets the unprivileged kenneld reopen the `audit_ringbuf` to drain it and the owner inspect the maps (`bpftool map dump pinned /run/kennel/bpf/ai-coding/allow_v4`) without exposing them to write — or read — by another user; the `0711` root means another user cannot even list `/run/kennel/bpf/` to discover the kennel exists.
 
-Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, which an unprivileged kenneld cannot traverse to `BPF_OBJ_GET` the ring buffer. The pin step is best-effort — a pin failure degrades to "no BPF audit drain / no inspection" but never fails egress setup. The `kennel-readers` group is not yet created by an installer (none exists); until then pins fall back to the caller's group and inspection is owner/root-only.
+Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, which an unprivileged kenneld cannot traverse to `BPF_OBJ_GET` the ring buffer. The pin step is best-effort — a pin failure degrades to "no BPF audit drain / no inspection" but never fails egress setup.
 
 The workload's view never includes `/run/kennel/bpf` — the constructed shim does not mount it.
 

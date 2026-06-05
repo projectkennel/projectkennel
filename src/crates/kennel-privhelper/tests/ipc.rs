@@ -240,7 +240,7 @@ fn pins_the_shared_maps_under_run_kennel_bpf() {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o640, "pin {map} should be mode 0640, got {mode:o}");
+        assert_eq!(mode, 0o600, "pin {map} should be mode 0600, got {mode:o}");
     }
     let dir_mode = std::fs::metadata(&pin_dir)
         .expect("stat pin dir")
@@ -248,8 +248,8 @@ fn pins_the_shared_maps_under_run_kennel_bpf() {
         .mode()
         & 0o777;
     assert_eq!(
-        dir_mode, 0o750,
-        "pin dir should be mode 0750, got {dir_mode:o}"
+        dir_mode, 0o700,
+        "pin dir should be owner-only 0700, got {dir_mode:o}"
     );
 
     // Cleanup: unlink the pins + dir, detach by removing the cgroup. Leave the bpffs

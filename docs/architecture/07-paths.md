@@ -167,13 +167,16 @@ Mode and ownership follow the system's cgroup delegation policy. Modern systemd 
 
 ### `/run/kennel/bpf/<id>/`
 
-Per-kennel BPF map pinning, for the audit ring-buffer drain and for inspection. The privhelper creates ONE bpffs at `/run/kennel/bpf/` (root, mode `0755`) and pins each kennel's shared map set under `/run/kennel/bpf/<id>/`:
+Per-kennel BPF map pinning, for the audit ring-buffer drain and for owner
+inspection. The privhelper mounts ONE bpffs at `/run/kennel/bpf/` (root, mode
+`0711` — traverse-only) and pins each kennel's shared map set under
+`/run/kennel/bpf/<id>/`:
 
 ```
-/run/kennel/bpf/                     bpffs (root, 0755) — one per host
-└── <id>/                            per-kennel pin dir (caller-owned)
+/run/kennel/bpf/                     bpffs (root, 0711 — traverse, not listable)
+└── <id>/                            per-kennel pin dir (caller-owned, 0700)
     ├── audit_ringbuf                pinned ringbuf — kenneld obj_gets + drains it
-    ├── kennel_meta_map              pinned BPF maps (for bptool inspection)
+    ├── kennel_meta_map              pinned BPF maps (owner inspects with bpftool)
     ├── allow_v4
     ├── allow_v6
     ├── deny_v4
@@ -183,12 +186,14 @@ Per-kennel BPF map pinning, for the audit ring-buffer drain and for inspection. 
 
 A kennel's programs share one map set (`kennel_bpf::create_maps` +
 `load_program_against`), so there is exactly one `audit_ringbuf` per kennel and
-one coherent set to pin. The pin dir and its pins are owned by the **caller**
-(kenneld's uid) — the same delegation model as the per-kennel cgroup — so the
-unprivileged kenneld can `BPF_OBJ_GET` the ring buffer to drain it and clean the
-pins up at teardown. Mode: directory `0750`, pins `0640`. Group: `kennel-readers`
-when that group exists (operators in it can `bpftool map dump` the pins), else the
-caller's primary group. kenneld removes the pin dir when the kennel exits.
+one coherent set to pin. **Kennel is a per-user tool**: the pin dir and its pins
+are chowned to the **caller** (the user kenneld runs as) and are **owner-only** —
+directory `0700`, pins `0600`, no shared OS group. So the unprivileged kenneld can
+`BPF_OBJ_GET` the ring buffer to drain it (and the owner can `bpftool map dump` the
+pins), while another user can neither read the pins nor — because the shared bpffs
+root is `0711` — *list* `/run/kennel/bpf/` to discover that the kennel exists.
+Multiple users run kennels side by side, none the wiser of the others. kenneld
+removes the pin dir when its kennel exits.
 
 Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, so an
 unprivileged kenneld cannot traverse it to reopen the ring buffer. `/run/kennel/`
@@ -197,11 +202,6 @@ on a dedicated bpffs beneath it.
 
 The workload never sees this tree — the shim does not bind-mount `/run/kennel/bpf`
 into the kennel's view.
-
-The `kennel-readers` group itself is not yet created by an installer (kennel has
-no installer yet); until it exists the pins fall back to the caller's group, so
-inspection is owner/root-only. Reopening for the drain does not depend on the
-group — kenneld owns the pins.
 
 ### `/run/kennel/privhelper.lock`
 
@@ -270,7 +270,7 @@ Each path's mode and ownership are part of its security contract. The most-load-
 
 - **`~/.local/state/kennel/<kennel>/`** mode `0700`: the workload (running as the same UID) is denied access because the shim does not bind-mount this directory into the workload's view. The mode is belt-and-braces.
 - **`/run/user/<uid>/kennel/control.sock`** mode `0600`: only the owning user may connect. kenneld additionally validates via `SO_PEERCRED` (boundary 7 in `04-trust-boundaries.md`).
-- **`/run/kennel/bpf/<id>/`** directory `0750`, pins `0640`, group `kennel-readers` when that group exists: operators in `kennel-readers` inspect the pinned maps with `bpftool`; the workload (with no view onto `/run/kennel/bpf`) cannot reach them. The pins are owned by the caller (kenneld's uid) so the unprivileged daemon can reopen the ring buffer to drain it and clean the pins up at teardown. The `kennel-readers` group is not yet created by an installer (none exists yet); until then the pins fall back to the caller's group and inspection is owner/root-only.
+- **`/run/kennel/bpf/<id>/`** directory `0700`, pins `0600`, **owner-only** (chowned to the caller, no shared group): the owning user's kenneld reopens the ring buffer to drain it and the owner inspects the maps with `bpftool`; the workload (with no view onto `/run/kennel/bpf`) cannot reach them, and another *user* can neither read the pins nor list the `0711` bpffs root to learn the kennel exists. Kennel is per-user — there is no OS-level "readers" group; isolation is by ownership, the way the rest of `/run/kennel/<id>/` already works.
 - **`/etc/kennel/keys/*.pub`** mode `0644`: public keys; world-readable is fine. Private keys are not in this tree.
 - **`kennel-privhelper`** setuid root (as installed; file capabilities a per-distribution alternative): a compromise of the calling process (kenneld) does not automatically gain privilege; the privhelper validates every request per `04-trust-boundaries.md` boundary 1.
 
