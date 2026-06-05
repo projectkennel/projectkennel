@@ -183,8 +183,9 @@ describe these read as roadmap.
     binary as its `ProxyCommand`; it SOCKS5s through the proxy (`$KENNEL_SOCKS_PROXY`)
     to the bastion (reached as a host-loopback service, §7.3). The synthetic config
     generator emits the `ProxyCommand` line. *Design decision:* the bastion is
-    reached via the existing `[[net.loopback.host_services]]` allow, and a shipped
-    SOCKS connector (not a dependency on `nc`) bridges `ssh` to the proxy.
+    reached via the existing `[[net.host_services]]` allow (the shipped key; see the
+    host-loopback-services note below), and a shipped SOCKS connector (not a
+    dependency on `nc`) bridges `ssh` to the proxy.
   - **End-to-end proof** — `src/tools/ssh-bastion-e2e.sh` stands up a real topology
     with stock OpenSSH 9.6 (a bastion `sshd` + a destination `sshd` + an agent) and
     drives the **built** binaries through it, asserting §7.8.9's load-bearing

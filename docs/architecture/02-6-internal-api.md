@@ -49,7 +49,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `spawn(plan, command) -> Result<Child, SpawnError>` and `spawn_with_gid_map(plan, command, map_gids)` — apply the irreversible seal in the forked child immediately before `execve`; the `gid_map` variant runs the §7.2.8 privileged `gid_map` handshake on a servicer thread.
 - `SpawnError` variants for every failure point, including `Policy` (verification), `UnsubstitutedPlaceholder` (boundary 13 in `04-trust-boundaries.md`), and `Syscall`.
 
-**Depends on.** `kennel-policy` (for `SettledPolicy` and `verify_settled`), `kennel-syscall`, `kennel-bpf`. `#![forbid(unsafe_code)]` — every syscall routes through `kennel-syscall`/`kennel-bpf`. An optional `bwrap-compose` build-time feature delegates the namespace/mount phase to bubblewrap (see `03-crate-decomposition.md`).
+**Depends on.** `kennel-policy` (for `SettledPolicy` and `verify_settled`), `kennel-syscall`, `kennel-bpf`. `#![forbid(unsafe_code)]` — every syscall routes through `kennel-syscall`/`kennel-bpf`. The namespace/mount phase is built in-crate over `kennel-syscall` (bubblewrap-style, identity-mapped user namespace); there is no subprocess delegation to an external composer.
 
 **Depended on by.** `kenneld` — kenneld performs the spawn on the CLI's behalf (the CLI passes the workload's stdio over `SCM_RIGHTS` and kenneld runs the spawn sequence).
 
@@ -70,12 +70,12 @@ The full workspace layout — directory structure, dependency graph, build featu
 **Public surface.** (There is no `BpfRuntime` handle, no `attach_to_cgroup`, and no `next_audit_event` — the surface is a loader plus a ringbuf reader.)
 - `load_program` / `Loaded` (`loader` module) — load and relocate one compiled program object; `Loaded` holds the resulting program/map fds.
 - `MapSpec` / `ProgramSpec` and the `KENNEL_MAPS` / `KENNEL_PROGRAMS` tables — the Rust descriptions of the maps and programs, mirroring `bpf/maps.h`.
-- `RingBuffer` (`ringbuf` module) — the lock-free `mmap`'d audit-event drain (the reader that feeds kenneld; drops on a full buffer).
+- `RingBuffer` (`ringbuf` module) — the lock-free `mmap`'d audit-event drain (drops on a full buffer). The reader exists in this crate; kenneld does not yet drive it (see the note under `kennel-audit` and `03-crate-decomposition.md`).
 - `programs::object(name)` — the embedded compiled `.o` bytes, available only under the `embed-programs` feature.
 
 **Depends on.** `object` (ELF parsing) and `libc` (the `bpf(2)` FFI; `kennel-bpf` is the second `unsafe` crate). It does **not** depend on `kennel-policy`; the egress map entries are built by `kennel-spawn::plan` and carried over the privhelper wire.
 
-**Depended on by.** `kennel-privhelper` *optionally* (under `bpf-egress`, for the egress load/attach), `kenneld` (the ringbuf reader). `kennel-spawn` references it for the egress map-entry types; the actual cgroup attach is done by the privhelper, not in `kennel-spawn`.
+**Depended on by.** `kennel-privhelper` *optionally* (under `bpf-egress`, for the egress load/attach). `kennel-spawn` references it for the egress map-entry types; the actual cgroup attach is done by the privhelper, not in `kennel-spawn`. The ringbuf reader is present but not yet wired into kenneld.
 
 **Notes.** Crate-level `#![allow(unsafe_code)]` for the `bpf(2)` FFI boundary (confined to `sys.rs`); reviewed under §4. ELF parsing is delegated to `object`.
 
@@ -83,7 +83,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Purpose.** The privileged binary. Reads a fixed-layout request from stdin, validates it, performs one network/cgroup operation, writes a response to stdout, exits.
 
-**Public surface (binary + library).** The wire format is fixed-size packed structs in the `wire` module (`src/wire.rs`), documented in `02-4-ipc.md` under "kenneld ↔ privhelper protocol". The crate has a library half exposing `wire`/`validate`; the rest is `pub(crate)` and tested in-crate.
+**Public surface (binary + library).** The wire format is fixed-size packed structs in the `wire` module (`src/wire.rs`), documented in `02-4-ipc.md` under "kenneld ↔ privhelper protocol". The crate's library half exposes `wire` and `validate` (the request frame and its validation core), `addr` and `alloc` (the address/allocation maths the validator and `kenneld` share), `client` (the helper-invocation client `kenneld` links), and `exec` (the privileged-syscall execution, Linux-only). It is tested in-crate.
 
 **Depends on.** `kennel-syscall` (for the privileged syscalls — netlink address ops), and an **optional** `kennel-bpf` pulled in only under the `bpf-egress` feature (for the egress load/attach). Not `kennel-text` and not `serde`: the IPC is fixed-layout packed structs over stdin/stdout (`wire`, packed field-by-field), and the validation core is std-only — so the crate stays `#![forbid(unsafe_code)]`. A plain build links neither `kennel-bpf` nor clang.
 
@@ -101,7 +101,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Depended on by.** `kennel-spawn`, `kennel-privhelper`, `kenneld`, and `kennel-audit` (the latter only under `audit-journald`, for the journald FFI and the UUIDv7 randomness). Notably **not** `kennel-policy`, which is pure and links no Project Kennel crate.
 
-**Notes.** Crate-level `#![allow(unsafe_code)]`; every `unsafe` block follows the comment template in §4. The crate is sized to be reviewable in one sitting — target ceiling 1500 lines of Rust.
+**Notes.** Crate-level `#![allow(unsafe_code)]`; every `unsafe` block follows the comment template in §4. The crate is partitioned a module per concern so each `unsafe` surface is reviewable on its own.
 
 ### `kennel-audit`
 
@@ -148,7 +148,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 ### `kenneld` (library + binaries)
 
-**Purpose.** The per-user supervisor. The crate has a library half (`src/lib.rs`) providing the kennel registry and per-kennel orchestration, plus two binaries: `src/bin/kenneld.rs` (the daemon) and `src/bin/kennel.rs` (the CLI). It owns the control protocol, the per-kennel teardown, and the BPF ringbuf audit reader.
+**Purpose.** The per-user supervisor. The crate has a library half (`src/lib.rs`) providing the kennel registry and per-kennel orchestration, plus three binaries: `src/bin/kenneld.rs` (the daemon), `src/bin/kennel.rs` (the CLI), and `src/bin/kennel-akc.rs` (the root-owned `AuthorizedKeysCommand` helper that queries the running daemon for the SSH egress bastion; see `07-8`). It owns the control protocol and the per-kennel teardown. Draining the BPF ringbuf into the audit writer is not yet wired here (a roadmap remnant; see the `kennel-audit` note and `03-crate-decomposition.md`).
 
 **Public surface (library).**
 - `Kennel` — a live kennel; `Kennel::stop(&P)` performs immediate teardown (proxy reaped, addresses removed, cgroup deleted), returning the workload's exit status. There is no grace period, no draining state, and no reference counting: one `kennel run` is one kennel.
@@ -196,7 +196,7 @@ The `Invariants` block of `kennel-policy` includes the cryptographic-minimums cl
 ## What this chapter does not cover
 
 - Dependency graph between crates (acyclic, layered): `03-crate-decomposition.md`.
-- Build-time feature flags (bubblewrap composition, audit-format toggles): `03-crate-decomposition.md` and `06-build-and-test.md`.
+- Build-time feature flags (`bpf-egress`, `embed-programs`, audit-format toggles): `03-crate-decomposition.md` and `06-build-and-test.md`.
 - Per-crate test placement (unit vs integration, root-required vs not): `06-build-and-test.md`.
 - Which crates are published to crates.io (currently: none; the workspace is internal): `06-build-and-test.md`.
 - Per-crate ownership and review expectations: implicit from CODING-STANDARDS.md §13; explicit list lives in `MAINTAINERS.md`.

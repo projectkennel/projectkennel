@@ -31,7 +31,7 @@ Runs as the user.
 
 ### `kennel-privhelper` (the privileged component)
 
-Small binary, target size approximately 500 lines of Rust plus the `kennel-syscall` dependency. Installed setuid root *or* with file capabilities `cap_net_admin,cap_sys_admin=ep`. File capabilities are preferred where supported; setuid is the fallback.
+Small binary, target size approximately 500 lines of Rust plus the `kennel-syscall` dependency. The installer installs it setuid root (mode `4755`, owner root); file capabilities `cap_net_admin,cap_sys_admin,cap_setgid=ep` are a documented per-distribution alternative the installer does not itself apply (`cap_setgid` is for the `set-gid-map` op). `cap_net_admin`/`cap_sys_admin` cover the loopback addresses and egress BPF.
 
 Operations — exactly four (the `Op` enum in `kennel-privhelper::wire`):
 
@@ -52,7 +52,7 @@ A future revision may replace this with a long-running daemon owning the same ca
 
 SOCKS5 proxy enforcing the per-destination network allowlist. One instance per active kennel; concurrent kennels mean concurrent proxy processes, each listening on a different per-kennel loopback address — the kennel's primary (host offset 1 in its `/28`) at port 1080, exposed to the workload as `$KENNEL_SOCKS_PROXY`, plus the corresponding IPv6 ULA.
 
-Reads its configuration at startup from kenneld (resolved policy fragment relevant to networking) and accepts reconfiguration via SIGHUP-triggered reload of its control socket. Writes network audit events to the kennel's audit directory.
+Reads its configuration once at startup from a config file kenneld writes (the resolved networking policy); reconfiguration is by respawn, not in-place reload. Writes network audit events to the kennel's audit directory.
 
 The proxy is the only network egress path for the workload. The cgroup BPF rules deny `connect()` to any address other than the proxy; the workload's `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` environment variables point at the proxy. Together this makes the proxy unbypassable from inside the kennel — kernel enforcement guarantees the workload cannot reach the network without going through the proxy, and the proxy enforces the destination allowlist.
 
@@ -72,7 +72,7 @@ Project Kennel does not reimplement well-trodden tools where they exist. The fol
 
 - **`xdg-dbus-proxy`** — D-Bus method-level filtering, one instance per kennel that enables D-Bus.
 - **`Xwayland`** or **`Xephyr`** — X11 server isolation, per kennel (only for the `x11-isolated-dev` template family; not used by `ai-coding-strict`).
-- **`bubblewrap`** — *optionally*, for the namespace/mount setup phase. Project Kennel can perform this work directly via `kennel-syscall`, but composing `bubblewrap` is a supported alternative; the choice is a build-time feature flag. See `03-crate-decomposition.md` and `06-build-and-test.md`.
+Project Kennel performs the namespace/mount setup phase directly via `kennel-syscall` (bubblewrap-style, in an identity-mapped user namespace); it does not compose `bubblewrap` as a subprocess.
 
 These are dependencies, not source. Their versions are pinned in the build environment per `BUILD-ENV.md` and audited under §5 of the coding standards.
 
@@ -84,7 +84,7 @@ These are dependencies, not source. Their versions are pinned in the build envir
 |---|---|---|---|
 | `kennel` (CLI) | user | inherited from shell | nothing special |
 | `kenneld` | user | none | started by systemd --user or equivalent |
-| `kennel-privhelper` | root (setuid) or user | `cap_net_admin,cap_sys_admin=ep` | preferred: file caps; fallback: setuid |
+| `kennel-privhelper` | root (setuid) or user | `cap_net_admin,cap_sys_admin,cap_setgid=ep` | installer uses setuid (mode `4755`); file caps a per-distribution alternative |
 | `kennel-netproxy` | user | none | |
 | `kennel-ssh-agent` | user | none | |
 | `xdg-dbus-proxy` | user | none | external |
@@ -117,7 +117,7 @@ systemd --user                                              (user, supervisor)
 
 Two structural points worth naming:
 
-1. **The workload's immediate parent is kenneld**, not the `kennel run` invocation. kenneld performs the spawn and owns the workload; the CLI is a client that holds the connection open for the workload's lifetime and forwards its exit code.
+1. **kenneld owns the workload's lifecycle**, not the `kennel run` invocation. kenneld performs the spawn; the CLI is a client that holds the connection open for the workload's lifetime and forwards its exit code. The workload is not literally kenneld's immediate child: the spawn forks an intermediate reaper (process A) which becomes PID 1 of the workload's new PID namespace, then forks the workload (process B) and `_exit()`s with B's status — so kenneld holds a `Child` handle for A, and A relays B's exit code up. The CLI and kenneld therefore see the workload's true exit status, but the workload's immediate parent is the in-namespace reaper A.
 2. **Each `kennel run` is one kennel** with its own `kennel-netproxy` child of kenneld. Kennels are not shared by name and per-kennel resources are not reference-counted: a second `kennel run` is a separate kennel with its own proxy, addresses, cgroup, and view.
 
 ---
@@ -181,7 +181,7 @@ The full lifecycle is in `05-state-and-supervision.md`. The summary:
 
 - **kenneld** is socket-activated on the first `kennel run` and persists for the user session. It is the longest-lived Kennel process.
 - **`kennel run`** asks kenneld to start a kennel. kenneld allocates a context byte, creates the cgroup in its delegated subtree, invokes the privhelper to add the loopback addresses and attach the egress BPF, writes the proxy config and launches `kennel-netproxy`, then performs the spawn sequence. The workload's PID lands in the kennel's cgroup.
-- **The workload** runs as a child of kenneld. The CLI holds its connection open for the workload's lifetime; the audit log captures lifecycle events.
+- **The workload** runs under kenneld's ownership — PID 1 of a fresh PID namespace, reaped by the intermediate reaper kenneld forked, which relays the exit status. The CLI holds its connection open for the workload's lifetime; the audit log captures lifecycle events.
 - **When the workload exits**, kenneld tears the kennel down immediately: reaps the proxy, invokes the privhelper to remove the loopback addresses, deletes the cgroup it created, and discards the constructed view. There is no grace window and no daemon sharing by name — a second `kennel run` is a separate kennel.
 - **`kennel-privhelper`** invocations are stateless and synchronous: exec'd, read request, perform, respond, exit. The privhelper retains no state between invocations.
 

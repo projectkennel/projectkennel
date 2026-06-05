@@ -38,13 +38,13 @@ Each boundary is described in its own section below. The descriptions follow a c
 
 **Validator.** `kennel-privhelper`'s `validate` module. For each operation:
 
-- `add-addr` / `del-addr`: the `addr` must fall within the caller's per-kennel loopback subnet — IPv4 laid out `127 | tag(12) | ctx(8) | host(4)` (a **/28**) or IPv6 `0xfd | gid(40) | ctx(16) | host(64)` (a **/64**), where `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`) and `ctx` is the value in the request. The helper reconstructs the embedded `tag`/`ctx` from the address and refuses anything outside the caller's scope. The `interface` must be `lo` or a per-kennel dummy interface named `kennel-<id>`. The `prefix` is fixed at 28 (IPv4) or 64 (IPv6); any other value is refused.
+- `add-addr` / `del-addr`: the `addr` must fall within the caller's per-kennel loopback subnet — IPv4 laid out `127 | tag(12) | ctx(8) | host(4)` (a **/28**) or IPv6 `0xfd | gid(40) | ctx(16) | host(64)` (a **/64**), where `tag`/`gid` are the caller's per-user values (from `/etc/kennel/subkennel`) and `ctx` is the value in the request. The helper reconstructs the embedded `tag`/`ctx` from the address and refuses anything outside the caller's scope. The `interface` must be `lo` or a per-kennel dummy interface named `<namespace>-<id>`, where `<namespace>` is the caller's per-user resource namespace (default `kennel`, so the default install accepts `kennel-<id>`; the rule is namespace-parameterised, not a literal `kennel-` prefix). The `prefix` is fixed at 28 (IPv4) or 64 (IPv6); any other value is refused.
 - `setup-egress`: the request carries the target cgroup `path`; the helper requires it to start with the kennel cgroup root, reject `..`/symlink components, and — the cross-user check — confirm the caller actually **owns** that cgroup before it loads and attaches the egress BPF to it. The map contents (the kennel's own egress allowlist) are not scope-validated: the caller already controls them; the cgroup path is the boundary.
 - `set-gid-map`: the helper refuses any gid the caller is **not** a member of and any target pid the caller does **not** own, then writes the identity `gid_map` for that pid (it holds `CAP_SETGID` in the init userns; an unprivileged process cannot self-map a group it lacks). Mapping a group the user is not in would be an escalation, so this gating is the boundary.
 
 There is **no** cgroup-create / cgroup-delete operation: the privhelper neither creates nor deletes cgroups. kenneld creates and removes the per-kennel cgroup itself, unprivileged, in its systemd-delegated subtree; the privhelper's only cgroup interaction is the ownership-checked `setup-egress` attach onto a cgroup kenneld already made.
 
-The validator rejects out-of-scope requests with the `out-of-scope` error code; nothing happens at the privileged syscall level.
+The validator rejects out-of-scope requests with a stable numeric refusal code carried on the wire (`AddrOutOfScope = 2` for an address outside the reserved subnet, alongside `BadPrefix = 1`, `InterfaceNotAllowed = 3`, `InterfaceNameTooLong = 4`, `GidNotMember = 5`, `EmptyGidMap = 6`, and the scope/ownership codes `100`/`101`/`102`); the refusal is surfaced as a `priv.refuse` audit event and a non-zero exit. Nothing happens at the privileged syscall level.
 
 **Failure mode.** A compromised kenneld asking the privhelper to add `169.254.169.254` to loopback would be refused. The privhelper logs the refusal to its own audit channel and exits non-zero. kenneld observes the refusal and surfaces it.
 
@@ -150,10 +150,11 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 
 **Validator.** kenneld's `control` decoder. Per CODING-STANDARDS.md §10.2 and `02-4-ipc.md`:
 
-- Frame length is bounded; longer frames are a protocol violation, connection dropped (`WireError::TooLarge`).
-- Each field is bounds-checked as it is read; a truncated or oversized field is `WireError::Truncated`/`WireError::TooLarge`.
-- String fields must be valid UTF-8 (`WireError::BadString`); the op byte must name a known request.
-- Per-method param validation (e.g., kennel names follow `[a-z0-9-]{1,64}`).
+- Frame length is bounded at `MAX_MESSAGE` (1 MiB); longer frames are a protocol violation, connection dropped.
+- Each field is bounds-checked as it is read: string length is capped at `MAX_STRING` (64 KiB) and array/argv counts at `MAX_COUNT` (4096); a truncated or oversized field is rejected.
+- String fields must be valid UTF-8 (`WireError::BadString`); an unknown op byte is `WireError::BadTag`.
+
+There is currently **no** character-set or per-method format validation of the kennel name at this boundary (no `[a-z0-9-]{1,64}` check): `reserve()` only rejects a duplicate name and an exhausted context pool. Name-format validation is owed work.
 
 **Failure mode.** Structured error response (with code from the catalogue in `02-4-ipc.md`); the connection remains open for the client to issue the next request or close. Protocol-framing violations close the connection.
 
@@ -277,12 +278,12 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 1. Verify the settled policy's `signature` against the trust store. One verification. In attested deployments this is the *only* signature check at runtime; the source-artefact signatures (boundary 3) were verified at compile time and are recorded in the provenance block, not re-verified here.
 2. Check `settled_schema_version` is in the supported range.
-3. **Re-assert framework invariants** against `effective_policy`, regardless of the signature and regardless of `framework_invariants_asserted`. Framework invariants are Project Kennel's structural guarantees, not the signer's; a validly-signed settled policy that violates one is refused. The checks are a handful of structural assertions (`no_new_privs`, deny-setuid/setgid/setcap, mandatory shim, cloud-metadata denies, PID namespace, proxy-only egress) and are cheap.
+3. **Re-assert framework invariants** against `effective_policy`, regardless of the signature and regardless of `framework_invariants_asserted`. Framework invariants are Project Kennel's structural guarantees, not the signer's; a validly-signed settled policy that violates one is refused. The checks (`kennel-policy::invariant::validate`) are a handful of structural assertions and are cheap: `cap.no_new_privs`, `exec.deny_setuid`/`deny_setgid`/`deny_setcap`/`deny_writable`, the mandatory home shim (`fs.home.shadow` plus `shim_root` under `/run/kennel/`), the non-empty invariant deny CIDRs (cloud metadata, link-local, RFC1918), and `proc.visibility == self`. `net.mode` is matched exhaustively (the type admits only `constrained`/`open`) rather than asserted to a single value; there is no separate "PID namespace" assertion at this step.
 4. Substitute the `deferred_substitutions` with per-instance values; refuse if any other unsubstituted placeholder remains in `effective_policy`.
 
 **Trust reduction.** This boundary is deliberately narrow. The spawn path links none of the template machinery — no TOML template parsing, no chain-walking, no include resolution, no delta application, no source-signature verification. Those crossed boundary 3 at compile time. The runtime trusts one signature and re-checks the structural invariants. On a fleet workstation that holds only settled policies, this is the entire policy-trust surface.
 
-**Failure mode.** `SpawnError::SettledSignatureFailure`, `SpawnError::SettledSchemaUnsupported`, `SpawnError::FrameworkInvariantViolated` (naming the invariant), or `SpawnError::UnsubstitutedPlaceholder` (naming the placeholder). The spawn is refused; no workload runs.
+**Failure mode.** The signature, schema-version, and invariant checks live in `kennel_policy::verify_settled`; their failures surface as `SpawnError::Policy` wrapping the underlying `PolicyError` — `PolicyError::Signature(..)` for a bad signature, `PolicyError::UnsupportedSchemaVersion { .. }` for an out-of-range `settled_schema_version`, and `PolicyError::InvariantViolations(..)` (carrying the violated invariant names) for a framework-invariant failure. An unresolved placeholder is the distinct `SpawnError::UnsubstitutedPlaceholder { field, value }` (naming the field and value). The spawn is refused; no workload runs.
 
 **Threat IDs addressed.** T2.5 and T2.6 at runtime (a tampered or invariant-weakening settled policy is refused by signature check and invariant re-assertion respectively); supports the attestation capability (the workstation enforces exactly the signed artefact, identified by content hash, with no live resolution that could diverge).
 

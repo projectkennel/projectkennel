@@ -29,11 +29,11 @@ The release-build environment is a container image whose exact contents are pinn
 
 For a full workspace build:
 
-1. **Vendor verification.** `tools/verify-checksums` (and its shell twin) confirm `src/vendor/` matches `CHECKSUMS.toml` and `Cargo.lock`.
+1. **Vendor verification.** `src/tools/verify-checksums.sh` confirms `src/vendor/` matches `CHECKSUMS.toml` and `Cargo.lock`. The Rust verifier twin (`kennel-checksum-verify`, needing vendored `sha2`) is a contingent §5.5.1 call, not yet built; the shell script is the implementation.
 2. **BPF compilation.** `kennel-bpf`'s `build.rs` invokes clang against `bpf/*.bpf.c`, producing `*.bpf.o` files in `OUT_DIR`. Each `.bpf.c` includes `<linux/bpf.h>` (kernel UAPI) and `bpf/maps.h`; **no** `vmlinux.h`, no CO-RE relocations. The `.o` is embedded into the crate; map references are left as ELF relocations the loader resolves at load time.
-3. **Rust compilation.** `cargo build --workspace` builds every crate. The workspace is twelve crates: `kennel-syscall`, `kennel-text`, `kennel-policy`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-netproxy`, `kennel-privhelper`, `kennel-spawn`, `kennel-ssh-reorigin`, `kennel-socks-connect`, and `kenneld` (which also produces the `kennel` CLI binary alongside the `kenneld` daemon, in its `src/bin/`). Order is computed by Cargo from `[workspace.dependencies]`; the lower-layer crates (`kennel-syscall`, `kennel-text`) are built before higher layers (`kennel-spawn`, `kenneld`).
-4. **Binary stripping** (release only). `strip = "symbols"` in the release profile; separately, debug-info binaries are produced under `target/release-with-debuginfo/` for distributions that want a parallel `.debug` package.
-5. **Reproducibility check** (release-build CI only). The release builds twice on two different runners; output hashes must match.
+3. **Rust compilation.** `cargo build --workspace` builds every crate. The workspace is twelve crates: `kennel-syscall`, `kennel-text`, `kennel-policy`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-netproxy`, `kennel-privhelper`, `kennel-spawn`, `kennel-ssh-reorigin`, `kennel-socks-connect`, and `kenneld` (which also produces the `kennel` CLI binary alongside the `kenneld` daemon, in its `src/bin/`). Order is computed by Cargo from each member's `[dependencies]` (there is no `[workspace.dependencies]` table — members pin their own external versions); the lower-layer crates (`kennel-syscall`, `kennel-text`) are built before higher layers (`kennel-spawn`, `kenneld`).
+4. **Binary stripping** (release only). `strip = "symbols"` in the release profile. A separate `release-with-debuginfo` profile producing parallel debug-info binaries under `target/release-with-debuginfo/` for distributions that want a `.debug` package is **roadmap** — only `[profile.release]` is defined today.
+5. **Reproducibility check** (release-build CI only). Designed so the release builds twice on two different runners and the output hashes must match. **Roadmap**: this double-build is not yet wired (it needs the pinned release image), and `cargo build --offline --frozen --locked` is the only build command in the per-PR gate.
 
 A typical incremental dev build (no BPF source changes) takes 5-10 seconds on a modern workstation. A full release build (clean target, BPF compilation, all features) takes 2-4 minutes.
 
@@ -124,7 +124,7 @@ Kernel matrix (subject to change in `BUILD-ENV.md`):
 | `bpf-compile` | Compile every `bpf/*.bpf.c` program against the kernel UAPI with `clang -Wall -Wextra -Werror -target bpf` (the compile-regression gate; the verifier-load matrix is owed, see below). |
 | `fuzz` | Clippy and `cargo test` the separate `src/fuzz/` workspace, `--offline --locked` (the no-panic corpus across every untrusted-input parser). |
 | `supply-chain` | Install the pinned, hash-verified `cargo-deny`/`-audit`/`-vet` binaries, then `cargo deny --all-features check`, `cargo audit --deny warnings`, `cargo vet --locked`. |
-| `tooling` | The shell checksum witness (`tools/verify-checksums.sh`) and the hook/tool shell tests. |
+| `tooling` | The shell checksum witness (`src/tools/verify-checksums.sh`) and the hook/tool shell tests. |
 
 The `rust` job folds what would otherwise be separate fmt/clippy/test/build/doc jobs into one runner's step sequence; a step failure fails the job. All five jobs gate a PR.
 
@@ -136,12 +136,12 @@ CI is configured in `.github/workflows/`. The configuration is reviewed under th
 
 ## Local development loop
 
-A developer pre-pushes locally via `tools/install-hooks.sh`, which sets up the pre-commit and pre-push hooks per CODING-STANDARDS.md §15.
+A developer pre-pushes locally via `src/tools/install-hooks.sh`, which sets up the pre-commit and pre-push hooks per CODING-STANDARDS.md §15.
 
 The hooks run the *fast subset* of CI:
 
 - pre-commit: `cargo fmt --check` (workspace), scoped clippy, secret-pattern scan, file-size sanity, `src/vendor`/`CHECKSUMS.toml` consistency.
-- pre-push: full clippy, full test, offline build, both checksum verifiers.
+- pre-push: full clippy, full test, offline build, the shell checksum verifier (`src/tools/verify-checksums.sh`; the hook probes for a Rust `kennel-checksum-verify` twin and skips it while that remains owed).
 
 The hooks do not run the BPF verifier matrix (no kernel-VM setup on the developer's machine) or the reproducible-build check (single-runner). Those run in CI.
 
@@ -153,9 +153,9 @@ A few specific placement choices:
 
 ### Root-required tests
 
-`kennel-spawn::tests::namespace_setup`, `kennel-spawn::tests::landlock_sealing`, `kennel-bpf::tests::attach_to_real_cgroup`, `kennel-privhelper::tests::addr_add_succeeds` — these need root.
+A subset of integration tests need root for namespace operations, cgroup creation, Landlock sealing on a real kernel, and BPF attach. As built these live in each crate's flat `tests/` directory — `kennel-privhelper/tests/ipc.rs`, `kenneld/tests/e2e.rs`, `kenneld/tests/akc_openssh.rs`, `kennel-syscall/tests/landlock_exec_semantics.rs` — guarded at runtime/`#[cfg(feature = "root-tests")]` rather than collected under a `tests/root/` subdirectory.
 
-Placement: in `tests/root/` within each crate, behind `#[cfg(feature = "root-tests")]`. The feature flag is workspace-level; `cargo test --workspace --features root-tests` runs them, `cargo test --workspace` does not.
+The `root-tests` feature is defined **per crate** (`kennel-spawn`, `kennel-bpf`, `kennel-syscall`, `kennel-privhelper`, `kenneld`), not at the workspace level; it transitively enables `embed-programs`/`bpf-egress`. The real invocation is per crate, e.g. `sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features root-tests`. CI exercises the privileged paths via the all-features build (`cargo test --all-features`); a dedicated privileged `root-tests` runner is owed (see the CI-jobs section).
 
 The CI runner for `root-tests` is privileged but ephemeral: a container or VM that exists only for the duration of the test run, with a fresh kernel, and no persistent state.
 
@@ -171,7 +171,9 @@ Audit events are JSON Lines: one well-formed JSON object per line, every string 
 
 ## Reproducible builds
 
-Release builds run twice on two different CI runners. The build process:
+**Status: roadmap.** This section describes the designed release-build process; none of the machinery below (`SOURCE_DATE_EPOCH` pin, `--remap-path-prefix`, the `release-with-debuginfo` profile, the double-build hash compare) is wired today, and the reproducible-build job is not in CI pending the pinned release image. No `SOURCE_DATE_EPOCH` or `--remap-path-prefix` appears in any `Cargo.toml` or workflow yet.
+
+Release builds are designed to run twice on two different CI runners. The build process:
 
 1. Pin `SOURCE_DATE_EPOCH` to the commit timestamp.
 2. Build with the pinned toolchain and pinned clang.
@@ -192,6 +194,6 @@ The reproducible-build job is not in the per-PR CI gate (it would be too slow); 
 
 - Per-crate dep graph and crate purposes: `03-crate-decomposition.md`.
 - The CI workflow files in detail: `.github/workflows/`.
-- The container image used for release builds: `BUILD-ENV.md` and `tools/release-image/`.
+- The container image used for release builds: `BUILD-ENV.md` (the `release-image/` recipe directory is owed alongside the release image itself).
 - The set of clippy lints denied: CODING-STANDARDS.md §12.2.
 - The dep audit cadence: CODING-STANDARDS.md §5.6, §5.7.

@@ -131,7 +131,9 @@ A theme: the workload's *confinement* never depends on kenneld being alive. Land
 
 ## Operational signals
 
-- **`SIGTERM`** — shutdown. Stop accepting new kennel starts and exit. Used by `systemctl --user stop kenneld`. Each live kennel's serving thread reaps its proxy and removes its addresses as its workload exits.
+kenneld installs no signal handlers: `run()` builds the shared state and calls `serve()`, a blocking accept loop, with no `sigaction`/`SIGTERM`/`ctrlc` handling. Signals therefore take their default disposition.
+
+- **`SIGTERM`** — default-terminates the process (used by `systemctl --user stop kenneld`). This ends the accept loop and the per-kennel serving threads without an orderly drain; each thread's owned workload is left to the kernel-enforced confinement that survives kenneld (Landlock, cgroup BPF, the sealed mount namespace) and to whatever supervisor reaps the process tree. There is no "stop accepting new starts, let workloads drain" sequence — kenneld holds no draining state.
 
 ---
 
