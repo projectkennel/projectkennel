@@ -385,6 +385,8 @@ fn fold_net_bind(p: &NetBind, c: &NetBind) -> NetBind {
         allow_host_loopback_v4: or(&c.allow_host_loopback_v4, &p.allow_host_loopback_v4),
         allow_host_loopback_v6: or(&c.allow_host_loopback_v6, &p.allow_host_loopback_v6),
         min_port: or(&c.min_port, &p.min_port),
+        // A child's explicit allowlist overrides the parent's (set-wins, like min_port).
+        allowed_ports: or(&c.allowed_ports, &p.allowed_ports),
     }
 }
 

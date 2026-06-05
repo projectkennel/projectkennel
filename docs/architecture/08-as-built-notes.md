@@ -391,18 +391,22 @@ describe these read as roadmap.
   `kennel compile`/`validate` (on `Compiled.warnings`) and re-derived + logged by
   `kenneld` at load (`policy.rs`). A deny that is simply never granted is enforced by
   omission and warns about nothing.
-- **Bind port policy** (`07-3-network.md` §7.3.7) — **`min_port` BUILT + kernel-proven;
-  `allowed_ports` still owed.** The `[net.bind].min_port` floor (T6, §7.3.9 item 17) now
+- **Bind port policy** (`07-3-network.md` §7.3.7) — **BUILT + kernel-proven (both
+  `min_port` and `allowed_ports`).** The `[net.bind].min_port` floor (T6, §7.3.9 item 17)
   flows source → `NetPolicy.bind_port_min` (translate) → the `kennel_meta` BPF map (the
-  repurposed `_pad0` slot, stamped by `kennel-spawn::plan`), and the `bind4`/`bind6`
-  programs deny any bind whose port is below it (checked before the address logic, since
-  a too-low port is refused regardless of address; `0` = no floor, opt-in). Proven
-  adversarially on the running kernel (`kennel-bpf` root test `bind4_enforces_the_min_port_floor`):
-  a wildcard bind to `:80` under a 1024 floor is denied, `:8080` is allowed, and with no
-  floor `:80` is allowed. **Still owed:** the `allowed_ports` *allowlist* (an explicit
-  set of permitted bind ports) — it cannot ride the single `_pad0` slot and needs the
-  `bind_subnet` struct (and the `EgressPayload` wire + privhelper population) extended
-  with a small port array; `min_port` is the threat-bearing control and is done.
+  repurposed `_pad0` slot, stamped by `kennel-spawn::plan`); the `[net.bind].allowed_ports`
+  allowlist flows source → `NetPolicy.bind_allowed_ports` → the `Plan` → the
+  `EgressPayload` wire (a length-prefixed `u16` tail, tolerant of an absent tail) →
+  the privhelper, which writes the `bind_subnet` BPF map (extended with `n_ports` +
+  `allowed_ports[8]`, a 44-byte value; `MAX_BIND_PORTS = 8`, over-limit is a translation
+  error). The `bind4`/`bind6` programs enforce both before the address logic — deny a
+  bind below the floor, and (when `n_ports > 0`) deny a port not in the allowlist via a
+  bounded, verifier-clean loop. Proven adversarially on the running kernel (`kennel-bpf`
+  root tests): `bind4_enforces_the_min_port_floor` (`:80` denied under a 1024 floor,
+  `:8080` allowed, `:80` allowed with no floor) and `bind4_enforces_the_allowed_ports_allowlist`
+  (`:8080` allowed, `:9090` denied), with `all_programs_load` confirming the verifier
+  accepts the new loop. The `min_port` floor still rides `kennel_meta`; the allowlist
+  rides `bind_subnet` — the two halves of the bind-port policy.
 - **ssh-agent footgun** (`05-templates.md` §5.9 / `07-8-ssh.md`) — **BUILT.** A policy
   that shims a real ssh-agent via `[[unix.allow]]` (`name = "ssh-agent"` or
   `env = "SSH_AUTH_SOCK"`) is no longer refused: the `[ssh]` bastion is the intended

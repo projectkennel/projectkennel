@@ -161,6 +161,15 @@ pub struct NetPolicy {
     /// the table fields so the canonical TOML emits this scalar before them.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub bind_port_min: u16,
+    /// Explicit bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7).
+    ///
+    /// When non-empty, the workload may `bind()` only these ports (and still no lower
+    /// than [`bind_port_min`](Self::bind_port_min)); empty means any port at or above
+    /// the floor. Capped at [`MAX_BIND_PORTS`] by translation (the `bind_subnet` BPF map
+    /// carries a fixed-size array). Carried into the `bind_subnet` map; omitted from the
+    /// canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bind_allowed_ports: Vec<u16>,
     /// Where the egress proxy listens (offset + port within the kennel's subnet).
     #[serde(default)]
     pub proxy: ProxyListen,
@@ -184,6 +193,13 @@ pub struct NetPolicy {
 const fn is_zero_u16(v: &u16) -> bool {
     *v == 0
 }
+
+/// The maximum number of `[net.bind].allowed_ports` entries (§7.3.7).
+///
+/// The `bind_subnet` BPF map carries a fixed-size array of this width, so a policy
+/// listing more is a translation error (the author learns the limit rather than having
+/// ports silently dropped).
+pub const MAX_BIND_PORTS: usize = 8;
 
 /// Private-`/tmp` tmpfs parameters (§7.2.6).
 ///

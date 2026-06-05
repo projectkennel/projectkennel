@@ -905,6 +905,7 @@ mod tests {
                         protocol: Protocol::Any,
                     }],
                     bind_port_min: 0,
+                    bind_allowed_ports: Vec::new(),
                 },
                 fs: FsPolicy {
                     home_shadow: true,
@@ -1453,6 +1454,7 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
         }
@@ -1584,6 +1586,7 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
         };
@@ -1682,6 +1685,7 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             // The setgroups field is unused on the userns path; the handshake carries
             // the group grant instead.
@@ -1824,6 +1828,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
         };
@@ -1901,6 +1906,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: vec![(src.clone(), target.clone()), (src, missing)],
             supplementary_groups: None,
         };
@@ -1998,6 +2004,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
         };
@@ -2069,6 +2076,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
         }
@@ -2170,6 +2178,7 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
         };

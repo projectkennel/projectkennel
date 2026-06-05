@@ -160,6 +160,7 @@ mod tests {
                         protocol: Protocol::Any,
                     }],
                     bind_port_min: 0,
+                    bind_allowed_ports: Vec::new(),
                 },
                 fs: FsPolicy {
                     home_shadow: true,

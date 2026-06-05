@@ -525,6 +525,12 @@ pub struct NetBind {
     /// Lowest bindable port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_port: Option<u16>,
+    /// Explicit allowlist of bindable ports (§7.3.7). When non-empty, the workload may
+    /// `bind()` only these ports (in addition to passing [`min_port`](Self::min_port));
+    /// empty/absent means any port at or above `min_port`. At most
+    /// [`MAX_BIND_PORTS`](crate::settled::MAX_BIND_PORTS) entries survive translation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_ports: Option<Vec<u16>>,
 }
 
 /// `[net.ipv6]`.

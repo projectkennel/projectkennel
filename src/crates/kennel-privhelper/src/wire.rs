@@ -287,6 +287,39 @@ pub struct EgressPayload {
     pub allow_v6: Vec<V6Entry>,
     /// `deny_v6` LPM entries.
     pub deny_v6: Vec<V6Entry>,
+    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7) for the
+    /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. Capped
+    /// at [`MAX_BIND_PORTS`] on decode (the BPF array is fixed-size).
+    pub bind_allowed_ports: Vec<u16>,
+}
+
+/// The maximum number of `bind_allowed_ports` the wire carries (the `bind_subnet`
+/// BPF array size; mirrors `kennel_policy::settled::MAX_BIND_PORTS`).
+pub const MAX_BIND_PORTS: usize = 8;
+
+/// Read the bind-port allowlist tail: a `u32` count then that many host-order `u16`
+/// ports. Tolerant of an absent tail (fewer than 4 bytes ⇒ empty, fail-closed: no
+/// extra ports). A count above [`MAX_BIND_PORTS`] is rejected.
+fn read_bind_ports(bytes: &[u8]) -> Result<Vec<u16>, WireError> {
+    let Some(count_bytes) = bytes.get(..4) else {
+        return Ok(Vec::new());
+    };
+    let n = count_bytes
+        .try_into()
+        .map(u32::from_ne_bytes)
+        .map(|v| v as usize)
+        .map_err(|_| WireError::BadLength)?;
+    if n > MAX_BIND_PORTS {
+        return Err(WireError::BadLength);
+    }
+    let span = n.checked_mul(2).ok_or(WireError::BadLength)?;
+    let end = span.checked_add(4).ok_or(WireError::BadLength)?;
+    let region = bytes.get(4..end).ok_or(WireError::BadLength)?;
+    let ports = region
+        .chunks_exact(2)
+        .filter_map(|c| c.try_into().ok().map(u16::from_ne_bytes))
+        .collect();
+    Ok(ports)
 }
 
 /// Read `n` IPv4 entries (8-byte key + 8-byte value) from the front of `bytes`,
@@ -367,6 +400,16 @@ impl EgressPayload {
             b.extend_from_slice(k);
             b.extend_from_slice(v);
         }
+        // Bind-port allowlist tail: a count then the host-order ports. Appended last so
+        // the existing prefix layout is unchanged.
+        b.extend_from_slice(
+            &u32::try_from(self.bind_allowed_ports.len())
+                .unwrap_or(u32::MAX)
+                .to_ne_bytes(),
+        );
+        for port in &self.bind_allowed_ports {
+            b.extend_from_slice(&port.to_ne_bytes());
+        }
         b
     }
 
@@ -396,8 +439,10 @@ impl EgressPayload {
         let (allow_v6, used) =
             read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_allow_v6)?;
         off = off.checked_add(used).ok_or(WireError::BadLength)?;
-        let (deny_v6, _) =
+        let (deny_v6, used) =
             read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v6)?;
+        off = off.checked_add(used).ok_or(WireError::BadLength)?;
+        let bind_allowed_ports = read_bind_ports(rest.get(off..).unwrap_or(&[]))?;
 
         Ok(Self {
             meta,
@@ -405,6 +450,7 @@ impl EgressPayload {
             deny_v4,
             allow_v6,
             deny_v6,
+            bind_allowed_ports,
         })
     }
 }
@@ -607,9 +653,33 @@ mod tests {
             deny_v4: vec![([0xff; 8], [0; 8]), ([0x11; 8], [0x22; 8])],
             allow_v6: vec![([3u8; 20], [4u8; 8])],
             deny_v6: Vec::new(),
+            bind_allowed_ports: vec![8080, 9090],
         };
         let bytes = payload.encode();
         assert_eq!(EgressPayload::decode(&bytes), Ok(payload));
+    }
+
+    #[test]
+    fn egress_payload_tolerates_a_missing_bind_port_tail() {
+        // A payload encoded without the bind-port tail (e.g. an older producer) decodes
+        // with an empty allowlist rather than failing — fail-closed (no extra ports).
+        let payload = EgressPayload {
+            meta: [0u8; META_LEN],
+            allow_v4: Vec::new(),
+            deny_v4: Vec::new(),
+            allow_v6: Vec::new(),
+            deny_v6: Vec::new(),
+            bind_allowed_ports: vec![1234],
+        };
+        let mut bytes = payload.encode();
+        // Drop the 4-byte count + the one u16 port from the tail.
+        bytes.truncate(bytes.len().saturating_sub(6));
+        let decoded = EgressPayload::decode(&bytes).expect("decode without tail");
+        assert!(decoded.bind_allowed_ports.is_empty());
+        // A count claiming more ports than bytes is rejected.
+        let mut bad = payload.encode();
+        bad.truncate(bad.len().saturating_sub(2)); // count says 1, but the port is gone
+        assert!(EgressPayload::decode(&bad).is_err());
     }
 
     #[test]

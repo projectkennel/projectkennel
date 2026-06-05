@@ -93,7 +93,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_subnet_map",
         map_type: MAP_TYPE_ARRAY,
         key_size: 4,
-        value_size: 28,
+        value_size: 44,
         max_entries: 1,
         map_flags: 0,
     },
@@ -697,13 +697,20 @@ mod root_tests {
         m
     }
 
-    /// A 28-byte `bind_subnet` value: v4 `127.0.0.1//24`, v6 zero `/64`. The
-    /// `INADDR_ANY` rewrite target, so an allowed wildcard bind lands on the loopback.
-    fn bind_subnet_loopback() -> [u8; 28] {
-        let mut v = [0u8; 28];
+    /// A 44-byte `bind_subnet` value: v4 `127.0.0.1//24`, v6 zero `/64`, plus the bind
+    /// `allowed` ports (host order). `INADDR_ANY` rewrites to the loopback, so an
+    /// allowed wildcard bind lands there. Empty `allowed` ⇒ `n_ports = 0` (any port).
+    fn bind_subnet_loopback(allowed: &[u16]) -> [u8; 44] {
+        let mut v = [0u8; 44];
         v[0..4].copy_from_slice(&[127, 0, 0, 1]);
         v[4..8].copy_from_slice(&24u32.to_ne_bytes());
         v[24] = 64;
+        v[25] = u8::try_from(allowed.len().min(8)).unwrap_or(0);
+        // allowed_ports[8] starts at offset 26; write via chunks to avoid index math.
+        let ports = v.get_mut(26..).expect("ports region");
+        for (slot, port) in ports.chunks_mut(2).zip(allowed.iter().take(8)) {
+            slot.copy_from_slice(&port.to_ne_bytes());
+        }
         v
     }
 
@@ -764,7 +771,7 @@ mod root_tests {
             .update_map(
                 "bind_subnet_map",
                 &0u32.to_ne_bytes(),
-                &bind_subnet_loopback(),
+                &bind_subnet_loopback(&[]),
                 sys::BPF_ANY,
             )
             .expect("populate bind_subnet");
@@ -810,5 +817,46 @@ mod root_tests {
             denied = wildcard_bind_denied_in_cgroup(cg, 80);
         });
         assert!(!denied, "with no floor a bind to :80 must be allowed");
+    }
+
+    #[test]
+    fn bind4_enforces_the_allowed_ports_allowlist() {
+        if skip_if_unprivileged("bind4_enforces_the_allowed_ports_allowlist") {
+            return;
+        }
+        let loaded = load_bind4();
+        // No floor, but an explicit allowlist of {8080}. A no-floor meta keeps the
+        // floor check out of the way so this isolates the allowlist.
+        loaded
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &meta_with_bind_floor(0),
+                sys::BPF_ANY,
+            )
+            .expect("populate meta");
+        loaded
+            .update_map(
+                "bind_subnet_map",
+                &0u32.to_ne_bytes(),
+                &bind_subnet_loopback(&[8080]),
+                sys::BPF_ANY,
+            )
+            .expect("populate bind_subnet with allowlist");
+
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-bindallow");
+        let (mut allowed_denied, mut other_denied) = (true, false);
+        with_attached_bind4(cg, &loaded, || {
+            allowed_denied = wildcard_bind_denied_in_cgroup(cg, 8080);
+            other_denied = wildcard_bind_denied_in_cgroup(cg, 9090);
+        });
+        assert!(
+            !allowed_denied,
+            "a bind to the allowlisted :8080 must be allowed"
+        );
+        assert!(
+            other_denied,
+            "a bind to :9090 (not in the allowlist) must be denied"
+        );
     }
 }

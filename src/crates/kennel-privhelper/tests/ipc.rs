@@ -145,6 +145,7 @@ const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
         deny_v4: Vec::new(),
         allow_v6: Vec::new(),
         deny_v6: Vec::new(),
+        bind_allowed_ports: Vec::new(),
     }
 }
 
@@ -169,6 +170,7 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
         deny_v4: Vec::new(),
         allow_v6: Vec::new(),
         deny_v6: Vec::new(),
+        bind_allowed_ports: Vec::new(),
     };
     let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
     assert_eq!(

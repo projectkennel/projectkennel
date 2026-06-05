@@ -950,6 +950,7 @@ mod tests {
                 bpf_allow_v6: Vec::new(),
                 bpf_deny_v6: Vec::new(),
                 bpf_meta: [0u8; 64],
+                bind_allowed_ports: Vec::new(),
                 file_binds: Vec::new(),
                 supplementary_groups: None,
             };
@@ -960,6 +961,7 @@ mod tests {
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
                 bind_port_min: 0,
+                bind_allowed_ports: Vec::new(),
             };
             Ok(Loaded {
                 plan,

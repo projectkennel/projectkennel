@@ -444,10 +444,27 @@ fn translate_net(
     // The bind floor (§7.3.7): a workload bind below `min_port` is denied by the
     // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
     let bind_port_min = net.bind.as_ref().and_then(|b| b.min_port).unwrap_or(0);
+    // The bind-port allowlist (§7.3.7): when non-empty, only these ports may be bound.
+    // Capped at the bind_subnet array size; an over-long list is a translation error
+    // (a hard map limit, not a footgun), so the author learns it rather than having
+    // ports silently dropped.
+    let bind_allowed_ports = net
+        .bind
+        .as_ref()
+        .and_then(|b| b.allowed_ports.clone())
+        .unwrap_or_default();
+    if bind_allowed_ports.len() > crate::settled::MAX_BIND_PORTS {
+        return Err(translation(format!(
+            "[net.bind].allowed_ports has {} entries; the maximum is {}",
+            bind_allowed_ports.len(),
+            crate::settled::MAX_BIND_PORTS
+        )));
+    }
 
     Ok(NetPolicy {
         mode,
         bind_port_min,
+        bind_allowed_ports,
         proxy,
         allow,
         allow_names,
@@ -1335,6 +1352,30 @@ mod tests {
                 .bind_port_min,
             1024
         );
+    }
+
+    #[test]
+    fn net_bind_allowed_ports_carries_and_is_capped() {
+        let p = parse(
+            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nallowed_ports = [8080, 9090]\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            translate_net(&p, &mut BTreeSet::new())
+                .expect("translate")
+                .bind_allowed_ports,
+            vec![8080, 9090]
+        );
+        // More than MAX_BIND_PORTS entries is a hard translation error.
+        let many = (1..=9)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src = format!(
+            "name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nallowed_ports = [{many}]\n"
+        );
+        let over = parse(src.as_bytes()).expect("parse");
+        assert!(translate_net(&over, &mut BTreeSet::new()).is_err());
     }
 
     #[test]

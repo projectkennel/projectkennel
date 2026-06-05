@@ -202,20 +202,32 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     Response::ok()
 }
 
-/// Build the `struct bind_subnet` (28 bytes) the `bind4`/`bind6` programs read,
-/// from the kennel's own loopback addresses carried in `meta` (the `kennel_meta`
-/// layout: `proxy_addr_v4` at offset 8, `proxy_addr_v6` at 16). The prefixes are
-/// the per-kennel allocation widths (v4 `/28`, v6 `/64`). Returns `None` if the
-/// meta is too short to hold them (never, for a well-formed payload).
+/// Build the `struct bind_subnet` (44 bytes) the `bind4`/`bind6` programs read, from
+/// the kennel's own loopback addresses carried in `meta` (the `kennel_meta` layout:
+/// `proxy_addr_v4` at offset 8, `proxy_addr_v6` at 16) plus the bind-port allowlist.
+/// The prefixes are the per-kennel allocation widths (v4 `/28`, v6 `/64`). Layout
+/// matches `struct bind_subnet` in `bpf/maps.h`: addrs/prefixes, then `n_ports` (u8 at
+/// offset 25) and `allowed_ports[8]` (host-order u16 at offset 26). At most 8 ports
+/// are written. Returns `None` only if the meta is too short (never, for a well-formed
+/// payload).
 #[cfg(feature = "bpf-egress")]
-fn bind_subnet_value(meta: &[u8]) -> Option<[u8; 28]> {
+fn bind_subnet_value(meta: &[u8], allowed_ports: &[u16]) -> Option<[u8; 44]> {
     let v4_addr = meta.get(8..12)?;
     let v6_addr = meta.get(16..32)?;
-    let mut value = [0u8; 28];
+    let mut value = [0u8; 44];
     value.get_mut(0..4)?.copy_from_slice(v4_addr);
     value.get_mut(4..8)?.copy_from_slice(&28u32.to_ne_bytes());
     value.get_mut(8..24)?.copy_from_slice(v6_addr);
     *value.get_mut(24)? = 64;
+    let n = allowed_ports.len().min(8);
+    *value.get_mut(25)? = u8::try_from(n).unwrap_or(0);
+    for (i, port) in allowed_ports.iter().take(8).enumerate() {
+        let off = 26usize.checked_add(i.checked_mul(2)?)?;
+        let end = off.checked_add(2)?;
+        value
+            .get_mut(off..end)?
+            .copy_from_slice(&port.to_ne_bytes());
+    }
     Some(value)
 }
 
@@ -237,7 +249,7 @@ fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::i
     // a workload inside the kennel cannot bind a listening socket. The kennel's
     // own loopback addresses are already in the meta, so it derives from there.
     if loaded.maps.contains_key("bind_subnet_map") {
-        if let Some(value) = bind_subnet_value(&payload.meta) {
+        if let Some(value) = bind_subnet_value(&payload.meta, &payload.bind_allowed_ports) {
             loaded.update_map("bind_subnet_map", &0u32.to_ne_bytes(), &value, BPF_ANY)?;
         }
     }
@@ -313,10 +325,21 @@ mod tests {
             .expect("v6 range")
             .copy_from_slice(&[0xfd, 0, 0, 0, 0, 0, 7, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let v = bind_subnet_value(&meta).expect("meta long enough");
+        let v = bind_subnet_value(&meta, &[8080, 9090]).expect("meta long enough");
         assert_eq!(v.get(0..4), Some(&[127u8, 42, 7, 1][..]), "v4_addr");
         assert_eq!(v.get(4..8), Some(&28u32.to_ne_bytes()[..]), "v4_prefix /28");
         assert_eq!(v.get(8..24), meta.get(16..32), "v6_addr");
         assert_eq!(v.get(24), Some(&64u8), "v6_prefix /64");
+        assert_eq!(v.get(25), Some(&2u8), "n_ports");
+        assert_eq!(
+            v.get(26..28),
+            Some(&8080u16.to_ne_bytes()[..]),
+            "allowed_ports[0]"
+        );
+        assert_eq!(
+            v.get(28..30),
+            Some(&9090u16.to_ne_bytes()[..]),
+            "allowed_ports[1]"
+        );
     }
 }

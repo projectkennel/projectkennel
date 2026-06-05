@@ -80,7 +80,8 @@ struct bind_subnet {
 	__u32 v4_prefix;  /* host order, expected 24 */
 	__u8 v6_addr[16];
 	__u8 v6_prefix;	  /* expected 64 */
-	__u8 _pad[3];
+	__u8 n_ports;	  /* valid entries in allowed_ports (0 = any port >= the floor) */
+	__u16 allowed_ports[8]; /* host order; if n_ports>0 the bind port must be one (§7.3.7) */
 };
 
 /* ------------------------------------------------------------------ maps */
