@@ -45,6 +45,14 @@ const TTL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 pub struct Loaded {
     /// The kernel-enforcement plan.
     pub plan: Plan,
+    /// The workload's masked user name (`[identity].user`, default `kennel`):
+    /// `$USER`/`$LOGNAME`, the synthetic `/etc/passwd` account, and the base of
+    /// `$HOME` (`/home/<account>`, the plan's view shim root).
+    pub account: String,
+    /// The workload's masked **primary** group name (`[identity].group`, default
+    /// `kennel`): the synthetic `/etc/passwd` `pw_gid` name and the `/etc/group`
+    /// entry for the primary gid.
+    pub account_group: String,
     /// The network policy the egress proxy enforces.
     pub net: NetPolicy,
     /// The per-kennel SSH runtime (§7.8): the bastion grants `kenneld` realises.
@@ -656,6 +664,8 @@ fn run_kennel<P, L>(
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
         staging_dir: base.join(format!("etc-{ctx}")),
+        account: loaded.account.clone(),
+        account_group: loaded.account_group.clone(),
         hostname: req.kennel.clone(),
         uid: id.uid,
         gid: id.gid,
@@ -720,8 +730,8 @@ fn run_kennel<P, L>(
     if !loaded.exec_path.is_empty() {
         command.env("PATH", loaded.exec_path.join(":"));
     }
-    command.env("USER", crate::etc::ACCOUNT_NAME);
-    command.env("LOGNAME", crate::etc::ACCOUNT_NAME);
+    command.env("USER", &loaded.account);
+    command.env("LOGNAME", &loaded.account);
     command.env("SHELL", &loaded.shell);
     command.env("HOME", &shim_root);
     for (key, value) in &loaded.env.vars {
@@ -991,6 +1001,8 @@ mod tests {
             };
             Ok(Loaded {
                 plan,
+                account: "kennel".to_owned(),
+                account_group: "kennel".to_owned(),
                 net,
                 ssh: kennel_policy::SshRuntime::default(),
                 unix: kennel_policy::UnixRuntime::default(),

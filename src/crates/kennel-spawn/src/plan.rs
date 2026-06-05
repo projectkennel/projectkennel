@@ -397,7 +397,9 @@ impl Plan {
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
 
-        let shim_root = PathBuf::from(&ep.fs.shim_root);
+        // The in-view `$HOME`: a normal non-system user's home, `/home/<user>` (the
+        // masked `[identity].user`, default `kennel`). `~/…` grants remap beneath it.
+        let shim_root = PathBuf::from(format!("/home/{}", policy.identity.user));
 
         // Classify every granted path once. The in-kennel target — `~/…` paths
         // remap beneath `shim_root`, `/etc` is the constructed synthetic set, any

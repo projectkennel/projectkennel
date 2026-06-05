@@ -297,9 +297,6 @@ pub struct FsHome {
     /// Whether `$HOME` is shadowed by a constructed view (must be true once resolved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<bool>,
-    /// The shim root path (must be under `/run/kennel/<kennel>/` once resolved).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shim_root: Option<String>,
     /// `[[fs.home.sanitise]]` — host config files copied in with secrets stripped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitise: Vec<FsHomeSanitise>,
@@ -605,6 +602,18 @@ pub struct UnixAllow {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentitySection {
+    /// The workload's masked user name — `$USER`/`$LOGNAME` and the synthetic
+    /// `/etc/passwd` account, and the base of `$HOME` (`/home/<user>`). Defaults to
+    /// `kennel` (a non-system, non-privileged account) when unset; an operator may
+    /// override it. Validated as a portable username at translation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The workload's masked **primary** group name (synthetic `/etc/passwd` `pw_gid`
+    /// name and the `/etc/group` entry for the primary gid). Defaults to `kennel`;
+    /// validated as a portable name at translation. Distinct from `groups` below (the
+    /// *supplementary* groups).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Supplementary group names to retain (e.g. `["dialout", "plugdev"]`). The user
     /// must be a member of each; resolved to GIDs at spawn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

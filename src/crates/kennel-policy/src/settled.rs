@@ -237,8 +237,6 @@ pub struct DevPolicy {
 pub struct FsPolicy {
     /// Whether `$HOME` is shadowed by the shim (must be true).
     pub home_shadow: bool,
-    /// The shim root, which must live under `/run/kennel/`.
-    pub shim_root: String,
     /// Paths granted read (and directory-read/execute) access.
     pub read: Vec<String>,
     /// Paths granted write access.
@@ -528,20 +526,65 @@ pub struct UnixSocket {
 /// `setgroups` to exactly that set (default empty — all inherited host groups dropped),
 /// and the synthetic `/etc/group` names them so `id` shows names not bare numbers.
 /// Carried in the signed settled policy; omitted from the canonical form when empty.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityRuntime {
+    /// The workload's masked user name — `$USER`/`$LOGNAME`, the synthetic
+    /// `/etc/passwd` account, and the base of `$HOME` (`/home/<user>`). Defaults to
+    /// [`DEFAULT_USER`] (`kennel`); omitted from the canonical form when it is the
+    /// default, so a policy that does not override it signs unchanged.
+    #[serde(default = "default_user", skip_serializing_if = "is_default_user")]
+    pub user: String,
+    /// The workload's masked **primary** group name — the synthetic `/etc/passwd`
+    /// `pw_gid`'s name and the `/etc/group` entry for the workload's primary gid.
+    /// Defaults to [`DEFAULT_GROUP`] (`kennel`); omitted from the canonical form when
+    /// it is the default. (Distinct from [`groups`](Self::groups), the *supplementary*
+    /// groups.)
+    #[serde(default = "default_group", skip_serializing_if = "is_default_group")]
+    pub group: String,
     /// Supplementary group names to retain (resolved to GIDs at spawn). Includes the
     /// groups named by `[[fs.dev.passthrough]]` (merged at translation).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
 }
 
+/// The default masked user name: a non-system, non-privileged account.
+pub const DEFAULT_USER: &str = "kennel";
+/// The default masked primary-group name.
+pub const DEFAULT_GROUP: &str = "kennel";
+
+fn default_user() -> String {
+    DEFAULT_USER.to_owned()
+}
+
+fn is_default_user(user: &str) -> bool {
+    user == DEFAULT_USER
+}
+
+fn default_group() -> String {
+    DEFAULT_GROUP.to_owned()
+}
+
+fn is_default_group(group: &str) -> bool {
+    group == DEFAULT_GROUP
+}
+
+impl Default for IdentityRuntime {
+    fn default() -> Self {
+        Self {
+            user: default_user(),
+            group: default_group(),
+            groups: Vec::new(),
+        }
+    }
+}
+
 impl IdentityRuntime {
-    /// Whether there is nothing to realise (no supplementary group granted).
+    /// Whether there is nothing to realise (the default user and group, no
+    /// supplementary group).
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.groups.is_empty()
+    pub fn is_empty(&self) -> bool {
+        is_default_user(&self.user) && is_default_group(&self.group) && self.groups.is_empty()
     }
 }
 

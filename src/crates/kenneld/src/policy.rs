@@ -100,6 +100,8 @@ impl PolicyLoader for TrustStoreLoader {
         let env = substituted.env;
         Ok(Loaded {
             plan,
+            account: substituted.identity.user,
+            account_group: substituted.identity.group,
             net,
             ssh,
             unix,

@@ -224,6 +224,12 @@ pub struct ProxySetup {
 pub struct EtcSetup {
     /// Directory the per-kennel `/etc` files are written to (then bind-mounted).
     pub staging_dir: PathBuf,
+    /// The workload's masked user name (`[identity].user`, default `kennel`): the
+    /// synthetic `/etc/passwd` account.
+    pub account: String,
+    /// The workload's masked primary-group name (`[identity].group`, default
+    /// `kennel`): the synthetic `/etc/group` name for the primary gid.
+    pub account_group: String,
     /// The kennel's hostname (its runtime name).
     pub hostname: String,
     /// The workload's uid.
@@ -713,6 +719,8 @@ fn bring_up<P: Privileged + Sync>(
     if let Some(etc) = etc {
         let params = crate::etc::EtcParams {
             hostname: &etc.hostname,
+            user: &etc.account,
+            group: &etc.account_group,
             uid: etc.uid,
             gid: etc.gid,
             home: &etc.home,

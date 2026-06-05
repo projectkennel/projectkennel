@@ -302,7 +302,6 @@ fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
 fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
     FsHome {
         shadow: or(&c.shadow, &p.shadow),
-        shim_root: or(&c.shim_root, &p.shim_root),
         sanitise: if c.sanitise.is_empty() {
             p.sanitise.clone()
         } else {
@@ -457,8 +456,11 @@ fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
 }
 
 fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
-    // Bare-set: a child's non-empty group list replaces the parent's.
+    // Bare-set: a child's non-empty group list replaces the parent's; the child's
+    // `user` overrides the parent's when set.
     IdentitySection {
+        user: or(&c.user, &p.user),
+        group: or(&c.group, &p.group),
         groups: if c.groups.is_empty() {
             p.groups.clone()
         } else {

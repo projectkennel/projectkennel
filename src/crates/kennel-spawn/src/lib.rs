@@ -150,9 +150,6 @@ pub fn substitute(
     let mut p = policy.clone();
     let fs = &mut p.effective_policy.fs;
 
-    fs.shim_root = substitute_str(&fs.shim_root, subst);
-    reject_leftover("fs.shim_root", &fs.shim_root)?;
-
     for path in &mut fs.read {
         *path = substitute_str(path, subst);
         reject_leftover("fs.read", path)?;
@@ -910,7 +907,6 @@ mod tests {
                 },
                 fs: FsPolicy {
                     home_shadow: true,
-                    shim_root: "/run/kennel/<kennel>".to_owned(),
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
                     home_persist: Vec::new(),
@@ -978,7 +974,7 @@ mod tests {
     #[test]
     fn substitution_fills_placeholders() {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        assert_eq!(p.effective_policy.fs.shim_root, "/run/kennel/ai-coding");
+        assert_eq!(p.identity.user, "kennel");
         assert_eq!(
             p.effective_policy.fs.read,
             vec!["/usr".to_owned(), "/home/dev/.config".to_owned()]
@@ -1171,7 +1167,7 @@ mod tests {
             .view
             .as_ref()
             .expect("a policy-derived plan carries a view");
-        assert_eq!(view.shim_root, PathBuf::from("/run/kennel/ai-coding"));
+        assert_eq!(view.shim_root, PathBuf::from("/home/kennel"));
 
         assert!(
             view.binds.iter().any(|b| b.source == Path::new("/usr")
@@ -1183,7 +1179,7 @@ mod tests {
             view.binds
                 .iter()
                 .any(|b| b.source == Path::new("/home/dev/.config")
-                    && b.target == Path::new("/run/kennel/ai-coding/.config")
+                    && b.target == Path::new("/home/kennel/.config")
                     && !b.writable),
             "home path remapped beneath shim_root"
         );
@@ -1246,7 +1242,7 @@ mod tests {
         let bind = view
             .binds
             .iter()
-            .find(|b| b.target == Path::new("/run/kennel/ai-coding/projects/foo"))
+            .find(|b| b.target == Path::new("/home/kennel/projects/foo"))
             .expect("remapped writable bind");
         assert_eq!(
             bind.source,

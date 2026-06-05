@@ -164,7 +164,6 @@ mod tests {
                 },
                 fs: FsPolicy {
                     home_shadow: true,
-                    shim_root: "/run/kennel/ai-coding".to_owned(),
                     read: vec!["/usr".to_owned()],
                     write: vec!["/run/kennel/ai-coding/home".to_owned()],
                     home_persist: Vec::new(),

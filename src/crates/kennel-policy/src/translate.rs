@@ -104,7 +104,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let lifecycle = translate_lifecycle(effective)?;
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
-    let identity = translate_identity(effective);
+    let identity = translate_identity(effective)?;
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
 
@@ -283,7 +283,7 @@ fn parse_size_bytes(s: &str) -> Result<u64, PolicyError> {
 /// `[identity].groups` plus every group named by a `[[fs.dev.passthrough]]` (a device
 /// is unusable without its DAC group), de-duplicated in first-seen order. `kenneld`
 /// resolves these names to GIDs and membership-checks them at spawn.
-fn translate_identity(src: &SourcePolicy) -> IdentityRuntime {
+fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError> {
     let mut groups: Vec<String> = Vec::new();
     let mut push = |g: &str| {
         if !g.is_empty() && !groups.iter().any(|e| e == g) {
@@ -302,7 +302,52 @@ fn translate_identity(src: &SourcePolicy) -> IdentityRuntime {
             }
         }
     }
-    IdentityRuntime { groups }
+    let id = src.identity.as_ref();
+    let user = id
+        .and_then(|i| i.user.clone())
+        .unwrap_or_else(|| crate::settled::DEFAULT_USER.to_owned());
+    validate_name("identity.user", &user)?;
+    let group = id
+        .and_then(|i| i.group.clone())
+        .unwrap_or_else(|| crate::settled::DEFAULT_GROUP.to_owned());
+    validate_name("identity.group", &group)?;
+    Ok(IdentityRuntime {
+        user,
+        group,
+        groups,
+    })
+}
+
+/// Reject anything that is not a portable, non-system Unix user/group name. The
+/// `identity.user` becomes the synthetic `/etc/passwd` account, `$USER`/`$LOGNAME`,
+/// and the *path component* of `$HOME` (`/home/<user>`); `identity.group` becomes the
+/// synthetic primary-group name. A `/`, `:`, NUL, or whitespace would corrupt the
+/// passwd/group file or escape the home path — refuse, never sanitise.
+fn validate_name(field: &str, name: &str) -> Result<(), PolicyError> {
+    let invalid =
+        |why: &str| PolicyError::Translation(format!("{field} `{name}` is invalid: {why}"));
+    if name.is_empty() {
+        return Err(invalid("must not be empty"));
+    }
+    if name.len() > 32 {
+        return Err(invalid("must be at most 32 characters"));
+    }
+    // Portable name: lowercase letter or underscore first, then lowercase letters,
+    // digits, underscore, or hyphen (the `useradd(8)` NAME_REGEX default).
+    let first_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+    if !first_ok {
+        return Err(invalid("must start with a lowercase letter or `_`"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(invalid("may only contain `[a-z0-9_-]`"));
+    }
+    Ok(())
 }
 
 /// Flatten the source `[unix]` section into the settled [`UnixRuntime`]: one
@@ -520,11 +565,6 @@ fn translate_fs(
 ) -> Result<FsPolicy, PolicyError> {
     let fs = src.fs.as_ref().ok_or_else(|| missing("fs"))?;
     let home = fs.home.as_ref().ok_or_else(|| missing("fs.home"))?;
-    let shim_root_raw = home
-        .shim_root
-        .as_deref()
-        .ok_or_else(|| missing("fs.home.shim_root"))?;
-    let shim_root = subst(shim_root_raw, deferred);
 
     let read = subst_each(fs.read.as_deref().unwrap_or_default(), deferred);
     let write = subst_each(fs.write.as_deref().unwrap_or_default(), deferred);
@@ -569,7 +609,6 @@ fn translate_fs(
 
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
-        shim_root,
         read,
         write,
         home_persist,
@@ -1074,10 +1113,8 @@ mod tests {
 
     #[test]
     fn fs_home_persist_carries_to_settled() {
-        let src = parse(
-            b"name = \"k\"\n[fs.home]\nshadow = true\nshim_root = \"/run/kennel/k\"\npersist = [\".bashrc\"]\n",
-        )
-        .expect("parse");
+        let src = parse(b"name = \"k\"\n[fs.home]\nshadow = true\npersist = [\".bashrc\"]\n")
+            .expect("parse");
         let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate_fs");
         assert_eq!(fs.home_persist, vec![".bashrc".to_owned()]);
     }
@@ -1124,6 +1161,7 @@ mod tests {
         let src = SourcePolicy {
             identity: Some(IdentitySection {
                 groups: vec!["plugdev".to_owned(), "dialout".to_owned()],
+                ..IdentitySection::default()
             }),
             fs: Some(FsSection {
                 dev: Some(FsDev {
@@ -1153,14 +1191,68 @@ mod tests {
             }),
             ..SourcePolicy::default()
         };
-        let id = translate_identity(&src);
+        let id = translate_identity(&src).expect("translate identity");
         assert_eq!(
             id.groups,
             vec!["plugdev", "dialout", "netdev"],
             "explicit first, device groups added, de-duped"
         );
         // No [identity] and no device groups ⇒ empty (dropped from the canonical form).
-        assert!(translate_identity(&SourcePolicy::default()).is_empty());
+        assert!(translate_identity(&SourcePolicy::default())
+            .expect("translate identity")
+            .is_empty());
+    }
+
+    #[test]
+    fn identity_user_and_group_default_to_kennel_and_can_be_overridden() {
+        use crate::source::IdentitySection;
+        // Default: both `kennel`, so the runtime is empty (omitted from canonical form).
+        let dflt = translate_identity(&SourcePolicy::default()).expect("default");
+        assert_eq!(dflt.user, "kennel");
+        assert_eq!(dflt.group, "kennel");
+        assert!(dflt.is_empty());
+
+        // Overridden: carried through, and no longer empty.
+        let src = SourcePolicy {
+            identity: Some(IdentitySection {
+                user: Some("dev".to_owned()),
+                group: Some("staff".to_owned()),
+                groups: Vec::new(),
+            }),
+            ..SourcePolicy::default()
+        };
+        let id = translate_identity(&src).expect("override");
+        assert_eq!(id.user, "dev");
+        assert_eq!(id.group, "staff");
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_identity_name_is_refused() {
+        use crate::source::IdentitySection;
+        for (field, bad) in [
+            ("user", "../escape"),
+            ("user", "has space"),
+            ("user", "Root"),     // uppercase
+            ("user", "1leading"), // leading digit
+            ("user", ""),
+            ("group", "a:b"),
+        ] {
+            let mut sec = IdentitySection::default();
+            if field == "user" {
+                sec.user = Some(bad.to_owned());
+            } else {
+                sec.group = Some(bad.to_owned());
+            }
+            let src = SourcePolicy {
+                identity: Some(sec),
+                ..SourcePolicy::default()
+            };
+            assert!(
+                translate_identity(&src).is_err(),
+                "identity.{field} `{bad}` must be refused"
+            );
+        }
     }
 
     #[test]
@@ -1174,10 +1266,7 @@ mod tests {
                 ..NetSection::default()
             }),
             fs: Some(FsSection {
-                home: Some(FsHome {
-                    shim_root: Some("/run/kennel/<kennel>/home".to_owned()),
-                    ..FsHome::default()
-                }),
+                home: Some(FsHome::default()),
                 dev: Some(FsDev {
                     allow: Some(vec!["/dev/null".to_owned()]),
                     passthrough: vec![DevPassthrough {
@@ -1257,7 +1346,6 @@ mod tests {
             .any(|r| r.cidr == "fd00:ec2::254" && r.prefix_len == 128));
 
         assert!(ep.fs.home_shadow);
-        assert_eq!(ep.fs.shim_root, "/run/kennel/<kennel>/home");
         assert_eq!(ep.fs.tmp.size_mib, 512);
         assert_eq!(ep.fs.tmp.mode, "0700");
         assert!(ep.fs.dev.allow.iter().any(|d| d == "/dev/null"));

@@ -156,7 +156,6 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             },
             fs: FsPolicy {
                 home_shadow: true,
-                shim_root: "/run/kennel/e2e".to_owned(),
                 read: vec![
                     "/usr".to_owned(),
                     "/bin".to_owned(),
@@ -413,6 +412,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         }),
         etc: Some(EtcSetup {
             staging_dir: etc_base.join("etc-1"),
+            account: "kennel".to_owned(),
+            account_group: "kennel".to_owned(),
             hostname: "e2e".to_owned(),
             // The kernel uid/gid inside the userns are the operator's (identity map),
             // so the synthetic passwd/group must name those very ids as `kennel` for

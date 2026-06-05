@@ -25,9 +25,6 @@ impl InvariantViolation {
     }
 }
 
-/// The shim-root prefix every kennel's home shim must live under.
-const SHIM_ROOT_PREFIX: &str = "/run/kennel/";
-
 /// Re-assert the framework invariants against `policy`'s effective rules.
 ///
 /// # Errors
@@ -60,15 +57,6 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
         v.push(InvariantViolation::new(
             "fs.home.shadow",
             "the home shim is mandatory",
-        ));
-    }
-    if !ep.fs.shim_root.starts_with(SHIM_ROOT_PREFIX) {
-        v.push(InvariantViolation::new(
-            "fs.home.shim_root",
-            format!(
-                "must be under {SHIM_ROOT_PREFIX}, got `{}`",
-                ep.fs.shim_root
-            ),
         ));
     }
     // net.mode is structurally constrained to constrained|open (no

@@ -45,7 +45,6 @@ pub const ASSERTED_INVARIANTS: &[&str] = &[
     "exec.deny_setcap",
     "exec.deny_writable",
     "fs.home.shadow",
-    "fs.home.shim_root",
     "net.mode",
     "net.deny.invariant",
     "proc.visibility",

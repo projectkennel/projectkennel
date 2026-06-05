@@ -67,6 +67,7 @@ mod tests {
         SourcePolicy {
             identity: Some(IdentitySection {
                 groups: groups.iter().map(|s| (*s).to_owned()).collect(),
+                ..IdentitySection::default()
             }),
             ..SourcePolicy::default()
         }
