@@ -248,6 +248,10 @@ pub struct EtcSetup {
 
 /// Everything needed to bring one kennel up.
 pub struct Spec {
+    /// The kennel's globally-unique runtime id (`<id>` in `07-paths.md`; equal to
+    /// the kennel name after substitution). Names the per-kennel runtime tree
+    /// (`/run/kennel/<id>/`) and the BPF pin dir (`/run/kennel/bpf/<id>/`).
+    pub id: String,
     /// The kennel's cgroup, under kenneld's delegated subtree. kenneld creates it
     /// (unprivileged) and the workload joins it; the helper attaches BPF to it.
     pub cgroup: PathBuf,
@@ -553,6 +557,7 @@ pub fn start<P: Privileged + Sync>(
     command: &mut Command,
 ) -> Result<Kennel, Error> {
     let Spec {
+        id,
         cgroup,
         ctx,
         scope,
@@ -569,6 +574,7 @@ pub fn start<P: Privileged + Sync>(
 
     match bring_up(
         privileged,
+        &id,
         &cgroup,
         ctx,
         &scope,
@@ -614,6 +620,7 @@ pub fn start<P: Privileged + Sync>(
 #[allow(clippy::too_many_arguments)]
 fn bring_up<P: Privileged + Sync>(
     privileged: &P,
+    id: &str,
     cgroup: &Path,
     ctx: u16,
     scope: &ReservedScope,
@@ -671,6 +678,9 @@ fn bring_up<P: Privileged + Sync>(
         allow_v6: plan.bpf_allow_v6.clone(),
         deny_v6: plan.bpf_deny_v6.clone(),
         bind_allowed_ports: plan.bind_allowed_ports.clone(),
+        // The helper pins this kennel's maps under `/run/kennel/bpf/<id>/` so kenneld
+        // can drain the audit ringbuf and operators can inspect the maps (§02-5).
+        pin_id: id.to_owned(),
     };
     expect_ok("setup_egress", privileged.setup_egress(cgroup, &payload))?;
 
@@ -1088,6 +1098,7 @@ mod tests {
 
     fn spec(cgroup: PathBuf, ctx: u16) -> Spec {
         Spec {
+            id: "kennel-test".to_owned(),
             plan: trivial_plan(&cgroup),
             ctx,
             scope: ReservedScope::new(9, [0, 0, 0, 0, 1], "kennel-test"),

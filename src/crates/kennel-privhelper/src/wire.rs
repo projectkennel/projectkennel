@@ -291,18 +291,29 @@ pub struct EgressPayload {
     /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. Capped
     /// at [`MAX_BIND_PORTS`] on decode (the BPF array is fixed-size).
     pub bind_allowed_ports: Vec<u16>,
+    /// The kennel's globally-unique runtime id (`<id>` in `07-paths.md`). When
+    /// non-empty, the helper pins this kennel's BPF maps under
+    /// `/run/kennel/bpf/<id>/` (for `bpftool` inspection and the audit-ringbuf
+    /// drain). Empty ⇒ pinning disabled. The helper validates the grammar before
+    /// using it as a path component. Capped at [`MAX_PIN_ID`] bytes on decode.
+    pub pin_id: String,
 }
 
 /// The maximum number of `bind_allowed_ports` the wire carries (the `bind_subnet`
 /// BPF array size; mirrors `kennel_policy::settled::MAX_BIND_PORTS`).
 pub const MAX_BIND_PORTS: usize = 8;
 
+/// The maximum byte length of the [`EgressPayload::pin_id`] field on the wire.
+/// A kennel id is a name or UUID; this is a generous defensive cap.
+const MAX_PIN_ID: usize = 256;
+
 /// Read the bind-port allowlist tail: a `u32` count then that many host-order `u16`
 /// ports. Tolerant of an absent tail (fewer than 4 bytes ⇒ empty, fail-closed: no
-/// extra ports). A count above [`MAX_BIND_PORTS`] is rejected.
-fn read_bind_ports(bytes: &[u8]) -> Result<Vec<u16>, WireError> {
+/// extra ports). A count above [`MAX_BIND_PORTS`] is rejected. Returns the ports
+/// and the number of bytes consumed (so a following field can be located).
+fn read_bind_ports(bytes: &[u8]) -> Result<(Vec<u16>, usize), WireError> {
     let Some(count_bytes) = bytes.get(..4) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     };
     let n = count_bytes
         .try_into()
@@ -319,7 +330,29 @@ fn read_bind_ports(bytes: &[u8]) -> Result<Vec<u16>, WireError> {
         .chunks_exact(2)
         .filter_map(|c| c.try_into().ok().map(u16::from_ne_bytes))
         .collect();
-    Ok(ports)
+    Ok((ports, end))
+}
+
+/// Read the optional pin-id tail: a `u32` byte-length then that many UTF-8 bytes.
+/// Tolerant of an absent tail (fewer than 4 bytes ⇒ empty: pinning disabled). A
+/// length above [`MAX_PIN_ID`] is rejected.
+fn read_pin_id(bytes: &[u8]) -> Result<String, WireError> {
+    let Some(len_bytes) = bytes.get(..4) else {
+        return Ok(String::new());
+    };
+    let n = len_bytes
+        .try_into()
+        .map(u32::from_ne_bytes)
+        .map(|v| v as usize)
+        .map_err(|_| WireError::BadLength)?;
+    if n > MAX_PIN_ID {
+        return Err(WireError::BadLength);
+    }
+    let end = n.checked_add(4).ok_or(WireError::BadLength)?;
+    let region = bytes.get(4..end).ok_or(WireError::BadLength)?;
+    core::str::from_utf8(region)
+        .map(str::to_owned)
+        .map_err(|_| WireError::BadString)
 }
 
 /// Read `n` IPv4 entries (8-byte key + 8-byte value) from the front of `bytes`,
@@ -410,6 +443,14 @@ impl EgressPayload {
         for port in &self.bind_allowed_ports {
             b.extend_from_slice(&port.to_ne_bytes());
         }
+        // Pin-id tail: a byte-length then the UTF-8 id. Appended last so the existing
+        // layout is unchanged and an older consumer simply ignores it.
+        b.extend_from_slice(
+            &u32::try_from(self.pin_id.len())
+                .unwrap_or(u32::MAX)
+                .to_ne_bytes(),
+        );
+        b.extend_from_slice(self.pin_id.as_bytes());
         b
     }
 
@@ -442,7 +483,9 @@ impl EgressPayload {
         let (deny_v6, used) =
             read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v6)?;
         off = off.checked_add(used).ok_or(WireError::BadLength)?;
-        let bind_allowed_ports = read_bind_ports(rest.get(off..).unwrap_or(&[]))?;
+        let ports_tail = rest.get(off..).unwrap_or(&[]);
+        let (bind_allowed_ports, used) = read_bind_ports(ports_tail)?;
+        let pin_id = read_pin_id(ports_tail.get(used..).unwrap_or(&[]))?;
 
         Ok(Self {
             meta,
@@ -451,6 +494,7 @@ impl EgressPayload {
             allow_v6,
             deny_v6,
             bind_allowed_ports,
+            pin_id,
         })
     }
 }
@@ -654,6 +698,7 @@ mod tests {
             allow_v6: vec![([3u8; 20], [4u8; 8])],
             deny_v6: Vec::new(),
             bind_allowed_ports: vec![8080, 9090],
+            pin_id: "ai-coding".to_owned(),
         };
         let bytes = payload.encode();
         assert_eq!(EgressPayload::decode(&bytes), Ok(payload));
@@ -661,8 +706,9 @@ mod tests {
 
     #[test]
     fn egress_payload_tolerates_a_missing_bind_port_tail() {
-        // A payload encoded without the bind-port tail (e.g. an older producer) decodes
-        // with an empty allowlist rather than failing — fail-closed (no extra ports).
+        // A payload encoded without the bind-port/pin-id tails (e.g. an older producer)
+        // decodes with empty values rather than failing — fail-closed (no extra ports,
+        // no pinning).
         let payload = EgressPayload {
             meta: [0u8; META_LEN],
             allow_v4: Vec::new(),
@@ -670,16 +716,40 @@ mod tests {
             allow_v6: Vec::new(),
             deny_v6: Vec::new(),
             bind_allowed_ports: vec![1234],
+            pin_id: String::new(),
         };
         let mut bytes = payload.encode();
-        // Drop the 4-byte count + the one u16 port from the tail.
-        bytes.truncate(bytes.len().saturating_sub(6));
+        // Drop both optional tails: pin-id length (4) + bind-port count (4) + one port (2).
+        bytes.truncate(bytes.len().saturating_sub(10));
         let decoded = EgressPayload::decode(&bytes).expect("decode without tail");
         assert!(decoded.bind_allowed_ports.is_empty());
-        // A count claiming more ports than bytes is rejected.
+        assert!(decoded.pin_id.is_empty());
+        // A count claiming more ports than bytes is rejected (drop the port + pin-id tail,
+        // leaving the bind-port count saying 1).
         let mut bad = payload.encode();
-        bad.truncate(bad.len().saturating_sub(2)); // count says 1, but the port is gone
+        bad.truncate(bad.len().saturating_sub(6));
         assert!(EgressPayload::decode(&bad).is_err());
+    }
+
+    #[test]
+    fn egress_payload_round_trips_with_pin_id_and_tolerates_its_absence() {
+        let payload = EgressPayload {
+            meta: [1u8; META_LEN],
+            allow_v4: Vec::new(),
+            deny_v4: Vec::new(),
+            allow_v6: Vec::new(),
+            deny_v6: Vec::new(),
+            bind_allowed_ports: vec![443],
+            pin_id: "kennel-9f3a".to_owned(),
+        };
+        assert_eq!(EgressPayload::decode(&payload.encode()), Ok(payload.clone()));
+        // Drop just the pin-id tail (length 4 + 11 id bytes): the rest still decodes,
+        // with pinning disabled.
+        let mut bytes = payload.encode();
+        bytes.truncate(bytes.len().saturating_sub(4 + "kennel-9f3a".len()));
+        let decoded = EgressPayload::decode(&bytes).expect("decode without pin-id");
+        assert!(decoded.pin_id.is_empty());
+        assert_eq!(decoded.bind_allowed_ports, vec![443]);
     }
 
     #[test]

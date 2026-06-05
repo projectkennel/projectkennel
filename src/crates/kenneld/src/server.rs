@@ -677,6 +677,7 @@ fn run_kennel<P, L>(
         .map(std::time::Duration::from_secs);
     let ttl_action = loaded.lifecycle.ttl_action;
     let spec = crate::Spec {
+        id: req.kennel.clone(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
         ctx,
         scope: id.scope.clone(),

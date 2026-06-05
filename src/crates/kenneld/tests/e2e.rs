@@ -401,6 +401,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     };
 
     let spec = Spec {
+        id: "kennel-e2e".to_owned(),
         cgroup: cgroup.clone(),
         ctx,
         scope,
