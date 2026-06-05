@@ -58,13 +58,32 @@ The proxy is the only network egress path for the workload. The cgroup BPF rules
 
 Runs as the user.
 
-### `kennel-ssh-agent` (per-kennel SSH agent)
+### `kennel-sshd` (per-kennel SSH egress bastion)
 
-Per-kennel ssh-agent, spawned by kenneld when a kennel's policy references one. The agent's socket is bound at `/run/user/<uid>/kennel/ssh-agent.sock` and shim-mounted into the workload's `$HOME/.ssh/agent.sock`.
+When a kennel's `[ssh]` policy grants SSH egress, kenneld re-originates it through a
+**bastion** rather than handing the workload a key or an agent socket (design §7.8).
+The bastion is a per-user managed instance of stock OpenSSH `sshd` (`kenneld::bastion`/`sshd`),
+sibling to kenneld, lazily started on the first grant and stopped when the last kennel
+deregisters. It re-originates a kennel's SSH to the policy-fixed destination with the
+user's real key, held host-side; the workload reaches it through its egress proxy and
+holds no key.
 
-Two implementations are supported: stock `ssh-agent` (with a custom socket path), or a Project Kennel-supplied implementation that exposes the same wire protocol with additional auditing. The choice is a policy field; both are valid. The user's main `ssh-agent` is never bind-mounted into the kennel.
+The supporting binaries:
+- **`kennel-akc`** — the root-owned `AuthorizedKeysCommand`. OpenSSH's safe-path check
+  accepts only a root-owned helper, so the forced-command bindings (the access policy)
+  cannot be rewritten behind kenneld's back; `kennel-akc` answers each auth by querying
+  the **running kenneld** over the control socket (`Request::AuthorizedKeys`) for the
+  line bound to the offered key. No `authorized_keys` file is written. A prototype
+  `AuthorizedKeysFile` on a `0700` safe-owned path remains as an e2e fallback.
+- **`kennel-ssh-reorigin`** — the unprivileged forced-command router that maps an
+  authenticated synthetic key to its fixed destination and execs outbound `ssh`.
+- **`kennel-socks-connect`** — the `ProxyCommand` that bridges `ssh` to the kennel's
+  SOCKS5 egress proxy (the workload may `connect()` only the proxy, §7.3).
 
-Runs as the user.
+The workload sees a synthetic read-only `~/.ssh` (one bastion-routed stanza per granted
+host, the disposable synthetic key, the bastion-pinned `known_hosts`); the user's real
+key and agent are never bound in. All run as the user except `kennel-akc` (root-owned,
+runs as the bastion user to reach the per-user control socket).
 
 ### Adopted external binaries
 
@@ -86,9 +105,10 @@ These are dependencies, not source. Their versions are pinned in the build envir
 | `kenneld` | user | none | started by systemd --user or equivalent |
 | `kennel-privhelper` | root (setuid) or user | `cap_net_admin,cap_sys_admin,cap_setgid=ep` | installer uses setuid (mode `4755`); file caps a per-distribution alternative |
 | `kennel-netproxy` | user | none | |
-| `kennel-ssh-agent` | user | none | |
+| `kennel-sshd` (bastion) | user | none | per-user, managed by kenneld; stock OpenSSH `sshd` |
+| `kennel-akc` | root-owned, runs as bastion user | none | OpenSSH `AuthorizedKeysCommand`; queries kenneld, writes no file |
 | `xdg-dbus-proxy` | user | none | external |
-| Workload | user | bounding set cleared per policy | `PR_SET_NO_NEW_PRIVS` set unconditionally; Landlock sealed; cgroup BPF attached |
+| Workload | user | bounding set cleared per policy | `PR_SET_NO_NEW_PRIVS` set unconditionally; Landlock sealed; cgroup BPF attached; `setrlimit` caps applied (`[ulimits]`, after Landlock) |
 
 Only `kennel-privhelper` operates with elevated privilege, and only transiently per invocation. Project Kennel does not run any long-lived privileged daemon. The bounded duration of privilege is a deliberate constraint.
 
@@ -138,7 +158,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |        |                     |                                       |
    |        |                     +-->  /run/user/<uid>/kennel/proxy.ctl        |
    |        |                     +-->  /run/user/<uid>/kennel/dbus.ctl         |
-   |        |                     +-->  /run/user/<uid>/kennel/ssh-agent.sock   |
+   |        |                     +-->  kennel-sshd (SSH egress bastion, §7.8)  |
    |        |                     +-->  writes ~/.local/state/            |
    |        |                                  kennel/<id>/*.jsonl        |
    |        |                                                             |
@@ -146,7 +166,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |   Workload (in cgroup, Landlock sealed)                              |
    |        |                                                             |
    |        +-->  $KENNEL_SOCKS_PROXY (kennel primary, :1080)            |
-   |        +-->  /run/user/<uid>/kennel/ssh-agent.sock  (shim-mounted)         |
+   |        +-->  ssh -> kennel-socks-connect -> proxy -> bastion (§7.8) |
    |        +-->  /run/user/<uid>/bus  (D-Bus, via dbus-proxy)            |
    |                                                                      |
    |   BPF programs (attached to workload's cgroup)                       |
@@ -169,7 +189,7 @@ Notes on the diagram:
 
 - The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with the workload's stdio fds over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-4-ipc.md`.
 - The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is the kennel's primary loopback (`$KENNEL_SOCKS_PROXY` — host offset 1 in its `/28`, port 1080), never the control socket.
-- The ssh-agent socket is bind-mounted from `/run/user/<uid>/kennel/ssh-agent.sock` into the workload's `$HOME/.ssh/agent.sock` via the shim. The workload sees only the shim path.
+- SSH egress is re-originated through the per-user `kennel-sshd` bastion (§7.8): the workload's `ssh` reaches it via `kennel-socks-connect` → the egress proxy, authenticating with a disposable synthetic key in its constructed `~/.ssh`. The workload holds no real key and no agent socket; the bastion uses the user's host-side key.
 - BPF programs do not push events to userspace; they write into a ringbuf. A reader in kenneld drains the ringbuf and writes JSONL events to the audit directory.
 - The privhelper is invoked by kenneld during a kennel's bring-up and teardown.
 

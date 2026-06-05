@@ -239,7 +239,8 @@ into the kennel's view.
 | `kenneld` | `/usr/libexec/kennel/kenneld` | Started by systemd-user or by the CLI in degraded mode; not on `PATH`. |
 | `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_net_admin,cap_sys_admin,cap_setgid=ep` are a documented per-distribution alternative the installer does not itself apply. `cap_setgid` is for the `set-gid-map` op — writing a workload's user-namespace `gid_map` so it keeps a granted supplementary group (§7.2.8); the other two are for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
 | `kennel-netproxy` | `/usr/libexec/kennel/kennel-netproxy` | Spawned by kenneld; not on `PATH`. |
-| `kennel-ssh-agent` | `/usr/libexec/kennel/kennel-ssh-agent` | Spawned by kenneld (when the policy enables it); not on `PATH`. |
+| `kennel-akc` | `/usr/libexec/kennel/kennel-akc` | The SSH bastion's root-owned `AuthorizedKeysCommand` (§7.8); installed root-owned (safe-path), queries kenneld; not on `PATH`. |
+| `kennel-socks-connect` | `/usr/libexec/kennel/kennel-socks-connect` | The `ProxyCommand` bridging a kennel's `ssh` to its egress proxy (§7.8); bound into the view with a Landlock execute grant. |
 
 Distributions relocate the libexec directory with `install.sh --prefix <dir>`, which installs the binaries there and rewrites `libexec_dir` in the deployment `system.toml` (and the `kenneld.service` `ExecStart` and the AppArmor profile path) to match — no path is baked into a binary. The default `/usr/libexec/kennel` matches the FHS recommendation.
 

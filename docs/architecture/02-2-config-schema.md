@@ -60,8 +60,8 @@ The full section list:
 | `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction, scrub patterns | §7.2 |
 | `[net]` and `[net.*]` | Network egress allowlist, proxy listen, loopback rules, bind rules, audit | §7.3 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling | §7.4 |
-| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); source-only, planned | §7.8 |
-| `[identity]` | Supplementary-group isolation (`groups`); source-only, realised by the spawn seal | §7.2 |
+| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.8 |
+| `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.2 |
 | `[container]` | Container-mode policy surface; source-only, design-level (no runtime yet) | §7.9 |
 | `[dbus]` | D-Bus session/system bus enablement and method filtering | §7.5 |
 | `[x11]` | X11/Wayland display server isolation | §7.6 |
@@ -309,15 +309,24 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 ## The settled policy (compilation)
 
 The settled schema is defined in `src/crates/kennel-policy/src/settled.rs`. The
-settled `effective_policy` carries only the **runtime-relevant** sections —
-`net`, `fs`, `exec`, `proc`, `cap`, `seccomp`, `lifecycle`. The source-only
-sections (`unix`, `dbus`, `x11`, `env`, `ptrace`, `signal`, `audit`) are
-compile-time concerns and are not present in the settled form, so "every
-section" below means that resolved subset. The settled net section carries
-`net.allow_names` (the by-name proxy allowlist) and `net.proxy` (`offset`,
-`port`); the settled fs section adds `fs.tmp` (`private`, `size_mib`, `mode`)
-and `fs.dev.allow`, and the proc section adds `proc.hidepid`. Settled `FsPolicy`
-uses flat field names (`home_shadow`, `shim_root`), not nested `fs.home.*`.
+settled body (`SettledPolicy`) has two layers. Its `effective_policy`
+(`EffectivePolicy`) is the **kernel-enforcement core** — `net`, `fs`, `exec`,
+`proc`, `cap`, `seccomp`, `lifecycle` — the sections the spawn seal and the BPF
+realise directly. Alongside it the body carries the **service-input sections**
+the daemon and spawn *services* realise (not the kernel), each signed but omitted
+from the canonical form when empty (so a policy that does not use one signs
+unchanged): `ssh` (`SshRuntime`), `unix` (`UnixRuntime`), `identity`
+(`IdentityRuntime` — the masked `user`/`group` and supplementary `groups`),
+`audit` (`AuditRuntime`), `env` (`EnvRuntime` — the synthesised environment), and
+`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The sections with no runtime
+representation yet — `dbus`, `x11`, `ptrace`, `signal`, and the source-only
+`fs.scrub`/`fs.home.sanitise` — are dropped at translate and absent from the
+settled form. The settled net section carries `net.allow_names` (the by-name proxy
+allowlist), `net.proxy` (`offset`, `port`), and the bind-port policy
+(`bind_port_min` + `bind_allowed_ports`, §7.3.7); the settled fs section adds
+`fs.tmp` (`private`, `size_mib`, `mode`) and `fs.dev.allow`, and the proc section
+adds `proc.hidepid`. Settled `FsPolicy` uses flat field names (`home_shadow`,
+`home_persist`, `home_readonly`), not nested `fs.home.*`.
 
 The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
 

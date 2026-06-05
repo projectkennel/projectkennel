@@ -18,7 +18,7 @@ Project Kennel ships the following BPF programs. Each is in `bpf/<name>.bpf.c` a
 |---|---|---|
 | `connect4` | `cgroup/connect4` | Enforce IPv4 destination allowlist. |
 | `connect6` | `cgroup/connect6` | Enforce IPv6 destination allowlist. |
-| `bind4` | `cgroup/bind4` | Rewrite `INADDR_ANY` binds to the kennel's loopback; deny others. |
+| `bind4` | `cgroup/bind4` | Enforce the bind-port floor + allowlist (§7.3.7), then rewrite `INADDR_ANY` binds to the kennel's loopback and deny others. |
 | `bind6` | `cgroup/bind6` | Same for IPv6. |
 | `setsockopt` | `cgroup/setsockopt` | Force `IPV6_V6ONLY=1`; prevent dual-stack escape. |
 | `sock_create` | `cgroup/sock_create` | Family allowlist (no `AF_PACKET`, no `AF_NETLINK` from workload). |
@@ -77,13 +77,13 @@ struct kennel_meta {           // 64 bytes (loader value_size); bpf/maps.h is au
     __u16 ctx_byte;          // 6  the <ctx> for this kennel
     __u32 proxy_addr_v4;     // 8  the proxy listen address (network byte order)
     __u16 proxy_port;        // 12 network byte order
-    __u16 _pad0;             // 14
+    __u16 bind_port_min;     // 14 host order; lowest bindable port (§7.3.7), 0 = no floor
     __u8  proxy_addr_v6[16]; // 16 IPv6
     __u8  policy_hash[32];   // 32 SHA-256 of the resolved policy; for audit correlation
 };
 ```
 
-The loader is designed to verify `magic` and `abi_version` after population by reading the map back; a mismatch indicates a corrupted build and fails the kennel to start. **Status: readback verification not yet built (roadmap)** — the `magic` (`0x4B4E454C`) and `KENNEL_ABI_VERSION` constants exist on the C side (`bpf/maps.h`), but no Rust code reads the map back to validate them; the value is written from the payload `meta` without a post-write check. The proxy fields are ordered `proxy_port` before `proxy_addr_v6`, with an explicit `_pad0`, for natural alignment; the BPF enforcement path reads the deny/allow tries, not these fields.
+The loader is designed to verify `magic` and `abi_version` after population by reading the map back; a mismatch indicates a corrupted build and fails the kennel to start. **Status: readback verification not yet built (roadmap)** — the `magic` (`0x4B4E454C`) and `KENNEL_ABI_VERSION` constants exist on the C side (`bpf/maps.h`), but no Rust code reads the map back to validate them; the value is written from the payload `meta` without a post-write check. The slot at offset 14 (formerly `_pad0`) is now `bind_port_min` (host order): the lowest port the workload may `bind()`, read by `bind4`/`bind6` to deny a privileged-port bind (T6, §7.3.7); `0` enforces no floor. The egress decision path reads the deny/allow tries, not the proxy/bind fields.
 
 **`allow_v4`** (BPF_MAP_TYPE_LPM_TRIE)
 
@@ -119,17 +119,24 @@ Deny is checked first so an `allow` rule cannot accidentally cover an invariant-
 
 **`bind_subnet`** (BPF_MAP_TYPE_ARRAY, capacity 1)
 
-The kennel's bind subnet for `INADDR_ANY` rewriting:
+The kennel's bind subnet for `INADDR_ANY` rewriting, plus the optional bind-port
+allowlist (§7.3.7):
 
 ```c
 struct bind_subnet {
-    __u32 v4_addr;       // network byte order
-    __u32 v4_prefix;     // host order, expected 28 (per-kennel /28 allocation)
+    __u32 v4_addr;          // network byte order
+    __u32 v4_prefix;        // host order, expected 28 (per-kennel /28 allocation)
     __u8  v6_addr[16];
-    __u8  v6_prefix;     // expected 64
-    __u8  reserved[3];
+    __u8  v6_prefix;        // expected 64
+    __u8  n_ports;          // valid entries in allowed_ports (0 = any port ≥ the floor)
+    __u16 allowed_ports[8]; // host order; when n_ports>0 the bind port must be one (MAX_BIND_PORTS=8)
 };
 ```
+
+`bind4`/`bind6` enforce both bind-port checks before the address rewrite: deny a
+port below `kennel_meta.bind_port_min`, and — when `n_ports > 0` — deny a port not
+in `allowed_ports` (a bounded, verifier-clean loop). The two halves of the
+bind-port policy: the floor rides `kennel_meta`, the allowlist rides `bind_subnet`.
 
 ### Shared maps
 
