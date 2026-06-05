@@ -881,7 +881,10 @@ mod tests {
             "npm2",
             "x".repeat(64).as_str(),
         ] {
-            validate_kennel_name(ok).unwrap_or_else(|e| panic!("`{ok}` should be valid: {e}"));
+            assert!(
+                validate_kennel_name(ok).is_ok(),
+                "`{ok}` should be a valid kennel name"
+            );
         }
     }
 
