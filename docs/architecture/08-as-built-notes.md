@@ -405,10 +405,20 @@ describe these read as roadmap.
   spawn** by `kenneld` (it inspects the realised `UnixRuntime` sockets and logs the same
   pointer), so an operator who runs a pre-compiled artefact still sees it. Loud at
   validate, compile, and runtime — never fatal.
-- **`kennel run` auto-compile** (`09-policy-lifecycle.md` §9.10) — **designed, not built.**
-  The design's local-dev loop auto-compiles a source policy in memory; today `run` requires
-  a pre-settled, signed artefact (the spawn path verifies only). **Owed:** the in-memory
-  compile-and-sign dev path.
+- **`kennel run` auto-compile** (`09-policy-lifecycle.md` §9.10) — **BUILT.** `kennel run`
+  now accepts either a pre-compiled **settled** artefact (used as-is, the production
+  path) or a **source** policy (template/leaf), which it compiles and signs *in memory*
+  before the run — the §9.10 local-dev loop, so an author need not run `kennel compile`
+  between edits. Detection is structural (`is_source_policy`: a source policy parses as
+  `SourcePolicy`/`LeafPolicy`; a settled doc's extra fields make the two parses mutually
+  exclusive). The in-memory build reuses the exact `kennel compile` machinery
+  (`build_settled` → `sign_settled`), prints any policy warnings, and requires `--key`
+  (kenneld verifies the settled signature against its trust store — there is no
+  accept-unsigned dev mode in the daemon). The signed bytes are written to a short-lived
+  temp file under `$XDG_RUNTIME_DIR` that an RAII guard removes when the run returns.
+  `--template-dir`/`--trust-dir` flow through for chain resolution. **Not built:** a
+  daemon-side accept-unsigned dev mode (the design's `algorithm = "none"` path) — `run`'s
+  dev loop signs instead, which needs no daemon change.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

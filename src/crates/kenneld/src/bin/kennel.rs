@@ -48,25 +48,90 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     }
 }
 
-/// `kennel run <policy> <name> -- <argv...>`
+/// `kennel run <policy> <name> [--key K] [--template-dir D]... [--trust-dir D]... -- <argv...>`
+///
+/// `<policy>` is either a pre-compiled **settled** artefact (used as-is, the
+/// production path) or a **source** policy (template/leaf), which is compiled and
+/// signed *in memory* before the run — the §9.10 local-dev loop, so an author need
+/// not run `kennel compile` between edits. The in-memory build needs `--key` (kenneld
+/// verifies the settled signature against its trust store); the settled bytes are
+/// written to a short-lived temp file that is removed when the run returns.
 fn run(args: &[String]) -> Result<ExitCode, String> {
-    // policy, name, then "--", then the command.
+    // <head...> then "--" then the command.
     let sep = args
         .iter()
         .position(|a| a == "--")
         .ok_or("run needs `-- <cmd...>`")?;
     let head = args.get(..sep).unwrap_or(&[]);
     let command = args.get(sep.saturating_add(1)..).unwrap_or(&[]);
-    let [policy, name] = head else {
-        return Err("usage: kennel run <policy> <name> -- <cmd...>".to_owned());
-    };
+
+    let mut policy_path: Option<&str> = None;
+    let mut name: Option<&str> = None;
+    let mut key_path: Option<&str> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut it = head.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if policy_path.is_none() => policy_path = Some(v),
+            v if name.is_none() => name = Some(v),
+            _ => return Err("unexpected extra argument before `--`".to_owned()),
+        }
+    }
+    let policy_path = policy_path
+        .ok_or("usage: kennel run <policy> <name> [--key K] [--template-dir D]... -- <cmd...>")?;
+    let name = name.ok_or("usage: kennel run <policy> <name> -- <cmd...>")?;
     if command.is_empty() {
         return Err("no command given after `--`".to_owned());
     }
+
+    // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
+    // artefact is passed straight through. `_temp` keeps the on-disk settled file
+    // alive for the daemon to read, and removes it when this function returns.
+    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    // Held only for its `Drop` (removes the temp settled file when the run returns);
+    // never read, hence the allow.
+    #[allow(clippy::collection_is_never_read)]
+    let _temp;
+    let effective_policy: PathBuf = if is_source_policy(&bytes) {
+        let key_path = key_path.ok_or(
+            "`<policy>` is a source policy: pass `--key <path>` to compile-and-sign it in \
+             memory for this run, or pre-compile it with `kennel compile`",
+        )?;
+        add_default_template_dirs(&mut template_dirs);
+        add_default_trust_dirs(&mut trust_dirs);
+        let source = FsTemplateSource {
+            dirs: template_dirs,
+        };
+        let keys = load_trust_store(&trust_dirs)?;
+        let trust = kennel_policy::Trust::allow_unsigned(Some(&keys));
+        let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+            .map_err(|e| format!("compiling {policy_path}: {e}"))?;
+        print_warnings(&compiled.warnings);
+        let key = load_signing_key(key_path)?;
+        let doc = kennel_policy::sign_settled(&compiled.policy, &key)
+            .map_err(|e| format!("signing: {e}"))?;
+        let out = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
+        let temp = TempSettled::write(name, &out)?;
+        let path = temp.path().to_path_buf();
+        eprintln!("kennel: compiled `{policy_path}` in memory for this run");
+        _temp = Some(temp);
+        path
+    } else {
+        _temp = None;
+        PathBuf::from(policy_path)
+    };
+
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let request = Request::Start(StartRequest {
-        policy: policy.into(),
-        kennel: name.clone(),
+        policy: effective_policy,
+        kennel: name.to_owned(),
         argv: command.to_vec(),
         cwd,
     });
@@ -319,6 +384,45 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Whether `bytes` is a **source** policy (a template or a leaf) rather than a
+/// compiled settled artefact. A source policy parses as a `SourcePolicy` or
+/// `LeafPolicy`; a settled document carries fields (`settled_schema_version`,
+/// `[signature]`, …) those `deny_unknown_fields` schemas reject, so the two parses
+/// are mutually exclusive. Used by `kennel run` to decide whether to compile.
+fn is_source_policy(bytes: &[u8]) -> bool {
+    kennel_policy::parse_source(bytes).is_ok() || kennel_policy::parse_leaf(bytes).is_ok()
+}
+
+/// A short-lived on-disk settled policy produced by `kennel run`'s in-memory
+/// compile. The daemon reads the path during bring-up; the file is removed when this
+/// guard drops (the run returns or errors out).
+struct TempSettled {
+    path: PathBuf,
+}
+
+impl TempSettled {
+    /// Write `bytes` to a unique, safe-owned path (under `$XDG_RUNTIME_DIR` when set,
+    /// else the temp dir) keyed by kennel name and pid.
+    fn write(name: &str, bytes: &[u8]) -> Result<Self, String> {
+        let dir =
+            std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let path = dir.join(format!("kennel-run-{name}-{}.settled", std::process::id()));
+        std::fs::write(&path, bytes)
+            .map_err(|e| format!("writing temp settled policy {}: {e}", path.display()))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempSettled {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Print compile-time policy warnings to stderr, one `kennel: warning:` line each.
 ///
 /// These are footgun grants the policy is allowed to keep (e.g. shimming a real
@@ -549,4 +653,49 @@ fn load_signing_key(path: &str) -> Result<kennel_policy::SigningKey, String> {
         .ok_or_else(|| format!("cannot derive a key id from {path}"))?;
     kennel_policy::SigningKey::from_seed(key_id, &seed)
         .map_err(|e| format!("loading key {path}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE_CONFINED: &[u8] =
+        include_bytes!("../../../../../templates/base-confined/policy.toml");
+
+    #[test]
+    fn a_template_is_detected_as_a_source_policy() {
+        // The `kennel run` dev path compiles a source policy; a shipped template
+        // must be recognised as one.
+        assert!(is_source_policy(BASE_CONFINED));
+    }
+
+    #[test]
+    fn a_settled_document_is_not_a_source_policy() {
+        // A settled artefact carries `settled_schema_version` / `[signature]`, which
+        // the source schemas reject — so it is passed through, not recompiled.
+        let settled = br#"
+settled_schema_version = 2
+name = "demo"
+[signature]
+algorithm = "none"
+key_id = ""
+signature = ""
+signed_fields = []
+"#;
+        assert!(!is_source_policy(settled));
+    }
+
+    #[test]
+    fn temp_settled_is_removed_on_drop() {
+        let path = {
+            let temp = TempSettled::write("unit-test", b"x").expect("write temp");
+            let p = temp.path().to_path_buf();
+            assert!(p.exists(), "temp settled file should exist while held");
+            p
+        };
+        assert!(
+            !path.exists(),
+            "temp settled file should be removed on drop"
+        );
+    }
 }
