@@ -398,8 +398,14 @@ mod tests {
     fn defaults_are_the_documented_paths() {
         let d = Deployment::defaults();
         assert_eq!(d.trust_dir(), Path::new("/etc/kennel/keys"));
-        assert_eq!(d.privhelper(), Path::new("/usr/libexec/kennel/kennel-privhelper"));
-        assert_eq!(d.netproxy(), Path::new("/usr/libexec/kennel/kennel-netproxy"));
+        assert_eq!(
+            d.privhelper(),
+            Path::new("/usr/libexec/kennel/kennel-privhelper")
+        );
+        assert_eq!(
+            d.netproxy(),
+            Path::new("/usr/libexec/kennel/kennel-netproxy")
+        );
         assert_eq!(d.akc(), Path::new("/usr/libexec/kennel/kennel-akc"));
         assert_eq!(d.sshd(), Path::new("/usr/sbin/sshd"));
     }
@@ -410,12 +416,19 @@ mod tests {
         let system = tmp("system");
         // Vendor sets libexec_dir; system overrides only the trust dir.
         write(&vendor, SYSTEM_FILE, "libexec_dir = \"/vendor/libexec\"\n");
-        write(&system, SYSTEM_FILE, "trust_dir = \"/etc/kennel/admin-keys\"\n");
+        write(
+            &system,
+            SYSTEM_FILE,
+            "trust_dir = \"/etc/kennel/admin-keys\"\n",
+        );
         let d = Deployment::load_from_dirs(&[vendor, system]).expect("load");
         // system override wins for trust_dir...
         assert_eq!(d.trust_dir(), Path::new("/etc/kennel/admin-keys"));
         // ...vendor's libexec_dir survives and drives binary resolution...
-        assert_eq!(d.privhelper(), Path::new("/vendor/libexec/kennel-privhelper"));
+        assert_eq!(
+            d.privhelper(),
+            Path::new("/vendor/libexec/kennel-privhelper")
+        );
         // ...and unset keys fall back to compiled defaults.
         assert_eq!(d.sshd(), Path::new("/usr/sbin/sshd"));
     }
@@ -430,7 +443,10 @@ mod tests {
         );
         let d = Deployment::load_from_dirs(&[system]).expect("load");
         assert_eq!(d.netproxy(), Path::new("/custom/np"));
-        assert_eq!(d.privhelper(), Path::new("/opt/k/libexec/kennel-privhelper"));
+        assert_eq!(
+            d.privhelper(),
+            Path::new("/opt/k/libexec/kennel-privhelper")
+        );
     }
 
     #[test]
@@ -451,11 +467,7 @@ mod tests {
     #[test]
     fn user_config_replaces_search_dirs() {
         let user = tmp("user");
-        write(
-            &user,
-            USER_FILE,
-            "template_dirs = [\"/srv/templates\"]\n",
-        );
+        write(&user, USER_FILE, "template_dirs = [\"/srv/templates\"]\n");
         let u = User::load_from_dirs(&[user]).expect("load");
         assert_eq!(u.template_dirs(), vec![PathBuf::from("/srv/templates")]);
     }

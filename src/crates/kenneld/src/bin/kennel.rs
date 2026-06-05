@@ -475,7 +475,11 @@ const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
 /// `template_dirs` if set, else the built-in default (user config dir, then
 /// system). A malformed user config falls back to the built-in default.
 fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
-    dirs.extend(kennel_config::User::load().unwrap_or_default().template_dirs());
+    dirs.extend(
+        kennel_config::User::load()
+            .unwrap_or_default()
+            .template_dirs(),
+    );
 }
 
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.

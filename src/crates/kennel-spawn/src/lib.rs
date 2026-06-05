@@ -1038,20 +1038,25 @@ mod tests {
         // allowlisted binary and the loader's lib dirs carry EXECUTE; writes
         // carry write access (§7.1).
         assert!(
-            plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr")
-                && acc.contains(AccessFs::READ_FILE)
-                && !acc.contains(AccessFs::EXECUTE)),
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/usr")
+                    && acc.contains(AccessFs::READ_FILE)
+                    && !acc.contains(AccessFs::EXECUTE)),
             "with an exec allowlist, a read path must not be executable"
         );
         assert!(
-            plan.landlock_fs.iter().any(|(path, acc)| path
-                == &PathBuf::from("/usr/bin/python3")
-                && acc.contains(AccessFs::EXECUTE)),
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/usr/bin/python3")
+                    && acc.contains(AccessFs::EXECUTE)),
             "the allowlisted binary gets EXECUTE"
         );
         assert!(
-            plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr/lib")
-                && acc.contains(AccessFs::EXECUTE)),
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/usr/lib")
+                    && acc.contains(AccessFs::EXECUTE)),
             "the loader's lib dir (covered by the /usr read grant) gets EXECUTE"
         );
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
@@ -1112,8 +1117,9 @@ mod tests {
         )
         .expect("plan");
         assert!(
-            plan.landlock_fs.iter().any(|(path, acc)| path == &PathBuf::from("/usr")
-                && acc.contains(AccessFs::EXECUTE)),
+            plan.landlock_fs.iter().any(
+                |(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)
+            ),
             "without an exec allowlist, read paths remain executable"
         );
         assert!(

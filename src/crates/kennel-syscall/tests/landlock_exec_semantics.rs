@@ -71,7 +71,8 @@ fn grant_lib_reads(r: &mut Ruleset) {
 fn grant_lib_exec(r: &mut Ruleset) {
     for d in ["/usr/lib", "/lib", "/lib64", "/usr/lib64"] {
         if Path::new(d).exists() {
-            r.allow_path(Path::new(d), exec_access()).expect("grant exec");
+            r.allow_path(Path::new(d), exec_access())
+                .expect("grant exec");
         }
     }
 }
