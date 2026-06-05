@@ -22,6 +22,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod audit;
 pub mod bastion;
 pub mod cgroup;
 pub mod control;
@@ -162,19 +163,11 @@ pub struct HelperClient {
 }
 
 impl HelperClient {
-    /// Use the privhelper at `helper`.
+    /// Use the privhelper at `helper` (resolved from the deployment config by
+    /// the daemon; see [`kennel_config::Deployment::privhelper`]).
     pub fn new(helper: impl Into<PathBuf>) -> Self {
         Self {
             helper: helper.into(),
-        }
-    }
-
-    /// Use the privhelper at its installed location
-    /// ([`kennel_privhelper::client::DEFAULT_HELPER`]).
-    #[must_use]
-    pub fn installed() -> Self {
-        Self {
-            helper: kennel_privhelper::client::default_helper_path().to_path_buf(),
         }
     }
 }
@@ -244,6 +237,12 @@ pub struct EtcSetup {
     /// so they resolve by name; these are the gids the seal `setgroups` to. Empty by
     /// default (the kennel carries no supplementary groups unless policy grants them).
     pub groups: Vec<(String, u32)>,
+    /// The kennel's login shell (§7.7.2a) — the `passwd` `pw_shell` field. `/bin/sh`
+    /// unless the policy set `[exec].shell`.
+    pub shell: String,
+    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
+    /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
+    pub home_persist: Vec<String>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -270,12 +269,13 @@ pub struct Spec {
     /// (or a view-less plan) keeps the in-place fallback seal. kenneld creates it
     /// at bring-up and removes it at teardown.
     pub view_root: Option<PathBuf>,
-    /// Where the egress proxy writes its JSONL audit log
-    /// (`~/.local/state/kennel/<kennel>/network.jsonl`, §7.3.4), or `None` to
-    /// leave it on stderr. kenneld creates the parent directory at bring-up; the
-    /// log persists across runs (it is *not* removed at teardown — it is audit
-    /// data). Ignored when no proxy runs.
-    pub audit_path: Option<PathBuf>,
+    /// The unified-audit context for the egress proxy (the `[audit]` block, §02-3):
+    /// the kennel name, the shared `kennel_uuid`, the per-kennel state dir
+    /// (`~/.local/state/kennel/<kennel>/`, where `network.jsonl` lands), and the
+    /// sinks/levels. kenneld creates the dir at bring-up; the logs persist across
+    /// runs (not removed at teardown — they are audit data). `None` (or no proxy)
+    /// leaves the proxy logging egress to stdout.
+    pub proxy_audit: Option<crate::proxy::ProxyAudit>,
     /// The prepared SSH egress (§7.8): the synthetic `~/.ssh` binds, the bastion
     /// host-service to allow, and the in-kennel connector to bind in. Empty
     /// ([`SshPrep::default`]) for a kennel with no `[ssh]` grant.
@@ -456,7 +456,7 @@ pub fn start<P: Privileged + Sync>(
         proxy,
         etc,
         view_root,
-        audit_path,
+        proxy_audit,
         ssh,
         unix,
     } = spec;
@@ -472,7 +472,7 @@ pub fn start<P: Privileged + Sync>(
         proxy.as_ref(),
         etc.as_ref(),
         view_root.as_deref(),
-        audit_path.as_deref(),
+        proxy_audit.as_ref(),
         &ssh,
         &unix,
         command,
@@ -517,7 +517,7 @@ fn bring_up<P: Privileged + Sync>(
     proxy: Option<&ProxySetup>,
     etc: Option<&EtcSetup>,
     view_root: Option<&Path>,
-    audit_path: Option<&Path>,
+    proxy_audit: Option<&crate::proxy::ProxyAudit>,
     ssh: &SshPrep,
     unix: &UnixPrep,
     command: &mut Command,
@@ -575,15 +575,13 @@ fn bring_up<P: Privileged + Sync>(
     //     configured (unit tests).
     if let Some(setup) = proxy {
         let listen = proxy_listen(state.v4, addr6, port);
-        // The per-kennel audit log persists across runs; create its directory but
-        // never remove it at teardown (it is audit data, not scratch).
-        if let Some(audit) = audit_path {
-            if let Some(parent) = audit.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+        // The per-kennel audit dir persists across runs; create it but never
+        // remove it at teardown (it is audit data, not scratch).
+        if let Some(audit) = proxy_audit {
+            std::fs::create_dir_all(&audit.dir)?;
         }
         let config =
-            crate::proxy::config_toml(net, &listen, audit_path, ssh.host_service.as_slice())
+            crate::proxy::config_toml(net, &listen, proxy_audit, ssh.host_service.as_slice())
                 .map_err(Error::ProxyConfig)?;
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
@@ -601,10 +599,33 @@ fn bring_up<P: Privileged + Sync>(
             gid: etc.gid,
             home: &etc.home,
             groups: &etc.groups,
+            shell: &etc.shell,
             v4: state.v4,
             v6: addr6,
         };
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
+
+        // Synthesise the user shell-init dotfiles into the kennel home (§7.7.2a):
+        // copied into the fresh view root each spawn (reconstructed, non-persistent),
+        // skipping any path in `home_persist`. Like the synthetic ~/.ssh, the home
+        // subtree is not in `fs.read`, so grant Landlock read on each dotfile's dir.
+        let dot_dir = etc.staging_dir.join("home");
+        let dot_binds =
+            crate::etc::materialize_home_dotfiles(&dot_dir, &etc.home, &etc.home_persist)?;
+        if !dot_binds.is_empty() {
+            use kennel_syscall::landlock::AccessFs;
+            let mut dot_dirs = std::collections::BTreeSet::new();
+            for (_src, target) in &dot_binds {
+                if let Some(parent) = target.parent() {
+                    dot_dirs.insert(parent.to_path_buf());
+                }
+            }
+            for dir in dot_dirs {
+                plan.landlock_fs
+                    .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
+            }
+            plan.file_binds.extend(dot_binds);
+        }
     }
 
     // 3c-ssh. Lay the synthetic ~/.ssh into the view (config, known_hosts, the
@@ -974,7 +995,7 @@ mod tests {
             proxy: None,
             etc: None,
             view_root: None,
-            audit_path: None,
+            proxy_audit: None,
             ssh: SshPrep::default(),
             unix: UnixPrep::default(),
         }

@@ -220,6 +220,9 @@ mod root_tests {
 
     #[test]
     fn tmpfs_mounts_and_is_writable_then_detaches() {
+        if crate::unistd::skip_if_unprivileged("tmpfs_mounts_and_is_writable_then_detaches") {
+            return;
+        }
         in_private_mount_ns(|| {
             let dir = Path::new("/tmp/kennel-mnt-tmpfs");
             if std::fs::create_dir_all(dir).is_err() {
@@ -241,6 +244,9 @@ mod root_tests {
 
     #[test]
     fn bind_then_remount_readonly_blocks_writes() {
+        if crate::unistd::skip_if_unprivileged("bind_then_remount_readonly_blocks_writes") {
+            return;
+        }
         in_private_mount_ns(|| {
             // A tmpfs we can write, bind it elsewhere, remount the bind RO.
             let src = Path::new("/tmp/kennel-mnt-src");
@@ -269,6 +275,9 @@ mod root_tests {
 
     #[test]
     fn tmpfs_with_size_and_mode_mounts_and_is_writable() {
+        if crate::unistd::skip_if_unprivileged("tmpfs_with_size_and_mode_mounts_and_is_writable") {
+            return;
+        }
         in_private_mount_ns(|| {
             let dir = Path::new("/tmp/kennel-mnt-tmpfs-opts");
             if std::fs::create_dir_all(dir).is_err() {
@@ -289,6 +298,9 @@ mod root_tests {
 
     #[test]
     fn proc_with_hidepid_mounts() {
+        if crate::unistd::skip_if_unprivileged("proc_with_hidepid_mounts") {
+            return;
+        }
         in_private_mount_ns(|| {
             let dir = Path::new("/tmp/kennel-mnt-proc-hidepid");
             if std::fs::create_dir_all(dir).is_err() {
@@ -310,6 +322,9 @@ mod root_tests {
 
     #[test]
     fn pivot_root_into_a_fresh_tmpfs_root() {
+        if crate::unistd::skip_if_unprivileged("pivot_root_into_a_fresh_tmpfs_root") {
+            return;
+        }
         in_private_mount_ns(|| {
             let new_root = Path::new("/tmp/kennel-newroot");
             if std::fs::create_dir_all(new_root).is_err() {

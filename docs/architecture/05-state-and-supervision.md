@@ -59,10 +59,11 @@ Every lock in the system, what it protects, and what acquisition failure means.
 
 | Lock | Type | Scope | Held for | On failure |
 |---|---|---|---|---|
-| `/run/user/<uid>/kennel/kenneld.lock` | `flock` (exclusive) | one kenneld per user | kenneld's whole lifetime | Another kenneld is running; the second instance exits with a clear error naming the holding PID. |
-| bind on `/run/user/<uid>/kennel/kenneld.sock` | kernel socket bind | one listener per path | kenneld's whole lifetime | `EADDRINUSE`; second instance exits. Belt-and-braces with the lockfile. |
+| systemd socket activation on `/run/user/<uid>/kennel/control.sock` | the unit owns the listener | one kenneld per user | kenneld's whole lifetime | systemd hands the single bound listener to one daemon; it is the single-instance guarantee. When started without socket activation (dev), kenneld binds the path itself, replacing a stale socket first. |
 | `/run/kennel/privhelper.lock` | `flock` (exclusive) | machine-wide | duration of one privhelper operation | Concurrent privhelper invocations serialise; the second waits. |
 | kenneld registry mutex | in-process `Mutex` | kenneld's registry and `<ctx>` allocator | brief; never across slow operations | N/A (in-process); the slow bring-up runs outside the lock. |
+
+Single-instance-per-user is enforced by **systemd socket activation**: the `kenneld.socket` user unit owns the one bound listener and hands it to a single daemon (`kennel-config`/`socket.rs`). There is no `kenneld.lock` flock and no `kenneld.pid` file. In the development/socket-less path kenneld binds `control.sock` itself, removing any stale socket first.
 
 ### The discipline around the registry mutex
 
@@ -130,7 +131,9 @@ A theme: the workload's *confinement* never depends on kenneld being alive. Land
 
 ## Operational signals
 
-- **`SIGTERM`** — shutdown. Stop accepting new kennel starts and exit. Used by `systemctl --user stop kenneld`. Each live kennel's serving thread reaps its proxy and removes its addresses as its workload exits.
+kenneld installs no signal handlers: `run()` builds the shared state and calls `serve()`, a blocking accept loop, with no `sigaction`/`SIGTERM`/`ctrlc` handling. Signals therefore take their default disposition.
+
+- **`SIGTERM`** — default-terminates the process (used by `systemctl --user stop kenneld`). This ends the accept loop and the per-kennel serving threads without an orderly drain; each thread's owned workload is left to the kernel-enforced confinement that survives kenneld (Landlock, cgroup BPF, the sealed mount namespace) and to whatever supervisor reaps the process tree. There is no "stop accepting new starts, let workloads drain" sequence — kenneld holds no draining state.
 
 ---
 

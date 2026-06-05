@@ -3,7 +3,7 @@
 //! Ties the pure modules together for a live connection: peek the first byte
 //! ([`protocol::detect`]), parse the handshake ([`socks5`] or [`http`]), decide
 //! against the [`Ruleset`], resolve names through the [`Resolver`] seam, connect
-//! upstream, signal the client, relay bytes, and write one [`audit`] record. One
+//! upstream, signal the client, relay bytes, and write one [`crate::audit`] record. One
 //! thread per connection, matching `kenneld`'s server and the OpenSSH bar; a
 //! proxy is bounded by policy, not by connection count.
 //!
@@ -22,7 +22,7 @@
 //!   destination, an unresolvable name, or a failed upstream connect all end the
 //!   connection without relaying, after an audit record is written.
 //! - **The handshake is time-bounded.** A client that connects and never speaks
-//!   is dropped after [`HANDSHAKE_TIMEOUT`]; the read timeout is cleared only
+//!   is dropped after `HANDSHAKE_TIMEOUT`; the read timeout is cleared only
 //!   once relaying begins, so legitimate long-lived tunnels are not cut.
 //! - **Resolved addresses are re-checked.** A name that clears the allowlist is
 //!   connected only to a resolved address that clears the deny rules
@@ -38,7 +38,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::allow::{
@@ -63,8 +63,8 @@ const CHUNK: usize = 256;
 const HTTP_200: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
 /// A per-kennel egress proxy: a resolved ruleset, a name resolver, the
-/// resolved-address private-space opinion, and an audit sink.
-pub struct Proxy<W, R> {
+/// resolved-address private-space opinion, and the unified audit writer.
+pub struct Proxy<R> {
     ruleset: Ruleset,
     resolver: R,
     /// Whether a name may be connected to a resolved address in special-use
@@ -76,7 +76,9 @@ pub struct Proxy<W, R> {
     /// invariant deny — e.g. the SSH bastion (§7.8.4). Matched only against a literal
     /// destination address (never a resolved name), so there is no rebinding surface.
     host_services: Vec<SocketAddr>,
-    audit: Mutex<W>,
+    /// The unified audit writer (`02-3`): one `net.egress` event per request,
+    /// fanned out to every sink the policy selected.
+    audit: Arc<kennel_audit::Writer>,
 }
 
 /// Why [`Proxy::resolve_and_connect`] did not yield an upstream connection.
@@ -87,22 +89,22 @@ enum ConnectError {
     Failed(&'static str),
 }
 
-impl<W: Write + Send, R: Resolver> Proxy<W, R> {
+impl<R: Resolver> Proxy<R> {
     /// Build a proxy over an already-resolved `ruleset`, a name `resolver`, the
-    /// `accept_private_resolved` opinion, and an `audit` sink (one JSON Lines
-    /// record is written per request).
+    /// `accept_private_resolved` opinion, and the unified audit `writer` (one
+    /// `net.egress` event is emitted per request).
     pub const fn new(
         ruleset: Ruleset,
         resolver: R,
         accept_private_resolved: bool,
-        audit: W,
+        writer: Arc<kennel_audit::Writer>,
     ) -> Self {
         Self {
             ruleset,
             resolver,
             accept_private_resolved,
             host_services: Vec::new(),
-            audit: Mutex::new(audit),
+            audit: writer,
         }
     }
 
@@ -129,7 +131,6 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
     /// An OS error if accepting a connection fails.
     pub fn serve(self: &Arc<Self>, listener: &TcpListener) -> io::Result<()>
     where
-        W: 'static,
         R: 'static,
     {
         for conn in listener.incoming() {
@@ -155,7 +156,6 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
     /// listener thread panicked.
     pub fn serve_all(self: &Arc<Self>, listeners: Vec<TcpListener>) -> io::Result<()>
     where
-        W: 'static,
         R: 'static,
     {
         let handles: Vec<_> = listeners
@@ -173,12 +173,11 @@ impl<W: Write + Send, R: Resolver> Proxy<W, R> {
         Ok(())
     }
 
-    /// Write one audit record. A poisoned lock or a write error is swallowed: an
-    /// audit-sink failure must not take down request handling.
+    /// Emit one audit record through the unified writer. The writer never blocks
+    /// the caller (its sinks are buffered) and swallows sink errors internally,
+    /// so an audit-sink problem cannot take down request handling.
     fn write_audit(&self, record: &Record) {
-        if let Ok(mut sink) = self.audit.lock() {
-            let _ = writeln!(sink, "{}", record.to_jsonl());
-        }
+        self.audit.emit(&record.to_event());
     }
 
     /// Handle one connection: detect the protocol from the first byte and
@@ -542,6 +541,21 @@ mod tests {
         FakeResolver(HashMap::new())
     }
 
+    /// A writer with no sinks — emits go nowhere. These tests exercise relay and
+    /// reply behaviour, not audit content (the `Record` → event mapping is covered
+    /// in `crate::audit`'s tests).
+    fn discard_writer() -> Arc<kennel_audit::Writer> {
+        Arc::new(kennel_audit::Writer::new(
+            kennel_audit::WriterContext {
+                kennel: "test".to_owned(),
+                kennel_uuid: "test".to_owned(),
+                host: "test".to_owned(),
+            },
+            kennel_audit::Levels::default(),
+            Vec::new(),
+        ))
+    }
+
     /// Spawn a loopback echo server; return its address and the join handle.
     fn echo_server() -> (SocketAddr, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind echo");
@@ -588,7 +602,7 @@ mod tests {
     }
 
     /// Run a proxy on a loopback listener for exactly one connection.
-    fn serve_one<R: Resolver + Send + 'static>(proxy: Arc<Proxy<io::Sink, R>>) -> SocketAddr {
+    fn serve_one<R: Resolver + Send + 'static>(proxy: Arc<Proxy<R>>) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy");
         let addr = listener.local_addr().expect("proxy addr");
         std::thread::spawn(move || {
@@ -638,7 +652,7 @@ mod tests {
             allow_cidr("127.0.0.0", 8, echo_port),
             no_resolver(),
             false,
-            io::sink(),
+            discard_writer(),
         ));
         let proxy_addr = serve_one(proxy);
 
@@ -682,7 +696,7 @@ mod tests {
             }],
         };
         let proxy = Arc::new(
-            Proxy::new(ruleset, no_resolver(), false, io::sink())
+            Proxy::new(ruleset, no_resolver(), false, discard_writer())
                 .with_host_services(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, echo_port))]),
         );
         let proxy_addr = serve_one(proxy);
@@ -722,7 +736,7 @@ mod tests {
             }],
         };
         let proxy = Arc::new(
-            Proxy::new(ruleset, no_resolver(), false, io::sink())
+            Proxy::new(ruleset, no_resolver(), false, discard_writer())
                 .with_host_services(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 7022))]),
         );
         let proxy_addr = serve_one(proxy);
@@ -752,7 +766,7 @@ mod tests {
             allow_cidr("127.0.0.0", 8, 9),
             no_resolver(),
             false,
-            io::sink(),
+            discard_writer(),
         ));
         let l1 = TcpListener::bind("127.0.0.1:0").expect("bind l1");
         let a1 = l1.local_addr().expect("a1");
@@ -775,7 +789,7 @@ mod tests {
             allow_cidr("10.0.0.0", 8, echo.port()),
             no_resolver(),
             false,
-            io::sink(),
+            discard_writer(),
         ));
         let proxy_addr = serve_one(proxy);
 
@@ -814,7 +828,7 @@ mod tests {
             allow_name("echo.test", echo_port),
             FakeResolver(map),
             true,
-            io::sink(),
+            discard_writer(),
         ));
         let proxy_addr = serve_one(proxy);
 
@@ -850,7 +864,7 @@ mod tests {
             allow_name("echo.test", echo_port),
             FakeResolver(map),
             false,
-            io::sink(),
+            discard_writer(),
         ));
         let proxy_addr = serve_one(proxy);
 
@@ -881,7 +895,7 @@ mod tests {
             allow_cidr("127.0.0.0", 8, echo_port),
             no_resolver(),
             false,
-            io::sink(),
+            discard_writer(),
         ));
         let proxy_addr = serve_one(proxy);
 

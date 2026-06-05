@@ -4,7 +4,7 @@
 
 Status: working draft
 Version: 0.1
-Last updated: 2026-05-16
+Last updated: 2026-06-04
 
 ---
 
@@ -19,6 +19,8 @@ The same threat shape applies to other unsigned workloads. Malicious npm post-in
 The defence that scales correctly is capability-based constraint at a level the workload cannot influence — kernel-enforced, workload-agnostic, with policy expressed in a vocabulary durable across vendors and workload types. Project Kennel is that vocabulary: signed templates, threat-tagged audit, kernel-enforced confinement applied at user-level workload granularity.
 
 Project Kennel does not ask the workload to be trustworthy. It assumes the workload will optimise for completion (in the AI agent case) or that the developer will route around friction (in every other case), and constrains what either is permitted to look like.
+
+This is built, not proposed — and it runs **without privilege**. `kenneld` is an ordinary user process; the sandbox (mount namespace, `pivot_root`, the constructed `$HOME` view) is assembled inside an identity-mapped **user namespace**, the same kernel mechanism bubblewrap uses, so no step of the spawn needs real privilege. There is no `sudo` and no setuid-root daemon. The single privileged component is a small file-capabilities helper confined to the three host-global operations a user namespace cannot reach — adding the per-kennel loopback addresses, attaching the egress BPF, and writing a policy-granted supplementary group into the workload's `gid_map`. A confinement layer that itself demanded root would be a new privileged attack surface bolted onto the problem it set out to solve; Project Kennel does not have one. The reference runtime confines a workload end-to-end on stock Linux (kernel 6.17, Landlock ABI ≥ 6), proven as the ordinary operator.
 
 ---
 
@@ -51,7 +53,8 @@ This document has three audiences. Read the chapters that match yours.
 | 7.4 | Policy surface: AF_UNIX sockets and the shim model |
 | 7.5 | Policy surface: D-Bus (proxied) |
 | 7.6 | Policy surface: X11 (isolated only) |
-| 7.7 | Policy surface: process introspection, env, capabilities, misc |
+| 7.7 | Policy surface: process introspection, environment, capabilities, mounts, tty |
+| 7.8 | Policy surface: per-kennel SSH egress |
 | 8 | Enforcement architecture |
 | 9 | Policy lifecycle |
 | 10 | Failure modes and degraded operation |

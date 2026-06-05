@@ -242,6 +242,9 @@ mod root_tests {
 
     #[test]
     fn add_and_remove_loopback_v4_and_v6() {
+        if crate::unistd::skip_if_unprivileged("add_and_remove_loopback_v4_and_v6") {
+            return;
+        }
         let lo = if_index(c"lo").expect("lo index");
         let v4: IpAddr = "127.9.9.1".parse().expect("v4");
         let v6: IpAddr = "fd00:9:9::1".parse().expect("v6");

@@ -5,7 +5,7 @@
 //! `include`, no delta operators — only the final effective rules, plus
 //! provenance and a single signature. The template/resolution machinery that
 //! *produces* a settled policy (chain-walking, includes, deltas, the lockfile)
-//! lives alongside this module ([`crate::compile`] and friends) but is a separate,
+//! lives alongside this module ([`crate::compile`](mod@crate::compile) and friends) but is a separate,
 //! compile-time concern off the spawn hot path.
 //!
 //! ## Serialisation format
@@ -17,6 +17,8 @@
 //! canonical-form signature relies on: because the same implementation produces
 //! and verifies the canonical bytes, a fixed-field-order serialisation is
 //! reproducible without JSON's canonicalisation machinery.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -205,6 +207,11 @@ pub struct FsPolicy {
     pub read: Vec<String>,
     /// Paths granted write access.
     pub write: Vec<String>,
+    /// Home-relative paths that persist across runs (§7.7.2a). The synthesised
+    /// dotfiles are reconstructed read-only each spawn except for the paths named
+    /// here, which the dotfile seeder skips. Empty ⇒ everything is reconstructed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home_persist: Vec<String>,
     /// Private-`/tmp` tmpfs parameters. Declared after the scalar/array fields
     /// so the canonical TOML emits this sub-table last (valid table ordering).
     pub tmp: TmpPolicy,
@@ -229,6 +236,25 @@ pub struct ExecPolicy {
     /// Allowlisted binaries (absolute paths). Empty means "no exec allowlist
     /// enforced beyond the deny flags".
     pub allow: Vec<String>,
+    /// `PATH` search roots, synthesised into the workload's `$PATH` (§7.1.6).
+    /// Empty ⇒ `$PATH` is not set from policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
+    /// The kennel's login shell (synthetic-`passwd` `pw_shell` and `$SHELL`,
+    /// §7.7.2a). Defaults to `/bin/sh`; must be in [`allow`](Self::allow) when an
+    /// allowlist is enforced.
+    #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
+    pub shell: String,
+}
+
+/// The default kennel login shell.
+#[must_use]
+pub fn default_shell() -> String {
+    "/bin/sh".to_owned()
+}
+
+fn is_default_shell(s: &str) -> bool {
+    s == "/bin/sh"
 }
 
 /// Procfs policy.
@@ -426,16 +452,6 @@ const fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Installation-specific constants baked in at compile time.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct InstallConstants {
-    /// The installation's tag byte (`<tag>`).
-    pub tag: u8,
-    /// The IPv6 ULA GID for this installation (`<gid>`).
-    pub ula_gid: String,
-}
-
 /// One resolved template or fragment that contributed to the settled policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -464,11 +480,189 @@ pub struct Provenance {
     pub leaf_policy_sha256: String,
     /// SHA-256 (hex) of the invariant set enforced at compile time.
     pub invariant_set_sha256: String,
-    /// Installation constants baked in.
-    pub install_constants: InstallConstants,
     /// The resolved templates/fragments, from the lockfile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_artifacts: Vec<ResolvedArtifact>,
+}
+
+/// An active audit sink (`docs/architecture/02-3-audit-schema.md` §Sinks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditSinkKind {
+    /// Per-class JSONL files under the kennel state dir (the default).
+    File,
+    /// systemd-journald (needs the `audit-journald` build of kenneld).
+    Journald,
+    /// RFC 5424 syslog to `/dev/log`.
+    Syslog,
+    /// JSONL on kenneld's stdout (container deployments).
+    Stdout,
+}
+
+impl AuditSinkKind {
+    /// The stable lowercase token (matches the policy and proxy-config spelling).
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Journald => "journald",
+            Self::Syslog => "syslog",
+            Self::Stdout => "stdout",
+        }
+    }
+}
+
+/// File-sink tuning carried in the settled policy. Every field is optional; an
+/// unset field means kenneld applies the `02-3` default. All-unset is "empty"
+/// and omitted from the canonical form.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFileConfig {
+    /// Override the per-kennel directory (placeholders allowed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Rotate a class file once it would exceed this many bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate_at_bytes: Option<u64>,
+    /// Gzip a rotated file this many seconds after rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compress_after_seconds: Option<u64>,
+    /// Keep at most this many rotated files per class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_count: Option<u64>,
+}
+
+impl AuditFileConfig {
+    /// Whether nothing is overridden (kenneld uses all defaults).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.dir.is_none()
+            && self.rotate_at_bytes.is_none()
+            && self.compress_after_seconds.is_none()
+            && self.retain_count.is_none()
+    }
+
+    /// Layer `over` onto `self`: each field `over` sets wins, the rest stay.
+    #[must_use]
+    pub fn overlay(&self, over: &Self) -> Self {
+        Self {
+            dir: over.dir.clone().or_else(|| self.dir.clone()),
+            rotate_at_bytes: over.rotate_at_bytes.or(self.rotate_at_bytes),
+            compress_after_seconds: over.compress_after_seconds.or(self.compress_after_seconds),
+            retain_count: over.retain_count.or(self.retain_count),
+        }
+    }
+}
+
+/// The per-kennel audit runtime (`02-3`): which sinks are active and any
+/// per-class level / file / syslog deviation from the defaults.
+///
+/// Like [`SshRuntime`]/[`UnixRuntime`] this is a *service* input, not
+/// enforcement: kenneld realises it by constructing the `kennel-audit` writer.
+/// A class level left unset inherits the `02-3` default (summary, or denies-only
+/// for filesystem), so only deviations are carried — an all-default policy has
+/// an empty runtime and signs exactly as a no-`[audit]` policy did before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditRuntime {
+    /// Active sinks. Empty means kenneld uses the default (`file`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sinks: Vec<AuditSinkKind>,
+    /// `net` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_level: Option<String>,
+    /// `fs` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_level: Option<String>,
+    /// `exec` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_level: Option<String>,
+    /// `unix` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_level: Option<String>,
+    /// `dbus` class level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dbus_level: Option<String>,
+    /// Syslog facility name (default `user`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syslog_facility: Option<String>,
+    /// File-sink tuning. A table, so declared last; omitted when empty.
+    #[serde(default, skip_serializing_if = "AuditFileConfig::is_empty")]
+    pub file: AuditFileConfig,
+}
+
+impl AuditRuntime {
+    /// Whether nothing deviates from the defaults (omitted from canonical form).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.sinks.is_empty()
+            && self.network_level.is_none()
+            && self.filesystem_level.is_none()
+            && self.exec_level.is_none()
+            && self.unix_level.is_none()
+            && self.dbus_level.is_none()
+            && self.syslog_facility.is_none()
+            && self.file.is_empty()
+    }
+
+    /// Layer `over` onto `self`: every field `over` sets wins, the rest stay.
+    ///
+    /// kenneld combines the installation default, the per-user override, and the
+    /// per-kennel policy `[audit]` with this (`08` §8.1; precedence built-in <
+    /// `/etc/kennel/audit.toml` < `~/.config/kennel/audit.toml` < policy). A field
+    /// left unset everywhere falls through to the built-in default at writer build.
+    #[must_use]
+    pub fn overlay(&self, over: &Self) -> Self {
+        Self {
+            sinks: if over.sinks.is_empty() {
+                self.sinks.clone()
+            } else {
+                over.sinks.clone()
+            },
+            network_level: over
+                .network_level
+                .clone()
+                .or_else(|| self.network_level.clone()),
+            filesystem_level: over
+                .filesystem_level
+                .clone()
+                .or_else(|| self.filesystem_level.clone()),
+            exec_level: over.exec_level.clone().or_else(|| self.exec_level.clone()),
+            unix_level: over.unix_level.clone().or_else(|| self.unix_level.clone()),
+            dbus_level: over.dbus_level.clone().or_else(|| self.dbus_level.clone()),
+            syslog_facility: over
+                .syslog_facility
+                .clone()
+                .or_else(|| self.syslog_facility.clone()),
+            file: self.file.overlay(&over.file),
+        }
+    }
+}
+
+/// The synthesised environment (`07-7-other.md` §7.7.2).
+///
+/// The spawn clears the inherited environment and builds the workload's from
+/// scratch; `vars` are the fixed `KEY=value` pairs from `[env].set` (and, in
+/// future, a compile-time `[env].template`). `PATH`/`HOME`/`USER`/`SHELL` are
+/// synthesised separately by the spawn (from `[exec].path`/`shell` and the masked
+/// identity) and are not repeated here. A *service* input like [`AuditRuntime`]:
+/// omitted from the canonical form when empty, so a policy with no `[env].set`
+/// signs as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvRuntime {
+    /// Fixed environment variables, applied after the synthesised base. Sorted
+    /// (a `BTreeMap`) so the canonical form is deterministic.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, String>,
+}
+
+impl EnvRuntime {
+    /// Whether no environment variables are set (omitted from the canonical form).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.vars.is_empty()
+    }
 }
 
 /// The settled policy body (everything the signature covers).
@@ -503,6 +697,16 @@ pub struct SettledPolicy {
     /// form when empty, so a policy that grants no group signs exactly as before.
     #[serde(default, skip_serializing_if = "IdentityRuntime::is_empty")]
     pub identity: IdentityRuntime,
+    /// The per-kennel audit runtime (`02-3`). A table like [`ssh`](Self::ssh) and
+    /// declared after the others; omitted from the canonical form when empty, so a
+    /// policy with no (or all-default) `[audit]` signs exactly as before.
+    #[serde(default, skip_serializing_if = "AuditRuntime::is_empty")]
+    pub audit: AuditRuntime,
+    /// The synthesised environment (§7.7.2). A table like [`audit`](Self::audit);
+    /// omitted from the canonical form when empty, so a policy with no `[env].set`
+    /// signs exactly as before.
+    #[serde(default, skip_serializing_if = "EnvRuntime::is_empty")]
+    pub env: EnvRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

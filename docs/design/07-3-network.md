@@ -40,7 +40,7 @@ Why this is the right primitive:
 The kernel-level rules become trivially expressible:
 
 - `cgroup BPF inet4_connect`: allow `127.42.<ctx>.1:1080`, deny everything else.
-- `cgroup BPF inet6_connect`: allow `[fd<gid>:<tag>:<ctx>::1]:1080`, deny everything else.
+- `cgroup BPF inet6_connect`: allow the kennel's IPv6 primary (`0xfd | gid(40) | ctx(16) | host=1`) on `:1080`, deny everything else.
 - `cgroup BPF inet_sock_create`: deny `AF_PACKET`, `AF_NETLINK`, raw socket families.
 - `cgroup BPF bind`: allow loopback in the kennel's assigned range, deny elsewhere.
 
@@ -52,7 +52,7 @@ A small, single-purpose daemon launched per kennel:
 
 - Blocking, thread-per-connection Rust (`kennel-netproxy`). No async runtime — the same TCB bar as OpenSSH.
 - Reads the settled policy emitted by the compiler.
-- Listens on **both** the kennel's v4 and v6 loopback addresses (`Proxy::serve_all` over a listen set; kenneld passes both loopback addresses). Egress reaches the proxy symmetrically over either family.
+- Listens on **both** the kennel's v4 and v6 loopback addresses. Egress reaches the proxy symmetrically over either family.
 - Speaks SOCKS5 (well-defined, every HTTP client and most others speak it via `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`).
 - Optionally speaks HTTP CONNECT (some clients prefer it).
 - Resolves names via the OS resolver and vets the answers against the policy's name allowlist and the invariant denies before dialling.

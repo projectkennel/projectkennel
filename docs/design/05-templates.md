@@ -310,22 +310,23 @@ The default is `"empty"` for compatibility; templates that prioritise strictness
 
 ### Per-kennel service instances
 
-Some services are inappropriate to share with the user's main session but are needed by the agent. The canonical example is ssh-agent: granting the user's real `~/.ssh/agent.sock` to the agent exposes every key the user has loaded; running no ssh-agent at all breaks git-over-SSH.
+Some services are inappropriate to share with the user's main session but are needed by the agent. The canonical example is gpg-agent: the agent needs to sign commits, but it should sign with a per-kennel instance, not reach the user's main agent and every key it holds.
 
-Templates declare per-kennel service instances:
+Templates declare per-kennel service instances through `[[unix.allow]]`:
 
 ```toml
 [[unix.allow]]
-name = "ssh-agent"
-real = "/run/kennel/<kennel>/ssh-agent.sock"
-shim = "~/.ssh/agent.sock"
-env = "SSH_AUTH_SOCK"
-reason = "git-over-SSH operations via per-kennel agent"
+name = "gpg-agent"
+real = "~/.gnupg/kennels/<kennel>/S.gpg-agent"
+shim = "~/.gnupg/S.gpg-agent"
+reason = "sign commits via a per-kennel gpg-agent"
 ```
 
-Project Kennel's spawn flow recognises the per-kennel service pattern and launches a dedicated ssh-agent at kennel start, with its socket at the `real` path. The shim bind-mounts the socket into the workload's `$HOME/.ssh/agent.sock`. The environment variable `SSH_AUTH_SOCK` is set in the spawned process's environment to the shim path. When the kennel exits, the agent process is reaped and its in-memory keys are lost.
+Project Kennel binds the granted host socket into the kennel's constructed view at the `shim` path (and, where given, sets the named `env` var to that path); the socket at the `real` path is the per-kennel instance. The same pattern applies to per-kennel keyring daemons and similar.
 
-The same pattern applies to per-kennel gpg-agent, per-kennel keyring daemons, and similar. Templates declare the service; Project Kennel handles the lifecycle.
+**ssh-agent is special: prefer the bastion, not a raw shim.** An exposed ssh-agent socket is a destination-blind signing oracle: anything that can reach the socket can sign with every key the agent holds, against any host (T1.6, §7.8.1). The intended path for SSH egress is therefore the dedicated `[ssh]` section and the §7.8 re-origination bastion, which binds each synthetic key to a forced command for one fixed destination, so a kennel can never use a key against a host it was not granted and never holds the real key.
+
+A policy *may* still shim a real ssh-agent through `[[unix.allow]]` (with `env = "SSH_AUTH_SOCK"`); Project Kennel does not forbid the footgun. But because doing so re-creates the signing-oracle exposure the bastion exists to prevent, the framework flags it loudly — at validation, at compile, and at run time — so the author is choosing it with eyes open rather than by accident.
 
 ## 5.10 Signing, versioned references, and includes
 

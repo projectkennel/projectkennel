@@ -32,6 +32,10 @@ seccompiler = "=0.5.0"
 # `cargo test` runs unprivileged; CI/maintainers run `sudo -E cargo test
 # --features root-tests` (CODING-STANDARDS.md / 03-crate-decomposition.md).
 root-tests = []
+# Compiles the `journal` module and links libsystemd for the journald audit
+# sink (sd_journal_sendv FFI). Off by default; enabled transitively by
+# kennel-audit's `audit-journald` feature. Needs libsystemd-dev to build.
+audit-journald = []
 
 [lints]
 workspace = true

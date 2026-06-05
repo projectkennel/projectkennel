@@ -353,6 +353,22 @@ mod root_tests {
     use std::path::Path;
     use std::process::Command;
 
+    /// Skip a root-only test when not running as root, matching the
+    /// skip-with-cause convention of the other crates' root-tests (a skip is not
+    /// a proof). BPF cgroup load needs privilege, so without it these tests can
+    /// only fail; skipping keeps `cargo test --all-features` green for an
+    /// unprivileged runner while `sudo … --features root-tests` still exercises them.
+    fn skip_if_unprivileged(test: &str) -> bool {
+        // SAFETY: geteuid() only reads the calling process's effective uid; it
+        // takes no arguments and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            eprintln!("skipping {test}: requires root (euid={euid}) for BPF load");
+            return true;
+        }
+        false
+    }
+
     /// Compile `bpf/<name>.bpf.c` against the kernel UAPI (no CO-RE) and return
     /// the resulting object bytes. The three shared headers are copied alongside.
     fn compile_uapi(name: &str) -> Vec<u8> {
@@ -388,6 +404,9 @@ mod root_tests {
     /// attach-and-enforce behaviour for one representative program.
     #[test]
     fn all_programs_load() {
+        if skip_if_unprivileged("all_programs_load") {
+            return;
+        }
         let mut failures = Vec::new();
         for spec in KENNEL_PROGRAMS {
             let elf = compile_uapi(spec.name);
@@ -473,6 +492,9 @@ mod root_tests {
 
     #[test]
     fn load_attach_and_enforce_connect4() {
+        if skip_if_unprivileged("load_attach_and_enforce_connect4") {
+            return;
+        }
         let loaded = load_connect4();
         // It referenced real maps.
         assert!(loaded.maps.contains_key("kennel_meta_map"));
@@ -490,6 +512,9 @@ mod root_tests {
 
     #[test]
     fn connect_allowed_when_map_populated() {
+        if skip_if_unprivileged("connect_allowed_when_map_populated") {
+            return;
+        }
         let loaded = load_connect4();
         // Allow 127.0.0.1/32 on any port via BPF_MAP_UPDATE_ELEM.
         let (key, val) = allow_v4_entry([127, 0, 0, 1], 0, u16::MAX);
@@ -510,6 +535,9 @@ mod root_tests {
 
     #[test]
     fn drains_audit_event_on_connect() {
+        if skip_if_unprivileged("drains_audit_event_on_connect") {
+            return;
+        }
         let loaded = load_connect4();
         // Map the audit ringbuf before triggering traffic.
         let mut rb = loaded
@@ -572,6 +600,9 @@ mod root_tests {
 
     #[test]
     fn detach_restores_connectivity() {
+        if skip_if_unprivileged("detach_restores_connectivity") {
+            return;
+        }
         let loaded = load_connect4();
         let spec = KENNEL_PROGRAMS
             .iter()
@@ -603,6 +634,9 @@ mod root_tests {
 
     #[test]
     fn pin_and_get_program() {
+        if skip_if_unprivileged("pin_and_get_program") {
+            return;
+        }
         let loaded = load_connect4();
         let pin = c"/sys/fs/bpf/kennel-bpf-test-pin";
         let pin_path = Path::new("/sys/fs/bpf/kennel-bpf-test-pin");

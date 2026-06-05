@@ -20,9 +20,13 @@
 //! - `passwd`, `group` — minimal synthetic entries for the kennel's uid/gid (so
 //!   `getpwuid` resolves `$HOME`/shell/name) without leaking the host's user list.
 //! - `host.conf` — the legacy `multi on`.
+//! - `profile`, `bash.bashrc` — the system shell-init files (§7.7.2a): a sane
+//!   `umask` and a kennel-identifying prompt; read-only, rebuilt each spawn.
 //!
 //! Rendering is pure and unit-tested; [`materialize`] writes the set to a staging
-//! directory the spawn then bind-mounts.
+//! directory the spawn then bind-mounts. [`materialize_home_dotfiles`] does the same
+//! for the user shell-init dotfiles (`~/.bashrc`, `~/.profile`, §7.7.2a), which are
+//! copied into the kennel home and reconstructed each spawn.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -39,6 +43,8 @@ pub const FILES: &[&str] = &[
     "passwd",
     "group",
     "host.conf",
+    "profile",
+    "bash.bashrc",
 ];
 
 /// The masked account/group name the workload's uid and gid resolve to inside a kennel.
@@ -67,6 +73,9 @@ pub struct EtcParams<'a> {
     /// checked by `kenneld`, named in `/etc/group` so `id` shows names not bare
     /// numbers. These are exactly the gids the seal `setgroups` to. Empty by default.
     pub groups: &'a [(String, u32)],
+    /// The kennel's login shell (§7.7.2a): the `passwd` `pw_shell` field. `/bin/sh`
+    /// unless the policy set `[exec].shell`.
+    pub shell: &'a str,
     /// The kennel's primary IPv4 address, if it has one.
     pub v4: Option<Ipv4Addr>,
     /// The kennel's primary IPv6 address.
@@ -145,12 +154,13 @@ pub const fn nsswitch_conf() -> &'static str {
 pub fn passwd(p: &EtcParams<'_>) -> String {
     format!(
         "root:x:0:0:root:/root:/usr/sbin/nologin\n\
-         {user}:x:{uid}:{gid}:Kennel user:{home}:/bin/sh\n\
+         {user}:x:{uid}:{gid}:Kennel user:{home}:{shell}\n\
          nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
         user = ACCOUNT_NAME,
         uid = p.uid,
         gid = p.gid,
         home = p.home.display(),
+        shell = p.shell,
     )
 }
 
@@ -249,9 +259,40 @@ pub fn render(name: &str, p: &EtcParams<'_>) -> Option<String> {
         "passwd" => passwd(p),
         "group" => group(p),
         "host.conf" => host_conf().to_owned(),
+        "profile" => profile().to_owned(),
+        "bash.bashrc" => bash_bashrc(p),
         _ => return None,
     };
     Some(body)
+}
+
+/// `/etc/profile` — the system-level POSIX login-shell init (§7.7.2a).
+///
+/// Synthesised, read-only, and rebuilt every spawn (never a persistence surface).
+/// It only sets a sane `umask` and sources `/etc/bash.bashrc` for bash; `PATH` and
+/// the rest of the environment are already synthesised into the workload's `envp`
+/// (§7.7.2), so this deliberately does not set them.
+#[must_use]
+pub const fn profile() -> &'static str {
+    "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Read-only; rebuilt each spawn.\n\
+     umask 022\n\
+     if [ -n \"${BASH_VERSION-}\" ] && [ -r /etc/bash.bashrc ]; then\n\
+     \t. /etc/bash.bashrc\n\
+     fi\n"
+}
+
+/// `/etc/bash.bashrc` — the system-level interactive-bash init (§7.7.2a).
+///
+/// Sets a kennel-identifying prompt so an interactive shell is visibly inside the
+/// kennel. Synthesised, read-only, rebuilt every spawn.
+#[must_use]
+pub fn bash_bashrc(p: &EtcParams<'_>) -> String {
+    format!(
+        "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Read-only; rebuilt each spawn.\n\
+         case $- in *i*) ;; *) return ;; esac\n\
+         PS1='[kennel:{host} \\w]\\$ '\n",
+        host = p.hostname,
+    )
 }
 
 /// Write the synthetic `/etc` set into `dir` (created if absent), returning the
@@ -269,6 +310,53 @@ pub fn materialize(dir: &Path, p: &EtcParams<'_>) -> io::Result<Vec<(PathBuf, Pa
         let source = dir.join(name);
         std::fs::write(&source, body)?;
         binds.push((source, Path::new("/etc").join(name)));
+    }
+    Ok(binds)
+}
+
+/// The default user shell-init dotfiles synthesised into the kennel home (§7.7.2a).
+///
+/// Thin shims that source the (also-synthesised, reconstructed) system rc, so the
+/// real prompt/`umask`/etc. live in `/etc/profile` + `/etc/bash.bashrc` and these
+/// stay tiny. `(filename, body)`.
+const HOME_DOTFILES: &[(&str, &str)] = &[
+    (
+        ".profile",
+        "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Rebuilt each spawn.\n\
+         [ -r /etc/profile ] && . /etc/profile\n",
+    ),
+    (
+        ".bashrc",
+        "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Rebuilt each spawn.\n\
+         [ -r /etc/bash.bashrc ] && . /etc/bash.bashrc\n",
+    ),
+];
+
+/// Synthesise the user shell-init dotfiles into `dir`, returning the
+/// `(source, <home>/<name>)` binds the spawn copies into the kennel home (§7.7.2a).
+///
+/// Reconstructed every spawn (the view root is a fresh tmpfs), so a workload's edits
+/// within a run never persist — no self-poisoning surface. A dotfile whose name is in
+/// `persist` is **skipped** (not reconstructed), leaving it to the workload's own
+/// home grant to carry across runs.
+///
+/// # Errors
+///
+/// An OS error if `dir` cannot be created or a file cannot be written.
+pub fn materialize_home_dotfiles(
+    dir: &Path,
+    home: &Path,
+    persist: &[String],
+) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    std::fs::create_dir_all(dir)?;
+    let mut binds = Vec::new();
+    for (name, body) in HOME_DOTFILES {
+        if persist.iter().any(|p| p == name) {
+            continue;
+        }
+        let source = dir.join(name);
+        std::fs::write(&source, body)?;
+        binds.push((source, home.join(name)));
     }
     Ok(binds)
 }
@@ -312,6 +400,7 @@ mod tests {
             gid: 1000,
             home: Path::new("/run/kennel/agent/home"),
             groups: &[],
+            shell: "/bin/sh",
             v4: Some(Ipv4Addr::new(127, 0, 144, 17)),
             v6: "fd00:0:1:1::1".parse().expect("v6"),
         }
@@ -329,6 +418,54 @@ mod tests {
             "v6 localhost → primary"
         );
         assert!(!h.contains("127.0.0.1"), "the host's loopback is not used");
+    }
+
+    #[test]
+    fn passwd_carries_the_policy_shell() {
+        // Default shell.
+        assert!(
+            passwd(&params()).contains(":/run/kennel/agent/home:/bin/sh\n"),
+            "{}",
+            passwd(&params())
+        );
+        // A policy-selected shell.
+        let mut bash = params();
+        bash.shell = "/bin/bash";
+        assert!(passwd(&bash).contains(":/bin/bash\n"), "{}", passwd(&bash));
+    }
+
+    #[test]
+    fn system_rc_files_are_synthesised() {
+        assert!(FILES.contains(&"profile") && FILES.contains(&"bash.bashrc"));
+        let prof = render("profile", &params()).expect("profile renders");
+        assert!(prof.contains("umask 022"));
+        assert!(prof.contains("/etc/bash.bashrc"), "profile sources bashrc");
+        let rc = render("bash.bashrc", &params()).expect("bashrc renders");
+        assert!(rc.contains("PS1="));
+        assert!(rc.contains("kennel:agent"), "prompt names the kennel: {rc}");
+    }
+
+    #[test]
+    fn home_dotfiles_synthesise_and_persist_skips() {
+        let dir = std::env::temp_dir().join(format!("kennel-dot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = Path::new("/run/kennel/agent");
+
+        // Default: both dotfiles, targeted under the kennel home; .bashrc sources the
+        // system rc.
+        let binds = materialize_home_dotfiles(&dir, home, &[]).expect("dotfiles");
+        assert_eq!(binds.len(), 2);
+        assert!(binds.iter().any(|(_s, t)| t == &home.join(".bashrc")));
+        assert!(binds.iter().any(|(_s, t)| t == &home.join(".profile")));
+        let bashrc = std::fs::read_to_string(dir.join(".bashrc")).expect("read .bashrc");
+        assert!(bashrc.contains("/etc/bash.bashrc"), "{bashrc}");
+
+        // A persisted path is not reconstructed.
+        let kept =
+            materialize_home_dotfiles(&dir, home, &[".bashrc".to_owned()]).expect("dotfiles");
+        assert_eq!(kept.len(), 1);
+        assert!(kept.iter().all(|(_s, t)| t != &home.join(".bashrc")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

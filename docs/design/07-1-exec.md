@@ -91,9 +91,11 @@ This becomes the kennel's `$PATH`. Combined with `exec.allow`, Project Kennel ca
 
 ## 7.1.7 Dynamic linker and library considerations
 
-Landlock's filesystem ACL also covers reads. Project Kennel grants read access to `/usr/lib`, `/lib`, `/usr/lib64`, `/lib64`, and `/etc/ld.so.cache` by default in all templates, because every executable in `exec.allow` depends on these. Templates explicitly note this as a baseline grant.
+A dynamically-linked binary cannot run on `FS_EXECUTE` of the binary alone: the dynamic loader maps `libc`, the other shared objects, and the ELF interpreter (`ld.so`) itself with `PROT_EXEC`, and Landlock gates `mmap(PROT_EXEC)` of a file with `FS_EXECUTE` — not merely with read. The execute right on the loader's libraries is therefore a precondition for any allowlisted dynamic binary to run.
 
-Statically-linked binaries don't need lib reads, but Project Kennel cannot inspect a binary's linkage at policy-load time without either parsing ELF or running ldd, both of which are out of scope. The unconditional lib-read grant is a small over-grant for static binaries; Project Kennel accepts this rather than introduce ELF parsing.
+So Project Kennel grants **`FS_EXECUTE`** — not just read — on the loader's library directories (`/usr/lib`, `/lib`, `/usr/lib64`, `/lib64`, `/usr/local/lib`) by default in all templates, alongside the `exec.allow` binaries. These dirs hold shared objects rather than user-facing tools, so the grant is small and bounded; the binaries a policy means to gate (`/usr/bin`, `/sbin`, …) are *not* execute-granted unless listed in `exec.allow`.
+
+Statically-linked binaries don't need the lib grant, but Project Kennel cannot inspect a binary's linkage at policy-load time without either parsing ELF or running ldd, both of which are out of scope. The unconditional loader-dir grant is a small over-grant for static binaries; Project Kennel accepts this rather than introduce ELF parsing.
 
 ## 7.1.8 Interaction with `no_new_privs`
 
@@ -117,7 +119,7 @@ The combined effect of the exec policy:
 - Binaries in writable paths may not run.
 - Setuid behaviour is neutralised even if a setuid binary somehow runs.
 - `PATH` lookups find only the policy-permitted directories.
-- The dynamic linker can find libraries (because libs are readable by baseline grant).
+- The dynamic linker can load libraries (because the loader's lib dirs are execute-granted by baseline, §7.1.7).
 
 ## 7.1.10 Test plan
 

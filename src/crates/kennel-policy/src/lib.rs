@@ -17,9 +17,10 @@
 //!
 //! Both halves are implemented. The runtime verification core ([`verify_settled`])
 //! is the spawn hot path. The compile-time front end is the rest: the [`source`]
-//! schema and validation, template-chain [`resolve`]ution and folding, [`leaf`]
-//! `+=`/`-=` deltas, [`translate`]ion + substitution to the settled form, ed25519
-//! [`source_sig`]nature verification, the [`lock`]file, and the [`compile`]
+//! schema and validation, template-chain [`resolve`](mod@crate::resolve)ution and
+//! folding, [`leaf`] `+=`/`-=` deltas, [`translate`](mod@crate::translate)ion +
+//! substitution to the settled form, ed25519 [`source_sig`]nature verification, the
+//! [`lock`]file, and the [`compile`](mod@crate::compile)
 //! orchestrator that ties them together. The CLI (`kennel compile`/`validate`/`sign`)
 //! drives this crate.
 
@@ -52,18 +53,18 @@ pub use leaf::{parse as parse_leaf, LeafPolicy};
 pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use settled::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants,
-    LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
-    Provenance, ProxyListen, ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy,
-    SignedSettledPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
-    UnixSocket,
+    AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
+    EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode,
+    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
+    ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant,
+    SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
 pub use source_sig::{
     sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
 };
-pub use translate::{translate, Translated};
+pub use translate::{parse_audit_defaults, translate, Translated};
 
 /// The newest `settled_schema_version` this build accepts.
 pub const SETTLED_SCHEMA_VERSION: u32 = 1;
@@ -164,6 +165,7 @@ mod tests {
                     shim_root: "/run/kennel/ai-coding".to_owned(),
                     read: vec!["/usr".to_owned()],
                     write: vec!["/run/kennel/ai-coding/home".to_owned()],
+                    home_persist: Vec::new(),
                     tmp: TmpPolicy {
                         private: true,
                         size_mib: 512,
@@ -179,6 +181,8 @@ mod tests {
                     deny_setcap: true,
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
+                    path: vec!["/usr/bin".to_owned()],
+                    shell: settled::default_shell(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,
@@ -200,10 +204,6 @@ mod tests {
                 threat_catalogue_version: "0.1".to_owned(),
                 leaf_policy_sha256: "00".to_owned(),
                 invariant_set_sha256: "00".to_owned(),
-                install_constants: InstallConstants {
-                    tag: 42,
-                    ula_gid: "fd00::".to_owned(),
-                },
                 resolved_artifacts: vec![ResolvedArtifact {
                     name: "base-confined".to_owned(),
                     version: "v3".to_owned(),
@@ -214,6 +214,8 @@ mod tests {
             ssh: settled::SshRuntime::default(),
             unix: settled::UnixRuntime::default(),
             identity: settled::IdentityRuntime::default(),
+            audit: settled::AuditRuntime::default(),
+            env: settled::EnvRuntime::default(),
         }
     }
 

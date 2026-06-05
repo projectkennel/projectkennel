@@ -26,6 +26,12 @@ bpf-egress = ["dep:kennel-bpf", "kennel-bpf/embed-programs"]
 #   sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features root-tests
 root-tests = ["bpf-egress"]
 
+[dev-dependencies]
+# The integration tests use the effective-uid primitive to skip the
+# privilege-requiring cases with cause on an unprivileged runner (a skip is not
+# a proof). Already a normal dependency; re-listed so `tests/` can use it directly.
+kennel-syscall = { path = "../kennel-syscall" }
+
 [lints]
 workspace = true
 

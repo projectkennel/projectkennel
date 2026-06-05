@@ -42,6 +42,20 @@ fn an_unallocated_user_is_refused() {
 #[cfg(feature = "root-tests")]
 const ROOT_ALLOCATION: &str = "0:9:0000000001:kennel-root\n";
 
+/// Skip a privilege-requiring test with cause on an unprivileged runner (a skip
+/// is not a proof), matching the other crates' root-tests so `cargo test
+/// --all-features` is green for any runner while `sudo … --features root-tests`
+/// still exercises it.
+#[cfg(feature = "root-tests")]
+fn skip_if_unprivileged(test: &str) -> bool {
+    let euid = kennel_syscall::unistd::effective_uid();
+    if euid != 0 {
+        eprintln!("skipping {test}: requires root (euid={euid}) for privileged privhelper ops");
+        return true;
+    }
+    false
+}
+
 #[cfg(feature = "root-tests")]
 fn provision_root_allocation() {
     std::fs::create_dir_all("/etc/kennel").expect("mkdir /etc/kennel");
@@ -67,6 +81,9 @@ fn v4(tag: u16, ctx: u16, host: u8) -> std::net::Ipv4Addr {
 #[cfg(feature = "root-tests")]
 #[test]
 fn adds_and_removes_an_in_scope_loopback_address() {
+    if skip_if_unprivileged("adds_and_removes_an_in_scope_loopback_address") {
+        return;
+    }
     provision_root_allocation();
     // In scope for tag=9, ctx=5, /28.
     let addr = v4(9, 5, 1);
@@ -136,6 +153,9 @@ const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
 fn loads_and_attaches_egress_to_an_owned_cgroup() {
     use kennel_privhelper::wire::{EgressPayload, META_LEN};
 
+    if skip_if_unprivileged("loads_and_attaches_egress_to_an_owned_cgroup") {
+        return;
+    }
     let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
     // Model the delegated-subtree flow: kenneld (here, the test running as the
     // caller) creates the cgroup itself; it is owned by the caller's uid.
@@ -167,6 +187,9 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
 fn egress_to_a_cgroup_not_owned_by_caller_is_refused() {
     use kennel_privhelper::exec::REFUSAL_CGROUP_NOT_OWNED;
 
+    if skip_if_unprivileged("egress_to_a_cgroup_not_owned_by_caller_is_refused") {
+        return;
+    }
     let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
     // A cgroup owned by a *different* uid must be refused before any BPF syscall —
     // the delegation boundary. (Run as root, so chowning to a foreign uid is possible.)

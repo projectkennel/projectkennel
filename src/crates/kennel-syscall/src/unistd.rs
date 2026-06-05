@@ -43,6 +43,21 @@ pub fn real_gid() -> u32 {
     getgid().as_raw()
 }
 
+/// Test helper: skip a privilege-requiring test with cause on an unprivileged
+/// runner (a skip is not a proof), so `cargo test --all-features` is green for
+/// any runner while `sudo … --features root-tests` still exercises it. Shared by
+/// this crate's `root_tests` modules (which only compile under that feature, so
+/// the helper is gated the same way to stay dead-code-free without it).
+#[cfg(all(test, feature = "root-tests"))]
+pub(crate) fn skip_if_unprivileged(test: &str) -> bool {
+    let euid = effective_uid();
+    if euid != 0 {
+        eprintln!("skipping {test}: requires root (euid={euid}) for the privileged operation");
+        return true;
+    }
+    false
+}
+
 /// The calling process's supplementary group IDs (`getgroups(2)`).
 ///
 /// Used to membership-check a policy's `[identity].groups` before the privileged

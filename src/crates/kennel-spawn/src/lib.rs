@@ -55,6 +55,13 @@ pub struct RuntimeSubstitutions {
     /// The caller's resource namespace (from `/etc/kennel/subkennel`), under
     /// which this kennel's cgroup lives (`/sys/fs/cgroup/<namespace>/<ctx>`).
     pub namespace: String,
+    /// The installation/user tag (`<tag>`) — the 12-bit IPv4 loopback selector from
+    /// the caller's scope. A per-user value the daemon already holds; the compiler
+    /// defers it here rather than baking an install constant.
+    pub tag: u16,
+    /// The IPv6 ULA global ID (`<gid>`) — the 40 bits after `0xfd`, from the
+    /// caller's scope. Rendered as 10 lowercase hex digits.
+    pub ula_gid: [u8; 5],
 }
 
 /// Everything that can stop a spawn before exec.
@@ -108,10 +115,14 @@ impl From<PolicyError> for SpawnError {
 
 /// Replace the four deferred placeholders in `s`.
 fn substitute_str(s: &str, subst: &RuntimeSubstitutions) -> String {
+    let [g0, g1, g2, g3, g4] = subst.ula_gid;
+    let gid = format!("{g0:02x}{g1:02x}{g2:02x}{g3:02x}{g4:02x}");
     s.replace("<ctx>", &subst.ctx.to_string())
         .replace("<uid>", &subst.uid.to_string())
         .replace("<kennel>", &subst.kennel)
         .replace("<home>", &subst.home.to_string_lossy())
+        .replace("<tag>", &subst.tag.to_string())
+        .replace("<gid>", &gid)
 }
 
 /// Error if `value` still contains an unresolved `<…>` placeholder.
@@ -153,6 +164,21 @@ pub fn substitute(
     for bin in &mut p.effective_policy.exec.allow {
         *bin = substitute_str(bin, subst);
         reject_leftover("exec.allow", bin)?;
+    }
+    for dir in &mut p.effective_policy.exec.path {
+        *dir = substitute_str(dir, subst);
+        reject_leftover("exec.path", dir)?;
+    }
+    {
+        let shell = &mut p.effective_policy.exec.shell;
+        *shell = substitute_str(shell, subst);
+        reject_leftover("exec.shell", shell)?;
+    }
+    // The synthesised environment (§7.7.2): substitute placeholders in the values
+    // (e.g. a HOME under `/run/kennel/<kennel>/…`); keys are fixed var names.
+    for value in p.env.vars.values_mut() {
+        *value = substitute_str(value, subst);
+        reject_leftover("env.set", value)?;
     }
 
     Ok(p)
@@ -759,7 +785,7 @@ fn join_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
 /// map/program fds (and, with the program, the attachment).
 ///
 /// `objects` pairs each program spec with its compiled object bytes (from
-/// [`kennel_bpf::programs`] in production, or compiled in tests). Each program
+/// `kennel_bpf::programs` in production, or compiled in tests). Each program
 /// currently gets its own maps; sharing one map set across all programs is a
 /// later increment, so for now pass the program(s) whose maps you populate
 /// (e.g. `connect4` for the v4 egress allowlist). IPv6 maps and the bind/proxy
@@ -835,9 +861,9 @@ fn populate_egress_maps(loaded: &kennel_bpf::Loaded, plan: &Plan) -> Result<(), 
 mod tests {
     use super::*;
     use kennel_policy::{
-        CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, InstallConstants,
-        LifecyclePolicy, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
-        Provenance, SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
+        CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
+        NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
+        SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
     };
     use kennel_syscall::landlock::{AccessFs, AccessNet};
     use kennel_syscall::namespace::Namespaces;
@@ -884,6 +910,7 @@ mod tests {
                     shim_root: "/run/kennel/<kennel>".to_owned(),
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
+                    home_persist: Vec::new(),
                     tmp: TmpPolicy {
                         private: true,
                         size_mib: 512,
@@ -899,6 +926,8 @@ mod tests {
                     deny_setcap: true,
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
+                    path: Vec::new(),
+                    shell: "/bin/sh".to_owned(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,
@@ -920,15 +949,13 @@ mod tests {
                 threat_catalogue_version: "0.1".to_owned(),
                 leaf_policy_sha256: "00".to_owned(),
                 invariant_set_sha256: "00".to_owned(),
-                install_constants: InstallConstants {
-                    tag: 42,
-                    ula_gid: "fd00::".to_owned(),
-                },
                 resolved_artifacts: Vec::new(),
             },
             ssh: kennel_policy::SshRuntime::default(),
             unix: kennel_policy::UnixRuntime::default(),
             identity: kennel_policy::IdentityRuntime::default(),
+            audit: kennel_policy::AuditRuntime::default(),
+            env: kennel_policy::EnvRuntime::default(),
         }
     }
 
@@ -939,6 +966,8 @@ mod tests {
             kennel: "ai-coding".to_owned(),
             home: PathBuf::from("/home/dev"),
             namespace: "kennel-dev".to_owned(),
+            tag: 42,
+            ula_gid: [0, 0, 0, 0, 2],
         }
     }
 
@@ -953,6 +982,27 @@ mod tests {
         assert_eq!(
             p.effective_policy.fs.write,
             vec!["/run/kennel/ai-coding/home".to_owned()]
+        );
+    }
+
+    #[test]
+    fn tag_and_gid_are_filled_from_scope_at_spawn() {
+        // <tag>/<gid> are deferred by the compiler and filled here, from the
+        // RuntimeSubstitutions the daemon builds from the user's scope.
+        let mut p = policy_with_placeholders();
+        p.env
+            .vars
+            .insert("PROXY".to_owned(), "127.<tag>.<ctx>.1".to_owned());
+        p.env.vars.insert("ULA".to_owned(), "fd<gid>".to_owned());
+        let out = substitute(&p, &subst()).expect("substitute");
+        // subst(): tag 42, ctx 7, ula_gid [0,0,0,0,2].
+        assert_eq!(
+            out.env.vars.get("PROXY").map(String::as_str),
+            Some("127.42.7.1")
+        );
+        assert_eq!(
+            out.env.vars.get("ULA").map(String::as_str),
+            Some("fd0000000002")
         );
     }
 
@@ -983,11 +1033,32 @@ mod tests {
         assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));
         assert!(plan.cgroup_join, "policy-derived plans enter their cgroup");
 
-        // Landlock: a read rule for each read path, a write rule for each write.
-        assert!(plan
-            .landlock_fs
-            .iter()
-            .any(|(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)));
+        // Landlock with the exec allowlist active (exec.allow is non-empty):
+        // a read path is read-only and NOT implicitly executable; the
+        // allowlisted binary and the loader's lib dirs carry EXECUTE; writes
+        // carry write access (§7.1).
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/usr")
+                    && acc.contains(AccessFs::READ_FILE)
+                    && !acc.contains(AccessFs::EXECUTE)),
+            "with an exec allowlist, a read path must not be executable"
+        );
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/usr/bin/python3")
+                    && acc.contains(AccessFs::EXECUTE)),
+            "the allowlisted binary gets EXECUTE"
+        );
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/usr/lib")
+                    && acc.contains(AccessFs::EXECUTE)),
+            "the loader's lib dir (covered by the /usr read grant) gets EXECUTE"
+        );
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
             == &PathBuf::from("/run/kennel/ai-coding/home")
             && acc.contains(AccessFs::WRITE_FILE)));
@@ -1030,6 +1101,52 @@ mod tests {
         };
         assert_eq!(plan.bpf_meta.get(0..4), Some(&magic[..]));
         assert_eq!(plan.bpf_meta.get(6), Some(&7u8), "ctx byte");
+    }
+
+    #[test]
+    fn empty_exec_allowlist_keeps_reads_executable() {
+        // The permissive posture (no exec.allow) is unchanged: a read path stays
+        // executable, and no separate per-binary EXECUTE rule is added.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.exec.allow.clear();
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        assert!(
+            plan.landlock_fs.iter().any(
+                |(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)
+            ),
+            "without an exec allowlist, read paths remain executable"
+        );
+        assert!(
+            !plan
+                .landlock_fs
+                .iter()
+                .any(|(path, _)| path == &PathBuf::from("/usr/bin/python3")),
+            "no per-binary exec rule without an allowlist"
+        );
+    }
+
+    #[test]
+    fn exec_allow_under_writable_path_is_rejected_when_deny_writable() {
+        // deny_writable (§7.1): refuse to make a writable path executable.
+        let mut p = policy_with_placeholders(); // deny_writable = true
+        p.effective_policy
+            .exec
+            .allow
+            .push("/run/kennel/<kennel>/home/evil".to_owned());
+        let err = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect_err("an allowlisted binary under a writable path must be rejected");
+        assert!(matches!(err, SpawnError::InvalidPolicy(_)), "got {err:?}");
     }
 
     #[test]
@@ -1667,8 +1784,24 @@ mod root_tests {
     use std::io::Read;
     use std::process::{Command, Stdio};
 
+    /// Skip a privilege-requiring test with cause on an unprivileged runner (a
+    /// skip is not a proof), matching the other crates' root-tests so `cargo test
+    /// --all-features` is green for any runner while `sudo … --features
+    /// root-tests` still exercises it.
+    fn skip_if_unprivileged(test: &str) -> bool {
+        let euid = kennel_syscall::unistd::effective_uid();
+        if euid != 0 {
+            eprintln!("skipping {test}: requires root (euid={euid}) for the privileged spawn");
+            return true;
+        }
+        false
+    }
+
     #[test]
     fn pid_and_mount_namespace_isolate_the_workload() {
+        if skip_if_unprivileged("pid_and_mount_namespace_isolate_the_workload") {
+            return;
+        }
         // mount/pid/ipc isolation, Landlock allowing just enough to run a shell
         // and read /proc, no seccomp. A new PID namespace makes the shell PID 1;
         // the freshly-mounted /proc shows only the namespace's own processes.
@@ -1730,6 +1863,9 @@ mod root_tests {
 
     #[test]
     fn file_binds_shadow_targets_in_the_kennel() {
+        if skip_if_unprivileged("file_binds_shadow_targets_in_the_kennel") {
+            return;
+        }
         // Stage a synthetic file and bind it over a target (the /etc-shadow idiom).
         // Outside /tmp, which spawn covers with a fresh tmpfs. A non-existent target
         // is included to prove it is skipped rather than failing the spawn.
@@ -1795,6 +1931,9 @@ mod root_tests {
 
     #[test]
     fn pivot_root_hides_non_granted_names() {
+        if skip_if_unprivileged("pivot_root_hides_non_granted_names") {
+            return;
+        }
         // The constructed view (§7.2.5) must make a non-granted sibling's NAME
         // absent (ENOENT), not merely access-denied, while a granted path stays
         // readable through the shim. Staged outside /tmp (the seal tmpfs-mounts
@@ -1971,6 +2110,9 @@ mod root_tests {
 
     #[test]
     fn bpf_egress_enforces_the_allowlist() {
+        if skip_if_unprivileged("bpf_egress_enforces_the_allowlist") {
+            return;
+        }
         // A listener so a permitted connect *succeeds* (vs. a denied one failing
         // with EPERM) — success/failure cleanly distinguishes allow from deny.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
@@ -1998,6 +2140,9 @@ mod root_tests {
 
     #[test]
     fn spawn_joins_the_workload_into_its_cgroup() {
+        if skip_if_unprivileged("spawn_joins_the_workload_into_its_cgroup") {
+            return;
+        }
         // The workload, spawned with `cgroup_join`, should write itself into the
         // cgroup in the seal — so its /proc/self/cgroup reports that cgroup. Run
         // as root, which may write any cgroup.procs; the delegated-subtree case

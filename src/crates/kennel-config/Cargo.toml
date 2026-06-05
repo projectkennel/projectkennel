@@ -1,0 +1,17 @@
+[package]
+name = "kennel-config"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel's layered deployment configuration: resolve install paths (the privhelper, helper binaries, the daemon trust store) and CLI conveniences through a TOML cascade with compiled-in fallback defaults, so no install-specific path is baked into a binary. Security-sensitive keys resolve from root-owned dirs only."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+basic-toml = "=0.1.10"
+
+[lints]
+workspace = true

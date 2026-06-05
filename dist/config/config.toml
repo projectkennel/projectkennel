@@ -1,0 +1,17 @@
+# Project Kennel — user config (`config.toml`).
+#
+# Conveniences for the `kennel` CLI. Search order (highest priority first):
+#   ~/.config/kennel/config.toml  (or $XDG_CONFIG_HOME/kennel/config.toml)
+#   /etc/kennel/config.toml
+#   /usr/lib/kennel/config.toml   (this vendor copy)
+#
+# Safe to edit as a user: it only steers where the CLI looks while authoring
+# policies. The daemon enforces against its own locked trust store
+# (system.toml's trust_dir) regardless of anything here.
+
+# Where `kennel compile` / `kennel validate` search for templates and signing
+# keys. Absolute paths only (no ~ expansion). A set list REPLACES the built-in
+# default (<user-config>/templates + /etc/kennel/templates, and .../keys).
+#
+# template_dirs = ["/etc/kennel/templates"]
+# key_dirs      = ["/etc/kennel/keys"]

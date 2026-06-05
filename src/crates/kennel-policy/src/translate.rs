@@ -2,7 +2,7 @@
 //!
 //! # Purpose
 //!
-//! The compiler stage after [`crate::resolve`]: take the effective [`SourcePolicy`]
+//! The compiler stage after [`crate::resolve`](mod@crate::resolve): take the effective [`SourcePolicy`]
 //! (rich, human-facing, every section) and produce the flat
 //! [`crate::settled::EffectivePolicy`] the runtime enforces, plus the list of
 //! per-instance placeholders the runtime must still fill
@@ -21,11 +21,12 @@
 //!
 //! # Substitution
 //!
-//! Installation constants (`<tag>`, `<gid>`) are substituted now, at compile time.
-//! Per-instance placeholders (`<kennel>`, `<ctx>`, `<uid>`, `<home>`, `<user>`) are
-//! left in place and recorded in `deferred_substitutions`; the runtime fills exactly
-//! those and refuses to spawn if any *other* placeholder survives (02-2 §Variable
-//! substitution).
+//! Nothing is substituted at compile time. Every placeholder — `<kennel>`, `<ctx>`,
+//! `<uid>`, `<home>`, `<user>`, and the per-user `<tag>`/`<gid>` — is left in place
+//! and recorded in `deferred_substitutions`; the daemon fills them all at spawn from
+//! the user's scope and identity (it loads the scope from `/etc/kennel/subkennel`),
+//! and refuses to spawn if any *other* placeholder survives (02-2 §Variable
+//! substitution). The compiler never needs to know the installation's tag/gid.
 //!
 //! # Non-goals
 //!
@@ -37,12 +38,13 @@
 //! stays architecture-independent and no syscall-number table lives in this pure crate.
 
 use crate::settled::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, IdentityRuntime, InstallConstants,
-    LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol,
-    ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy,
-    TtlAction, UnixRuntime, UnixSocket,
+    AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
+    EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode,
+    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
+    SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
+    UnixSocket,
 };
-use crate::source::SourcePolicy;
+use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
 use std::collections::BTreeSet;
 
@@ -58,6 +60,10 @@ pub struct Translated {
     pub unix: UnixRuntime,
     /// The workload's in-kennel identity (§7.2) — the supplementary groups it retains.
     pub identity: IdentityRuntime,
+    /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
+    pub audit: AuditRuntime,
+    /// The synthesised environment (§7.7.2) — the fixed `[env].set` vars.
+    pub env: EnvRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -65,20 +71,17 @@ pub struct Translated {
 /// Translate an effective (resolved, folded) source policy into the settled form.
 ///
 /// `effective` must be the output of [`crate::resolve::resolve`] (nothing left to
-/// inherit). `install` supplies the installation constants substituted now.
+/// inherit). All placeholders are deferred to spawn (see the module §Substitution).
 ///
 /// # Errors
 ///
 /// Returns [`PolicyError::Translation`] if a required field is missing or a human
 /// form (CIDR, size, duration, port spec, net mode) is malformed.
-pub fn translate(
-    effective: &SourcePolicy,
-    install: &InstallConstants,
-) -> Result<Translated, PolicyError> {
+pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let mut deferred = BTreeSet::new();
-    let net = translate_net(effective, install, &mut deferred)?;
-    let fs = translate_fs(effective, install, &mut deferred)?;
-    let exec = translate_exec(effective, install, &mut deferred);
+    let net = translate_net(effective, &mut deferred)?;
+    let fs = translate_fs(effective, &mut deferred)?;
+    let exec = translate_exec(effective, &mut deferred)?;
     let proc = translate_proc(effective)?;
     let cap = CapPolicy {
         no_new_privs: effective
@@ -100,8 +103,10 @@ pub fn translate(
     };
     let lifecycle = translate_lifecycle(effective)?;
     let ssh = translate_ssh(effective);
-    let unix = translate_unix(effective, install, &mut deferred);
+    let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective);
+    let audit = translate_audit(effective, &mut deferred)?;
+    let env = translate_env(effective, &mut deferred);
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -116,8 +121,162 @@ pub fn translate(
         ssh,
         unix,
         identity,
+        audit,
+        env,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Flatten the source `[env].set` into the settled [`EnvRuntime`] (§7.7.2). The
+/// environment is *synthesised* from policy, not curated from the parent: only the
+/// explicit `set` map is carried (the legacy `pass`/`deny` curation fields are
+/// ignored — there is no inheritance to filter). Placeholders in the values are
+/// recorded as deferred (filled by the daemon at spawn), like every other policy
+/// string. An empty result is omitted from the canonical form.
+fn translate_env(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> EnvRuntime {
+    let mut vars = std::collections::BTreeMap::new();
+    if let Some(set) = src.env.as_ref().and_then(|e| e.set.as_ref()) {
+        for (key, value) in set {
+            vars.insert(key.clone(), subst(value, deferred));
+        }
+    }
+    EnvRuntime { vars }
+}
+
+/// The valid per-class audit levels and the valid syslog facilities.
+const AUDIT_LEVELS: [&str; 4] = ["off", "denies-only", "summary", "full"];
+const SYSLOG_FACILITIES: [&str; 20] = [
+    "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv",
+    "ftp", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7",
+];
+
+/// Flatten the source `[audit]` section into the settled [`AuditRuntime`],
+/// validating sink names, per-class levels, sizes, and the syslog facility.
+/// Only deviations from the `02-3` defaults are carried; an absent or all-default
+/// section yields the empty runtime (omitted from the canonical form).
+fn translate_audit(
+    src: &SourcePolicy,
+    deferred: &mut BTreeSet<String>,
+) -> Result<AuditRuntime, PolicyError> {
+    src.audit.as_ref().map_or_else(
+        || Ok(AuditRuntime::default()),
+        |audit| translate_audit_section(audit, deferred),
+    )
+}
+
+/// Translate one `[audit]` section — a policy's, or a standalone `audit.toml`
+/// defaults file — into the settled [`AuditRuntime`].
+fn translate_audit_section(
+    audit: &AuditSection,
+    deferred: &mut BTreeSet<String>,
+) -> Result<AuditRuntime, PolicyError> {
+    let mut sinks = Vec::new();
+    for name in &audit.sinks {
+        let kind = match name.as_str() {
+            "file" => AuditSinkKind::File,
+            "journald" => AuditSinkKind::Journald,
+            "syslog" => AuditSinkKind::Syslog,
+            "stdout" => AuditSinkKind::Stdout,
+            other => {
+                return Err(translation(format!(
+                    "unknown audit sink `{other}` (expected file/journald/syslog/stdout)"
+                )))
+            }
+        };
+        if !sinks.contains(&kind) {
+            sinks.push(kind);
+        }
+    }
+
+    let level =
+        |class: &Option<crate::source::AuditClassSection>| -> Result<Option<String>, PolicyError> {
+            match class.as_ref().and_then(|c| c.level.as_ref()) {
+                None => Ok(None),
+                Some(l) if AUDIT_LEVELS.contains(&l.as_str()) => Ok(Some(l.clone())),
+                Some(l) => Err(translation(format!(
+                    "unknown audit level `{l}` (expected off/denies-only/summary/full)"
+                ))),
+            }
+        };
+
+    let syslog_facility = match audit.syslog.as_ref().and_then(|s| s.facility.as_ref()) {
+        None => None,
+        Some(f) if SYSLOG_FACILITIES.contains(&f.as_str()) => Some(f.clone()),
+        Some(f) => {
+            return Err(translation(format!(
+                "unknown syslog facility `{f}` (expected user/daemon/auth/local0-7/…)"
+            )))
+        }
+    };
+
+    let file = match &audit.file {
+        None => AuditFileConfig::default(),
+        Some(f) => AuditFileConfig {
+            dir: f.dir.as_ref().map(|d| subst(d, deferred)),
+            rotate_at_bytes: match &f.rotate_at_bytes {
+                None => None,
+                Some(s) => Some(parse_size_bytes(s)?),
+            },
+            compress_after_seconds: f.compress_after_seconds,
+            retain_count: f.retain_count,
+        },
+    };
+
+    Ok(AuditRuntime {
+        sinks,
+        network_level: level(&audit.network)?,
+        filesystem_level: level(&audit.filesystem)?,
+        exec_level: level(&audit.exec)?,
+        unix_level: level(&audit.unix)?,
+        dbus_level: level(&audit.dbus)?,
+        syslog_facility,
+        file,
+    })
+}
+
+/// Parse a standalone `audit.toml` defaults file into an [`AuditRuntime`].
+///
+/// The file body is the `[audit]` section content at top level (`sinks`,
+/// `[file]`, `[network]`/`[filesystem]`/…), validated exactly as a policy's
+/// `[audit]` section is. For the installation-wide `/etc/kennel/audit.toml` and
+/// the per-user override (`08` §8.1). `dir` placeholders are left literal —
+/// kenneld roots the file sink at the per-kennel state dir regardless.
+///
+/// # Errors
+/// [`PolicyError::Parse`] if the TOML is malformed, or a translation error for an
+/// unknown sink/level/facility or a malformed size.
+pub fn parse_audit_defaults(toml: &str) -> Result<AuditRuntime, PolicyError> {
+    let section: AuditSection =
+        basic_toml::from_str(toml).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    let mut deferred = BTreeSet::new();
+    translate_audit_section(&section, &mut deferred)
+}
+
+/// Parse a human byte size (`"64M"`, `"1G"`, `"512K"`, bare = bytes) into bytes.
+fn parse_size_bytes(s: &str) -> Result<u64, PolicyError> {
+    let bad = || {
+        translation(format!(
+            "size `{s}` is not a number with an optional K/M/G suffix"
+        ))
+    };
+    let trimmed = s.trim();
+    // (suffix-pair, multiplier), largest first; bare number is bytes.
+    let units: [([char; 2], u64); 3] = [
+        (['G', 'g'], 1024 * 1024 * 1024),
+        (['M', 'm'], 1024 * 1024),
+        (['K', 'k'], 1024),
+    ];
+    let mut num = trimmed;
+    let mut mult = 1_u64;
+    for (suffix, factor) in units {
+        if let Some(stripped) = trimmed.strip_suffix(suffix) {
+            num = stripped;
+            mult = factor;
+            break;
+        }
+    }
+    let value = num.trim().parse::<u64>().map_err(|_| bad())?;
+    value.checked_mul(mult).ok_or_else(bad)
 }
 
 /// Gather the workload's retained supplementary groups (§7.2): the explicit
@@ -152,11 +311,7 @@ fn translate_identity(src: &SourcePolicy) -> IdentityRuntime {
 /// Install constants are substituted now; per-instance placeholders (`<kennel>`,
 /// `<uid>`, `<home>`) survive into [`Translated::deferred_substitutions`] for the
 /// runtime to fill.
-fn translate_unix(
-    src: &SourcePolicy,
-    install: &InstallConstants,
-    deferred: &mut BTreeSet<String>,
-) -> UnixRuntime {
+fn translate_unix(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> UnixRuntime {
     let Some(unix) = &src.unix else {
         return UnixRuntime::default();
     };
@@ -166,8 +321,8 @@ fn translate_unix(
         .filter_map(|a| match (&a.real, &a.shim) {
             (Some(real), Some(shim)) => Some(UnixSocket {
                 name: a.name.clone().unwrap_or_default(),
-                real: subst(real, install, deferred),
-                shim: subst(shim, install, deferred),
+                real: subst(real, deferred),
+                shim: subst(shim, deferred),
                 env: a.env.clone(),
             }),
             _ => None,
@@ -215,7 +370,6 @@ fn translate_ssh(src: &SourcePolicy) -> SshRuntime {
 
 fn translate_net(
     src: &SourcePolicy,
-    install: &InstallConstants,
     deferred: &mut BTreeSet<String>,
 ) -> Result<NetPolicy, PolicyError> {
     let net = src.net.as_ref().ok_or_else(|| missing("net"))?;
@@ -240,7 +394,7 @@ fn translate_net(
         let protocol = parse_protocol(entry.protocol.as_deref())?;
         if let Some(cidr) = &entry.cidr {
             let (addr, prefix_len) = parse_cidr(cidr)?;
-            let addr = subst(&addr, install, deferred);
+            let addr = subst(&addr, deferred);
             if entry.ports.is_empty() {
                 allow.push(NetRule {
                     cidr: addr,
@@ -340,7 +494,6 @@ fn parse_cidr(cidr: &str) -> Result<(String, u8), PolicyError> {
 
 fn translate_fs(
     src: &SourcePolicy,
-    install: &InstallConstants,
     deferred: &mut BTreeSet<String>,
 ) -> Result<FsPolicy, PolicyError> {
     let fs = src.fs.as_ref().ok_or_else(|| missing("fs"))?;
@@ -349,10 +502,10 @@ fn translate_fs(
         .shim_root
         .as_deref()
         .ok_or_else(|| missing("fs.home.shim_root"))?;
-    let shim_root = subst(shim_root_raw, install, deferred);
+    let shim_root = subst(shim_root_raw, deferred);
 
-    let read = subst_each(fs.read.as_deref().unwrap_or_default(), install, deferred);
-    let write = subst_each(fs.write.as_deref().unwrap_or_default(), install, deferred);
+    let read = subst_each(fs.read.as_deref().unwrap_or_default(), deferred);
+    let write = subst_each(fs.write.as_deref().unwrap_or_default(), deferred);
 
     let tmp = match &fs.tmp {
         Some(t) => TmpPolicy {
@@ -379,23 +532,25 @@ fn translate_fs(
             .as_ref()
             .and_then(|d| d.allow.as_deref())
             .unwrap_or_default(),
-        install,
         deferred,
     );
     if let Some(d) = &fs.dev {
         for pt in &d.passthrough {
             if let Some(path) = &pt.path {
-                dev_allow.push(subst(path, install, deferred));
+                dev_allow.push(subst(path, deferred));
             }
         }
     }
     let dev = DevPolicy { allow: dev_allow };
+
+    let home_persist = subst_each(&home.persist, deferred);
 
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
         shim_root,
         read,
         write,
+        home_persist,
         tmp,
         dev,
     })
@@ -431,23 +586,39 @@ fn parse_size_mib(s: &str) -> Result<u32, PolicyError> {
 
 fn translate_exec(
     src: &SourcePolicy,
-    install: &InstallConstants,
     deferred: &mut BTreeSet<String>,
-) -> ExecPolicy {
+) -> Result<ExecPolicy, PolicyError> {
     let exec = src.exec.as_ref();
     let flag =
         |f: fn(&crate::source::ExecSection) -> Option<bool>| exec.and_then(f).unwrap_or(false);
-    ExecPolicy {
+    let allow = subst_each(
+        exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
+        deferred,
+    );
+    let path = subst_each(
+        exec.and_then(|e| e.path.as_deref()).unwrap_or_default(),
+        deferred,
+    );
+    // The login shell (§7.7.2a): default /bin/sh, and — when an exec allowlist is
+    // enforced — it must be one of the permitted binaries, or the kennel would set
+    // a shell it then refuses to run. Caught here, at compile time.
+    let shell = exec
+        .and_then(|e| e.shell.clone())
+        .map_or_else(crate::settled::default_shell, |s| subst(&s, deferred));
+    if !allow.is_empty() && !allow.contains(&shell) {
+        return Err(translation(format!(
+            "[exec].shell `{shell}` is not in exec.allow (the kennel would refuse to run its own shell)"
+        )));
+    }
+    Ok(ExecPolicy {
         deny_setuid: flag(|e| e.deny_setuid),
         deny_setgid: flag(|e| e.deny_setgid),
         deny_setcap: flag(|e| e.deny_setcap),
         deny_writable: flag(|e| e.deny_writable),
-        allow: subst_each(
-            exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
-            install,
-            deferred,
-        ),
-    }
+        allow,
+        path,
+        shell,
+    })
 }
 
 // ---- proc / lifecycle ----------------------------------------------------------
@@ -537,21 +708,19 @@ fn parse_duration_secs(s: &str) -> Result<u64, PolicyError> {
 // ---- substitution --------------------------------------------------------------
 
 /// Substitute install constants in `s` and record any remaining `<…>` placeholders.
-fn subst(s: &str, install: &InstallConstants, deferred: &mut BTreeSet<String>) -> String {
-    let out = s
-        .replace("<tag>", &install.tag.to_string())
-        .replace("<gid>", &install.ula_gid);
-    collect_placeholders(&out, deferred);
-    out
+fn subst(s: &str, deferred: &mut BTreeSet<String>) -> String {
+    // `<tag>`/`<gid>` are NOT substituted here. They are per-user values the daemon
+    // already holds (the reserved scope it loads from `/etc/kennel/subkennel`), so
+    // they are deferred to spawn like `<ctx>`/`<uid>` — the compiler only records
+    // them. This keeps one source of truth (the daemon) and means the CLI never has
+    // to know or find out the installation's tag/gid.
+    collect_placeholders(s, deferred);
+    s.to_owned()
 }
 
 /// Apply [`subst`] to each element of a slice.
-fn subst_each(
-    items: &[String],
-    install: &InstallConstants,
-    deferred: &mut BTreeSet<String>,
-) -> Vec<String> {
-    items.iter().map(|s| subst(s, install, deferred)).collect()
+fn subst_each(items: &[String], deferred: &mut BTreeSet<String>) -> Vec<String> {
+    items.iter().map(|s| subst(s, deferred)).collect()
 }
 
 /// Record every `<lowercase-token>` occurrence in `s` into `deferred`.
@@ -610,17 +779,10 @@ mod tests {
             BASE_CONFINED.as_bytes().to_vec(),
         )])
     }
-    fn install() -> InstallConstants {
-        InstallConstants {
-            tag: 42,
-            ula_gid: "fd00:abcd::".to_owned(),
-        }
-    }
-
     fn translate_template(src: &str) -> Translated {
         let entry = parse(src.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &base_src()).expect("resolve");
-        translate(&resolved.effective, &install()).expect("translate")
+        translate(&resolved.effective).expect("translate")
     }
 
     #[test]
@@ -670,6 +832,170 @@ mod tests {
         assert!(translate_ssh(&SourcePolicy::default()).is_empty());
     }
 
+    fn translate_audit_str(src: &str) -> Result<AuditRuntime, PolicyError> {
+        let mut deferred = BTreeSet::new();
+        let parsed = parse(src.as_bytes()).expect("parse");
+        translate_audit(&parsed, &mut deferred)
+    }
+
+    #[test]
+    fn audit_section_flattens_sinks_levels_and_file() {
+        let rt = translate_audit_str(
+            r#"
+            name = "k"
+            [audit]
+            sinks = ["file", "journald", "file"]
+            [audit.network]
+            level = "full"
+            [audit.filesystem]
+            level = "off"
+            [audit.syslog]
+            facility = "local3"
+            [audit.file]
+            rotate_at_bytes = "64M"
+            retain_count = 4
+            "#,
+        )
+        .expect("translate");
+        assert_eq!(
+            rt.sinks,
+            vec![AuditSinkKind::File, AuditSinkKind::Journald],
+            "dedup preserves first-seen order"
+        );
+        assert_eq!(rt.network_level.as_deref(), Some("full"));
+        assert_eq!(rt.filesystem_level.as_deref(), Some("off"));
+        assert_eq!(rt.syslog_facility.as_deref(), Some("local3"));
+        assert_eq!(rt.file.rotate_at_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(rt.file.retain_count, Some(4));
+        assert!(!rt.is_empty());
+    }
+
+    #[test]
+    fn no_audit_section_is_empty_and_back_compatible() {
+        let rt = translate_audit_str("name = \"k\"").expect("translate");
+        assert!(
+            rt.is_empty(),
+            "absent [audit] omits from the canonical form"
+        );
+    }
+
+    #[test]
+    fn unknown_sink_level_facility_and_size_are_rejected() {
+        assert!(translate_audit_str("name=\"k\"\n[audit]\nsinks=[\"smtp\"]").is_err());
+        assert!(
+            translate_audit_str("name=\"k\"\n[audit.network]\nlevel=\"loud\"").is_err(),
+            "bad level rejected"
+        );
+        assert!(
+            translate_audit_str("name=\"k\"\n[audit.syslog]\nfacility=\"nope\"").is_err(),
+            "bad facility rejected"
+        );
+        assert!(
+            translate_audit_str("name=\"k\"\n[audit.file]\nrotate_at_bytes=\"big\"").is_err(),
+            "bad size rejected"
+        );
+    }
+
+    #[test]
+    fn audit_defaults_file_parses_the_section_body_at_top_level() {
+        // A standalone audit.toml: the [audit] body without the [audit] wrapper.
+        let rt = parse_audit_defaults(
+            r#"
+            sinks = ["journald"]
+            [network]
+            level = "full"
+            [file]
+            rotate_at_bytes = "128M"
+            compress_after_seconds = 3600
+            "#,
+        )
+        .expect("parse defaults");
+        assert_eq!(rt.sinks, vec![AuditSinkKind::Journald]);
+        assert_eq!(rt.network_level.as_deref(), Some("full"));
+        assert_eq!(rt.file.rotate_at_bytes, Some(128 * 1024 * 1024));
+        assert_eq!(rt.file.compress_after_seconds, Some(3600));
+    }
+
+    #[test]
+    fn audit_defaults_file_rejects_bad_values() {
+        assert!(parse_audit_defaults("sinks = [\"smtp\"]").is_err());
+        assert!(parse_audit_defaults("[file]\nrotate_at_bytes = \"big\"").is_err());
+        assert!(parse_audit_defaults("not = valid = toml").is_err());
+    }
+
+    #[test]
+    fn overlay_lets_the_higher_layer_win_per_field() {
+        // The defaults file uses the source `[audit]`-section shape: the facility
+        // is `[syslog] facility`, not the settled flat `syslog_facility`.
+        let base = parse_audit_defaults(
+            "sinks = [\"journald\"]\n[syslog]\nfacility = \"local0\"\n[file]\nretain_count = 8",
+        )
+        .expect("base");
+        let over = AuditRuntime {
+            network_level: Some("full".to_owned()),
+            file: AuditFileConfig {
+                retain_count: Some(2),
+                ..AuditFileConfig::default()
+            },
+            ..AuditRuntime::default()
+        };
+        let merged = base.overlay(&over);
+        // over wins where set:
+        assert_eq!(merged.network_level.as_deref(), Some("full"));
+        assert_eq!(merged.file.retain_count, Some(2));
+        // base survives where over is unset:
+        assert_eq!(merged.sinks, vec![AuditSinkKind::Journald]);
+        assert_eq!(merged.syslog_facility.as_deref(), Some("local0"));
+        // an empty `over.sinks` does not clobber the base sinks:
+        assert!(!merged.sinks.is_empty());
+    }
+
+    #[test]
+    fn exec_shell_and_path_translate_with_allowlist_check() {
+        let src = parse(
+            b"name = \"k\"\n[exec]\nallow = [\"/bin/bash\", \"/usr/bin/git\"]\npath = [\"/usr/bin\", \"/bin\"]\nshell = \"/bin/bash\"\n",
+        )
+        .expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        assert_eq!(ep.shell, "/bin/bash");
+        assert_eq!(ep.path, vec!["/usr/bin".to_owned(), "/bin".to_owned()]);
+
+        // A shell not in a non-empty allowlist is a compile error.
+        let bad =
+            parse(b"name = \"k\"\n[exec]\nallow = [\"/usr/bin/git\"]\nshell = \"/bin/bash\"\n")
+                .expect("parse");
+        assert!(translate_exec(&bad, &mut BTreeSet::new()).is_err());
+
+        // Default shell /bin/sh; no allowlist ⇒ no constraint.
+        let dfl = parse(b"name = \"k\"\n").expect("parse");
+        let ep2 = translate_exec(&dfl, &mut BTreeSet::new()).expect("translate");
+        assert_eq!(ep2.shell, "/bin/sh");
+        assert!(ep2.path.is_empty());
+    }
+
+    #[test]
+    fn env_set_is_synthesised_ignoring_pass_and_deny() {
+        let src = parse(
+            b"name = \"k\"\n[env]\npass = [\"FOO\"]\ndeny = [\"BAR\"]\nset = { LANG = \"C.UTF-8\", TZ = \"UTC\" }\n",
+        )
+        .expect("parse");
+        let env = translate_env(&src, &mut BTreeSet::new());
+        assert_eq!(env.vars.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert_eq!(env.vars.get("TZ").map(String::as_str), Some("UTC"));
+        // Synthesis carries only `set` — the legacy pass/deny curation is ignored.
+        assert_eq!(env.vars.len(), 2);
+    }
+
+    #[test]
+    fn fs_home_persist_carries_to_settled() {
+        let src = parse(
+            b"name = \"k\"\n[fs.home]\nshadow = true\nshim_root = \"/run/kennel/k\"\npersist = [\".bashrc\"]\n",
+        )
+        .expect("parse");
+        let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate_fs");
+        assert_eq!(fs.home_persist, vec![".bashrc".to_owned()]);
+    }
+
     #[test]
     fn unix_section_flattens_into_the_settled_runtime() {
         use crate::source::{SourcePolicy, UnixAllow, UnixSection};
@@ -688,7 +1014,7 @@ mod tests {
             ..SourcePolicy::default()
         };
         let mut deferred = BTreeSet::new();
-        let unix = translate_unix(&src, &install(), &mut deferred);
+        let unix = translate_unix(&src, &mut deferred);
         assert_eq!(unix.sockets.len(), 1);
         let s = unix.sockets.first().expect("socket");
         assert_eq!(s.name, "gpg-agent");
@@ -701,7 +1027,7 @@ mod tests {
         );
         assert!(!unix.is_empty());
         // No [unix] ⇒ empty runtime, omitted from the canonical form.
-        assert!(translate_unix(&SourcePolicy::default(), &install(), &mut deferred).is_empty());
+        assert!(translate_unix(&SourcePolicy::default(), &mut deferred).is_empty());
     }
 
     #[test]
@@ -782,11 +1108,7 @@ mod tests {
             }),
             ..SourcePolicy::default()
         };
-        let dev = translate(&src, &install())
-            .expect("translate")
-            .effective_policy
-            .fs
-            .dev;
+        let dev = translate(&src).expect("translate").effective_policy.fs.dev;
         // The pseudo-device baseline and the passthrough device both land in `allow`,
         // which is what the spawn binds. The reason/threats/group do not survive.
         assert!(dev.allow.iter().any(|d| d == "/dev/null"), "baseline kept");
@@ -865,12 +1187,8 @@ mod tests {
         assert_eq!(ep.lifecycle.ttl_seconds, Some(28_800));
         assert_eq!(ep.lifecycle.ttl_action, TtlAction::Warn);
 
-        // The per-instance placeholder is deferred, not the install constants.
+        // Per-instance placeholders are deferred to spawn (the daemon fills them).
         assert!(t.deferred_substitutions.iter().any(|p| p == "<kennel>"));
-        assert!(!t
-            .deferred_substitutions
-            .iter()
-            .any(|p| p == "<tag>" || p == "<gid>"));
     }
 
     #[test]
@@ -890,12 +1208,13 @@ mod tests {
                 threat_catalogue_version: "0.1".to_owned(),
                 leaf_policy_sha256: "00".to_owned(),
                 invariant_set_sha256: "00".to_owned(),
-                install_constants: install(),
                 resolved_artifacts: Vec::<ResolvedArtifact>::new(),
             },
             ssh: t.ssh,
             unix: t.unix,
             identity: t.identity,
+            audit: t.audit,
+            env: t.env,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }
@@ -960,11 +1279,15 @@ mod tests {
     }
 
     #[test]
-    fn install_constants_are_substituted_now() {
+    fn tag_and_gid_are_deferred_to_spawn_not_substituted() {
+        // The compiler no longer knows the installation's tag/gid; <tag>/<gid> are
+        // left in place and recorded as deferred, for the daemon to fill from the
+        // user's scope (it loads it from /etc/kennel/subkennel).
         let mut deferred = BTreeSet::new();
-        let out = subst("addr-<tag>-<gid>-<kennel>", &install(), &mut deferred);
-        assert_eq!(out, "addr-42-fd00:abcd::-<kennel>");
+        let out = subst("addr-<tag>-<gid>-<kennel>", &mut deferred);
+        assert_eq!(out, "addr-<tag>-<gid>-<kennel>");
+        assert!(deferred.contains("<tag>"));
+        assert!(deferred.contains("<gid>"));
         assert!(deferred.contains("<kennel>"));
-        assert!(!deferred.contains("<tag>"));
     }
 }

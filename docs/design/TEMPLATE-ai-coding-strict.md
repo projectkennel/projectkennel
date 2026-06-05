@@ -488,9 +488,12 @@ mode = "constrained"
 # these addresses to the host's loopback interface (or to a per-kennel
 # dummy interface) at kennel start. The SOCKS5 proxy listens here.
 #
-# Implementation:
-#   ip addr add 127.<tag>.<ctx>.1/24 dev lo
-#   ip -6 addr add fd<gid>:<tag>:<ctx>::1/64 dev lo
+# Implementation: the kennel's primary loopback (host offset 1 in its
+# per-kennel subnet). The subnets are bit-packed, not dotted octets —
+# IPv4 `127 | tag(12) | ctx(8) | host(4)` (a /28), IPv6
+# `0xfd | gid(40) | ctx(16) | host(64)` (a /64). The proxy listens on
+# offset 1; the workload reaches it via $KENNEL_SOCKS_PROXY (and
+# `localhost`, which the synthetic /etc/hosts maps to this same primary).
 #
 # The address is unique per kennel; sibling contexts get different
 # subnets. The user's normal shell can reach the kennel's address
@@ -846,10 +849,12 @@ set = {
     TMPDIR = "/tmp",
     XDG_RUNTIME_DIR = "/run/user/<uid>",  # real path; contents shimmed
     SSH_AUTH_SOCK = "/run/kennel/<kennel>/home/.ssh/agent.sock",
-    # Project Kennel sets per-kennel proxy variables:
-    HTTPS_PROXY = "socks5h://127.<tag>.<ctx>.1:1080",
-    HTTP_PROXY = "socks5h://127.<tag>.<ctx>.1:1080",
-    ALL_PROXY = "socks5h://127.<tag>.<ctx>.1:1080",
+    # Point tools at the per-kennel proxy. `localhost` resolves (via the
+    # synthetic /etc/hosts) to the kennel's primary loopback, where the proxy
+    # listens; the daemon also exports the same address as $KENNEL_SOCKS_PROXY.
+    HTTPS_PROXY = "socks5h://localhost:1080",
+    HTTP_PROXY = "socks5h://localhost:1080",
+    ALL_PROXY = "socks5h://localhost:1080",
     NO_PROXY = "",
     # The agent vendor's CLI tends to honour these for its API calls:
     # the user's leaf policy may add ANTHROPIC_API_KEY etc, but the

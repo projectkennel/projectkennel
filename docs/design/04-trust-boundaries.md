@@ -82,7 +82,7 @@ The same architectural pattern appears in every resource class. Project Kennel p
 | Resource class | Real host state | Constructed view inside kennel |
 |---|---|---|
 | Filesystem (§7.2) | Full `$HOME`, `/usr`, `/etc`, `/tmp`, `/mnt`, etc. | Shim `$HOME` containing only granted paths, bind-mounted from real locations; private `/tmp` tmpfs |
-| Network (§7.3) | Real loopback `127.0.0.1` and `::1`; full routing | Per-kennel `127.<tag>.<ctx>.0/24` and `fd<gid>:<tag>:<ctx>::/64`; outbound only via proxy |
+| Network (§7.3) | Real loopback `127.0.0.1` and `::1`; full routing | Per-kennel IPv4 `/28` (`127 \| tag(12) \| ctx(8) \| host(4)`) and IPv6 `/64` (`0xfd \| gid(40) \| ctx(16) \| host(64)`); outbound only via proxy |
 | AF_UNIX sockets (§7.4) | All sockets in `$HOME` and `$XDG_RUNTIME_DIR` | Shim view: only granted sockets present; per-kennel service instances bind-mounted to standard paths |
 | D-Bus (§7.5) | User's session bus, system bus | Per-kennel xdg-dbus-proxy filtering every method call |
 | Process visibility (§7.7) | Full system processes | PID namespace: only the kennel's own descendants |

@@ -42,11 +42,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
+name = "kennel-audit"
+version = "0.1.0"
+dependencies = [
+ "kennel-text",
+]
+
+[[package]]
 name = "kennel-bpf"
 version = "0.1.0"
 dependencies = [
  "libc",
  "object",
+]
+
+[[package]]
+name = "kennel-config"
+version = "0.1.0"
+dependencies = [
+ "basic-toml",
+ "serde",
 ]
 
 [[package]]
@@ -65,6 +80,7 @@ name = "kennel-netproxy"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "kennel-audit",
  "serde",
 ]
 
@@ -104,10 +120,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-text"
+version = "0.1.0"
+
+[[package]]
 name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "kennel-audit",
+ "kennel-config",
  "kennel-policy",
  "kennel-privhelper",
  "kennel-spawn",

@@ -41,7 +41,7 @@ Every policy file has the following top-level fields:
 | `template_name` | string | Yes for templates; No for leaf policies | The template's own name. Leaf policies use the kennel name from `name`. |
 | `name` | string | Yes for leaf policies; No for templates | The kennel name. Matches the leaf policy's filename without `.toml`. |
 | `include` | array of versioned references | No | Additional signed fragments composed additively. See §Includes. |
-| `threat_catalogue_version` | string | Yes | The version of `THREATS.md` the template was authored against. Used to detect catalogue drift. |
+| `threat_catalogue_version` | string | No | The version of `THREATS.md` the template was authored against. Used to detect catalogue drift. `Option<String>` in the schema; the validator does not require it, and the in-tree templates omit it. Authors are encouraged to set it. |
 | `signature` | object | Yes for templates and fragments; optional for leaf policies | Signature envelope over the artefact's content; see §Signatures. |
 
 The parser produces a structurally typed value before any field is read; raw `toml::Value` is not retained past parse (`10.5` in CODING-STANDARDS.md).
@@ -61,6 +61,8 @@ The full section list:
 | `[net]` and `[net.*]` | Network egress allowlist, proxy listen, loopback rules, bind rules, audit | §7.3 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling | §7.4 |
 | `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); source-only, planned | §7.8 |
+| `[identity]` | Supplementary-group isolation (`groups`); source-only, realised by the spawn seal | §7.2 |
+| `[container]` | Container-mode policy surface; source-only, design-level (no runtime yet) | §7.9 |
 | `[dbus]` | D-Bus session/system bus enablement and method filtering | §7.5 |
 | `[x11]` | X11/Wayland display server isolation | §7.6 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.7 |
@@ -161,7 +163,7 @@ include = [
 
 A fragment is structurally a template: same schema, same `[signature]` requirement, same parse/validate/verify/lock discipline. The difference is in what it may contain and how it composes:
 
-- **Additive-only.** A fragment may use `[[<section>.add]]` and `[[<section>.*.invariant]]`. It may *not* use `.remove`, `.replace`, or scalar `.override`. The validator rejects a fragment that does. Additive-only composition is order-independent and free of diamond-resolution ambiguity.
+- **Additive-only.** A fragment may use `[[<section>.add]]` and `[[<section>.*.invariant]]`. It may *not* use `.remove` or scalar `.override`. The validator rejects a fragment that does. Additive-only composition is order-independent and free of diamond-resolution ambiguity.
 - **No inheritance of its own resolution into the parent's chain.** A fragment may itself declare `template_base` only as `base-confined` (or none); it does not splice a competing inheritance line into the including policy. A fragment that names a non-base `template_base` is rejected.
 - **Conflict is an error, not last-wins.** If two includes contribute entries with the same unique key (e.g., two `[[net.allow]]` for the same host with different ports), resolution fails with `PolicyError::IncludeConflict` naming both fragments. The author reconciles deliberately.
 
@@ -189,7 +191,6 @@ For each section, the effective value is the union/override of the chain, with l
 - `[exec.allow]` and similar list-valued fields use *delta operators* in the leaf policy:
   - `[fs.read.add]` — appends entries.
   - `[fs.read.remove]` — removes entries from the inherited set, with a `reason` required for each removal.
-  - `[fs.read.replace]` — replaces the inherited list entirely; requires a `reason`.
 - Scalar fields (e.g., `[lifecycle].ttl`) are overridden by the most-leaf value that sets them.
 - Object fields (e.g., `[fs.home]`) are merged shallowly: leaf fields override template fields key-by-key.
 
@@ -217,7 +218,7 @@ The current invariants (mechanism details in design doc §12):
 - `exec.deny_setuid = true`, `exec.deny_setgid = true`, `exec.deny_setcap = true`, `exec.deny_writable = true`. Cannot be set false.
 - `fs.home.shadow = true`. The shim is mandatory.
 - `[fs.home.shim_root]` must be under `/run/kennel/<kennel>/`.
-- `[net.mode]` may be `"constrained"` or `"open"` (the latter only for `ai-coding-permissive`-style templates); it may not be `"unrestricted"` or absent.
+- `[net.mode]` may be `"none"`, `"constrained"`, or `"open"`; it may not be any other value. `"none"` and `"constrained"` both translate to the settled `NetMode::Constrained` (proxy-only egress; `"none"` is "constrained with an empty allowlist"); an absent `[net.mode]` is accepted and also translates to `Constrained`. `"open"` is the permissive mode for `ai-coding-permissive`-style templates. The runtime re-assert only checks the settled mode is `Constrained` or `Open`; the "open only for permissive templates" guidance is a convention, not a validator-enforced rule.
 - `[net.deny.invariant]` entries (cloud metadata, link-local, RFC1918) are present and cannot be removed by any delta.
 - `[proc.visibility] = "self"`.
 - `[fs.dev.allow]` is the default-deny list documented in design §7.7; user deltas may not add device files outside the framework-known safe set without an explicit `framework_override` flag (which is itself an invariant override and requires a separate signed envelope; see `04-trust-boundaries.md`).
@@ -235,16 +236,16 @@ Templates and fragments are signed. The signature covers the artefact's *content
 algorithm = "ed25519"
 key_id = "kennel-maint-2026-01"
 signature = "BASE64..."
-signed_fields = ["template_base", "include", ..., "lifecycle"]
+# signed_fields is optional advisory metadata; the in-tree templates omit it.
 ```
 
-The signature is over the canonical-form serialisation of `signed_fields`, computed by the procedure documented in `02-6-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
+The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-6-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
 
 Signature verification rules:
 
 - The signing key must be in the configured key set (the project's maintainer keys, or the customer's organisation keys for self-signed templates and fragments). The key store is under `~/.config/kennel/keys/` and `/etc/kennel/keys/` (`07-paths.md`).
 - The `algorithm` must be in the supported algorithm set (currently: `ed25519`). Cryptographic minimums are enforced at validation; negotiation below the current floor is a categorical error.
-- The `signed_fields` list must cover every top-level field of the artefact *except* `[signature]` itself — including `template_base` and `include`, so the reference's own dependency declarations are signed. An artefact that signs only a subset of its fields is rejected.
+- Coverage is whole-body, not field-selectable. The signature is over the canonical form of every top-level field *except* `[signature]` itself — including `template_base` and `include`, so the reference's own dependency declarations are always signed. The `signed_fields` list in the envelope is advisory metadata (`#[serde(default)]`, empty when absent); the verifier does not read it to decide coverage, so there is no way to sign "only a subset" — the canonical form fixes the covered bytes as the whole artefact-minus-`[signature]`.
 - An artefact whose signature does not verify is rejected even if the unverified fields are not consulted.
 
 Leaf policies may be unsigned. The user wrote them; they are loaded under the user's authority. An organisation may require leaf-policy signing via a configured policy enforcer, but the schema does not mandate it. A leaf policy's `kennel.lock` still pins the signed artefacts it references, so an unsigned leaf composing signed templates and fragments is still byte-reproducible.
@@ -258,10 +259,12 @@ The following placeholders are substituted at load time:
 | Placeholder | Meaning |
 |---|---|
 | `<kennel>` | The kennel's runtime ID (e.g., the kennel name for named kennels, or the generated ID for `--template` ad-hoc kennels). |
-| `<tag>` | The Project Kennel installation's tag byte (per-installation, fixed at install time). |
+| `<tag>` | The caller's 12-bit IPv4 loopback tag, from their `/etc/kennel/subkennel` allocation (per-user, fixed for that user). |
 | `<ctx>` | The kennel's allocated context byte (per-kennel, assigned at start by kenneld). |
-| `<gid>` | The IPv6 ULA `<gid>` byte for this installation (random at install time). |
+| `<gid>` | The caller's 40-bit IPv6 ULA global ID, from their `/etc/kennel/subkennel` allocation (per-user). |
 | `<uid>` | The user's UID as a decimal string. |
+| `<home>` | The user's home directory (the host path before shim construction). |
+| `<user>` | The user's login name. |
 
 Substitution happens once at policy resolution; the substituted values are then immutable for the lifetime of the kennel. A template that uses `<ctx>` resolves to a different concrete value for each kennel that derives from it.
 

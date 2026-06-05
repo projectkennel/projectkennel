@@ -1,29 +1,26 @@
 //! Structured audit records for proxied requests (CODING-STANDARDS.md §9.2).
 //!
-//! Every request the proxy handles — allowed or denied — produces one JSON Lines
-//! record. This is the security-relevant stream (§9.2), distinct from developer
+//! Every request the proxy handles — allowed or denied — produces one audit
+//! event. This is the security-relevant stream (§9.2), distinct from developer
 //! logging: it is what a SIEM consumes to see where confined workloads tried to
 //! reach. The proxy *is* the policy decision, so the record is authoritative —
 //! no correlation with kernel events is needed (`docs/design/07-3-network.md` §7.3.2).
 //!
-//! # Input handling
+//! # Delivery
 //!
-//! The requested host is attacker-controlled (it came from the confined
-//! workload). It is emitted as a JSON string value through a serialiser that
-//! escapes every control character and the JSON metacharacters (§10.3: JSON is
-//! never built by raw concatenation of untrusted bytes). A consumer rendering
-//! the record to a terminal still applies its own sanitisation, but the record
-//! itself is always well-formed JSON with no raw control bytes.
+//! A [`Record`] is the proxy's internal shape for one request. [`Record::to_event`]
+//! turns it into a canonical [`kennel_audit::Event`] (a `net.egress` event); the
+//! `kennel-audit` [`Writer`](kennel_audit::Writer) the server holds sanitises it,
+//! applies the audit level, and fans it out to every configured sink (the
+//! per-kennel `network.jsonl` file, and any others the policy selected). The
+//! requested host is attacker-controlled, so it is emitted as a
+//! [`Value::untrusted`] field — the writer runs the single sanitisation pass.
 //!
-//! # Non-goals
-//!
-//! This module does not write the records anywhere — it formats them. The server
-//! owns the sink (a file under the kennel's state dir, or an fd kenneld passed).
-//! It does not carry payload bytes (§9.3): only the destination, byte counts,
-//! and the policy outcome.
+//! This module does not write anywhere; it formats. The server owns the writer.
+//! It carries no payload bytes (§9.3): only the destination, byte counts, and
+//! the policy outcome.
 
-use std::fmt::Write as _;
-use std::net::IpAddr;
+use kennel_audit::{Event, Outcome as AuditOutcome, Resource, Source, Value};
 
 /// The protocol a request arrived on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +61,27 @@ pub enum Outcome {
     Failed(&'static str),
 }
 
+impl Outcome {
+    /// The canonical envelope outcome (`allowed` → allow, `denied` → deny,
+    /// `failed` → error).
+    const fn audit_outcome(self) -> AuditOutcome {
+        match self {
+            Self::Allowed { .. } => AuditOutcome::Allow,
+            Self::Denied(_) => AuditOutcome::Deny,
+            Self::Failed(_) => AuditOutcome::Error,
+        }
+    }
+
+    /// The egress-specific outcome token, retained for human triage.
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Allowed { .. } => "allowed",
+            Self::Denied(_) => "denied",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
 /// One audit record for a single proxied request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
@@ -74,100 +92,52 @@ pub struct Record {
     /// The destination port.
     pub port: u16,
     /// The address the name resolved to and the proxy connected to, if any.
-    pub resolved: Option<IpAddr>,
+    pub resolved: Option<std::net::IpAddr>,
     /// The policy outcome.
     pub outcome: Outcome,
 }
 
 impl Record {
-    /// Render this record as a single JSON Lines entry (no trailing newline).
-    ///
-    /// The output is always well-formed JSON: every string value is escaped, so
-    /// an attacker-controlled host cannot break the structure or inject control
-    /// bytes.
+    /// Render this record as a canonical `net.egress` [`Event`] for the unified
+    /// writer. The untrusted host rides a [`Value::untrusted`] field so the
+    /// writer's single sanitisation pass neutralises it before any sink.
     #[must_use]
-    pub fn to_jsonl(&self) -> String {
-        let mut out = String::with_capacity(128);
-        out.push('{');
-        push_str_field(&mut out, "event", "egress");
-        out.push(',');
-        push_str_field(&mut out, "wire", self.wire.token());
-        out.push(',');
-        push_key(&mut out, "host");
-        push_json_string(&mut out, &self.host);
-        out.push(',');
-        push_key(&mut out, "port");
-        // A u16 is plain ASCII digits; no escaping needed.
-        let _ = write!(out, "{}", self.port);
-        out.push(',');
-        push_key(&mut out, "resolved");
-        match self.resolved {
-            Some(addr) => push_json_string(&mut out, &addr.to_string()),
-            None => out.push_str("null"),
-        }
-        out.push(',');
+    pub fn to_event(&self) -> Event {
+        let resolved = self
+            .resolved
+            .map_or(Value::Null, |addr| Value::str(addr.to_string()));
+        let base = Event::new(
+            "net.egress",
+            Resource::Net,
+            self.outcome.audit_outcome(),
+            Source::Proxy,
+        )
+        .target(format!("{}:{}", self.host, self.port))
+        .field("wire", Value::str(self.wire.token()))
+        .field("egress_outcome", Value::str(self.outcome.token()))
+        .field("host", Value::untrusted(self.host.clone()))
+        .field("port", Value::Uint(u64::from(self.port)))
+        .field("resolved", resolved);
         match self.outcome {
             Outcome::Allowed {
                 bytes_up,
                 bytes_down,
-            } => {
-                push_str_field(&mut out, "outcome", "allowed");
-                let _ = write!(out, ",\"bytes_up\":{bytes_up},\"bytes_down\":{bytes_down}");
-            }
-            Outcome::Denied(reason) => {
-                push_str_field(&mut out, "outcome", "denied");
-                out.push(',');
-                push_str_field(&mut out, "reason", reason);
-            }
-            Outcome::Failed(reason) => {
-                push_str_field(&mut out, "outcome", "failed");
-                out.push(',');
-                push_str_field(&mut out, "reason", reason);
+            } => base
+                .field("bytes_up", Value::Uint(bytes_up))
+                .field("bytes_down", Value::Uint(bytes_down)),
+            Outcome::Denied(reason) | Outcome::Failed(reason) => {
+                base.field("reason", Value::str(reason))
             }
         }
-        out.push('}');
-        out
     }
-}
-
-/// Append `"key":` to `out`. Keys here are all internal string literals.
-fn push_key(out: &mut String, key: &str) {
-    push_json_string(out, key);
-    out.push(':');
-}
-
-/// Append `"key":"value"` for an internal (trusted) string value.
-fn push_str_field(out: &mut String, key: &str, value: &str) {
-    push_key(out, key);
-    push_json_string(out, value);
-}
-
-/// Append `s` as a quoted, escaped JSON string. Control characters become the
-/// short escapes or `\u00XX`, and `"` and `\` are escaped, so the result is
-/// valid JSON regardless of `s`'s contents.
-fn push_json_string(out: &mut String, s: &str) {
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            // Other C0 control characters: \u00XX.
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use kennel_audit::{Sink, SinkError, Writer, WriterContext};
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::{Arc, Mutex};
 
     fn allowed(host: &str, port: u16, resolved: Option<IpAddr>) -> Record {
         Record {
@@ -182,23 +152,76 @@ mod tests {
         }
     }
 
-    #[test]
-    fn allowed_record_shape() {
-        let r = allowed(
-            "example.com",
-            443,
-            Some(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))),
+    /// A sink that records each event's rendered JSONL, so the test can assert on
+    /// what the writer produced from a `Record`.
+    #[derive(Default)]
+    struct CaptureSink(Mutex<Vec<String>>);
+    impl Sink for CaptureSink {
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+        fn write(&self, record: &kennel_audit::Record) -> Result<(), SinkError> {
+            if let Ok(mut v) = self.0.lock() {
+                v.push(record.to_jsonl());
+            }
+            Ok(())
+        }
+    }
+    struct Shared(Arc<CaptureSink>);
+    impl Sink for Shared {
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+        fn write(&self, record: &kennel_audit::Record) -> Result<(), SinkError> {
+            self.0.write(record)
+        }
+    }
+
+    fn emit(record: &Record) -> String {
+        let cap = Arc::new(CaptureSink::default());
+        let ctx = WriterContext {
+            kennel: "k".to_owned(),
+            kennel_uuid: "u".to_owned(),
+            host: "h".to_owned(),
+        };
+        let w = Writer::new(
+            ctx,
+            kennel_audit::Levels {
+                net: kennel_audit::Level::Full,
+                ..kennel_audit::Levels::default()
+            },
+            vec![Box::new(Shared(Arc::clone(&cap)))],
         );
-        let line = r.to_jsonl();
-        let expected = concat!(
-            r#"{"event":"egress","wire":"socks5","host":"example.com","port":443,"#,
-            r#""resolved":"93.184.216.34","outcome":"allowed","bytes_up":10,"bytes_down":200}"#
-        );
-        assert_eq!(line, expected);
+        w.emit(&record.to_event());
+        cap.0
+            .lock()
+            .ok()
+            .and_then(|v| v.last().cloned())
+            .unwrap_or_default()
     }
 
     #[test]
-    fn unresolved_is_null() {
+    fn allowed_record_shape() {
+        let line = emit(&allowed(
+            "example.com",
+            443,
+            Some(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))),
+        ));
+        assert!(line.contains(r#""event":"net.egress""#), "{line}");
+        assert!(line.contains(r#""resource":"net""#));
+        assert!(line.contains(r#""outcome":"allow""#));
+        assert!(line.contains(r#""source":"proxy""#));
+        assert!(line.contains(r#""wire":"socks5""#));
+        assert!(line.contains(r#""egress_outcome":"allowed""#));
+        assert!(line.contains(r#""host":"example.com""#));
+        assert!(line.contains(r#""port":443"#));
+        assert!(line.contains(r#""resolved":"93.184.216.34""#));
+        assert!(line.contains(r#""bytes_up":10"#));
+        assert!(line.contains(r#""bytes_down":200"#));
+    }
+
+    #[test]
+    fn unresolved_deny_is_null_with_reason() {
         let r = Record {
             wire: Wire::HttpConnect,
             host: "blocked.example".to_owned(),
@@ -206,36 +229,26 @@ mod tests {
             resolved: None,
             outcome: Outcome::Denied("not-allowed"),
         };
-        let line = r.to_jsonl();
+        let line = emit(&r);
         assert!(line.contains(r#""wire":"http-connect""#));
         assert!(line.contains(r#""resolved":null"#));
-        assert!(line.contains(r#""outcome":"denied","reason":"not-allowed""#));
+        assert!(line.contains(r#""outcome":"deny""#));
+        assert!(line.contains(r#""reason":"not-allowed""#));
     }
 
     #[test]
-    fn hostile_host_cannot_break_json_or_inject_control_bytes() {
+    fn hostile_host_is_sanitised_by_the_writer() {
         // A host carrying a quote, a backslash, a newline, and an ESC.
-        let r = allowed("a\"b\\c\nd\u{1b}e", 443, None);
-        let line = r.to_jsonl();
-        // No raw control bytes survive into the record.
+        let line = emit(&allowed("a\"b\\c\nd\u{1b}e", 443, None));
         assert!(!line.contains('\n'), "no raw newline, got {line}");
         assert!(!line.contains('\u{1b}'), "no raw ESC, got {line}");
-        // Quote and backslash are escaped; the ESC becomes its \u00XX escape.
-        assert!(line.contains("\\\""), "escaped quote present, got {line}");
-        assert!(
-            line.contains("\\\\"),
-            "escaped backslash present, got {line}"
-        );
-        assert!(
-            line.contains("\\u001b"),
-            "ESC escaped as \\u001b, got {line}"
-        );
-        // The whole record is still a single line.
+        // The writer flags that sanitisation altered an untrusted field.
+        assert!(line.contains(r#""sanitised":true"#), "{line}");
         assert_eq!(line.lines().count(), 1);
     }
 
     #[test]
-    fn failed_outcome_carries_reason() {
+    fn failed_outcome_maps_to_error_with_reason() {
         let r = Record {
             wire: Wire::Socks5,
             host: "h".to_owned(),
@@ -243,8 +256,9 @@ mod tests {
             resolved: None,
             outcome: Outcome::Failed("connect-refused"),
         };
-        assert!(r
-            .to_jsonl()
-            .contains(r#""outcome":"failed","reason":"connect-refused""#));
+        let line = emit(&r);
+        assert!(line.contains(r#""outcome":"error""#));
+        assert!(line.contains(r#""egress_outcome":"failed""#));
+        assert!(line.contains(r#""reason":"connect-refused""#));
     }
 }

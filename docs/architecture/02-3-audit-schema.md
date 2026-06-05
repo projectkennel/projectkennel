@@ -1,22 +1,29 @@
 # API surfaces — audit schema
 
 > **Scope.** The audit *event schema* below is the durable contract. The
-> multi-sink delivery layer — the `journald`/`syslog`/`stdout` sinks, the
-> centralised `kennel-audit` writer that fans one event out to several sinks, the
-> `[audit]` policy section / `audit.toml`, and the per-sink emit timeout — is the
-> **roadmap** delivery model; the sections describing it specify the target
-> design. Today the audit path is a per-kennel JSONL file sink:
+> multi-sink delivery layer is **built**: the `kennel-audit` writer fans one
+> sanitised event out to the `file`, `stdout`, `syslog`, and (feature
+> `audit-journald`) `journald` sinks, applying the per-class levels; the `[audit]`
+> policy section is parsed, validated, and carried in the signed settled policy as
+> `AuditRuntime`; kenneld builds the writer from it and emits the `lifecycle.*`
+> events; a bounded per-sink worker queue caps a stuck sink's effect on the writer;
+> and the journald sink stamps `MESSAGE_ID`. The installation-wide `audit.toml`
+> remains roadmap (`08-as-built-notes.md` §8.1).
 >
-> - BPF events are submitted to a kernel **ring buffer** (`bpf/audit_events.h`,
->   `bpf/kennel.bpf.h`) and drained lock-free by `kennel-bpf::ringbuf`. The ring
->   buffer drops events when full; the reader counts the drops.
-> - The egress proxy formats **one JSONL record per request** in
->   `kennel-netproxy::audit`.
-> - kenneld wires a per-kennel **file sink** at
->   `~/.local/state/kennel/<kennel>/network.jsonl`.
+> **Scope: the writer unifies *userspace* sources.** Kernel-side events report
+> through the kernel's own channels, deliberately *not* through this writer:
 >
-> The event schema is identical regardless of which delivery model is in use, so
-> records written today are forward-compatible with the multi-sink model.
+> - The cgroup **BPF programs** report via the kernel — the audit ring buffer
+>   (`bpf/audit_events.h`, `bpf/kennel.bpf.h`) and `dmesg`. Funnelling them through
+>   an unprivileged userspace writer would add privilege and TCB for no gain.
+> - **LSM denials** (Landlock/AppArmor) are the kernel's to log.
+>
+> Both userspace sources route through the writer: kenneld's lifecycle events,
+> and the egress proxy's per-request `net.egress` events
+> (`kennel-netproxy::audit::Record::to_event`, written to
+> `~/.local/state/kennel/<kennel>/network.jsonl` plus any other configured sink).
+> kenneld shares one `kennel_uuid` with the proxy per run, so their events
+> correlate.
 
 ## Stability commitment
 
@@ -65,7 +72,7 @@ The supported sinks:
 | `syslog` | No | The system runs an RFC 5424 syslog daemon (rsyslog, syslog-ng) and journald is not in use. |
 | `stdout` | No | Container deployments where logs are captured from the kenneld process's stdout by an orchestrator. |
 
-Multiple sinks may be active concurrently — for example, `file` + `journald` during a migration period — and the same event is emitted to each. The sink fan-out is synchronous from the writer's perspective; each sink is responsible for its own back-pressure handling and for not blocking the writer past a configured timeout (default 50 ms; configurable per sink).
+Multiple sinks may be active concurrently — for example, `file` + `journald` during a migration period — and the same event is emitted to each. The sink fan-out keeps a slow sink from stalling the writer: each sink is wrapped in a bounded per-sink worker queue (`TimeoutSink`, default capacity 1024 events) whose worker thread performs the possibly-blocking I/O. The writer's hand-off to a sink is a non-blocking channel send; if a sink's worker falls behind and its queue fills, further events for that sink are dropped (the back-pressure equivalent of a per-emit timeout) and the writer reports the drop to the other sinks.
 
 A sink that fails to emit an event raises an internal error which is itself recorded — in the other sinks. A configuration where the only sink fails is a hard error: events are dropped and kenneld logs a self-diagnostic via stderr; the operator is expected to notice.
 
@@ -97,14 +104,27 @@ Event-specific fields extend the envelope; see §Event types.
 
 ## Event types
 
-The catalogue below names every event the project currently emits. Field lists are non-exhaustive — each sink representation in the sink sections describes the full field mapping for that sink.
+The catalogue below names every event in the schema. Field lists are non-exhaustive — each sink representation in the sink sections describes the full field mapping for that sink.
+
+As-built: the events emitted today are the **lifecycle** events (kenneld), the **network/egress** events (the per-kennel netproxy and the cgroup BPF), and the **`priv.*`** events (the privhelper). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively); they are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
 
 ### Network (`resource: "net"`)
+
+The connect/bind events below are *kernel-sourced*: the cgroup BPF programs report
+them through the kernel's own channels (the audit ring buffer and `dmesg`),
+deliberately not through this userspace writer (see §Scope). Their `MESSAGE_ID`s and
+field shapes are reserved here so tooling can be written against them, but the
+writer does not emit them and the `addr_family` / `addr_requested` / `addr_rewritten`
+field encodings are not yet built — they are part of the stable schema ahead of the
+kernel-side producers.
 
 - **`net.connect-allow`** / **`net.connect-deny`** — connect() attempt, sourced from the BPF connect programs. Allow under audit-level rules; deny always. Adds `addr_family`, `addr`, `port`.
 - **`net.bind-allow`** / **`net.bind-deny`** / **`net.bind-rewrite`** — bind() attempt, sourced from the BPF bind programs. Adds `addr_requested`, `addr_rewritten` (for rewrites), `port`.
 
-The per-kennel proxy emits one `egress` record per request (`kennel-netproxy::audit`), carrying `wire` (`socks5` or `http-connect`), `host`, `port`, `resolved` (the IP the name resolved to via the OS resolver, or null), `outcome` (`allowed` / `denied` / `failed`), `reason` (for denies and failures), and `bytes_up` / `bytes_down`. Name-to-address resolution goes through the OS resolver and is recorded in the `resolved` field of this single record — there is no separate DNS-lookup event and no DNS-protocol telemetry, because the proxy does not implement a resolver of its own.
+The one network event the userspace writer *does* emit is the netproxy's
+per-request `net.egress` record, described next.
+
+The per-kennel proxy emits one `net.egress` record per request (`kennel-netproxy::audit`), carrying `wire` (`socks5` or `http-connect`), `host`, `port`, `resolved` (the IP the name resolved to via the OS resolver, or null), `egress_outcome` (`allowed` / `denied` / `failed`), `reason` (for denies and failures), and `bytes_up` / `bytes_down`. The canonical envelope `outcome` (`allow` / `deny` / `error`) is set in parallel from the same disposition; `egress_outcome` is the event-specific, proxy-flavoured token. Name-to-address resolution goes through the OS resolver and is recorded in the `resolved` field of this single record — there is no separate DNS-lookup event and no DNS-protocol telemetry, because the proxy does not implement a resolver of its own.
 
 ### Filesystem (`resource: "fs"`)
 
@@ -125,16 +145,21 @@ The per-kennel proxy emits one `egress` record per request (`kennel-netproxy::au
 
 ### Privileged (`resource: "priv"`)
 
+The `source` is `privhelper`, but kenneld writes these on the helper's behalf: the helper is root and transient and holds no writer, so kenneld records each call at the IPC boundary (an `AuditedPrivileged` wrapper around its helper client), exactly as it records kernel/BPF-sourced events. `operation` is the wire op (`add-addr`, `del-addr`, `setup-egress`, `set-gid-map`); a refusal maps the wire refusal `code` to a human `message`. The `outcome` is `allow` for an invocation, `deny` for a policy refusal, and `error` for a protocol/syscall/IPC failure.
+
 - **`priv.invoke`** — privhelper invocation. Adds `operation`, `params` (object), `duration_ms`.
 - **`priv.refuse`** — privhelper refusal. Adds `operation`, `params`, `code`, `message`.
 
 ### Lifecycle (`resource: "lifecycle"`)
 
-- **`lifecycle.kennel-start`** — Adds `policy_path`, `template_chain` (array), `policy_hash`, `workload_argv0`, `started_pid`.
-- **`lifecycle.kennel-exit`** — Adds `uptime_seconds`, `workloads_run`, `reason`.
+- **`lifecycle.kennel-start`** — Schema adds `policy_path`, `template_chain` (array), `policy_hash`, `workload_argv0`, `started_pid`. Today kenneld emits `ctx` and `started_pid`; the remaining provenance fields are reserved and filled as their sources are wired.
+- **`lifecycle.kennel-exit`** — Schema adds `uptime_seconds`, `workloads_run`, `reason`. Today kenneld emits `reason`.
+- **`lifecycle.workload-exit`** — Schema adds `pid`, `exit_code`, `signal`, `uptime_seconds`, `rss_max_bytes`. Today kenneld emits `pid` and `exit_code`.
+
+**Status: reserved (roadmap).** The daemon and state-dump lifecycle events below are part of the stable schema and hold registered `MESSAGE_ID`s, but kenneld does not yet construct or emit them; they are wired as the per-daemon supervisor and the `SIGUSR1` handler land (`05-state-and-supervision.md`).
+
 - **`lifecycle.daemon-spawn`** / **`lifecycle.daemon-exit`** — Adds `daemon` (name), `pid`, daemon-specific listening addresses.
 - **`lifecycle.daemon-giveup`** — A daemon exceeded the crash-loop restart limit and is no longer being respawned (`05-state-and-supervision.md`). Adds `daemon` (name), `restarts`, `window_seconds`.
-- **`lifecycle.workload-exit`** — Adds `pid`, `exit_code`, `signal`, `uptime_seconds`, `rss_max_bytes`.
 - **`lifecycle.kenneld-state-dump`** — Emitted on `SIGUSR1`: one event per registered kennel with its state, reference count, drain-timer remaining, and daemon PIDs. A debugging aid.
 
 ---
@@ -182,7 +207,7 @@ One file per resource class per kennel. The class-level granularity makes `kenne
 
 **Concurrent writers.** Per-kennel daemons that emit network events (the netproxy in particular) write directly to `network.jsonl` via `O_APPEND`-opened handles. `write()` calls under `PIPE_BUF` (4 KiB on Linux) are atomic. The writer rejects events that would exceed 4 KiB; longer events are a bug, not a runtime case.
 
-**Rotation.** Kenneld rotates files at 64 MB by default (configurable per kennel via `[audit].file.rotate_at_bytes`). Rotated files are renamed `<class>.<unix-timestamp>.jsonl` and optionally gzipped after `[audit].file.compress_after_seconds`. Retention is operator policy via external rotation tooling (logrotate, similar) or via `[audit].file.retain_count` if the operator wants kenneld to handle it.
+**Rotation.** Kenneld rotates files at 64 MB by default (configurable per kennel via `[audit].file.rotate_at_bytes`). Rotated files are renamed `<class>.<unix-timestamp>.jsonl`. When `[audit].file.compress_after_seconds` is set, the file sink gzips a rotated file once it is at least that old — lazily, swept at the next rotation, by shelling out to the system `gzip(1)` on the already-closed file (producing `<class>.<unix-timestamp>.jsonl.gz`). There is no in-process compression codec: a file at rest is exactly `gzip(1)`'s job, so no DEFLATE library enters the TCB. Compression is best-effort — if `gzip` is missing, denied, or fails, the rotated file is left uncompressed and the failure is reported to stderr; the live append path is never touched. Retention is operator policy via external rotation tooling (logrotate, similar) or via `[audit].file.retain_count` (which counts compressed and uncompressed rotations alike) if the operator wants kenneld to handle it.
 
 **Querying.** `kennel audit <kennel>` (`02-1-cli.md`) reads these files directly. The CLI does not depend on any external log-shipping infrastructure; the file sink is queryable from a fresh shell on the host.
 
@@ -229,13 +254,13 @@ Additional fields journald requires or expects:
 | journald field | Value |
 |---|---|
 | `MESSAGE` | Human-readable one-line summary synthesised by the writer; e.g., `"deny connect to 169.254.169.254:80 (cloud metadata)"`. Never the only place where structured information lives; consumers read `KENNEL_*` fields, not `MESSAGE`. |
-| `MESSAGE_ID` | A UUID per event type, registered in `audit/message-ids.toml` in the repo. Allows journald filtering by event kind: `journalctl MESSAGE_ID=<uuid>`. |
+| `MESSAGE_ID` | A UUID per event type, registered in the hard-coded `MESSAGE_IDS` table in `kennel-audit::message_ids` (the source of truth; emitted in journald's dash-free 32-hex form). Allows journald filtering by event kind: `journalctl MESSAGE_ID=<uuid>`. |
 | `SYSLOG_IDENTIFIER` | `kennel-audit`. |
 | `PRIORITY` | Syslog level mapped from `outcome`: `info`/`allow` → 6 (info), `deny` → 4 (warning), `error` → 3 (err). |
 
 **Querying.** `journalctl` directly: `journalctl --user _SYSTEMD_USER_UNIT=kenneld.service KENNEL_NAME=ai-coding KENNEL_EVENT=net.connect-deny --since "1h ago"`. The `kennel audit` CLI subcommand reads from the file sink by default; for journald-only deployments, `kennel audit --print-journalctl-command <kennel>` emits the equivalent `journalctl` invocation with the requested filters.
 
-**Back-pressure.** `sd_journal_send` is non-blocking under normal conditions but may block briefly under heavy log pressure. The writer applies a 50 ms timeout per emit; on timeout, the event is recorded as dropped (incrementing a counter) and the writer continues. Drops are themselves emitted as `lifecycle.audit-drop` events to the other sinks (or, if journald is the only sink, surfaced via kenneld's stderr).
+**Back-pressure.** `sd_journal_send` is non-blocking under normal conditions but may block briefly under heavy log pressure. The journald sink, like every sink, runs behind a bounded per-sink worker queue (`TimeoutSink`, default capacity 1024): the writer's hand-off is a non-blocking channel send, and the worker thread performs the blocking `sd_journal_send`. When the worker falls behind and the queue fills, the event is dropped (the writer's send returns an error) rather than blocking the writer. Drops are emitted as `lifecycle.audit-drop` events to the other sinks (or, if journald is the only sink, surfaced via kenneld's stderr).
 
 ---
 
@@ -248,10 +273,10 @@ Mapping:
 - APP-NAME: `kennel-audit`.
 - PROCID: kenneld PID.
 - MSGID: the event type, in dot-form (`net.connect-deny`).
-- STRUCTURED-DATA: one SD-ELEMENT with SD-ID `kennel@<PEN>` (where `<PEN>` is the IANA Private Enterprise Number for Project Kennel; reserved at the first release that ships syslog support). Each canonical event field becomes one SD-PARAM. Field-name casing follows the canonical schema; SD-PARAM names allow lowercase and dots.
+- STRUCTURED-DATA: one SD-ELEMENT with SD-ID `kennel@<PEN>`. The live value is `kennel@32473`, where `32473` is the RFC 5612 PEN reserved for documentation/examples — a placeholder the project's own IANA Private Enterprise Number replaces at the first release that commits to syslog support. Each canonical event field becomes one SD-PARAM. Field-name casing follows the canonical schema; SD-PARAM names allow lowercase and dots.
 - MSG: a human-readable one-line summary, the same string as journald's `MESSAGE`.
 
-Syslog message length is capped at 2 KiB on most receivers. The writer truncates after sanitisation if needed, adding a `truncated: true` SD-PARAM. Truncation is logged as a `lifecycle.audit-truncate` event to other sinks if any.
+Syslog message length is capped at 2 KiB (`SYSLOG_MAX_BYTES`) on most receivers. When a formatted message exceeds the cap, the writer truncates on a UTF-8 char boundary and appends a literal `...[truncated]` marker to the message. There is no separate truncation event: the `lifecycle.audit-truncate` `MESSAGE_ID` is reserved in the registry but the writer does not emit it.
 
 ---
 
@@ -304,6 +329,8 @@ level = "summary"
 Defaults: sinks = `["file"]`, all classes at `summary` except `filesystem` which is `denies-only` (filesystem traffic is high-volume; full or summary is opt-in).
 
 An installation-wide default lives in `/etc/kennel/audit.toml` and is inherited by every kennel unless overridden in the leaf policy. The installation default is the right place to choose `["journald"]` once; per-kennel overrides are reserved for the exceptional case.
+
+kenneld reads two defaults files at spawn — `/etc/kennel/audit.toml` (root-owned, installation-wide) and `~/.config/kennel/audit.toml` (the user's override) — each holding the `[audit]` section body at top level (`sinks`, `[network]`/`[filesystem]`/…, `[file]`, `[syslog]`), validated by exactly the policy's `[audit]` validator. They merge per-field, lowest to highest precedence: **built-in default < `/etc/kennel/audit.toml` < `~/.config/kennel/audit.toml` < the leaf policy's `[audit]`**. A missing file is skipped and a malformed one is logged and skipped, so a bad defaults file never blocks a spawn.
 
 ---
 

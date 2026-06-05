@@ -21,7 +21,6 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kennel_policy::settled::InstallConstants;
 use kennel_policy::TemplateSource;
 use kenneld::control::{self, Request, Response, StartRequest};
 use kenneld::socket;
@@ -249,12 +248,9 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
 
-    // Installation constants are fixed at install time; until an install-config
-    // reader exists they take the documented defaults (tag 42, ULA fd00::).
-    let install = InstallConstants {
-        tag: 42,
-        ula_gid: "fd00::".to_owned(),
-    };
+    // No installation constants here: `<tag>`/`<gid>` are deferred to spawn, where
+    // the daemon fills them from the user's scope (`/etc/kennel/subkennel`). The CLI
+    // neither knows nor needs them.
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
@@ -272,7 +268,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         kennel_policy::Trust::allow_unsigned(Some(&keys))
     };
 
-    let compiled = match build_settled(&bytes, &source, &trust, &install, version) {
+    let compiled = match build_settled(&bytes, &source, &trust, version) {
         Ok(compiled) => compiled,
         Err(e) => {
             eprintln!("kennel: {e}");
@@ -337,13 +333,12 @@ fn build_settled(
     bytes: &[u8],
     source: &FsTemplateSource,
     trust: &kennel_policy::Trust<'_>,
-    install: &InstallConstants,
     version: &str,
 ) -> Result<kennel_policy::Compiled, kennel_policy::PolicyError> {
     match kennel_policy::parse_source(bytes) {
-        Ok(entry) => kennel_policy::compile(&entry, source, trust, install, version),
+        Ok(entry) => kennel_policy::compile(&entry, source, trust, version),
         Err(source_err) => kennel_policy::parse_leaf(bytes).map_or(Err(source_err), |leaf| {
-            kennel_policy::compile_leaf(&leaf, source, trust, install, version)
+            kennel_policy::compile_leaf(&leaf, source, trust, version)
         }),
     }
 }
@@ -378,10 +373,6 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
     add_default_trust_dirs(&mut trust_dirs);
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
-    let install = InstallConstants {
-        tag: 42,
-        ula_gid: "fd00::".to_owned(),
-    };
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
@@ -392,7 +383,7 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
         kennel_policy::Trust::allow_unsigned(Some(&keys))
     };
 
-    match build_settled(&bytes, &source, &trust, &install, env!("CARGO_PKG_VERSION")) {
+    match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
         Ok(compiled) => {
             eprintln!(
                 "valid: `{}` resolves cleanly ({} references, {} deferred substitutions)",
@@ -480,12 +471,15 @@ const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
     }
 }
 
-/// Append the default template search directories (user, then system).
+/// Append the default template search directories: the user `config.toml`'s
+/// `template_dirs` if set, else the built-in default (user config dir, then
+/// system). A malformed user config falls back to the built-in default.
 fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(home).join(".config/kennel/templates"));
-    }
-    dirs.push(PathBuf::from("/etc/kennel/templates"));
+    dirs.extend(
+        kennel_config::User::load()
+            .unwrap_or_default()
+            .template_dirs(),
+    );
 }
 
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
@@ -496,12 +490,12 @@ fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
     dir.join(format!("{name}.settled.toml"))
 }
 
-/// Append the default trust-store directories (user, then system).
+/// Append the default trust-store (authoring) directories: the user
+/// `config.toml`'s `key_dirs` if set, else the built-in default (user config
+/// dir, then system). This is the CLI's *authoring* trust store; the daemon
+/// re-verifies against its own locked [`kennel_config::Deployment::trust_dir`].
 fn add_default_trust_dirs(dirs: &mut Vec<PathBuf>) {
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(home).join(".config/kennel/keys"));
-    }
-    dirs.push(PathBuf::from("/etc/kennel/keys"));
+    dirs.extend(kennel_config::User::load().unwrap_or_default().key_dirs());
 }
 
 /// Load a trust store: every `<key_id>.pub` (base64 32-byte public key) under each

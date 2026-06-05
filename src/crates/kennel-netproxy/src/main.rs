@@ -10,14 +10,15 @@
 //! integration-tested. `main` only wires the config to the server and maps
 //! errors to an exit code.
 
-use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io;
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use kennel_netproxy::config;
+use kennel_audit::build::{writer as build_writer, SinkConfig};
+use kennel_audit::{Levels, SinkKind, Writer, WriterContext};
+use kennel_netproxy::config::{self, ProxyConfig};
 use kennel_netproxy::dns::SystemResolver;
 use kennel_netproxy::server::Proxy;
 
@@ -39,11 +40,7 @@ fn main() -> ExitCode {
 /// fatal error (a successful `serve` runs until the listener fails).
 fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load(path)?;
-    // The audit sink: the configured JSON Lines file (append), else stderr.
-    let audit: Box<dyn Write + Send> = match &cfg.audit_log {
-        Some(p) => Box::new(OpenOptions::new().create(true).append(true).open(p)?),
-        None => Box::new(io::stderr()),
-    };
+    let writer = Arc::new(build_audit_writer(&cfg));
     // One listener per configured address (a dual-stack kennel has a v4 and a v6
     // loopback address; one TcpListener binds a single family).
     let listeners = cfg
@@ -56,10 +53,63 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             cfg.ruleset,
             SystemResolver,
             cfg.accept_private_resolved,
-            audit,
+            writer,
         )
         .with_host_services(cfg.host_services),
     );
     proxy.serve_all(listeners)?;
     Ok(())
+}
+
+/// Build the unified audit writer. With an `[audit]` block (the `kenneld`-written
+/// config), it uses the policy's sinks, levels, and shared `kennel_uuid`. Without
+/// one (a standalone proxy), it falls back to a file sink at `audit_log`'s parent
+/// directory, or stdout — emitting `network.jsonl` either way.
+fn build_audit_writer(cfg: &ProxyConfig) -> Writer {
+    if let Some(a) = &cfg.audit {
+        let ctx = WriterContext {
+            kennel: a.kennel.clone(),
+            kennel_uuid: a.kennel_uuid.clone(),
+            host: kennel_audit::hostname(),
+        };
+        let mut levels = Levels::default();
+        if let Some(level) = a.network_level {
+            levels.net = level;
+        }
+        let sinks = SinkConfig {
+            kinds: a.sinks.clone(),
+            dir: a.dir.clone(),
+            rotate_at_bytes: a.rotate_at_bytes,
+            compress_after_seconds: a.compress_after_seconds,
+            retain_count: a.retain_count,
+            syslog_facility: a.syslog_facility.clone(),
+        };
+        return build_writer(ctx, levels, &sinks);
+    }
+    // Standalone: a deterministic placeholder identity, a file sink in the
+    // audit_log's parent dir (or stdout when unset).
+    let ctx = WriterContext {
+        kennel: "netproxy".to_owned(),
+        kennel_uuid: kennel_audit::format_uuid_v7(0, [0; 10]),
+        host: kennel_audit::hostname(),
+    };
+    let (kinds, dir) = cfg.audit_log.as_ref().map_or_else(
+        || (vec![SinkKind::Stdout], PathBuf::from(".")),
+        |path| {
+            (
+                vec![SinkKind::File],
+                path.parent()
+                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+            )
+        },
+    );
+    let sinks = SinkConfig {
+        kinds,
+        dir,
+        rotate_at_bytes: None,
+        compress_after_seconds: None,
+        retain_count: None,
+        syslog_facility: None,
+    };
+    build_writer(ctx, Levels::default(), &sinks)
 }

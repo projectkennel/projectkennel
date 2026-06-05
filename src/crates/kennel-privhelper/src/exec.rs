@@ -39,6 +39,28 @@ pub const REFUSAL_CGROUP_NOT_OWNED: u8 = 101;
 /// the caller" — a user may only write the `gid_map` of its own process's userns.
 pub const REFUSAL_PID_NOT_OWNED: u8 = 102;
 
+/// A short, stable description of a wire refusal code.
+///
+/// For the `message` field of a `priv.refuse` audit event (`02-3`). Mirrors the
+/// `refusal_code` table and the scope/ownership constants so the audit and the
+/// helper share one source of truth; an unrecognised code (a future helper
+/// version) maps to `"refused"`.
+#[must_use]
+pub const fn refusal_message(code: u8) -> &'static str {
+    match code {
+        1 => "prefix length is wrong for the address family",
+        2 => "address is outside the reserved per-kennel subnet",
+        3 => "interface is not `lo` or a `<namespace>-<id>` dummy",
+        4 => "interface name exceeds the kernel length limit",
+        5 => "caller is not a member of a requested gid",
+        6 => "gid_map request carried no gids",
+        REFUSAL_NO_SCOPE => "helper has no configured reserved scope for this user",
+        REFUSAL_CGROUP_NOT_OWNED => "target cgroup is not owned by the caller",
+        REFUSAL_PID_NOT_OWNED => "target process is not owned by the caller",
+        _ => "refused",
+    }
+}
+
 /// `ENOSYS` on Linux — returned when a [`Op::SetupEgress`] request reaches a
 /// helper built without the `bpf-egress` feature.
 const ENOSYS: i32 = 38;
@@ -180,6 +202,23 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     Response::ok()
 }
 
+/// Build the `struct bind_subnet` (28 bytes) the `bind4`/`bind6` programs read,
+/// from the kennel's own loopback addresses carried in `meta` (the `kennel_meta`
+/// layout: `proxy_addr_v4` at offset 8, `proxy_addr_v6` at 16). The prefixes are
+/// the per-kennel allocation widths (v4 `/28`, v6 `/64`). Returns `None` if the
+/// meta is too short to hold them (never, for a well-formed payload).
+#[cfg(feature = "bpf-egress")]
+fn bind_subnet_value(meta: &[u8]) -> Option<[u8; 28]> {
+    let v4_addr = meta.get(8..12)?;
+    let v6_addr = meta.get(16..32)?;
+    let mut value = [0u8; 28];
+    value.get_mut(0..4)?.copy_from_slice(v4_addr);
+    value.get_mut(4..8)?.copy_from_slice(&28u32.to_ne_bytes());
+    value.get_mut(8..24)?.copy_from_slice(v6_addr);
+    *value.get_mut(24)? = 64;
+    Some(value)
+}
+
 /// Write `payload` into whichever of a loaded program's egress maps it declares.
 #[cfg(feature = "bpf-egress")]
 fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::io::Result<()> {
@@ -192,6 +231,15 @@ fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::i
             &payload.meta,
             BPF_ANY,
         )?;
+    }
+    // Per-kennel bind subnet (§7.3): the INADDR_ANY/in6addr_any rewrite target
+    // for dev-server binds. The bind4/bind6 programs fail closed without it, so
+    // a workload inside the kennel cannot bind a listening socket. The kennel's
+    // own loopback addresses are already in the meta, so it derives from there.
+    if loaded.maps.contains_key("bind_subnet_map") {
+        if let Some(value) = bind_subnet_value(&payload.meta) {
+            loaded.update_map("bind_subnet_map", &0u32.to_ne_bytes(), &value, BPF_ANY)?;
+        }
     }
     if loaded.maps.contains_key("allow_v4") {
         for (key, value) in &payload.allow_v4 {
@@ -247,5 +295,28 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     match result {
         Ok(()) => Response::ok(),
         Err(e) => Response::internal(errno_of(&e)),
+    }
+}
+
+#[cfg(all(test, feature = "bpf-egress"))]
+mod tests {
+    use super::bind_subnet_value;
+
+    #[test]
+    fn bind_subnet_is_derived_from_the_meta_loopback_addresses() {
+        // kennel_meta layout: proxy_addr_v4 @8..12 (net order), proxy_addr_v6 @16..32.
+        let mut meta = [0u8; 64];
+        meta.get_mut(8..12)
+            .expect("v4 range")
+            .copy_from_slice(&[127, 42, 7, 1]);
+        meta.get_mut(16..32)
+            .expect("v6 range")
+            .copy_from_slice(&[0xfd, 0, 0, 0, 0, 0, 7, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let v = bind_subnet_value(&meta).expect("meta long enough");
+        assert_eq!(v.get(0..4), Some(&[127u8, 42, 7, 1][..]), "v4_addr");
+        assert_eq!(v.get(4..8), Some(&28u32.to_ne_bytes()[..]), "v4_prefix /28");
+        assert_eq!(v.get(8..24), meta.get(16..32), "v6_addr");
+        assert_eq!(v.get(24), Some(&64u8), "v6_prefix /64");
     }
 }

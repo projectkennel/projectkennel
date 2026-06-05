@@ -10,17 +10,81 @@ should shape the rest of the build, and the build/test gotchas that bite.
 Real design intent, not dead ideas; simply not implemented yet. The chapters that
 describe these read as roadmap.
 
-- **The unified audit writer + sinks** (`02-3-audit-schema.md`): the
-  journald/syslog/stdout sinks, the `[audit]` policy section / `audit.toml`, the
-  per-sink timeout, and a centralised `kennel-audit` writer. Today: BPF events
-  drain a lock-free ring buffer that drops on full (`kennel-bpf/src/ringbuf.rs`,
-  `bpf/kennel.bpf.h`); the netproxy formats one JSONL record per request
-  (`kennel-netproxy/src/audit.rs`) and owns its sink; kenneld wires a per-kennel
-  file sink (`~/.local/state/kennel/<kennel>/network.jsonl`, §7.3.4). The
-  journald/syslog sinks, the `[audit]` section, and a single writer are owed.
+- **The run environment** (`07-7-other.md` §7.7.2 / §7.7.2a, `07-1-exec.md` §7.1.6) —
+  **BUILT (2026-06-04); the env-leak gap is closed.** The workload no longer inherits
+  kenneld's environment: the spawn `env_clear`s and **synthesises `envp` from policy**
+  — `PATH` (from `[exec].path`), `USER`/`LOGNAME` (the masked `kennel` account),
+  `SHELL` (`[exec].shell`), `HOME` (the shim home), then the fixed `[env].set` vars
+  (substituted; the legacy `[env].pass`/`deny` curation fields are ignored — synthesis
+  supersedes them, the parent's environment is never a source). Carried in the settled
+  policy as `EnvRuntime` + `ExecPolicy.path`/`shell`; applied in
+  `kenneld::server::run_kennel` to the workload `Command`. **`[exec].shell`** (default
+  `/bin/sh`, compile error if not in a non-empty `exec.allow`) sets the
+  synthetic-`passwd` `pw_shell` and `$SHELL`. **rc files are BUILT**, both levels:
+  system rc (`/etc/profile`, `/etc/bash.bashrc`) in the synthetic `/etc`, and **user
+  dotfiles** (`~/.bashrc`, `~/.profile`) synthesised into the kennel home via the same
+  `file_binds` path the synthetic `~/.ssh` uses (with a Landlock read grant on the
+  home). Because the view root is a fresh tmpfs copied each spawn, the dotfiles are
+  reconstructed every run and a workload's edits never persist — no self-poisoning
+  surface, the design's safe default. **`[fs.home].persist` is BUILT**: a home-relative
+  path named there is skipped by the dotfile seeder (not reconstructed), so a writable
+  home grant for it survives — OFF by default, per-path, unioned up the template chain,
+  carried in `FsPolicy.home_persist`. Only the compile-time **`template` file-loading**
+  (`[env].template`, `[fs.home].template` — seed values/dotfiles from a
+  policy-referenced file pinned at compile) is unbuilt: a convenience over the inline
+  `[env].set` / built-in dotfile defaults that work today, needing the same compiler
+  file-input plumbing as the `audit.toml` defaults.
+
+- **The unified audit writer + sinks** (`02-3-audit-schema.md`) — **BUILT** (it
+  graduated from this roadmap; kept here for the remnants still owed). The
+  `kennel-audit` crate (`#![forbid(unsafe_code)]`) is the seam: the canonical
+  `AuditEvent` envelope, one `kennel-text` sanitisation pass, per-class audit-level
+  filtering (incl. `summary` first-allow dedup), and a `Sink` trait with fan-out
+  and drop-reporting. All four sinks exist — file (per-class JSONL, append-atomic,
+  rotation+retention), stdout, hand-rolled RFC 5424 syslog, and a feature-gated
+  journald sink (`sd_journal_sendv` FFI in `kennel-syscall`, feature
+  `audit-journald`). The `[audit]` policy section is parsed, folded, validated, and
+  carried in the signed settled policy as `AuditRuntime` (omitted from the canonical
+  form when empty, so existing policies sign unchanged). kenneld builds the writer
+  from it and emits the `lifecycle.*` events through it, the per-sink emit timeout
+  (a bounded worker queue, `TimeoutSink`) bounds a stuck sink's effect on the
+  writer, and the journald sink stamps `MESSAGE_ID` from the registry.
+
+  **The unified writer is for *userspace* sources.** Kernel-side events report
+  through the kernel's own channels, not this writer: the cgroup BPF programs emit
+  via the kernel (ring buffer / `dmesg`), and LSM denials (Landlock/AppArmor) are
+  the kernel's to log — funnelling them through an unprivileged userspace writer
+  would add privilege and TCB for no gain. So BPF/LSM routing is a non-goal here,
+  not a remnant. All three userspace sources now route through the writer —
+  kenneld's lifecycle events, the netproxy's per-request `net.egress` events, and
+  the privhelper's `priv.invoke`/`priv.refuse` (sharing one `kennel_uuid` per run).
+  The **privhelper routing is BUILT**: kenneld wraps its `Privileged` IPC client in
+  an `AuditedPrivileged` decorator for the spawn and teardown, so every
+  loopback-address, egress-BPF, and `gid_map` operation — and every refusal, with
+  the wire refusal code mapped to a message — is recorded at the one IPC boundary.
+  The privileged helper itself holds no writer and writes no file (it is root and
+  transient); kenneld records on its behalf with `source: privhelper`, exactly as
+  it does for the kernel/BPF sources, so no audit write is ever privileged. This
+  needed the writer to be built *before* `start()` so bring-up operations are
+  captured. File-sink gzip compression (`[audit].file.compress_after_seconds`) is
+  **BUILT**: the sink shells out to the system `gzip(1)` on the already-closed,
+  rotated file (best-effort, swept at the next rotation, never touching the live
+  append path), so no DEFLATE codec enters the TCB — `zip`/`flate2` were weighed
+  and rejected (a file at rest is `gzip(1)`'s job; flate2's `rust_backend` would
+  have added five crates, two carrying SIMD `unsafe`, for no gain). The
+  installation-wide `/etc/kennel/audit.toml` and per-user `~/.config/kennel/audit.toml`
+  defaults are **BUILT**: kenneld reads both at spawn (each the `[audit]` section
+  body, validated by the policy's own audit validator) and merges them per-field
+  under the leaf policy — built-in &lt; `/etc/kennel` &lt; `~/.config` &lt; policy.
+  With that, the audit subsystem owes nothing further at the userspace level;
+  kernel-side BPF/LSM reporting via `dmesg` remains a non-goal here by design.
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
-  / §5.5): the shell witness (`src/tools/verify-checksums.sh`, system `sha256sum`)
-  is what runs today; the Rust twin lands once `sha2` is itself vendored (§5.5.1).
+  / §5.5) — **settled, not owed.** The shell witness (`src/tools/verify-checksums.sh`,
+  system `sha256sum`) *is* the implementation and enforces the gate in CI and
+  `pre-push`; there is no functional gap. A Rust twin is contingent on the separate
+  §5.5.1 decision to vendor `sha2` (its only new dependency) — a maintainer call
+  that has not been made and need not be. Listed here for completeness, not as a
+  roadmap deliverable.
 
 - **`kennel-sshd` — the per-kennel SSH egress bastion** (design `07-8-ssh.md` §7.8) — **BUILT** (it graduated from this roadmap; kept here for its build
   notes and the findings that shaped it). A per-user managed instance of stock
@@ -119,8 +183,9 @@ describe these read as roadmap.
     binary as its `ProxyCommand`; it SOCKS5s through the proxy (`$KENNEL_SOCKS_PROXY`)
     to the bastion (reached as a host-loopback service, §7.3). The synthetic config
     generator emits the `ProxyCommand` line. *Design decision:* the bastion is
-    reached via the existing `[[net.loopback.host_services]]` allow, and a shipped
-    SOCKS connector (not a dependency on `nc`) bridges `ssh` to the proxy.
+    reached via the existing `[[net.host_services]]` allow (the shipped key; see the
+    host-loopback-services note below), and a shipped SOCKS connector (not a
+    dependency on `nc`) bridges `ssh` to the proxy.
   - **End-to-end proof** — `src/tools/ssh-bastion-e2e.sh` stands up a real topology
     with stock OpenSSH 9.6 (a bastion `sshd` + a destination `sshd` + an agent) and
     drives the **built** binaries through it, asserting §7.8.9's load-bearing
@@ -280,6 +345,41 @@ describe these read as roadmap.
     userns-correct isolation invariant (every gid is the primary, the overflow, or the
     granted one). The no-userns path's `setgroups`-to-exactly-the-granted-set is covered
     by the privileged unit/root tests; the production proof is the unprivileged vertical.
+
+- **D-Bus proxy** (`07-5-dbus.md`) — **designed, not built.** The schema exposes only a
+  per-bus `enabled` toggle (`[dbus.session]`/`[dbus.system]` in `kennel-policy::source`);
+  no `xdg-dbus-proxy` is launched and no per-method allowlist is enforced. The design's
+  rich primitives (talk/call/broadcast/own) are roadmap.
+- **X11 isolation** (`07-6-x11.md`) — **designed, not built.** The schema exposes only
+  `xwayland_isolated`/`xephyr_isolated` toggles; no Xwayland/Xephyr is spawned and no
+  isolated display is constructed.
+- **`fs.scrub` / `fs.home.sanitise`** (`07-2-filesystem.md` §7.2.5) — **designed, not
+  built.** Both parse and fold up the template chain in the source policy but are dropped
+  at translate (source-only) with no shim-construction step that overlays scrubbed files
+  or writes the sanitised copy.
+- **TTL runtime enforcement** (`09-policy-lifecycle.md` §9.7) — **partial.** `ttl` /
+  `ttl_action` parse, translate, and are carried (signed) in the settled policy, but
+  nothing reads `ttl_seconds` to arm a timer. Code also owes the full action set: the
+  design specifies `exit | warn | renew`; the settled `TtlAction` enum is only
+  `stop | warn`. **Owed:** the enum reconciliation + the runtime reaper (SIGTERM→SIGKILL
+  / prompt).
+- **`exec.deny` composition** (`07-1-exec.md` §7.1.4) — **partial.** `exec.allow` is now a
+  Landlock execution allowlist (built), but `exec.deny` is parsed and never composed up
+  the template chain, so settled policies carry only `allow`; denials work by omission.
+  **Owed:** compose `exec.deny`, and warn where a deny falls inside an allow-dir (Landlock
+  cannot subtract).
+- **Bind port policy** (`07-3-network.md`) — **partial.** `bind_subnet_map` is now
+  populated so `INADDR_ANY`/in-subnet binds work, but the bind4/bind6 programs do not
+  check the port; `min_port`/`allowed_ports` are not enforced. **Owed:** the BPF port check.
+- **ssh-agent footgun** (`05-templates.md` §5.9 / `07-8-ssh.md`) — **code deviates from
+  design.** The `[ssh]` bastion is the intended path, but a policy is allowed to shim a
+  real ssh-agent via `[[unix.allow]]` — the framework should **warn loudly** (validate /
+  compile / runtime), not forbid. `kennel-policy::unix` currently **hard-refuses** it.
+  **Owed:** change the refusal to a loud warning.
+- **`kennel run` auto-compile** (`09-policy-lifecycle.md` §9.10) — **designed, not built.**
+  The design's local-dev loop auto-compiles a source policy in memory; today `run` requires
+  a pre-settled, signed artefact (the spawn path verifies only). **Owed:** the in-memory
+  compile-and-sign dev path.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

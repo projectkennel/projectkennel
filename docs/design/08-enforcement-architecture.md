@@ -67,7 +67,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
 
 3. Allocate kennel resources:
    - Kennel ID (small integer, derived from policy name hash)
-   - Loopback IPv4 subnet (127.<tag>.<ctx>.0/24)
+   - Loopback IPv4 subnet (/28: `127 | tag(12) | ctx(8) | host(4)`)
    - Loopback IPv6 ULA /64
    - Cgroup path (/sys/fs/cgroup/kennel/<ctx>/)
    - Shim directory (/run/kennel/<ctx>/)
@@ -156,7 +156,7 @@ Project Kennel runs primarily as the user's uid. Two components have elevated pr
 
 **The network-configuration helper.** Adds IPv4/IPv6 addresses to loopback or per-kennel dummy interfaces. Requires `CAP_NET_ADMIN`. Installed setuid root or with file capability `CAP_NET_ADMIN=ep`.
 
-Trust boundary: this helper accepts requests only via a Unix socket owned by Project Kennel's UID with mode 0600. It validates that every requested operation falls within Project Kennel's reserved address space (e.g., the configured ULA `/48`, the `127.<tag>.0.0/16` subnet). It refuses any request outside that space.
+Trust boundary: this helper accepts requests only via a Unix socket owned by Project Kennel's UID with mode 0600. It validates that every requested operation falls within the caller's reserved address space — the per-user IPv6 ULA `/48` and, within `127.0.0.0/8`, the kennel's `/28` (`127 | tag(12) | ctx(8) | host(4)`) — reconstructing the embedded `tag`/`gid`/`ctx` and comparing to the caller's scope. It refuses any request outside that space.
 
 The helper is a few hundred lines and is Project Kennel's primary attack surface for privilege escalation. It is reviewed carefully, fuzzed, and kept narrow. A future revision could replace it with a long-running daemon owning `CAP_NET_ADMIN`, accessed via a privileged socket; this trades fewer setuid invocations for a continuously-privileged daemon.
 

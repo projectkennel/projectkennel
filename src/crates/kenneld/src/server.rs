@@ -54,6 +54,22 @@ pub struct Loaded {
     /// loader also sets `plan.supplementary_groups` to these gids (what the seal
     /// `setgroups` to). Empty when no group is granted (the kennel drops all).
     pub groups: Vec<(String, u32)>,
+    /// The per-kennel audit runtime (§02-3): the sinks and per-class levels
+    /// kenneld realises by constructing the `kennel-audit` writer. Empty (all
+    /// defaults) for a kennel with no — or an all-default — `[audit]` section.
+    pub audit: kennel_policy::AuditRuntime,
+    /// The synthesised environment (§7.7.2): the fixed `[env].set` vars the spawn
+    /// applies after clearing the inherited environment. Empty for no `[env].set`.
+    pub env: kennel_policy::EnvRuntime,
+    /// The `PATH` search roots (§7.1.6), synthesised into the workload's `$PATH`.
+    /// Empty ⇒ `$PATH` is not set from policy.
+    pub exec_path: Vec<String>,
+    /// The kennel's login shell (§7.7.2a): the synthetic-`passwd` `pw_shell` and
+    /// `$SHELL`. `/bin/sh` unless the policy set `[exec].shell`.
+    pub shell: String,
+    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
+    /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
+    pub home_persist: Vec<String>,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -429,6 +445,22 @@ where
 {
     for conn in listener.incoming() {
         let mut conn = conn?;
+        // Boundary 7 (04-trust-boundaries.md): only the user this daemon serves
+        // may drive the control socket. The kernel stamps SO_PEERCRED at connect,
+        // so this cannot be spoofed; it is defence-in-depth behind the socket's
+        // 0600 mode. Reject (close without a wire exchange) anything else.
+        let served = shared.identity.uid;
+        match kennel_syscall::scm::peer_uid(conn.as_fd()) {
+            Ok(uid) if uid == served => {}
+            Ok(uid) => {
+                eprintln!("kenneld: rejected control connection from uid {uid} (serves {served})");
+                continue;
+            }
+            Err(e) => {
+                eprintln!("kenneld: rejecting control connection (peer-cred check failed: {e})");
+                continue;
+            }
+        }
         let shared = Arc::clone(shared);
         std::thread::spawn(move || handle_connection(&shared, &mut conn));
     }
@@ -457,6 +489,9 @@ where
 
 /// Bring a kennel up, report it `Started`, block until the workload exits, tear
 /// it down, and report `Exited`.
+// allow: one linear request lifecycle (reserve, load, ssh/unix/audit prep, spawn,
+// block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.
+#[allow(clippy::too_many_lines)]
 fn run_kennel<P, L>(
     shared: &Shared<P, L>,
     req: &StartRequest,
@@ -480,6 +515,11 @@ fn run_kennel<P, L>(
         kennel: req.kennel.clone(),
         home: shared.identity.home.clone(),
         namespace: shared.identity.scope.namespace().to_owned(),
+        // `<tag>`/`<gid>` come from the user's reserved scope (loaded from
+        // /etc/kennel/subkennel) — the daemon is the one source of truth, so the
+        // compiler/CLI never bakes them in.
+        tag: shared.identity.scope.tag(),
+        ula_gid: shared.identity.scope.ula_gid(),
     };
 
     let loaded = match shared.loader.load(&req.policy, &subst) {
@@ -506,6 +546,34 @@ fn run_kennel<P, L>(
     // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
+    // The audit runtime (§02-3): the installation/per-user `audit.toml` defaults
+    // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
+    // ~/.config < policy). Captured before `loaded` is consumed below.
+    let audit_runtime = crate::audit::load_audit_defaults().overlay(&loaded.audit);
+    // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
+    // egress proxy's writer so their events correlate. The per-kennel state dir is
+    // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
+    let kennel_uuid = crate::audit::kennel_uuid();
+    let state_dir = shared
+        .identity
+        .audit_base
+        .as_ref()
+        .map(|base| base.join(&req.kennel));
+    let proxy_audit = state_dir.as_ref().map(|dir| crate::proxy::ProxyAudit {
+        kennel: req.kennel.clone(),
+        kennel_uuid: kennel_uuid.clone(),
+        dir: dir.clone(),
+        sinks: audit_runtime
+            .sinks
+            .iter()
+            .map(|k| k.token().to_owned())
+            .collect(),
+        network_level: audit_runtime.network_level.clone(),
+        syslog_facility: audit_runtime.syslog_facility.clone(),
+        rotate_at_bytes: audit_runtime.file.rotate_at_bytes,
+        compress_after_seconds: audit_runtime.file.compress_after_seconds,
+        retain_count: audit_runtime.file.retain_count,
+    });
 
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
@@ -519,6 +587,10 @@ fn run_kennel<P, L>(
         // The resolved supplementary groups, named in /etc/group (§7.2). The loader
         // already set plan.supplementary_groups to their gids (what the seal drops to).
         groups: loaded.groups.clone(),
+        // The login shell for the synthetic passwd's pw_shell field (§7.7.2a).
+        shell: loaded.shell.clone(),
+        // Home-relative paths exempt from dotfile reconstruction (§7.7.2a).
+        home_persist: loaded.home_persist.clone(),
     });
     let spec = crate::Spec {
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
@@ -532,15 +604,41 @@ fn run_kennel<P, L>(
             .view_base
             .as_ref()
             .map(|base| base.join(format!("root-{ctx}"))),
-        audit_path: id
-            .audit_base
-            .as_ref()
-            .map(|base| base.join(&req.kennel).join("network.jsonl")),
+        proxy_audit,
         ssh,
         unix,
     };
 
-    let kennel = match start(&shared.privileged, spec, &mut command) {
+    // Construct the per-kennel audit writer *before* start so the privileged
+    // operations during bring-up (and any refusal) are recorded as `priv.*`
+    // events through the same writer; it shares the run's `kennel_uuid` with the
+    // proxy. With no state dir configured, audit is simply not recorded and the
+    // decorator is a transparent pass-through.
+    let audit = state_dir.as_ref().map(|dir| {
+        crate::audit::build_writer(&req.kennel, dir, &audit_runtime, kennel_uuid.clone())
+    });
+    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_ref());
+
+    // Synthesise the workload environment from policy (§7.7.2): clear the inherited
+    // environment and build it from scratch. `PATH` (from `[exec].path`),
+    // `USER`/`LOGNAME` (the masked account), `SHELL` (`[exec].shell`), and `HOME`
+    // (the kennel's shim home) are synthesised; `[env].set` is layered on top. The
+    // parent's environment is never a source — a secret policy did not name cannot
+    // reach the workload. (`bring_up` adds `KENNEL_SOCKS_PROXY` and any unix-shim
+    // vars on top of this cleared base.)
+    command.env_clear();
+    if !loaded.exec_path.is_empty() {
+        command.env("PATH", loaded.exec_path.join(":"));
+    }
+    command.env("USER", crate::etc::ACCOUNT_NAME);
+    command.env("LOGNAME", crate::etc::ACCOUNT_NAME);
+    command.env("SHELL", &loaded.shell);
+    command.env("HOME", &shim_root);
+    for (key, value) in &loaded.env.vars {
+        command.env(key, value);
+    }
+
+    let kennel = match start(&audited, spec, &mut command) {
         Ok(kennel) => kennel,
         Err(e) => {
             return fail(
@@ -554,10 +652,18 @@ fn run_kennel<P, L>(
     };
     let pid = kennel.id();
     shared.set_pid(&req.kennel, pid);
+    if let Some(writer) = &audit {
+        writer.emit(&crate::audit::kennel_start(pid, ctx));
+    }
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
     // Block until the workload exits (on its own or via `stop`), then tear down.
-    let status = kennel.stop(&shared.privileged);
+    // The audited privileged records the teardown's `del_address` refusals too.
+    let status = kennel.stop(&audited);
+    if let Some(writer) = &audit {
+        writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
+        writer.emit(&crate::audit::kennel_exit("stopped"));
+    }
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
     let _ = control::send_response(
@@ -719,6 +825,11 @@ mod tests {
                 ssh: kennel_policy::SshRuntime::default(),
                 unix: kennel_policy::UnixRuntime::default(),
                 groups: Vec::new(),
+                audit: kennel_policy::AuditRuntime::default(),
+                env: kennel_policy::EnvRuntime::default(),
+                exec_path: Vec::new(),
+                shell: "/bin/sh".to_owned(),
+                home_persist: Vec::new(),
             })
         }
     }

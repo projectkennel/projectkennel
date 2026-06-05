@@ -2,7 +2,7 @@
 
 ## Stability commitment
 
-**Internal-stable** per `02-0-overview.md`. The BPF map ABI is internal: the loader and the BPF programs are built from the same source within a release, so version skew is impossible inside a release. Across releases, the loader carries a magic-number-and-version check at attach time; mismatched binaries refuse to attach with a structured error.
+**Internal-stable** per `02-0-overview.md`. The BPF map ABI is internal: the loader and the BPF programs are built from the same source within a release, so version skew is impossible inside a release. Across releases, a magic-number-and-version check at attach time is designed to make mismatched binaries refuse to attach with a structured error. **Status: not yet built (roadmap)** — the `magic` and `abi_version` constants exist on the C side, but the loader does not read the map back to validate them (see the `kennel_meta` and ABI-versioning sections).
 
 External parties do not write BPF programs against our maps or consume our ringbuf events. If a third-party integration ever needs that surface, it is added to the external CLI (`kennel audit --follow` already streams equivalent events) or to a stable JSON channel; we do not promote internal BPF types to external stability.
 
@@ -52,7 +52,9 @@ Required BPF features beyond the attach points:
 - **LPM trie maps** (kernel 4.11+). Used for CIDR-based allowlists.
 - **`bpf_loop`** (kernel 5.17+, optional). Replaces some `#pragma unroll` loops; programs fall back to unrolling when unavailable.
 
-The loader checks kernel-feature availability at attach time and refuses to attach if any required feature is missing, with a structured error naming the missing feature.
+The loader is designed to check kernel-feature availability at attach time and refuse to attach if any required feature is missing, with a structured error naming the missing feature.
+
+**Status: not yet built (roadmap).** The as-built attach path goes straight to `load_program` then `attach`; a missing feature currently surfaces as a raw kernel errno from `map_create`/`prog_load`/`attach`, not a structured named-feature error. The only feature gating in place is the build-time `bpf-egress` cfg, which returns `ENOSYS` when the program is not embedded.
 
 ---
 
@@ -64,7 +66,9 @@ Each kennel has its own copy of the per-kennel maps; the project-wide audit ring
 
 **`kennel_meta`** (BPF_MAP_TYPE_ARRAY, capacity 1)
 
-A single-element array carrying per-kennel metadata. Read by every program at every invocation; updated by the loader at kennel start (and never again — the map is marked read-only via `BPF_F_RDONLY_PROG` once populated).
+A single-element array carrying per-kennel metadata. Read by every program at every invocation; updated by the loader at kennel start and not written again thereafter.
+
+> **Status: read-only sealing not yet built (roadmap).** The map is intended to be marked read-only via `BPF_F_RDONLY_PROG` once populated. As built, `kennel_meta_map` is created with `map_flags = 0` and is never frozen; the write-once property is upheld by the loader convention, not enforced by the kernel.
 
 ```c
 struct kennel_meta {           // 64 bytes (loader value_size); bpf/maps.h is authoritative
@@ -79,7 +83,7 @@ struct kennel_meta {           // 64 bytes (loader value_size); bpf/maps.h is au
 };
 ```
 
-The loader verifies `magic` and `abi_version` after population by reading the map back. Mismatch indicates a corrupted build; the kennel fails to start. The proxy fields are ordered `proxy_port` before `proxy_addr_v6`, with an explicit `_pad0`, for natural alignment; the BPF enforcement path reads the deny/allow tries, not these fields.
+The loader is designed to verify `magic` and `abi_version` after population by reading the map back; a mismatch indicates a corrupted build and fails the kennel to start. **Status: readback verification not yet built (roadmap)** — the `magic` (`0x4B4E454C`) and `KENNEL_ABI_VERSION` constants exist on the C side (`bpf/maps.h`), but no Rust code reads the map back to validate them; the value is written from the payload `meta` without a post-write check. The proxy fields are ordered `proxy_port` before `proxy_addr_v6`, with an explicit `_pad0`, for natural alignment; the BPF enforcement path reads the deny/allow tries, not these fields.
 
 **`allow_v4`** (BPF_MAP_TYPE_LPM_TRIE)
 
@@ -120,7 +124,7 @@ The kennel's bind subnet for `INADDR_ANY` rewriting:
 ```c
 struct bind_subnet {
     __u32 v4_addr;       // network byte order
-    __u32 v4_prefix;     // host order, expected 24
+    __u32 v4_prefix;     // host order, expected 28 (per-kennel /28 allocation)
     __u8  v6_addr[16];
     __u8  v6_prefix;     // expected 64
     __u8  reserved[3];
@@ -191,11 +195,12 @@ Strings — destination names, paths — are not included in BPF events. The ker
 The loader's setup for one kennel:
 
 1. Open the embedded BPF object (`include_bytes!` into the loader binary).
-2. Create the per-kennel maps. Pin them under `/sys/fs/bpf/kennel/<id>/` for inspection (read-only to the user; not in the workload's view).
+2. Create the per-kennel maps.
 3. Populate `kennel_meta`, `allow_v4`, `allow_v6`, `deny_v4`, `deny_v6`, `bind_subnet` from the resolved policy.
-4. Mark `kennel_meta` read-only.
-5. Load the programs, attaching to the kennel's cgroup at `/sys/fs/cgroup/kennel/<id>/`.
-6. The cgroup is then ready; the workload can be moved into it.
+4. Load the programs, attaching to the kennel's cgroup (under `/sys/fs/cgroup/<namespace>/<ctx>/`, where `<namespace>` defaults to `kennel`).
+5. The cgroup is then ready; the workload can be moved into it.
+
+> **Status: map pinning and read-only sealing not yet built (roadmap).** The as-built attach path creates maps, populates them, and attaches the programs; it does not pin the maps under `/sys/fs/bpf/kennel/<id>/` and does not freeze `kennel_meta`. Map-pinning for inspection (step "pin them under bpffs") and the explicit "mark `kennel_meta` read-only" step are designed but unwired (see the Maps and Map pinning sections).
 
 The audit ringbuf is created once at kenneld start, not per kennel. Per-kennel events carry the `ctx_byte` so the reader can route to the right log file.
 
@@ -223,13 +228,17 @@ CI runs the BPF programs through `bpftool prog load` on the kernel-version matri
 
 The `abi_version` field in `kennel_meta` is the cross-release compatibility check. Bumping it is a minor-version event with both the loader and the programs landing together (which is the default — they are built from the same source).
 
-A non-matching `abi_version` between the loader and the maps it created would indicate a build bug; we do not expect users to mix loader and program binaries across releases. The check exists for review-time assurance, not for operator-facing version negotiation.
+A non-matching `abi_version` between the loader and the maps it created would indicate a build bug; we do not expect users to mix loader and program binaries across releases. The check is designed for review-time assurance, not for operator-facing version negotiation.
+
+**Status: not yet built (roadmap).** As built, the loader writes the `meta` payload (including `abi_version`) into the map without reading it back to compare against a compiled-in constant; there is no runtime ABI check.
 
 ---
 
 ## Map pinning and inspection
 
-Per-kennel maps are pinned under `/sys/fs/bpf/kennel/<id>/`. The pins are owned by root with mode 0640 and group `kennel-readers` (created at install time). This makes the maps inspectable for debugging (`bpftool map dump pinned /sys/fs/bpf/kennel/ai-coding/allow_v4`) without exposing them to write attacks.
+Per-kennel maps are designed to be pinned under `/sys/fs/bpf/kennel/<id>/`, owned by root with mode 0640 and group `kennel-readers` (created at install time). This would make the maps inspectable for debugging (`bpftool map dump pinned /sys/fs/bpf/kennel/ai-coding/allow_v4`) without exposing them to write attacks.
+
+**Status: not yet built (roadmap).** As built, the attach path creates, populates, and attaches without pinning any map or program: it does not create `/sys/fs/bpf/kennel/<id>/`, and there is no mode-0640 or `kennel-readers`-group code. The loader's `pin_program` helper and the underlying `obj_pin`/`obj_get` syscalls exist but are exercised only by a root test against a flat scratch path, not by the production path.
 
 The workload's view never includes `/sys/fs/bpf` — the constructed shim does not mount it.
 
