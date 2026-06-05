@@ -104,14 +104,13 @@ private = true
 size = "512M"                          # cap on the tmpfs size
 mode = "0700"
 
-# Shadow $HOME: present the kennel with a synthetic home directory
-# rooted elsewhere, with only granted paths visible.
+# Shadow $HOME: present the kennel with a synthetic home directory,
+# with only granted paths visible.
 [fs.home]
 shadow = true                          # default in confined templates
-shim_root = "/run/kennel/<kennel>/home"
-# When shadow=true, the kennel's $HOME points to shim_root.
-# Paths listed in fs.read/fs.write under ~/ are bind-mounted from real $HOME
-# into shim_root.
+# When shadow=true, $HOME is /home/<user> (the masked [identity].user, default
+# "kennel"). Paths listed in fs.read/fs.write under ~/ are bind-mounted from the
+# real $HOME beneath it.
 
 # Procfs handling
 [fs.proc]
@@ -169,10 +168,10 @@ read = ["~/projects/foo/**", "~/.config/git/**"]
 write = ["~/projects/foo/**"]
 ```
 
-The shim at `/run/kennel/<ctx>/home/` is constructed as:
+The shim at `/home/<user>/` is constructed as:
 
 ```
-/run/kennel/<ctx>/home/
+/home/<user>/
 ├── projects/
 │   └── foo/                  ← bind-mounted from real ~/projects/foo (rw)
 ├── .config/
@@ -181,7 +180,7 @@ The shim at `/run/kennel/<ctx>/home/` is constructed as:
     └── <kennel>/            ← bind-mounted from ~/.cache/<kennel> (rw)
 ```
 
-The kennel's environment has `HOME=/run/kennel/<ctx>/home`. Inside the kennel, `ls ~/` shows exactly these entries. `ls ~/.ssh/` returns `ENOENT` because the directory does not exist in the shim. The Landlock ruleset additionally denies access to the real `~/.ssh/`, so even constructed paths cannot reach it.
+The kennel's environment has `HOME=/home/<user>`. Inside the kennel, `ls ~/` shows exactly these entries. `ls ~/.ssh/` returns `ENOENT` because the directory does not exist in the shim. The Landlock ruleset additionally denies access to the real `~/.ssh/`, so even constructed paths cannot reach it.
 
 This solves the problem that motivated Project Kennel: the kennel cannot enumerate, cannot discover, cannot accidentally reach the credentials and state in the user's real `$HOME`.
 
@@ -189,7 +188,7 @@ This solves the problem that motivated Project Kennel: the kennel cannot enumera
 
 Two template-level features extend the constructed-`$HOME` pattern. They are not separate policy primitives — both compose the underlying mount-namespace + bind-mount machinery — but they are common enough that templates declare them with dedicated syntax. The semantics live here in §7.2; the template-author-facing description lives in §5.9.
 
-**`fs.home.sanitise`** constructs a sanitised copy of a host configuration file at kennel-spawn time and bind-mounts the sanitised copy into the shim at the path the agent expects. Useful for `~/.gitconfig`, `~/.npmrc`, and similar config files where the agent needs the file to operate but specific keys (credential helpers, embedded tokens, URL rewrites) must not be visible. Project Kennel reads the real file, applies the `strip` patterns to remove matching keys, writes the result to a tmpfs location under `/run/kennel/<kennel>/sanitised/`, and bind-mounts that location into the shim.
+**`fs.home.sanitise`** constructs a sanitised copy of a host configuration file at kennel-spawn time and bind-mounts the sanitised copy into the shim at the path the agent expects. Useful for `~/.gitconfig`, `~/.npmrc`, and similar config files where the agent needs the file to operate but specific keys (credential helpers, embedded tokens, URL rewrites) must not be visible. Project Kennel reads the real file, applies the `strip` patterns to remove matching keys, writes the result to a per-user staging location, and bind-mounts that into the shim at the path the agent expects.
 
 **`fs.scrub`** overlays a tmpfs over files within otherwise-granted directories that match a glob pattern. The canonical use case is hiding `.env`, `.env.*`, `terraform.tfstate`, `*.pem`, `*.key`, and similar credential-shaped files within the project tree. The agent can read the file but sees either an empty file (`mode = "empty"`, the default) or ENOENT (`mode = "enoent"`, stricter but breaks tools that test for file existence). Project Kennel iterates the granted directories at shim construction time, finds files matching the patterns, and overlays a per-file tmpfs at each match.
 

@@ -137,7 +137,7 @@ struct bind_subnet {
 
 The audit reader in kenneld drains it; events carry the originating kennel's `kennel_uuid` (resolved from `ctx_byte` via kenneld's in-memory registry), and route through the unified audit writer (`02-3-audit-schema.md` §Scope) with `source: bpf`.
 
-As built, there is exactly *one* `audit_ringbuf` per kennel: the privhelper creates the kennel's map set once (`kennel_bpf::create_maps`) and loads every program against it (`load_program_against`), so all of a kennel's programs share the one buffer. The privhelper pins it to `/run/user/<uid>/kennel/bpf/<id>/audit_ringbuf` (`07-paths.md`); the unprivileged kenneld reopens it with `BPF_OBJ_GET` and drains it on a per-kennel thread (`kenneld::bpf_audit`). (The design once said "one buffer created at kenneld start"; kenneld is unprivileged and cannot create BPF maps, so the privileged helper creates and pins it instead, one per kennel, and kenneld reopens it.)
+There is exactly *one* `audit_ringbuf` per kennel: the privhelper creates the kennel's map set once (`kennel_bpf::create_maps`) and loads every program against it (`load_program_against`), so all of a kennel's programs share the one buffer. kenneld is unprivileged and cannot create BPF maps, so the privhelper creates and pins the buffer to `/run/user/<uid>/kennel/bpf/<id>/audit_ringbuf` (`07-paths.md`); the unprivileged kenneld reopens it with `BPF_OBJ_GET` and drains it on a per-kennel thread (`kenneld::bpf_audit`).
 
 Capacity is configurable per kennel via `[audit].ringbuf_bytes`, capped at 16 MiB to prevent operator misconfiguration causing memory pressure.
 
@@ -205,7 +205,7 @@ The loader's setup for one kennel:
 
 > **Status: `kennel_meta` read-only sealing not yet built (roadmap).** The attach path creates, populates, attaches, and pins the maps; it does not yet freeze `kennel_meta` against further writes (`BPF_MAP_FREEZE`). The explicit "mark `kennel_meta` read-only" step is designed but unwired.
 
-The audit ringbuf is one per kennel, shared across that kennel's programs, so per-kennel events (carrying the `ctx_byte`) route through one drain to the right log file. (It was once designed as a single buffer created at kenneld start; kenneld is unprivileged and cannot create BPF maps, so the privhelper creates and pins it per kennel — see the `audit_ringbuf` section above.)
+The audit ringbuf is one per kennel, shared across that kennel's programs, so per-kennel events (carrying the `ctx_byte`) route through one drain to the right log file (see the `audit_ringbuf` section above).
 
 ---
 

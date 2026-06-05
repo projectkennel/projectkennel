@@ -60,7 +60,7 @@ Runs as the user.
 
 ### `kennel-ssh-agent` (per-kennel SSH agent)
 
-Per-kennel ssh-agent, spawned by kenneld when a kennel's policy references one. The agent's socket is bound at `/run/kennel/<kennel>/ssh-agent.sock` and shim-mounted into the workload's `$HOME/.ssh/agent.sock`.
+Per-kennel ssh-agent, spawned by kenneld when a kennel's policy references one. The agent's socket is bound at `/run/user/<uid>/kennel/ssh-agent.sock` and shim-mounted into the workload's `$HOME/.ssh/agent.sock`.
 
 Two implementations are supported: stock `ssh-agent` (with a custom socket path), or a Project Kennel-supplied implementation that exposes the same wire protocol with additional auditing. The choice is a policy field; both are valid. The user's main `ssh-agent` is never bind-mounted into the kennel.
 
@@ -136,9 +136,9 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |                              |                                       |
    |   kennel run    ----->  kenneld                                      |
    |        |                     |                                       |
-   |        |                     +-->  /run/kennel/<id>/proxy.ctl        |
-   |        |                     +-->  /run/kennel/<id>/dbus.ctl         |
-   |        |                     +-->  /run/kennel/<id>/ssh-agent.sock   |
+   |        |                     +-->  /run/user/<uid>/kennel/proxy.ctl        |
+   |        |                     +-->  /run/user/<uid>/kennel/dbus.ctl         |
+   |        |                     +-->  /run/user/<uid>/kennel/ssh-agent.sock   |
    |        |                     +-->  writes ~/.local/state/            |
    |        |                                  kennel/<id>/*.jsonl        |
    |        |                                                             |
@@ -146,7 +146,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |   Workload (in cgroup, Landlock sealed)                              |
    |        |                                                             |
    |        +-->  $KENNEL_SOCKS_PROXY (kennel primary, :1080)            |
-   |        +-->  /run/kennel/<id>/ssh-agent.sock  (shim-mounted)         |
+   |        +-->  /run/user/<uid>/kennel/ssh-agent.sock  (shim-mounted)         |
    |        +-->  /run/user/<uid>/bus  (D-Bus, via dbus-proxy)            |
    |                                                                      |
    |   BPF programs (attached to workload's cgroup)                       |
@@ -169,7 +169,7 @@ Notes on the diagram:
 
 - The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with the workload's stdio fds over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-4-ipc.md`.
 - The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is the kennel's primary loopback (`$KENNEL_SOCKS_PROXY` — host offset 1 in its `/28`, port 1080), never the control socket.
-- The ssh-agent socket is bind-mounted from `/run/kennel/<id>/ssh-agent.sock` into the workload's `$HOME/.ssh/agent.sock` via the shim. The workload sees only the shim path.
+- The ssh-agent socket is bind-mounted from `/run/user/<uid>/kennel/ssh-agent.sock` into the workload's `$HOME/.ssh/agent.sock` via the shim. The workload sees only the shim path.
 - BPF programs do not push events to userspace; they write into a ringbuf. A reader in kenneld drains the ringbuf and writes JSONL events to the audit directory.
 - The privhelper is invoked by kenneld during a kennel's bring-up and teardown.
 
@@ -200,7 +200,7 @@ Coordination across concurrent requests *inside* kenneld is internal:
 Cross-process exclusion:
 
 - One kenneld per user is provided by systemd socket activation (it owns the single bound `control.sock` listener), not a lock file.
-- `/run/kennel/privhelper.lock` — an exclusive `flock` across the machine, serialising privhelper invocations.
+- The privhelper holds no inter-process lock: each invocation runs one validated operation and exits, and the kernel serialises the privileged syscalls.
 
 Full state and the lockfile inventory are in `05-state-and-supervision.md`.
 

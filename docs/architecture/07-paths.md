@@ -87,27 +87,34 @@ Single-instance-per-user is provided by systemd socket activation (it owns the o
 
 `/run/user/<uid>/` is provided by `pam_systemd` on systemd systems (tmpfs, cleaned on logout). On non-systemd systems, kenneld creates `/run/user/<uid>/kennel/` itself with the appropriate mode and removes it on graceful shutdown.
 
-### `/run/kennel/<id>/`
+### Per-kennel runtime state (under `/run/user/<uid>/kennel/`)
 
-Per-kennel runtime state. Created by kenneld; cleaned immediately when the workload exits.
+Kennel is per-user: every kennel's runtime state lives in the owning user's
+`$XDG_RUNTIME_DIR` (`/run/user/<uid>/kennel/`, §`/run/user/<uid>/kennel/` above) —
+`0700`, owned by the user, so two users running a kennel of the same name neither
+collide nor see each other's. Per-kennel files within that tree are keyed by the
+numeric context `<ctx>` (not the kennel name):
 
 ```
-/run/kennel/<id>/
-├── proxy.ctl                        kenneld → netproxy control socket
-├── proxy.pid                        netproxy's PID
-├── ssh-agent.sock                   ssh-agent socket (shim-mounted into workload's $HOME)
-├── ssh-agent.pid
-├── dbus-proxy.sock                  dbus-proxy socket (shim-mounted)
-├── dbus-proxy.ctl
-├── dbus-proxy.pid
-└── kennel.json                      current kennel metadata (uuid, ctx, policy_hash)
+/run/user/<uid>/kennel/
+├── proxy/proxy-<ctx>.toml           the per-kennel netproxy's config (kenneld writes, netproxy reads)
+├── etc/etc-<ctx>/                   the per-kennel synthetic /etc, staged then bind-mounted
+├── root/root-<ctx>/                 the constructed-view new-root mountpoint (pivot_root target)
+└── bpf/<id>/                        the per-kennel BPF map pins (above)
 ```
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-The per-kennel egress proxy does **not** listen on a Unix socket in this directory. It listens on a **TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64` (IPv6) address at the policy-given offset and port (offset 1, port 1080 by default), e.g. `127.<…>:1080`. The address is computed from the kennel's tag/ctx (`07-3-network.md` §7.3.2) and carried in the signed policy (`net.proxy`); kenneld writes it into the per-kennel `proxy-<ctx>.toml` as the proxy's `listen` address. `proxy.ctl` above is the separate kenneld → netproxy control socket; there is no `proxy.sock` listen socket.
-
-Note: `/run/kennel/` itself (without the `<id>` suffix) is owned by root, mode `0755`, so that kennels from different users can coexist (each user's kennel directory is under `/run/kennel/<id>` with `<id>` being globally unique, but the user's per-kennel directories are user-owned).
+The per-kennel egress proxy does **not** listen on a Unix socket: it listens on a
+**TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64`
+(IPv6) address at the policy-given offset and port (offset 1, port 1080 by
+default), e.g. `127.<…>:1080`. The address is computed from the kennel's tag/ctx
+(`07-3-network.md` §7.3.2) and carried in the signed policy (`net.proxy`); kenneld
+writes it into `proxy-<ctx>.toml` as the proxy's `listen` address. Reconfiguration
+is by respawn with a fresh config file, not an on-socket control protocol — there
+is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
+*future work* (`08-as-built-notes.md`); when built, their sockets stage under this
+same per-user tree, never a shared one.
 
 ---
 
@@ -223,9 +230,6 @@ private from every other, so the pins live on a bpffs there instead.
 The workload never sees this tree — the shim does not bind-mount the runtime bpffs
 into the kennel's view.
 
-### `/run/kennel/privhelper.lock`
-
-Machine-wide flock target for serialising privhelper invocations in degraded mode. Owner: root. Mode: `0600`. Created at first privhelper invocation; persists across reboots if the path is in `/run/` (which is tmpfs; recreated at boot).
 
 ### Binary install paths
 
@@ -260,11 +264,10 @@ The resolver requires the *exact* `<name>@<version>`; it does not fall back to a
 | `~/.config/kennel/` | Operator | Operator | All restarts and reboots |
 | `~/.local/state/kennel/<kennel>/` | kenneld (first kennel start) | Operator (audit retention) | All restarts and reboots |
 | `/run/user/<uid>/kennel/` | kenneld (startup) | logout (systemd) or kenneld (graceful shutdown) | User session |
-| `/run/kennel/<id>/` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/run/user/<uid>/kennel/{proxy,etc,root}/…-<ctx>` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/sys/fs/cgroup/<namespace>/<ctx>/` | kenneld (unprivileged, in its delegated subtree) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/run/user/<uid>/kennel/bpf/<id>/` | privhelper (egress setup; pins chowned to the caller) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/etc/kennel/` | Package installation | Package removal | All restarts and reboots |
-| `/run/kennel/privhelper.lock` | First privhelper invocation | Reboot (tmpfs) | Reboot |
 
 ---
 

@@ -60,8 +60,9 @@ Every lock in the system, what it protects, and what acquisition failure means.
 | Lock | Type | Scope | Held for | On failure |
 |---|---|---|---|---|
 | systemd socket activation on `/run/user/<uid>/kennel/control.sock` | the unit owns the listener | one kenneld per user | kenneld's whole lifetime | systemd hands the single bound listener to one daemon; it is the single-instance guarantee. When started without socket activation (dev), kenneld binds the path itself, replacing a stale socket first. |
-| `/run/kennel/privhelper.lock` | `flock` (exclusive) | machine-wide | duration of one privhelper operation | Concurrent privhelper invocations serialise; the second waits. |
 | kenneld registry mutex | in-process `Mutex` | kenneld's registry and `<ctx>` allocator | brief; never across slow operations | N/A (in-process); the slow bring-up runs outside the lock. |
+
+The privhelper holds no inter-process lock: each invocation runs one validated operation and exits, and the kernel serialises the privileged syscalls themselves.
 
 Single-instance-per-user is enforced by **systemd socket activation**: the `kenneld.socket` user unit owns the one bound listener and hands it to a single daemon (`kennel-config`/`socket.rs`). There is no `kenneld.lock` flock and no `kenneld.pid` file. In the development/socket-less path kenneld binds `control.sock` itself, removing any stale socket first.
 
@@ -143,5 +144,5 @@ kenneld installs no signal handlers: `run()` builds the shared state and calls `
 - The control-protocol wire format that drives bring-up (`Start`, `Stop`, `List`): `02-4-ipc.md`.
 - The settled-policy verification performed during bring-up: `02-2-config-schema.md` and `04-trust-boundaries.md` (boundary 13).
 - The privhelper protocol invoked for address and cgroup operations: `02-4-ipc.md`.
-- The on-disk layout of `/run/kennel/<id>/`: `07-paths.md`.
+- The on-disk layout of the per-kennel runtime tree (`/run/user/<uid>/kennel/`): `07-paths.md`.
 - The kernel mechanisms whose enforcement is independent of kenneld: design doc §7 and §8.
