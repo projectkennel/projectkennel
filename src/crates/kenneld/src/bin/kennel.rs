@@ -17,6 +17,7 @@
 
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -44,8 +45,9 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some((cmd, rest)) if cmd == "compile" => compile(rest),
         Some((cmd, rest)) if cmd == "validate" => validate(rest),
         Some((cmd, rest)) if cmd == "sign" => sign(rest),
+        Some((cmd, rest)) if cmd == "keygen" => keygen(rest),
         Some((cmd, rest)) if cmd == "audit" => audit(rest),
-        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K | kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]".to_owned()),
+        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K | kennel keygen <key-id> [--dir D] [--force] | kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]".to_owned()),
     }
 }
 
@@ -823,6 +825,128 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
         kennel_policy::b64::encode(&key.public_key_bytes())
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel keygen <key-id> [--dir DIR] [--force]`
+///
+/// Generate an Ed25519 signing key and write it into the user key dir (default
+/// `$XDG_CONFIG_HOME/kennel/keys`, else `~/.config/kennel/keys`). `<key-id>.key` is
+/// the private seed (mode `0600`) you pass to `--key` (`sign`/`compile`/`run`);
+/// `<key-id>.pub` is the public key the daemon must trust. Refuses to overwrite an
+/// existing seed without `--force` — replacing a signing key invalidates everything
+/// signed with the old one. The `<key-id>` is both the filename and the signature
+/// `key_id`, so it is restricted to a safe character set.
+fn keygen(args: &[String]) -> Result<ExitCode, String> {
+    let mut key_id: Option<&str> = None;
+    let mut dir: Option<PathBuf> = None;
+    let mut force = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--dir" => dir = Some(it.next().ok_or("--dir needs a value")?.into()),
+            "--force" => force = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            value if key_id.is_none() => key_id = Some(value),
+            _ => return Err("only one <key-id> may be given".to_owned()),
+        }
+    }
+    let key_id = key_id.ok_or("usage: kennel keygen <key-id> [--dir DIR] [--force]")?;
+    if !is_valid_key_id(key_id) {
+        return Err(format!(
+            "invalid key id `{key_id}`: 1-64 chars of letters, digits, `.`, `-`, `_` \
+             (it is both a filename and the signature key_id)"
+        ));
+    }
+    let dir = dir.unwrap_or_else(default_key_dir);
+    let key_path = dir.join(format!("{key_id}.key"));
+    let pub_path = dir.join(format!("{key_id}.pub"));
+    if key_path.exists() && !force {
+        return Err(format!(
+            "{} already exists; refusing to overwrite a signing key \
+             (pass --force to replace it, which invalidates everything signed with the old key)",
+            key_path.display()
+        ));
+    }
+
+    // 32 bytes from the OS CSPRNG (`getrandom`) → the Ed25519 seed.
+    let mut seed = [0u8; 32];
+    kennel_syscall::random::fill(&mut seed).map_err(|e| format!("reading OS randomness: {e}"))?;
+    let key = kennel_policy::SigningKey::from_seed(key_id, &seed)
+        .map_err(|e| format!("deriving key: {e}"))?;
+
+    // The key dir holds secret seeds: 0700.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    write_secret(&key_path, &kennel_policy::b64::encode(&seed), 0o600)
+        .map_err(|e| format!("writing {}: {e}", key_path.display()))?;
+    write_secret(
+        &pub_path,
+        &kennel_policy::b64::encode(&key.public_key_bytes()),
+        0o644,
+    )
+    .map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
+
+    eprintln!("generated Ed25519 signing key `{key_id}`:");
+    eprintln!(
+        "  private seed : {}   (0600 — keep secret; pass to --key)",
+        key_path.display()
+    );
+    eprintln!("  public key   : {}   (0644)", pub_path.display());
+    eprintln!();
+    eprintln!("To let the daemon trust policies you sign with this key, install the *public* key");
+    eprintln!("into the root-owned system trust store, then compile/run:");
+    eprintln!(
+        "  sudo install -m 0644 {} /etc/kennel/keys/{key_id}.pub",
+        pub_path.display()
+    );
+    eprintln!(
+        "  kennel run <policy> <name> --key {} -- <cmd...>",
+        key_path.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A key id is both a filename and the signature `key_id`; restrict it to a safe,
+/// portable set so it cannot escape the key dir or smuggle odd bytes into a policy.
+fn is_valid_key_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s != "."
+        && s != ".."
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// The default user key directory: `$XDG_CONFIG_HOME/kennel/keys`, else
+/// `~/.config/kennel/keys` (matching the CLI's default key search).
+fn default_key_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("kennel").join("keys")
+}
+
+/// Write base64 `text` (plus a trailing newline) to `path`, creating it with `mode`
+/// and enforcing `mode` even if it already existed (`.mode` only applies on create).
+fn write_secret(path: &Path, text: &str, mode: u32) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)?;
+    f.write_all(text.as_bytes())?;
+    f.write_all(b"\n")?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
 }
 
 /// Map a compile-time [`kennel_policy::PolicyError`] to a CLI exit code (`02-1`).
