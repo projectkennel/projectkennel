@@ -52,7 +52,7 @@ A future revision may replace this with a long-running daemon owning the same ca
 
 SOCKS5 proxy enforcing the per-destination network allowlist. One instance per active kennel; concurrent kennels mean concurrent proxy processes, each listening on a different per-kennel loopback address — the kennel's primary (host offset 1 in its `/28`) at port 1080, exposed to the workload as `$KENNEL_SOCKS_PROXY`, plus the corresponding IPv6 ULA.
 
-Reads its configuration once at startup from a config file kenneld writes (the resolved networking policy); reconfiguration is by respawn, not in-place reload. Writes network audit events to the kennel's audit directory.
+Reads its configuration at startup from a config file kenneld writes (the resolved networking policy) and **live-reloads** it: a watcher thread re-reads the file when its mtime changes and swaps the ruleset/host-services in place (`Proxy::reload`), so an egress-policy change needs only a config rewrite, not a respawn (§02-4). Listen-address and audit-sink changes still require a respawn. Writes network audit events to the kennel's audit directory.
 
 The proxy is the only network egress path for the workload. The cgroup BPF rules deny `connect()` to any address other than the proxy; the workload's `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` environment variables point at the proxy. Together this makes the proxy unbypassable from inside the kennel — kernel enforcement guarantees the workload cannot reach the network without going through the proxy, and the proxy enforces the destination allowlist.
 
