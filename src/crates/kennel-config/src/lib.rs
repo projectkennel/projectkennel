@@ -64,7 +64,7 @@ pub enum ConfigError {
         /// The underlying I/O error.
         source: std::io::Error,
     },
-    /// The file was larger than [`MAX_CONFIG`].
+    /// The file was larger than the `MAX_CONFIG` size bound.
     TooLarge {
         /// The offending path.
         path: PathBuf,
