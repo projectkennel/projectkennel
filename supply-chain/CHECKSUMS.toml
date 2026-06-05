@@ -53,7 +53,7 @@ verified-against = [
     "crates.io static.crates.io .crate download — sha256 matches",
     "github.com/nix-rust/nix @ b5933ca178802b558a667514f717a86b3a1cedcc (tag v0.31.3) — 122 source files byte-identical via tools/audit-source.sh",
 ]
-notes = "Direct dependency of kennel-syscall: safe, typed syscall wrappers used instead of hand-rolled unsafe (§4). default-features off; features = [\"user\", \"process\", \"sched\", \"mount\", \"fs\", \"poll\", \"socket\"]. Transitive: bitflags, cfg-if, libc, memoffset (normal, last via the socket feature); cfg_aliases, autocfg (build)."
+notes = "Direct dependency of kennel-syscall: safe, typed syscall wrappers used instead of hand-rolled unsafe (§4). default-features off; features = [\"user\", \"process\", \"sched\", \"mount\", \"fs\", \"poll\", \"socket\", \"net\"]. Transitive: bitflags, cfg-if, libc, memoffset (normal, last via the socket feature); cfg_aliases, autocfg (build)."
 
 [crate."bitflags"]
 version = "=2.11.1"

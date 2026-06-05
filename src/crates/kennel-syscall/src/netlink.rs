@@ -9,15 +9,21 @@
 //!   `127.0.0.1` — and there is no `ioctl` to add an IPv6 address at all);
 //! - shelling out to `ip` (an external dependency in the privileged path).
 //!
-//! The message is built as a plain byte buffer (no `transmute`); the only
-//! `unsafe` is the three socket syscalls, each §4-commented. The netlink
-//! constants are the stable kernel UAPI values (`<linux/rtnetlink.h>`,
-//! `<linux/netlink.h>`), defined here as we define the Landlock ones.
+//! The message is built as a plain byte buffer (no `transmute`); the socket
+//! itself goes through nix's safe `socket`/`sendto`/`recv`/`NetlinkAddr` wrappers
+//! (`CODING-STANDARDS.md` §4 — prefer a vetted crate to our own `unsafe`), so this
+//! module carries none of its own. The netlink constants are the stable kernel
+//! UAPI values (`<linux/rtnetlink.h>`, `<linux/netlink.h>`), defined here as we
+//! define the Landlock ones.
 
 use std::ffi::CStr;
 use std::io;
 use std::net::IpAddr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
+
+use nix::sys::socket::{
+    recv, sendto, socket, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType,
+};
 
 // netlink message types and flags (`<linux/netlink.h>`, `<linux/rtnetlink.h>`).
 const RTM_NEWADDR: u16 = 20;
@@ -44,16 +50,9 @@ fn invalid(msg: &'static str) -> io::Error {
 ///
 /// Returns the OS error if no interface has that name.
 pub fn if_index(name: &CStr) -> io::Result<u32> {
-    // SAFETY: `name` is a valid NUL-terminated C string for the duration of the
-    // call; `if_nametoindex` only reads it and returns the index or 0 on error.
-    // INVARIANTS UPHELD: pointer comes from a live `&CStr`.
-    // FAILURE MODE: unknown name returns 0; we map that to the last OS error.
-    let idx = unsafe { libc::if_nametoindex(name.as_ptr()) };
-    if idx == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(idx)
-    }
+    // nix wraps `if_nametoindex` safely (it reads the `&CStr` and returns the index
+    // or an errno).
+    Ok(nix::net::if_::if_nametoindex(name)?)
 }
 
 /// Add `addr/prefix_len` to the interface `ifindex` (`RTM_NEWADDR`).
@@ -151,52 +150,20 @@ fn build_addr_msg(
 
 /// Open a `NETLINK_ROUTE` socket, send `msg` to the kernel, and interpret the ack.
 fn netlink_round_trip(msg: &[u8]) -> io::Result<()> {
-    // SAFETY: socket() with constant, valid arguments returns a new fd or -1.
-    // FAILURE MODE: -1 → last_os_error; otherwise we own the fd via OwnedFd.
-    let raw = unsafe {
-        libc::socket(
-            libc::AF_NETLINK,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-            libc::NETLINK_ROUTE,
-        )
-    };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `raw` is a fresh, exclusively-owned fd the kernel just returned.
-    let sock = unsafe { OwnedFd::from_raw_fd(raw) };
+    let sock = socket(
+        AddressFamily::Netlink,
+        SockType::Raw,
+        SockFlag::SOCK_CLOEXEC,
+        SockProtocol::NetlinkRoute,
+    )?;
 
-    // Destination: the kernel (pid 0).
-    // SAFETY: zeroed sockaddr_nl is a valid all-zero address; we set the family.
-    let mut dst: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
-    dst.nl_family = u16::try_from(libc::AF_NETLINK).unwrap_or(16);
-
-    // SAFETY: `msg` is valid for `msg.len()` bytes; `dst` is a live, fully
-    // initialised sockaddr_nl of the given size. sendto only reads them.
-    // FAILURE MODE: short/!= write or -1 is surfaced as an error.
-    let sent = unsafe {
-        libc::sendto(
-            sock.as_raw_fd(),
-            msg.as_ptr().cast(),
-            msg.len(),
-            0,
-            std::ptr::from_ref(&dst).cast(),
-            u32::try_from(size_of::<libc::sockaddr_nl>()).unwrap_or(12),
-        )
-    };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // Destination: the kernel — pid 0, no multicast groups.
+    let dst = NetlinkAddr::new(0, 0);
+    sendto(sock.as_raw_fd(), msg, &dst, MsgFlags::empty())?;
 
     let mut buf = [0u8; 4096];
-    // SAFETY: `buf` is a live, writable 4096-byte buffer; recv writes at most
-    // that many bytes and returns the count or -1.
-    let n = unsafe { libc::recv(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let len = usize::try_from(n).unwrap_or(0);
-    parse_ack(buf.get(..len).unwrap_or(&[]))
+    let n = recv(sock.as_raw_fd(), &mut buf, MsgFlags::empty())?;
+    parse_ack(buf.get(..n).unwrap_or(&[]))
 }
 
 /// Interpret a netlink reply: an `NLMSG_ERROR` whose `error` field is 0 is the
