@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.autocfg]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.5.1"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-05): byte-identical to github.com/cuviper/autocfg at tag 1.5.1 via tools/audit-source.sh. Build-only — nix's and memoffset's build.rs use it to probe the toolchain for cfg/feature support; nothing ships in any binary. No proc-macro, no dependencies. It probes by compiling tiny snippets via $RUSTC and writing only to OUT_DIR; no network, no fs writes outside OUT_DIR, no arbitrary process exec beyond the compiler probe."
+
 [[audits.basic-toml]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
@@ -36,6 +42,12 @@ who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.2.186"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/rust-lang/libc at tag 0.2.186 via tools/audit-source.sh. build.rs confirmed to do target/toolchain cfg detection only; no proc-macros."
+
+[[audits.memoffset]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.9.1"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-05): byte-identical to github.com/Gilnaa/memoffset at tag 0.9.1 via tools/audit-source.sh. Pulled by nix's `socket` feature for the CMSG offset macros (scm.rs). Provides the `offset_of!`/`span_of!` macros — pointer-offset arithmetic over `MaybeUninit`; the unsafe is confined to that struct-field-offset computation. No network/fs/process/env. Its build.rs uses autocfg (above) to probe for raw-ref/const-fn support; no proc-macro."
 
 [[audits.nix]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
