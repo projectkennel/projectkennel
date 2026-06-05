@@ -1,7 +1,5 @@
 # §7.5 Policy surface: D-Bus (proxied)
 
-> **Status: not yet built — design intent / roadmap.** The policy schema currently exposes only a per-bus `enabled` toggle (`[dbus.session]` / `[dbus.system]`); no `xdg-dbus-proxy` is launched and no per-method allowlist is enforced. The rich primitives below describe the intended design, not current behaviour.
-
 D-Bus is proxied, not granted directly. If a kennel needs D-Bus access, Project Kennel launches an `xdg-dbus-proxy` instance per kennel that enforces a per-method allowlist between the kennel and the real bus. The proxy's socket is shimmed into the kennel as the standard bus path. Without explicit policy enabling it, no bus socket exists in the kennel's view.
 
 ## 7.5.1 Direct D-Bus access

@@ -96,9 +96,14 @@ Setup flow:
 
 Linux's AF_UNIX has two namespaces: filesystem-path sockets (covered by Landlock's path rules) and abstract-namespace sockets (starting with `\0`, addressed by no path ACL). Project Kennel denies the abstract namespace with **Landlock scoping**, the kernel-native mechanism.
 
-**Landlock scoping (ABI 6, kernel 6.12+) is the mechanism.** `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` makes a Landlock domain deny `connect()` to any abstract-namespace socket bound *outside* the sandbox — no `sun_path` inspection, no userspace-memory dereference, no AppArmor dependency. This is the kernel-native form of `unix.abstract = "deny"`. The companion `LANDLOCK_SCOPE_SIGNAL` isolates the kennel's signal-delivery domain the same way (a confined process cannot signal a process outside its domain), the native replacement for a PID-namespace + AppArmor signal story. Project Kennel queries the Landlock ABI and enables both scopes wherever the kernel reports ABI ≥ 6. Implemented in `kennel-syscall::landlock` (`Scope::ABSTRACT_UNIX_SOCKET`, `Scope::SIGNAL`, set in `Ruleset::new`). The reference dev/CI box runs 6.17 (ABI 7), where both scopes apply.
+**Landlock scoping (ABI 6, kernel 6.12+) is the primary mechanism.** `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` makes a Landlock domain deny `connect()` to any abstract-namespace socket bound *outside* the sandbox — no `sun_path` inspection, no userspace-memory dereference, no AppArmor dependency. This is the kernel-native form of `unix.abstract = "deny"`. The companion `LANDLOCK_SCOPE_SIGNAL` isolates the kennel's signal-delivery domain the same way (a confined process cannot signal a process outside its domain), the native replacement for a PID-namespace + AppArmor signal story. Project Kennel queries the Landlock ABI and enables both scopes by default wherever the kernel reports ABI ≥ 6. Implemented in `kennel-syscall::landlock` (`Scope::ABSTRACT_UNIX_SOCKET`, `Scope::SIGNAL`, set in `Ruleset::new`). The runtime floor is 6.10 (ABI 5); the reference dev/CI box runs 6.17 (ABI 7), where both scopes apply.
 
-**Below ABI 6 there is no fallback: abstract-socket scoping simply requires ABI ≥ 6.** `supported_scope(abi)` returns the empty scope set below ABI 6, so on an older kernel the scope is not requested (requesting an unsupported scope bit is `EINVAL`) and abstract-namespace denial is not enforced — there is no seccomp `connect()` filter and no AppArmor `unix` rule in the build. Abstract-socket isolation is therefore conditional on the kernel providing Landlock ABI 6 scoping; that is the floor for this guarantee.
+**Fallback below ABI 6.** Where the kernel predates the scope bits, abstract-socket denial falls back to a seccomp `connect()` filter that reads the first byte of `sun_path` and denies on `\0`, or to AppArmor `unix` rules where a system policy is available:
+
+- **`SECCOMP_RET_TRAP`** to a userspace handler that inspects `sun_path` (it lives in userspace memory most kernels can't safely dereference inline). Slow, complex, works.
+- **AppArmor `unix` rules** for the kennel (requires root or system policy). Cleaner where AppArmor is present.
+
+The fallback is the documented path below ABI 6 only; on a supported kernel the native scoping supersedes it entirely.
 
 ## 7.4.4 Policy primitives
 
@@ -254,7 +259,7 @@ For each invariant, a regression test in `tests/unix/`:
 
 1. Context with `unix.allow = []` attempts `connect()` to `$XDG_RUNTIME_DIR/bus`; expect ENOENT (the shim is empty — the name is absent, not merely denied).
 2. Context with a `gpg-agent` shim grant finds the socket at `~/.gnupg/S.gpg-agent` and can use it.
-3. Context with `unix.abstract = "deny"` connects to ` /org/freedesktop/DBus`; expect EPERM from the Landlock abstract-unix scope (the scope requires ABI >= 6; on an older kernel the case is skipped — there is no fallback to enforce it).
+3. Context with `unix.abstract = "deny"` connects to ` /org/freedesktop/DBus`; expect EPERM from the Landlock abstract-unix scope (EACCES from the seccomp/AppArmor fallback below ABI 6).
 4. Context lists `$XDG_RUNTIME_DIR`; expect to see only granted entries.
 5. Context attempts to read a non-granted socket path; expect ENOENT — un-granted names are absent from the constructed view, not present-but-denied.
 6. Two kennels with different `gpg-agent` grants each see only their own instance's socket.

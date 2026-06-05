@@ -324,7 +324,9 @@ reason = "sign commits via a per-kennel gpg-agent"
 
 Project Kennel binds the granted host socket into the kennel's constructed view at the `shim` path (and, where given, sets the named `env` var to that path); the socket at the `real` path is the per-kennel instance. The same pattern applies to per-kennel keyring daemons and similar.
 
-**ssh-agent is the deliberate exception, not an example of this pattern.** An exposed ssh-agent socket is a destination-blind signing oracle: anything that can reach the socket can sign with every key the agent holds, against any host (T1.6, §7.8.1). For that reason the policy compiler *refuses* any `[[unix.allow]]` named `ssh-agent`, and any entry whose `env = "SSH_AUTH_SOCK"` — the AF_UNIX shim is not a permitted path for SSH. SSH egress is granted instead through the dedicated `[ssh]` section and the §7.8 re-origination bastion, which binds each synthetic key to a forced command for one fixed destination, so a kennel can never use a key against a host it was not granted and never holds the real key.
+**ssh-agent is special: prefer the bastion, not a raw shim.** An exposed ssh-agent socket is a destination-blind signing oracle: anything that can reach the socket can sign with every key the agent holds, against any host (T1.6, §7.8.1). The intended path for SSH egress is therefore the dedicated `[ssh]` section and the §7.8 re-origination bastion, which binds each synthetic key to a forced command for one fixed destination, so a kennel can never use a key against a host it was not granted and never holds the real key.
+
+A policy *may* still shim a real ssh-agent through `[[unix.allow]]` (with `env = "SSH_AUTH_SOCK"`); Project Kennel does not forbid the footgun. But because doing so re-creates the signing-oracle exposure the bastion exists to prevent, the framework flags it loudly — at validation, at compile, and at run time — so the author is choosing it with eyes open rather than by accident.
 
 ## 5.10 Signing, versioned references, and includes
 
