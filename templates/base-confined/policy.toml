@@ -99,7 +99,10 @@ deny = [
 
 # The constructed $HOME (T1.1). HOME is /home/<user> (the masked [identity].user,
 # default `kennel`); granted ~/ paths are bound beneath it; the Landlock ruleset
-# backstops on the resolved view (§7.2.3/.5).
+# backstops on the resolved view (§7.2.3/.5). The home root is writable by default,
+# but it is a fresh tmpfs — anything written directly there is ephemeral. Persistence
+# is opt-in per path via `persist` (or a writable ~/ grant), which binds the real host
+# inode read-write beneath the home.
 [fs.home]
 shadow = true
 

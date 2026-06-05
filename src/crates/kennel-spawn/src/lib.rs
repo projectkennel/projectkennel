@@ -5,8 +5,9 @@
 //! Turn a settled policy into a confined workload. The runtime pipeline is:
 //! verify the settled-policy bytes (one signature, schema gate, framework
 //! invariants — via [`kennel_policy::verify_settled`]); substitute the
-//! per-instance placeholders (`<ctx>`, `<uid>`, `<kennel>`, `<home>`) and refuse
-//! any that remain; translate the result into a [`Plan`] of kernel enforcement
+//! per-instance placeholders (`<ctx>`, `<uid>`, `<kennel>`, `<home>`, `<tag>`,
+//! `<gid>`, and the masked `<user>`/`<group>`) and refuse any that remain;
+//! translate the result into a [`Plan`] of kernel enforcement
 //! objects; then apply the plan and exec.
 //!
 //! This crate holds **no `unsafe`** (`#![forbid(unsafe_code)]`): every syscall
@@ -113,8 +114,10 @@ impl From<PolicyError> for SpawnError {
     }
 }
 
-/// Replace the four deferred placeholders in `s`.
-fn substitute_str(s: &str, subst: &RuntimeSubstitutions) -> String {
+/// Replace the deferred placeholders in `s`. `user`/`group` are the policy's own
+/// masked identity (`[identity].user`/`.group`, default `kennel`), not runtime
+/// context — they are grammar-validated names (§7.2), so safe to splice into paths.
+fn substitute_str(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
     let [g0, g1, g2, g3, g4] = subst.ula_gid;
     let gid = format!("{g0:02x}{g1:02x}{g2:02x}{g3:02x}{g4:02x}");
     s.replace("<ctx>", &subst.ctx.to_string())
@@ -123,6 +126,8 @@ fn substitute_str(s: &str, subst: &RuntimeSubstitutions) -> String {
         .replace("<home>", &subst.home.to_string_lossy())
         .replace("<tag>", &subst.tag.to_string())
         .replace("<gid>", &gid)
+        .replace("<user>", user)
+        .replace("<group>", group)
 }
 
 /// Error if `value` still contains an unresolved `<…>` placeholder.
@@ -148,33 +153,36 @@ pub fn substitute(
     subst: &RuntimeSubstitutions,
 ) -> Result<SettledPolicy, SpawnError> {
     let mut p = policy.clone();
+    // The masked identity drives `<user>`/`<group>`; clone before borrowing `fs`.
+    let user = p.identity.user.clone();
+    let group = p.identity.group.clone();
     let fs = &mut p.effective_policy.fs;
 
     for path in &mut fs.read {
-        *path = substitute_str(path, subst);
+        *path = substitute_str(path, subst, &user, &group);
         reject_leftover("fs.read", path)?;
     }
     for path in &mut fs.write {
-        *path = substitute_str(path, subst);
+        *path = substitute_str(path, subst, &user, &group);
         reject_leftover("fs.write", path)?;
     }
     for bin in &mut p.effective_policy.exec.allow {
-        *bin = substitute_str(bin, subst);
+        *bin = substitute_str(bin, subst, &user, &group);
         reject_leftover("exec.allow", bin)?;
     }
     for dir in &mut p.effective_policy.exec.path {
-        *dir = substitute_str(dir, subst);
+        *dir = substitute_str(dir, subst, &user, &group);
         reject_leftover("exec.path", dir)?;
     }
     {
         let shell = &mut p.effective_policy.exec.shell;
-        *shell = substitute_str(shell, subst);
+        *shell = substitute_str(shell, subst, &user, &group);
         reject_leftover("exec.shell", shell)?;
     }
     // The synthesised environment (§7.7.2): substitute placeholders in the values
-    // (e.g. a HOME under `/run/kennel/<kennel>/…`); keys are fixed var names.
+    // (e.g. a HOME under `/home/<user>/…`); keys are fixed var names.
     for value in p.env.vars.values_mut() {
-        *value = substitute_str(value, subst);
+        *value = substitute_str(value, subst, &user, &group);
         reject_leftover("env.set", value)?;
     }
 
@@ -1003,6 +1011,32 @@ mod tests {
         assert_eq!(
             out.env.vars.get("ULA").map(String::as_str),
             Some("fd0000000002")
+        );
+    }
+
+    #[test]
+    fn user_and_group_are_filled_from_the_masked_identity() {
+        // `<user>`/`<group>` resolve to the policy's own [identity], not runtime
+        // context: the default is `kennel`, and an override flows through.
+        let mut p = policy_with_placeholders();
+        p.identity.user = "claude".to_owned();
+        p.identity.group = "staff".to_owned();
+        p.effective_policy
+            .fs
+            .read
+            .push("/home/<user>/.cache".to_owned());
+        p.env
+            .vars
+            .insert("WHO".to_owned(), "<user>:<group>".to_owned());
+        let out = substitute(&p, &subst()).expect("substitute");
+        assert!(out
+            .effective_policy
+            .fs
+            .read
+            .contains(&"/home/claude/.cache".to_owned()));
+        assert_eq!(
+            out.env.vars.get("WHO").map(String::as_str),
+            Some("claude:staff")
         );
     }
 

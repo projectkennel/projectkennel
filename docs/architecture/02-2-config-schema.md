@@ -263,7 +263,8 @@ The following placeholders are substituted at load time:
 | `<gid>` | The caller's 40-bit IPv6 ULA global ID, from their `/etc/kennel/subkennel` allocation (per-user). |
 | `<uid>` | The user's UID as a decimal string. |
 | `<home>` | The user's home directory (the host path before shim construction). |
-| `<user>` | The user's login name. |
+| `<user>` | The workload's **masked** account name — `[identity].user`, default `kennel`. This is the base of the in-view `$HOME` (`/home/<user>`), not the caller's host login. |
+| `<group>` | The workload's **masked** primary group — `[identity].group`, default `kennel`. |
 
 Substitution happens once at policy resolution; the substituted values are then immutable for the lifetime of the kennel. A template that uses `<ctx>` resolves to a different concrete value for each kennel that derives from it.
 

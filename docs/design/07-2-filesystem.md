@@ -157,6 +157,15 @@ allow = [
 > teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is applied
 > **after** `pivot_root` so its rules key on the view's inodes. `$HOME` is set to
 > `shim_root`.
+>
+> **The home root is writable by default** — a non-system user owns their home (least
+> astonishment), so the constructed `$HOME` carries a Landlock write grant. But it is
+> the *fresh tmpfs* that is writable: anything the workload creates directly in `$HOME`
+> is **ephemeral**, gone at teardown. Persistence is opt-in — a path under `[fs.home].persist`
+> (or any writable `~/…` grant) binds the real host inode read-write beneath the home, and
+> only those survive. Read-only `~/…` binds stay read-only at the VFS layer regardless of
+> the home-root grant, and the write grant carries no `EXECUTE`, so `deny_writable` holds
+> (a file written into `$HOME` cannot then be run).
 
 The most important transformation in the filesystem policy: the kennel does not see the real `$HOME`. Project Kennel constructs a shim directory and bind-mounts the policy-granted paths from the real `$HOME` into it.
 
