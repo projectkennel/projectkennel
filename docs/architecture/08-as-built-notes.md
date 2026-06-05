@@ -345,6 +345,41 @@ describe these read as roadmap.
     granted one). The no-userns path's `setgroups`-to-exactly-the-granted-set is covered
     by the privileged unit/root tests; the production proof is the unprivileged vertical.
 
+- **D-Bus proxy** (`07-5-dbus.md`) — **designed, not built.** The schema exposes only a
+  per-bus `enabled` toggle (`[dbus.session]`/`[dbus.system]` in `kennel-policy::source`);
+  no `xdg-dbus-proxy` is launched and no per-method allowlist is enforced. The design's
+  rich primitives (talk/call/broadcast/own) are roadmap.
+- **X11 isolation** (`07-6-x11.md`) — **designed, not built.** The schema exposes only
+  `xwayland_isolated`/`xephyr_isolated` toggles; no Xwayland/Xephyr is spawned and no
+  isolated display is constructed.
+- **`fs.scrub` / `fs.home.sanitise`** (`07-2-filesystem.md` §7.2.5) — **designed, not
+  built.** Both parse and fold up the template chain in the source policy but are dropped
+  at translate (source-only) with no shim-construction step that overlays scrubbed files
+  or writes the sanitised copy.
+- **TTL runtime enforcement** (`09-policy-lifecycle.md` §9.7) — **partial.** `ttl` /
+  `ttl_action` parse, translate, and are carried (signed) in the settled policy, but
+  nothing reads `ttl_seconds` to arm a timer. Code also owes the full action set: the
+  design specifies `exit | warn | renew`; the settled `TtlAction` enum is only
+  `stop | warn`. **Owed:** the enum reconciliation + the runtime reaper (SIGTERM→SIGKILL
+  / prompt).
+- **`exec.deny` composition** (`07-1-exec.md` §7.1.4) — **partial.** `exec.allow` is now a
+  Landlock execution allowlist (built), but `exec.deny` is parsed and never composed up
+  the template chain, so settled policies carry only `allow`; denials work by omission.
+  **Owed:** compose `exec.deny`, and warn where a deny falls inside an allow-dir (Landlock
+  cannot subtract).
+- **Bind port policy** (`07-3-network.md`) — **partial.** `bind_subnet_map` is now
+  populated so `INADDR_ANY`/in-subnet binds work, but the bind4/bind6 programs do not
+  check the port; `min_port`/`allowed_ports` are not enforced. **Owed:** the BPF port check.
+- **ssh-agent footgun** (`05-templates.md` §5.9 / `07-8-ssh.md`) — **code deviates from
+  design.** The `[ssh]` bastion is the intended path, but a policy is allowed to shim a
+  real ssh-agent via `[[unix.allow]]` — the framework should **warn loudly** (validate /
+  compile / runtime), not forbid. `kennel-policy::unix` currently **hard-refuses** it.
+  **Owed:** change the refusal to a loud warning.
+- **`kennel run` auto-compile** (`09-policy-lifecycle.md` §9.10) — **designed, not built.**
+  The design's local-dev loop auto-compiles a source policy in memory; today `run` requires
+  a pre-settled, signed artefact (the spawn path verifies only). **Owed:** the in-memory
+  compile-and-sign dev path.
+
 ## 8.2 Implementation lessons (apply these to the rest)
 
 - **A read-only bind remount must preserve the source's locked flags inside a userns.**
