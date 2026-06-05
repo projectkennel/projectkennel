@@ -135,7 +135,9 @@ struct bind_subnet {
 
 **`audit_ringbuf`** (BPF_MAP_TYPE_RINGBUF, capacity 1 MiB default)
 
-One shared ringbuf. The audit reader in kenneld drains it; events carry the originating kennel's `kennel_uuid` (resolved from `ctx_byte` via kenneld's in-memory registry).
+The audit reader in kenneld drains it; events carry the originating kennel's `kennel_uuid` (resolved from `ctx_byte` via kenneld's in-memory registry), and route through the unified audit writer (`02-3-audit-schema.md` §Scope) with `source: bpf`.
+
+> **Status: the drain is not yet built (roadmap; `08-as-built-notes.md` §8.1).** As built, the programs reserve-and-commit events into this buffer but nothing consumes it in production, so the events are dropped. The design here is *one shared* ring buffer created once at kenneld start; the as-built `load_program` instead mints a fresh `audit_ringbuf` per program load (so a kennel has one per attached program, all closing when the privhelper exits). Building the drain requires kenneld to hold a stable handle to a shared buffer — the load-bearing prerequisite called out in §8.1.
 
 Capacity is configurable per kennel via `[audit].ringbuf_bytes`, capped at 16 MiB to prevent operator misconfiguration causing memory pressure.
 
@@ -143,7 +145,7 @@ Capacity is configurable per kennel via `[audit].ringbuf_bytes`, capped at 16 Mi
 
 ## Ringbuf event format
 
-Every event in the ringbuf is a packed struct. The reader in kenneld parses these, enriches with the kennel name (via `ctx_byte` lookup), sanitises any string fields, and writes JSONL to the appropriate audit file.
+Every event in the ringbuf is a packed struct. The reader in kenneld parses these, enriches with the kennel name (via `ctx_byte` lookup), sanitises any string fields, and emits the canonical event through the unified writer (to JSONL and any other configured sink). *(This reader is the roadmap drain above — the `Loaded::ringbuf` consumer exists and is exercised by the `connect4` root test, but is not wired into production.)*
 
 The base header (every event):
 
@@ -202,7 +204,7 @@ The loader's setup for one kennel:
 
 > **Status: map pinning and read-only sealing not yet built (roadmap).** The as-built attach path creates maps, populates them, and attaches the programs; it does not pin the maps under `/sys/fs/bpf/kennel/<id>/` and does not freeze `kennel_meta`. Map-pinning for inspection (step "pin them under bpffs") and the explicit "mark `kennel_meta` read-only" step are designed but unwired (see the Maps and Map pinning sections).
 
-The audit ringbuf is created once at kenneld start, not per kennel. Per-kennel events carry the `ctx_byte` so the reader can route to the right log file.
+The audit ringbuf is *designed* to be created once at kenneld start, not per kennel, so per-kennel events (carrying the `ctx_byte`) route through one drain to the right log file. (As built it is minted per program load instead — see the Status note under `audit_ringbuf` above and the §8.1 roadmap entry.)
 
 ---
 

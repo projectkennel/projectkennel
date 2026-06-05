@@ -10,20 +10,28 @@
 > and the journald sink stamps `MESSAGE_ID`. The installation-wide `audit.toml`
 > remains roadmap (`08-as-built-notes.md` §8.1).
 >
-> **Scope: the writer unifies *userspace* sources.** Kernel-side events report
-> through the kernel's own channels, deliberately *not* through this writer:
+> **Scope: the writer unifies every source kenneld can reach in userspace —
+> including the BPF ring buffer.** Two cases differ:
 >
-> - The cgroup **BPF programs** report via the kernel — the audit ring buffer
->   (`bpf/audit_events.h`, `bpf/kennel.bpf.h`) and `dmesg`. Funnelling them through
->   an unprivileged userspace writer would add privilege and TCB for no gain.
-> - **LSM denials** (Landlock/AppArmor) are the kernel's to log.
+> - The cgroup **BPF programs** emit to **our own** `audit_ringbuf` (a
+>   `BPF_MAP_TYPE_RINGBUF`, `bpf/audit_events.h`/`bpf/kennel.bpf.h`) — **not** to
+>   `dmesg` or the kernel audit subsystem. Those events reach an operator only when
+>   **kenneld drains the ring buffer**, resolves `ctx_byte`→`kennel_uuid`, sanitises
+>   the string fields, and emits canonical events **through this writer** (so a
+>   `net.bind-deny` lands in the same JSONL/syslog/journald sinks as a
+>   userspace event). kenneld already owns the ring buffer it drains, so this adds
+>   no privilege. **Status: the drain is roadmap** (`08-as-built-notes.md` §8.1) — the
+>   programs emit today but nothing consumes the buffer in production yet.
+> - **LSM denials** (Landlock/AppArmor) *are* the kernel's to log — they surface
+>   through the kernel's own channels (`dmesg`/auditd), not our ring buffer, so they
+>   are genuinely out of this writer's scope.
 >
-> Both userspace sources route through the writer: kenneld's lifecycle events,
-> and the egress proxy's per-request `net.egress` events
+> The userspace sources that route through the writer today: kenneld's lifecycle
+> events, the egress proxy's per-request `net.egress` events
 > (`kennel-netproxy::audit::Record::to_event`, written to
-> `~/.local/state/kennel/<kennel>/network.jsonl` plus any other configured sink).
-> kenneld shares one `kennel_uuid` with the proxy per run, so their events
-> correlate.
+> `~/.local/state/kennel/<kennel>/network.jsonl` plus any other configured sink), and
+> the privhelper's `priv.*` events (kenneld records them on the helper's behalf).
+> kenneld shares one `kennel_uuid` with the proxy per run, so their events correlate.
 
 ## Stability commitment
 
@@ -48,7 +56,7 @@ The Project Kennel audit log is conceptually a *stream* of structured events. Ea
 Sources of events (where they originate before being passed to the sinks):
 
 - **Kernel** via Landlock and AppArmor LSM hooks (filesystem denials, ptrace denials).
-- **cgroup BPF programs.** Network connect/bind/sock-create denials, allow events under summary or full level. Programs write to a kernel ringbuf; the audit reader in kenneld translates to canonical events.
+- **cgroup BPF programs.** Network connect/bind/sock-create denials, allow events under summary or full level. Programs write to *our* `audit_ringbuf`; the audit reader in kenneld is designed to drain it and translate to canonical events through the unified writer (roadmap — see §Scope and `08-as-built-notes.md` §8.1; the buffer is emitted-to but not yet consumed in production).
 - **The netproxy.** SOCKS5-level allow/deny, DNS resolution, byte counters.
 - **xdg-dbus-proxy.** D-Bus method allow/deny.
 - **kennel-privhelper.** Privileged-operation invocations and refusals.
@@ -106,17 +114,18 @@ Event-specific fields extend the envelope; see §Event types.
 
 The catalogue below names every event in the schema. Field lists are non-exhaustive — each sink representation in the sink sections describes the full field mapping for that sink.
 
-As-built: the events emitted today are the **lifecycle** events (kenneld), the **network/egress** events (the per-kennel netproxy and the cgroup BPF), and the **`priv.*`** events (the privhelper). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively); they are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
+As-built: the events emitted through the writer today are the **lifecycle** events (kenneld), the per-request **`net.egress`** events (the per-kennel netproxy), and the **`priv.*`** events (the privhelper). The cgroup BPF programs already emit **`net.connect-*`**/**`net.bind-*`** events into the `audit_ringbuf`, but kenneld does not yet drain it, so those reach no sink in production (roadmap; §Scope and `08-as-built-notes.md` §8.1). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively); they are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
 
 ### Network (`resource: "net"`)
 
-The connect/bind events below are *kernel-sourced*: the cgroup BPF programs report
-them through the kernel's own channels (the audit ring buffer and `dmesg`),
-deliberately not through this userspace writer (see §Scope). Their `MESSAGE_ID`s and
-field shapes are reserved here so tooling can be written against them, but the
-writer does not emit them and the `addr_family` / `addr_requested` / `addr_rewritten`
-field encodings are not yet built — they are part of the stable schema ahead of the
-kernel-side producers.
+The connect/bind events below are *BPF-sourced*: the cgroup programs emit them into
+**our** `audit_ringbuf` (not `dmesg`; see §Scope). They are designed to route through
+this writer once kenneld **drains the ring buffer** — resolving `ctx_byte`→`kennel_uuid`,
+sanitising, and emitting the canonical event with `source: bpf`. That drain is roadmap
+(`08-as-built-notes.md` §8.1): the programs reserve-and-commit these events today, but
+nothing consumes the buffer in production, so they reach no sink yet. Their `MESSAGE_ID`s
+and field shapes are reserved here so tooling can be written against them ahead of the
+drain.
 
 - **`net.connect-allow`** / **`net.connect-deny`** — connect() attempt, sourced from the BPF connect programs. Allow under audit-level rules; deny always. Adds `addr_family`, `addr`, `port`.
 - **`net.bind-allow`** / **`net.bind-deny`** / **`net.bind-rewrite`** — bind() attempt, sourced from the BPF bind programs. Adds `addr_requested`, `addr_rewritten` (for rewrites), `port`.
