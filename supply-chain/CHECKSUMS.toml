@@ -53,7 +53,7 @@ verified-against = [
     "crates.io static.crates.io .crate download — sha256 matches",
     "github.com/nix-rust/nix @ b5933ca178802b558a667514f717a86b3a1cedcc (tag v0.31.3) — 122 source files byte-identical via tools/audit-source.sh",
 ]
-notes = "Direct dependency of kennel-syscall: safe, typed syscall wrappers used instead of hand-rolled unsafe (§4). default-features off; features = [\"user\"] for now. Transitive: bitflags, cfg-if, libc (normal); cfg_aliases (build)."
+notes = "Direct dependency of kennel-syscall: safe, typed syscall wrappers used instead of hand-rolled unsafe (§4). default-features off; features = [\"user\", \"process\", \"sched\", \"mount\", \"fs\", \"poll\", \"socket\", \"net\"]. Transitive: bitflags, cfg-if, libc, memoffset (normal, last via the socket feature); cfg_aliases, autocfg (build)."
 
 [crate."bitflags"]
 version = "=2.11.1"
@@ -87,6 +87,28 @@ verified-against = [
     "github.com/katharostech/cfg_aliases @ 3d55ba79872b61265a7176110a5200df0c9d9e54 (tag v0.2.1) — 6 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "Transitive BUILD dependency of nix (cfg-alias macro used in nix's build.rs). Smallest crate in the set; read in full."
+
+[crate."memoffset"]
+version = "=0.9.1"
+crate-sha256 = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+audited-by = "remco"
+audited-on = "2026-06-05"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/Gilnaa/memoffset @ 153fc3d50f03755be53148bc3eb97390f9011e45 (tag v0.9.1) — 10 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive of nix's `socket` feature (`offset_of!` over the cmsg/msghdr layout). Enabled so kennel-syscall's scm.rs and netlink.rs use nix's safe sendmsg/recvmsg/ControlMessage instead of hand-rolled CMSG `unsafe` (§4). Pulls autocfg (build-only)."
+
+[crate."autocfg"]
+version = "=1.5.1"
+crate-sha256 = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+audited-by = "remco"
+audited-on = "2026-06-05"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches",
+    "github.com/cuviper/autocfg @ 2799b09c24e6632f8e653c5cd8fc303e85a906ba (tag 1.5.1) — 19 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Transitive BUILD dependency of memoffset (its build.rs probes for `offset_of!`/const support). Build-only — no code ships in any binary. Zero further deps."
 
 [crate."seccompiler"]
 version = "=0.5.0"

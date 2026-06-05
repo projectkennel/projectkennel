@@ -145,6 +145,8 @@ const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
         deny_v4: Vec::new(),
         allow_v6: Vec::new(),
         deny_v6: Vec::new(),
+        bind_allowed_ports: Vec::new(),
+        pin_id: String::new(),
     }
 }
 
@@ -169,6 +171,8 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
         deny_v4: Vec::new(),
         allow_v6: Vec::new(),
         deny_v6: Vec::new(),
+        bind_allowed_ports: Vec::new(),
+        pin_id: String::new(),
     };
     let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
     assert_eq!(
@@ -179,6 +183,80 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
     );
 
     // Removing the cgroup detaches the programs.
+    std::fs::remove_dir(&cgroup).expect("remove cgroup");
+}
+
+/// With a `pin_id`, the helper pins the kennel's shared maps under the caller's
+/// XDG runtime dir `/run/user/<uid>/kennel/bpf/<id>/` (item 10 + the audit-drain
+/// prerequisite). Proves the pins land owner-only with the right modes; reopening
+/// the ringbuf to drain is the kenneld e2e. (Runs as root, so uid 0.)
+#[cfg(feature = "root-tests")]
+#[test]
+fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
+    use kennel_privhelper::wire::{EgressPayload, META_LEN};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if skip_if_unprivileged("pins_the_shared_maps_in_the_xdg_runtime_dir") {
+        return;
+    }
+    let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
+    let cgroup = std::path::PathBuf::from("/sys/fs/cgroup/kennel-egress-pin-test");
+    let _ = std::fs::remove_dir(&cgroup);
+    std::fs::create_dir(&cgroup).expect("create cgroup");
+
+    let pin_id = "kennel-pintest";
+    // Pins live in the caller's XDG runtime dir (root here, so /run/user/0).
+    let uid = kennel_syscall::unistd::real_uid();
+    let pin_dir = std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf")).join(pin_id);
+    let _ = std::fs::remove_dir_all(&pin_dir);
+
+    let payload = EgressPayload {
+        meta: [0u8; META_LEN],
+        allow_v4: vec![allow_v4_any([127, 0, 0, 1])],
+        deny_v4: Vec::new(),
+        allow_v6: Vec::new(),
+        deny_v6: Vec::new(),
+        bind_allowed_ports: Vec::new(),
+        pin_id: pin_id.to_owned(),
+    };
+    let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
+    assert_eq!(
+        resp.status,
+        Status::Ok,
+        "egress setup (errno {})",
+        resp.errno
+    );
+
+    // The audit ringbuf and the data maps are pinned (obj_pin only succeeds on bpffs,
+    // so their presence proves the bpffs was mounted and the pin worked).
+    for map in [
+        "audit_ringbuf",
+        "kennel_meta_map",
+        "allow_v4",
+        "bind_subnet_map",
+    ] {
+        let pin = pin_dir.join(map);
+        assert!(pin.exists(), "expected pinned map at {}", pin.display());
+        let mode = std::fs::metadata(&pin)
+            .expect("stat pin")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "pin {map} should be mode 0600, got {mode:o}");
+    }
+    let dir_mode = std::fs::metadata(&pin_dir)
+        .expect("stat pin dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        dir_mode, 0o700,
+        "pin dir should be owner-only 0700, got {dir_mode:o}"
+    );
+
+    // Cleanup: unlink the pins + dir, detach by removing the cgroup. Leave the bpffs
+    // mounted (idempotent across runs).
+    let _ = std::fs::remove_dir_all(&pin_dir);
     std::fs::remove_dir(&cgroup).expect("remove cgroup");
 }
 

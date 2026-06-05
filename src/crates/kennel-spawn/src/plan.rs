@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use kennel_syscall::landlock::{AccessFs, AccessNet};
 use kennel_syscall::namespace::Namespaces;
+use kennel_syscall::process::{Resource, RLIM_INFINITY};
 use kennel_syscall::seccomp::{Action, Filter};
 
 use kennel_policy::{NetMode, NetRule, Protocol, SeccompAction, SettledPolicy};
@@ -82,10 +83,21 @@ fn meta_bytes(ctx: u16) -> [u8; 64] {
     m
 }
 
+/// Stamp the `kennel_meta` `bind_port_min` field (the repurposed `_pad0` slot, offset
+/// 14, host byte order) — the lowest port a workload may `bind()` (§7.3.7). `0` leaves
+/// no floor. Read by the `bind4`/`bind6` BPF; host order because it compares against a
+/// host-order bind port on the same machine that wrote it.
+fn stamp_bind_port_min(meta: &mut [u8; 64], min_port: u16) {
+    if let Some(slot) = meta.get_mut(14..16) {
+        slot.copy_from_slice(&min_port.to_ne_bytes());
+    }
+}
+
 /// Fill the `kennel_meta` proxy fields in place from `endpoint`: `proxy_addr_v4`
 /// (offset 8), `proxy_port` (offset 12), and `proxy_addr_v6` (offset 16), all in
 /// network byte order per the C ABI (`bpf/maps.h`). A v6-only kennel leaves
-/// `proxy_addr_v4` zero. `_pad0` (offset 14) is untouched, staying zero.
+/// `proxy_addr_v4` zero. The `bind_port_min` slot (offset 14) is set separately by
+/// [`stamp_bind_port_min`].
 fn stamp_proxy_meta(meta: &mut [u8; 64], endpoint: &ProxyEndpoint) {
     let v4 = endpoint.v4.map_or([0u8; 4], |a| a.octets());
     if let Some(slot) = meta.get_mut(8..12) {
@@ -185,6 +197,32 @@ fn write_access() -> AccessFs {
         | AccessFs::REMOVE_FILE
         | AccessFs::REMOVE_DIR
         | AccessFs::TRUNCATE
+}
+
+/// Parse a settled `[ulimits]` value into `(soft, hard)`. The translator normalised
+/// it to one whitespace-separated token (`soft == hard`) or two (`soft hard`), each a
+/// decimal or the literal `unlimited` (→ [`RLIM_INFINITY`]). A malformed value here is
+/// a compiler bug, surfaced as an invalid-policy error.
+fn parse_ulimit_value(name: &str, value: &str) -> Result<(u64, u64), SpawnError> {
+    let bad =
+        || SpawnError::InvalidPolicy(format!("ulimit `{name}` has a malformed value `{value}`"));
+    let token = |t: &str| -> Result<u64, SpawnError> {
+        if t == "unlimited" {
+            Ok(RLIM_INFINITY)
+        } else {
+            t.parse::<u64>().map_err(|_| bad())
+        }
+    };
+    let mut parts = value.split_whitespace();
+    let soft = token(parts.next().ok_or_else(bad)?)?;
+    let hard = match parts.next() {
+        Some(h) => token(h)?,
+        None => soft,
+    };
+    if parts.next().is_some() {
+        return Err(bad());
+    }
+    Ok((soft, hard))
 }
 
 /// The kennel's egress proxy endpoint.
@@ -332,6 +370,10 @@ pub struct Plan {
     pub bpf_deny_v6: Vec<LpmV6Entry>,
     /// The `kennel_meta` map value (64 bytes) for `kennel_meta_map[0]`.
     pub bpf_meta: [u8; 64],
+    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7) to write into the
+    /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. The
+    /// `min_port` floor itself rides `bpf_meta`; this is the explicit set.
+    pub bind_allowed_ports: Vec<u16>,
     /// Single-file bind mounts `(source, target)` applied read-only in the mount
     /// seal, after the root is made private and `/proc`/`/tmp` are mounted. Used to
     /// shadow individual files (the synthetic `/etc` set) over their host
@@ -345,6 +387,11 @@ pub struct Plan {
     /// non-kenneld path). The names are resolved to GIDs and membership-checked by
     /// kenneld (the host-runtime gate), so this carries only already-verified GIDs.
     pub supplementary_groups: Option<Vec<u32>>,
+    /// Resource limits applied via `setrlimit(2)` in the seal, just before `execve`
+    /// (after Landlock — lowering `RLIMIT_NOFILE` must not starve the rule-building
+    /// opens). Each entry is `(resource, soft, hard)`; [`RLIM_INFINITY`] is unlimited.
+    /// Derived from the settled `[ulimits]`; empty ⇒ nothing applied.
+    pub ulimits: Vec<(Resource, u64, u64)>,
 }
 
 impl Plan {
@@ -382,7 +429,9 @@ impl Plan {
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
 
-        let shim_root = PathBuf::from(&ep.fs.shim_root);
+        // The in-view `$HOME`: a normal non-system user's home, `/home/<user>` (the
+        // masked `[identity].user`, default `kennel`). `~/…` grants remap beneath it.
+        let shim_root = PathBuf::from(format!("/home/{}", policy.identity.user));
 
         // Classify every granted path once. The in-kennel target — `~/…` paths
         // remap beneath `shim_root`, `/etc` is the constructed synthetic set, any
@@ -487,6 +536,22 @@ impl Plan {
             dev_allow.push(path);
         }
 
+        // The constructed `$HOME` is writable by default (§7.2.3): grant Landlock
+        // write on the home root so the workload owns its home like any ordinary
+        // user. Its safety is that it is a *fresh tmpfs* — ephemeral, reconstructed
+        // each spawn, so nothing written here survives unless a path is opted into
+        // persistence via `[fs.home].persist` (which binds the real host inode,
+        // read-write, beneath the home). Read-only project binds beneath the home
+        // stay read-only at the VFS layer (`MS_RDONLY` remount). `write_access()`
+        // omits `EXECUTE` (so the home is not an `execve` target), but that is not an
+        // execution barrier — an allowlisted interpreter reads a script as data
+        // (`sh script`, `python evil.py`), needing no `EXECUTE` on it. `[fs.home].readonly`
+        // suppresses the grant (escape hatch), leaving only `write`-granted `~/` paths
+        // writable.
+        if !ep.fs.home_readonly {
+            landlock_fs.push((shim_root.clone(), write_access()));
+        }
+
         let view = Some(ShimView {
             shim_root,
             binds,
@@ -523,8 +588,26 @@ impl Plan {
             .filter_map(|name| kennel_syscall::seccomp::syscall_number(name))
             .collect();
 
+        // Resource limits (§7.2): map each settled `[ulimits]` entry to its
+        // `setrlimit` resource + numeric soft/hard. The translator already validated
+        // names and normalised values, so an unknown name here is a bug, surfaced as
+        // an invalid-policy error rather than silently dropped.
+        let mut ulimits: Vec<(Resource, u64, u64)> = Vec::new();
+        for (name, value) in &policy.ulimits.limits {
+            let resource = kennel_syscall::process::resource_by_name(name).ok_or_else(|| {
+                SpawnError::InvalidPolicy(format!("unknown ulimit resource `{name}`"))
+            })?;
+            let (soft, hard) = parse_ulimit_value(name, value)?;
+            ulimits.push((resource, soft, hard));
+        }
+
         let (bpf_allow_v4, bpf_allow_v6) = encode(&ep.net.allow)?;
         let (bpf_deny_v4, bpf_deny_v6) = encode(&ep.net.deny_invariant)?;
+
+        // The bind floor (§7.3.7): stamped into the kennel_meta `bind_port_min` slot
+        // so the bind4/bind6 BPF can deny a privileged-port bind (T6).
+        let mut bpf_meta = meta_bytes(ctx);
+        stamp_bind_port_min(&mut bpf_meta, ep.net.bind_port_min);
 
         Ok(Self {
             namespaces,
@@ -540,9 +623,11 @@ impl Plan {
             bpf_deny_v4,
             bpf_allow_v6,
             bpf_deny_v6,
-            bpf_meta: meta_bytes(ctx),
+            bpf_meta,
+            bind_allowed_ports: ep.net.bind_allowed_ports.clone(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits,
         })
     }
 
@@ -583,5 +668,23 @@ impl Plan {
     #[must_use]
     pub fn seccomp_filter(&self) -> Filter {
         Filter::denylist(&self.seccomp_deny, self.seccomp_deny_action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_port_min_lands_in_the_meta_pad_slot() {
+        // `bind_port_min` occupies the repurposed `_pad0` slot at offset 14 (host
+        // order) and disturbs nothing else; `0` leaves the slot zero.
+        let mut meta = meta_bytes(7);
+        assert_eq!(&meta[14..16], &[0, 0], "no floor ⇒ slot stays zero");
+        stamp_bind_port_min(&mut meta, 1024);
+        assert_eq!(meta.get(14..16), Some(1024u16.to_ne_bytes().as_slice()));
+        // The ctx/magic head and the proxy region around it are untouched.
+        assert_eq!(&meta[6..8], &7u16.to_ne_bytes(), "ctx preserved");
+        assert_eq!(&meta[8..14], &[0u8; 6], "proxy v4/port slots still zero");
     }
 }

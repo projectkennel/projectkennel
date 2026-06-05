@@ -59,6 +59,29 @@ int kennel_bind6(struct bpf_sock_addr *ctx)
 
 	__u8 rewritten[16] = {};
 
+	/* The bind floor (§7.3.7): deny a bind below `bind_port_min` before the address
+	 * logic — the privileged-port protection (T6), mirroring bind4. 0 = no floor. */
+	if (meta->bind_port_min != 0 && bpf_ntohs(port_be) < meta->bind_port_min) {
+		kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET6, port_be, addr, rewritten, meta);
+		return KENNEL_DENY;
+	}
+
+	/* The bind-port allowlist (§7.3.7): when `n_ports` is set, the port must be one of
+	 * the listed ports. Bounded loop over the fixed array, mirroring bind4. */
+	if (bs->n_ports != 0) {
+		__u16 hport = bpf_ntohs(port_be);
+		int allowed = 0;
+		for (int i = 0; i < 8; i++) {
+			if (i < bs->n_ports && bs->allowed_ports[i] == hport)
+				allowed = 1;
+		}
+		if (!allowed) {
+			kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET6, port_be, addr, rewritten,
+					  meta);
+			return KENNEL_DENY;
+		}
+	}
+
 	if (kennel_is_any6(addr)) {
 		kennel_ctx_store_ip6(ctx, bs->v6_addr);
 		__builtin_memcpy(rewritten, bs->v6_addr, 16);

@@ -56,7 +56,7 @@ allow = [
 # A build is bounded; stop at the TTL rather than warn (no interactive session).
 [lifecycle]
 ttl = "2h"
-ttl_action = "stop"
+ttl_action = "exit"
 
 [signature]
 algorithm = "ed25519"

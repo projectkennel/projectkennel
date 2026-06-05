@@ -47,6 +47,8 @@ A kennel is `starting` while it is being brought up and `running` once its workl
 
 **`starting` → `running`.** The workload is launched into the cgroup. kenneld replies `Started { ctx, pid }` to the CLI and blocks on the workload.
 
+**TTL expiry (optional, `[lifecycle]` §9.7).** When the settled policy sets `ttl_seconds`, the blocking wait is the TTL reaper (`Kennel::stop_with_ttl`): it polls the workload while watching the deadline and, at expiry, acts per `ttl_action`. `exit` SIGTERMs every cgroup member (read from `cgroup.procs`) and, if the workload is still alive after a 10s grace, SIGKILLs the cgroup (`cgroup.kill`) — the only action that ends the kennel. `warn` and `renew` each emit one `lifecycle.ttl-expired` audit event (stage `warn`/`renew`) and leave the workload running; the interactive `renew` user-session prompt is still owed, so `renew` behaves today as a distinct, audited `warn`. With no `ttl` the wait is a single blocking `wait()`. The reaper acts on the live handle's own cgroup, so it never races teardown (which runs only after the wait returns).
+
 **Bring-up failure.** Any step fails (signature verification, privhelper refusal, proxy launch, spawn). kenneld unwinds whatever it allocated in reverse (`teardown`: reap the proxy if launched, remove any added addresses, delete the cgroup), removes the registry entry, and returns a structured error to the caller.
 
 **`running` → removed.** The workload exits. kenneld replies `Exited { code }`, runs teardown immediately — reap the proxy, invoke the privhelper to remove the loopback addresses, delete the cgroup, discard the constructed view — and removes the registry entry. A `Stop` request for the kennel reaches the same teardown by terminating the workload first. There is no grace window: a later `kennel run` is a separate kennel with its own resources.
@@ -60,8 +62,9 @@ Every lock in the system, what it protects, and what acquisition failure means.
 | Lock | Type | Scope | Held for | On failure |
 |---|---|---|---|---|
 | systemd socket activation on `/run/user/<uid>/kennel/control.sock` | the unit owns the listener | one kenneld per user | kenneld's whole lifetime | systemd hands the single bound listener to one daemon; it is the single-instance guarantee. When started without socket activation (dev), kenneld binds the path itself, replacing a stale socket first. |
-| `/run/kennel/privhelper.lock` | `flock` (exclusive) | machine-wide | duration of one privhelper operation | Concurrent privhelper invocations serialise; the second waits. |
 | kenneld registry mutex | in-process `Mutex` | kenneld's registry and `<ctx>` allocator | brief; never across slow operations | N/A (in-process); the slow bring-up runs outside the lock. |
+
+The privhelper holds no inter-process lock: each invocation runs one validated operation and exits, and the kernel serialises the privileged syscalls themselves.
 
 Single-instance-per-user is enforced by **systemd socket activation**: the `kenneld.socket` user unit owns the one bound listener and hands it to a single daemon (`kennel-config`/`socket.rs`). There is no `kenneld.lock` flock and no `kenneld.pid` file. In the development/socket-less path kenneld binds `control.sock` itself, removing any stale socket first.
 
@@ -143,5 +146,5 @@ kenneld installs no signal handlers: `run()` builds the shared state and calls `
 - The control-protocol wire format that drives bring-up (`Start`, `Stop`, `List`): `02-4-ipc.md`.
 - The settled-policy verification performed during bring-up: `02-2-config-schema.md` and `04-trust-boundaries.md` (boundary 13).
 - The privhelper protocol invoked for address and cgroup operations: `02-4-ipc.md`.
-- The on-disk layout of `/run/kennel/<id>/`: `07-paths.md`.
+- The on-disk layout of the per-kennel runtime tree (`/run/user/<uid>/kennel/`): `07-paths.md`.
 - The kernel mechanisms whose enforcement is independent of kenneld: design doc §7 and §8.

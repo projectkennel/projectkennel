@@ -5,8 +5,9 @@
 //! Turn a settled policy into a confined workload. The runtime pipeline is:
 //! verify the settled-policy bytes (one signature, schema gate, framework
 //! invariants — via [`kennel_policy::verify_settled`]); substitute the
-//! per-instance placeholders (`<ctx>`, `<uid>`, `<kennel>`, `<home>`) and refuse
-//! any that remain; translate the result into a [`Plan`] of kernel enforcement
+//! per-instance placeholders (`<ctx>`, `<uid>`, `<kennel>`, `<home>`, `<tag>`,
+//! `<gid>`, and the masked `<user>`/`<group>`) and refuse any that remain;
+//! translate the result into a [`Plan`] of kernel enforcement
 //! objects; then apply the plan and exec.
 //!
 //! This crate holds **no `unsafe`** (`#![forbid(unsafe_code)]`): every syscall
@@ -113,8 +114,10 @@ impl From<PolicyError> for SpawnError {
     }
 }
 
-/// Replace the four deferred placeholders in `s`.
-fn substitute_str(s: &str, subst: &RuntimeSubstitutions) -> String {
+/// Replace the deferred placeholders in `s`. `user`/`group` are the policy's own
+/// masked identity (`[identity].user`/`.group`, default `kennel`), not runtime
+/// context — they are grammar-validated names (§7.2), so safe to splice into paths.
+fn substitute_str(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
     let [g0, g1, g2, g3, g4] = subst.ula_gid;
     let gid = format!("{g0:02x}{g1:02x}{g2:02x}{g3:02x}{g4:02x}");
     s.replace("<ctx>", &subst.ctx.to_string())
@@ -123,6 +126,8 @@ fn substitute_str(s: &str, subst: &RuntimeSubstitutions) -> String {
         .replace("<home>", &subst.home.to_string_lossy())
         .replace("<tag>", &subst.tag.to_string())
         .replace("<gid>", &gid)
+        .replace("<user>", user)
+        .replace("<group>", group)
 }
 
 /// Error if `value` still contains an unresolved `<…>` placeholder.
@@ -148,36 +153,36 @@ pub fn substitute(
     subst: &RuntimeSubstitutions,
 ) -> Result<SettledPolicy, SpawnError> {
     let mut p = policy.clone();
+    // The masked identity drives `<user>`/`<group>`; clone before borrowing `fs`.
+    let user = p.identity.user.clone();
+    let group = p.identity.group.clone();
     let fs = &mut p.effective_policy.fs;
 
-    fs.shim_root = substitute_str(&fs.shim_root, subst);
-    reject_leftover("fs.shim_root", &fs.shim_root)?;
-
     for path in &mut fs.read {
-        *path = substitute_str(path, subst);
+        *path = substitute_str(path, subst, &user, &group);
         reject_leftover("fs.read", path)?;
     }
     for path in &mut fs.write {
-        *path = substitute_str(path, subst);
+        *path = substitute_str(path, subst, &user, &group);
         reject_leftover("fs.write", path)?;
     }
     for bin in &mut p.effective_policy.exec.allow {
-        *bin = substitute_str(bin, subst);
+        *bin = substitute_str(bin, subst, &user, &group);
         reject_leftover("exec.allow", bin)?;
     }
     for dir in &mut p.effective_policy.exec.path {
-        *dir = substitute_str(dir, subst);
+        *dir = substitute_str(dir, subst, &user, &group);
         reject_leftover("exec.path", dir)?;
     }
     {
         let shell = &mut p.effective_policy.exec.shell;
-        *shell = substitute_str(shell, subst);
+        *shell = substitute_str(shell, subst, &user, &group);
         reject_leftover("exec.shell", shell)?;
     }
     // The synthesised environment (§7.7.2): substitute placeholders in the values
-    // (e.g. a HOME under `/run/kennel/<kennel>/…`); keys are fixed var names.
+    // (e.g. a HOME under `/home/<user>/…`); keys are fixed var names.
     for value in p.env.vars.values_mut() {
-        *value = substitute_str(value, subst);
+        *value = substitute_str(value, subst, &user, &group);
         reject_leftover("env.set", value)?;
     }
 
@@ -372,6 +377,7 @@ fn spawn_inner(
     let landlock_fs = plan.landlock_fs.clone();
     let landlock_net = plan.landlock_net.clone();
     let supplementary_groups = plan.supplementary_groups.clone();
+    let ulimits = plan.ulimits.clone();
     let does_mount = seal_ns.contains(Namespaces::MOUNT);
 
     // The **inner seal** — the irreversible confinement that must run in the process
@@ -434,7 +440,14 @@ fn spawn_inner(
             Some(rs) => rs,
             None => build_ruleset(&landlock_fs, &landlock_net, true)?,
         };
-        rs.restrict_current_process()
+        rs.restrict_current_process()?;
+        // Resource limits last (§7.2): after the Landlock ruleset is built, so
+        // lowering `RLIMIT_NOFILE` cannot starve the per-path rule opens, and just
+        // before `execve` so the workload inherits exactly the policy's limits.
+        for (resource, soft, hard) in &ulimits {
+            kennel_syscall::process::set_rlimit(*resource, *soft, *hard)?;
+        }
+        Ok(())
     };
 
     // The **outer seal** runs in the child std forks. It does the once-only setup
@@ -785,11 +798,12 @@ fn join_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
 /// map/program fds (and, with the program, the attachment).
 ///
 /// `objects` pairs each program spec with its compiled object bytes (from
-/// `kennel_bpf::programs` in production, or compiled in tests). Each program
-/// currently gets its own maps; sharing one map set across all programs is a
-/// later increment, so for now pass the program(s) whose maps you populate
-/// (e.g. `connect4` for the v4 egress allowlist). IPv6 maps and the bind/proxy
-/// maps are not yet populated here.
+/// `kennel_bpf::programs` in production, or compiled in tests). This in-process
+/// helper mints each program its own maps and is used by the spawn root tests;
+/// the production egress path (the privhelper, `kennel_privhelper::exec`) instead
+/// creates one shared map set per kennel (`create_maps` + `load_program_against`)
+/// and pins it. Pass the program(s) whose maps you populate (e.g. `connect4` for
+/// the v4 egress allowlist).
 ///
 /// # Errors
 ///
@@ -904,13 +918,15 @@ mod tests {
                         port_max: 65535,
                         protocol: Protocol::Any,
                     }],
+                    bind_port_min: 0,
+                    bind_allowed_ports: Vec::new(),
                 },
                 fs: FsPolicy {
                     home_shadow: true,
-                    shim_root: "/run/kennel/<kennel>".to_owned(),
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
                     home_persist: Vec::new(),
+                    home_readonly: false,
                     tmp: TmpPolicy {
                         private: true,
                         size_mib: 512,
@@ -926,6 +942,7 @@ mod tests {
                     deny_setcap: true,
                     deny_writable: true,
                     allow: vec!["/usr/bin/python3".to_owned()],
+                    deny: Vec::new(),
                     path: Vec::new(),
                     shell: "/bin/sh".to_owned(),
                 },
@@ -956,6 +973,7 @@ mod tests {
             identity: kennel_policy::IdentityRuntime::default(),
             audit: kennel_policy::AuditRuntime::default(),
             env: kennel_policy::EnvRuntime::default(),
+            ulimits: kennel_policy::UlimitsRuntime::default(),
         }
     }
 
@@ -974,7 +992,7 @@ mod tests {
     #[test]
     fn substitution_fills_placeholders() {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        assert_eq!(p.effective_policy.fs.shim_root, "/run/kennel/ai-coding");
+        assert_eq!(p.identity.user, "kennel");
         assert_eq!(
             p.effective_policy.fs.read,
             vec!["/usr".to_owned(), "/home/dev/.config".to_owned()]
@@ -1007,6 +1025,32 @@ mod tests {
     }
 
     #[test]
+    fn user_and_group_are_filled_from_the_masked_identity() {
+        // `<user>`/`<group>` resolve to the policy's own [identity], not runtime
+        // context: the default is `kennel`, and an override flows through.
+        let mut p = policy_with_placeholders();
+        p.identity.user = "claude".to_owned();
+        p.identity.group = "staff".to_owned();
+        p.effective_policy
+            .fs
+            .read
+            .push("/home/<user>/.cache".to_owned());
+        p.env
+            .vars
+            .insert("WHO".to_owned(), "<user>:<group>".to_owned());
+        let out = substitute(&p, &subst()).expect("substitute");
+        assert!(out
+            .effective_policy
+            .fs
+            .read
+            .contains(&"/home/claude/.cache".to_owned()));
+        assert_eq!(
+            out.env.vars.get("WHO").map(String::as_str),
+            Some("claude:staff")
+        );
+    }
+
+    #[test]
     fn leftover_placeholder_is_rejected() {
         let mut p = policy_with_placeholders();
         p.effective_policy.fs.read.push("<unknown>/x".to_owned());
@@ -1014,6 +1058,75 @@ mod tests {
         assert!(
             matches!(&err, SpawnError::UnsubstitutedPlaceholder { field, .. } if field == "fs.read"),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn home_is_writable_by_default_and_readonly_suppresses_the_grant() {
+        // shim_root for the default identity (`kennel`).
+        let home_root = PathBuf::from("/home/kennel");
+        let home_writable = |plan: &Plan| {
+            plan.landlock_fs
+                .iter()
+                .any(|(p, a)| *p == home_root && a.contains(AccessFs::WRITE_FILE))
+        };
+
+        let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        assert!(
+            home_writable(&plan),
+            "the constructed home is writable by default"
+        );
+
+        let mut ro = policy_with_placeholders();
+        ro.effective_policy.fs.home_readonly = true;
+        let ro = substitute(&ro, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&ro, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        assert!(
+            !home_writable(&plan),
+            "[fs.home].readonly suppresses the home write grant"
+        );
+    }
+
+    #[test]
+    fn every_ulimit_resource_name_maps_to_a_kernel_resource() {
+        // Lock-step with the policy crate's accepted names: a name translate admits
+        // must resolve to a Resource here, or a valid policy would fail at spawn.
+        for name in kennel_policy::ULIMIT_RESOURCES {
+            assert!(
+                kennel_syscall::process::resource_by_name(name).is_some(),
+                "policy accepts ulimit `{name}` but spawn cannot map it"
+            );
+        }
+    }
+
+    #[test]
+    fn ulimits_flow_from_policy_into_the_plan() {
+        use kennel_syscall::process::{Resource, RLIM_INFINITY};
+        let mut p = policy_with_placeholders();
+        p.ulimits
+            .limits
+            .insert("nofile".to_owned(), "8192".to_owned());
+        p.ulimits
+            .limits
+            .insert("cpu".to_owned(), "unlimited".to_owned());
+        p.ulimits
+            .limits
+            .insert("nproc".to_owned(), "256 512".to_owned());
+        let p = substitute(&p, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let find = |r: Resource| plan.ulimits.iter().find(|(res, _, _)| *res == r).copied();
+        assert_eq!(
+            find(Resource::RLIMIT_NOFILE),
+            Some((Resource::RLIMIT_NOFILE, 8192, 8192))
+        );
+        assert_eq!(
+            find(Resource::RLIMIT_CPU),
+            Some((Resource::RLIMIT_CPU, RLIM_INFINITY, RLIM_INFINITY))
+        );
+        assert_eq!(
+            find(Resource::RLIMIT_NPROC),
+            Some((Resource::RLIMIT_NPROC, 256, 512))
         );
     }
 
@@ -1167,7 +1280,7 @@ mod tests {
             .view
             .as_ref()
             .expect("a policy-derived plan carries a view");
-        assert_eq!(view.shim_root, PathBuf::from("/run/kennel/ai-coding"));
+        assert_eq!(view.shim_root, PathBuf::from("/home/kennel"));
 
         assert!(
             view.binds.iter().any(|b| b.source == Path::new("/usr")
@@ -1179,7 +1292,7 @@ mod tests {
             view.binds
                 .iter()
                 .any(|b| b.source == Path::new("/home/dev/.config")
-                    && b.target == Path::new("/run/kennel/ai-coding/.config")
+                    && b.target == Path::new("/home/kennel/.config")
                     && !b.writable),
             "home path remapped beneath shim_root"
         );
@@ -1242,7 +1355,7 @@ mod tests {
         let bind = view
             .binds
             .iter()
-            .find(|b| b.target == Path::new("/run/kennel/ai-coding/projects/foo"))
+            .find(|b| b.target == Path::new("/home/kennel/projects/foo"))
             .expect("remapped writable bind");
         assert_eq!(
             bind.source,
@@ -1451,8 +1564,10 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         }
     }
 
@@ -1582,8 +1697,10 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         // Granted file readable through $HOME; the non-granted sibling's name absent;
@@ -1630,6 +1747,104 @@ mod tests {
             out.trim(),
             "GRANTED",
             "the granted file is readable through the shim"
+        );
+    }
+
+    /// **A `[ulimits]` cap reaches the workload (§7.2.12).** A userns spawn whose plan
+    /// carries `RLIMIT_NOFILE = 64` runs `sh -c 'ulimit -n'`; the workload reports the
+    /// limit the seal applied (after Landlock, before `execve`). Skips with the precise
+    /// cause where the host forbids the userns, exactly like the confined-view proof.
+    #[test]
+    fn unprivileged_userns_spawn_applies_a_ulimit() {
+        use kennel_syscall::process::Resource;
+        use std::io::Read;
+        use std::process::Stdio;
+
+        if userns_hard_disabled() || !landlock_available() {
+            eprintln!("SKIP: unprivileged user namespaces or Landlock unavailable on this host");
+            return;
+        }
+
+        let base =
+            std::env::temp_dir().join(format!("kennel-userns-ulimit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let new_root = base.join("root");
+        std::fs::create_dir_all(&new_root).expect("mkdir new_root");
+
+        let shim_root = PathBuf::from("/khome");
+        let ro = AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE;
+        let sys = ["/usr", "/bin", "/lib", "/lib64"];
+        let binds: Vec<BindMount> = sys
+            .iter()
+            .map(|d| BindMount {
+                source: PathBuf::from(*d),
+                target: PathBuf::from(*d),
+                writable: false,
+            })
+            .collect();
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> =
+            sys.iter().map(|d| (PathBuf::from(*d), ro)).collect();
+        landlock_fs.push((shim_root.clone(), ro));
+
+        let plan = Plan {
+            namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::IPC | Namespaces::PID,
+            cgroup: PathBuf::from("/sys/fs/cgroup/kennel/0"),
+            cgroup_join: false,
+            view: Some(ShimView {
+                shim_root: shim_root.clone(),
+                binds,
+                dev_allow: Vec::new(),
+                tmp_size_mib: 64,
+                tmp_mode: "0700".to_owned(),
+                proc_hidepid: false,
+            }),
+            new_root: Some(new_root),
+            landlock_fs,
+            landlock_net: Vec::new(),
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
+            bpf_allow_v4: Vec::new(),
+            bpf_deny_v4: Vec::new(),
+            bpf_allow_v6: Vec::new(),
+            bpf_deny_v6: Vec::new(),
+            bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
+            file_binds: Vec::new(),
+            supplementary_groups: None,
+            ulimits: vec![(Resource::RLIMIT_NOFILE, 64, 64)],
+        };
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("HOME", &shim_root)
+            .arg("-c")
+            .arg("ulimit -n")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+
+        let spawned = spawn(&plan, &mut cmd);
+        if let Err(SpawnError::Syscall(e)) = &spawned {
+            if e.kind() == io::ErrorKind::PermissionDenied && apparmor_restricts_userns() {
+                let _ = std::fs::remove_dir_all(&base);
+                eprintln!("SKIP: this test binary has no AppArmor profile granting `userns`: {e}");
+                return;
+            }
+        }
+        let mut child = spawned.expect("unprivileged userns spawn");
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_string(&mut out)
+            .expect("read stdout");
+        let status = child.wait().expect("wait");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(status.success(), "workload ran (got {status:?})");
+        assert_eq!(
+            out.trim(),
+            "64",
+            "the workload sees the policy's RLIMIT_NOFILE soft limit"
         );
     }
 
@@ -1680,10 +1895,12 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             // The setgroups field is unused on the userns path; the handshake carries
             // the group grant instead.
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -1822,8 +2039,10 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -1899,8 +2118,10 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: vec![(src.clone(), target.clone()), (src, missing)],
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/cat");
@@ -1996,8 +2217,10 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         // Granted file readable through $HOME, and the non-granted sibling's name
@@ -2067,8 +2290,10 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         }
     }
 
@@ -2168,8 +2393,10 @@ mod root_tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/cat");

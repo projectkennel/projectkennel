@@ -55,7 +55,7 @@ threats.exposed = ["T1.9"]
 # that tries to linger as a background process cannot (T1.10).
 [lifecycle]
 ttl = "1h"
-ttl_action = "stop"
+ttl_action = "exit"
 
 [signature]
 algorithm = "ed25519"

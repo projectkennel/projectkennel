@@ -15,12 +15,16 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use kennel_audit::build::{writer as build_writer, SinkConfig};
 use kennel_audit::{Levels, SinkKind, Writer, WriterContext};
 use kennel_netproxy::config::{self, ProxyConfig};
 use kennel_netproxy::dns::SystemResolver;
 use kennel_netproxy::server::Proxy;
+
+/// How often the reloader thread re-stats the config file for a live reload.
+const RELOAD_POLL: Duration = Duration::from_secs(1);
 
 fn main() -> ExitCode {
     let Some(path) = std::env::args_os().nth(1) else {
@@ -57,8 +61,48 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_host_services(cfg.host_services),
     );
+    // Live-reload (§02-4): watch the config file and swap the ruleset/host-services
+    // in place when `kenneld` rewrites it, without restarting or dropping connections.
+    spawn_reloader(Arc::clone(&proxy), path.to_path_buf());
     proxy.serve_all(listeners)?;
     Ok(())
+}
+
+/// The config file's last-modified time, or `None` if it cannot be stated.
+fn config_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Spawn a background thread that re-reads `path` whenever its mtime changes and
+/// live-reloads the proxy's ruleset/host-services/resolved-address opinion (§02-4).
+///
+/// A reload that fails to parse is logged and ignored — the running policy is kept,
+/// never silently widened. Listen addresses and audit sinks are *not* hot-reloaded
+/// (those still require a respawn), so this only swaps the egress decision inputs.
+fn spawn_reloader(proxy: Arc<Proxy<SystemResolver>>, path: PathBuf) {
+    std::thread::spawn(move || {
+        let mut seen = config_mtime(&path);
+        loop {
+            std::thread::sleep(RELOAD_POLL);
+            let now = config_mtime(&path);
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            match config::load(&path) {
+                Ok(cfg) => {
+                    proxy.reload(cfg.ruleset, cfg.accept_private_resolved, cfg.host_services);
+                    eprintln!(
+                        "kennel-netproxy: reloaded egress policy from {}",
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("kennel-netproxy: config reload failed, keeping current policy: {e}");
+                }
+            }
+        }
+    });
 }
 
 /// Build the unified audit writer. With an `[audit]` block (the `kenneld`-written

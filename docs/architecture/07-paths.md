@@ -76,35 +76,45 @@ Per-user runtime state. Created by kenneld at startup; cleaned at logout.
 ├── control.sock                     CLI ↔ kenneld control socket
 ├── proxy/                           per-kennel netproxy config (proxy-<ctx>.toml)
 ├── etc/  root/  bastion/            staged synthetic /etc, view roots, SSH bastion
+├── bpf/                             bpffs holding the per-kennel BPF map pins (below)
 ```
 
-Owner: user. Mode: directory `0700`, files `0600` (the socket too).
+Owner: user. Mode: directory `0700`, files `0600` (the socket too). The `bpf/`
+subdirectory is a bpffs the privhelper mounts (it needs `CAP_SYS_ADMIN`); see
+[`/run/user/<uid>/kennel/bpf/<id>/`](#runuseruidkennelbpfid).
 
 Single-instance-per-user is provided by systemd socket activation (it owns the one bound listener), not a lock file: there is no `kenneld.lock` and no `kenneld.pid` (`05-state-and-supervision.md`).
 
 `/run/user/<uid>/` is provided by `pam_systemd` on systemd systems (tmpfs, cleaned on logout). On non-systemd systems, kenneld creates `/run/user/<uid>/kennel/` itself with the appropriate mode and removes it on graceful shutdown.
 
-### `/run/kennel/<id>/`
+### Per-kennel runtime state (under `/run/user/<uid>/kennel/`)
 
-Per-kennel runtime state. Created by kenneld; cleaned immediately when the workload exits.
+Kennel is per-user: every kennel's runtime state lives in the owning user's
+`$XDG_RUNTIME_DIR` (`/run/user/<uid>/kennel/`, §`/run/user/<uid>/kennel/` above) —
+`0700`, owned by the user, so two users running a kennel of the same name neither
+collide nor see each other's. Per-kennel files within that tree are keyed by the
+numeric context `<ctx>` (not the kennel name):
 
 ```
-/run/kennel/<id>/
-├── proxy.ctl                        kenneld → netproxy control socket
-├── proxy.pid                        netproxy's PID
-├── ssh-agent.sock                   ssh-agent socket (shim-mounted into workload's $HOME)
-├── ssh-agent.pid
-├── dbus-proxy.sock                  dbus-proxy socket (shim-mounted)
-├── dbus-proxy.ctl
-├── dbus-proxy.pid
-└── kennel.json                      current kennel metadata (uuid, ctx, policy_hash)
+/run/user/<uid>/kennel/
+├── proxy/proxy-<ctx>.toml           the per-kennel netproxy's config (kenneld writes, netproxy reads)
+├── etc/etc-<ctx>/                   the per-kennel synthetic /etc, staged then bind-mounted
+├── root/root-<ctx>/                 the constructed-view new-root mountpoint (pivot_root target)
+└── bpf/<id>/                        the per-kennel BPF map pins (above)
 ```
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-The per-kennel egress proxy does **not** listen on a Unix socket in this directory. It listens on a **TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64` (IPv6) address at the policy-given offset and port (offset 1, port 1080 by default), e.g. `127.<…>:1080`. The address is computed from the kennel's tag/ctx (`07-3-network.md` §7.3.2) and carried in the signed policy (`net.proxy`); kenneld writes it into the per-kennel `proxy-<ctx>.toml` as the proxy's `listen` address. `proxy.ctl` above is the separate kenneld → netproxy control socket; there is no `proxy.sock` listen socket.
-
-Note: `/run/kennel/` itself (without the `<id>` suffix) is owned by root, mode `0755`, so that kennels from different users can coexist (each user's kennel directory is under `/run/kennel/<id>` with `<id>` being globally unique, but the user's per-kennel directories are user-owned).
+The per-kennel egress proxy does **not** listen on a Unix socket: it listens on a
+**TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64`
+(IPv6) address at the policy-given offset and port (offset 1, port 1080 by
+default), e.g. `127.<…>:1080`. The address is computed from the kennel's tag/ctx
+(`07-3-network.md` §7.3.2) and carried in the signed policy (`net.proxy`); kenneld
+writes it into `proxy-<ctx>.toml` as the proxy's `listen` address. Reconfiguration
+is by respawn with a fresh config file, not an on-socket control protocol — there
+is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
+*future work* (`08-as-built-notes.md`); when built, their sockets stage under this
+same per-user tree, never a shared one.
 
 ---
 
@@ -165,30 +175,61 @@ Owner: user (kenneld creates the cgroup itself, unprivileged, within its delegat
 
 Mode and ownership follow the system's cgroup delegation policy. Modern systemd configurations delegate `/sys/fs/cgroup/user.slice/user-<uid>.slice/` to the user, and Project Kennel's `<namespace>/` subtree lives within that delegation. kenneld — not the privhelper — creates and removes the per-kennel cgroup; the privhelper only *attaches* the egress BPF to a cgroup whose ownership it re-validates against the caller's allocation.
 
-### `/sys/fs/bpf/kennel/` (roadmap)
+### `/run/user/<uid>/kennel/bpf/<id>/`
 
-Stable BPF map and program pinning for inspection. **Not yet wired.** Today the loader loads, populates, and attaches the egress programs to the kennel's cgroup directly and does **not** pin its maps or programs to a stable bpffs path; the `pin_program` primitive exists but is exercised only by a root-test on an ad-hoc path. The installer creates **no** `kennel-readers` group and sets up no `/sys/fs/bpf/kennel/` tree. The layout below is the intended stable surface once pinning lands:
+Per-kennel BPF map pinning, for the audit ring-buffer drain and for owner
+inspection. The pins live in the **owner's own `$XDG_RUNTIME_DIR`** — systemd's
+per-user `/run/user/<uid>/` tree (`0700`, owned by the user) — so isolation is
+*structural*, not a permissions game in a shared directory. The privhelper mounts
+a bpffs at `/run/user/<uid>/kennel/bpf/` (alongside kenneld's other per-user
+runtime state) and pins each kennel's shared map set under it:
 
 ```
-/sys/fs/bpf/kennel/
-├── <id>/                            per-kennel BPF state
-│   ├── kennel_meta                  pinned BPF map
-│   ├── allow_v4
-│   ├── allow_v6
-│   ├── deny_v4
-│   ├── deny_v6
-│   ├── bind_subnet
-│   └── progs/                       pinned program references (for debug inspection)
-└── ...
+/run/user/<uid>/                     systemd per-user runtime dir (0700, owned by the user)
+└── kennel/bpf/                      bpffs the privhelper mounts (owner-only, 0700)
+    └── <id>/                        per-kennel pin dir (owner-only, 0700)
+        ├── audit_ringbuf            pinned ringbuf — kenneld obj_gets + drains it
+        ├── kennel_meta_map          pinned BPF maps (owner inspects with bpftool)
+        ├── allow_v4
+        ├── allow_v6
+        ├── deny_v4
+        ├── deny_v6
+        └── bind_subnet_map
 ```
 
-Planned owner: root. Mode: directory `0750`, files `0640`. Group: `kennel-readers` (to be created at install time; operators in this group could `bpftool map dump` the pins).
+A kennel's programs share one map set (`kennel_bpf::create_maps` +
+`load_program_against`), so there is exactly one `audit_ringbuf` per kennel and one
+coherent set to pin. Because the whole `/run/user/<uid>/` tree is already private to
+the user, this design needs no shared `/run/kennel/bpf` directory, no `kennel-readers`
+group, and no `0711` hide-and-seek: another user simply cannot reach into another's
+`$XDG_RUNTIME_DIR`. It also falls out for free that:
 
-The workload never sees this tree — the shim does not bind-mount `/sys/fs/bpf` into the kennel's view.
+- **No collisions** — each user has their own runtime dir, so two users can both run
+  a kennel named `dev` without clashing (the uid is in the path).
+- **No cross-user clobber** — the root privhelper resolves the path from its own
+  *real* uid (it is setuid-root but runs for the calling user), never the wire, so it
+  only ever writes — and clears stale pins — under the caller's own
+  `/run/user/<uid>/`. It can never touch another user's pins even though privileged.
 
-### `/run/kennel/privhelper.lock`
+The bpffs, the per-kennel dir, and the pins are all owner-only (`0700`/`0700`/`0600`,
+no OS group): the unprivileged kenneld `BPF_OBJ_GET`s the ring buffer to drain it and
+the owner inspects the maps with `bpftool`. Multiple users run kennels side by side,
+none the wiser of the others. kenneld removes the pin dir when its kennel exits; the
+bpffs mount is cleaned up with the rest of `/run/user/<uid>/` at logout.
 
-Machine-wide flock target for serialising privhelper invocations in degraded mode. Owner: root. Mode: `0600`. Created at first privhelper invocation; persists across reboots if the path is in `/run/` (which is tmpfs; recreated at boot).
+The uid is resolved from the running user (not `$XDG_RUNTIME_DIR` in the environment)
+so the privileged helper and the unprivileged daemon agree on the path without one
+trusting the other's environment; in the standard systemd case this *is*
+`$XDG_RUNTIME_DIR/kennel/bpf`.
+
+Not `/sys/fs/bpf/kennel/` (the obvious bpffs): systemd mounts `/sys/fs/bpf`
+`mode=700`, so an unprivileged kenneld cannot traverse it to reopen the ring
+buffer. The owning user's `$XDG_RUNTIME_DIR` is both reachable by that user and
+private from every other, so the pins live on a bpffs there instead.
+
+The workload never sees this tree — the shim does not bind-mount the runtime bpffs
+into the kennel's view.
+
 
 ### Binary install paths
 
@@ -198,7 +239,8 @@ Machine-wide flock target for serialising privhelper invocations in degraded mod
 | `kenneld` | `/usr/libexec/kennel/kenneld` | Started by systemd-user or by the CLI in degraded mode; not on `PATH`. |
 | `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_net_admin,cap_sys_admin,cap_setgid=ep` are a documented per-distribution alternative the installer does not itself apply. `cap_setgid` is for the `set-gid-map` op — writing a workload's user-namespace `gid_map` so it keeps a granted supplementary group (§7.2.8); the other two are for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
 | `kennel-netproxy` | `/usr/libexec/kennel/kennel-netproxy` | Spawned by kenneld; not on `PATH`. |
-| `kennel-ssh-agent` | `/usr/libexec/kennel/kennel-ssh-agent` | Spawned by kenneld (when the policy enables it); not on `PATH`. |
+| `kennel-akc` | `/usr/libexec/kennel/kennel-akc` | The SSH bastion's root-owned `AuthorizedKeysCommand` (§7.8); installed root-owned (safe-path), queries kenneld; not on `PATH`. |
+| `kennel-socks-connect` | `/usr/libexec/kennel/kennel-socks-connect` | The `ProxyCommand` bridging a kennel's `ssh` to its egress proxy (§7.8); bound into the view with a Landlock execute grant. |
 
 Distributions relocate the libexec directory with `install.sh --prefix <dir>`, which installs the binaries there and rewrites `libexec_dir` in the deployment `system.toml` (and the `kenneld.service` `ExecStart` and the AppArmor profile path) to match — no path is baked into a binary. The default `/usr/libexec/kennel` matches the FHS recommendation.
 
@@ -223,11 +265,10 @@ The resolver requires the *exact* `<name>@<version>`; it does not fall back to a
 | `~/.config/kennel/` | Operator | Operator | All restarts and reboots |
 | `~/.local/state/kennel/<kennel>/` | kenneld (first kennel start) | Operator (audit retention) | All restarts and reboots |
 | `/run/user/<uid>/kennel/` | kenneld (startup) | logout (systemd) or kenneld (graceful shutdown) | User session |
-| `/run/kennel/<id>/` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/run/user/<uid>/kennel/{proxy,etc,root}/…-<ctx>` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/sys/fs/cgroup/<namespace>/<ctx>/` | kenneld (unprivileged, in its delegated subtree) | kenneld (immediately on workload exit) | Kennel lifetime |
-| `/sys/fs/bpf/kennel/<id>/` | kenneld (kennel start) — *roadmap; pinning not yet wired* | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/run/user/<uid>/kennel/bpf/<id>/` | privhelper (egress setup; pins chowned to the caller) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/etc/kennel/` | Package installation | Package removal | All restarts and reboots |
-| `/run/kennel/privhelper.lock` | First privhelper invocation | Reboot (tmpfs) | Reboot |
 
 ---
 
@@ -253,7 +294,7 @@ Each path's mode and ownership are part of its security contract. The most-load-
 
 - **`~/.local/state/kennel/<kennel>/`** mode `0700`: the workload (running as the same UID) is denied access because the shim does not bind-mount this directory into the workload's view. The mode is belt-and-braces.
 - **`/run/user/<uid>/kennel/control.sock`** mode `0600`: only the owning user may connect. kenneld additionally validates via `SO_PEERCRED` (boundary 7 in `04-trust-boundaries.md`).
-- **`/sys/fs/bpf/kennel/<id>/`** mode `0750` group `kennel-readers` (*roadmap*, once pinning lands): operators in `kennel-readers` would inspect maps with `bpftool`; the workload (not in `kennel-readers`, and with no view onto `/sys/fs/bpf`) cannot modify them. Today the maps are not pinned and the group is not created.
+- **`/run/user/<uid>/kennel/bpf/<id>/`** in the owner's private `$XDG_RUNTIME_DIR`; bpffs, per-kennel dir, and pins all **owner-only** (`0700`/`0700`/`0600`, chowned to the caller, no shared group): the owning user's kenneld reopens the ring buffer to drain it and the owner inspects the maps with `bpftool`; no other user can reach into `/run/user/<uid>/` at all. Because the path is in the user's own runtime dir (resolved from the caller's real uid, never the wire), per-user kennel names cannot collide and the root privhelper can only ever touch the caller's own subtree (no cross-user clobber). Kennel is per-user — isolation is structural, by ownership; there is no OS-level "readers" group.
 - **`/etc/kennel/keys/*.pub`** mode `0644`: public keys; world-readable is fine. Private keys are not in this tree.
 - **`kennel-privhelper`** setuid root (as installed; file capabilities a per-distribution alternative): a compromise of the calling process (kenneld) does not automatically gain privilege; the privhelper validates every request per `04-trust-boundaries.md` boundary 1.
 

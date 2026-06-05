@@ -24,6 +24,7 @@
 
 pub mod audit;
 pub mod bastion;
+pub mod bpf_audit;
 pub mod cgroup;
 pub mod control;
 pub mod ctx;
@@ -39,8 +40,9 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::time::{Duration, Instant};
 
-use kennel_policy::NetPolicy;
+use kennel_policy::{NetPolicy, TtlAction};
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response, Status};
@@ -222,6 +224,12 @@ pub struct ProxySetup {
 pub struct EtcSetup {
     /// Directory the per-kennel `/etc` files are written to (then bind-mounted).
     pub staging_dir: PathBuf,
+    /// The workload's masked user name (`[identity].user`, default `kennel`): the
+    /// synthetic `/etc/passwd` account.
+    pub account: String,
+    /// The workload's masked primary-group name (`[identity].group`, default
+    /// `kennel`): the synthetic `/etc/group` name for the primary gid.
+    pub account_group: String,
     /// The kennel's hostname (its runtime name).
     pub hostname: String,
     /// The workload's uid.
@@ -247,6 +255,10 @@ pub struct EtcSetup {
 
 /// Everything needed to bring one kennel up.
 pub struct Spec {
+    /// The kennel's runtime id (`<id>` in `07-paths.md`; equal to the kennel name
+    /// after substitution). Names the BPF pin dir in the owner's runtime tree
+    /// (`/run/user/<uid>/kennel/bpf/<id>/`).
+    pub id: String,
     /// The kennel's cgroup, under kenneld's delegated subtree. kenneld creates it
     /// (unprivileged) and the workload joins it; the helper attaches BPF to it.
     pub cgroup: PathBuf,
@@ -413,6 +425,110 @@ impl Kennel {
         );
         Ok(status)
     }
+
+    /// Wait for the workload to exit, arming the TTL reaper (§9.7), then tear down.
+    ///
+    /// With no `ttl` this is exactly [`stop`](Self::stop) — a single blocking wait.
+    /// With a `ttl`, the wait polls so the reaper can act at expiry; `on_event` is
+    /// called as each [`TtlEvent`] occurs (kenneld maps them to audit events):
+    ///
+    /// - [`TtlAction::Exit`] — at expiry, SIGTERM every cgroup member
+    ///   ([`TtlEvent::Terminating`]); if the workload is still alive after `grace`,
+    ///   SIGKILL the cgroup ([`TtlEvent::Killed`]). This is the only action that ends
+    ///   the kennel.
+    /// - [`TtlAction::Warn`] — emit [`TtlEvent::Warned`] once and leave it running.
+    /// - [`TtlAction::Renew`] — emit [`TtlEvent::RenewRequested`] once and leave it
+    ///   running (the interactive session prompt is not yet wired; §8.1).
+    ///
+    /// The reaper acts on the live handle's own cgroup, so it never races a released
+    /// context: teardown runs only after the wait returns.
+    ///
+    /// # Errors
+    /// An OS error if waiting on the workload fails.
+    pub fn stop_with_ttl<P: Privileged>(
+        mut self,
+        privileged: &P,
+        ttl: Option<Duration>,
+        action: TtlAction,
+        grace: Duration,
+        mut on_event: impl FnMut(TtlEvent),
+    ) -> io::Result<ExitStatus> {
+        let status = match ttl {
+            None => self.child.wait()?,
+            Some(ttl) => self.wait_with_ttl(ttl, action, grace, &mut on_event)?,
+        };
+        teardown(
+            privileged,
+            self.ctx,
+            Some(self.cgroup.as_path()),
+            self.v4,
+            self.v6,
+            self.proxy.take(),
+            self.view_root.as_deref(),
+        );
+        Ok(status)
+    }
+
+    /// The TTL-aware wait loop. Polls the workload while tracking the deadline; for
+    /// `Exit`, runs the SIGTERM→(grace)→SIGKILL escalation against the cgroup.
+    fn wait_with_ttl(
+        &mut self,
+        ttl: Duration,
+        action: TtlAction,
+        grace: Duration,
+        on_event: &mut impl FnMut(TtlEvent),
+    ) -> io::Result<ExitStatus> {
+        /// How often the wait loop wakes to re-check the deadline and the workload.
+        const POLL: Duration = Duration::from_millis(200);
+        let start = Instant::now();
+        let mut fired = false; // warn/renew emitted, or SIGTERM sent
+        let mut terminating_since: Option<Instant> = None;
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
+            }
+            let expired = start.elapsed() >= ttl;
+            match action {
+                TtlAction::Warn if expired && !fired => {
+                    on_event(TtlEvent::Warned);
+                    fired = true;
+                }
+                TtlAction::Renew if expired && !fired => {
+                    on_event(TtlEvent::RenewRequested);
+                    fired = true;
+                }
+                TtlAction::Exit if expired => match terminating_since {
+                    None => {
+                        on_event(TtlEvent::Terminating);
+                        let _ = cgroup::terminate_cgroup(&self.cgroup);
+                        terminating_since = Some(Instant::now());
+                    }
+                    Some(since) if since.elapsed() >= grace => {
+                        on_event(TtlEvent::Killed);
+                        let _ = cgroup::kill_cgroup(&self.cgroup);
+                        // Next iteration's try_wait reaps the now-killed workload.
+                    }
+                    Some(_) => {}
+                },
+                _ => {}
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
+/// A TTL-reaper milestone (`docs/design/09-policy-lifecycle.md` §9.7), reported by
+/// [`Kennel::stop_with_ttl`] so the caller can audit it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtlEvent {
+    /// `warn` action: the TTL elapsed; the workload is left running.
+    Warned,
+    /// `renew` action: the TTL elapsed; renewal is requested, workload left running.
+    RenewRequested,
+    /// `exit` action: the TTL elapsed; the workload was sent SIGTERM (grace started).
+    Terminating,
+    /// `exit` action: the grace period elapsed; the cgroup was `SIGKILL`ed.
+    Killed,
 }
 
 /// Kill and reap an egress-proxy child (best-effort; an already-exited proxy is
@@ -448,6 +564,7 @@ pub fn start<P: Privileged + Sync>(
     command: &mut Command,
 ) -> Result<Kennel, Error> {
     let Spec {
+        id,
         cgroup,
         ctx,
         scope,
@@ -464,6 +581,7 @@ pub fn start<P: Privileged + Sync>(
 
     match bring_up(
         privileged,
+        &id,
         &cgroup,
         ctx,
         &scope,
@@ -509,6 +627,7 @@ pub fn start<P: Privileged + Sync>(
 #[allow(clippy::too_many_arguments)]
 fn bring_up<P: Privileged + Sync>(
     privileged: &P,
+    id: &str,
     cgroup: &Path,
     ctx: u16,
     scope: &ReservedScope,
@@ -565,6 +684,11 @@ fn bring_up<P: Privileged + Sync>(
         deny_v4: plan.bpf_deny_v4.clone(),
         allow_v6: plan.bpf_allow_v6.clone(),
         deny_v6: plan.bpf_deny_v6.clone(),
+        bind_allowed_ports: plan.bind_allowed_ports.clone(),
+        // The helper pins this kennel's maps under the owner's
+        // `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can drain the audit ringbuf
+        // and the owner can inspect the maps (§02-5).
+        pin_id: id.to_owned(),
     };
     expect_ok("setup_egress", privileged.setup_egress(cgroup, &payload))?;
 
@@ -595,6 +719,8 @@ fn bring_up<P: Privileged + Sync>(
     if let Some(etc) = etc {
         let params = crate::etc::EtcParams {
             hostname: &etc.hostname,
+            user: &etc.account,
+            group: &etc.account_group,
             uid: etc.uid,
             gid: etc.gid,
             home: &etc.home,
@@ -974,13 +1100,16 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         }
     }
 
     fn spec(cgroup: PathBuf, ctx: u16) -> Spec {
         Spec {
+            id: "kennel-test".to_owned(),
             plan: trivial_plan(&cgroup),
             ctx,
             scope: ReservedScope::new(9, [0, 0, 0, 0, 1], "kennel-test"),
@@ -991,6 +1120,8 @@ mod tests {
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
+                bind_port_min: 0,
+                bind_allowed_ports: Vec::new(),
             },
             proxy: None,
             etc: None,
@@ -1033,6 +1164,97 @@ mod tests {
         assert!(
             !cgroup.exists(),
             "the cgroup directory should have been removed"
+        );
+    }
+
+    #[test]
+    fn stop_with_ttl_no_ttl_is_a_plain_blocking_wait() {
+        // With ttl = None the reaper is never armed: a workload that exits on its own
+        // returns its status and fires no TtlEvent.
+        let cgroup = temp_cgroup("ttl-none");
+        let _ = std::fs::remove_dir_all(&cgroup);
+        let fake = FakePriv::new(None);
+        let kennel = start(&fake, spec(cgroup, 8), &mut Command::new("/bin/true")).expect("start");
+        let mut events = Vec::new();
+        let status = kennel
+            .stop_with_ttl(
+                &fake,
+                None,
+                TtlAction::Exit,
+                Duration::from_millis(10),
+                |ev| events.push(ev),
+            )
+            .expect("stop");
+        assert!(status.success(), "the trivial workload exits 0");
+        assert!(
+            events.is_empty(),
+            "no reaper milestone with no ttl: {events:?}"
+        );
+    }
+
+    #[test]
+    fn ttl_exit_reaper_terminates_the_workload() {
+        // A long-running workload past its TTL is SIGTERMed by the reaper. The
+        // stand-in cgroup has no kernel `cgroup.procs`, so we seed it with the
+        // workload's pid (in this no-userns test path the handle *is* the workload)
+        // and the reaper's `terminate_cgroup` SIGTERMs it.
+        let cgroup = temp_cgroup("ttl-exit");
+        let _ = std::fs::remove_dir_all(&cgroup);
+        let fake = FakePriv::new(None);
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("60");
+        let kennel = start(&fake, spec(cgroup.clone(), 9), &mut cmd).expect("start");
+        std::fs::write(cgroup.join("cgroup.procs"), format!("{}\n", kennel.id()))
+            .expect("seed cgroup.procs");
+        let mut events = Vec::new();
+        let status = kennel
+            .stop_with_ttl(
+                &fake,
+                Some(Duration::from_millis(50)),
+                TtlAction::Exit,
+                Duration::from_millis(50),
+                |ev| events.push(ev),
+            )
+            .expect("stop");
+        assert!(
+            !status.success(),
+            "the SIGTERMed sleep must not exit cleanly"
+        );
+        assert!(
+            events.contains(&TtlEvent::Terminating),
+            "the SIGTERM milestone must be reported: {events:?}"
+        );
+    }
+
+    #[test]
+    fn ttl_warn_reaper_reports_but_leaves_the_workload_running() {
+        // `warn` emits the milestone once and does not terminate. The workload here
+        // exits on its own shortly after the TTL elapses, so the wait returns its
+        // (clean) status with exactly one Warned event.
+        let cgroup = temp_cgroup("ttl-warn");
+        let _ = std::fs::remove_dir_all(&cgroup);
+        let fake = FakePriv::new(None);
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("0.4");
+        let kennel = start(&fake, spec(cgroup, 10), &mut cmd).expect("start");
+        let mut events = Vec::new();
+        let status = kennel
+            .stop_with_ttl(
+                &fake,
+                Some(Duration::from_millis(50)),
+                TtlAction::Warn,
+                Duration::from_millis(50),
+                |ev| events.push(ev),
+            )
+            .expect("stop");
+        assert!(
+            status.success(),
+            "warn never kills: the sleep exits 0 on its own"
+        );
+        assert_eq!(
+            events,
+            vec![TtlEvent::Warned],
+            "exactly one warn milestone, emitted once: {events:?}"
         );
     }
 
@@ -1323,8 +1545,10 @@ mod tests {
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
+            bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: Some(vec![granted_gid]),
+            ulimits: Vec::new(),
         }
     }
 }

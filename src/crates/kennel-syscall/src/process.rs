@@ -20,6 +20,54 @@ pub fn set_no_new_privs() -> io::Result<()> {
     nix::sys::prctl::set_no_new_privs().map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
+pub use nix::sys::resource::{Resource, RLIM_INFINITY};
+
+/// Map a short `[ulimits]` resource name to its `setrlimit(2)` [`Resource`].
+///
+/// The policy translator validates names against `kennel_policy::ULIMIT_RESOURCES`,
+/// so the spawn layer should only ever pass a known name; an unknown one returns
+/// `None` (the caller treats that as a policy error). Kept in lock-step with that
+/// list — a spawn-side test asserts every accepted name resolves here.
+#[must_use]
+pub fn resource_by_name(name: &str) -> Option<Resource> {
+    Some(match name {
+        "as" => Resource::RLIMIT_AS,
+        "core" => Resource::RLIMIT_CORE,
+        "cpu" => Resource::RLIMIT_CPU,
+        "data" => Resource::RLIMIT_DATA,
+        "fsize" => Resource::RLIMIT_FSIZE,
+        "locks" => Resource::RLIMIT_LOCKS,
+        "memlock" => Resource::RLIMIT_MEMLOCK,
+        "msgqueue" => Resource::RLIMIT_MSGQUEUE,
+        "nice" => Resource::RLIMIT_NICE,
+        "nofile" => Resource::RLIMIT_NOFILE,
+        "nproc" => Resource::RLIMIT_NPROC,
+        "rtprio" => Resource::RLIMIT_RTPRIO,
+        "rttime" => Resource::RLIMIT_RTTIME,
+        "sigpending" => Resource::RLIMIT_SIGPENDING,
+        "stack" => Resource::RLIMIT_STACK,
+        _ => return None,
+    })
+}
+
+/// Set a `setrlimit(2)` resource limit on the current process.
+///
+/// Use [`RLIM_INFINITY`] for "unlimited". Called in the seal, after the Landlock
+/// ruleset is built (lowering `RLIMIT_NOFILE` must not starve the rule-building opens)
+/// and just before `execve`, so the workload inherits exactly the policy's limits.
+///
+/// An unprivileged process can only lower a hard limit; raising one above the
+/// daemon's inherited ceiling needs `CAP_SYS_RESOURCE` and otherwise fails closed.
+///
+/// # Errors
+///
+/// Returns the OS error if the `setrlimit` fails (e.g. `EPERM` when raising a hard
+/// limit without privilege, or `EINVAL` for `soft > hard`).
+pub fn set_rlimit(resource: Resource, soft: u64, hard: u64) -> io::Result<()> {
+    nix::sys::resource::setrlimit(resource, soft, hard)
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -104,14 +104,13 @@ private = true
 size = "512M"                          # cap on the tmpfs size
 mode = "0700"
 
-# Shadow $HOME: present the kennel with a synthetic home directory
-# rooted elsewhere, with only granted paths visible.
+# Shadow $HOME: present the kennel with a synthetic home directory,
+# with only granted paths visible.
 [fs.home]
 shadow = true                          # default in confined templates
-shim_root = "/run/kennel/<kennel>/home"
-# When shadow=true, the kennel's $HOME points to shim_root.
-# Paths listed in fs.read/fs.write under ~/ are bind-mounted from real $HOME
-# into shim_root.
+# When shadow=true, $HOME is /home/<user> (the masked [identity].user, default
+# "kennel"). Paths listed in fs.read/fs.write under ~/ are bind-mounted from the
+# real $HOME beneath it.
 
 # Procfs handling
 [fs.proc]
@@ -158,6 +157,20 @@ allow = [
 > teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is applied
 > **after** `pivot_root` so its rules key on the view's inodes. `$HOME` is set to
 > `shim_root`.
+>
+> **The home root is writable by default** — a non-system user owns their home (least
+> astonishment), so the constructed `$HOME` carries a Landlock write grant. But it is
+> the *fresh tmpfs* that is writable: anything the workload creates directly in `$HOME`
+> is **ephemeral**, gone at teardown. Persistence is opt-in — a path under `[fs.home].persist`
+> (or any writable `~/…` grant) binds the real host inode read-write beneath the home, and
+> only those survive. Read-only `~/…` binds stay read-only at the VFS layer regardless of
+> the home-root grant. The write grant omits `EXECUTE`, so the home is not an `execve`
+> target — but do **not** read that as an execution barrier: an allowlisted interpreter
+> reads a script as *data* (`sh script.sh`, `python evil.py`) and needs no `EXECUTE` on it,
+> so the only thing the writable home really gives you is the ephemeral-tmpfs safety above,
+> not a guarantee that nothing in it can run. `[fs.home].readonly = true` is the escape
+> hatch: it suppresses the home-root grant, so only `write`-granted `~/…` paths are writable
+> and the rest of the home is read-only.
 
 The most important transformation in the filesystem policy: the kennel does not see the real `$HOME`. Project Kennel constructs a shim directory and bind-mounts the policy-granted paths from the real `$HOME` into it.
 
@@ -169,10 +182,10 @@ read = ["~/projects/foo/**", "~/.config/git/**"]
 write = ["~/projects/foo/**"]
 ```
 
-The shim at `/run/kennel/<ctx>/home/` is constructed as:
+The shim at `/home/<user>/` is constructed as:
 
 ```
-/run/kennel/<ctx>/home/
+/home/<user>/
 ├── projects/
 │   └── foo/                  ← bind-mounted from real ~/projects/foo (rw)
 ├── .config/
@@ -181,7 +194,7 @@ The shim at `/run/kennel/<ctx>/home/` is constructed as:
     └── <kennel>/            ← bind-mounted from ~/.cache/<kennel> (rw)
 ```
 
-The kennel's environment has `HOME=/run/kennel/<ctx>/home`. Inside the kennel, `ls ~/` shows exactly these entries. `ls ~/.ssh/` returns `ENOENT` because the directory does not exist in the shim. The Landlock ruleset additionally denies access to the real `~/.ssh/`, so even constructed paths cannot reach it.
+The kennel's environment has `HOME=/home/<user>`. Inside the kennel, `ls ~/` shows exactly these entries. `ls ~/.ssh/` returns `ENOENT` because the directory does not exist in the shim. The Landlock ruleset additionally denies access to the real `~/.ssh/`, so even constructed paths cannot reach it.
 
 This solves the problem that motivated Project Kennel: the kennel cannot enumerate, cannot discover, cannot accidentally reach the credentials and state in the user's real `$HOME`.
 
@@ -189,7 +202,7 @@ This solves the problem that motivated Project Kennel: the kennel cannot enumera
 
 Two template-level features extend the constructed-`$HOME` pattern. They are not separate policy primitives — both compose the underlying mount-namespace + bind-mount machinery — but they are common enough that templates declare them with dedicated syntax. The semantics live here in §7.2; the template-author-facing description lives in §5.9.
 
-**`fs.home.sanitise`** constructs a sanitised copy of a host configuration file at kennel-spawn time and bind-mounts the sanitised copy into the shim at the path the agent expects. Useful for `~/.gitconfig`, `~/.npmrc`, and similar config files where the agent needs the file to operate but specific keys (credential helpers, embedded tokens, URL rewrites) must not be visible. Project Kennel reads the real file, applies the `strip` patterns to remove matching keys, writes the result to a tmpfs location under `/run/kennel/<kennel>/sanitised/`, and bind-mounts that location into the shim.
+**`fs.home.sanitise`** constructs a sanitised copy of a host configuration file at kennel-spawn time and bind-mounts the sanitised copy into the shim at the path the agent expects. Useful for `~/.gitconfig`, `~/.npmrc`, and similar config files where the agent needs the file to operate but specific keys (credential helpers, embedded tokens, URL rewrites) must not be visible. Project Kennel reads the real file, applies the `strip` patterns to remove matching keys, writes the result to a per-user staging location, and bind-mounts that into the shim at the path the agent expects.
 
 **`fs.scrub`** overlays a tmpfs over files within otherwise-granted directories that match a glob pattern. The canonical use case is hiding `.env`, `.env.*`, `terraform.tfstate`, `*.pem`, `*.key`, and similar credential-shaped files within the project tree. The agent can read the file but sees either an empty file (`mode = "empty"`, the default) or ENOENT (`mode = "enoent"`, stricter but breaks tools that test for file existence). Project Kennel iterates the granted directories at shim construction time, finds files matching the patterns, and overlays a per-file tmpfs at each match.
 
@@ -322,3 +335,33 @@ Each is a regression test in `tests/fs/`:
 15. Context attempts to write `/sys/kernel/security/...`; expect EACCES.
 
 Roughly 30 tests total in the full corpus; the list above captures the most important invariants.
+
+## 7.2.12 Resource limits (`[ulimits]`)
+
+A kennel may cap the workload's kernel resource limits via `[ulimits]` — a table of
+`setrlimit(2)` resources. Nothing is set by default; the section is available for a
+template or leaf that wants a belt-and-braces cap on fork bombs, fd exhaustion, runaway
+memory, or CPU.
+
+```toml
+[ulimits]
+nofile = "8192"        # soft = hard = 8192 open files
+nproc  = "256:512"     # soft 256, hard 512 processes
+as     = "4G"          # 4 GiB virtual-memory ceiling
+core   = "0"           # no core dumps
+cpu    = "unlimited"   # explicit no-limit
+```
+
+- **Names** are the short `setrlimit` resources: `as`, `core`, `cpu`, `data`, `fsize`,
+  `locks`, `memlock`, `msgqueue`, `nice`, `nofile`, `nproc`, `rtprio`, `rttime`,
+  `sigpending`, `stack`. An unknown name is a compile error.
+- **Values** are strings: `soft` (sets soft = hard) or `soft:hard`, each a number with an
+  optional `K`/`M`/`G` (1024-based) suffix, or `unlimited`.
+- **Composition** folds per-key up the template chain (like `[env].set`): a derived layer
+  overrides one resource and leaves the rest. The settled value is normalised to a decimal
+  (or `unlimited`) and carried in the signed artefact.
+- **Application** happens in the spawn seal via `setrlimit(2)`, *after* the Landlock ruleset
+  is built (so lowering `nofile` cannot starve the rule-building opens) and just before
+  `execve`, so the workload inherits exactly the policy's limits. Because the kennel runs
+  unprivileged, a limit can only *lower* the daemon's inherited hard ceiling; raising one
+  needs `CAP_SYS_RESOURCE` and otherwise fails the spawn closed.

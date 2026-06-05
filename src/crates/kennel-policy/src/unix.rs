@@ -21,13 +21,20 @@
 //!   to. (A future ABI-gated escape hatch may revisit this.)
 //! - **Every `[[unix.allow]]` has `real` and `shim`.** A shim is a bind mount from a
 //!   real host path to a path in the view; both ends are required.
-//! - **No `[[unix.allow]]` shims an SSH agent.** An exposed ssh-agent socket is a
-//!   destination-blind signing oracle (§7.8.1); SSH egress goes through the `[ssh]`
-//!   section and the §7.8 re-origination bastion, never the `AF_UNIX` shim. An entry
-//!   named `ssh-agent` or setting `SSH_AUTH_SOCK` is refused with that pointer.
+//! - **A `[[unix.allow]]` that shims an SSH agent is a *footgun*, warned not forbidden.**
+//!   An exposed ssh-agent socket is a destination-blind signing oracle (§7.8.1); the
+//!   intended path for SSH egress is the `[ssh]` section and the §7.8 re-origination
+//!   bastion. But a policy author *may* deliberately shim a real agent — the framework
+//!   warns loudly (here at compile, and again at runtime when `kenneld` realises the
+//!   shim) rather than amputating the choice. An entry named `ssh-agent` or setting
+//!   `SSH_AUTH_SOCK` raises a warning with that pointer; it does not fail the compile.
 //!
 //! Validation runs on the *resolved* policy (chain folded, includes applied, leaf
 //! deltas merged). The required-`reason` check lives in `SourcePolicy::validate`.
+//!
+//! Errors (malformed/unhonourable grants) fail the compile; warnings (footguns the
+//! author can knowingly accept) are returned on the `Ok` path and surfaced by the
+//! caller (the `kennel compile` CLI prints them; `kenneld` re-derives and logs them).
 
 use crate::source::SourcePolicy;
 use crate::PolicyError;
@@ -35,16 +42,20 @@ use crate::PolicyError;
 /// Validate the `[unix]` section of a resolved source policy.
 ///
 /// A policy with no `[unix]` section is vacuously valid. Returns every problem found,
-/// not just the first, so an author fixes them in one pass.
+/// not just the first, so an author fixes them in one pass. On success returns the
+/// (possibly empty) list of **warnings** — footgun grants the policy is allowed to
+/// keep but should be loud about (e.g. shimming a real ssh-agent socket).
 ///
 /// # Errors
 ///
-/// Returns [`PolicyError::SourceValidation`] carrying one message per problem.
-pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
+/// Returns [`PolicyError::SourceValidation`] carrying one message per hard problem
+/// (a malformed grant or an unhonourable `default`/`abstract`).
+pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
     let Some(unix) = &policy.unix else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let mut errs: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     match unix.default.as_deref() {
         None | Some("deny") => {}
@@ -82,24 +93,27 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
                 "[[unix.allow]] `{who}` is missing `shim` (the in-view path to bind it at)"
             ));
         }
-        // SSH must not be shimmed as an agent socket — it is a destination-blind
-        // signing oracle (§7.8.1). Route SSH via the [ssh] section and the bastion.
+        // Shimming a real ssh-agent socket is a footgun, not a crime: an exposed agent
+        // is a destination-blind signing oracle (§7.8.1) and the [ssh] bastion is the
+        // intended path — but the framework warns loudly rather than forbidding it
+        // (footguns are warned, not amputated). The warning fires again at runtime.
         let shims_ssh = a
             .name
             .as_deref()
             .is_some_and(|n| n.eq_ignore_ascii_case("ssh-agent"))
             || a.env.as_deref() == Some("SSH_AUTH_SOCK");
         if shims_ssh {
-            errs.push(format!(
-                "[[unix.allow]] `{who}` shims an SSH agent (name = \"ssh-agent\" / env = \"SSH_AUTH_SOCK\"); \
-                 an exposed agent is a destination-blind signing oracle (§7.8.1) — grant SSH through the \
-                 [ssh] section and the §7.8 re-origination bastion instead"
+            warnings.push(format!(
+                "[[unix.allow]] `{who}` shims an SSH agent (name = \"ssh-agent\" / env = \"SSH_AUTH_SOCK\"): \
+                 an exposed agent is a destination-blind signing oracle (§7.8.1). This is the intended \
+                 job of the [ssh] section and the §7.8 re-origination bastion — shim a raw agent only if \
+                 you accept that any code in the kennel can sign for any destination"
             ));
         }
     }
 
     if errs.is_empty() {
-        Ok(())
+        Ok(warnings)
     } else {
         Err(PolicyError::SourceValidation(errs))
     }
@@ -189,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ssh_agent_shim_is_refused_by_name() {
+    fn an_ssh_agent_shim_warns_but_is_allowed_by_name() {
         let unix = UnixSection {
             allow: vec![allow(
                 "ssh-agent",
@@ -198,23 +212,30 @@ mod tests {
             )],
             ..UnixSection::default()
         };
-        let err = validate(&policy_with(unix)).expect_err("refused");
-        assert!(
-            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("destination-blind")))
-        );
+        // Footgun: permitted, but loudly warned (not refused).
+        let warnings = validate(&policy_with(unix)).expect("allowed with a warning");
+        assert!(warnings.iter().any(|s| s.contains("destination-blind")));
     }
 
     #[test]
-    fn an_ssh_auth_sock_env_is_refused() {
+    fn an_ssh_auth_sock_env_warns_but_is_allowed() {
         let mut a = allow("custom", "/run/x.sock", "~/.ssh/agent.sock");
         a.env = Some("SSH_AUTH_SOCK".to_owned());
         let unix = UnixSection {
             allow: vec![a],
             ..UnixSection::default()
         };
-        let err = validate(&policy_with(unix)).expect_err("refused");
-        assert!(
-            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("destination-blind")))
-        );
+        let warnings = validate(&policy_with(unix)).expect("allowed with a warning");
+        assert!(warnings.iter().any(|s| s.contains("destination-blind")));
+    }
+
+    #[test]
+    fn a_clean_grant_yields_no_warnings() {
+        let unix = UnixSection {
+            default: Some("deny".to_owned()),
+            abstract_ns: Some("deny".to_owned()),
+            allow: vec![allow("gpg-agent", "/run/gpg.sock", "~/.gnupg/S.gpg-agent")],
+        };
+        assert!(validate(&policy_with(unix)).expect("valid").is_empty());
     }
 }

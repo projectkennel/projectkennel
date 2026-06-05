@@ -60,12 +60,13 @@ The full section list:
 | `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction, scrub patterns | §7.2 |
 | `[net]` and `[net.*]` | Network egress allowlist, proxy listen, loopback rules, bind rules, audit | §7.3 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling | §7.4 |
-| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); source-only, planned | §7.8 |
-| `[identity]` | Supplementary-group isolation (`groups`); source-only, realised by the spawn seal | §7.2 |
+| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.8 |
+| `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.2 |
 | `[container]` | Container-mode policy surface; source-only, design-level (no runtime yet) | §7.9 |
 | `[dbus]` | D-Bus session/system bus enablement and method filtering | §7.5 |
 | `[x11]` | X11/Wayland display server isolation | §7.6 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.7 |
+| `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.2 |
 | `[cap]` | Capabilities and `no_new_privs` | §7.7 |
 | `[seccomp]` | Seccomp filter | §7.7 |
 | `[proc]` | Procfs visibility and hidepid | §7.7 |
@@ -216,8 +217,7 @@ The current invariants (mechanism details in design doc §12):
 
 - `cap.no_new_privs = true`. Cannot be set false.
 - `exec.deny_setuid = true`, `exec.deny_setgid = true`, `exec.deny_setcap = true`, `exec.deny_writable = true`. Cannot be set false.
-- `fs.home.shadow = true`. The shim is mandatory.
-- `[fs.home.shim_root]` must be under `/run/kennel/<kennel>/`.
+- `fs.home.shadow = true`. The shim is mandatory. `$HOME` is `/home/<user>` — the masked `[identity].user`, default `kennel`.
 - `[net.mode]` may be `"none"`, `"constrained"`, or `"open"`; it may not be any other value. `"none"` and `"constrained"` both translate to the settled `NetMode::Constrained` (proxy-only egress; `"none"` is "constrained with an empty allowlist"); an absent `[net.mode]` is accepted and also translates to `Constrained`. `"open"` is the permissive mode for `ai-coding-permissive`-style templates. The runtime re-assert only checks the settled mode is `Constrained` or `Open`; the "open only for permissive templates" guidance is a convention, not a validator-enforced rule.
 - `[net.deny.invariant]` entries (cloud metadata, link-local, RFC1918) are present and cannot be removed by any delta.
 - `[proc.visibility] = "self"`.
@@ -264,7 +264,8 @@ The following placeholders are substituted at load time:
 | `<gid>` | The caller's 40-bit IPv6 ULA global ID, from their `/etc/kennel/subkennel` allocation (per-user). |
 | `<uid>` | The user's UID as a decimal string. |
 | `<home>` | The user's home directory (the host path before shim construction). |
-| `<user>` | The user's login name. |
+| `<user>` | The workload's **masked** account name — `[identity].user`, default `kennel`. This is the base of the in-view `$HOME` (`/home/<user>`), not the caller's host login. |
+| `<group>` | The workload's **masked** primary group — `[identity].group`, default `kennel`. |
 
 Substitution happens once at policy resolution; the substituted values are then immutable for the lifetime of the kennel. A template that uses `<ctx>` resolves to a different concrete value for each kennel that derives from it.
 
@@ -308,15 +309,24 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 ## The settled policy (compilation)
 
 The settled schema is defined in `src/crates/kennel-policy/src/settled.rs`. The
-settled `effective_policy` carries only the **runtime-relevant** sections —
-`net`, `fs`, `exec`, `proc`, `cap`, `seccomp`, `lifecycle`. The source-only
-sections (`unix`, `dbus`, `x11`, `env`, `ptrace`, `signal`, `audit`) are
-compile-time concerns and are not present in the settled form, so "every
-section" below means that resolved subset. The settled net section carries
-`net.allow_names` (the by-name proxy allowlist) and `net.proxy` (`offset`,
-`port`); the settled fs section adds `fs.tmp` (`private`, `size_mib`, `mode`)
-and `fs.dev.allow`, and the proc section adds `proc.hidepid`. Settled `FsPolicy`
-uses flat field names (`home_shadow`, `shim_root`), not nested `fs.home.*`.
+settled body (`SettledPolicy`) has two layers. Its `effective_policy`
+(`EffectivePolicy`) is the **kernel-enforcement core** — `net`, `fs`, `exec`,
+`proc`, `cap`, `seccomp`, `lifecycle` — the sections the spawn seal and the BPF
+realise directly. Alongside it the body carries the **service-input sections**
+the daemon and spawn *services* realise (not the kernel), each signed but omitted
+from the canonical form when empty (so a policy that does not use one signs
+unchanged): `ssh` (`SshRuntime`), `unix` (`UnixRuntime`), `identity`
+(`IdentityRuntime` — the masked `user`/`group` and supplementary `groups`),
+`audit` (`AuditRuntime`), `env` (`EnvRuntime` — the synthesised environment), and
+`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The sections with no runtime
+representation yet — `dbus`, `x11`, `ptrace`, `signal`, and the source-only
+`fs.scrub`/`fs.home.sanitise` — are dropped at translate and absent from the
+settled form. The settled net section carries `net.allow_names` (the by-name proxy
+allowlist), `net.proxy` (`offset`, `port`), and the bind-port policy
+(`bind_port_min` + `bind_allowed_ports`, §7.3.7); the settled fs section adds
+`fs.tmp` (`private`, `size_mib`, `mode`) and `fs.dev.allow`, and the proc section
+adds `proc.hidepid`. Settled `FsPolicy` uses flat field names (`home_shadow`,
+`home_persist`, `home_readonly`), not nested `fs.home.*`.
 
 The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
 

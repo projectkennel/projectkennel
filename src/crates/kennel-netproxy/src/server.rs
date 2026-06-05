@@ -38,7 +38,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use crate::allow::{
@@ -62,11 +62,16 @@ const CHUNK: usize = 256;
 /// The HTTP `CONNECT` success response sent before a tunnel begins relaying.
 const HTTP_200: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
-/// A per-kennel egress proxy: a resolved ruleset, a name resolver, the
-/// resolved-address private-space opinion, and the unified audit writer.
-pub struct Proxy<R> {
+/// The hot-swappable, config-derived half of a [`Proxy`].
+///
+/// Holds everything `kenneld`'s resolved policy determines, behind an
+/// `RwLock<Arc<…>>` so it can be replaced live ([`Proxy::reload`], §02-4) without
+/// restarting the proxy or dropping in-flight connections; each request snapshots
+/// the current `Arc` once.
+#[derive(Clone)]
+struct ProxyState {
+    /// The resolved egress allow/deny ruleset.
     ruleset: Ruleset,
-    resolver: R,
     /// Whether a name may be connected to a resolved address in special-use
     /// space (RFC1918 / ULA / loopback / ...). Default posture is `false`; set
     /// only for a kennel that legitimately reaches internal services by name.
@@ -76,6 +81,26 @@ pub struct Proxy<R> {
     /// invariant deny — e.g. the SSH bastion (§7.8.4). Matched only against a literal
     /// destination address (never a resolved name), so there is no rebinding surface.
     host_services: Vec<SocketAddr>,
+}
+
+impl ProxyState {
+    /// Whether `addr:port` is a configured host service (exact literal match).
+    fn is_host_service(&self, addr: IpAddr, port: u16) -> bool {
+        self.host_services
+            .iter()
+            .any(|hs| hs.ip() == addr && hs.port() == port)
+    }
+}
+
+/// A per-kennel egress proxy.
+///
+/// Combines the hot-swappable `ProxyState` (ruleset, host-services,
+/// resolved-address opinion), a name resolver, and the unified audit writer. The
+/// resolver and writer are fixed for the proxy's life; the state is reloadable.
+pub struct Proxy<R> {
+    /// The config-derived ruleset/host-services/opinion, swappable via [`Proxy::reload`].
+    state: RwLock<Arc<ProxyState>>,
+    resolver: R,
     /// The unified audit writer (`02-3`): one `net.egress` event per request,
     /// fanned out to every sink the policy selected.
     audit: Arc<kennel_audit::Writer>,
@@ -93,35 +118,64 @@ impl<R: Resolver> Proxy<R> {
     /// Build a proxy over an already-resolved `ruleset`, a name `resolver`, the
     /// `accept_private_resolved` opinion, and the unified audit `writer` (one
     /// `net.egress` event is emitted per request).
-    pub const fn new(
+    pub fn new(
         ruleset: Ruleset,
         resolver: R,
         accept_private_resolved: bool,
         writer: Arc<kennel_audit::Writer>,
     ) -> Self {
         Self {
-            ruleset,
+            state: RwLock::new(Arc::new(ProxyState {
+                ruleset,
+                accept_private_resolved,
+                host_services: Vec::new(),
+            })),
             resolver,
-            accept_private_resolved,
-            host_services: Vec::new(),
             audit: writer,
         }
     }
 
     /// Add the sanctioned host-loopback services this proxy may reach despite the
     /// host-loopback invariant deny (`[[net.host_services]]`, §7.3 — the SSH bastion
-    /// is one). A builder so [`new`](Self::new) stays a simple `const fn`.
+    /// is one). A builder used at construction, before the proxy starts serving.
     #[must_use]
-    pub fn with_host_services(mut self, host_services: Vec<SocketAddr>) -> Self {
-        self.host_services = host_services;
+    pub fn with_host_services(self, host_services: Vec<SocketAddr>) -> Self {
+        {
+            let mut guard = self.state.write().unwrap_or_else(PoisonError::into_inner);
+            let mut next = (**guard).clone();
+            next.host_services = host_services;
+            *guard = Arc::new(next);
+        }
         self
     }
 
-    /// Whether `addr:port` is a configured host service (exact literal match).
-    fn is_host_service(&self, addr: IpAddr, port: u16) -> bool {
-        self.host_services
-            .iter()
-            .any(|hs| hs.ip() == addr && hs.port() == port)
+    /// Snapshot the current config-derived state (cheap `Arc` clone). Taken once per
+    /// request so a mid-request [`reload`](Self::reload) cannot split a decision.
+    fn snapshot(&self) -> Arc<ProxyState> {
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replace the live ruleset, resolved-address opinion, and host-services
+    /// **without restarting** (§02-4 live-reload): `kenneld` rewrites the proxy's
+    /// config file and the reloader thread (`run` in the binary) calls this. In-flight
+    /// connections keep the snapshot they started with; new requests see the new
+    /// policy. The listen sockets and the audit writer are *not* reloaded — changing
+    /// those still needs a respawn.
+    pub fn reload(
+        &self,
+        ruleset: Ruleset,
+        accept_private_resolved: bool,
+        host_services: Vec<SocketAddr>,
+    ) {
+        let next = Arc::new(ProxyState {
+            ruleset,
+            accept_private_resolved,
+            host_services,
+        });
+        *self.state.write().unwrap_or_else(PoisonError::into_inner) = next;
     }
 
     /// Accept connections on `listener` forever, handling each on its own thread.
@@ -358,18 +412,22 @@ impl<R: Resolver> Proxy<R> {
         port: u16,
         transport: Transport,
     ) -> Result<(TcpStream, Option<IpAddr>), ConnectError> {
+        // One snapshot of the config-derived state for the whole decision, so a
+        // concurrent live-reload cannot split the host-service check from the ruleset
+        // check within a single request.
+        let state = self.snapshot();
         // Sanctioned host-loopback services (the SSH bastion, §7.8.4) are an explicit
         // allow-exception, checked ahead of the ruleset's deny-before-allow: a literal
         // bastion address would otherwise be caught by the host-loopback invariant
         // deny. Only an exact literal `addr:port` match qualifies — never a name.
         if let Destination::Addr(addr) = dest {
-            if self.is_host_service(*addr, port) {
+            if state.is_host_service(*addr, port) {
                 let stream = TcpStream::connect((*addr, port))
                     .map_err(|_| ConnectError::Failed("connect-refused"))?;
                 return Ok((stream, Some(*addr)));
             }
         }
-        match self.ruleset.decide_request(dest, port, transport) {
+        match state.ruleset.decide_request(dest, port, transport) {
             RequestDecision::Deny(reason) => Err(ConnectError::Denied(deny_token(reason))),
             RequestDecision::Allow => match dest {
                 Destination::Addr(addr) => {
@@ -387,10 +445,10 @@ impl<R: Resolver> Proxy<R> {
                         .resolve(name)
                         .map_err(|_| ConnectError::Failed("resolve-error"))?;
                     for addr in addrs {
-                        if self.ruleset.decide_resolved(addr, port, transport) != Decision::Allow {
+                        if state.ruleset.decide_resolved(addr, port, transport) != Decision::Allow {
                             continue;
                         }
-                        if !self.accept_private_resolved && is_special_use(addr) {
+                        if !state.accept_private_resolved && is_special_use(addr) {
                             continue;
                         }
                         if let Ok(stream) = TcpStream::connect((addr, port)) {
@@ -599,6 +657,53 @@ mod tests {
             }],
             deny: vec![],
         }
+    }
+
+    #[test]
+    fn reload_swaps_the_live_ruleset_and_host_services() {
+        use crate::allow::{Destination, RequestDecision, Transport};
+        let ten: IpAddr = "10.0.0.1".parse().expect("v4");
+        let priv168: IpAddr = "192.168.0.1".parse().expect("v4");
+
+        // Start allowing 10.0.0.0/8:443, no host services.
+        let proxy = Proxy::new(
+            allow_cidr("10.0.0.0", 8, 443),
+            no_resolver(),
+            false,
+            discard_writer(),
+        );
+        let st0 = proxy.snapshot();
+        assert_eq!(
+            st0.ruleset
+                .decide_request(&Destination::Addr(ten), 443, Transport::Tcp),
+            RequestDecision::Allow
+        );
+        assert!(matches!(
+            st0.ruleset
+                .decide_request(&Destination::Addr(priv168), 443, Transport::Tcp),
+            RequestDecision::Deny(_)
+        ));
+        assert!(!st0.is_host_service(IpAddr::from(Ipv4Addr::LOCALHOST), 22));
+
+        // Live-reload to a different allowlist + a host service: new requests see it,
+        // the old allow is now denied, and the bastion address is sanctioned.
+        proxy.reload(
+            allow_cidr("192.168.0.0", 16, 443),
+            false,
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 22))],
+        );
+        let st1 = proxy.snapshot();
+        assert_eq!(
+            st1.ruleset
+                .decide_request(&Destination::Addr(priv168), 443, Transport::Tcp),
+            RequestDecision::Allow
+        );
+        assert!(matches!(
+            st1.ruleset
+                .decide_request(&Destination::Addr(ten), 443, Transport::Tcp),
+            RequestDecision::Deny(_)
+        ));
+        assert!(st1.is_host_service(IpAddr::from(Ipv4Addr::LOCALHOST), 22));
     }
 
     /// Run a proxy on a loopback listener for exactly one connection.

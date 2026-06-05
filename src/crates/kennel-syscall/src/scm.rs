@@ -6,14 +6,20 @@
 //! kernel mechanism: the sender names fds in a `sendmsg` control message, and the
 //! kernel installs *new* fds referring to the same open files in the receiver.
 //!
-//! There is no `std` API for this, and the established crates (`sendfd`,
-//! `passfd`, `nix`'s `sendmsg`) each pull a tree we would rather not vendor for
-//! one call site, so it lives here as reviewed `unsafe` (`CODING-STANDARDS.md`
-//! §4) over `libc::{sendmsg,recvmsg}`. Received fds arrive with `MSG_CMSG_CLOEXEC`
-//! set, so they never leak across an `execve`.
+//! There is no `std` API for this, so it goes through nix's safe `sendmsg` /
+//! `recvmsg` / `ControlMessage` wrappers (`CODING-STANDARDS.md` §4 — prefer a
+//! vetted crate to our own `unsafe`; nix's `socket` feature is already enabled for
+//! this and `netlink`). The only `unsafe` left is adopting each received raw fd
+//! into an `OwnedFd`, the same one-line ownership transfer the rest of the crate
+//! uses. Received fds arrive with `MSG_CMSG_CLOEXEC` set, so they never leak
+//! across an `execve`.
 
-use std::io;
+use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+
+use nix::sys::socket::{
+    getsockopt, recvmsg, sendmsg, sockopt, ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr,
+};
 
 /// The largest number of fds [`recv_with_fds`] will accept in one message.
 pub const MAX_FDS: usize = 8;
@@ -29,28 +35,10 @@ pub const MAX_FDS: usize = 8;
 /// An OS error if `getsockopt(SO_PEERCRED)` fails (e.g. not a connected
 /// `AF_UNIX` socket).
 pub fn peer_uid(sock: BorrowedFd<'_>) -> io::Result<u32> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).unwrap_or(0);
-    // SAFETY: `getsockopt` writes a `libc::ucred` of `len` bytes into `cred` and
-    // the actual length back into `len`; both outlive the call, and `sock` is a
-    // valid borrowed fd for the duration.
-    let rc = unsafe {
-        libc::getsockopt(
-            sock.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
-            std::ptr::addr_of_mut!(len),
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(cred.uid)
+    // nix's PeerCredentials getsockopt fills and returns the kernel-stamped
+    // `ucred`; no manual buffer or length juggling, and no `unsafe`.
+    let cred = getsockopt(&sock, sockopt::PeerCredentials)?;
+    Ok(cred.uid())
 }
 
 /// Send `data` (at least one byte) over `sock`, attaching `fds` as an
@@ -61,9 +49,6 @@ pub fn peer_uid(sock: BorrowedFd<'_>) -> io::Result<u32> {
 /// # Errors
 /// An OS error if `sendmsg` fails, or `InvalidInput` if `data` is empty or there
 /// are more than [`MAX_FDS`] fds.
-// The CMSG_DATA fd payload is written via copy_nonoverlapping, which does not
-// require the destination pointer to be aligned.
-#[allow(clippy::cast_ptr_alignment)]
 pub fn send_with_fds(
     sock: BorrowedFd<'_>,
     data: &[u8],
@@ -79,63 +64,18 @@ pub fn send_with_fds(
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many fds"));
     }
 
-    // A raw-fd array the control message copies from.
+    // nix builds and sizes the SCM_RIGHTS control message for us from this slice.
     let raw: Vec<RawFd> = fds.iter().map(AsRawFd::as_raw_fd).collect();
-    let payload_len = std::mem::size_of_val(raw.as_slice());
+    let iov = [IoSlice::new(data)];
+    let cmsgs = [ControlMessage::ScmRights(&raw)];
+    // No fds: send a plain message with no control data (matching the SCM_RIGHTS
+    // contract that an empty rights message is pointless).
+    let cmsgs: &[ControlMessage<'_>] = if raw.is_empty() { &[] } else { &cmsgs };
 
-    // SAFETY: a zeroed iovec/msghdr is a valid all-zero structure; we then set
-    // the fields. `data` is read-only here (sendmsg only reads it).
-    let mut iov = libc::iovec {
-        iov_base: data.as_ptr().cast::<libc::c_void>().cast_mut(),
-        iov_len: data.len(),
-    };
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = std::ptr::from_mut(&mut iov);
-    msg.msg_iovlen = 1;
-
-    // Control buffer sized for `raw.len()` fds. CMSG_SPACE includes alignment.
-    // SAFETY: CMSG_SPACE is a pure size calculation over a constant payload size.
-    let space = unsafe { libc::CMSG_SPACE(u32::try_from(payload_len).unwrap_or(0)) } as usize;
-    let mut control = vec![0u8; space];
-
-    if !raw.is_empty() {
-        msg.msg_control = control.as_mut_ptr().cast::<libc::c_void>();
-        msg.msg_controllen = space as _;
-        // SAFETY: msg.msg_control points at `space` writable bytes; CMSG_FIRSTHDR
-        // returns a pointer into that buffer (or null if it is too small, which it
-        // is not). We initialise the single cmsg header it returns.
-        let cmsg = unsafe { libc::CMSG_FIRSTHDR(std::ptr::from_ref(&msg)) };
-        if cmsg.is_null() {
-            return Err(io::Error::other("CMSG_FIRSTHDR returned null"));
-        }
-        // SAFETY: `cmsg` is a valid, writable cmsghdr inside `control`. CMSG_LEN
-        // computes the header+payload length; CMSG_DATA points at the payload
-        // region, which is `payload_len` bytes for `raw.len()` fds.
-        unsafe {
-            (*cmsg).cmsg_level = libc::SOL_SOCKET;
-            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            (*cmsg).cmsg_len = libc::CMSG_LEN(u32::try_from(payload_len).unwrap_or(0)) as _;
-            std::ptr::copy_nonoverlapping(
-                raw.as_ptr(),
-                libc::CMSG_DATA(cmsg).cast::<RawFd>(),
-                raw.len(),
-            );
-        }
-    }
-
-    // SAFETY: `msg` is fully initialised and describes valid buffers; sendmsg
-    // reads them and returns the byte count or -1.
-    let n = unsafe {
-        libc::sendmsg(
-            sock.as_raw_fd(),
-            std::ptr::from_ref(&msg),
-            libc::MSG_NOSIGNAL,
-        )
-    };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(usize::try_from(n).unwrap_or(0))
+    // `UnixAddr` only names the (unused) address type; a connected socket needs no
+    // destination, so `addr` is None.
+    let n = sendmsg::<UnixAddr>(sock.as_raw_fd(), &iov, cmsgs, MsgFlags::MSG_NOSIGNAL, None)?;
+    Ok(n)
 }
 
 /// Receive into `buf` from `sock`, collecting any `SCM_RIGHTS` fds (up to
@@ -145,41 +85,20 @@ pub fn send_with_fds(
 /// # Errors
 /// An OS error if `recvmsg` fails, or `InvalidData` if the control data was
 /// truncated (more fds than [`MAX_FDS`] were sent).
-// The CMSG_DATA fd payload is read via read_unaligned, which does not require
-// the source pointer to be aligned.
-#[allow(clippy::cast_ptr_alignment)]
 pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize, Vec<OwnedFd>)> {
-    // SAFETY: zeroed iovec/msghdr is valid; we set the fields to describe `buf`
-    // and the control buffer below.
-    let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr().cast::<libc::c_void>(),
-        iov_len: buf.len(),
-    };
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = std::ptr::from_mut(&mut iov);
-    msg.msg_iovlen = 1;
-
-    // SAFETY: CMSG_SPACE is a pure size calculation.
-    let fd_bytes = std::mem::size_of::<RawFd>().saturating_mul(MAX_FDS);
-    let space = unsafe { libc::CMSG_SPACE(u32::try_from(fd_bytes).unwrap_or(0)) } as usize;
-    let mut control = vec![0u8; space];
-    msg.msg_control = control.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = space as _;
-
-    // SAFETY: `msg` describes valid writable buffers; recvmsg fills them and
-    // returns the data byte count or -1. MSG_CMSG_CLOEXEC marks received fds
-    // close-on-exec so they do not leak through the workload's execve.
-    let n = unsafe {
-        libc::recvmsg(
-            sock.as_raw_fd(),
-            std::ptr::from_mut(&mut msg),
-            libc::MSG_CMSG_CLOEXEC,
-        )
-    };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+    let mut iov = [IoSliceMut::new(buf)];
+    // A control buffer sized for MAX_FDS fds; nix's macro accounts for the cmsg
+    // header and alignment.
+    let mut cmsg_buf = nix::cmsg_space!([RawFd; MAX_FDS]);
+    // MSG_CMSG_CLOEXEC marks received fds close-on-exec so they do not leak through
+    // the workload's execve.
+    let msg = recvmsg::<UnixAddr>(
+        sock.as_raw_fd(),
+        &mut iov,
+        Some(&mut cmsg_buf),
+        MsgFlags::MSG_CMSG_CLOEXEC,
+    )?;
+    if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "control data truncated (too many fds)",
@@ -187,39 +106,18 @@ pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize,
     }
 
     let mut fds = Vec::new();
-    // SAFETY: `msg` was populated by recvmsg; CMSG_FIRSTHDR/CMSG_NXTHDR walk the
-    // control buffer it filled, returning valid cmsghdr pointers or null at the end.
-    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(std::ptr::from_ref(&msg)) };
-    while !cmsg.is_null() {
-        // SAFETY: `cmsg` is a valid cmsghdr inside `control`.
-        let (level, ctype, len) = unsafe {
-            (
-                (*cmsg).cmsg_level,
-                (*cmsg).cmsg_type,
-                (*cmsg).cmsg_len as usize,
-            )
-        };
-        if level == libc::SOL_SOCKET && ctype == libc::SCM_RIGHTS {
-            // SAFETY: CMSG_LEN(0) is the header size; the remainder is the fd payload.
-            let header = unsafe { libc::CMSG_LEN(0) as usize };
-            let payload = len.saturating_sub(header);
-            let count = payload
-                .checked_div(std::mem::size_of::<RawFd>())
-                .unwrap_or(0);
-            // SAFETY: CMSG_DATA points at `payload` valid bytes holding `count`
-            // RawFds the kernel just installed; we read them out one at a time and
-            // take ownership via OwnedFd (so each is closed exactly once).
-            let data = unsafe { libc::CMSG_DATA(cmsg).cast::<RawFd>() };
-            for i in 0..count {
-                let raw = unsafe { data.add(i).read_unaligned() };
+    for cmsg in msg.cmsgs()? {
+        if let ControlMessageOwned::ScmRights(raw_fds) = cmsg {
+            for raw in raw_fds {
+                // SAFETY: `raw` is a fresh fd the kernel just installed for this
+                // process (with O_CLOEXEC, via MSG_CMSG_CLOEXEC) and that nothing
+                // else owns; wrapping it transfers ownership for RAII close.
                 fds.push(unsafe { OwnedFd::from_raw_fd(raw) });
             }
         }
-        // SAFETY: walking to the next header in the same control buffer.
-        cmsg = unsafe { libc::CMSG_NXTHDR(std::ptr::from_mut(&mut msg), cmsg) };
     }
 
-    Ok((usize::try_from(n).unwrap_or(0), fds))
+    Ok((msg.bytes, fds))
 }
 
 #[cfg(test)]

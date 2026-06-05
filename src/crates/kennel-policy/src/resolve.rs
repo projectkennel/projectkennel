@@ -230,7 +230,21 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
         container: merge(&parent.container, &child.container, fold_container),
         audit: merge(&parent.audit, &child.audit, fold_audit),
+        ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
     }
+}
+
+/// Fold `[ulimits]` per-key: the child's entry for a resource overrides the
+/// parent's, other resources carry through (same model as `[env].set`).
+fn fold_ulimits(
+    parent: &std::collections::BTreeMap<String, String>,
+    child: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut m = parent.clone();
+    for (k, v) in child {
+        m.insert(k.clone(), v.clone());
+    }
+    m
 }
 
 // ---- generic combinators -------------------------------------------------------
@@ -302,13 +316,13 @@ fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
 fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
     FsHome {
         shadow: or(&c.shadow, &p.shadow),
-        shim_root: or(&c.shim_root, &p.shim_root),
         sanitise: if c.sanitise.is_empty() {
             p.sanitise.clone()
         } else {
             c.sanitise.clone()
         },
         persist: union_strings(&p.persist, &c.persist),
+        readonly: or(&c.readonly, &p.readonly),
     }
 }
 
@@ -385,6 +399,8 @@ fn fold_net_bind(p: &NetBind, c: &NetBind) -> NetBind {
         allow_host_loopback_v4: or(&c.allow_host_loopback_v4, &p.allow_host_loopback_v4),
         allow_host_loopback_v6: or(&c.allow_host_loopback_v6, &p.allow_host_loopback_v6),
         min_port: or(&c.min_port, &p.min_port),
+        // A child's explicit allowlist overrides the parent's (set-wins, like min_port).
+        allowed_ports: or(&c.allowed_ports, &p.allowed_ports),
     }
 }
 
@@ -455,8 +471,11 @@ fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
 }
 
 fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
-    // Bare-set: a child's non-empty group list replaces the parent's.
+    // Bare-set: a child's non-empty group list replaces the parent's; the child's
+    // `user` overrides the parent's when set.
     IdentitySection {
+        user: or(&c.user, &p.user),
+        group: or(&c.group, &p.group),
         groups: if c.groups.is_empty() {
             p.groups.clone()
         } else {
@@ -588,6 +607,19 @@ mod tests {
     const AI_CODING_STRICT: &str =
         include_str!("../../../../templates/ai-coding-strict/policy.toml");
     const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
+
+    #[test]
+    fn fold_ulimits_is_per_key_child_overrides() {
+        let mut parent = std::collections::BTreeMap::new();
+        parent.insert("nofile".to_owned(), "1024".to_owned());
+        parent.insert("nproc".to_owned(), "256".to_owned());
+        let mut child = std::collections::BTreeMap::new();
+        child.insert("nofile".to_owned(), "8192".to_owned());
+        let folded = fold_ulimits(&parent, &child);
+        // child raises nofile; parent's nproc carries through untouched.
+        assert_eq!(folded.get("nofile").map(String::as_str), Some("8192"));
+        assert_eq!(folded.get("nproc").map(String::as_str), Some("256"));
+    }
 
     /// An in-memory [`TemplateSource`] backed by `(name, version) -> bytes`.
     struct MapSource(Vec<(String, String, Vec<u8>)>);

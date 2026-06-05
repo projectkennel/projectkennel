@@ -14,14 +14,15 @@
 //! * A → servicer: a 4-byte **ready** signal carrying A's pid.
 //! * servicer → A: a 1-byte **ack** (proceed / abort).
 //!
-//! # Why libc here
+//! # Why nix here
 //!
-//! `kennel-syscall` is the designated `unsafe` crate (§4); these are four trivial
-//! syscalls (`pipe2`/`poll`/`read`/`write`) wrapped with the mandated `SAFETY:`
-//! comments, exactly as [`crate::netlink`] does for its sockets. nix does not
-//! enable its `poll` module under our feature set, and the cancellable wait
-//! genuinely needs `poll`, so owning these here keeps `kennel-spawn`
-//! `#![forbid(unsafe_code)]` without widening the nix feature surface.
+//! These are four trivial syscalls (`pipe2`/`poll`/`read`/`write`). Rather than
+//! own the `unsafe` for them, this module uses nix's safe wrappers
+//! (`nix::unistd::{pipe2, read, write}` and `nix::poll`) — the §4 "prefer a vetted
+//! crate to our own `unsafe`" rule. The cancellable wait genuinely needs `poll`,
+//! so the crate enables nix's `poll` feature (it pulls no new dependency); the
+//! module is itself `unsafe`-free, which keeps `kennel-spawn`
+//! `#![forbid(unsafe_code)]` for free.
 //!
 //! # Threat bearing
 //!
@@ -32,8 +33,11 @@
 //! its own spawn child).
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout};
 
 /// The ack byte the servicer sends when the privileged step succeeded and A may
 /// proceed.
@@ -53,25 +57,9 @@ pub const ACK_ABORT: u8 = 0;
 ///
 /// The OS error if `pipe2(2)` fails (e.g. the process fd table is full).
 pub fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0 as libc::c_int; 2];
-    // SAFETY: `pipe2` writes exactly two fds into the 2-element array and returns
-    // 0 on success / -1 on error (writing nothing on error). `O_CLOEXEC` is a
-    // valid flag. No aliasing: `fds` is a fresh local.
-    //
-    // INVARIANTS UPHELD: on success the two ints are fresh kernel fds we then take
-    // sole ownership of via `OwnedFd`; on failure we own nothing and return early.
-    //
-    // FAILURE MODE: rc < 0 → return the errno; the array is untouched, no fd leaks.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let [rfd, wfd] = fds;
-    // SAFETY: `pipe2` returned 0, so `rfd`/`wfd` are open, owned fds; we transfer
-    // ownership to the two `OwnedFd`s, which close them on drop. They are distinct.
-    let read = unsafe { OwnedFd::from_raw_fd(rfd) };
-    let write = unsafe { OwnedFd::from_raw_fd(wfd) };
-    Ok((read, write))
+    // nix::unistd::pipe2 hands back the two ends as `OwnedFd`s already (RAII close),
+    // so there is no raw fd to adopt — the whole call is safe.
+    Ok(nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?)
 }
 
 /// Send a 4-byte native-endian `pid` (the ready signal) on `fd`.
@@ -133,25 +121,16 @@ pub fn recv_ready_cancellable(
         if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let mut pfd = libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
+        let mut fds = [PollFd::new(fd, PollFlags::POLLIN)];
+        // A negative tick means "block indefinitely" (libc poll convention), which
+        // PollTimeout spells `NONE`; any value >= -1 converts infallibly.
+        let timeout = PollTimeout::try_from(tick_ms.max(-1)).unwrap_or(PollTimeout::NONE);
+        let ready = match nix::poll::poll(&mut fds, timeout) {
+            Ok(ready) => ready,
+            Err(Errno::EINTR) => continue,
+            Err(e) => return Err(e.into()),
         };
-        // SAFETY: `&mut pfd` points at one valid, initialised `pollfd`; `nfds = 1`
-        // matches the single element. `poll` only reads `fd`/`events` and writes
-        // `revents`. `tick_ms` is a plain timeout.
-        //
-        // FAILURE MODE: rc < 0 → errno; `EINTR` retries, anything else propagates.
-        let rc = unsafe { libc::poll(&raw mut pfd, 1, tick_ms) };
-        if rc < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
-        }
-        if rc == 0 {
+        if ready == 0 {
             // Timeout: re-check `cancel` and poll again.
             continue;
         }
@@ -169,24 +148,12 @@ pub fn recv_ready_cancellable(
 fn write_all(fd: BorrowedFd<'_>, buf: &[u8]) -> io::Result<()> {
     let mut rest = buf;
     while !rest.is_empty() {
-        // SAFETY: `rest` is a valid initialised slice of `rest.len()` bytes; we
-        // pass its pointer and length to `write`, which only reads from it. `fd`
-        // is a borrowed, open fd for the lifetime of the call.
-        //
-        // FAILURE MODE: n < 0 → errno (EINTR retries); n == 0 → WriteZero.
-        let n = unsafe { libc::write(fd.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
+        match nix::unistd::write(fd, rest) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(written) => rest = rest.get(written..).unwrap_or(&[]),
+            Err(Errno::EINTR) => {} // interrupted before any byte moved: retry
+            Err(e) => return Err(e.into()),
         }
-        let written = usize::try_from(n).unwrap_or(0);
-        if written == 0 {
-            return Err(io::Error::from(io::ErrorKind::WriteZero));
-        }
-        rest = rest.get(written..).unwrap_or(&[]);
     }
     Ok(())
 }
@@ -197,23 +164,12 @@ fn read_exact(fd: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<bool> {
     let mut filled = 0usize;
     while filled < buf.len() {
         let dst = buf.get_mut(filled..).unwrap_or(&mut []);
-        // SAFETY: `dst` is a valid initialised mutable slice of `dst.len()` bytes;
-        // `read` writes at most that many. `fd` is a borrowed, open fd.
-        //
-        // FAILURE MODE: n < 0 → errno (EINTR retries); n == 0 → EOF (return false).
-        let n = unsafe { libc::read(fd.as_raw_fd(), dst.as_mut_ptr().cast(), dst.len()) };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
+        match nix::unistd::read(fd, dst) {
+            Ok(0) => return Ok(false), // EOF before the buffer was filled
+            Ok(got) => filled = filled.saturating_add(got),
+            Err(Errno::EINTR) => {} // interrupted before any byte moved: retry
+            Err(e) => return Err(e.into()),
         }
-        let got = usize::try_from(n).unwrap_or(0);
-        if got == 0 {
-            return Ok(false);
-        }
-        filled = filled.saturating_add(got);
     }
     Ok(true)
 }

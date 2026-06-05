@@ -156,10 +156,14 @@ fn perform_egress(req: &Request, payload: &EgressPayload) -> Response {
     attach_egress_programs(&req.cgroup_path, payload)
 }
 
-/// Load every egress program, populate its maps from `payload`, and attach it to
-/// the cgroup at `path`. `BPF_PROG_ATTACH` outlives this process, so the
-/// programs stay attached after the helper exits even though the program/map fds
-/// close when each `Loaded` drops.
+/// Load every egress program against ONE shared map set, populate it from
+/// `payload`, attach each program to the cgroup at `path`, then pin the shared
+/// maps for inspection and the audit-ringbuf drain.
+///
+/// `BPF_PROG_ATTACH` outlives this process, so the programs stay attached after
+/// the helper exits even though the program/map fds close on drop. Pinning the
+/// maps under `/run/user/<uid>/kennel/bpf/<id>/` keeps them alive (and reachable)
+/// for the unprivileged kenneld to drain — see [`pin_kennel_maps`].
 ///
 /// The caller must own the cgroup directory (the delegation boundary): the fd is
 /// opened once and `fstat`ed, so the ownership check and the attach use the same
@@ -182,84 +186,228 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     }
     let cgroup_fd = dir.as_fd();
 
+    // One shared map set for the whole kennel: every program references the same
+    // maps (so there is one `audit_ringbuf` to drain and one coherent set to pin).
+    let maps = match kennel_bpf::create_maps(kennel_bpf::KENNEL_MAPS) {
+        Ok(m) => m,
+        Err(e) => return Response::internal(errno_of(&e)),
+    };
+    if let Err(e) = populate_maps(&maps, payload) {
+        return Response::internal(errno_of(&e));
+    }
+
     for spec in kennel_bpf::KENNEL_PROGRAMS {
         let Some(elf) = kennel_bpf::programs::object(spec.name) else {
             // The binary was built without this program embedded — treat as unsupported.
             return Response::internal(ENOSYS);
         };
-        let loaded = match kennel_bpf::load_program(elf, spec, kennel_bpf::KENNEL_MAPS) {
-            Ok(l) => l,
+        let prog = match kennel_bpf::load_program_against(elf, spec, &maps) {
+            Ok(p) => p,
             Err(e) => return Response::internal(errno_of(&e)),
         };
-        if let Err(e) = populate_maps(&loaded, payload) {
+        if let Err(e) =
+            kennel_bpf::sys::prog_attach_cgroup(cgroup_fd, prog.as_fd(), spec.attach_type)
+        {
             return Response::internal(errno_of(&e));
         }
-        if let Err(e) = loaded.attach(cgroup_fd, spec.attach_type) {
-            return Response::internal(errno_of(&e));
-        }
-        // `loaded` drops here: its fds close, but the cgroup keeps the attachment.
+        // `prog` drops here: its fd closes, but the cgroup keeps the attachment.
+        // The shared `maps` stay open (owned by `maps`) for pinning below.
     }
+
+    // Pin the shared maps so they outlive the helper and the unprivileged kenneld
+    // can reopen the audit ringbuf to drain it. Best-effort: a pin failure degrades
+    // to "no BPF audit drain / no map inspection" but never fails egress setup, which
+    // is already in force (the programs are attached).
+    pin_kennel_maps(&maps, &payload.pin_id);
+
     Response::ok()
 }
 
-/// Build the `struct bind_subnet` (28 bytes) the `bind4`/`bind6` programs read,
-/// from the kennel's own loopback addresses carried in `meta` (the `kennel_meta`
-/// layout: `proxy_addr_v4` at offset 8, `proxy_addr_v6` at 16). The prefixes are
-/// the per-kennel allocation widths (v4 `/28`, v6 `/64`). Returns `None` if the
-/// meta is too short to hold them (never, for a well-formed payload).
+/// Pin this kennel's shared BPF maps under `/run/user/<uid>/kennel/bpf/<pin_id>/`.
+///
+/// The pins keep the maps alive after the helper exits and reachable by the
+/// unprivileged kenneld (which `BPF_OBJ_GET`s `audit_ringbuf` to drain, and which
+/// the owning user inspects with `bpftool`).
+///
+/// Kennel is a **per-user** tool, so the pins live in the caller's own
+/// `$XDG_RUNTIME_DIR` (`/run/user/<uid>/`, which systemd creates `0700`, owned by
+/// the user). Isolation is therefore *structural* — the whole tree is already
+/// unreachable by other users — rather than permission gymnastics in a shared
+/// directory: no cross-user collision (the uid is in the path), no clobber (this
+/// root helper only ever writes under the caller's own `/run/user/<uid>/`), and no
+/// existence disclosure. The uid is the helper's **real** uid (it is setuid-root
+/// but runs for the caller), never the wire. The bpffs, the per-kennel dir, and the
+/// pins are all owner-only (`0700`/`0700`/`0600`, no OS group).
+///
+/// All steps are best-effort: any failure simply leaves the drain/inspection
+/// unavailable for this kennel; egress enforcement is unaffected. `pin_id` empty
+/// (an older kenneld, or pinning disabled) skips pinning entirely.
 #[cfg(feature = "bpf-egress")]
-fn bind_subnet_value(meta: &[u8]) -> Option<[u8; 28]> {
+fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedFd>, pin_id: &str) {
+    use std::os::fd::AsFd as _;
+
+    if pin_id.is_empty() || !valid_pin_id(pin_id) {
+        return;
+    }
+    let caller_uid = kennel_syscall::unistd::real_uid();
+    let base = pin_root(caller_uid);
+    if ensure_bpffs(&base, caller_uid).is_err() {
+        return;
+    }
+    let dir = base.join(pin_id);
+    // Clear any stale pins from a prior kennel of the same name (this user's own).
+    let _ = clear_pin_dir(&dir);
+    if std::fs::create_dir(&dir).is_err() {
+        return;
+    }
+    let _ = std::os::unix::fs::chown(&dir, Some(caller_uid), None);
+    let _ = set_mode(&dir, 0o700);
+
+    for (name, fd) in maps {
+        let pin = dir.join(name);
+        let Ok(cpin) = std::ffi::CString::new(pin.as_os_str().as_encoded_bytes()) else {
+            continue;
+        };
+        if kennel_bpf::sys::obj_pin(fd.as_fd(), &cpin).is_err() {
+            continue;
+        }
+        let _ = std::os::unix::fs::chown(&pin, Some(caller_uid), None);
+        let _ = set_mode(&pin, 0o600);
+    }
+}
+
+/// The bpffs mount root for a user's BPF pins: `/run/user/<uid>/kennel/bpf`.
+///
+/// uid-derived (matching `kenneld::bpf_audit::pin_dir_for`) so the privileged helper
+/// and the unprivileged daemon agree without passing a path over the wire. This is
+/// `$XDG_RUNTIME_DIR/kennel/bpf` in the standard systemd case; we resolve it from
+/// the uid rather than the (scrubbed, untrusted) environment.
+#[cfg(feature = "bpf-egress")]
+fn pin_root(uid: u32) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf"))
+}
+
+/// Whether `id` is a safe single path component for a pin dir: the kennel-name
+/// grammar `[a-z0-9][a-z0-9-]{0,63}` (so never `..`, never containing `/`).
+#[cfg(feature = "bpf-egress")]
+fn valid_pin_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
+    let mut chars = id.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    first_ok
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Ensure a bpffs is mounted at `base` (idempotent) and owned by the caller,
+/// owner-only `0700`. `base` lives inside the user's `0700` `/run/user/<uid>/`, so
+/// other users cannot reach it regardless; the chown lets the unprivileged owner
+/// reopen the pins and clean them up.
+#[cfg(feature = "bpf-egress")]
+fn ensure_bpffs(base: &std::path::Path, caller_uid: u32) -> std::io::Result<()> {
+    std::fs::create_dir_all(base)?;
+    if !kennel_syscall::mount::is_bpffs(base).unwrap_or(false) {
+        kennel_syscall::mount::mount_bpffs(base)?;
+    }
+    // Hand the bpffs root to the owning user, owner-only. Enforced every time
+    // (cheap, root-only) so it self-heals a stale owner/mode.
+    let _ = std::os::unix::fs::chown(base, Some(caller_uid), None);
+    set_mode(base, 0o700)?;
+    Ok(())
+}
+
+/// Remove a per-kennel pin dir and its pinned-map files (unlinking a pin detaches
+/// that reference). Missing is success.
+#[cfg(feature = "bpf-egress")]
+fn clear_pin_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            std::fs::remove_dir(dir)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Set `path`'s permission bits to `mode` (octal).
+#[cfg(feature = "bpf-egress")]
+fn set_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// Build the `struct bind_subnet` (44 bytes) the `bind4`/`bind6` programs read, from
+/// the kennel's own loopback addresses carried in `meta` (the `kennel_meta` layout:
+/// `proxy_addr_v4` at offset 8, `proxy_addr_v6` at 16) plus the bind-port allowlist.
+/// The prefixes are the per-kennel allocation widths (v4 `/28`, v6 `/64`). Layout
+/// matches `struct bind_subnet` in `bpf/maps.h`: addrs/prefixes, then `n_ports` (u8 at
+/// offset 25) and `allowed_ports[8]` (host-order u16 at offset 26). At most 8 ports
+/// are written. Returns `None` only if the meta is too short (never, for a well-formed
+/// payload).
+#[cfg(feature = "bpf-egress")]
+fn bind_subnet_value(meta: &[u8], allowed_ports: &[u16]) -> Option<[u8; 44]> {
     let v4_addr = meta.get(8..12)?;
     let v6_addr = meta.get(16..32)?;
-    let mut value = [0u8; 28];
+    let mut value = [0u8; 44];
     value.get_mut(0..4)?.copy_from_slice(v4_addr);
     value.get_mut(4..8)?.copy_from_slice(&28u32.to_ne_bytes());
     value.get_mut(8..24)?.copy_from_slice(v6_addr);
     *value.get_mut(24)? = 64;
+    let n = allowed_ports.len().min(8);
+    *value.get_mut(25)? = u8::try_from(n).unwrap_or(0);
+    for (i, port) in allowed_ports.iter().take(8).enumerate() {
+        let off = 26usize.checked_add(i.checked_mul(2)?)?;
+        let end = off.checked_add(2)?;
+        value
+            .get_mut(off..end)?
+            .copy_from_slice(&port.to_ne_bytes());
+    }
     Some(value)
 }
 
-/// Write `payload` into whichever of a loaded program's egress maps it declares.
+/// Write `payload` into the shared egress map set (from `kennel_bpf::create_maps`).
 #[cfg(feature = "bpf-egress")]
-fn populate_maps(loaded: &kennel_bpf::Loaded, payload: &EgressPayload) -> std::io::Result<()> {
-    use kennel_bpf::sys::BPF_ANY;
+fn populate_maps(
+    maps: &std::collections::BTreeMap<String, std::os::fd::OwnedFd>,
+    payload: &EgressPayload,
+) -> std::io::Result<()> {
+    use kennel_bpf::sys::{map_update, BPF_ANY};
+    use std::os::fd::AsFd as _;
 
-    if loaded.maps.contains_key("kennel_meta_map") {
-        loaded.update_map(
-            "kennel_meta_map",
-            &0u32.to_ne_bytes(),
-            &payload.meta,
-            BPF_ANY,
-        )?;
-    }
+    let update = |name: &str, key: &[u8], value: &[u8]| -> std::io::Result<()> {
+        if let Some(fd) = maps.get(name) {
+            map_update(fd.as_fd(), key, value, BPF_ANY)?;
+        }
+        Ok(())
+    };
+
+    update("kennel_meta_map", &0u32.to_ne_bytes(), &payload.meta)?;
     // Per-kennel bind subnet (§7.3): the INADDR_ANY/in6addr_any rewrite target
     // for dev-server binds. The bind4/bind6 programs fail closed without it, so
     // a workload inside the kennel cannot bind a listening socket. The kennel's
     // own loopback addresses are already in the meta, so it derives from there.
-    if loaded.maps.contains_key("bind_subnet_map") {
-        if let Some(value) = bind_subnet_value(&payload.meta) {
-            loaded.update_map("bind_subnet_map", &0u32.to_ne_bytes(), &value, BPF_ANY)?;
-        }
+    if let Some(value) = bind_subnet_value(&payload.meta, &payload.bind_allowed_ports) {
+        update("bind_subnet_map", &0u32.to_ne_bytes(), &value)?;
     }
-    if loaded.maps.contains_key("allow_v4") {
-        for (key, value) in &payload.allow_v4 {
-            loaded.update_map("allow_v4", key, value, BPF_ANY)?;
-        }
+    for (key, value) in &payload.allow_v4 {
+        update("allow_v4", key, value)?;
     }
-    if loaded.maps.contains_key("deny_v4") {
-        for (key, value) in &payload.deny_v4 {
-            loaded.update_map("deny_v4", key, value, BPF_ANY)?;
-        }
+    for (key, value) in &payload.deny_v4 {
+        update("deny_v4", key, value)?;
     }
-    if loaded.maps.contains_key("allow_v6") {
-        for (key, value) in &payload.allow_v6 {
-            loaded.update_map("allow_v6", key, value, BPF_ANY)?;
-        }
+    for (key, value) in &payload.allow_v6 {
+        update("allow_v6", key, value)?;
     }
-    if loaded.maps.contains_key("deny_v6") {
-        for (key, value) in &payload.deny_v6 {
-            loaded.update_map("deny_v6", key, value, BPF_ANY)?;
-        }
+    for (key, value) in &payload.deny_v6 {
+        update("deny_v6", key, value)?;
     }
     Ok(())
 }
@@ -313,10 +461,21 @@ mod tests {
             .expect("v6 range")
             .copy_from_slice(&[0xfd, 0, 0, 0, 0, 0, 7, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let v = bind_subnet_value(&meta).expect("meta long enough");
+        let v = bind_subnet_value(&meta, &[8080, 9090]).expect("meta long enough");
         assert_eq!(v.get(0..4), Some(&[127u8, 42, 7, 1][..]), "v4_addr");
         assert_eq!(v.get(4..8), Some(&28u32.to_ne_bytes()[..]), "v4_prefix /28");
         assert_eq!(v.get(8..24), meta.get(16..32), "v6_addr");
         assert_eq!(v.get(24), Some(&64u8), "v6_prefix /64");
+        assert_eq!(v.get(25), Some(&2u8), "n_ports");
+        assert_eq!(
+            v.get(26..28),
+            Some(&8080u16.to_ne_bytes()[..]),
+            "allowed_ports[0]"
+        );
+        assert_eq!(
+            v.get(28..30),
+            Some(&9090u16.to_ne_bytes()[..]),
+            "allowed_ports[1]"
+        );
     }
 }

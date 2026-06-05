@@ -47,26 +47,24 @@ pub const FILES: &[&str] = &[
     "bash.bashrc",
 ];
 
-/// The masked account/group name the workload's uid and gid resolve to inside a kennel.
-///
-/// A constant, never the real login name: `getpwuid`/`getgrgid` (and so `id`,
-/// `whoami`, `ls -l`) report `kennel`, not the operator's identity. The uid/gid
-/// *numbers* are unchanged (they must match the host inodes of bind-mounted files);
-/// only the name is masked.
-pub const ACCOUNT_NAME: &str = "kennel";
-
 /// What the synthetic `/etc` is rendered from: the kennel's network identity and
 /// the workload's credentials.
 #[derive(Debug, Clone)]
 pub struct EtcParams<'a> {
     /// The kennel's hostname (its runtime name).
     pub hostname: &'a str,
+    /// The workload's masked user name (`[identity].user`, default `kennel`): the
+    /// `passwd` account name and the member of each supplementary `/etc/group` line.
+    pub user: &'a str,
+    /// The workload's masked primary-group name (`[identity].group`, default
+    /// `kennel`): the `/etc/group` name for the primary gid.
+    pub group: &'a str,
     /// The workload's uid.
     pub uid: u32,
     /// The workload's gid.
     pub gid: u32,
     /// The workload's in-kennel home directory — the constructed shim `$HOME`, *not*
-    /// the operator's real home (which would re-leak the identity the [`ACCOUNT_NAME`]
+    /// the operator's real home (which would re-leak the identity the account name
     /// mask hides). The `passwd` entry's home field.
     pub home: &'a Path,
     /// The granted supplementary groups `(name, gid)` (§7.2): resolved + membership-
@@ -143,7 +141,7 @@ pub const fn nsswitch_conf() -> &'static str {
      netgroup:   files\n"
 }
 
-/// `/etc/passwd` — `root`, the kennel's own uid (as the masked [`ACCOUNT_NAME`]), and
+/// `/etc/passwd` — `root`, the kennel's own uid (as the masked account name), and
 /// `nobody`.
 ///
 /// Synthetic — the host's users are not leaked — but enough for
@@ -156,7 +154,7 @@ pub fn passwd(p: &EtcParams<'_>) -> String {
         "root:x:0:0:root:/root:/usr/sbin/nologin\n\
          {user}:x:{uid}:{gid}:Kennel user:{home}:{shell}\n\
          nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
-        user = ACCOUNT_NAME,
+        user = p.user,
         uid = p.uid,
         gid = p.gid,
         home = p.home.display(),
@@ -164,7 +162,7 @@ pub fn passwd(p: &EtcParams<'_>) -> String {
     )
 }
 
-/// `/etc/group`: `root`, the kennel's own gid (as the masked [`ACCOUNT_NAME`]), and
+/// `/etc/group`: `root`, the kennel's own gid (as the masked primary-group name), and
 /// `nogroup`.
 ///
 /// The workload's gid resolves to `kennel`. Inherited *supplementary* gids are not
@@ -176,15 +174,15 @@ pub fn group(p: &EtcParams<'_>) -> String {
     let mut s = format!(
         "root:x:0:\n\
          {grp}:x:{gid}:\n",
-        grp = ACCOUNT_NAME,
+        grp = p.group,
         gid = p.gid,
     );
     // One line per granted supplementary group, with the kennel account as a member,
     // so getgrgid resolves the gid to its name and `id` shows it. Skip a group equal
-    // to the primary gid (already the `kennel` line above).
+    // to the primary gid (already the primary-group line above).
     for (name, gid) in p.groups {
         if *gid != p.gid {
-            let _ = writeln!(s, "{name}:x:{gid}:{ACCOUNT_NAME}");
+            let _ = writeln!(s, "{name}:x:{gid}:{user}", user = p.user);
         }
     }
     s.push_str("nogroup:x:65534:\n");
@@ -396,6 +394,8 @@ mod tests {
     fn params() -> EtcParams<'static> {
         EtcParams {
             hostname: "agent",
+            user: "kennel",
+            group: "kennel",
             uid: 1000,
             gid: 1000,
             home: Path::new("/run/kennel/agent/home"),

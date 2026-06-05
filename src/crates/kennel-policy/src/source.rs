@@ -123,6 +123,13 @@ pub struct SourcePolicy {
     /// Audit section (`[audit]` and `[audit.*]`) — sinks and per-class levels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditSection>,
+    /// Resource limits (`[ulimits]`) — a table of `name = "value"` pairs applied via
+    /// `setrlimit(2)` in the seal. Nothing is set by default. The name is a short
+    /// `setrlimit` resource (`nofile`, `nproc`, `as`, `cpu`, …); the value is `soft`,
+    /// or `"soft:hard"`, each a number (with optional `K`/`M`/`G`) or `"unlimited"`.
+    /// Validated at translate time; folds per-key like `[env].set`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ulimits: Option<BTreeMap<String, String>>,
 }
 
 /// `[audit]`: sink selection, per-class levels, and per-sink tuning
@@ -297,9 +304,6 @@ pub struct FsHome {
     /// Whether `$HOME` is shadowed by a constructed view (must be true once resolved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<bool>,
-    /// The shim root path (must be under `/run/kennel/<kennel>/` once resolved).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shim_root: Option<String>,
     /// `[[fs.home.sanitise]]` — host config files copied in with secrets stripped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitise: Vec<FsHomeSanitise>,
@@ -310,6 +314,13 @@ pub struct FsHome {
     /// persistent-`~/.bashrc` re-execution trade-off is taken, visible in the diff.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persist: Vec<String>,
+    /// Make the constructed `$HOME` **read-only** (default: writable). The home root
+    /// is writable by default — a non-system user owns their home — but it is a fresh
+    /// tmpfs, so writes are ephemeral. Setting this suppresses the home write grant:
+    /// only explicitly `write`-granted `~/` paths are then writable, the rest of the
+    /// home read-only. The escape hatch for a workload that must not write its home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
 }
 
 /// One `[[fs.home.sanitise]]` entry (`docs/design/05-templates.md` §5.9).
@@ -525,6 +536,12 @@ pub struct NetBind {
     /// Lowest bindable port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_port: Option<u16>,
+    /// Explicit allowlist of bindable ports (§7.3.7). When non-empty, the workload may
+    /// `bind()` only these ports (in addition to passing [`min_port`](Self::min_port));
+    /// empty/absent means any port at or above `min_port`. At most
+    /// [`MAX_BIND_PORTS`](crate::settled::MAX_BIND_PORTS) entries survive translation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_ports: Option<Vec<u16>>,
 }
 
 /// `[net.ipv6]`.
@@ -599,6 +616,18 @@ pub struct UnixAllow {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentitySection {
+    /// The workload's masked user name — `$USER`/`$LOGNAME` and the synthetic
+    /// `/etc/passwd` account, and the base of `$HOME` (`/home/<user>`). Defaults to
+    /// `kennel` (a non-system, non-privileged account) when unset; an operator may
+    /// override it. Validated as a portable username at translation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The workload's masked **primary** group name (synthetic `/etc/passwd` `pw_gid`
+    /// name and the `/etc/group` entry for the primary gid). Defaults to `kennel`;
+    /// validated as a portable name at translation. Distinct from `groups` below (the
+    /// *supplementary* groups).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Supplementary group names to retain (e.g. `["dialout", "plugdev"]`). The user
     /// must be a member of each; resolved to GIDs at spawn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1193,6 +1222,16 @@ mod tests {
             .published_ports
             .iter()
             .all(|p| !is_blank(p.reason.as_deref())));
+    }
+
+    #[test]
+    fn ulimits_section_parses_into_a_name_value_map() {
+        let src = "template_name = \"x\"\n\n[ulimits]\nnofile = \"8192\"\nas = \"4G\"\ncpu = \"unlimited\"\n";
+        let pol = parse(src.as_bytes()).expect("parse");
+        let ulimits = pol.ulimits.expect("ulimits");
+        assert_eq!(ulimits.get("nofile").map(String::as_str), Some("8192"));
+        assert_eq!(ulimits.get("as").map(String::as_str), Some("4G"));
+        assert_eq!(ulimits.get("cpu").map(String::as_str), Some("unlimited"));
     }
 
     #[test]

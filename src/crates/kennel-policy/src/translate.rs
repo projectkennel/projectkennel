@@ -41,8 +41,8 @@ use crate::settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
     EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode,
     NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
-    SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
-    UnixSocket,
+    SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime,
+    UnixRuntime, UnixSocket,
 };
 use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
@@ -64,6 +64,8 @@ pub struct Translated {
     pub audit: AuditRuntime,
     /// The synthesised environment (§7.7.2) — the fixed `[env].set` vars.
     pub env: EnvRuntime,
+    /// The per-kennel resource limits (§7.2) — applied via `setrlimit` in the seal.
+    pub ulimits: UlimitsRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -104,9 +106,10 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let lifecycle = translate_lifecycle(effective)?;
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
-    let identity = translate_identity(effective);
+    let identity = translate_identity(effective)?;
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
+    let ulimits = translate_ulimits(effective)?;
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -123,8 +126,77 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         identity,
         audit,
         env,
+        ulimits,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.2). Each entry is a
+/// `setrlimit` resource name (validated against [`ULIMIT_RESOURCES`]) and a value of
+/// the form `soft` or `soft:hard`, every token a number (optional `K`/`M`/`G`, 1024-
+/// based) or `unlimited`. The value is normalised to the settled form `soft` (when
+/// `soft == hard`) or `"soft hard"`, each token a decimal or the literal `unlimited`.
+/// Nothing is set by default — an absent or empty `[ulimits]` yields an empty runtime.
+///
+/// # Errors
+///
+/// [`PolicyError::Translation`] on an unknown resource name or an unparseable value.
+fn translate_ulimits(src: &SourcePolicy) -> Result<UlimitsRuntime, PolicyError> {
+    let mut limits = std::collections::BTreeMap::new();
+    let Some(src_limits) = src.ulimits.as_ref() else {
+        return Ok(UlimitsRuntime::default());
+    };
+    for (name, value) in src_limits {
+        if !crate::settled::ULIMIT_RESOURCES.contains(&name.as_str()) {
+            return Err(translation(format!(
+                "unknown ulimit resource `{name}` (expected one of {})",
+                crate::settled::ULIMIT_RESOURCES.join(", ")
+            )));
+        }
+        let (soft, hard) = if let Some((s, h)) = value.split_once(':') {
+            (parse_rlim_token(name, s)?, parse_rlim_token(name, h)?)
+        } else {
+            let t = parse_rlim_token(name, value)?;
+            (t.clone(), t)
+        };
+        let normalised = if soft == hard {
+            soft
+        } else {
+            format!("{soft} {hard}")
+        };
+        limits.insert(name.clone(), normalised);
+    }
+    Ok(UlimitsRuntime { limits })
+}
+
+/// Parse one ulimit token — `unlimited`/`infinity`, or a number with an optional
+/// `K`/`M`/`G` (1024-based) suffix — into its normalised settled string (`"unlimited"`
+/// or a decimal). `field` names the resource for the error message.
+fn parse_rlim_token(field: &str, tok: &str) -> Result<String, PolicyError> {
+    let t = tok.trim();
+    if t.eq_ignore_ascii_case("unlimited") || t.eq_ignore_ascii_case("infinity") {
+        return Ok("unlimited".to_owned());
+    }
+    // Strip an optional 1024-based suffix; each is a distinct single char, so the
+    // first match wins. `find_map` over a table avoids an if-let/else chain.
+    let (num, mult): (&str, u64) = [('K', 1u64 << 10), ('M', 1u64 << 20), ('G', 1u64 << 30)]
+        .into_iter()
+        .find_map(|(c, m)| {
+            t.strip_suffix([c, c.to_ascii_lowercase()])
+                .map(|stripped| (stripped, m))
+        })
+        .unwrap_or((t, 1));
+    let base = num.trim().parse::<u64>().map_err(|_| {
+        translation(format!(
+            "ulimit `{field}` value `{tok}` is not a number (optional K/M/G) or `unlimited`"
+        ))
+    })?;
+    let scaled = base.checked_mul(mult).ok_or_else(|| {
+        translation(format!(
+            "ulimit `{field}` value `{tok}` overflows a 64-bit limit"
+        ))
+    })?;
+    Ok(scaled.to_string())
 }
 
 /// Flatten the source `[env].set` into the settled [`EnvRuntime`] (§7.7.2). The
@@ -283,7 +355,7 @@ fn parse_size_bytes(s: &str) -> Result<u64, PolicyError> {
 /// `[identity].groups` plus every group named by a `[[fs.dev.passthrough]]` (a device
 /// is unusable without its DAC group), de-duplicated in first-seen order. `kenneld`
 /// resolves these names to GIDs and membership-checks them at spawn.
-fn translate_identity(src: &SourcePolicy) -> IdentityRuntime {
+fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError> {
     let mut groups: Vec<String> = Vec::new();
     let mut push = |g: &str| {
         if !g.is_empty() && !groups.iter().any(|e| e == g) {
@@ -302,7 +374,52 @@ fn translate_identity(src: &SourcePolicy) -> IdentityRuntime {
             }
         }
     }
-    IdentityRuntime { groups }
+    let id = src.identity.as_ref();
+    let user = id
+        .and_then(|i| i.user.clone())
+        .unwrap_or_else(|| crate::settled::DEFAULT_USER.to_owned());
+    validate_name("identity.user", &user)?;
+    let group = id
+        .and_then(|i| i.group.clone())
+        .unwrap_or_else(|| crate::settled::DEFAULT_GROUP.to_owned());
+    validate_name("identity.group", &group)?;
+    Ok(IdentityRuntime {
+        user,
+        group,
+        groups,
+    })
+}
+
+/// Reject anything that is not a portable, non-system Unix user/group name. The
+/// `identity.user` becomes the synthetic `/etc/passwd` account, `$USER`/`$LOGNAME`,
+/// and the *path component* of `$HOME` (`/home/<user>`); `identity.group` becomes the
+/// synthetic primary-group name. A `/`, `:`, NUL, or whitespace would corrupt the
+/// passwd/group file or escape the home path — refuse, never sanitise.
+fn validate_name(field: &str, name: &str) -> Result<(), PolicyError> {
+    let invalid =
+        |why: &str| PolicyError::Translation(format!("{field} `{name}` is invalid: {why}"));
+    if name.is_empty() {
+        return Err(invalid("must not be empty"));
+    }
+    if name.len() > 32 {
+        return Err(invalid("must be at most 32 characters"));
+    }
+    // Portable name: lowercase letter or underscore first, then lowercase letters,
+    // digits, underscore, or hyphen (the `useradd(8)` NAME_REGEX default).
+    let first_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+    if !first_ok {
+        return Err(invalid("must start with a lowercase letter or `_`"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(invalid("may only contain `[a-z0-9_-]`"));
+    }
+    Ok(())
 }
 
 /// Flatten the source `[unix]` section into the settled [`UnixRuntime`]: one
@@ -441,8 +558,30 @@ fn translate_net(
         }
     }
 
+    // The bind floor (§7.3.7): a workload bind below `min_port` is denied by the
+    // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
+    let bind_port_min = net.bind.as_ref().and_then(|b| b.min_port).unwrap_or(0);
+    // The bind-port allowlist (§7.3.7): when non-empty, only these ports may be bound.
+    // Capped at the bind_subnet array size; an over-long list is a translation error
+    // (a hard map limit, not a footgun), so the author learns it rather than having
+    // ports silently dropped.
+    let bind_allowed_ports = net
+        .bind
+        .as_ref()
+        .and_then(|b| b.allowed_ports.clone())
+        .unwrap_or_default();
+    if bind_allowed_ports.len() > crate::settled::MAX_BIND_PORTS {
+        return Err(translation(format!(
+            "[net.bind].allowed_ports has {} entries; the maximum is {}",
+            bind_allowed_ports.len(),
+            crate::settled::MAX_BIND_PORTS
+        )));
+    }
+
     Ok(NetPolicy {
         mode,
+        bind_port_min,
+        bind_allowed_ports,
         proxy,
         allow,
         allow_names,
@@ -498,11 +637,6 @@ fn translate_fs(
 ) -> Result<FsPolicy, PolicyError> {
     let fs = src.fs.as_ref().ok_or_else(|| missing("fs"))?;
     let home = fs.home.as_ref().ok_or_else(|| missing("fs.home"))?;
-    let shim_root_raw = home
-        .shim_root
-        .as_deref()
-        .ok_or_else(|| missing("fs.home.shim_root"))?;
-    let shim_root = subst(shim_root_raw, deferred);
 
     let read = subst_each(fs.read.as_deref().unwrap_or_default(), deferred);
     let write = subst_each(fs.write.as_deref().unwrap_or_default(), deferred);
@@ -547,10 +681,10 @@ fn translate_fs(
 
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
-        shim_root,
         read,
         write,
         home_persist,
+        home_readonly: home.readonly.unwrap_or(false),
         tmp,
         dev,
     })
@@ -591,17 +725,29 @@ fn translate_exec(
     let exec = src.exec.as_ref();
     let flag =
         |f: fn(&crate::source::ExecSection) -> Option<bool>| exec.and_then(f).unwrap_or(false);
-    let allow = subst_each(
+    let mut allow = subst_each(
         exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
         deferred,
     );
+    // exec.deny (§7.1.4) is composed up the chain (folded in resolve) and carried into
+    // the settled policy for audit and runtime warning. "deny evaluated before allow":
+    // a deny that exactly matches an allow entry is *subtracted* here, so Landlock never
+    // grants EXECUTE on it (the only deny the allow-only LSM can actually enforce). A
+    // deny that falls inside an allowed directory, or that is set without any allow, is
+    // advisory — `ExecPolicy::deny_warnings` flags it at compile and spawn.
+    let deny = subst_each(
+        exec.and_then(|e| e.deny.as_deref()).unwrap_or_default(),
+        deferred,
+    );
+    allow.retain(|a| !deny.contains(a));
     let path = subst_each(
         exec.and_then(|e| e.path.as_deref()).unwrap_or_default(),
         deferred,
     );
     // The login shell (§7.7.2a): default /bin/sh, and — when an exec allowlist is
     // enforced — it must be one of the permitted binaries, or the kennel would set
-    // a shell it then refuses to run. Caught here, at compile time.
+    // a shell it then refuses to run. Caught here, at compile time (after the deny
+    // subtraction, so denying your own shell is caught as the same contradiction).
     let shell = exec
         .and_then(|e| e.shell.clone())
         .map_or_else(crate::settled::default_shell, |s| subst(&s, deferred));
@@ -616,6 +762,7 @@ fn translate_exec(
         deny_setcap: flag(|e| e.deny_setcap),
         deny_writable: flag(|e| e.deny_writable),
         allow,
+        deny,
         path,
         shell,
     })
@@ -661,12 +808,15 @@ fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyErro
         Some(s) => Some(parse_duration_secs(s)?),
         None => None,
     };
+    // §9.7: exit | warn | renew, defaulting to exit. "stop" is accepted as a
+    // backward-compatible alias for "exit" (the token earlier builds shipped).
     let ttl_action = match lc.and_then(|l| l.ttl_action.as_deref()) {
-        Some("stop") => TtlAction::Stop,
-        Some("warn") | None => TtlAction::Warn,
+        Some("exit" | "stop") | None => TtlAction::Exit,
+        Some("warn") => TtlAction::Warn,
+        Some("renew") => TtlAction::Renew,
         Some(other) => {
             return Err(translation(format!(
-                "ttl_action `{other}` is not stop/warn"
+                "ttl_action `{other}` is not exit/warn/renew"
             )))
         }
     };
@@ -779,6 +929,45 @@ mod tests {
             BASE_CONFINED.as_bytes().to_vec(),
         )])
     }
+    fn ulimits_src(pairs: &[(&str, &str)]) -> SourcePolicy {
+        let mut m = std::collections::BTreeMap::new();
+        for (k, v) in pairs {
+            m.insert((*k).to_owned(), (*v).to_owned());
+        }
+        SourcePolicy {
+            ulimits: Some(m),
+            ..SourcePolicy::default()
+        }
+    }
+
+    #[test]
+    fn ulimits_normalise_soft_hard_suffixes_and_unlimited() {
+        let src = ulimits_src(&[
+            ("nofile", "8192"),
+            ("as", "2G"),
+            ("cpu", "unlimited"),
+            ("nproc", "512:1024"),
+            ("memlock", "64K"),
+        ]);
+        let r = translate_ulimits(&src).expect("translate ulimits");
+        assert_eq!(r.limits.get("nofile").map(String::as_str), Some("8192"));
+        assert_eq!(r.limits.get("as").map(String::as_str), Some("2147483648"));
+        assert_eq!(r.limits.get("cpu").map(String::as_str), Some("unlimited"));
+        assert_eq!(r.limits.get("nproc").map(String::as_str), Some("512 1024"));
+        assert_eq!(r.limits.get("memlock").map(String::as_str), Some("65536"));
+    }
+
+    #[test]
+    fn ulimits_unknown_resource_is_rejected() {
+        let err = translate_ulimits(&ulimits_src(&[("bogus", "1")])).expect_err("must reject");
+        assert!(format!("{err:?}").contains("bogus"), "got {err:?}");
+    }
+
+    #[test]
+    fn ulimits_non_numeric_value_is_rejected() {
+        assert!(translate_ulimits(&ulimits_src(&[("nofile", "lots")])).is_err());
+    }
+
     fn translate_template(src: &str) -> Translated {
         let entry = parse(src.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &base_src()).expect("resolve");
@@ -974,6 +1163,54 @@ mod tests {
     }
 
     #[test]
+    fn exec_deny_is_carried_and_exact_matches_subtracted_from_allow() {
+        // "deny evaluated before allow": an exact-match deny is removed from allow
+        // (Landlock never grants EXECUTE on it); the full deny list is carried for
+        // audit and runtime warning.
+        let src = parse(
+            b"name = \"k\"\n[exec]\nallow = [\"/usr/bin/git\", \"/usr/bin/sudo\"]\ndeny = [\"/usr/bin/sudo\", \"/usr/bin/mount\"]\nshell = \"/usr/bin/git\"\n",
+        )
+        .expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        assert_eq!(ep.allow, vec!["/usr/bin/git".to_owned()], "sudo subtracted");
+        assert_eq!(
+            ep.deny,
+            vec!["/usr/bin/sudo".to_owned(), "/usr/bin/mount".to_owned()],
+            "full deny list carried"
+        );
+        // /usr/bin/sudo was an exact allow entry now removed, and there is no glob
+        // dir grant re-exposing it ⇒ enforced by omission, no warning. /usr/bin/mount
+        // is simply never granted ⇒ also enforced, no warning.
+        assert!(ep.deny_warnings().is_empty(), "{:?}", ep.deny_warnings());
+    }
+
+    #[test]
+    fn exec_deny_inside_an_allowed_glob_dir_warns() {
+        let src = parse(
+            b"name = \"k\"\n[exec]\nallow = [\"/usr/bin/**\", \"/bin/sh\"]\ndeny = [\"/usr/bin/sudo\"]\n",
+        )
+        .expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        // The glob dir grant re-exposes sudo; Landlock cannot subtract ⇒ advisory warn.
+        let w = ep.deny_warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w
+            .first()
+            .is_some_and(|s| s.contains("falls inside allowed directory")));
+    }
+
+    #[test]
+    fn exec_deny_without_any_allow_warns_as_advisory() {
+        let src = parse(b"name = \"k\"\n[exec]\ndeny = [\"/usr/bin/sudo\"]\n").expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        let w = ep.deny_warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w
+            .first()
+            .is_some_and(|s| s.contains("execution is permissive")));
+    }
+
+    #[test]
     fn env_set_is_synthesised_ignoring_pass_and_deny() {
         let src = parse(
             b"name = \"k\"\n[env]\npass = [\"FOO\"]\ndeny = [\"BAR\"]\nset = { LANG = \"C.UTF-8\", TZ = \"UTC\" }\n",
@@ -988,12 +1225,21 @@ mod tests {
 
     #[test]
     fn fs_home_persist_carries_to_settled() {
-        let src = parse(
-            b"name = \"k\"\n[fs.home]\nshadow = true\nshim_root = \"/run/kennel/k\"\npersist = [\".bashrc\"]\n",
-        )
-        .expect("parse");
+        let src = parse(b"name = \"k\"\n[fs.home]\nshadow = true\npersist = [\".bashrc\"]\n")
+            .expect("parse");
         let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate_fs");
         assert_eq!(fs.home_persist, vec![".bashrc".to_owned()]);
+    }
+
+    #[test]
+    fn fs_home_readonly_defaults_false_and_carries_when_set() {
+        let dflt = parse(b"name = \"k\"\n[fs.home]\nshadow = true\n").expect("parse");
+        let fs = translate_fs(&dflt, &mut BTreeSet::new()).expect("translate_fs");
+        assert!(!fs.home_readonly, "home is writable by default");
+        let ro =
+            parse(b"name = \"k\"\n[fs.home]\nshadow = true\nreadonly = true\n").expect("parse");
+        let fs = translate_fs(&ro, &mut BTreeSet::new()).expect("translate_fs");
+        assert!(fs.home_readonly, "readonly carries to the settled policy");
     }
 
     #[test]
@@ -1038,6 +1284,7 @@ mod tests {
         let src = SourcePolicy {
             identity: Some(IdentitySection {
                 groups: vec!["plugdev".to_owned(), "dialout".to_owned()],
+                ..IdentitySection::default()
             }),
             fs: Some(FsSection {
                 dev: Some(FsDev {
@@ -1067,14 +1314,68 @@ mod tests {
             }),
             ..SourcePolicy::default()
         };
-        let id = translate_identity(&src);
+        let id = translate_identity(&src).expect("translate identity");
         assert_eq!(
             id.groups,
             vec!["plugdev", "dialout", "netdev"],
             "explicit first, device groups added, de-duped"
         );
         // No [identity] and no device groups ⇒ empty (dropped from the canonical form).
-        assert!(translate_identity(&SourcePolicy::default()).is_empty());
+        assert!(translate_identity(&SourcePolicy::default())
+            .expect("translate identity")
+            .is_empty());
+    }
+
+    #[test]
+    fn identity_user_and_group_default_to_kennel_and_can_be_overridden() {
+        use crate::source::IdentitySection;
+        // Default: both `kennel`, so the runtime is empty (omitted from canonical form).
+        let dflt = translate_identity(&SourcePolicy::default()).expect("default");
+        assert_eq!(dflt.user, "kennel");
+        assert_eq!(dflt.group, "kennel");
+        assert!(dflt.is_empty());
+
+        // Overridden: carried through, and no longer empty.
+        let src = SourcePolicy {
+            identity: Some(IdentitySection {
+                user: Some("dev".to_owned()),
+                group: Some("staff".to_owned()),
+                groups: Vec::new(),
+            }),
+            ..SourcePolicy::default()
+        };
+        let id = translate_identity(&src).expect("override");
+        assert_eq!(id.user, "dev");
+        assert_eq!(id.group, "staff");
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_identity_name_is_refused() {
+        use crate::source::IdentitySection;
+        for (field, bad) in [
+            ("user", "../escape"),
+            ("user", "has space"),
+            ("user", "Root"),     // uppercase
+            ("user", "1leading"), // leading digit
+            ("user", ""),
+            ("group", "a:b"),
+        ] {
+            let mut sec = IdentitySection::default();
+            if field == "user" {
+                sec.user = Some(bad.to_owned());
+            } else {
+                sec.group = Some(bad.to_owned());
+            }
+            let src = SourcePolicy {
+                identity: Some(sec),
+                ..SourcePolicy::default()
+            };
+            assert!(
+                translate_identity(&src).is_err(),
+                "identity.{field} `{bad}` must be refused"
+            );
+        }
     }
 
     #[test]
@@ -1088,10 +1389,7 @@ mod tests {
                 ..NetSection::default()
             }),
             fs: Some(FsSection {
-                home: Some(FsHome {
-                    shim_root: Some("/run/kennel/<kennel>/home".to_owned()),
-                    ..FsHome::default()
-                }),
+                home: Some(FsHome::default()),
                 dev: Some(FsDev {
                     allow: Some(vec!["/dev/null".to_owned()]),
                     passthrough: vec![DevPassthrough {
@@ -1171,7 +1469,6 @@ mod tests {
             .any(|r| r.cidr == "fd00:ec2::254" && r.prefix_len == 128));
 
         assert!(ep.fs.home_shadow);
-        assert_eq!(ep.fs.shim_root, "/run/kennel/<kennel>/home");
         assert_eq!(ep.fs.tmp.size_mib, 512);
         assert_eq!(ep.fs.tmp.mode, "0700");
         assert!(ep.fs.dev.allow.iter().any(|d| d == "/dev/null"));
@@ -1215,6 +1512,7 @@ mod tests {
             identity: t.identity,
             audit: t.audit,
             env: t.env,
+            ulimits: t.ulimits,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }
@@ -1233,9 +1531,63 @@ mod tests {
             .deny_invariant
             .iter()
             .any(|r| r.cidr == "10.0.0.0" && r.prefix_len == 8));
-        // 2h TTL, stop.
+        // 2h TTL, "stop" (the backward-compat alias for exit).
         assert_eq!(t.effective_policy.lifecycle.ttl_seconds, Some(7_200));
-        assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Stop);
+        assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Exit);
+    }
+
+    #[test]
+    fn net_bind_min_port_carries_into_the_settled_policy() {
+        // `[net.bind].min_port` → `NetPolicy.bind_port_min` (the BPF bind floor, §7.3.7);
+        // absent ⇒ 0 (no floor).
+        let with =
+            parse(b"name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nmin_port = 8080\n")
+                .expect("parse");
+        assert_eq!(
+            translate_net(&with, &mut BTreeSet::new())
+                .expect("translate")
+                .bind_port_min,
+            8080
+        );
+        let without = parse(b"name = \"k\"\n[net]\nmode = \"constrained\"\n").expect("parse");
+        assert_eq!(
+            translate_net(&without, &mut BTreeSet::new())
+                .expect("translate")
+                .bind_port_min,
+            0
+        );
+        // The shipped base-confined template sets the conventional 1024 floor.
+        assert_eq!(
+            translate_template(BASE_CONFINED)
+                .effective_policy
+                .net
+                .bind_port_min,
+            1024
+        );
+    }
+
+    #[test]
+    fn net_bind_allowed_ports_carries_and_is_capped() {
+        let p = parse(
+            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nallowed_ports = [8080, 9090]\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            translate_net(&p, &mut BTreeSet::new())
+                .expect("translate")
+                .bind_allowed_ports,
+            vec![8080, 9090]
+        );
+        // More than MAX_BIND_PORTS entries is a hard translation error.
+        let many = (1..=9)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src = format!(
+            "name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nallowed_ports = [{many}]\n"
+        );
+        let over = parse(src.as_bytes()).expect("parse");
+        assert!(translate_net(&over, &mut BTreeSet::new()).is_err());
     }
 
     #[test]

@@ -66,14 +66,20 @@ pub enum SeccompAction {
     KillProcess,
 }
 
-/// What to do when a kennel's TTL expires.
+/// What to do when a kennel's TTL expires (`docs/design/09-policy-lifecycle.md` §9.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TtlAction {
-    /// Send SIGTERM, then SIGKILL after a grace period.
-    Stop,
+    /// Terminate the kennel cleanly: SIGTERM the workload, then SIGKILL after a grace
+    /// period. The default for a policy that sets a `ttl` without an action.
+    Exit,
     /// Leave the workload running; emit an audit event only.
     Warn,
+    /// Request renewal: emit a renewal-requested audit event and leave the workload
+    /// running. The interactive user-session prompt (notification/terminal) is the
+    /// remaining piece — kenneld is a daemon with no session channel — so today this
+    /// behaves as a distinct, louder `warn`. See `08-as-built-notes.md §8.1`.
+    Renew,
 }
 
 /// One network allow/deny rule: a CIDR plus a port range and protocol.
@@ -147,6 +153,23 @@ impl Default for ProxyListen {
 pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
+    /// Lowest port the workload may `bind()` (`[net.bind].min_port`, §7.3.7). A bind
+    /// below this is denied by the cgroup `bind4`/`bind6` BPF — the privileged-port
+    /// protection (T6, §7.3.9 item 17). `0` means no minimum is enforced. Carried into
+    /// the `kennel_meta` BPF map (the repurposed `_pad0` slot); omitted from the
+    /// canonical form when `0`, so a policy without it signs unchanged. Declared before
+    /// the table fields so the canonical TOML emits this scalar before them.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub bind_port_min: u16,
+    /// Explicit bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7).
+    ///
+    /// When non-empty, the workload may `bind()` only these ports (and still no lower
+    /// than [`bind_port_min`](Self::bind_port_min)); empty means any port at or above
+    /// the floor. Capped at [`MAX_BIND_PORTS`] by translation (the `bind_subnet` BPF map
+    /// carries a fixed-size array). Carried into the `bind_subnet` map; omitted from the
+    /// canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bind_allowed_ports: Vec<u16>,
     /// Where the egress proxy listens (offset + port within the kennel's subnet).
     #[serde(default)]
     pub proxy: ProxyListen,
@@ -164,6 +187,19 @@ pub struct NetPolicy {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_invariant: Vec<NetRule>,
 }
+
+/// `skip_serializing_if` helper: a `u16` that is `0`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
+}
+
+/// The maximum number of `[net.bind].allowed_ports` entries (§7.3.7).
+///
+/// The `bind_subnet` BPF map carries a fixed-size array of this width, so a policy
+/// listing more is a translation error (the author learns the limit rather than having
+/// ports silently dropped).
+pub const MAX_BIND_PORTS: usize = 8;
 
 /// Private-`/tmp` tmpfs parameters (§7.2.6).
 ///
@@ -201,8 +237,6 @@ pub struct DevPolicy {
 pub struct FsPolicy {
     /// Whether `$HOME` is shadowed by the shim (must be true).
     pub home_shadow: bool,
-    /// The shim root, which must live under `/run/kennel/`.
-    pub shim_root: String,
     /// Paths granted read (and directory-read/execute) access.
     pub read: Vec<String>,
     /// Paths granted write access.
@@ -212,6 +246,13 @@ pub struct FsPolicy {
     /// here, which the dotfile seeder skips. Empty ⇒ everything is reconstructed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub home_persist: Vec<String>,
+    /// Whether the constructed `$HOME` is read-only (`[fs.home].readonly`). False (the
+    /// default) gives the home root a Landlock write grant — the workload owns its
+    /// ephemeral home; true suppresses it, so only `write`-granted `~/` paths are
+    /// writable. Omitted from the canonical form when false, so a policy without it
+    /// signs unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub home_readonly: bool,
     /// Private-`/tmp` tmpfs parameters. Declared after the scalar/array fields
     /// so the canonical TOML emits this sub-table last (valid table ordering).
     pub tmp: TmpPolicy,
@@ -234,8 +275,19 @@ pub struct ExecPolicy {
     /// Refuse to exec writable files.
     pub deny_writable: bool,
     /// Allowlisted binaries (absolute paths). Empty means "no exec allowlist
-    /// enforced beyond the deny flags".
+    /// enforced beyond the deny flags". Exact-match entries named in
+    /// [`deny`](Self::deny) are already subtracted here at translation.
     pub allow: Vec<String>,
+    /// Denylisted absolute paths or globs (§7.1.4), composed up the template chain
+    /// and carried for audit and runtime warning. Landlock is allow-only and cannot
+    /// subtract a single path from a granted directory, so a deny is *enforced* only
+    /// where it removes an exact `allow` entry (done at translation) or where the
+    /// path is simply never granted; a deny that falls inside an allowed directory
+    /// (or that is set without any `allow`) is *advisory* and warned about at compile
+    /// and spawn. See [`Self::deny_warnings`]. Omitted from the canonical form when
+    /// empty, so an existing policy with no `exec.deny` signs unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
     /// `PATH` search roots, synthesised into the workload's `$PATH` (§7.1.6).
     /// Empty ⇒ `$PATH` is not set from policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -245,6 +297,58 @@ pub struct ExecPolicy {
     /// allowlist is enforced.
     #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
     pub shell: String,
+}
+
+impl ExecPolicy {
+    /// Warnings for [`deny`](Self::deny) entries that cannot be enforced by Landlock.
+    ///
+    /// Landlock grants execution; it cannot *subtract* a path from a granted
+    /// directory. Translation already removes any deny that exactly matches an
+    /// `allow` entry (that deny is enforced — the binary is simply never granted
+    /// `EXECUTE`). What remains warnable:
+    ///
+    /// - a deny that falls **inside an allowed directory/glob** (e.g. `allow =
+    ///   ["/usr/bin/**"]`, `deny = ["/usr/bin/sudo"]`): the directory grant
+    ///   re-exposes it, so the deny is advisory only; and
+    /// - **any** deny when there is **no `allow`** at all: exec is permissive, so
+    ///   Landlock is not restricting execution and the deny enforces nothing.
+    ///
+    /// A deny that is neither (a path simply never granted) is enforced by omission
+    /// and yields no warning. Returns one message per warnable deny.
+    #[must_use]
+    pub fn deny_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in &self.deny {
+            if self.allow.is_empty() {
+                out.push(format!(
+                    "exec.deny `{d}` is advisory: with no exec.allow, execution is permissive and \
+                     Landlock cannot subtract a single path — the deny enforces nothing (use exec.allow \
+                     to switch on the allowlist)"
+                ));
+            } else if let Some(dir) = self.allow.iter().find(|a| glob_covers(a, d)) {
+                out.push(format!(
+                    "exec.deny `{d}` falls inside allowed directory `{dir}`: Landlock cannot subtract a \
+                     single path from a granted directory, so this deny is advisory only"
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Whether glob/dir `allow` entry covers path `deny` (a `…/*` or `…/**` whose root is
+/// a prefix of `deny`). An exact non-glob `allow` does not "cover" — that case is
+/// handled by exact-match subtraction at translation.
+fn glob_covers(allow: &str, deny: &str) -> bool {
+    let root = allow
+        .strip_suffix("/**")
+        .or_else(|| allow.strip_suffix("/*"))
+        .or_else(|| allow.strip_suffix("**"))
+        .or_else(|| allow.strip_suffix('*'));
+    root.is_some_and(|root| {
+        let root = root.trim_end_matches('/');
+        !root.is_empty() && (deny == root || deny.starts_with(&format!("{root}/")))
+    })
 }
 
 /// The default kennel login shell.
@@ -429,20 +533,65 @@ pub struct UnixSocket {
 /// `setgroups` to exactly that set (default empty — all inherited host groups dropped),
 /// and the synthetic `/etc/group` names them so `id` shows names not bare numbers.
 /// Carried in the signed settled policy; omitted from the canonical form when empty.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityRuntime {
+    /// The workload's masked user name — `$USER`/`$LOGNAME`, the synthetic
+    /// `/etc/passwd` account, and the base of `$HOME` (`/home/<user>`). Defaults to
+    /// [`DEFAULT_USER`] (`kennel`); omitted from the canonical form when it is the
+    /// default, so a policy that does not override it signs unchanged.
+    #[serde(default = "default_user", skip_serializing_if = "is_default_user")]
+    pub user: String,
+    /// The workload's masked **primary** group name — the synthetic `/etc/passwd`
+    /// `pw_gid`'s name and the `/etc/group` entry for the workload's primary gid.
+    /// Defaults to [`DEFAULT_GROUP`] (`kennel`); omitted from the canonical form when
+    /// it is the default. (Distinct from [`groups`](Self::groups), the *supplementary*
+    /// groups.)
+    #[serde(default = "default_group", skip_serializing_if = "is_default_group")]
+    pub group: String,
     /// Supplementary group names to retain (resolved to GIDs at spawn). Includes the
     /// groups named by `[[fs.dev.passthrough]]` (merged at translation).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
 }
 
+/// The default masked user name: a non-system, non-privileged account.
+pub const DEFAULT_USER: &str = "kennel";
+/// The default masked primary-group name.
+pub const DEFAULT_GROUP: &str = "kennel";
+
+fn default_user() -> String {
+    DEFAULT_USER.to_owned()
+}
+
+fn is_default_user(user: &str) -> bool {
+    user == DEFAULT_USER
+}
+
+fn default_group() -> String {
+    DEFAULT_GROUP.to_owned()
+}
+
+fn is_default_group(group: &str) -> bool {
+    group == DEFAULT_GROUP
+}
+
+impl Default for IdentityRuntime {
+    fn default() -> Self {
+        Self {
+            user: default_user(),
+            group: default_group(),
+            groups: Vec::new(),
+        }
+    }
+}
+
 impl IdentityRuntime {
-    /// Whether there is nothing to realise (no supplementary group granted).
+    /// Whether there is nothing to realise (the default user and group, no
+    /// supplementary group).
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.groups.is_empty()
+    pub fn is_empty(&self) -> bool {
+        is_default_user(&self.user) && is_default_group(&self.group) && self.groups.is_empty()
     }
 }
 
@@ -665,6 +814,54 @@ impl EnvRuntime {
     }
 }
 
+/// The `setrlimit(2)` resources a policy may name in `[ulimits]`, as their short
+/// policy names.
+///
+/// The spawn layer maps each to its `RLIMIT_*` constant; the translator validates
+/// against this list so a typo is a compile error. Kept here (the pure crate) so
+/// policy and spawn share one source of truth — a spawn-side test asserts every name
+/// maps to a resource.
+pub const ULIMIT_RESOURCES: &[&str] = &[
+    "as",
+    "core",
+    "cpu",
+    "data",
+    "fsize",
+    "locks",
+    "memlock",
+    "msgqueue",
+    "nice",
+    "nofile",
+    "nproc",
+    "rtprio",
+    "rttime",
+    "sigpending",
+    "stack",
+];
+
+/// The per-kennel resource limits (`[ulimits]`, §7.2).
+///
+/// A *service* input applied via `setrlimit(2)` in the seal, not a kernel-enforcement
+/// object. Each value is the normalised `soft` (when `soft == hard`) or `"soft hard"`
+/// form, every token either a decimal string or the literal `unlimited`. Omitted from
+/// the canonical form when empty, so a policy with no `[ulimits]` signs as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UlimitsRuntime {
+    /// Resource name → normalised limit. Sorted (`BTreeMap`) for a deterministic
+    /// canonical form.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub limits: BTreeMap<String, String>,
+}
+
+impl UlimitsRuntime {
+    /// Whether no limits are set (omitted from the canonical form).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.limits.is_empty()
+    }
+}
+
 /// The settled policy body (everything the signature covers).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -707,6 +904,11 @@ pub struct SettledPolicy {
     /// signs exactly as before.
     #[serde(default, skip_serializing_if = "EnvRuntime::is_empty")]
     pub env: EnvRuntime,
+    /// The per-kennel resource limits (§7.2). A table like [`env`](Self::env) and
+    /// declared after it; omitted from the canonical form when empty, so a policy with
+    /// no `[ulimits]` signs exactly as before.
+    #[serde(default, skip_serializing_if = "UlimitsRuntime::is_empty")]
+    pub ulimits: UlimitsRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

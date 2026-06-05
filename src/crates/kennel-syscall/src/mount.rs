@@ -140,6 +140,43 @@ pub fn mount_tmpfs(
     .map_err(map_err)
 }
 
+/// `f_type` of a `bpf` filesystem (`BPF_FS_MAGIC`, `<linux/magic.h>`), as the
+/// `statfs` `FsType` newtype (its inner integer type varies by platform, so we
+/// let the literal infer into it rather than casting).
+const BPF_FS_MAGIC: nix::sys::statfs::FsType = nix::sys::statfs::FsType(0xcafe_4a11);
+
+/// Mount a fresh `bpf` filesystem (bpffs) at `target` with `nosuid,nodev`.
+///
+/// bpffs is where BPF maps/programs are *pinned* (`BPF_OBJ_PIN`) so they outlive
+/// the loading process and can be reopened (`BPF_OBJ_GET`) by another process
+/// subject to the pin's file permissions. The mount root's mode is set separately
+/// (chmod after mount) rather than via a `mode=` option.
+///
+/// # Errors
+///
+/// Returns the OS error if the mount fails (e.g. without `CAP_SYS_ADMIN`).
+pub fn mount_bpffs(target: &Path) -> io::Result<()> {
+    nix::mount::mount(
+        Some("bpf"),
+        target,
+        Some("bpf"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        None::<&Path>,
+    )
+    .map_err(map_err)
+}
+
+/// Whether `path` is the root of (or sits on) a mounted bpffs — i.e. `statfs`
+/// reports `BPF_FS_MAGIC`. Used to mount the kennel bpffs idempotently.
+///
+/// # Errors
+///
+/// Returns the OS error if `path` cannot be `statfs`'d (e.g. it does not exist).
+pub fn is_bpffs(path: &Path) -> io::Result<bool> {
+    let st = nix::sys::statfs::statfs(path).map_err(map_err)?;
+    Ok(st.filesystem_type() == BPF_FS_MAGIC)
+}
+
 /// Mount a fresh `proc` at `target` (`nosuid,nodev`), with `hidepid=2` when
 /// `hidepid` so `/proc/<pid>` is owner-only even within the PID namespace
 /// (§7.2.7, belt-and-braces atop the namespace).

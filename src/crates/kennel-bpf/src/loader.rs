@@ -93,7 +93,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_subnet_map",
         map_type: MAP_TYPE_ARRAY,
         key_size: 4,
-        value_size: 28,
+        value_size: 44,
         max_entries: 1,
         map_flags: 0,
     },
@@ -285,22 +285,22 @@ fn patch_map_fd(insns: &mut [u8], off: usize, fd: i32) -> io::Result<()> {
     Ok(())
 }
 
-/// Load `prog` from the compiled BPF object `elf`, creating (and relocating) the
-/// maps it references from `map_specs`.
-///
-/// # Errors
-///
-/// Returns an error if the ELF is malformed, a referenced map is unknown, a map
-/// cannot be created, or the program fails to load/verify (the kernel's verifier
-/// log is included in the error message).
-pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io::Result<Loaded> {
-    let file = object::File::parse(elf).map_err(other)?;
-    let section = file
-        .section_by_name(prog.section)
-        .ok_or_else(|| other(format!("no section {}", prog.section)))?;
-    let mut insns = section.data().map_err(other)?.to_vec();
+/// A program section's instruction bytes plus its map relocations as
+/// `(instruction offset, map symbol name)` pairs.
+type SectionRelocations = (Vec<u8>, Vec<(usize, String)>);
 
-    let mut maps: BTreeMap<String, OwnedFd> = BTreeMap::new();
+/// Parse `prog.section` from `elf` and gather its map relocations: the
+/// instruction bytes plus a `(instruction offset, map name)` list. The names are
+/// resolved to fds separately (created fresh, or against a shared set).
+fn section_relocations(
+    file: &object::File<'_>,
+    section_name: &str,
+) -> io::Result<SectionRelocations> {
+    let section = file
+        .section_by_name(section_name)
+        .ok_or_else(|| other(format!("no section {section_name}")))?;
+    let insns = section.data().map_err(other)?.to_vec();
+    let mut relocs = Vec::new();
     for (off, reloc) in section.relocations() {
         let RelocationTarget::Symbol(symidx) = reloc.target() else {
             continue;
@@ -310,6 +310,95 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
         if name.is_empty() {
             continue;
         }
+        let off = usize::try_from(off).map_err(|_| other("reloc offset too large"))?;
+        relocs.push((off, name.to_owned()));
+    }
+    Ok((insns, relocs))
+}
+
+/// `BPF_PROG_LOAD` `insns` as `prog`, surfacing the verifier log on failure.
+fn finish_load(prog: &ProgramSpec, insns: &[u8]) -> io::Result<OwnedFd> {
+    let mut log = vec![0u8; 64 * 1024];
+    sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut log).map_err(|e| {
+        let end = log.iter().position(|&b| b == 0).unwrap_or(0);
+        let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
+        other(format!("prog_load failed: {e}\nverifier log:\n{text}"))
+    })
+}
+
+/// Create every map in `map_specs`, returning them keyed by symbol name.
+///
+/// This is the shared-map model.
+///
+/// Create the kennel's map set once, then load
+/// each program against it with [`load_program_against`] so all programs of a
+/// kennel reference the *same* maps (one `audit_ringbuf` to drain, one coherent
+/// set to pin). Contrast [`load_program`], which mints a fresh per-program set.
+///
+/// # Errors
+///
+/// Returns the OS error if any map cannot be created (e.g. missing `CAP_BPF`).
+pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd>> {
+    let mut maps = BTreeMap::new();
+    for spec in map_specs {
+        let fd = sys::map_create(
+            spec.map_type,
+            spec.key_size,
+            spec.value_size,
+            spec.max_entries,
+            spec.map_flags,
+        )?;
+        maps.insert(spec.name.to_owned(), fd);
+    }
+    Ok(maps)
+}
+
+/// Load `prog` from `elf` against the pre-created shared `maps`.
+///
+/// Patches the program's map relocations against the shared `maps` (from
+/// [`create_maps`]). Returns just the program fd; the caller owns the shared maps
+/// (to populate, pin, and keep alive).
+///
+/// # Errors
+///
+/// Returns an error if the ELF is malformed, the program references a map absent
+/// from `maps`, or the program fails to load/verify (verifier log included).
+pub fn load_program_against(
+    elf: &[u8],
+    prog: &ProgramSpec,
+    maps: &BTreeMap<String, OwnedFd>,
+) -> io::Result<OwnedFd> {
+    let file = object::File::parse(elf).map_err(other)?;
+    let (mut insns, relocs) = section_relocations(&file, prog.section)?;
+    for (off, name) in &relocs {
+        let fd = maps.get(name).ok_or_else(|| {
+            other(format!(
+                "program references map `{name}` not in the shared set"
+            ))
+        })?;
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&fd.as_fd());
+        patch_map_fd(&mut insns, *off, raw)?;
+    }
+    finish_load(prog, &insns)
+}
+
+/// Load `prog` from the compiled BPF object `elf`, minting its own maps.
+///
+/// Creates (and relocates) the maps `prog` references from `map_specs`. Each call
+/// mints its *own* maps — for the shared-map model (one map set across a kennel's
+/// programs) use [`create_maps`] plus [`load_program_against`].
+///
+/// # Errors
+///
+/// Returns an error if the ELF is malformed, a referenced map is unknown, a map
+/// cannot be created, or the program fails to load/verify (the kernel's verifier
+/// log is included in the error message).
+pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io::Result<Loaded> {
+    let file = object::File::parse(elf).map_err(other)?;
+    let (mut insns, relocs) = section_relocations(&file, prog.section)?;
+
+    let mut maps: BTreeMap<String, OwnedFd> = BTreeMap::new();
+    for (off, name) in &relocs {
         // Create the map once, then patch this instruction with its fd.
         if !maps.contains_key(name) {
             let spec = map_specs
@@ -323,21 +412,14 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
                 spec.max_entries,
                 spec.map_flags,
             )?;
-            maps.insert(name.to_owned(), fd);
+            maps.insert(name.clone(), fd);
         }
         let fd = maps.get(name).ok_or_else(|| other("map vanished"))?.as_fd();
         let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
-        let off = usize::try_from(off).map_err(|_| other("reloc offset too large"))?;
-        patch_map_fd(&mut insns, off, raw)?;
+        patch_map_fd(&mut insns, *off, raw)?;
     }
 
-    let mut log = vec![0u8; 64 * 1024];
-    let program = sys::prog_load(prog.prog_type, prog.attach_type, &insns, c"GPL", &mut log)
-        .map_err(|e| {
-            let end = log.iter().position(|&b| b == 0).unwrap_or(0);
-            let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
-            other(format!("prog_load failed: {e}\nverifier log:\n{text}"))
-        })?;
+    let program = finish_load(prog, &insns)?;
     Ok(Loaded { program, maps })
 }
 
@@ -598,6 +680,68 @@ mod root_tests {
         );
     }
 
+    /// The shared-map model: `create_maps` once, then load several programs
+    /// against that one set with `load_program_against`. All programs reference
+    /// the *same* `audit_ringbuf`, so a single reader over the shared map drains
+    /// the event a denied connect (via the shared-maps connect4) emits.
+    #[test]
+    fn shared_maps_drain_one_ringbuf_across_programs() {
+        if skip_if_unprivileged("shared_maps_drain_one_ringbuf_across_programs") {
+            return;
+        }
+        let maps = create_maps(KENNEL_MAPS).expect("create shared maps");
+
+        // Load connect4 and bind4 against the one shared map set.
+        let connect4 = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "connect4")
+            .expect("connect4 spec");
+        let bind4 = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "bind4")
+            .expect("bind4 spec");
+        let c4 = load_program_against(&compile_uapi("connect4"), connect4, &maps)
+            .expect("load connect4 against shared maps");
+        let _b4 = load_program_against(&compile_uapi("bind4"), bind4, &maps)
+            .expect("load bind4 against shared maps");
+
+        // Read the shared ringbuf directly from the shared map set.
+        let rb_fd = maps.get("audit_ringbuf").expect("shared audit_ringbuf");
+        let size = usize::try_from(
+            KENNEL_MAPS
+                .iter()
+                .find(|m| m.name == "audit_ringbuf")
+                .expect("ringbuf spec")
+                .max_entries,
+        )
+        .expect("ringbuf size");
+        let mut rb =
+            crate::ringbuf::RingBuffer::new(rb_fd.as_fd(), size).expect("map shared ringbuf");
+
+        // Attach the shared-maps connect4 and trigger a denied connect.
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-shared");
+        let _ = std::fs::create_dir(cg);
+        let cgfd = std::fs::File::open(cg).expect("open cgroup");
+        sys::prog_attach_cgroup(cgfd.as_fd(), c4.as_fd(), connect4.attach_type)
+            .expect("attach shared connect4");
+        let denied = connect_denied_in_cgroup(cg);
+
+        let mut samples: Vec<Vec<u8>> = Vec::new();
+        let _ = rb.poll(1000);
+        rb.consume(|s| samples.push(s.to_vec()))
+            .expect("consume shared ringbuf");
+        let _ = std::fs::remove_dir(cg);
+
+        assert!(
+            denied,
+            "precondition: connect should be denied (fail closed)"
+        );
+        assert!(
+            !samples.is_empty(),
+            "the shared ringbuf should carry the denied-connect audit event"
+        );
+    }
+
     #[test]
     fn detach_restores_connectivity() {
         if skip_if_unprivileged("detach_restores_connectivity") {
@@ -673,5 +817,190 @@ mod root_tests {
             libc::close(s);
             rc < 0 && matches!(err, Some(libc::EPERM | libc::EACCES))
         }
+    }
+
+    fn load_bind4() -> Loaded {
+        let elf = compile_uapi("bind4");
+        let spec = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "bind4")
+            .expect("bind4 spec");
+        load_program(&elf, spec, KENNEL_MAPS).expect("load bind4")
+    }
+
+    /// A 64-byte `kennel_meta` value with the magic/abi head and `bind_port_min`
+    /// (offset 14, host order) set; everything else zero. Native byte order, as the
+    /// producer (`kennel-spawn::plan`) writes it.
+    fn meta_with_bind_floor(min_port: u16) -> [u8; 64] {
+        const MAGIC: u32 = 0x4B4E_454C;
+        const ABI: u16 = 1;
+        let mut m = [0u8; 64];
+        m[0..4].copy_from_slice(&MAGIC.to_ne_bytes());
+        m[4..6].copy_from_slice(&ABI.to_ne_bytes());
+        m[14..16].copy_from_slice(&min_port.to_ne_bytes());
+        m
+    }
+
+    /// A 44-byte `bind_subnet` value: v4 `127.0.0.1//24`, v6 zero `/64`, plus the bind
+    /// `allowed` ports (host order). `INADDR_ANY` rewrites to the loopback, so an
+    /// allowed wildcard bind lands there. Empty `allowed` ⇒ `n_ports = 0` (any port).
+    fn bind_subnet_loopback(allowed: &[u16]) -> [u8; 44] {
+        let mut v = [0u8; 44];
+        v[0..4].copy_from_slice(&[127, 0, 0, 1]);
+        v[4..8].copy_from_slice(&24u32.to_ne_bytes());
+        v[24] = 64;
+        v[25] = u8::try_from(allowed.len().min(8)).unwrap_or(0);
+        // allowed_ports[8] starts at offset 26; write via chunks to avoid index math.
+        let ports = v.get_mut(26..).expect("ports region");
+        for (slot, port) in ports.chunks_mut(2).zip(allowed.iter().take(8)) {
+            slot.copy_from_slice(&port.to_ne_bytes());
+        }
+        v
+    }
+
+    /// In a child joined to `cg`, `bind()` a fresh TCP socket to `0.0.0.0:port` (which
+    /// `bind4` rewrites to the kennel loopback when it allows). Returns true if the
+    /// bind was refused by the cgroup BPF verdict (`EPERM`/`EACCES`).
+    fn wildcard_bind_denied_in_cgroup(cg: &Path, port: u16) -> bool {
+        // SAFETY: fork(); the child only joins the cgroup, binds once, and _exit()s.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            let pid = std::process::id().to_string();
+            let _ = std::fs::write(cg.join("cgroup.procs"), &pid);
+            // SAFETY: a standard socket()/bind() with a stack sockaddr_in valid for the
+            // length passed; errno is read immediately after.
+            let denied = unsafe {
+                let s = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+                let mut addr: libc::sockaddr_in = std::mem::zeroed();
+                addr.sin_family = u16::try_from(libc::AF_INET).unwrap_or(2);
+                addr.sin_port = port.to_be();
+                addr.sin_addr.s_addr = 0; // INADDR_ANY
+                let len = u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16);
+                let rc = libc::bind(s, std::ptr::from_ref(&addr).cast::<libc::sockaddr>(), len);
+                let err = io::Error::last_os_error().raw_os_error();
+                libc::close(s);
+                rc < 0 && matches!(err, Some(libc::EPERM | libc::EACCES))
+            };
+            // SAFETY: _exit without unwinding/atexit after fork.
+            unsafe { libc::_exit(i32::from(denied)) };
+        }
+        let mut status = 0;
+        // SAFETY: waitpid on our child with a valid status pointer.
+        unsafe { libc::waitpid(child, std::ptr::from_mut(&mut status), 0) };
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1
+    }
+
+    fn with_attached_bind4(cg: &Path, loaded: &Loaded, body: impl FnOnce()) {
+        let _ = std::fs::create_dir(cg);
+        let cgfd = std::fs::File::open(cg).expect("open cgroup");
+        let spec = KENNEL_PROGRAMS
+            .iter()
+            .find(|p| p.name == "bind4")
+            .expect("bind4 spec");
+        loaded
+            .attach(cgfd.as_fd(), spec.attach_type)
+            .expect("attach bind4");
+        body();
+        let _ = std::fs::remove_dir(cg);
+    }
+
+    #[test]
+    fn bind4_enforces_the_min_port_floor() {
+        if skip_if_unprivileged("bind4_enforces_the_min_port_floor") {
+            return;
+        }
+        let loaded = load_bind4();
+        loaded
+            .update_map(
+                "bind_subnet_map",
+                &0u32.to_ne_bytes(),
+                &bind_subnet_loopback(&[]),
+                sys::BPF_ANY,
+            )
+            .expect("populate bind_subnet");
+
+        // Floor at 1024: a wildcard bind below it is denied; one at/above it is allowed
+        // (rewritten to the loopback). The denied/allowed pair is the adversarial proof
+        // (§8.3): the deny path actually denies on the running kernel.
+        loaded
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &meta_with_bind_floor(1024),
+                sys::BPF_ANY,
+            )
+            .expect("populate meta (floor 1024)");
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-bindfloor");
+        let (mut low_denied, mut high_denied) = (false, true);
+        with_attached_bind4(cg, &loaded, || {
+            low_denied = wildcard_bind_denied_in_cgroup(cg, 80);
+            high_denied = wildcard_bind_denied_in_cgroup(cg, 8080);
+        });
+        assert!(
+            low_denied,
+            "a bind to :80 below the 1024 floor must be denied"
+        );
+        assert!(
+            !high_denied,
+            "a bind to :8080 at/above the floor must be allowed"
+        );
+
+        // No floor (0): even :80 is allowed — the floor is opt-in.
+        loaded
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &meta_with_bind_floor(0),
+                sys::BPF_ANY,
+            )
+            .expect("populate meta (no floor)");
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-nofloor");
+        let mut denied = true;
+        with_attached_bind4(cg, &loaded, || {
+            denied = wildcard_bind_denied_in_cgroup(cg, 80);
+        });
+        assert!(!denied, "with no floor a bind to :80 must be allowed");
+    }
+
+    #[test]
+    fn bind4_enforces_the_allowed_ports_allowlist() {
+        if skip_if_unprivileged("bind4_enforces_the_allowed_ports_allowlist") {
+            return;
+        }
+        let loaded = load_bind4();
+        // No floor, but an explicit allowlist of {8080}. A no-floor meta keeps the
+        // floor check out of the way so this isolates the allowlist.
+        loaded
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &meta_with_bind_floor(0),
+                sys::BPF_ANY,
+            )
+            .expect("populate meta");
+        loaded
+            .update_map(
+                "bind_subnet_map",
+                &0u32.to_ne_bytes(),
+                &bind_subnet_loopback(&[8080]),
+                sys::BPF_ANY,
+            )
+            .expect("populate bind_subnet with allowlist");
+
+        let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-bindallow");
+        let (mut allowed_denied, mut other_denied) = (true, false);
+        with_attached_bind4(cg, &loaded, || {
+            allowed_denied = wildcard_bind_denied_in_cgroup(cg, 8080);
+            other_denied = wildcard_bind_denied_in_cgroup(cg, 9090);
+        });
+        assert!(
+            !allowed_denied,
+            "a bind to the allowlisted :8080 must be allowed"
+        );
+        assert!(
+            other_denied,
+            "a bind to :9090 (not in the allowlist) must be denied"
+        );
     }
 }

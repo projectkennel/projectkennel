@@ -13,11 +13,16 @@
 //!
 //! # `unsafe`
 //!
-//! The `unsafe` is confined to the four raw syscall wrappers (this module is the
-//! reason the crate carries `#![allow(unsafe_code)]`); each carries the §4
-//! `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment. Opening rule
-//! paths goes through `std` (`O_PATH`), and `no_new_privs` through nix — both
-//! safe. Landlock is unprivileged: `restrict_self` needs no capabilities.
+//! Each of the three Landlock syscalls has one raw FFI site, mirroring
+//! `kennel-bpf`'s `bpf()`: `sys_create_ruleset` and `sys_add_rule` take typed
+//! references (so they are sound to call from safe code, leaving `abi_version` /
+//! `create_ruleset` / `add_path_rule` / `add_net_rule` `unsafe`-free), and
+//! `restrict_self` holds the third. With the `OwnedFd` adoption in
+//! `create_ruleset` that is four `unsafe` blocks, each carrying the §4 `SAFETY:` /
+//! `INVARIANTS UPHELD:` / `FAILURE MODE:` comment (this module is the reason the
+//! crate carries `#![allow(unsafe_code)]`). Opening rule paths goes through `std`
+//! (`O_PATH`), and `no_new_privs` through nix — both safe. Landlock is
+//! unprivileged: `restrict_self` needs no capabilities.
 //!
 //! # Kernel support
 //!
@@ -144,6 +149,68 @@ struct NetPortAttr {
     port: u64,
 }
 
+/// Raw `landlock_create_ruleset`. With `attr = Some`, creates a ruleset and
+/// returns its fd as a non-negative integer; with `attr = None` it is the ABI
+/// probe (pass `CREATE_RULESET_VERSION` as `flags`) and returns the version.
+/// The raw syscall result is returned verbatim — the caller maps `< 0` to errno.
+///
+/// This is the single home for the `landlock_create_ruleset` FFI, mirroring
+/// `kennel-bpf`'s `bpf()`; because its only inputs are an `Option<&RulesetAttr>`
+/// (guaranteed live and correctly sized) and a `flags` word, it is sound to call
+/// from safe code, so [`abi_version`] and [`create_ruleset`] carry no `unsafe`.
+fn sys_create_ruleset(attr: Option<&RulesetAttr>, flags: libc::c_uint) -> i64 {
+    let (ptr, size) = attr.map_or((std::ptr::null::<libc::c_void>(), 0_usize), |a| {
+        (
+            std::ptr::from_ref(a).cast::<libc::c_void>(),
+            size_of::<RulesetAttr>(),
+        )
+    });
+    // SAFETY: `landlock_create_ruleset` reads `size` bytes through `ptr` and does
+    // not retain it. With `Some(attr)` the pair is (live RulesetAttr, its exact
+    // byte length); with `None` it is (NULL, 0) — the kernel's version-probe form,
+    // which dereferences nothing. Either way pointer and size describe the same
+    // object (a struct, or nothing).
+    //
+    // INVARIANTS UPHELD: `flags` is 0 to create or CREATE_RULESET_VERSION to probe;
+    // no memory we own is mutated (the kernel only reads).
+    //
+    // FAILURE MODE: an unsupported/invalid request returns -1 + errno (mapped by
+    // the caller); no memory unsafety is reachable on any path.
+    unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, ptr, size, flags) }
+}
+
+/// Raw `landlock_add_rule`. `attr` is a reference to the rule struct the kernel
+/// selects from `rule_type` (`RULE_PATH_BENEATH` ↔ [`PathBeneathAttr`],
+/// `RULE_NET_PORT` ↔ [`NetPortAttr`]). Sound to call from safe code: the kernel
+/// reads only the fixed-size struct for `rule_type`, and a live `&T` is always
+/// valid for that read, so [`add_path_rule`] / [`add_net_rule`] carry no `unsafe`.
+fn sys_add_rule<T>(ruleset: BorrowedFd<'_>, rule_type: libc::c_uint, attr: &T) -> io::Result<()> {
+    // SAFETY: `landlock_add_rule` reads the fixed-size rule struct selected by
+    // `rule_type` through the pointer and does not retain it; `attr: &T` is a live
+    // reference the caller pairs with the matching `rule_type`. `ruleset` is an
+    // open ruleset fd (BorrowedFd guarantees it). The kernel only reads.
+    //
+    // INVARIANTS UPHELD: the two call sites pair the correct attr type with
+    // `rule_type` (PATH_BENEATH↔PathBeneathAttr, NET_PORT↔NetPortAttr); flags 0.
+    //
+    // FAILURE MODE: a wrong fd or unsupported rule returns -1 + errno (Err); no
+    // memory unsafety is reachable.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset.as_raw_fd(),
+            rule_type,
+            std::ptr::from_ref(attr),
+            0_u32,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// Query the Landlock ABI version supported by the running kernel.
 ///
 /// # Errors
@@ -152,25 +219,9 @@ struct NetPortAttr {
 /// disabled (`EOPNOTSUPP`), or [`io::ErrorKind::InvalidData`] in the
 /// can't-happen case of an implausibly large version.
 pub fn abi_version() -> io::Result<u32> {
-    // SAFETY: `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
-    // is the kernel's documented ABI-probe form (uapi/linux/landlock.h): with a
-    // NULL attr pointer and zero size it dereferences nothing and returns the
-    // supported ABI version as a non-negative integer.
-    //
-    // INVARIANTS UPHELD: the (pointer, size) pair is exactly (NULL, 0), the
-    // contract for the version query; no memory we own is read or written.
-    //
-    // FAILURE MODE: on a kernel without Landlock the syscall returns -1 and sets
-    // errno (ENOSYS / EOPNOTSUPP), surfaced below as Err. No memory unsafety is
-    // reachable on any path.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            std::ptr::null::<libc::c_void>(),
-            0_usize,
-            CREATE_RULESET_VERSION,
-        )
-    };
+    // The (NULL, 0, VERSION) probe form (uapi/linux/landlock.h): a kernel without
+    // Landlock returns -1 + errno (ENOSYS / EOPNOTSUPP), surfaced below as Err.
+    let ret = sys_create_ruleset(None, CREATE_RULESET_VERSION);
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -235,23 +286,7 @@ pub fn supported_scope(abi: u32) -> Scope {
 
 /// Create a ruleset fd governing the handled access rights in `attr`.
 fn create_ruleset(attr: &RulesetAttr) -> io::Result<OwnedFd> {
-    // SAFETY: `attr` is a fully initialised RulesetAttr that outlives the call;
-    // we pass its address and exact byte size, the contract for
-    // landlock_create_ruleset, which reads `size` bytes through the pointer and
-    // returns a new ruleset fd (or -1/errno).
-    //
-    // INVARIANTS UPHELD: pointer and size describe the same live struct; flags 0.
-    //
-    // FAILURE MODE: a bad/unsupported request returns -1 + errno (surfaced as
-    // Err); no memory unsafety is reachable.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            std::ptr::from_ref(attr),
-            size_of::<RulesetAttr>(),
-            0_u32,
-        )
-    };
+    let ret = sys_create_ruleset(Some(attr), 0);
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -276,28 +311,7 @@ fn add_path_rule(
         allowed_access: access.bits(),
         parent_fd: parent.as_raw_fd(),
     };
-    // SAFETY: `attr` is a live, fully initialised PathBeneathAttr passed by
-    // address; the kernel reads it (read-only) for the duration of the call.
-    // `ruleset` is a valid Landlock ruleset fd (BorrowedFd guarantees it is open).
-    //
-    // INVARIANTS UPHELD: rule type matches the attr struct (PATH_BENEATH); flags 0.
-    //
-    // FAILURE MODE: an invalid access bit or fd returns -1 + errno (Err); no
-    // memory unsafety is reachable.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_add_rule,
-            ruleset.as_raw_fd(),
-            RULE_PATH_BENEATH,
-            std::ptr::from_ref(&attr),
-            0_u32,
-        )
-    };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    sys_add_rule(ruleset, RULE_PATH_BENEATH, &attr)
 }
 
 /// Add a "allow `access` on TCP `port`" rule to `ruleset`.
@@ -306,25 +320,7 @@ fn add_net_rule(ruleset: BorrowedFd<'_>, access: AccessNet, port: u16) -> io::Re
         allowed_access: access.bits(),
         port: u64::from(port),
     };
-    // SAFETY: as add_path_rule, with a NetPortAttr and the NET_PORT rule type.
-    //
-    // INVARIANTS UPHELD: rule type matches the attr struct (NET_PORT); flags 0.
-    //
-    // FAILURE MODE: invalid access/port (or pre-ABI-4 kernel) returns -1 + errno.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_add_rule,
-            ruleset.as_raw_fd(),
-            RULE_NET_PORT,
-            std::ptr::from_ref(&attr),
-            0_u32,
-        )
-    };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    sys_add_rule(ruleset, RULE_NET_PORT, &attr)
 }
 
 /// Irreversibly restrict the calling process to `ruleset`. Requires

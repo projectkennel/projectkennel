@@ -30,6 +30,10 @@ use crate::control::{self, KennelInfo, Request, Response, StartRequest};
 use crate::ctx::CtxAllocator;
 use crate::{cgroup, start, Privileged};
 
+/// Grace between the TTL reaper's SIGTERM and its SIGKILL for `ttl_action = "exit"`
+/// (§9.7): the workload gets this long to exit cleanly before the cgroup is killed.
+const TTL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A loaded, verified policy, split into the two artefacts kenneld applies.
 ///
 /// The kernel-enforcement [`Plan`] (seal + BPF) and the [`NetPolicy`] the
@@ -41,6 +45,14 @@ use crate::{cgroup, start, Privileged};
 pub struct Loaded {
     /// The kernel-enforcement plan.
     pub plan: Plan,
+    /// The workload's masked user name (`[identity].user`, default `kennel`):
+    /// `$USER`/`$LOGNAME`, the synthetic `/etc/passwd` account, and the base of
+    /// `$HOME` (`/home/<account>`, the plan's view shim root).
+    pub account: String,
+    /// The workload's masked **primary** group name (`[identity].group`, default
+    /// `kennel`): the synthetic `/etc/passwd` `pw_gid` name and the `/etc/group`
+    /// entry for the primary gid.
+    pub account_group: String,
     /// The network policy the egress proxy enforces.
     pub net: NetPolicy,
     /// The per-kennel SSH runtime (§7.8): the bastion grants `kenneld` realises.
@@ -70,6 +82,9 @@ pub struct Loaded {
     /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
     /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
     pub home_persist: Vec<String>,
+    /// The lifecycle policy (§9.7): the optional TTL and what to do at expiry. Drives
+    /// the TTL reaper in `run_kennel`. `ttl_seconds = None` ⇒ no reaper armed.
+    pub lifecycle: kennel_policy::LifecyclePolicy,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -478,13 +493,67 @@ where
     let Ok((request, fds)) = recv_request_with_fds(conn) else {
         return;
     };
+    // Trust boundary 6 (§04 trust boundaries): the kennel name arrives from the
+    // user's CLI over the control socket and flows into filesystem paths (the
+    // synthetic `/etc` staging dir, the per-kennel audit dir), the synthetic
+    // `/etc/hostname`, and the registry key. Validate its grammar — `[a-z0-9]`
+    // start, then `[a-z0-9-]`, ≤64 chars — *before* it is used anywhere, so a name
+    // with `/`, `..`, NUL, whitespace, or control bytes cannot traverse a path or
+    // inject a hostname. List/AuthorizedKeys carry no name.
     let response = match request {
-        Request::Start(req) => return run_kennel(shared, &req, fds, conn),
-        Request::Stop { kennel } => shared.stop(&kennel),
+        Request::Start(req) => match validate_kennel_name(&req.kennel) {
+            Ok(()) => return run_kennel(shared, &req, fds, conn),
+            Err(e) => Response::Error(e),
+        },
+        Request::Stop { kennel } => match validate_kennel_name(&kennel) {
+            Ok(()) => shared.stop(&kennel),
+            Err(e) => Response::Error(e),
+        },
         Request::List => shared.list(),
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),
     };
     let _ = control::send_response(conn, &response);
+}
+
+/// The maximum kennel-name length (`02-2-config-schema.md`: `[a-z0-9][a-z0-9-]{0,63}`).
+const MAX_KENNEL_NAME: usize = 64;
+
+/// Validate a kennel name against its grammar `[a-z0-9][a-z0-9-]{0,63}` (§02-2): a
+/// lowercase-alphanumeric first character, then lowercase-alphanumeric or hyphen, at
+/// most 64 characters. This is the trust-boundary-6 check (§04): the name is
+/// untrusted CLI input that becomes path components and the synthetic hostname.
+///
+/// # Errors
+/// A human-readable reason if the name is empty, too long, or contains a character
+/// outside the grammar (in particular `/`, `.`, NUL, whitespace, or control bytes).
+fn validate_kennel_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("kennel name must not be empty".to_owned());
+    }
+    if name.len() > MAX_KENNEL_NAME {
+        return Err(format!(
+            "kennel name `{name}` is too long ({} chars; the limit is {MAX_KENNEL_NAME})",
+            name.len()
+        ));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(format!(
+            "kennel name `{name}` must start with a lowercase letter or digit \
+             (the grammar is [a-z0-9][a-z0-9-]{{0,63}})"
+        ));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && *c != '-')
+    {
+        return Err(format!(
+            "kennel name `{name}` contains the illegal character {bad:?} \
+             (only [a-z0-9-] are allowed, so it cannot traverse a path or inject a hostname)"
+        ));
+    }
+    Ok(())
 }
 
 /// Bring a kennel up, report it `Started`, block until the workload exits, tear
@@ -546,6 +615,23 @@ fn run_kennel<P, L>(
     // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
+    // Re-derive the compile-time footgun warning at spawn (§7.8.1): a policy may shim a
+    // real ssh-agent socket via `[[unix.allow]]`, which the framework permits but warns
+    // loudly about — an exposed agent is a destination-blind signing oracle. An operator
+    // who ran a pre-compiled artefact never saw the `kennel compile` warning, so emit it
+    // here too. Warned, not refused — footguns are loud, not amputated.
+    for sock in &loaded.unix.sockets {
+        let shims_ssh_agent = sock.name.eq_ignore_ascii_case("ssh-agent")
+            || sock.env.as_deref() == Some("SSH_AUTH_SOCK");
+        if shims_ssh_agent {
+            eprintln!(
+                "kenneld: warning: kennel `{}` shims an SSH agent (`{}`): an exposed agent is a \
+                 destination-blind signing oracle (§7.8.1) — any code in the kennel can sign for \
+                 any destination. The [ssh] re-origination bastion is the intended path.",
+                req.kennel, sock.name
+            );
+        }
+    }
     // The audit runtime (§02-3): the installation/per-user `audit.toml` defaults
     // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
     // ~/.config < policy). Captured before `loaded` is consumed below.
@@ -578,6 +664,8 @@ fn run_kennel<P, L>(
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
         staging_dir: base.join(format!("etc-{ctx}")),
+        account: loaded.account.clone(),
+        account_group: loaded.account_group.clone(),
         hostname: req.kennel.clone(),
         uid: id.uid,
         gid: id.gid,
@@ -592,7 +680,14 @@ fn run_kennel<P, L>(
         // Home-relative paths exempt from dotfile reconstruction (§7.7.2a).
         home_persist: loaded.home_persist.clone(),
     });
+    // The TTL reaper inputs (§9.7), captured before `loaded` is consumed below.
+    let ttl = loaded
+        .lifecycle
+        .ttl_seconds
+        .map(std::time::Duration::from_secs);
+    let ttl_action = loaded.lifecycle.ttl_action;
     let spec = crate::Spec {
+        id: req.kennel.clone(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
         ctx,
         scope: id.scope.clone(),
@@ -615,9 +710,14 @@ fn run_kennel<P, L>(
     // proxy. With no state dir configured, audit is simply not recorded and the
     // decorator is a transparent pass-through.
     let audit = state_dir.as_ref().map(|dir| {
-        crate::audit::build_writer(&req.kennel, dir, &audit_runtime, kennel_uuid.clone())
+        Arc::new(crate::audit::build_writer(
+            &req.kennel,
+            dir,
+            &audit_runtime,
+            kennel_uuid.clone(),
+        ))
     });
-    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_ref());
+    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
 
     // Synthesise the workload environment from policy (§7.7.2): clear the inherited
     // environment and build it from scratch. `PATH` (from `[exec].path`),
@@ -630,8 +730,8 @@ fn run_kennel<P, L>(
     if !loaded.exec_path.is_empty() {
         command.env("PATH", loaded.exec_path.join(":"));
     }
-    command.env("USER", crate::etc::ACCOUNT_NAME);
-    command.env("LOGNAME", crate::etc::ACCOUNT_NAME);
+    command.env("USER", &loaded.account);
+    command.env("LOGNAME", &loaded.account);
     command.env("SHELL", &loaded.shell);
     command.env("HOME", &shim_root);
     for (key, value) in &loaded.env.vars {
@@ -641,13 +741,17 @@ fn run_kennel<P, L>(
     let kennel = match start(&audited, spec, &mut command) {
         Ok(kennel) => kennel,
         Err(e) => {
+            // A bring-up failure after the egress step may have left BPF pins behind
+            // (the teardown removes the cgroup, which detaches the programs, but the
+            // pins outlive the helper). Clean them up best-effort.
+            crate::bpf_audit::cleanup_pins(&req.kennel);
             return fail(
                 shared,
                 &req.kennel,
                 ctx,
                 conn,
                 &Response::Error(e.to_string()),
-            )
+            );
         }
     };
     let pid = kennel.id();
@@ -655,14 +759,47 @@ fn run_kennel<P, L>(
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::kennel_start(pid, ctx));
     }
+    // Drain the per-kennel BPF audit ring buffer (§02-5): reopen the pinned ringbuf
+    // and route its connect/bind events through the same writer with `source: bpf`.
+    // Best-effort — absent pin (older helper / pinning failed) or no audit writer ⇒
+    // no drain, egress unaffected.
+    let drain = audit.as_ref().and_then(|writer| {
+        crate::bpf_audit::spawn(
+            crate::bpf_audit::pin_dir_for(&req.kennel),
+            ctx,
+            Arc::clone(writer),
+        )
+    });
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
-    // Block until the workload exits (on its own or via `stop`), then tear down.
-    // The audited privileged records the teardown's `del_address` refusals too.
-    let status = kennel.stop(&audited);
+    // Block until the workload exits (on its own, via `stop`, or via the TTL reaper),
+    // then tear down. With a `ttl` the wait polls so the reaper can act at expiry
+    // (§9.7); each milestone is recorded through the audit writer. The audited
+    // privileged records the teardown's `del_address` refusals too.
+    let ttl_writer = audit.as_ref();
+    let status = kennel.stop_with_ttl(&audited, ttl, ttl_action, TTL_GRACE, |ev| {
+        let stage = match ev {
+            crate::TtlEvent::Warned => "warn",
+            crate::TtlEvent::RenewRequested => "renew",
+            crate::TtlEvent::Terminating => "terminating",
+            crate::TtlEvent::Killed => "killed",
+        };
+        eprintln!(
+            "kenneld: kennel `{}` TTL elapsed (action {ttl_action:?}): {stage}",
+            req.kennel
+        );
+        if let Some(writer) = ttl_writer {
+            writer.emit(&crate::audit::ttl_expired(pid, stage));
+        }
+    });
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
         writer.emit(&crate::audit::kennel_exit("stopped"));
+    }
+    // Stop the BPF drain after the lifecycle events: a final sweep captures events
+    // committed just before exit, then the per-kennel pins are removed.
+    if let Some(drain) = drain {
+        drain.stop();
     }
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
@@ -771,6 +908,46 @@ mod tests {
     use kennel_syscall::namespace::Namespaces;
     use kennel_syscall::seccomp::Action;
 
+    #[test]
+    fn valid_kennel_names_are_accepted() {
+        for ok in [
+            "a",
+            "0",
+            "ai-coding-strict",
+            "npm2",
+            "x".repeat(64).as_str(),
+        ] {
+            assert!(
+                validate_kennel_name(ok).is_ok(),
+                "`{ok}` should be a valid kennel name"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_kennel_names_are_rejected() {
+        // Empty, too long, path-traversal, hostname/log injection, control bytes.
+        for bad in [
+            "",
+            "-leading-hyphen",
+            "Upper",
+            "../escape",
+            "a/b",
+            "a.b",
+            "has space",
+            "tab\tname",
+            "nul\0byte",
+            "emoji😀",
+        ] {
+            assert!(
+                validate_kennel_name(bad).is_err(),
+                "`{bad}` must be rejected"
+            );
+        }
+        // 65 chars is one over the limit.
+        assert!(validate_kennel_name(&"a".repeat(65)).is_err());
+    }
+
     #[derive(Clone)]
     struct OkPriv;
     impl Privileged for OkPriv {
@@ -809,8 +986,10 @@ mod tests {
                 bpf_allow_v6: Vec::new(),
                 bpf_deny_v6: Vec::new(),
                 bpf_meta: [0u8; 64],
+                bind_allowed_ports: Vec::new(),
                 file_binds: Vec::new(),
                 supplementary_groups: None,
+                ulimits: Vec::new(),
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,
@@ -818,9 +997,13 @@ mod tests {
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
+                bind_port_min: 0,
+                bind_allowed_ports: Vec::new(),
             };
             Ok(Loaded {
                 plan,
+                account: "kennel".to_owned(),
+                account_group: "kennel".to_owned(),
                 net,
                 ssh: kennel_policy::SshRuntime::default(),
                 unix: kennel_policy::UnixRuntime::default(),
@@ -830,6 +1013,10 @@ mod tests {
                 exec_path: Vec::new(),
                 shell: "/bin/sh".to_owned(),
                 home_persist: Vec::new(),
+                lifecycle: kennel_policy::LifecyclePolicy {
+                    ttl_seconds: None,
+                    ttl_action: kennel_policy::TtlAction::Exit,
+                },
             })
         }
     }

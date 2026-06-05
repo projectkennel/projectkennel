@@ -151,10 +151,11 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                     port_max: 65535,
                     protocol: Protocol::Any,
                 }],
+                bind_port_min: 0,
+                bind_allowed_ports: Vec::new(),
             },
             fs: FsPolicy {
                 home_shadow: true,
-                shim_root: "/run/kennel/e2e".to_owned(),
                 read: vec![
                     "/usr".to_owned(),
                     "/bin".to_owned(),
@@ -165,6 +166,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 ],
                 write: Vec::new(),
                 home_persist: Vec::new(),
+                home_readonly: false,
                 tmp: TmpPolicy {
                     private: true,
                     size_mib: 512,
@@ -178,6 +180,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 deny_setcap: true,
                 deny_writable: true,
                 allow: Vec::new(),
+                deny: Vec::new(),
                 path: Vec::new(),
                 shell: "/bin/sh".to_owned(),
             },
@@ -208,6 +211,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         identity: kennel_policy::IdentityRuntime::default(),
         audit: kennel_policy::AuditRuntime::default(),
         env: kennel_policy::EnvRuntime::default(),
+        ulimits: kennel_policy::UlimitsRuntime::default(),
     }
 }
 
@@ -398,6 +402,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     };
 
     let spec = Spec {
+        id: "kennel-e2e".to_owned(),
         cgroup: cgroup.clone(),
         ctx,
         scope,
@@ -409,6 +414,8 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         }),
         etc: Some(EtcSetup {
             staging_dir: etc_base.join("etc-1"),
+            account: "kennel".to_owned(),
+            account_group: "kennel".to_owned(),
             hostname: "e2e".to_owned(),
             // The kernel uid/gid inside the userns are the operator's (identity map),
             // so the synthetic passwd/group must name those very ids as `kennel` for

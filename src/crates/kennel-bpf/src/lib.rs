@@ -29,7 +29,10 @@ pub mod loader;
 pub mod ringbuf;
 pub mod sys;
 
-pub use loader::{load_program, Loaded, MapSpec, ProgramSpec, KENNEL_MAPS, KENNEL_PROGRAMS};
+pub use loader::{
+    create_maps, load_program, load_program_against, Loaded, MapSpec, ProgramSpec, KENNEL_MAPS,
+    KENNEL_PROGRAMS,
+};
 pub use ringbuf::RingBuffer;
 
 /// Compiled BPF program objects, embedded at build time.
