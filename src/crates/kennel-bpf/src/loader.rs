@@ -371,9 +371,11 @@ pub fn load_program_against(
     let file = object::File::parse(elf).map_err(other)?;
     let (mut insns, relocs) = section_relocations(&file, prog.section)?;
     for (off, name) in &relocs {
-        let fd = maps
-            .get(name)
-            .ok_or_else(|| other(format!("program references map `{name}` not in the shared set")))?;
+        let fd = maps.get(name).ok_or_else(|| {
+            other(format!(
+                "program references map `{name}` not in the shared set"
+            ))
+        })?;
         let raw = std::os::fd::AsRawFd::as_raw_fd(&fd.as_fd());
         patch_map_fd(&mut insns, *off, raw)?;
     }
@@ -713,7 +715,8 @@ mod root_tests {
                 .max_entries,
         )
         .expect("ringbuf size");
-        let mut rb = crate::ringbuf::RingBuffer::new(rb_fd.as_fd(), size).expect("map shared ringbuf");
+        let mut rb =
+            crate::ringbuf::RingBuffer::new(rb_fd.as_fd(), size).expect("map shared ringbuf");
 
         // Attach the shared-maps connect4 and trigger a denied connect.
         let cg = Path::new("/sys/fs/cgroup/kennel-bpf-test-shared");
@@ -729,7 +732,10 @@ mod root_tests {
             .expect("consume shared ringbuf");
         let _ = std::fs::remove_dir(cg);
 
-        assert!(denied, "precondition: connect should be denied (fail closed)");
+        assert!(
+            denied,
+            "precondition: connect should be denied (fail closed)"
+        );
         assert!(
             !samples.is_empty(),
             "the shared ringbuf should carry the denied-connect audit event"

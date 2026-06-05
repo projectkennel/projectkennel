@@ -283,7 +283,9 @@ fn valid_pin_id(id: &str) -> bool {
         return false;
     }
     let mut chars = id.chars();
-    let first_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     first_ok
         && id
             .chars()

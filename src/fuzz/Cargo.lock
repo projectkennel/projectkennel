@@ -135,6 +135,7 @@ version = "0.1.0"
 dependencies = [
  "basic-toml",
  "kennel-audit",
+ "kennel-bpf",
  "kennel-config",
  "kennel-policy",
  "kennel-privhelper",

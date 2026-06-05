@@ -218,18 +218,39 @@ fn pins_the_shared_maps_under_run_kennel_bpf() {
         pin_id: pin_id.to_owned(),
     };
     let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
-    assert_eq!(resp.status, Status::Ok, "egress setup (errno {})", resp.errno);
+    assert_eq!(
+        resp.status,
+        Status::Ok,
+        "egress setup (errno {})",
+        resp.errno
+    );
 
     // The audit ringbuf and the data maps are pinned (obj_pin only succeeds on bpffs,
     // so their presence proves the bpffs was mounted and the pin worked).
-    for map in ["audit_ringbuf", "kennel_meta_map", "allow_v4", "bind_subnet_map"] {
+    for map in [
+        "audit_ringbuf",
+        "kennel_meta_map",
+        "allow_v4",
+        "bind_subnet_map",
+    ] {
         let pin = pin_dir.join(map);
         assert!(pin.exists(), "expected pinned map at {}", pin.display());
-        let mode = std::fs::metadata(&pin).expect("stat pin").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&pin)
+            .expect("stat pin")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o640, "pin {map} should be mode 0640, got {mode:o}");
     }
-    let dir_mode = std::fs::metadata(&pin_dir).expect("stat pin dir").permissions().mode() & 0o777;
-    assert_eq!(dir_mode, 0o750, "pin dir should be mode 0750, got {dir_mode:o}");
+    let dir_mode = std::fs::metadata(&pin_dir)
+        .expect("stat pin dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        dir_mode, 0o750,
+        "pin dir should be mode 0750, got {dir_mode:o}"
+    );
 
     // Cleanup: unlink the pins + dir, detach by removing the cgroup. Leave the bpffs
     // mounted (idempotent across runs).

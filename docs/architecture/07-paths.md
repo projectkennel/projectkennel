@@ -165,26 +165,43 @@ Owner: user (kenneld creates the cgroup itself, unprivileged, within its delegat
 
 Mode and ownership follow the system's cgroup delegation policy. Modern systemd configurations delegate `/sys/fs/cgroup/user.slice/user-<uid>.slice/` to the user, and Project Kennel's `<namespace>/` subtree lives within that delegation. kenneld — not the privhelper — creates and removes the per-kennel cgroup; the privhelper only *attaches* the egress BPF to a cgroup whose ownership it re-validates against the caller's allocation.
 
-### `/sys/fs/bpf/kennel/` (roadmap)
+### `/run/kennel/bpf/<id>/`
 
-Stable BPF map and program pinning for inspection. **Not yet wired.** Today the loader loads, populates, and attaches the egress programs to the kennel's cgroup directly and does **not** pin its maps or programs to a stable bpffs path; the `pin_program` primitive exists but is exercised only by a root-test on an ad-hoc path. The installer creates **no** `kennel-readers` group and sets up no `/sys/fs/bpf/kennel/` tree. The layout below is the intended stable surface once pinning lands:
+Per-kennel BPF map pinning, for the audit ring-buffer drain and for inspection. The privhelper creates ONE bpffs at `/run/kennel/bpf/` (root, mode `0755`) and pins each kennel's shared map set under `/run/kennel/bpf/<id>/`:
 
 ```
-/sys/fs/bpf/kennel/
-├── <id>/                            per-kennel BPF state
-│   ├── kennel_meta                  pinned BPF map
-│   ├── allow_v4
-│   ├── allow_v6
-│   ├── deny_v4
-│   ├── deny_v6
-│   ├── bind_subnet
-│   └── progs/                       pinned program references (for debug inspection)
-└── ...
+/run/kennel/bpf/                     bpffs (root, 0755) — one per host
+└── <id>/                            per-kennel pin dir (caller-owned)
+    ├── audit_ringbuf                pinned ringbuf — kenneld obj_gets + drains it
+    ├── kennel_meta_map              pinned BPF maps (for bptool inspection)
+    ├── allow_v4
+    ├── allow_v6
+    ├── deny_v4
+    ├── deny_v6
+    └── bind_subnet_map
 ```
 
-Planned owner: root. Mode: directory `0750`, files `0640`. Group: `kennel-readers` (to be created at install time; operators in this group could `bpftool map dump` the pins).
+A kennel's programs share one map set (`kennel_bpf::create_maps` +
+`load_program_against`), so there is exactly one `audit_ringbuf` per kennel and
+one coherent set to pin. The pin dir and its pins are owned by the **caller**
+(kenneld's uid) — the same delegation model as the per-kennel cgroup — so the
+unprivileged kenneld can `BPF_OBJ_GET` the ring buffer to drain it and clean the
+pins up at teardown. Mode: directory `0750`, pins `0640`. Group: `kennel-readers`
+when that group exists (operators in it can `bpftool map dump` the pins), else the
+caller's primary group. kenneld removes the pin dir when the kennel exits.
 
-The workload never sees this tree — the shim does not bind-mount `/sys/fs/bpf` into the kennel's view.
+Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, so an
+unprivileged kenneld cannot traverse it to reopen the ring buffer. `/run/kennel/`
+is already kennel's root-owned `0755` traversable runtime tree, so the pins live
+on a dedicated bpffs beneath it.
+
+The workload never sees this tree — the shim does not bind-mount `/run/kennel/bpf`
+into the kennel's view.
+
+The `kennel-readers` group itself is not yet created by an installer (kennel has
+no installer yet); until it exists the pins fall back to the caller's group, so
+inspection is owner/root-only. Reopening for the drain does not depend on the
+group — kenneld owns the pins.
 
 ### `/run/kennel/privhelper.lock`
 
@@ -225,7 +242,7 @@ The resolver requires the *exact* `<name>@<version>`; it does not fall back to a
 | `/run/user/<uid>/kennel/` | kenneld (startup) | logout (systemd) or kenneld (graceful shutdown) | User session |
 | `/run/kennel/<id>/` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/sys/fs/cgroup/<namespace>/<ctx>/` | kenneld (unprivileged, in its delegated subtree) | kenneld (immediately on workload exit) | Kennel lifetime |
-| `/sys/fs/bpf/kennel/<id>/` | kenneld (kennel start) — *roadmap; pinning not yet wired* | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/run/kennel/bpf/<id>/` | privhelper (egress setup; pins chowned to the caller) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/etc/kennel/` | Package installation | Package removal | All restarts and reboots |
 | `/run/kennel/privhelper.lock` | First privhelper invocation | Reboot (tmpfs) | Reboot |
 
@@ -253,7 +270,7 @@ Each path's mode and ownership are part of its security contract. The most-load-
 
 - **`~/.local/state/kennel/<kennel>/`** mode `0700`: the workload (running as the same UID) is denied access because the shim does not bind-mount this directory into the workload's view. The mode is belt-and-braces.
 - **`/run/user/<uid>/kennel/control.sock`** mode `0600`: only the owning user may connect. kenneld additionally validates via `SO_PEERCRED` (boundary 7 in `04-trust-boundaries.md`).
-- **`/sys/fs/bpf/kennel/<id>/`** mode `0750` group `kennel-readers` (*roadmap*, once pinning lands): operators in `kennel-readers` would inspect maps with `bpftool`; the workload (not in `kennel-readers`, and with no view onto `/sys/fs/bpf`) cannot modify them. Today the maps are not pinned and the group is not created.
+- **`/run/kennel/bpf/<id>/`** directory `0750`, pins `0640`, group `kennel-readers` when that group exists: operators in `kennel-readers` inspect the pinned maps with `bpftool`; the workload (with no view onto `/run/kennel/bpf`) cannot reach them. The pins are owned by the caller (kenneld's uid) so the unprivileged daemon can reopen the ring buffer to drain it and clean the pins up at teardown. The `kennel-readers` group is not yet created by an installer (none exists yet); until then the pins fall back to the caller's group and inspection is owner/root-only.
 - **`/etc/kennel/keys/*.pub`** mode `0644`: public keys; world-readable is fine. Private keys are not in this tree.
 - **`kennel-privhelper`** setuid root (as installed; file capabilities a per-distribution alternative): a compromise of the calling process (kenneld) does not automatically gain privilege; the privhelper validates every request per `04-trust-boundaries.md` boundary 1.
 

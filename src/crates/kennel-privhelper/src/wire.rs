@@ -742,7 +742,10 @@ mod tests {
             bind_allowed_ports: vec![443],
             pin_id: "kennel-9f3a".to_owned(),
         };
-        assert_eq!(EgressPayload::decode(&payload.encode()), Ok(payload.clone()));
+        assert_eq!(
+            EgressPayload::decode(&payload.encode()),
+            Ok(payload.clone())
+        );
         // Drop just the pin-id tail (length 4 + 11 id bytes): the rest still decodes,
         // with pinning disabled.
         let mut bytes = payload.encode();

@@ -54,10 +54,10 @@ describe these read as roadmap.
   including the BPF ring buffer — only LSM is the kernel's.** Two cases differ, and
   an earlier draft wrongly lumped them: the cgroup **BPF programs** emit to *our own*
   `audit_ringbuf` (a `BPF_MAP_TYPE_RINGBUF`), **not** to `dmesg` — so those
-  `net.connect-*`/`net.bind-*` events reach a sink only when **kenneld drains the ring
-  buffer** and routes them through this writer. That is real owed work, **not** a
-  non-goal (see the roadmap entry below); kenneld already owns the buffer it would
-  drain, so it adds no privilege. **LSM denials** (Landlock/AppArmor), by contrast,
+  `net.connect-*`/`net.bind-*` events reach a sink because **kenneld drains the ring
+  buffer** and routes them through this writer (BUILT — see the drain entry below);
+  it was never a non-goal. The unprivileged kenneld reopens the privhelper-pinned
+  buffer, so the drain adds no privilege. **LSM denials** (Landlock/AppArmor), by contrast,
   genuinely *are* the kernel's to log via `dmesg`/auditd, so they stay out of this
   writer's scope. All three *currently-wired* userspace sources route through the
   writer —
@@ -81,34 +81,30 @@ describe these read as roadmap.
   defaults are **BUILT**: kenneld reads both at spawn (each the `[audit]` section
   body, validated by the policy's own audit validator) and merges them per-field
   under the leaf policy — built-in &lt; `/etc/kennel` &lt; `~/.config` &lt; policy.
-  With that, the *userspace-originated* audit sources are complete. What the
-  subsystem still owes is the **BPF ring-buffer drain** (the roadmap entry below):
-  kenneld consuming `audit_ringbuf` and routing the kernel-sourced
-  `net.connect-*`/`net.bind-*` events through this same writer. LSM reporting via
-  `dmesg`/auditd stays a non-goal by design (it is the kernel's channel, not ours).
+  With that, and the BPF ring-buffer drain (below) now built, the audit subsystem's
+  userspace-reachable sources are complete. LSM reporting via `dmesg`/auditd stays a
+  non-goal by design (it is the kernel's channel, not ours).
 
 - **BPF audit ring-buffer drain** (`02-3-audit-schema.md`, `02-5-bpf-abi.md`) —
-  **designed, not built; the audit subsystem's one remaining userspace-reachable
-  gap.** The cgroup programs already `bpf_ringbuf_reserve`/commit `net.connect-*` and
-  `net.bind-*` events into `audit_ringbuf`, but nothing consumes the buffer in
-  production, so those events are produced and dropped (the buffer fills and the
-  kernel increments its drop counter). Owed: kenneld drains the ring buffer, resolves
-  `ctx_byte`→`kennel_uuid` via its in-memory registry (an unknown `ctx_byte` —
-  a stale program from a defunct kennel — is logged and the event dropped), sanitises
-  the string fields (`kennel-text`), and emits canonical events with `source: bpf`
-  **through the unified writer** (the same sinks as the userspace events). The
-  load-bearing prerequisite is a **handle lifecycle**: today `load_program` mints a
-  *fresh* set of maps — including a fresh `audit_ringbuf` — on every call, so a kennel
-  has one ring buffer per attached program and all of them close when the (transient)
-  privhelper exits. The design's "one ring buffer, created once at kenneld start"
-  (`02-5` §Map pinning) is therefore not yet the as-built; the drain needs kenneld to
-  hold a *stable* handle to a *shared* buffer. The options (shared buffer created by
-  kenneld and referenced by every program load; or per-kennel ring buffers pinned to
-  bpffs — see the map-pinning entry — and reopened via `obj_get`; or the privhelper
-  passing the ring-buffer fd back over the control socket) are a TCB-shaping decision,
-  not yet made. The `Loaded::ringbuf` reader and the `connect4` root test already
-  drain a buffer end to end, so the consume-and-translate half is proven; the handle
-  lifecycle is the unbuilt part.
+  **BUILT and proven.** kenneld (`kenneld::bpf_audit`) reopens the per-kennel
+  `audit_ringbuf` and drains it on a per-kennel thread: each packed event
+  (`bpf/audit_events.h`) is parsed, attributed to its kennel by `ctx_byte` (a
+  foreign/corrupt one is dropped), carries `comm` as untrusted (writer-sanitised),
+  and is emitted as a canonical `net.*` event with `source: bpf` **through the
+  unified writer** (the same sinks as the userspace events). The handle-lifecycle
+  prerequisite was resolved by the **shared-map + pin** route: the privhelper creates
+  the kennel's map set once (`kennel_bpf::create_maps`) and loads every program
+  against it (`load_program_against`), so there is exactly one `audit_ringbuf` per
+  kennel; it pins that buffer to `/run/kennel/bpf/<id>/audit_ringbuf` (caller-owned),
+  and the unprivileged kenneld reopens it with `BPF_OBJ_GET` (gated on bpffs inode
+  permissions, *not* `CAP_BPF` — empirically confirmed under
+  `unprivileged_bpf_disabled=2`). No fd-passback over the control socket was needed.
+  The drain stops and removes the pins at kennel teardown. Proven end to end by
+  `kenneld/tests/bpf_drain.rs`: a real pinned ring buffer, the real drain, and a
+  denied connect's `net.connect-deny` (`source: bpf`) landing in `network.jsonl`.
+  (The design once specified "one buffer created at kenneld start"; kenneld is
+  unprivileged and cannot create BPF maps, so the privileged helper creates and pins
+  it per kennel — see `02-5` §The audit ring buffer.)
 - **`kennel-checksum-verify`** (the Rust verifier of `03-crate-decomposition.md`
   / §5.5) — **settled, not owed.** The shell witness (`src/tools/verify-checksums.sh`,
   system `sha256sum`) *is* the implementation and enforces the gate in CI and

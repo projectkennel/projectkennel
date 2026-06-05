@@ -137,7 +137,7 @@ struct bind_subnet {
 
 The audit reader in kenneld drains it; events carry the originating kennel's `kennel_uuid` (resolved from `ctx_byte` via kenneld's in-memory registry), and route through the unified audit writer (`02-3-audit-schema.md` §Scope) with `source: bpf`.
 
-> **Status: the drain is not yet built (roadmap; `08-as-built-notes.md` §8.1).** As built, the programs reserve-and-commit events into this buffer but nothing consumes it in production, so the events are dropped. The design here is *one shared* ring buffer created once at kenneld start; the as-built `load_program` instead mints a fresh `audit_ringbuf` per program load (so a kennel has one per attached program, all closing when the privhelper exits). Building the drain requires kenneld to hold a stable handle to a shared buffer — the load-bearing prerequisite called out in §8.1.
+As built, there is exactly *one* `audit_ringbuf` per kennel: the privhelper creates the kennel's map set once (`kennel_bpf::create_maps`) and loads every program against it (`load_program_against`), so all of a kennel's programs share the one buffer. The privhelper pins it to `/run/kennel/bpf/<id>/audit_ringbuf` (`07-paths.md`); the unprivileged kenneld reopens it with `BPF_OBJ_GET` and drains it on a per-kennel thread (`kenneld::bpf_audit`). (The design once said "one buffer created at kenneld start"; kenneld is unprivileged and cannot create BPF maps, so the privileged helper creates and pins it instead, one per kennel, and kenneld reopens it.)
 
 Capacity is configurable per kennel via `[audit].ringbuf_bytes`, capped at 16 MiB to prevent operator misconfiguration causing memory pressure.
 
@@ -145,7 +145,7 @@ Capacity is configurable per kennel via `[audit].ringbuf_bytes`, capped at 16 Mi
 
 ## Ringbuf event format
 
-Every event in the ringbuf is a packed struct. The reader in kenneld parses these, enriches with the kennel name (via `ctx_byte` lookup), sanitises any string fields, and emits the canonical event through the unified writer (to JSONL and any other configured sink). *(This reader is the roadmap drain above — the `Loaded::ringbuf` consumer exists and is exercised by the `connect4` root test, but is not wired into production.)*
+Every event in the ringbuf is a packed struct. The reader in kenneld (`kenneld::bpf_audit`) parses these, attributes each to its kennel by `ctx_byte` (dropping a foreign/corrupt one), carries `comm` as untrusted (writer-sanitised), and emits the canonical event through the unified writer (to JSONL and any other configured sink) with `source: bpf`. The drain is proven end to end by `kenneld/tests/bpf_drain.rs`: a denied connect's `net.connect-deny` lands in `network.jsonl`.
 
 The base header (every event):
 
@@ -197,14 +197,15 @@ Strings — destination names, paths — are not included in BPF events. The ker
 The loader's setup for one kennel:
 
 1. Open the embedded BPF object (`include_bytes!` into the loader binary).
-2. Create the per-kennel maps.
+2. Create the per-kennel map set *once* (`create_maps`).
 3. Populate `kennel_meta`, `allow_v4`, `allow_v6`, `deny_v4`, `deny_v6`, `bind_subnet` from the resolved policy.
-4. Load the programs, attaching to the kennel's cgroup (under `/sys/fs/cgroup/<namespace>/<ctx>/`, where `<namespace>` defaults to `kennel`).
-5. The cgroup is then ready; the workload can be moved into it.
+4. Load every program against that shared set (`load_program_against`), attaching to the kennel's cgroup (under `/sys/fs/cgroup/<namespace>/<ctx>/`, where `<namespace>` defaults to `kennel`).
+5. Pin the shared maps under `/run/kennel/bpf/<id>/` (Map pinning, below).
+6. The cgroup is then ready; the workload can be moved into it.
 
-> **Status: map pinning and read-only sealing not yet built (roadmap).** The as-built attach path creates maps, populates them, and attaches the programs; it does not pin the maps under `/sys/fs/bpf/kennel/<id>/` and does not freeze `kennel_meta`. Map-pinning for inspection (step "pin them under bpffs") and the explicit "mark `kennel_meta` read-only" step are designed but unwired (see the Maps and Map pinning sections).
+> **Status: `kennel_meta` read-only sealing not yet built (roadmap).** The attach path creates, populates, attaches, and pins the maps; it does not yet freeze `kennel_meta` against further writes (`BPF_MAP_FREEZE`). The explicit "mark `kennel_meta` read-only" step is designed but unwired.
 
-The audit ringbuf is *designed* to be created once at kenneld start, not per kennel, so per-kennel events (carrying the `ctx_byte`) route through one drain to the right log file. (As built it is minted per program load instead — see the Status note under `audit_ringbuf` above and the §8.1 roadmap entry.)
+The audit ringbuf is one per kennel, shared across that kennel's programs, so per-kennel events (carrying the `ctx_byte`) route through one drain to the right log file. (It was once designed as a single buffer created at kenneld start; kenneld is unprivileged and cannot create BPF maps, so the privhelper creates and pins it per kennel — see the `audit_ringbuf` section above.)
 
 ---
 
@@ -238,11 +239,11 @@ A non-matching `abi_version` between the loader and the maps it created would in
 
 ## Map pinning and inspection
 
-Per-kennel maps are designed to be pinned under `/sys/fs/bpf/kennel/<id>/`, owned by root with mode 0640 and group `kennel-readers` (created at install time). This would make the maps inspectable for debugging (`bpftool map dump pinned /sys/fs/bpf/kennel/ai-coding/allow_v4`) without exposing them to write attacks.
+Per-kennel maps are pinned under `/run/kennel/bpf/<id>/` (`07-paths.md`), on a bpffs the privhelper mounts at `/run/kennel/bpf/` (root, `0755`). The pin dir and pins are chowned to the caller (kenneld's uid — the per-kennel cgroup delegation model), dir `0750`, pins `0640`, group `kennel-readers` when that group exists. This makes the maps inspectable for debugging (`bpftool map dump pinned /run/kennel/bpf/ai-coding/allow_v4`) without exposing them to write attacks, and lets the unprivileged kenneld reopen the `audit_ringbuf` to drain it.
 
-**Status: not yet built (roadmap).** As built, the attach path creates, populates, and attaches without pinning any map or program: it does not create `/sys/fs/bpf/kennel/<id>/`, and there is no mode-0640 or `kennel-readers`-group code. The loader's `pin_program` helper and the underlying `obj_pin`/`obj_get` syscalls exist but are exercised only by a root test against a flat scratch path, not by the production path.
+Not `/sys/fs/bpf/kennel/`: systemd mounts `/sys/fs/bpf` `mode=700`, which an unprivileged kenneld cannot traverse to `BPF_OBJ_GET` the ring buffer. The pin step is best-effort — a pin failure degrades to "no BPF audit drain / no inspection" but never fails egress setup. The `kennel-readers` group is not yet created by an installer (none exists); until then pins fall back to the caller's group and inspection is owner/root-only.
 
-The workload's view never includes `/sys/fs/bpf` — the constructed shim does not mount it.
+The workload's view never includes `/run/kennel/bpf` — the constructed shim does not mount it.
 
 ---
 
