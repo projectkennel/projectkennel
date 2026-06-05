@@ -485,13 +485,67 @@ where
     let Ok((request, fds)) = recv_request_with_fds(conn) else {
         return;
     };
+    // Trust boundary 6 (§04 trust boundaries): the kennel name arrives from the
+    // user's CLI over the control socket and flows into filesystem paths (the
+    // synthetic `/etc` staging dir, the per-kennel audit dir), the synthetic
+    // `/etc/hostname`, and the registry key. Validate its grammar — `[a-z0-9]`
+    // start, then `[a-z0-9-]`, ≤64 chars — *before* it is used anywhere, so a name
+    // with `/`, `..`, NUL, whitespace, or control bytes cannot traverse a path or
+    // inject a hostname. List/AuthorizedKeys carry no name.
     let response = match request {
-        Request::Start(req) => return run_kennel(shared, &req, fds, conn),
-        Request::Stop { kennel } => shared.stop(&kennel),
+        Request::Start(req) => match validate_kennel_name(&req.kennel) {
+            Ok(()) => return run_kennel(shared, &req, fds, conn),
+            Err(e) => Response::Error(e),
+        },
+        Request::Stop { kennel } => match validate_kennel_name(&kennel) {
+            Ok(()) => shared.stop(&kennel),
+            Err(e) => Response::Error(e),
+        },
         Request::List => shared.list(),
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),
     };
     let _ = control::send_response(conn, &response);
+}
+
+/// The maximum kennel-name length (`02-2-config-schema.md`: `[a-z0-9][a-z0-9-]{0,63}`).
+const MAX_KENNEL_NAME: usize = 64;
+
+/// Validate a kennel name against its grammar `[a-z0-9][a-z0-9-]{0,63}` (§02-2): a
+/// lowercase-alphanumeric first character, then lowercase-alphanumeric or hyphen, at
+/// most 64 characters. This is the trust-boundary-6 check (§04): the name is
+/// untrusted CLI input that becomes path components and the synthetic hostname.
+///
+/// # Errors
+/// A human-readable reason if the name is empty, too long, or contains a character
+/// outside the grammar (in particular `/`, `.`, NUL, whitespace, or control bytes).
+fn validate_kennel_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("kennel name must not be empty".to_owned());
+    }
+    if name.len() > MAX_KENNEL_NAME {
+        return Err(format!(
+            "kennel name `{name}` is too long ({} chars; the limit is {MAX_KENNEL_NAME})",
+            name.len()
+        ));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(format!(
+            "kennel name `{name}` must start with a lowercase letter or digit \
+             (the grammar is [a-z0-9][a-z0-9-]{{0,63}})"
+        ));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && *c != '-')
+    {
+        return Err(format!(
+            "kennel name `{name}` contains the illegal character {bad:?} \
+             (only [a-z0-9-] are allowed, so it cannot traverse a path or inject a hostname)"
+        ));
+    }
+    Ok(())
 }
 
 /// Bring a kennel up, report it `Started`, block until the workload exits, tear
@@ -817,6 +871,43 @@ mod tests {
     use kennel_syscall::landlock::AccessFs;
     use kennel_syscall::namespace::Namespaces;
     use kennel_syscall::seccomp::Action;
+
+    #[test]
+    fn valid_kennel_names_are_accepted() {
+        for ok in [
+            "a",
+            "0",
+            "ai-coding-strict",
+            "npm2",
+            "x".repeat(64).as_str(),
+        ] {
+            validate_kennel_name(ok).unwrap_or_else(|e| panic!("`{ok}` should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn invalid_kennel_names_are_rejected() {
+        // Empty, too long, path-traversal, hostname/log injection, control bytes.
+        for bad in [
+            "",
+            "-leading-hyphen",
+            "Upper",
+            "../escape",
+            "a/b",
+            "a.b",
+            "has space",
+            "tab\tname",
+            "nul\0byte",
+            "emoji😀",
+        ] {
+            assert!(
+                validate_kennel_name(bad).is_err(),
+                "`{bad}` must be rejected"
+            );
+        }
+        // 65 chars is one over the limit.
+        assert!(validate_kennel_name(&"a".repeat(65)).is_err());
+    }
 
     #[derive(Clone)]
     struct OkPriv;

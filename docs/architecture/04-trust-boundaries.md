@@ -154,7 +154,7 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 - Each field is bounds-checked as it is read: string length is capped at `MAX_STRING` (64 KiB) and array/argv counts at `MAX_COUNT` (4096); a truncated or oversized field is rejected.
 - String fields must be valid UTF-8 (`WireError::BadString`); an unknown op byte is `WireError::BadTag`.
 
-There is currently **no** character-set or per-method format validation of the kennel name at this boundary (no `[a-z0-9-]{1,64}` check): `reserve()` only rejects a duplicate name and an exhausted context pool. Name-format validation is owed work.
+The kennel name is format-validated at this boundary before it is used anywhere: `kenneld::server::validate_kennel_name` enforces the `[a-z0-9][a-z0-9-]{0,63}` grammar (§02-2) on both `Start` and `Stop` requests, rejecting an empty name, one over 64 characters, or any character outside `[a-z0-9-]`. This runs ahead of `reserve()` (which still rejects a duplicate name and an exhausted context pool), so a name carrying `/`, `..`, NUL, whitespace, or control bytes can never reach the synthetic-`/etc` staging path, the per-kennel audit directory, the synthetic `/etc/hostname`, or the registry key — closing the path-traversal and hostname/log-injection surface at the trust boundary.
 
 **Failure mode.** Structured error response (with code from the catalogue in `02-4-ipc.md`); the connection remains open for the client to issue the next request or close. Protocol-framing violations close the connection.
 
