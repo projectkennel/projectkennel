@@ -128,12 +128,14 @@ version = "0.1.0"
 dependencies = [
  "basic-toml",
  "kennel-audit",
+ "kennel-bpf",
  "kennel-config",
  "kennel-netproxy",
  "kennel-policy",
  "kennel-privhelper",
  "kennel-spawn",
  "kennel-syscall",
+ "libc",
  "serde",
 ]
 

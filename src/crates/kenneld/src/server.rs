@@ -700,9 +700,14 @@ fn run_kennel<P, L>(
     // proxy. With no state dir configured, audit is simply not recorded and the
     // decorator is a transparent pass-through.
     let audit = state_dir.as_ref().map(|dir| {
-        crate::audit::build_writer(&req.kennel, dir, &audit_runtime, kennel_uuid.clone())
+        Arc::new(crate::audit::build_writer(
+            &req.kennel,
+            dir,
+            &audit_runtime,
+            kennel_uuid.clone(),
+        ))
     });
-    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_ref());
+    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
 
     // Synthesise the workload environment from policy (§7.7.2): clear the inherited
     // environment and build it from scratch. `PATH` (from `[exec].path`),
@@ -726,13 +731,17 @@ fn run_kennel<P, L>(
     let kennel = match start(&audited, spec, &mut command) {
         Ok(kennel) => kennel,
         Err(e) => {
+            // A bring-up failure after the egress step may have left BPF pins behind
+            // (the teardown removes the cgroup, which detaches the programs, but the
+            // pins outlive the helper). Clean them up best-effort.
+            crate::bpf_audit::cleanup_pins(&req.kennel);
             return fail(
                 shared,
                 &req.kennel,
                 ctx,
                 conn,
                 &Response::Error(e.to_string()),
-            )
+            );
         }
     };
     let pid = kennel.id();
@@ -740,6 +749,17 @@ fn run_kennel<P, L>(
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::kennel_start(pid, ctx));
     }
+    // Drain the per-kennel BPF audit ring buffer (§02-5): reopen the pinned ringbuf
+    // and route its connect/bind events through the same writer with `source: bpf`.
+    // Best-effort — absent pin (older helper / pinning failed) or no audit writer ⇒
+    // no drain, egress unaffected.
+    let drain = audit.as_ref().and_then(|writer| {
+        crate::bpf_audit::spawn(
+            crate::bpf_audit::pin_dir_for(&req.kennel),
+            ctx,
+            Arc::clone(writer),
+        )
+    });
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
     // Block until the workload exits (on its own, via `stop`, or via the TTL reaper),
@@ -765,6 +785,11 @@ fn run_kennel<P, L>(
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
         writer.emit(&crate::audit::kennel_exit("stopped"));
+    }
+    // Stop the BPF drain after the lifecycle events: a final sweep captures events
+    // committed just before exit, then the per-kennel pins are removed.
+    if let Some(drain) = drain {
+        drain.stop();
     }
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);

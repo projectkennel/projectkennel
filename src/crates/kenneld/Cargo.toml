@@ -21,6 +21,10 @@ kennel-config = { path = "../kennel-config" }
 # The unified audit writer (02-3): kenneld builds it from the settled
 # AuditRuntime and emits lifecycle events through it.
 kennel-audit = { path = "../kennel-audit" }
+# The BPF loader/ringbuf surface (02-5): kenneld reopens the pinned per-kennel
+# audit ringbuf and drains it. No `embed-programs` — kenneld never loads BPF
+# (the privhelper does), so this stays clang-free.
+kennel-bpf = { path = "../kennel-bpf" }
 # Writing the per-kennel egress-proxy TOML config (kenneld writes, the netproxy
 # reads). Both already vendored (kennel-policy/kennel-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
@@ -30,12 +34,15 @@ basic-toml = "=0.1.10"
 # Round-trip the config we write back through the netproxy's own parser, so the
 # writer cannot drift from the reader.
 kennel-netproxy = { path = "../kennel-netproxy" }
+# The BPF-drain root test forks a child into a cgroup and attempts a connect to
+# produce a real denied-connect audit event; libc gives it fork/connect/_exit.
+libc = "=0.2.186"
 
 [features]
 # End-to-end orchestration test that drives the real setuid privhelper and
 # performs real privileged operations (addresses, BPF attach). Requires root and
 # the privhelper built with its bpf-egress feature.
-root-tests = ["kennel-spawn/root-tests"]
+root-tests = ["kennel-spawn/root-tests", "kennel-bpf/embed-programs"]
 # Build the journald audit sink (links libsystemd via kennel-syscall's FFI).
 audit-journald = ["kennel-audit/audit-journald"]
 
