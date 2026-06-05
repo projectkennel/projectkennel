@@ -295,8 +295,8 @@ pub struct EgressPayload {
     /// non-empty, the helper pins this kennel's BPF maps under the owner's
     /// `/run/user/<uid>/kennel/bpf/<id>/` (for `bpftool` inspection and the
     /// audit-ringbuf drain). Empty ⇒ pinning disabled. The helper validates the
-    /// grammar before using it as a path component. Capped at [`MAX_PIN_ID`] bytes
-    /// on decode.
+    /// grammar before using it as a path component. Capped at `MAX_PIN_ID` (256)
+    /// bytes on decode.
     pub pin_id: String,
 }
 

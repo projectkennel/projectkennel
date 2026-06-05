@@ -44,13 +44,13 @@ A rough sense of scale — far more specification than code, and the code that e
 
 | Artefact | Size |
 |---|---|
-| Design docs ([`docs/design/`](docs/design/), 27 files) | ≈ 65,600 words |
-| Architecture docs ([`docs/architecture/`](docs/architecture/), 15 files) | ≈ 32,500 words |
-| Implementation — Rust (11 crates, tests included) | ≈ 21,700 SLOC |
-| Implementation — BPF (C: 8 programs + 3 shared headers) | ≈ 510 SLOC |
-| `unsafe` Rust — confined to `kennel-syscall` + `kennel-bpf` | ≈ 3,100 SLOC, ~100 `unsafe` blocks |
+| Design docs ([`docs/design/`](docs/design/), 27 files) | ≈ 67,500 words |
+| Architecture docs ([`docs/architecture/`](docs/architecture/), 15 files) | ≈ 36,700 words |
+| Implementation — Rust (12 crates, tests included) | ≈ 26,600 SLOC |
+| Implementation — BPF (C: 8 programs + 3 shared headers) | ≈ 545 SLOC |
+| `unsafe` Rust — confined to `kennel-syscall` + `kennel-bpf` | ≈ 3,400 SLOC, ~80 `unsafe` blocks |
 
-The other nine crates carry `#![forbid(unsafe_code)]`: the entire `unsafe` surface — raw syscalls, the Landlock/seccomp FFI, and the hand-rolled `bpf(2)` loader — is quarantined to two crates sized to be reviewable in one sitting ([supply-chain/UNSAFE-CRATES.md](supply-chain/UNSAFE-CRATES.md)).
+The other ten crates carry `#![forbid(unsafe_code)]`: the entire `unsafe` surface — raw syscalls, the Landlock/seccomp FFI, and the hand-rolled `bpf(2)` loader — is quarantined to two crates sized to be reviewable in one sitting ([supply-chain/UNSAFE-CRATES.md](supply-chain/UNSAFE-CRATES.md)).
 
 ## What is here
 
