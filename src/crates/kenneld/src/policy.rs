@@ -92,6 +92,7 @@ impl PolicyLoader for TrustStoreLoader {
         let exec_path = substituted.effective_policy.exec.path.clone();
         let shell = substituted.effective_policy.exec.shell.clone();
         let home_persist = substituted.effective_policy.fs.home_persist.clone();
+        let lifecycle = substituted.effective_policy.lifecycle.clone();
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
@@ -108,6 +109,7 @@ impl PolicyLoader for TrustStoreLoader {
             exec_path,
             shell,
             home_persist,
+            lifecycle,
         })
     }
 }

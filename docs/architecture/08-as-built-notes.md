@@ -357,12 +357,26 @@ describe these read as roadmap.
   built.** Both parse and fold up the template chain in the source policy but are dropped
   at translate (source-only) with no shim-construction step that overlays scrubbed files
   or writes the sanitised copy.
-- **TTL runtime enforcement** (`09-policy-lifecycle.md` §9.7) — **partial.** `ttl` /
-  `ttl_action` parse, translate, and are carried (signed) in the settled policy, but
-  nothing reads `ttl_seconds` to arm a timer. Code also owes the full action set: the
-  design specifies `exit | warn | renew`; the settled `TtlAction` enum is only
-  `stop | warn`. **Owed:** the enum reconciliation + the runtime reaper (SIGTERM→SIGKILL
-  / prompt).
+- **TTL runtime enforcement** (`09-policy-lifecycle.md` §9.7) — **BUILT** (less the
+  interactive renew prompt). The `TtlAction` enum is reconciled to the design's
+  `exit | warn | renew`, defaulting to `exit` (the source token `"stop"` is kept as a
+  backward-compatible alias for `exit`). The **runtime reaper** is armed in
+  `kenneld::server::run_kennel`: the final wait is now `Kennel::stop_with_ttl`, which —
+  when `ttl_seconds` is set — polls the workload while watching the deadline and acts at
+  expiry per `ttl_action`:
+  - `exit` — SIGTERM every cgroup member (`cgroup::terminate_cgroup`, reading
+    `cgroup.procs`), then SIGKILL the cgroup (`cgroup.kill`) if the workload is still
+    alive after the grace period (`TTL_GRACE`, 10s). The only action that ends the kennel.
+  - `warn` — emit `lifecycle.ttl-expired` (stage `warn`) once; leave it running.
+  - `renew` — emit `lifecycle.ttl-expired` (stage `renew`) once; leave it running.
+
+  Each milestone is reported via a callback that kenneld maps to the audit writer (and
+  stderr). The reaper acts on the live handle's own cgroup, so it never races a released
+  context (teardown runs only after the wait returns); with no `ttl` the wait stays a
+  single blocking `wait()`. **Still owed:** the `renew` action's *interactive* user-session
+  prompt (desktop notification / terminal) — kenneld is a daemon with no session channel,
+  so `renew` today behaves as a distinct, audited `warn`. Wiring a session-prompt IPC is
+  the remaining piece.
 - **`exec.deny` composition** (`07-1-exec.md` §7.1.4) — **BUILT.** `exec.deny` folds up
   the template chain (in `resolve`) and is now carried into the settled policy
   (`ExecPolicy.deny`, omitted from the canonical form when empty so existing signatures

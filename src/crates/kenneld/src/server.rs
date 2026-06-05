@@ -30,6 +30,10 @@ use crate::control::{self, KennelInfo, Request, Response, StartRequest};
 use crate::ctx::CtxAllocator;
 use crate::{cgroup, start, Privileged};
 
+/// Grace between the TTL reaper's SIGTERM and its SIGKILL for `ttl_action = "exit"`
+/// (§9.7): the workload gets this long to exit cleanly before the cgroup is killed.
+const TTL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A loaded, verified policy, split into the two artefacts kenneld applies.
 ///
 /// The kernel-enforcement [`Plan`] (seal + BPF) and the [`NetPolicy`] the
@@ -70,6 +74,9 @@ pub struct Loaded {
     /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
     /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
     pub home_persist: Vec<String>,
+    /// The lifecycle policy (§9.7): the optional TTL and what to do at expiry. Drives
+    /// the TTL reaper in `run_kennel`. `ttl_seconds = None` ⇒ no reaper armed.
+    pub lifecycle: kennel_policy::LifecyclePolicy,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -609,6 +616,12 @@ fn run_kennel<P, L>(
         // Home-relative paths exempt from dotfile reconstruction (§7.7.2a).
         home_persist: loaded.home_persist.clone(),
     });
+    // The TTL reaper inputs (§9.7), captured before `loaded` is consumed below.
+    let ttl = loaded
+        .lifecycle
+        .ttl_seconds
+        .map(std::time::Duration::from_secs);
+    let ttl_action = loaded.lifecycle.ttl_action;
     let spec = crate::Spec {
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
         ctx,
@@ -674,9 +687,26 @@ fn run_kennel<P, L>(
     }
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
-    // Block until the workload exits (on its own or via `stop`), then tear down.
-    // The audited privileged records the teardown's `del_address` refusals too.
-    let status = kennel.stop(&audited);
+    // Block until the workload exits (on its own, via `stop`, or via the TTL reaper),
+    // then tear down. With a `ttl` the wait polls so the reaper can act at expiry
+    // (§9.7); each milestone is recorded through the audit writer. The audited
+    // privileged records the teardown's `del_address` refusals too.
+    let ttl_writer = audit.as_ref();
+    let status = kennel.stop_with_ttl(&audited, ttl, ttl_action, TTL_GRACE, |ev| {
+        let stage = match ev {
+            crate::TtlEvent::Warned => "warn",
+            crate::TtlEvent::RenewRequested => "renew",
+            crate::TtlEvent::Terminating => "terminating",
+            crate::TtlEvent::Killed => "killed",
+        };
+        eprintln!(
+            "kenneld: kennel `{}` TTL elapsed (action {ttl_action:?}): {stage}",
+            req.kennel
+        );
+        if let Some(writer) = ttl_writer {
+            writer.emit(&crate::audit::ttl_expired(pid, stage));
+        }
+    });
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
         writer.emit(&crate::audit::kennel_exit("stopped"));
@@ -847,6 +877,10 @@ mod tests {
                 exec_path: Vec::new(),
                 shell: "/bin/sh".to_owned(),
                 home_persist: Vec::new(),
+                lifecycle: kennel_policy::LifecyclePolicy {
+                    ttl_seconds: None,
+                    ttl_action: kennel_policy::TtlAction::Exit,
+                },
             })
         }
     }

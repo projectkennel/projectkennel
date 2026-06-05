@@ -73,6 +73,33 @@ pub fn kill_cgroup(cgroup: &Path) -> io::Result<()> {
     std::fs::write(cgroup.join("cgroup.kill"), "1")
 }
 
+/// Send `SIGTERM` to **every** process in `cgroup` (a graceful request to exit).
+///
+/// Reads the member pids from `cgroup.procs`. Used by the TTL reaper (§9.7) for the
+/// polite first stage of `ttl_action = "exit"`, before the SIGKILL that
+/// [`kill_cgroup`] delivers after the grace period.
+///
+/// Unlike `cgroup.kill` (a single SIGKILL trigger), the kernel exposes no
+/// "SIGTERM the cgroup" file, so this enumerates `cgroup.procs` and signals each
+/// pid. The pids are members of nested PID namespaces but the values in
+/// `cgroup.procs` are in kenneld's namespace (the cgroupfs is namespace-flat), so
+/// they are the right numbers to `kill(2)`. Best-effort per pid: a process that
+/// exits between the read and the signal yields `ESRCH`, which is ignored.
+///
+/// # Errors
+/// An OS error if `cgroup.procs` cannot be read (e.g. the cgroup was already
+/// removed). Individual signal failures are swallowed (the process is already gone).
+pub fn terminate_cgroup(cgroup: &Path) -> io::Result<()> {
+    let procs = std::fs::read_to_string(cgroup.join("cgroup.procs"))?;
+    for line in procs.lines() {
+        if let Ok(pid) = line.trim().parse::<u32>() {
+            // Best-effort: ESRCH (already gone) is fine.
+            let _ = kennel_syscall::signal::terminate(pid);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +158,38 @@ mod tests {
             "1"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminate_cgroup_sigterms_every_member() {
+        // Against a stand-in `cgroup.procs` listing a real, live child: the helper must
+        // SIGTERM each pid it lists. We use a `sleep` whose pid we write into the file.
+        let dir = std::env::temp_dir().join(format!("kennel-cgterm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        // A live pid plus a stale one (already-gone): the stale pid's ESRCH is ignored.
+        std::fs::write(
+            dir.join("cgroup.procs"),
+            format!("{}\n2147483646\n", child.id()),
+        )
+        .expect("write procs");
+        terminate_cgroup(&dir).expect("terminate members");
+        let status = child.wait().expect("wait");
+        assert!(
+            !status.success(),
+            "the SIGTERMed sleep must not exit cleanly"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminate_cgroup_missing_procs_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("kennel-cgterm-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(terminate_cgroup(&dir).is_err(), "no cgroup.procs ⇒ Err");
     }
 }

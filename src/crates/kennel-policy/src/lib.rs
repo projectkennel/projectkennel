@@ -196,7 +196,7 @@ mod tests {
                 },
                 lifecycle: LifecyclePolicy {
                     ttl_seconds: Some(3600),
-                    ttl_action: TtlAction::Stop,
+                    ttl_action: TtlAction::Exit,
                 },
             },
             provenance: Provenance {

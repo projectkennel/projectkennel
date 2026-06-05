@@ -66,14 +66,20 @@ pub enum SeccompAction {
     KillProcess,
 }
 
-/// What to do when a kennel's TTL expires.
+/// What to do when a kennel's TTL expires (`docs/design/09-policy-lifecycle.md` §9.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TtlAction {
-    /// Send SIGTERM, then SIGKILL after a grace period.
-    Stop,
+    /// Terminate the kennel cleanly: SIGTERM the workload, then SIGKILL after a grace
+    /// period. The default for a policy that sets a `ttl` without an action.
+    Exit,
     /// Leave the workload running; emit an audit event only.
     Warn,
+    /// Request renewal: emit a renewal-requested audit event and leave the workload
+    /// running. The interactive user-session prompt (notification/terminal) is the
+    /// remaining piece — kenneld is a daemon with no session channel — so today this
+    /// behaves as a distinct, louder `warn`. See `08-as-built-notes.md §8.1`.
+    Renew,
 }
 
 /// One network allow/deny rule: a CIDR plus a port range and protocol.

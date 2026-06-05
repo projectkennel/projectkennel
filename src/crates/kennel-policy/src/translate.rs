@@ -674,12 +674,15 @@ fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyErro
         Some(s) => Some(parse_duration_secs(s)?),
         None => None,
     };
+    // §9.7: exit | warn | renew, defaulting to exit. "stop" is accepted as a
+    // backward-compatible alias for "exit" (the token earlier builds shipped).
     let ttl_action = match lc.and_then(|l| l.ttl_action.as_deref()) {
-        Some("stop") => TtlAction::Stop,
-        Some("warn") | None => TtlAction::Warn,
+        Some("exit" | "stop") | None => TtlAction::Exit,
+        Some("warn") => TtlAction::Warn,
+        Some("renew") => TtlAction::Renew,
         Some(other) => {
             return Err(translation(format!(
-                "ttl_action `{other}` is not stop/warn"
+                "ttl_action `{other}` is not exit/warn/renew"
             )))
         }
     };
@@ -1018,7 +1021,9 @@ mod tests {
         // The glob dir grant re-exposes sudo; Landlock cannot subtract ⇒ advisory warn.
         let w = ep.deny_warnings();
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w.first().is_some_and(|s| s.contains("falls inside allowed directory")));
+        assert!(w
+            .first()
+            .is_some_and(|s| s.contains("falls inside allowed directory")));
     }
 
     #[test]
@@ -1027,7 +1032,9 @@ mod tests {
         let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
         let w = ep.deny_warnings();
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w.first().is_some_and(|s| s.contains("execution is permissive")));
+        assert!(w
+            .first()
+            .is_some_and(|s| s.contains("execution is permissive")));
     }
 
     #[test]
@@ -1290,9 +1297,9 @@ mod tests {
             .deny_invariant
             .iter()
             .any(|r| r.cidr == "10.0.0.0" && r.prefix_len == 8));
-        // 2h TTL, stop.
+        // 2h TTL, "stop" (the backward-compat alias for exit).
         assert_eq!(t.effective_policy.lifecycle.ttl_seconds, Some(7_200));
-        assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Stop);
+        assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Exit);
     }
 
     #[test]
