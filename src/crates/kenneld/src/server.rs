@@ -989,6 +989,7 @@ mod tests {
                 bind_allowed_ports: Vec::new(),
                 file_binds: Vec::new(),
                 supplementary_groups: None,
+                ulimits: Vec::new(),
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,

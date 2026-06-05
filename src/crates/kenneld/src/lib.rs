@@ -1103,6 +1103,7 @@ mod tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         }
     }
 
@@ -1547,6 +1548,7 @@ mod tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: Some(vec![granted_gid]),
+            ulimits: Vec::new(),
         }
     }
 }

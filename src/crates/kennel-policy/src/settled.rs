@@ -807,6 +807,54 @@ impl EnvRuntime {
     }
 }
 
+/// The `setrlimit(2)` resources a policy may name in `[ulimits]`, as their short
+/// policy names.
+///
+/// The spawn layer maps each to its `RLIMIT_*` constant; the translator validates
+/// against this list so a typo is a compile error. Kept here (the pure crate) so
+/// policy and spawn share one source of truth — a spawn-side test asserts every name
+/// maps to a resource.
+pub const ULIMIT_RESOURCES: &[&str] = &[
+    "as",
+    "core",
+    "cpu",
+    "data",
+    "fsize",
+    "locks",
+    "memlock",
+    "msgqueue",
+    "nice",
+    "nofile",
+    "nproc",
+    "rtprio",
+    "rttime",
+    "sigpending",
+    "stack",
+];
+
+/// The per-kennel resource limits (`[ulimits]`, §7.2).
+///
+/// A *service* input applied via `setrlimit(2)` in the seal, not a kernel-enforcement
+/// object. Each value is the normalised `soft` (when `soft == hard`) or `"soft hard"`
+/// form, every token either a decimal string or the literal `unlimited`. Omitted from
+/// the canonical form when empty, so a policy with no `[ulimits]` signs as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UlimitsRuntime {
+    /// Resource name → normalised limit. Sorted (`BTreeMap`) for a deterministic
+    /// canonical form.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub limits: BTreeMap<String, String>,
+}
+
+impl UlimitsRuntime {
+    /// Whether no limits are set (omitted from the canonical form).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.limits.is_empty()
+    }
+}
+
 /// The settled policy body (everything the signature covers).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -849,6 +897,11 @@ pub struct SettledPolicy {
     /// signs exactly as before.
     #[serde(default, skip_serializing_if = "EnvRuntime::is_empty")]
     pub env: EnvRuntime,
+    /// The per-kennel resource limits (§7.2). A table like [`env`](Self::env) and
+    /// declared after it; omitted from the canonical form when empty, so a policy with
+    /// no `[ulimits]` signs exactly as before.
+    #[serde(default, skip_serializing_if = "UlimitsRuntime::is_empty")]
+    pub ulimits: UlimitsRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

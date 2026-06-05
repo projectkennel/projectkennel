@@ -377,6 +377,7 @@ fn spawn_inner(
     let landlock_fs = plan.landlock_fs.clone();
     let landlock_net = plan.landlock_net.clone();
     let supplementary_groups = plan.supplementary_groups.clone();
+    let ulimits = plan.ulimits.clone();
     let does_mount = seal_ns.contains(Namespaces::MOUNT);
 
     // The **inner seal** — the irreversible confinement that must run in the process
@@ -439,7 +440,14 @@ fn spawn_inner(
             Some(rs) => rs,
             None => build_ruleset(&landlock_fs, &landlock_net, true)?,
         };
-        rs.restrict_current_process()
+        rs.restrict_current_process()?;
+        // Resource limits last (§7.2): after the Landlock ruleset is built, so
+        // lowering `RLIMIT_NOFILE` cannot starve the per-path rule opens, and just
+        // before `execve` so the workload inherits exactly the policy's limits.
+        for (resource, soft, hard) in &ulimits {
+            kennel_syscall::process::set_rlimit(*resource, *soft, *hard)?;
+        }
+        Ok(())
     };
 
     // The **outer seal** runs in the child std forks. It does the once-only setup
@@ -964,6 +972,7 @@ mod tests {
             identity: kennel_policy::IdentityRuntime::default(),
             audit: kennel_policy::AuditRuntime::default(),
             env: kennel_policy::EnvRuntime::default(),
+            ulimits: kennel_policy::UlimitsRuntime::default(),
         }
     }
 
@@ -1048,6 +1057,48 @@ mod tests {
         assert!(
             matches!(&err, SpawnError::UnsubstitutedPlaceholder { field, .. } if field == "fs.read"),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn every_ulimit_resource_name_maps_to_a_kernel_resource() {
+        // Lock-step with the policy crate's accepted names: a name translate admits
+        // must resolve to a Resource here, or a valid policy would fail at spawn.
+        for name in kennel_policy::ULIMIT_RESOURCES {
+            assert!(
+                kennel_syscall::process::resource_by_name(name).is_some(),
+                "policy accepts ulimit `{name}` but spawn cannot map it"
+            );
+        }
+    }
+
+    #[test]
+    fn ulimits_flow_from_policy_into_the_plan() {
+        use kennel_syscall::process::{Resource, RLIM_INFINITY};
+        let mut p = policy_with_placeholders();
+        p.ulimits
+            .limits
+            .insert("nofile".to_owned(), "8192".to_owned());
+        p.ulimits
+            .limits
+            .insert("cpu".to_owned(), "unlimited".to_owned());
+        p.ulimits
+            .limits
+            .insert("nproc".to_owned(), "256 512".to_owned());
+        let p = substitute(&p, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let find = |r: Resource| plan.ulimits.iter().find(|(res, _, _)| *res == r).copied();
+        assert_eq!(
+            find(Resource::RLIMIT_NOFILE),
+            Some((Resource::RLIMIT_NOFILE, 8192, 8192))
+        );
+        assert_eq!(
+            find(Resource::RLIMIT_CPU),
+            Some((Resource::RLIMIT_CPU, RLIM_INFINITY, RLIM_INFINITY))
+        );
+        assert_eq!(
+            find(Resource::RLIMIT_NPROC),
+            Some((Resource::RLIMIT_NPROC, 256, 512))
         );
     }
 
@@ -1488,6 +1539,7 @@ mod tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         }
     }
 
@@ -1620,6 +1672,7 @@ mod tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         // Granted file readable through $HOME; the non-granted sibling's name absent;
@@ -1721,6 +1774,7 @@ mod tests {
             // The setgroups field is unused on the userns path; the handshake carries
             // the group grant instead.
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -1862,6 +1916,7 @@ mod root_tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -1940,6 +1995,7 @@ mod root_tests {
             bind_allowed_ports: Vec::new(),
             file_binds: vec![(src.clone(), target.clone()), (src, missing)],
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/cat");
@@ -2038,6 +2094,7 @@ mod root_tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         // Granted file readable through $HOME, and the non-granted sibling's name
@@ -2110,6 +2167,7 @@ mod root_tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         }
     }
 
@@ -2212,6 +2270,7 @@ mod root_tests {
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/cat");

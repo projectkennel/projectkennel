@@ -57,7 +57,8 @@ pub use settled::{
     EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode,
     NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
     ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant,
-    SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime, UnixSocket,
+    SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
+    ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
@@ -218,6 +219,7 @@ mod tests {
             identity: settled::IdentityRuntime::default(),
             audit: settled::AuditRuntime::default(),
             env: settled::EnvRuntime::default(),
+            ulimits: settled::UlimitsRuntime::default(),
         }
     }
 
@@ -279,6 +281,44 @@ mod tests {
         if let Some(rule) = tampered.policy.effective_policy.net.allow_names.first_mut() {
             rule.name = "evil.example.com".to_owned();
         }
+        let bytes = to_bytes(&tampered).expect("serialise");
+        let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
+        assert!(
+            matches!(err, PolicyError::Signature(SignatureError::Verification)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ulimits_round_trip_and_are_signature_bound() {
+        let key = signing_key();
+        let mut policy = sample_policy();
+        policy
+            .ulimits
+            .limits
+            .insert("nofile".to_owned(), "8192".to_owned());
+        policy
+            .ulimits
+            .limits
+            .insert("nproc".to_owned(), "256 512".to_owned());
+
+        // The limits survive a sign → serialise → verify round trip…
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert_eq!(verified.ulimits, policy.ulimits);
+
+        // …and they are inside the signed canonical form (tampering breaks it).
+        let canon =
+            String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(canon.contains("nofile"), "ulimit is in the canonical form");
+
+        let mut tampered = doc;
+        tampered
+            .policy
+            .ulimits
+            .limits
+            .insert("nofile".to_owned(), "999999".to_owned());
         let bytes = to_bytes(&tampered).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
         assert!(

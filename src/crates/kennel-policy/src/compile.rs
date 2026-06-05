@@ -297,6 +297,7 @@ fn assemble(
         identity: translated.identity.clone(),
         audit: translated.audit.clone(),
         env: translated.env.clone(),
+        ulimits: translated.ulimits.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),
             schema_version: SETTLED_SCHEMA_VERSION,

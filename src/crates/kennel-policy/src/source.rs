@@ -123,6 +123,13 @@ pub struct SourcePolicy {
     /// Audit section (`[audit]` and `[audit.*]`) — sinks and per-class levels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditSection>,
+    /// Resource limits (`[ulimits]`) — a table of `name = "value"` pairs applied via
+    /// `setrlimit(2)` in the seal. Nothing is set by default. The name is a short
+    /// `setrlimit` resource (`nofile`, `nproc`, `as`, `cpu`, …); the value is `soft`,
+    /// or `"soft:hard"`, each a number (with optional `K`/`M`/`G`) or `"unlimited"`.
+    /// Validated at translate time; folds per-key like `[env].set`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ulimits: Option<BTreeMap<String, String>>,
 }
 
 /// `[audit]`: sink selection, per-class levels, and per-sink tuning
@@ -1208,6 +1215,16 @@ mod tests {
             .published_ports
             .iter()
             .all(|p| !is_blank(p.reason.as_deref())));
+    }
+
+    #[test]
+    fn ulimits_section_parses_into_a_name_value_map() {
+        let src = "template_name = \"x\"\n\n[ulimits]\nnofile = \"8192\"\nas = \"4G\"\ncpu = \"unlimited\"\n";
+        let pol = parse(src.as_bytes()).expect("parse");
+        let ulimits = pol.ulimits.expect("ulimits");
+        assert_eq!(ulimits.get("nofile").map(String::as_str), Some("8192"));
+        assert_eq!(ulimits.get("as").map(String::as_str), Some("4G"));
+        assert_eq!(ulimits.get("cpu").map(String::as_str), Some("unlimited"));
     }
 
     #[test]

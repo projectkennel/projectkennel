@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use kennel_syscall::landlock::{AccessFs, AccessNet};
 use kennel_syscall::namespace::Namespaces;
+use kennel_syscall::process::{Resource, RLIM_INFINITY};
 use kennel_syscall::seccomp::{Action, Filter};
 
 use kennel_policy::{NetMode, NetRule, Protocol, SeccompAction, SettledPolicy};
@@ -198,6 +199,32 @@ fn write_access() -> AccessFs {
         | AccessFs::TRUNCATE
 }
 
+/// Parse a settled `[ulimits]` value into `(soft, hard)`. The translator normalised
+/// it to one whitespace-separated token (`soft == hard`) or two (`soft hard`), each a
+/// decimal or the literal `unlimited` (→ [`RLIM_INFINITY`]). A malformed value here is
+/// a compiler bug, surfaced as an invalid-policy error.
+fn parse_ulimit_value(name: &str, value: &str) -> Result<(u64, u64), SpawnError> {
+    let bad =
+        || SpawnError::InvalidPolicy(format!("ulimit `{name}` has a malformed value `{value}`"));
+    let token = |t: &str| -> Result<u64, SpawnError> {
+        if t == "unlimited" {
+            Ok(RLIM_INFINITY)
+        } else {
+            t.parse::<u64>().map_err(|_| bad())
+        }
+    };
+    let mut parts = value.split_whitespace();
+    let soft = token(parts.next().ok_or_else(bad)?)?;
+    let hard = match parts.next() {
+        Some(h) => token(h)?,
+        None => soft,
+    };
+    if parts.next().is_some() {
+        return Err(bad());
+    }
+    Ok((soft, hard))
+}
+
 /// The kennel's egress proxy endpoint.
 ///
 /// The per-kennel loopback address(es) and TCP port its SOCKS5/HTTP proxy listens
@@ -360,6 +387,11 @@ pub struct Plan {
     /// non-kenneld path). The names are resolved to GIDs and membership-checked by
     /// kenneld (the host-runtime gate), so this carries only already-verified GIDs.
     pub supplementary_groups: Option<Vec<u32>>,
+    /// Resource limits applied via `setrlimit(2)` in the seal, just before `execve`
+    /// (after Landlock — lowering `RLIMIT_NOFILE` must not starve the rule-building
+    /// opens). Each entry is `(resource, soft, hard)`; [`RLIM_INFINITY`] is unlimited.
+    /// Derived from the settled `[ulimits]`; empty ⇒ nothing applied.
+    pub ulimits: Vec<(Resource, u64, u64)>,
 }
 
 impl Plan {
@@ -551,6 +583,19 @@ impl Plan {
             .filter_map(|name| kennel_syscall::seccomp::syscall_number(name))
             .collect();
 
+        // Resource limits (§7.2): map each settled `[ulimits]` entry to its
+        // `setrlimit` resource + numeric soft/hard. The translator already validated
+        // names and normalised values, so an unknown name here is a bug, surfaced as
+        // an invalid-policy error rather than silently dropped.
+        let mut ulimits: Vec<(Resource, u64, u64)> = Vec::new();
+        for (name, value) in &policy.ulimits.limits {
+            let resource = kennel_syscall::process::resource_by_name(name).ok_or_else(|| {
+                SpawnError::InvalidPolicy(format!("unknown ulimit resource `{name}`"))
+            })?;
+            let (soft, hard) = parse_ulimit_value(name, value)?;
+            ulimits.push((resource, soft, hard));
+        }
+
         let (bpf_allow_v4, bpf_allow_v6) = encode(&ep.net.allow)?;
         let (bpf_deny_v4, bpf_deny_v6) = encode(&ep.net.deny_invariant)?;
 
@@ -577,6 +622,7 @@ impl Plan {
             bind_allowed_ports: ep.net.bind_allowed_ports.clone(),
             file_binds: Vec::new(),
             supplementary_groups: None,
+            ulimits,
         })
     }
 

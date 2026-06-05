@@ -230,7 +230,21 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
         container: merge(&parent.container, &child.container, fold_container),
         audit: merge(&parent.audit, &child.audit, fold_audit),
+        ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
     }
+}
+
+/// Fold `[ulimits]` per-key: the child's entry for a resource overrides the
+/// parent's, other resources carry through (same model as `[env].set`).
+fn fold_ulimits(
+    parent: &std::collections::BTreeMap<String, String>,
+    child: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut m = parent.clone();
+    for (k, v) in child {
+        m.insert(k.clone(), v.clone());
+    }
+    m
 }
 
 // ---- generic combinators -------------------------------------------------------
@@ -592,6 +606,19 @@ mod tests {
     const AI_CODING_STRICT: &str =
         include_str!("../../../../templates/ai-coding-strict/policy.toml");
     const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
+
+    #[test]
+    fn fold_ulimits_is_per_key_child_overrides() {
+        let mut parent = std::collections::BTreeMap::new();
+        parent.insert("nofile".to_owned(), "1024".to_owned());
+        parent.insert("nproc".to_owned(), "256".to_owned());
+        let mut child = std::collections::BTreeMap::new();
+        child.insert("nofile".to_owned(), "8192".to_owned());
+        let folded = fold_ulimits(&parent, &child);
+        // child raises nofile; parent's nproc carries through untouched.
+        assert_eq!(folded.get("nofile").map(String::as_str), Some("8192"));
+        assert_eq!(folded.get("nproc").map(String::as_str), Some("256"));
+    }
 
     /// An in-memory [`TemplateSource`] backed by `(name, version) -> bytes`.
     struct MapSource(Vec<(String, String, Vec<u8>)>);

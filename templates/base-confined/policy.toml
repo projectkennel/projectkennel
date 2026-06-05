@@ -261,6 +261,16 @@ deny = [
     "personality",
 ]
 
+# --- Resource limits (off by default) ---------------------------------------
+# setrlimit(2) caps, applied in the seal. Nothing is set here; a derived template
+# or leaf opts in. Names are the short rlimit resources (nofile, nproc, as, cpu,
+# data, fsize, core, stack, memlock, …); values are "soft" or "soft:hard", each a
+# number (optional K/M/G) or "unlimited". Example:
+#   [ulimits]
+#   nofile = "8192"
+#   nproc  = "512"
+#   core   = "0"
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"

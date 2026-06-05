@@ -41,8 +41,8 @@ use crate::settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
     EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode,
     NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
-    SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UnixRuntime,
-    UnixSocket,
+    SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime,
+    UnixRuntime, UnixSocket,
 };
 use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
@@ -64,6 +64,8 @@ pub struct Translated {
     pub audit: AuditRuntime,
     /// The synthesised environment (§7.7.2) — the fixed `[env].set` vars.
     pub env: EnvRuntime,
+    /// The per-kennel resource limits (§7.2) — applied via `setrlimit` in the seal.
+    pub ulimits: UlimitsRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -107,6 +109,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let identity = translate_identity(effective)?;
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
+    let ulimits = translate_ulimits(effective)?;
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -123,8 +126,77 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         identity,
         audit,
         env,
+        ulimits,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.2). Each entry is a
+/// `setrlimit` resource name (validated against [`ULIMIT_RESOURCES`]) and a value of
+/// the form `soft` or `soft:hard`, every token a number (optional `K`/`M`/`G`, 1024-
+/// based) or `unlimited`. The value is normalised to the settled form `soft` (when
+/// `soft == hard`) or `"soft hard"`, each token a decimal or the literal `unlimited`.
+/// Nothing is set by default — an absent or empty `[ulimits]` yields an empty runtime.
+///
+/// # Errors
+///
+/// [`PolicyError::Translation`] on an unknown resource name or an unparseable value.
+fn translate_ulimits(src: &SourcePolicy) -> Result<UlimitsRuntime, PolicyError> {
+    let mut limits = std::collections::BTreeMap::new();
+    let Some(src_limits) = src.ulimits.as_ref() else {
+        return Ok(UlimitsRuntime::default());
+    };
+    for (name, value) in src_limits {
+        if !crate::settled::ULIMIT_RESOURCES.contains(&name.as_str()) {
+            return Err(translation(format!(
+                "unknown ulimit resource `{name}` (expected one of {})",
+                crate::settled::ULIMIT_RESOURCES.join(", ")
+            )));
+        }
+        let (soft, hard) = if let Some((s, h)) = value.split_once(':') {
+            (parse_rlim_token(name, s)?, parse_rlim_token(name, h)?)
+        } else {
+            let t = parse_rlim_token(name, value)?;
+            (t.clone(), t)
+        };
+        let normalised = if soft == hard {
+            soft
+        } else {
+            format!("{soft} {hard}")
+        };
+        limits.insert(name.clone(), normalised);
+    }
+    Ok(UlimitsRuntime { limits })
+}
+
+/// Parse one ulimit token — `unlimited`/`infinity`, or a number with an optional
+/// `K`/`M`/`G` (1024-based) suffix — into its normalised settled string (`"unlimited"`
+/// or a decimal). `field` names the resource for the error message.
+fn parse_rlim_token(field: &str, tok: &str) -> Result<String, PolicyError> {
+    let t = tok.trim();
+    if t.eq_ignore_ascii_case("unlimited") || t.eq_ignore_ascii_case("infinity") {
+        return Ok("unlimited".to_owned());
+    }
+    // Strip an optional 1024-based suffix; each is a distinct single char, so the
+    // first match wins. `find_map` over a table avoids an if-let/else chain.
+    let (num, mult): (&str, u64) = [('K', 1u64 << 10), ('M', 1u64 << 20), ('G', 1u64 << 30)]
+        .into_iter()
+        .find_map(|(c, m)| {
+            t.strip_suffix([c, c.to_ascii_lowercase()])
+                .map(|stripped| (stripped, m))
+        })
+        .unwrap_or((t, 1));
+    let base = num.trim().parse::<u64>().map_err(|_| {
+        translation(format!(
+            "ulimit `{field}` value `{tok}` is not a number (optional K/M/G) or `unlimited`"
+        ))
+    })?;
+    let scaled = base.checked_mul(mult).ok_or_else(|| {
+        translation(format!(
+            "ulimit `{field}` value `{tok}` overflows a 64-bit limit"
+        ))
+    })?;
+    Ok(scaled.to_string())
 }
 
 /// Flatten the source `[env].set` into the settled [`EnvRuntime`] (§7.7.2). The
@@ -856,6 +928,45 @@ mod tests {
             BASE_CONFINED.as_bytes().to_vec(),
         )])
     }
+    fn ulimits_src(pairs: &[(&str, &str)]) -> SourcePolicy {
+        let mut m = std::collections::BTreeMap::new();
+        for (k, v) in pairs {
+            m.insert((*k).to_owned(), (*v).to_owned());
+        }
+        SourcePolicy {
+            ulimits: Some(m),
+            ..SourcePolicy::default()
+        }
+    }
+
+    #[test]
+    fn ulimits_normalise_soft_hard_suffixes_and_unlimited() {
+        let src = ulimits_src(&[
+            ("nofile", "8192"),
+            ("as", "2G"),
+            ("cpu", "unlimited"),
+            ("nproc", "512:1024"),
+            ("memlock", "64K"),
+        ]);
+        let r = translate_ulimits(&src).expect("translate ulimits");
+        assert_eq!(r.limits.get("nofile").map(String::as_str), Some("8192"));
+        assert_eq!(r.limits.get("as").map(String::as_str), Some("2147483648"));
+        assert_eq!(r.limits.get("cpu").map(String::as_str), Some("unlimited"));
+        assert_eq!(r.limits.get("nproc").map(String::as_str), Some("512 1024"));
+        assert_eq!(r.limits.get("memlock").map(String::as_str), Some("65536"));
+    }
+
+    #[test]
+    fn ulimits_unknown_resource_is_rejected() {
+        let err = translate_ulimits(&ulimits_src(&[("bogus", "1")])).expect_err("must reject");
+        assert!(format!("{err:?}").contains("bogus"), "got {err:?}");
+    }
+
+    #[test]
+    fn ulimits_non_numeric_value_is_rejected() {
+        assert!(translate_ulimits(&ulimits_src(&[("nofile", "lots")])).is_err());
+    }
+
     fn translate_template(src: &str) -> Translated {
         let entry = parse(src.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &base_src()).expect("resolve");
@@ -1389,6 +1500,7 @@ mod tests {
             identity: t.identity,
             audit: t.audit,
             env: t.env,
+            ulimits: t.ulimits,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }

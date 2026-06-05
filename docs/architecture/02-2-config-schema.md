@@ -66,6 +66,7 @@ The full section list:
 | `[dbus]` | D-Bus session/system bus enablement and method filtering | §7.5 |
 | `[x11]` | X11/Wayland display server isolation | §7.6 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.7 |
+| `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.2 |
 | `[cap]` | Capabilities and `no_new_privs` | §7.7 |
 | `[seccomp]` | Seccomp filter | §7.7 |
 | `[proc]` | Procfs visibility and hidepid | §7.7 |

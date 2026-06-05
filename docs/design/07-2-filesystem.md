@@ -330,3 +330,33 @@ Each is a regression test in `tests/fs/`:
 15. Context attempts to write `/sys/kernel/security/...`; expect EACCES.
 
 Roughly 30 tests total in the full corpus; the list above captures the most important invariants.
+
+## 7.2.12 Resource limits (`[ulimits]`)
+
+A kennel may cap the workload's kernel resource limits via `[ulimits]` — a table of
+`setrlimit(2)` resources. Nothing is set by default; the section is available for a
+template or leaf that wants a belt-and-braces cap on fork bombs, fd exhaustion, runaway
+memory, or CPU.
+
+```toml
+[ulimits]
+nofile = "8192"        # soft = hard = 8192 open files
+nproc  = "256:512"     # soft 256, hard 512 processes
+as     = "4G"          # 4 GiB virtual-memory ceiling
+core   = "0"           # no core dumps
+cpu    = "unlimited"   # explicit no-limit
+```
+
+- **Names** are the short `setrlimit` resources: `as`, `core`, `cpu`, `data`, `fsize`,
+  `locks`, `memlock`, `msgqueue`, `nice`, `nofile`, `nproc`, `rtprio`, `rttime`,
+  `sigpending`, `stack`. An unknown name is a compile error.
+- **Values** are strings: `soft` (sets soft = hard) or `soft:hard`, each a number with an
+  optional `K`/`M`/`G` (1024-based) suffix, or `unlimited`.
+- **Composition** folds per-key up the template chain (like `[env].set`): a derived layer
+  overrides one resource and leaves the rest. The settled value is normalised to a decimal
+  (or `unlimited`) and carried in the signed artefact.
+- **Application** happens in the spawn seal via `setrlimit(2)`, *after* the Landlock ruleset
+  is built (so lowering `nofile` cannot starve the rule-building opens) and just before
+  `execve`, so the workload inherits exactly the policy's limits. Because the kennel runs
+  unprivileged, a limit can only *lower* the daemon's inherited hard ceiling; raising one
+  needs `CAP_SYS_RESOURCE` and otherwise fails the spawn closed.

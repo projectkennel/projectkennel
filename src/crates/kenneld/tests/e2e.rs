@@ -210,6 +210,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         identity: kennel_policy::IdentityRuntime::default(),
         audit: kennel_policy::AuditRuntime::default(),
         env: kennel_policy::EnvRuntime::default(),
+        ulimits: kennel_policy::UlimitsRuntime::default(),
     }
 }
 
