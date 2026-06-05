@@ -720,8 +720,22 @@ fn build_view_and_pivot(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::File::create(&dest)?;
-        mount::bind(node, &dest, false)?;
+        // A directory dev grant (e.g. `/dev/pts`) is a pty filesystem, not a node:
+        // mount a fresh, isolated `devpts` and symlink `/dev/ptmx -> pts/ptmx` so the
+        // workload can allocate ptys (the symlink resolves into the Landlock-granted
+        // `/dev/pts` subtree). Every other entry is a single node bound from the host.
+        if node.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+            mount::mount_devpts(&dest)?;
+            if node == Path::new("/dev/pts") {
+                let ptmx = under(Path::new("/dev/ptmx"));
+                let _ = std::fs::remove_file(&ptmx);
+                std::os::unix::fs::symlink("pts/ptmx", &ptmx)?;
+            }
+        } else {
+            std::fs::File::create(&dest)?;
+            mount::bind(node, &dest, false)?;
+        }
     }
 
     // 5. Fresh /proc (reflecting the PID namespace) and the private /tmp.
@@ -1260,6 +1274,49 @@ mod tests {
         )
         .expect_err("an allowlisted binary under a writable path must be rejected");
         assert!(matches!(err, SpawnError::InvalidPolicy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn glob_grants_bind_the_directory_root() {
+        // A `/**` or `/*` read/write/dev grant must bind its real directory root, not
+        // the literal glob (which has no inode → ENOENT at mount). Regression for the
+        // base-confined `/usr/**` / `/dev/pts/**` spawn failures.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.read.push("/opt/tools/**".to_owned());
+        p.effective_policy.fs.dev.allow = vec!["/dev/pts/**".to_owned()];
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        let view = plan
+            .view
+            .as_ref()
+            .expect("a policy-derived plan carries a view");
+        assert!(
+            view.binds
+                .iter()
+                .any(|b| b.source == Path::new("/opt/tools")),
+            "a `/opt/tools/**` grant binds the stripped root, got {:?}",
+            view.binds
+                .iter()
+                .map(|b| b.source.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !view
+                .binds
+                .iter()
+                .any(|b| b.source.to_string_lossy().contains('*')),
+            "no bind source may contain a glob"
+        );
+        assert!(
+            view.dev_allow.iter().any(|d| d == Path::new("/dev/pts")),
+            "a `/dev/pts/**` dev grant strips to /dev/pts, got {:?}",
+            view.dev_allow
+        );
     }
 
     #[test]
