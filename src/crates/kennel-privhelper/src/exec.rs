@@ -223,15 +223,21 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     Response::ok()
 }
 
-/// Pin this kennel's shared BPF maps under `/run/kennel/bpf/<pin_id>/`.
+/// Pin this kennel's shared BPF maps under `/run/kennel/bpf/<uid>/<pin_id>/`.
 ///
 /// The pins keep the maps alive after the helper exits and reachable by the
 /// unprivileged kenneld (which `BPF_OBJ_GET`s `audit_ringbuf` to drain, and which
-/// the owning user inspects with `bpftool`). Kennel is a **per-user** tool: the
-/// pin dir and pins are chowned to the **caller** and made owner-only (dir `0700`,
-/// pins `0600`) — no shared OS group. Other users cannot read them, and the shared
-/// bpffs root is mode `0711` (traverse-only), so they cannot even enumerate another
-/// user's kennels.
+/// the owning user inspects with `bpftool`).
+///
+/// Kennel is a **per-user** tool, and `pin_id` (the kennel name) is only unique
+/// *within* a user — so the pins are partitioned by the caller's **uid**, taken
+/// from the helper's real uid (never the wire). `<uid>/` is the isolation
+/// boundary: owner-only `0700`, owned by the caller. This makes per-user names
+/// non-colliding *and* keeps this root-privileged helper from ever touching
+/// another user's subtree (it only ever writes under its own caller's `<uid>/`).
+/// The per-kennel dir and pins are likewise owner-only (`0700`/`0600`, no OS
+/// group); the shared bpffs root is `0711` — traverse-but-not-list and, crucially,
+/// **not** other-writable, so a user cannot pre-create (squat) another's `<uid>/`.
 ///
 /// All steps are best-effort: any failure simply leaves the drain/inspection
 /// unavailable for this kennel; egress enforcement is unaffected. `pin_id` empty
@@ -247,15 +253,23 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
     if ensure_bpffs(base).is_err() {
         return;
     }
-    let dir = base.join(pin_id);
-    // Clear any stale pins from a prior kennel of the same id before re-pinning.
+    // Per-uid partition: the caller's real uid (the helper is setuid-root but its
+    // *real* uid is the invoking user). This both prevents same-name collisions
+    // across users and confines every write below to this caller's own subtree.
+    let caller_uid = kennel_syscall::unistd::real_uid();
+    let user_root = base.join(caller_uid.to_string());
+    // Create (or reuse) the per-user dir, owner-only. A pre-existing one can only be
+    // this user's own — the 0711 root denies other users the write needed to squat it.
+    let _ = std::fs::create_dir(&user_root);
+    let _ = std::os::unix::fs::chown(&user_root, Some(caller_uid), None);
+    let _ = set_mode(&user_root, 0o700);
+
+    let dir = user_root.join(pin_id);
+    // Clear any stale pins from a prior kennel of the same name (this user's own).
     let _ = clear_pin_dir(&dir);
     if std::fs::create_dir(&dir).is_err() {
         return;
     }
-    // Owner-only, owned by the caller (the user kenneld runs as): chown the uid and
-    // leave the group untouched — there is no kennel-wide OS group by design.
-    let caller_uid = kennel_syscall::unistd::real_uid();
     let _ = std::os::unix::fs::chown(&dir, Some(caller_uid), None);
     let _ = set_mode(&dir, 0o700);
 

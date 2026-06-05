@@ -205,7 +205,11 @@ fn pins_the_shared_maps_under_run_kennel_bpf() {
     std::fs::create_dir(&cgroup).expect("create cgroup");
 
     let pin_id = "kennel-pintest";
-    let pin_dir = std::path::PathBuf::from("/run/kennel/bpf").join(pin_id);
+    // Pins are partitioned by the caller's uid (root here, so uid 0).
+    let uid = kennel_syscall::unistd::real_uid();
+    let pin_dir = std::path::PathBuf::from("/run/kennel/bpf")
+        .join(uid.to_string())
+        .join(pin_id);
     let _ = std::fs::remove_dir_all(&pin_dir);
 
     let payload = EgressPayload {
