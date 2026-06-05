@@ -59,12 +59,12 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 
 ### nix
 
-- **Version:** =0.31.3 (exact pin), `default-features = false`, `features = ["user", "process"]`.
-- **Justification:** Safe, typed wrappers over the syscalls `kennel-syscall` would otherwise hand-roll `unsafe` — namespaces, mounts, `pivot_root`, credentials, `no_new_privs`, and the rest of the spawn sequence (`docs/design/08`). Per §4 ("don't roll your own `unsafe`"), a vetted, widely-used crate is preferable to our own FFI for these. Features are enabled pay-as-you-go as each wrapper lands, to keep the compiled surface (and transitive set) minimal; `process` (added for `set_no_new_privs`, `fork`/`waitpid` in tests) pulls no new crate.
+- **Version:** =0.31.3 (exact pin), `default-features = false`, `features = ["user", "process", "sched", "mount", "fs", "poll", "socket"]`.
+- **Justification:** Safe, typed wrappers over the syscalls `kennel-syscall` would otherwise hand-roll `unsafe` — namespaces, mounts, `pivot_root`, credentials, `no_new_privs`, and the rest of the spawn sequence (`docs/design/08`). Per §4 ("don't roll your own `unsafe`"), a vetted, widely-used crate is preferable to our own FFI for these. Features are enabled pay-as-you-go as each wrapper lands, to keep the compiled surface (and transitive set) minimal; `process` / `sched` / `mount` / `fs` pull no new crate. `poll` (for the cancellable `gid_map` handshake) pulls nothing. `socket` (for the SCM_RIGHTS fd-passing in `scm.rs` and the AF_NETLINK sockets in `netlink.rs`, replacing hand-rolled `sendmsg`/`recvmsg`/CMSG `unsafe`) pulls `memoffset`, which in turn build-depends on `autocfg`.
 - **Licence:** MIT.
-- **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/nix-rust/nix` at the published commit, tag v0.31.3. Transitives likewise (bitflags, cfg-if, cfg_aliases).
-- **Transitive deps added:** `bitflags` =2.11.1, `cfg-if` =1.0.4 (normal); `cfg_aliases` =0.2.1 (build-dependency of nix's `build.rs`). `libc` is shared with the direct dependency above. Each is vendored and recorded in `CHECKSUMS.toml` with its own GitHub-provenance check.
-- **Proc-macros / build.rs:** nix has a `build.rs` that uses `cfg_aliases` to define `cfg` aliases from the target; `cfg_aliases` is a small macro crate (no proc-macro). No proc-macros in this set. The reviewer should confirm nix's `build.rs` does only cfg-alias setup.
+- **Reviewer:** remco (2026-05-30; `poll`/`socket` features + memoffset/autocfg transitives 2026-06-05). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/nix-rust/nix` at the published commit, tag v0.31.3. Transitives likewise (bitflags, cfg-if, cfg_aliases, memoffset, autocfg).
+- **Transitive deps added:** `bitflags` =2.11.1, `cfg-if` =1.0.4, `memoffset` =0.9.1 (normal, the last via the `socket` feature); `cfg_aliases` =0.2.1 and `autocfg` =1.5.1 (build-dependencies — of nix's and memoffset's `build.rs` respectively). `libc` is shared with the direct dependency above. Each is vendored and recorded in `CHECKSUMS.toml` with its own GitHub-provenance check.
+- **Proc-macros / build.rs:** nix has a `build.rs` that uses `cfg_aliases` to define `cfg` aliases from the target; `memoffset` has a `build.rs` that uses `autocfg` to probe for `offset_of!`/const-fn support. Both `cfg_aliases` and `autocfg` are small build-only crates (no proc-macro, nothing ships in any binary). No proc-macros in this set.
 
 ### bitflags
 
