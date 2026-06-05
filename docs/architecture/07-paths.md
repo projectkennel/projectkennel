@@ -156,11 +156,11 @@ The installer creates `keys/`, `templates/`, and `policies/` (it does **not** cr
 * **`system.toml`** (deployment, integrity-sensitive) resolves from **root-owned dirs only** — `/usr/lib/kennel` (vendor) then `/etc/kennel` (admin). It is deliberately **not** read from the user's `~/.config`, and honours no environment override: `kenneld` runs as the user, so letting the user redirect `trust_dir` would defeat policy signing. Each helper binary defaults to `<libexec_dir>/<name>`; an explicit per-binary key overrides one.
 * **`config.toml`** (CLI conveniences — template and key *search* dirs) resolves from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`. Safe to be user-writable: it only steers where the CLI looks while authoring; the daemon re-verifies against the locked `system.toml` `trust_dir` at run.
 
-The per-*user* loopback allocation — the 12-bit IPv4 `tag` and the 40-bit IPv6 ULA `gid` — is **not** in either file; it lives in `/etc/kennel/subkennel` (`<uid>:<tag>:<gid>:<namespace>`), kernel-trusted, and the daemon loads it from there to fill `<tag>`/`<gid>` at spawn.
+The per-*user* loopback allocation — the 12-bit IPv4 `tag` and the 40-bit IPv6 ULA `gid` — is **not** in either file; it lives in `/etc/kennel/subkennel` (`<uid>:<tag>:<gid>:<namespace>`), kernel-trusted, and the daemon loads it from there to fill `<tag>`/`<gid>` at spawn. `kennel subkennel add` generates a valid line (collision-free `tag`/`gid`); the `<namespace>` defaults to `kennel-<user>`.
 
 ### `/sys/fs/cgroup/<namespace>/`
 
-Project Kennel's cgroup hierarchy. `<namespace>` is the caller's resource namespace from their `/etc/kennel/subkennel` allocation (default `kennel`), and the per-kennel leaf is keyed by the numeric context byte `<ctx>`, not the kennel name — so the default-install path is `/sys/fs/cgroup/kennel/<ctx>/`.
+Project Kennel's cgroup hierarchy. `<namespace>` is the caller's resource namespace from their `/etc/kennel/subkennel` allocation (default `kennel-<user>`), and the per-kennel leaf is keyed by the numeric context byte `<ctx>`, not the kennel name.
 
 ```
 /sys/fs/cgroup/<namespace>/

@@ -46,8 +46,9 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some((cmd, rest)) if cmd == "validate" => validate(rest),
         Some((cmd, rest)) if cmd == "sign" => sign(rest),
         Some((cmd, rest)) if cmd == "keygen" => keygen(rest),
+        Some((cmd, rest)) if cmd == "subkennel" => subkennel(rest),
         Some((cmd, rest)) if cmd == "audit" => audit(rest),
-        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K | kennel keygen <key-id> [--dir D] [--force] | kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]".to_owned()),
+        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K | kennel keygen <key-id> [--dir D] [--force] | kennel subkennel <add|check> [...] | kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]".to_owned()),
     }
 }
 
@@ -947,6 +948,290 @@ fn write_secret(path: &Path, text: &str, mode: u32) -> io::Result<()> {
     f.write_all(b"\n")?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
     Ok(())
+}
+
+/// The system per-user allocation file.
+const SUBKENNEL_FILE: &str = "/etc/kennel/subkennel";
+
+/// Largest valid `tag` — the 12-bit IPv4 `/20` selector. Tag 0 is reserved (its
+/// `/20`, `127.0.0.0/20`, contains `127.0.0.1`). Mirrors
+/// `kennel-privhelper::validate::TAG_MAX`; the format is `kennel-privhelper::alloc`.
+const SUBKENNEL_TAG_MAX: u16 = 0x0FFF;
+
+/// One parsed `/etc/kennel/subkennel` allocation (`uid:tag:gid:namespace`).
+struct Alloc {
+    uid: u32,
+    tag: u16,
+    gid_hex: String,
+    namespace: String,
+}
+
+/// `kennel subkennel <add|check> ...` — manage the per-user allocation file. A user
+/// with no (or a malformed) line cannot start kenneld, so `add` generates a
+/// provably-valid line (collision-free `tag`/`gid`) and `check` validates the file.
+fn subkennel(args: &[String]) -> Result<ExitCode, String> {
+    match args.split_first() {
+        Some((cmd, rest)) if cmd == "add" => subkennel_add(rest),
+        Some((cmd, rest)) if cmd == "check" => subkennel_check(rest),
+        _ => Err("usage: kennel subkennel add [--uid N] [--namespace NS] [--tag N] [--file PATH] | kennel subkennel check [--uid N] [--file PATH]".to_owned()),
+    }
+}
+
+/// Parse a subkennel line into an [`Alloc`], matching `kennel-privhelper::alloc`
+/// (first four `:`-separated fields; extra fields ignored, as the daemon does).
+fn parse_alloc_line(line: &str) -> Result<Alloc, String> {
+    let mut f = line.split(':');
+    let uid = f
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or("field 1 (uid) is not a number")?;
+    let tag = f
+        .next()
+        .ok_or("missing field 2 (tag)")?
+        .parse::<u16>()
+        .map_err(|_| "field 2 (tag) is not a number".to_owned())?;
+    if tag > SUBKENNEL_TAG_MAX {
+        return Err(format!(
+            "tag {tag} exceeds the 12-bit max {SUBKENNEL_TAG_MAX}"
+        ));
+    }
+    let gid_hex = f.next().ok_or("missing field 3 (gid)")?;
+    if gid_hex.len() != 10 || u64::from_str_radix(gid_hex, 16).is_err() {
+        return Err("field 3 (gid) must be exactly 10 hex digits".to_owned());
+    }
+    let namespace = f.next().ok_or("missing field 4 (namespace)")?;
+    if namespace.is_empty() {
+        return Err("field 4 (namespace) is empty".to_owned());
+    }
+    Ok(Alloc {
+        uid,
+        tag,
+        gid_hex: gid_hex.to_owned(),
+        namespace: namespace.to_owned(),
+    })
+}
+
+/// Parse a subkennel file: the valid allocations, and the malformed lines (with
+/// their 1-based line number and reason) for `check` to report.
+fn parse_subkennel(text: &str) -> (Vec<Alloc>, Vec<(usize, String, String)>) {
+    let mut ok = Vec::new();
+    let mut bad = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match parse_alloc_line(line) {
+            Ok(a) => ok.push(a),
+            Err(reason) => bad.push((i.saturating_add(1), raw.to_owned(), reason)),
+        }
+    }
+    (ok, bad)
+}
+
+/// The username for the default namespace (`kennel-<user>`). The CLI is not setuid,
+/// so reading `$USER` is fine here (the privhelper, which is, never does this — the
+/// namespace is stored in the file precisely so the helper needs no lookup). Falls
+/// back to the uid when `$USER` is unset/unusable.
+fn default_user_label(uid: u32) -> String {
+    std::env::var("USER")
+        .ok()
+        .filter(|s| !s.is_empty() && !s.contains(':'))
+        .unwrap_or_else(|| uid.to_string())
+}
+
+/// `kennel subkennel add [--uid N] [--namespace NS] [--tag N] [--file PATH]`
+///
+/// Generate a valid allocation line for a user (default: the current uid). The
+/// namespace defaults to `kennel-<user>`; `--namespace` only overrides it. The `tag`
+/// is the lowest free 12-bit value (from 1; 0 is reserved) unless `--tag` is given,
+/// and the `gid` is a fresh random 40-bit ULA id — both checked against existing
+/// lines so two users never collide. Prints the line plus the exact `sudo` command
+/// to append it (the file is root-owned, so the CLI never writes it itself).
+fn subkennel_add(args: &[String]) -> Result<ExitCode, String> {
+    let mut uid: Option<u32> = None;
+    let mut namespace: Option<String> = None;
+    let mut tag_override: Option<u16> = None;
+    let mut file = PathBuf::from(SUBKENNEL_FILE);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--uid" => {
+                uid = Some(
+                    it.next()
+                        .ok_or("--uid needs a value")?
+                        .parse()
+                        .map_err(|_| "--uid must be a number".to_owned())?,
+                );
+            }
+            "--namespace" => {
+                namespace = Some(it.next().ok_or("--namespace needs a value")?.clone())
+            }
+            "--tag" => {
+                tag_override = Some(
+                    it.next()
+                        .ok_or("--tag needs a value")?
+                        .parse()
+                        .map_err(|_| {
+                            format!("--tag must be a number in 1..={SUBKENNEL_TAG_MAX}")
+                        })?,
+                );
+            }
+            "--file" => file = it.next().ok_or("--file needs a value")?.into(),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            _ => return Err("kennel subkennel add takes no positional arguments".to_owned()),
+        }
+    }
+    let uid = uid.unwrap_or_else(kennel_syscall::unistd::real_uid);
+
+    // Existing allocations (an absent file just means none yet).
+    let existing = std::fs::read_to_string(&file).unwrap_or_default();
+    let (allocs, _bad) = parse_subkennel(&existing);
+    if let Some(a) = allocs.iter().find(|a| a.uid == uid) {
+        return Err(format!(
+            "uid {uid} already has an allocation in {} (`{}:{}:{}:{}`); kenneld uses the first \
+             line for a uid, so edit that line instead of adding another",
+            file.display(),
+            a.uid,
+            a.tag,
+            a.gid_hex,
+            a.namespace
+        ));
+    }
+    let used_tags: std::collections::BTreeSet<u16> = allocs.iter().map(|a| a.tag).collect();
+    let tag = match tag_override {
+        Some(0) => return Err("tag 0 is reserved (its /20 contains 127.0.0.1)".to_owned()),
+        Some(t) if t > SUBKENNEL_TAG_MAX => {
+            return Err(format!(
+                "tag {t} exceeds the 12-bit max {SUBKENNEL_TAG_MAX}"
+            ))
+        }
+        Some(t) if used_tags.contains(&t) => {
+            return Err(format!("tag {t} is already allocated to another user"))
+        }
+        Some(t) => t,
+        None => (1..=SUBKENNEL_TAG_MAX)
+            .find(|t| !used_tags.contains(t))
+            .ok_or("no free tag remains (all 4095 are allocated)")?,
+    };
+
+    // A fresh random 40-bit ULA id, not colliding with an existing one.
+    let used_gids: std::collections::BTreeSet<&str> =
+        allocs.iter().map(|a| a.gid_hex.as_str()).collect();
+    let gid_hex = loop {
+        let mut g = [0u8; 5];
+        kennel_syscall::random::fill(&mut g).map_err(|e| format!("reading OS randomness: {e}"))?;
+        if g == [0u8; 5] {
+            continue; // avoid the degenerate all-zero ULA id
+        }
+        let hex = format!(
+            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+            g[0], g[1], g[2], g[3], g[4]
+        );
+        if !used_gids.contains(hex.as_str()) {
+            break hex;
+        }
+    };
+
+    let namespace = namespace.unwrap_or_else(|| format!("kennel-{}", default_user_label(uid)));
+    if namespace.is_empty() || namespace.contains(':') {
+        return Err("namespace must be non-empty and contain no `:`".to_owned());
+    }
+
+    let line = format!("{uid}:{tag}:{gid_hex}:{namespace}");
+    // The line we emit must parse back identically — a guard against a future format slip.
+    parse_alloc_line(&line)
+        .map_err(|e| format!("internal: generated a line that does not parse ({e})"))?;
+
+    eprintln!("allocation for uid {uid}: tag {tag}, gid {gid_hex}, namespace `{namespace}`");
+    println!("{line}");
+    eprintln!();
+    eprintln!("Install it into the root-owned allocation file, then (re)start the daemon:");
+    eprintln!(
+        "  echo '{line}' | sudo tee -a {} >/dev/null",
+        file.display()
+    );
+    eprintln!("  systemctl --user restart kenneld.socket");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel subkennel check [--uid N] [--file PATH]`
+///
+/// Validate the allocation file: report every malformed line and any duplicate
+/// `uid`/`tag`/`gid` (which would silently shadow or collide), then the named user's
+/// status. Exits non-zero if that user has no valid allocation — i.e. kenneld would
+/// refuse to start for them.
+fn subkennel_check(args: &[String]) -> Result<ExitCode, String> {
+    let mut uid: Option<u32> = None;
+    let mut file = PathBuf::from(SUBKENNEL_FILE);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--uid" => {
+                uid = Some(
+                    it.next()
+                        .ok_or("--uid needs a value")?
+                        .parse()
+                        .map_err(|_| "--uid must be a number".to_owned())?,
+                );
+            }
+            "--file" => file = it.next().ok_or("--file needs a value")?.into(),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            _ => return Err("kennel subkennel check takes no positional arguments".to_owned()),
+        }
+    }
+    let uid = uid.unwrap_or_else(kennel_syscall::unistd::real_uid);
+    let text = std::fs::read_to_string(&file).map_err(|e| {
+        format!(
+            "reading {}: {e} (run `kennel subkennel add`)",
+            file.display()
+        )
+    })?;
+    let (allocs, bad) = parse_subkennel(&text);
+
+    for (n, raw, reason) in &bad {
+        eprintln!("line {n}: MALFORMED — {reason}: {raw}");
+    }
+    // Duplicates: the daemon takes the first line per uid; collisions break isolation.
+    report_dups("uid", allocs.iter().map(|a| a.uid.to_string()));
+    report_dups("tag", allocs.iter().map(|a| a.tag.to_string()));
+    report_dups("gid", allocs.iter().map(|a| a.gid_hex.clone()));
+
+    eprintln!(
+        "{}: {} valid allocation(s), {} malformed line(s)",
+        file.display(),
+        allocs.len(),
+        bad.len()
+    );
+    allocs.iter().find(|a| a.uid == uid).map_or_else(
+        || {
+            Err(format!(
+                "uid {uid}: NO valid allocation — kenneld will refuse to start for this user; \
+                 run `kennel subkennel add`"
+            ))
+        },
+        |a| {
+            eprintln!(
+                "uid {uid}: OK — tag {}, gid {}, namespace `{}`",
+                a.tag, a.gid_hex, a.namespace
+            );
+            Ok(ExitCode::SUCCESS)
+        },
+    )
+}
+
+/// Warn about repeated values in `field` (uid/tag/gid).
+fn report_dups(field: &str, values: impl Iterator<Item = String>) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut dup = std::collections::BTreeSet::new();
+    for v in values {
+        if !seen.insert(v.clone()) {
+            dup.insert(v);
+        }
+    }
+    for v in dup {
+        eprintln!("warning: duplicate {field} `{v}` — only the first line is used; the rest are dead or collide");
+    }
 }
 
 /// Map a compile-time [`kennel_policy::PolicyError`] to a CLI exit code (`02-1`).
