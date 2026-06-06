@@ -186,6 +186,9 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 deny: Vec::new(),
                 path: Vec::new(),
                 shell: "/bin/sh".to_owned(),
+                lib_allow: Vec::new(),
+                lib_deny: Vec::new(),
+                libraries: Vec::new(),
             },
             proc: ProcPolicy {
                 visibility: ProcVisibility::SelfOnly,

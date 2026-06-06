@@ -1,18 +1,22 @@
 # ============================================================================
-# Template: base-confined  (v1)
+# Template: base-confined  (v1)  — the floor every kennel stands on.
 # Inherits: nothing — this is the root of every confined template.
 # Threat catalogue: THREATS.md v0.3
 #
-# The minimal confined posture every other template builds on: no_new_privs,
-# setuid/setgid/setcap denial, the constructed-$HOME view, proxy-only egress,
-# the cloud-metadata / RFC1918 invariant denies, the credential denylist, a
-# curated environment, and a defence-in-depth seccomp filter. base-confined has
-# NO filesystem or execution scope of its own (read = system baseline only,
-# write = the kennel's own state) and so cannot be run directly; derive a usable
-# template from it.
+# The minimal confined posture: no_new_privs, setuid/setgid/setcap denial, the
+# constructed-$HOME view, proxy-only egress, the cloud-metadata / RFC1918 invariant
+# denies, the credential denylist, a curated environment, and a defence-in-depth
+# seccomp filter.
 #
-# See docs/design/05-templates.md, TEMPLATE-ai-coding-strict.md, and templates/README.md
-# (implementation status — some sections below are design-level / compiler-folded).
+# Deny-by-default across the board: exec.allow is EMPTY, which now denies ALL
+# execution (execution is deny-by-default like fs and net) — so base-confined
+# cannot run anything and is not usable on its own. A derived template/leaf adds the
+# binaries it needs to `exec.allow`; the compiler then resolves and grants exactly
+# the shared libraries those binaries link (see the `[lib]` section below). Only
+# enforced sections appear here; sections the runtime does not implement
+# (dbus/x11/ptrace/signal) are deliberately omitted — declaring them would warn.
+#
+# See docs/design/05-templates.md and templates/README.md.
 # ============================================================================
 
 template_name = "base-confined"
@@ -25,9 +29,12 @@ no_new_privs = true        # PR_SET_NO_NEW_PRIVS, always; cannot be set false
 bounding_set = []          # drop the entire capability bounding set
 
 
-# --- Execution --------------------------------------------------------------
-# exec.allow is intentionally empty here: a usable template adds the interpreters
-# and tools its workflow needs. The deny list + the deny_* flags are baseline.
+# --- Execution (deny-by-default) --------------------------------------------
+# exec.allow is empty, which DENIES ALL EXECUTION: a merely-readable file is not
+# executable. Compose `base-interactive` (a shell + coreutils) and language/tool
+# fragments to grant execution; `permissive-exec` (a `**` entry) is the explicit
+# opt-out that restores the open posture. The deny list + deny_* flags are baseline
+# (and, with an empty allow, the deny list is redundant belt-and-braces).
 [exec]
 allow = []
 
@@ -127,6 +134,26 @@ allow = [
 ]
 
 
+# --- Libraries (the shared-library filter) ----------------------------------
+# Execution is deny-by-default, so a library is made executable (mmap PROT_EXEC by
+# the loader) only when an allowlisted binary actually links it: the compiler walks
+# each exec.allow binary's PT_INTERP + transitive DT_NEEDED closure and grants
+# EXECUTE on exactly those files. `allow` bounds where they may come from; `deny`
+# refuses some even when linked. This is a FILTER over the closure, never a grant —
+# a binary planted under /usr/lib is never executable because nothing links it. The
+# universal libraries (ld-linux, libc, libm, libgcc_s, libselinux, libpcre2, the NSS
+# backends) fall out of every binary's closure and are permitted by the dirs below.
+[lib]
+allow = [
+    "/lib/*-linux-gnu/**", "/usr/lib/*-linux-gnu/**",
+    "/lib64/**", "/usr/lib64/**",
+    "/lib/**", "/usr/lib/**",
+]
+deny = [
+    "/usr/lib/pam*/**", "/lib/security/**", "/usr/lib/security/**",
+]
+
+
 # --- Network ----------------------------------------------------------------
 # All egress funnels through a per-kennel SOCKS5/HTTP proxy; the cgroup BPF denies
 # direct connect() to anything but the proxy (fail-closed). The proxy resolves
@@ -196,32 +223,14 @@ default = "deny"
 abstract = "deny"
 
 
-# --- D-Bus / X11 (off by default) -------------------------------------------
-# A confined workload has no display or bus access. Templates that need them
-# (notifications, GUI) opt in via an xdg-dbus-proxy / isolated X server.
-[dbus]
-session.enabled = false
-system.enabled = false
-
-[x11]
-xwayland_isolated = false
-xephyr_isolated = false
-
-
-# --- Process introspection / signals / ptrace ------------------------------
-# PID namespace hides other processes; signal scope (Landlock ABI 6) denies
-# signalling outside the kennel; ptrace across the boundary is denied. (T1.6, T1.1.)
+# --- Process introspection --------------------------------------------------
+# The PID namespace hides every process outside the kennel; hidepid backstops it.
+# (Cross-boundary ptrace and signalling are already prevented by the PID/user
+# namespace — there is no separate [ptrace]/[signal] policy the runtime enforces,
+# so none is declared here. T1.6, T1.1.)
 [proc]
 visibility = "self"
 hidepid = true
-
-[ptrace]
-allow_targets = []
-allow_from = []
-
-[signal]
-allow_targets = ["self"]
-allow_from = []
 
 
 # --- Environment ------------------------------------------------------------
@@ -275,4 +284,4 @@ deny = [
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "+NpeKsmBTInnwXURLis9FmsuYq13tmY/pQIXTyXKON/AAzgDM2iyrI5ySXc1huHhKHbJcFwy4YuZloYEiQhhAQ=="
+signature = "TXV/UoaHWjQpDNFcZM+dORHHMPTdSrL8B73myRTSnLfdJauMHmjsmmeP0kua9zv+ov8T8Le5G0XNyZ2SVA58Dw=="

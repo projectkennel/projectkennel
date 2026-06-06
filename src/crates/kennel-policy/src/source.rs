@@ -81,6 +81,11 @@ pub struct SourcePolicy {
     /// Filesystem section (`[fs]` and `[fs.*]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<FsSection>,
+    /// Library section (`[lib]`) — the allow/deny path filter over the shared-library
+    /// closure of `exec.allow` (`07-1-execution`). A library is EXECUTE-granted only
+    /// if an allowlisted binary actually links it AND it matches `allow` AND not `deny`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lib: Option<LibSection>,
     /// Network section (`[net]` and `[net.*]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net: Option<NetSection>,
@@ -265,6 +270,28 @@ pub struct ExecSection {
     /// allowlist is enforced (compile error otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+}
+
+/// `[lib]` — the path filter over the shared-library closure of `exec.allow`.
+///
+/// Execution is deny-by-default, so a library is made `EXECUTE`-able (`PROT_EXEC`
+/// mmap by the loader) only if it is **linked by an allowlisted binary** — the
+/// compiler resolves each `exec.allow` binary's `PT_INTERP` + transitive `DT_NEEDED`
+/// closure. `allow`/`deny` then bound *where* those resolved libraries may come
+/// from: a closure member is granted only if it matches an `allow` glob and no
+/// `deny` glob. A binary planted under `/usr/lib` is never granted — nothing in the
+/// allowlist links it. The grant set is settled at compile time.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibSection {
+    /// Glob patterns the resolved libraries must fall under to be granted (e.g.
+    /// `/lib/*-linux-gnu/**`). Empty ⇒ no library is granted (nothing dynamic runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// Glob patterns to refuse even when a binary links them (e.g. `/usr/lib/pam*/**`).
+    /// A denied-but-needed library yields a compile warning (the binary may not load).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<Vec<String>>,
 }
 
 /// `[fs]` and its sub-tables.

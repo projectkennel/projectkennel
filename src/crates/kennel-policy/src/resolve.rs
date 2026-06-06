@@ -46,9 +46,9 @@
 use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, CapSection,
     ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
-    FsScrub, FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit, NetBind, NetDeny,
-    NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection, SourcePolicy,
-    SshSection, UnixSection, X11Section,
+    FsScrub, FsSection, FsTmp, IdentitySection, LibSection, LifecycleSection, NetAudit, NetBind,
+    NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection,
+    SourcePolicy, SshSection, UnixSection, X11Section,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -172,12 +172,14 @@ pub fn resolve_verified(
     }
     acc = fold(&acc, entry);
 
-    // The effective policy has nothing left to resolve.
+    // The `template_base` chain is fully folded; nothing left to inherit. The folded
+    // `include` list is *kept* (not cleared): includes are applied separately by
+    // `compile`/`compile_leaf` via `apply_includes`, which reads exactly this list, so
+    // clearing it here silently dropped every `include` declared on a source template.
     acc.template_base = None;
     entry.template_version.clone_into(&mut acc.template_version);
     entry.template_name.clone_into(&mut acc.template_name);
     entry.name.clone_into(&mut acc.name);
-    acc.include = Vec::new();
     acc.signature = None;
 
     links.reverse(); // root-first for provenance
@@ -216,6 +218,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         cap: merge(&parent.cap, &child.cap, fold_cap),
         exec: merge(&parent.exec, &child.exec, fold_exec),
         fs: merge(&parent.fs, &child.fs, fold_fs),
+        lib: merge(&parent.lib, &child.lib, fold_lib),
         net: merge(&parent.net, &child.net, fold_net),
         unix: merge(&parent.unix, &child.unix, fold_unix),
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
@@ -300,6 +303,26 @@ fn fold_exec(p: &ExecSection, c: &ExecSection) -> ExecSection {
     }
 }
 
+fn fold_lib(p: &LibSection, c: &LibSection) -> LibSection {
+    // Allow/deny accumulate down the chain — a derived layer may widen where libraries
+    // come from or add a refusal; neither replaces the parent's set.
+    let union = |a: &Option<Vec<String>>, b: &Option<Vec<String>>| -> Option<Vec<String>> {
+        if a.is_none() && b.is_none() {
+            return None;
+        }
+        let mut out = a.clone().unwrap_or_default();
+        for entry in b.clone().unwrap_or_default() {
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+        Some(out)
+    };
+    LibSection {
+        allow: union(&p.allow, &c.allow),
+        deny: union(&p.deny, &c.deny),
+    }
+}
 fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
     FsSection {
         read: or(&c.read, &p.read),

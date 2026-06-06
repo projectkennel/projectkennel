@@ -125,9 +125,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         };
         let keys = load_trust_store(&trust_dirs)?;
         let trust = kennel_policy::Trust::allow_unsigned(Some(&keys));
-        let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+        let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
+        print_warnings(&kennel_policy::resolve_settled_libraries(
+            &mut compiled.policy,
+        ));
         let key = load_signing_key(&key_path)?;
         let doc = kennel_policy::sign_settled(&compiled.policy, &key)
             .map_err(|e| format!("signing: {e}"))?;
@@ -611,7 +614,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         kennel_policy::Trust::allow_unsigned(Some(&keys))
     };
 
-    let compiled = match build_settled(&bytes, &source, &trust, version) {
+    let mut compiled = match build_settled(&bytes, &source, &trust, version) {
         Ok(compiled) => compiled,
         Err(e) => {
             eprintln!("kennel: {e}");
@@ -619,6 +622,11 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         }
     };
     print_warnings(&compiled.warnings);
+    // Resolve the shared-library closure of the allowlist into the settled artefact
+    // (reads the binaries from disk; deny-by-default execution, 07-1) before signing.
+    print_warnings(&kennel_policy::resolve_settled_libraries(
+        &mut compiled.policy,
+    ));
     let policy = &compiled.policy;
 
     let out = output_path.unwrap_or_else(|| default_settled_path(&policy_path, &policy.name));

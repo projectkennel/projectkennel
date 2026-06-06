@@ -297,6 +297,19 @@ pub struct ExecPolicy {
     /// allowlist is enforced.
     #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
     pub shell: String,
+    /// `[lib].allow` globs: the filter bounding where a resolved library may be
+    /// `EXECUTE`-granted from (`07-1-execution`). Carried for audit and re-resolution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lib_allow: Vec<String>,
+    /// `[lib].deny` globs: libraries refused even when linked by an allowlisted binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lib_deny: Vec<String>,
+    /// The **resolved** shared-library closure of [`allow`](Self::allow): the exact
+    /// absolute library paths to `EXECUTE`-grant, computed at compile time
+    /// ([`crate::libresolve`]) and filtered by [`lib_allow`](Self::lib_allow) /
+    /// [`lib_deny`](Self::lib_deny). The runtime grants EXECUTE on exactly these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<String>,
 }
 
 impl ExecPolicy {

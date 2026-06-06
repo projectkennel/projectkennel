@@ -1029,6 +1029,9 @@ mod tests {
                     deny: Vec::new(),
                     path: Vec::new(),
                     shell: "/bin/sh".to_owned(),
+                    lib_allow: Vec::new(),
+                    lib_deny: Vec::new(),
+                    libraries: Vec::new(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,
@@ -1216,7 +1219,10 @@ mod tests {
 
     #[test]
     fn plan_translates_policy() {
-        let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+        let mut p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+        // The resolved library closure (settled at compile) is what carries EXECUTE for
+        // libraries now — not a read-grant heuristic. Seed one to exercise the grant.
+        p.effective_policy.exec.libraries = vec!["/usr/lib/x86_64-linux-gnu/libc.so.6".to_owned()];
         let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
         // Namespaces: user (the unprivileged foundation) + mount/pid/ipc, never net.
@@ -1250,11 +1256,18 @@ mod tests {
             "the allowlisted binary gets EXECUTE"
         );
         assert!(
-            plan.landlock_fs
+            plan.landlock_fs.iter().any(|(path, acc)| path
+                == &PathBuf::from("/usr/lib/x86_64-linux-gnu/libc.so.6")
+                && acc.contains(AccessFs::EXECUTE)),
+            "a resolved library (settled exec.libraries) gets EXECUTE"
+        );
+        assert!(
+            !plan
+                .landlock_fs
                 .iter()
                 .any(|(path, acc)| path == &PathBuf::from("/usr/lib")
                     && acc.contains(AccessFs::EXECUTE)),
-            "the loader's lib dir (covered by the /usr read grant) gets EXECUTE"
+            "a bare read-grant lib dir is NOT executable — only the resolved closure is"
         );
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
             == &PathBuf::from("/run/kennel/ai-coding/home")

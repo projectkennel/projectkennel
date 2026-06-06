@@ -160,14 +160,6 @@ fn read_access(executable: bool) -> AccessFs {
     }
 }
 
-/// The dynamic loader's library directories. Under Landlock these need
-/// `FS_EXECUTE`, not merely read: the loader maps `libc`/`ld.so` with
-/// `PROT_EXEC`, which Landlock gates (proven by kennel-syscall's
-/// `landlock_exec_semantics` test; this corrects design §7.1.7). They are
-/// granted `EXECUTE` wherever a read grant mounts them, so allowlisted dynamic
-/// binaries can still load their libraries.
-const LOADER_EXEC_DIRS: &[&str] = &["/usr/lib", "/lib", "/lib64", "/usr/lib64", "/usr/local/lib"];
-
 /// Strip a trailing `/**` or `/*` glob from a grant entry, yielding the real
 /// directory (a Landlock rule and a bind both apply to the whole subtree) or file
 /// the rule applies to. A glob suffix has no inode of its own, so the bind source
@@ -492,29 +484,14 @@ impl Plan {
         }
 
         // The execution gate (§7.1): grant FS_EXECUTE only on the allowlisted binaries
-        // plus the loader's lib dirs (EXECUTE, not READ — the loader maps libc/ld.so
-        // PROT_EXEC, which Landlock gates). Reads carry no EXECUTE (above), so nothing
-        // else can run. Skipped entirely under `permissive-exec` (`**`), where reads
-        // already carry EXECUTE and execution is ungated.
+        // and on the exact shared libraries those binaries link — the closure resolved
+        // and settled at compile time (`exec.libraries`, `kennel_policy::libresolve`),
+        // EXECUTE not READ since the loader maps libc/ld.so PROT_EXEC. Reads carry no
+        // EXECUTE (above), so nothing else — including a binary planted in a lib dir —
+        // can run. Skipped under `permissive-exec` (`**`), where reads already carry
+        // EXECUTE and execution is ungated.
         let exec_access = AccessFs::EXECUTE | AccessFs::READ_FILE;
         if !permissive_exec {
-            for loader in LOADER_EXEC_DIRS {
-                let loader = Path::new(loader);
-                // Grant EXECUTE only where a read grant actually mounts the dir,
-                // so the Landlock rule's path exists in the constructed view. The
-                // read entry is glob-stripped first: a grant like `/lib64/**` mounts
-                // the `/lib64` loader dir, but `/lib64`.starts_with("/lib64/**") is
-                // false — without stripping, no loader dir is ever granted EXECUTE and
-                // every dynamically-linked allowlisted binary fails `execve` (EACCES).
-                let mounted = ep
-                    .fs
-                    .read
-                    .iter()
-                    .any(|r| loader.starts_with(glob_root(r.as_str())));
-                if mounted {
-                    landlock_fs.push((loader.to_path_buf(), exec_access));
-                }
-            }
             for entry in &ep.exec.allow {
                 let root = glob_root(entry);
                 // deny_writable (§7.1): a writable path must never be executable.
@@ -530,6 +507,12 @@ impl Plan {
                     )));
                 }
                 landlock_fs.push((remap_target(&root, home, &shim_root), exec_access));
+            }
+            // The resolved library closure: exact paths, already filtered by the
+            // `[lib]` allow/deny globs at compile time. `skip_missing` drops any the
+            // view does not contain.
+            for lib in &ep.exec.libraries {
+                landlock_fs.push((remap_target(Path::new(lib), home, &shim_root), exec_access));
             }
         }
 
@@ -702,30 +685,6 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn glob_read_grant_mounts_the_loader_dir() {
-        // Regression: under an `exec.allow` allowlist, a loader dir gets `EXECUTE`
-        // only where an `fs.read` grant mounts it. Read grants carry a `/**` glob, so
-        // the entry must be glob-stripped before the `starts_with` check — otherwise
-        // `/lib64`.starts_with("/lib64/**") is false, NO loader dir is granted
-        // EXECUTE, and every dynamically-linked allowlisted binary fails execve.
-        let reads = ["/lib64/**".to_owned(), "/usr/**".to_owned()];
-        let loader = Path::new("/lib64");
-        assert!(
-            reads
-                .iter()
-                .any(|r| loader.starts_with(glob_root(r.as_str()))),
-            "glob-stripped read grant must mount the loader dir"
-        );
-        // The pre-fix comparison (no strip) would have missed it.
-        assert!(
-            !reads
-                .iter()
-                .any(|r| loader.starts_with(PathBuf::from(r.as_str()))),
-            "the un-stripped comparison is the bug this guards against"
-        );
-    }
 
     #[test]
     fn bind_port_min_lands_in_the_meta_pad_slot() {
