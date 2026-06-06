@@ -57,13 +57,22 @@ pub fn if_index(name: &CStr) -> io::Result<u32> {
 
 /// Add `addr/prefix_len` to the interface `ifindex` (`RTM_NEWADDR`).
 ///
+/// Idempotent: if the address is already present (`EEXIST`) this succeeds — a kennel
+/// that reused this ctx and crashed before teardown can leave its loopback address
+/// behind, and that leak must not block the next spawn.
+///
 /// # Errors
 ///
-/// Returns the OS error if the address already exists (`EEXIST`) or the kernel
-/// otherwise rejects the request.
+/// Returns the OS error if the kernel rejects the request for any reason other than
+/// the address already existing.
 pub fn add_address(ifindex: u32, addr: IpAddr, prefix_len: u8) -> io::Result<()> {
+    /// `EEXIST` — re-adding an address already on the interface (idempotent add).
+    const EEXIST: i32 = 17;
     let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-    request(RTM_NEWADDR, flags, ifindex, addr, prefix_len)
+    match request(RTM_NEWADDR, flags, ifindex, addr, prefix_len) {
+        Err(e) if e.raw_os_error() == Some(EEXIST) => Ok(()),
+        other => other,
+    }
 }
 
 /// Remove `addr/prefix_len` from the interface `ifindex` (`RTM_DELADDR`).

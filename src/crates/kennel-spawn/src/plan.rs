@@ -306,11 +306,14 @@ fn remap_target(path: &Path, home: &Path, shim_root: &Path) -> PathBuf {
         .map_or_else(|_| path.to_path_buf(), |rel| shim_root.join(rel))
 }
 
-/// Whether `path` is served by the constructed synthetic `/etc` (and so is *not*
-/// bound from the host). Matches `/etc` and anything beneath it on a component
-/// boundary (`/etcfoo` does not match).
-fn is_constructed_etc(path: &Path) -> bool {
-    path.starts_with("/etc")
+/// Whether `path` is served by a constructed/special mount and so is *not* bound
+/// from the host: the synthetic `/etc`, or the freshly-mounted namespaced `/proc`.
+/// A read grant under either still gets its Landlock rule (on the constructed inode,
+/// post-pivot) — it just must not bind the host's version over it (which for `/proc`
+/// would recursively bind the host's whole procfs before the fresh mount shadows it).
+/// Matches on a component boundary (`/etcfoo` / `/procfoo` do not match).
+fn is_special_mount(path: &Path) -> bool {
+    path.starts_with("/etc") || path.starts_with("/proc")
 }
 
 /// Whether `mode` is a safe tmpfs `mode=` value: 3 or 4 octal digits and nothing
@@ -474,7 +477,7 @@ impl Plan {
                     read_access(permissive_exec)
                 },
             ));
-            if !is_constructed_etc(&source) {
+            if !is_special_mount(&source) {
                 binds.push(BindMount {
                     source,
                     target,
