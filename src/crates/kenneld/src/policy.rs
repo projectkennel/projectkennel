@@ -18,7 +18,7 @@
 //! substitutes the per-instance placeholders, and translates the result into a
 //! [`Plan`] — all via [`kennel_spawn::prepare`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kennel_policy::KeySet;
 use kennel_spawn::{Plan, RuntimeSubstitutions};
@@ -28,6 +28,11 @@ use crate::server::{Loaded, PolicyLoader};
 /// Load every `*.pub` in `dir` into `keys`, the file stem as key id. A key id
 /// already present is **skipped**, so when called over an ordered list the first
 /// dir wins (the system store, loaded first, cannot be shadowed by a later user key).
+///
+/// A single unreadable or malformed `*.pub` is **warned about and skipped**, not
+/// fatal: the trust store is re-read on every request, so one fat-fingered key file
+/// must not brick verification of policies signed by the *valid* keys beside it.
+/// Only an error reading the directory itself propagates.
 fn load_dir_into(keys: &mut KeySet, dir: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
@@ -40,36 +45,53 @@ fn load_dir_into(keys: &mut KeySet, dir: &Path) -> std::io::Result<()> {
         if keys.get(key_id).is_some() {
             continue; // an earlier (system) dir already defined this id; do not shadow
         }
-        let contents = std::fs::read_to_string(&path)?;
-        keys.insert_b64(key_id, contents.trim()).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("bad key {key_id}: {e:?}"),
-            )
-        })?;
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                eprintln!(
+                    "kenneld: warning: cannot read trust key {}: {e}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if let Err(e) = keys.insert_b64(key_id, contents.trim()) {
+            eprintln!(
+                "kenneld: warning: ignoring malformed trust key {}: {e:?}",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
 
+/// Where a [`TrustStoreLoader`] gets its keys.
+enum TrustSource {
+    /// Re-read these key dirs on **every** load (system dirs first, system winning a
+    /// key-id clash; a missing dir skipped). Reading per-request — not once at
+    /// startup — means a key added, changed, or removed on disk (e.g. by `kennel
+    /// keygen`) takes effect on the next `kennel run` with no daemon restart.
+    Dirs(Vec<PathBuf>),
+    /// A fixed in-memory key set (tests/embedding); never re-read.
+    Fixed(KeySet),
+}
+
 /// A [`PolicyLoader`] backed by a trust store of public keys.
 pub struct TrustStoreLoader {
-    keys: KeySet,
+    source: TrustSource,
 }
 
 impl TrustStoreLoader {
-    /// Build a loader from the public keys in `dir` (each `*.pub` file).
-    ///
-    /// # Errors
-    /// An OS error if the directory cannot be read, or `InvalidData` if a `*.pub`
-    /// file's contents are not a valid base64 Ed25519 public key.
-    pub fn from_dir(dir: &Path) -> std::io::Result<Self> {
-        let mut keys = KeySet::new();
-        load_dir_into(&mut keys, dir)?;
-        Ok(Self { keys })
+    /// Build a loader that re-reads the public keys in `dir` (each `*.pub`) per load.
+    #[must_use]
+    pub fn from_dir(dir: &Path) -> Self {
+        Self {
+            source: TrustSource::Dirs(vec![dir.to_path_buf()]),
+        }
     }
 
-    /// Build a loader from several key dirs, **earlier dirs winning** on a duplicate
-    /// key id; a missing dir is skipped (not an error).
+    /// Build a loader that re-reads several key dirs per load, **earlier dirs winning**
+    /// on a duplicate key id; a missing dir is skipped (not an error).
     ///
     /// Pass the system trust dir(s) **first**, then the user's
     /// `~/.config/kennel/keys`: a settled run policy may be signed by a system key
@@ -77,31 +99,51 @@ impl TrustStoreLoader {
     /// never shadow a system key of the same id (system is inserted first and wins).
     /// Templates are a separate, system-only trust handled at compile time, not here.
     ///
-    /// # Errors
-    /// An OS error if a present dir cannot be read, or `InvalidData` for a malformed key.
-    pub fn from_dirs(dirs: &[&Path]) -> std::io::Result<Self> {
-        let mut keys = KeySet::new();
-        for dir in dirs {
-            match load_dir_into(&mut keys, dir) {
-                Ok(()) => {}
-                // A missing layer (e.g. a user with no ~/.config/kennel/keys) is fine.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+    /// The dirs are read on every [`load`](PolicyLoader::load), so trust-store edits
+    /// are picked up live (no restart). Verification itself reports a malformed key.
+    #[must_use]
+    pub fn from_dirs(dirs: &[&Path]) -> Self {
+        Self {
+            source: TrustSource::Dirs(dirs.iter().map(|d| d.to_path_buf()).collect()),
         }
-        Ok(Self { keys })
     }
 
     /// Build a loader from an in-memory [`KeySet`] (for tests/embedding).
     #[must_use]
     pub const fn from_keys(keys: KeySet) -> Self {
-        Self { keys }
+        Self {
+            source: TrustSource::Fixed(keys),
+        }
     }
 
-    /// The number of trusted keys.
+    /// The current trust store: re-read from disk for [`TrustSource::Dirs`] (so it
+    /// reflects on-disk edits since startup), or the fixed set for tests.
+    ///
+    /// # Errors
+    /// An OS error if a present dir cannot be read, or `InvalidData` for a malformed key.
+    fn current_keys(&self) -> std::io::Result<KeySet> {
+        match &self.source {
+            TrustSource::Fixed(keys) => Ok(keys.clone()),
+            TrustSource::Dirs(dirs) => {
+                let mut keys = KeySet::new();
+                for dir in dirs {
+                    match load_dir_into(&mut keys, dir) {
+                        Ok(()) => {}
+                        // A missing layer (e.g. no ~/.config/kennel/keys) is fine.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(keys)
+            }
+        }
+    }
+
+    /// The number of trusted keys right now (re-reads the dirs; best-effort `0` on a
+    /// read error). For diagnostics/tests, not a hot path.
     #[must_use]
-    pub const fn key_count(&self) -> usize {
-        self.keys.len()
+    pub fn key_count(&self) -> usize {
+        self.current_keys().map_or(0, |k| k.len())
     }
 }
 
@@ -109,11 +151,15 @@ impl PolicyLoader for TrustStoreLoader {
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
         let bytes = std::fs::read(path)
             .map_err(|e| format!("cannot read policy {}: {e}", path.display()))?;
+        // Re-read the trust store now, so a key created/changed since the daemon
+        // started is honoured (the loader is built once at boot but keys live on disk).
+        let keys = self
+            .current_keys()
+            .map_err(|e| format!("reading trust store: {e}"))?;
         // Verify + substitute once; derive both artefacts from the one policy
         // (the same steps `kennel_spawn::prepare` runs, kept open here so the net
         // section is available to configure the egress proxy).
-        let verified =
-            kennel_policy::verify_settled(&bytes, &self.keys).map_err(|e| e.to_string())?;
+        let verified = kennel_policy::verify_settled(&bytes, &keys).map_err(|e| e.to_string())?;
         let substituted = kennel_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
         let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
             .map_err(|e| e.to_string())?;
@@ -225,16 +271,42 @@ mod tests {
         // A non-.pub file is ignored.
         std::fs::write(dir.join("README"), "ignore me").expect("write");
 
-        let loader = TrustStoreLoader::from_dir(&dir).expect("from_dir");
+        let loader = TrustStoreLoader::from_dir(&dir);
         assert_eq!(loader.key_count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn from_dir_rejects_a_malformed_key() {
+    fn a_malformed_key_is_skipped_not_fatal() {
+        // A malformed `.pub` is warned about and skipped (not loaded, not fatal) — one
+        // bad file must not brick verification for the valid keys re-read beside it.
         let dir = temp_dir("bad");
         std::fs::write(dir.join("broken.pub"), "not base64!!!").expect("write");
-        assert!(TrustStoreLoader::from_dir(&dir).is_err());
+        let good = SigningKey::from_seed("good", &[5u8; 32]).expect("key");
+        write_pubkey(&dir, &good);
+        let loader = TrustStoreLoader::from_dir(&dir);
+        assert_eq!(
+            loader.key_count(),
+            1,
+            "the good key loads; the broken one is skipped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keys_are_re_read_each_load_not_cached() {
+        // The fix for the startup-cache bug: a key added after the loader is built must
+        // be visible on the next read (the daemon never restarts between keygen and run).
+        let dir = temp_dir("live-reload");
+        let loader = TrustStoreLoader::from_dir(&dir);
+        assert_eq!(loader.key_count(), 0, "empty to start");
+        let key = SigningKey::from_seed("late", &[9u8; 32]).expect("key");
+        write_pubkey(&dir, &key);
+        assert_eq!(
+            loader.key_count(),
+            1,
+            "a key added after construction is picked up"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -252,17 +324,11 @@ mod tests {
         let mine = SigningKey::from_seed("mine", &[3u8; 32]).expect("user-only key");
         write_pubkey(&user, &mine);
 
-        let loader = TrustStoreLoader::from_dirs(&[&system, &user]).expect("from_dirs");
-        assert_eq!(
-            loader.key_count(),
-            2,
-            "clashing id deduped; user-only added"
-        );
-        assert!(
-            loader.keys.get("mine").is_some(),
-            "user-only key is trusted"
-        );
-        let got = loader.keys.get("shared").expect("shared id present");
+        let loader = TrustStoreLoader::from_dirs(&[&system, &user]);
+        let keys = loader.current_keys().expect("read keys");
+        assert_eq!(keys.len(), 2, "clashing id deduped; user-only added");
+        assert!(keys.get("mine").is_some(), "user-only key is trusted");
+        let got = keys.get("shared").expect("shared id present");
         let got_b64 = kennel_policy::b64::encode(&**got);
         let want_b64 = kennel_policy::b64::encode(&sys_key.public_key_bytes());
         assert_eq!(got_b64, want_b64, "the system key wins the id clash");
@@ -277,9 +343,12 @@ mod tests {
         let key = SigningKey::from_seed("k", &[7u8; 32]).expect("key");
         write_pubkey(&system, &key);
         let missing = system.join("no-such-user-keys");
-        let loader =
-            TrustStoreLoader::from_dirs(&[&system, &missing]).expect("missing dir is not an error");
-        assert_eq!(loader.key_count(), 1);
+        let loader = TrustStoreLoader::from_dirs(&[&system, &missing]);
+        assert_eq!(
+            loader.key_count(),
+            1,
+            "missing dir is skipped, not an error"
+        );
         let _ = std::fs::remove_dir_all(&system);
     }
 

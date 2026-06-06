@@ -45,12 +45,10 @@ fn run() -> Result<(), String> {
     }
     let dir_refs: Vec<&std::path::Path> =
         trust_dirs.iter().map(std::path::PathBuf::as_path).collect();
-    let loader = policy::TrustStoreLoader::from_dirs(&dir_refs).map_err(|e| {
-        format!(
-            "loading trust store {}: {e}",
-            deployment.trust_dir().display()
-        )
-    })?;
+    // The loader re-reads these dirs on every request, so a key created, changed, or
+    // removed after the daemon started (e.g. by `kennel keygen`) is honoured without a
+    // restart — the trust store lives on disk, not frozen in memory at boot.
+    let loader = policy::TrustStoreLoader::from_dirs(&dir_refs);
 
     let shared = Arc::new(Shared::new(identity, privileged, loader));
     let listener = socket::listener().map_err(|e| format!("control socket: {e}"))?;
