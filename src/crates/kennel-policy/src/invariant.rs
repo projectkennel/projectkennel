@@ -65,10 +65,21 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     match ep.net.mode {
         NetMode::Constrained | NetMode::Open => {}
     }
-    if ep.net.deny_invariant.is_empty() {
+    // The one egress destination that is NEVER defensible: the cloud-metadata IPv4
+    // (the SSRF crown jewel). It must be an invariant deny on every policy — enforced
+    // deny-first by the proxy even in `open` mode. RFC1918/CGNAT are deliberately NOT
+    // mandated here: making private space permanently unreachable is self-defeating
+    // (local dev servers, LAN/corp services, private registries), so the floor leaves
+    // them reachable via `open` mode or an explicit `[[net.allow]]`.
+    let metadata_denied = ep
+        .net
+        .deny_invariant
+        .iter()
+        .any(|r| r.cidr == "169.254.169.254");
+    if !metadata_denied {
         v.push(InvariantViolation::new(
             "net.deny.invariant",
-            "the invariant deny CIDRs (cloud metadata, link-local, RFC1918) must be present",
+            "the cloud-metadata deny (169.254.169.254) is mandatory and must not be removed",
         ));
     }
     match ep.proc.visibility {

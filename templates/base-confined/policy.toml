@@ -4,9 +4,9 @@
 # Threat catalogue: THREATS.md v0.3
 #
 # The minimal confined posture: no_new_privs, setuid/setgid/setcap denial, the
-# constructed-$HOME view, proxy-only egress, the cloud-metadata / RFC1918 invariant
-# denies, the credential denylist, a curated environment, and a defence-in-depth
-# seccomp filter.
+# constructed-$HOME view, proxy-only egress, the cloud-metadata + link-local
+# invariant denies (RFC1918 stays reachable — see [net]), a curated environment,
+# and a defence-in-depth seccomp filter.
 #
 # Deny-by-default across the board: exec.allow is EMPTY, which now denies ALL
 # execution (execution is deny-by-default like fs and net) — so base-confined
@@ -168,30 +168,26 @@ proxy_listen_v6 = true
 # "offset:port" (offset 1..=14, default "1:1080"). Project Kennel injects
 # HTTPS_PROXY / HTTP_PROXY / ALL_PROXY pointing at the computed proxy address.
 
-# Invariant denies — cloud metadata, link-local, RFC1918, CGNAT. Enforced
-# deny-first by the BPF AND refused by the proxy after name resolution. INVARIANT:
-# no downstream template or leaf may remove these (T1.6). (THREATS: T1.6.)
+# Invariant denies — the destinations that are NEVER a legitimate egress target,
+# enforced deny-first by the proxy (even in `open` mode) and non-removable by any
+# derived template or leaf (T1.6). Deliberately NARROW: cloud metadata (the SSRF
+# crown jewel) and link-local only.
+#
+# RFC1918 / CGNAT are intentionally NOT invariant denies. Making private space
+# permanently unreachable is self-defeating — a kennel routinely needs a local dev
+# server, a LAN database, an internal registry, or a corp service. In `constrained`
+# mode (the default) nothing private is reachable anyway unless a `[[net.allow]]`
+# names it; in `open` mode the operator has opted into arbitrary egress. Either way
+# that is the policy author's call, not an immovable floor.
 [[net.deny.invariant]]
 cidr = "169.254.169.254/32"
-reason = "cloud metadata IPv4 — never permitted from a kennel"
+reason = "cloud metadata IPv4 — never permitted from a kennel (mandatory invariant)"
 [[net.deny.invariant]]
 cidr = "fd00:ec2::254/128"
 reason = "AWS IPv6 metadata — never permitted"
 [[net.deny.invariant]]
 cidr = "fe80::/10"
 reason = "IPv6 link-local — no legitimate egress destination"
-[[net.deny.invariant]]
-cidr = "10.0.0.0/8"
-reason = "RFC1918 — internal-network exfiltration"
-[[net.deny.invariant]]
-cidr = "172.16.0.0/12"
-reason = "RFC1918"
-[[net.deny.invariant]]
-cidr = "192.168.0.0/16"
-reason = "RFC1918"
-[[net.deny.invariant]]
-cidr = "100.64.0.0/10"
-reason = "CGNAT range"
 
 # Bind: a wildcard bind (0.0.0.0 / ::) is rewritten to the kennel's private
 # loopback address (so dev servers work but are reachable only from inside the
@@ -284,4 +280,4 @@ deny = [
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "TXV/UoaHWjQpDNFcZM+dORHHMPTdSrL8B73myRTSnLfdJauMHmjsmmeP0kua9zv+ov8T8Le5G0XNyZ2SVA58Dw=="
+signature = "ZFrdu07LFr5qyYSJkhrFLbYdINJDeH8IMCH+1W3N7dJTwy2QTvaSFRg3wMMdsp/SZgnot7sXtdTlYmFunFlmDQ=="

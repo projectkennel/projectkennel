@@ -732,9 +732,10 @@ mod tests {
             Some("none"),
             "child scalar overrides parent"
         );
-        // The invariant denies still propagate even though mode is none.
+        // The invariant denies still propagate even though mode is none (the
+        // mandatory cloud-metadata deny; RFC1918 is no longer an invariant).
         let nd = net.deny.as_ref().expect("net.deny");
-        assert!(nd.invariant.iter().any(|d| d.cidr == "10.0.0.0/8"));
+        assert!(nd.invariant.iter().any(|d| d.cidr == "169.254.169.254/32"));
     }
 
     #[test]

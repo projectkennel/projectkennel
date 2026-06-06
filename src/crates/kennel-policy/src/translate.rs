@@ -1554,11 +1554,12 @@ mod tests {
             net.allow.is_empty() && net.allow_names.is_empty(),
             "no egress permitted"
         );
-        // Invariant denies still propagate.
+        // The mandatory cloud-metadata invariant deny still propagates (RFC1918 is
+        // no longer an invariant — see base-confined [net]).
         assert!(net
             .deny_invariant
             .iter()
-            .any(|r| r.cidr == "10.0.0.0" && r.prefix_len == 8));
+            .any(|r| r.cidr == "169.254.169.254" && r.prefix_len == 32));
         // 2h TTL, "stop" (the backward-compat alias for exit).
         assert_eq!(t.effective_policy.lifecycle.ttl_seconds, Some(7_200));
         assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Exit);
