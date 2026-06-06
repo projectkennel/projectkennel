@@ -503,13 +503,21 @@ where
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
             Ok(()) => return run_kennel(shared, &req, fds, conn),
-            Err(e) => Response::Error(e),
+            Err(e) => {
+                eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
+                Response::Error(e)
+            }
         },
         Request::Stop { kennel } => match validate_kennel_name(&kennel) {
             Ok(()) => shared.stop(&kennel),
-            Err(e) => Response::Error(e),
+            Err(e) => {
+                eprintln!("kenneld: rejected stop of `{kennel}`: {e}");
+                Response::Error(e)
+            }
         },
         Request::List => shared.list(),
+        // AuthorizedKeys errors are routine (sshd polls for keys the bastion may not
+        // hold), so they are not logged here to avoid spamming the journal.
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),
     };
     let _ = control::send_response(conn, &response);
@@ -573,6 +581,12 @@ fn run_kennel<P, L>(
     let ctx = match shared.reserve(&req.kennel) {
         Ok(ctx) => ctx,
         Err(resp) => {
+            if let Response::Error(msg) = &resp {
+                eprintln!(
+                    "kenneld: kennel `{}` failed to start [reserve]: {msg}",
+                    req.kennel
+                );
+            }
             let _ = control::send_response(conn, &resp);
             return;
         }
@@ -593,11 +607,11 @@ fn run_kennel<P, L>(
 
     let loaded = match shared.loader.load(&req.policy, &subst) {
         Ok(loaded) => loaded,
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
+        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
     };
     let mut command = match command_for(&req.argv, &req.cwd, fds) {
         Ok(command) => command,
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
+        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
     };
     // Prepare SSH egress (§7.8): mint synthetic keys, register the edges with the
     // per-user bastion, and build the synthetic ~/.ssh for the view. The ~/.ssh is
@@ -610,7 +624,16 @@ fn run_kennel<P, L>(
     let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
+        Err(reason) => {
+            return fail(
+                shared,
+                &req.kennel,
+                ctx,
+                conn,
+                "register ssh egress",
+                reason,
+            )
+        }
     };
     // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
@@ -750,7 +773,8 @@ fn run_kennel<P, L>(
                 &req.kennel,
                 ctx,
                 conn,
-                &Response::Error(e.to_string()),
+                "spawn workload",
+                e.to_string(),
             );
         }
     };
@@ -811,19 +835,25 @@ fn run_kennel<P, L>(
     );
 }
 
-/// Release the reservation and report an error (a bring-up step failed).
+/// Release the reservation, **log the reason**, and report it (a bring-up step
+/// failed). The CLI only receives the terse `Response::Error`, so without this log
+/// a failed start is invisible to the operator; kenneld runs as a systemd user unit,
+/// so stderr lands in the journal — `journalctl --user -u kenneld` shows `stage` and
+/// `reason`. Returns the same `Response::Error(reason)` it logged.
 fn fail<P: Privileged + Clone, L: PolicyLoader>(
     shared: &Shared<P, L>,
     name: &str,
     ctx: u16,
     conn: &mut UnixStream,
-    response: &Response,
+    stage: &str,
+    reason: String,
 ) {
+    eprintln!("kenneld: kennel `{name}` failed to start [{stage}]: {reason}");
     // Drop any SSH edges registered before the failing step (a no-op otherwise), so
     // a failed bring-up leaves no synthetic key in the bastion.
     shared.deregister_ssh(name);
     shared.release(name, ctx);
-    let _ = control::send_response(conn, response);
+    let _ = control::send_response(conn, &Response::Error(reason));
 }
 
 /// The exit code to report: the process's code, `128 + signal` if it was killed,

@@ -296,6 +296,18 @@ where
     spawn_inner(plan, command, Some(Box::new(map_gids)))
 }
 
+/// Tag a seal-step failure with *which* syscall failed before std collapses the
+/// error to a bare errno across its `pre_exec` pipe (an `os error 13` with no name
+/// is useless to diagnose). The forked child's stderr is the workload's stderr —
+/// the operator's terminal on a foreground `kennel run` — so this is where "which
+/// step bombed" actually reaches the user. Logs only on error; success is silent.
+fn step<T>(label: &str, r: io::Result<T>) -> io::Result<T> {
+    if let Err(e) = &r {
+        eprintln!("kennel: spawn seal step `{label}` failed: {e}");
+    }
+    r
+}
+
 /// The shared body of [`spawn`] and [`spawn_with_gid_map`]. With `mapper` `Some`
 /// and a userns plan, the spawn child defers its `gid_map` and the handshake runs;
 /// otherwise the child writes its own single-line `gid_map` and `mapper` is unused.
@@ -393,20 +405,32 @@ fn spawn_inner(
         if does_mount {
             // Detach mount propagation from the host first (`MS_PRIVATE` — stronger
             // than the `MS_SLAVE` of §7.2.10: no propagation in either direction).
-            kennel_syscall::mount::make_root_private()?;
+            step(
+                "make-root-private",
+                kennel_syscall::mount::make_root_private(),
+            )?;
             if let (Some(v), Some(root)) = (&view, &new_root) {
                 // The constructed view: build a fresh root, bind the granted paths
                 // into it, construct the synthetic `/etc` + `/dev` + `/proc` +
                 // `/tmp`, then `pivot_root` so non-granted path *names* are absent.
                 // The fresh `/proc` mount is why this runs as PID 1 on the userns path.
-                build_view_and_pivot(v, root, &file_binds)?;
+                step(
+                    "build-view-and-pivot",
+                    build_view_and_pivot(v, root, &file_binds),
+                )?;
             } else {
                 // Fallback (no view/staging): in-place fresh `/proc` + private
                 // `/tmp` + the single-file shadow binds. Landlock still denies
                 // access to non-granted paths; only the name-hiding is absent.
-                kennel_syscall::mount::mount_special("proc", Path::new("/proc"))?;
-                kennel_syscall::mount::mount_special("tmpfs", Path::new("/tmp"))?;
-                apply_file_binds(&file_binds)?;
+                step(
+                    "mount-proc",
+                    kennel_syscall::mount::mount_special("proc", Path::new("/proc")),
+                )?;
+                step(
+                    "mount-tmp",
+                    kennel_syscall::mount::mount_special("tmpfs", Path::new("/tmp")),
+                )?;
+                step("apply-file-binds", apply_file_binds(&file_binds))?;
             }
         }
         // Drop the inherited host supplementary groups (§7.2). Two regimes:
@@ -424,13 +448,19 @@ fn spawn_inner(
         //   limited to the single effective gid); that is handled out of band.
         if !use_userns {
             if let Some(groups) = &supplementary_groups {
-                kennel_syscall::unistd::set_supplementary_groups(groups)?;
+                step(
+                    "set-supplementary-groups",
+                    kennel_syscall::unistd::set_supplementary_groups(groups),
+                )?;
             }
         }
         // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
-        kennel_syscall::process::set_no_new_privs()?;
+        step(
+            "set-no-new-privs",
+            kennel_syscall::process::set_no_new_privs(),
+        )?;
         if let Some(f) = filter.as_ref() {
-            f.install()?;
+            step("install-seccomp", f.install())?;
         }
         // The ruleset: the parent-built one for the fallback path, or built here
         // (post-`pivot_root`, so the fds reference the constructed view's inodes)
@@ -438,14 +468,20 @@ fn spawn_inner(
         // (vacuous — the path the workload would reach does not exist).
         let rs = match parent_ruleset.take() {
             Some(rs) => rs,
-            None => build_ruleset(&landlock_fs, &landlock_net, true)?,
+            None => step(
+                "build-landlock",
+                build_ruleset(&landlock_fs, &landlock_net, true),
+            )?,
         };
-        rs.restrict_current_process()?;
+        step("apply-landlock", rs.restrict_current_process())?;
         // Resource limits last (§7.2): after the Landlock ruleset is built, so
         // lowering `RLIMIT_NOFILE` cannot starve the per-path rule opens, and just
         // before `execve` so the workload inherits exactly the policy's limits.
         for (resource, soft, hard) in &ulimits {
-            kennel_syscall::process::set_rlimit(*resource, *soft, *hard)?;
+            step(
+                "set-rlimit",
+                kennel_syscall::process::set_rlimit(*resource, *soft, *hard),
+            )?;
         }
         Ok(())
     };
@@ -460,7 +496,7 @@ fn spawn_inner(
         // credentials, in the host mount namespace (cgroupfs visible), before the
         // user namespace or Landlock could deny it.
         if let Some(cgroup) = &cgroup_join {
-            join_cgroup(cgroup)?;
+            step("join-cgroup", join_cgroup(cgroup))?;
         }
         if use_userns {
             // The unprivileged foundation: establish an identity-mapped user
@@ -474,7 +510,10 @@ fn spawn_inner(
                 // until it has written the multi-gid map (via the privhelper, which
                 // holds `CAP_SETGID` in the init userns) and acked proceed. An abort
                 // (or a closed pipe) fails the seal closed — the workload never execs.
-                kennel_syscall::namespace::establish_userns_defer_gid_map(uid)?;
+                step(
+                    "establish-userns",
+                    kennel_syscall::namespace::establish_userns_defer_gid_map(uid),
+                )?;
                 kennel_syscall::handshake::send_ready(rw.as_fd(), std::process::id())?;
                 match kennel_syscall::handshake::recv_ack(pr.as_fd())? {
                     Some(kennel_syscall::handshake::ACK_PROCEED) => {}
@@ -488,9 +527,12 @@ fn spawn_inner(
             } else {
                 // Default path: the single-line identity `gid_map` drops every
                 // inherited supplementary group to the overflow gid, for free.
-                kennel_syscall::namespace::establish_identity_userns(
-                    uid,
-                    kennel_syscall::unistd::real_gid(),
+                step(
+                    "establish-userns",
+                    kennel_syscall::namespace::establish_identity_userns(
+                        uid,
+                        kennel_syscall::unistd::real_gid(),
+                    ),
                 )?;
             }
             // Unshare mount/IPC/PID here; the PID unshare only takes effect for the
@@ -498,14 +540,20 @@ fn spawn_inner(
             // execs. Returns Ok in the grandchild (std then execs the workload);
             // never returns in this process, which reaps the grandchild and exits.
             if !seal_ns.is_empty() {
-                kennel_syscall::namespace::unshare(seal_ns)?;
+                step(
+                    "unshare-namespaces",
+                    kennel_syscall::namespace::unshare(seal_ns),
+                )?;
             }
             kennel_syscall::spawn::fork_into_pid1(&mut inner_seal)
         } else {
             // Privileged path: PID was unshared in the parent, so the child
             // std forked is already in the new PID namespace. No second fork.
             if !seal_ns.is_empty() {
-                kennel_syscall::namespace::unshare(seal_ns)?;
+                step(
+                    "unshare-namespaces",
+                    kennel_syscall::namespace::unshare(seal_ns),
+                )?;
             }
             inner_seal()
         }
