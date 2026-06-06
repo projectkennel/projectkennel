@@ -744,6 +744,28 @@ fn build_view_and_pivot(
         }
     }
 
+    // 2b. Merged-usr compat symlinks (`/bin -> usr/bin`, `/lib64 -> usr/lib`, …).
+    //    On modern systems these top-level dirs are symlinks into `/usr`; the view's
+    //    bound content lives under `/usr`, so without replicating them `/bin/sh`,
+    //    `#!/bin/sh` shebangs, and the `/lib64/ld-linux…` loader all `ENOENT`.
+    //    Mirror exactly the host's links (only where the host has one and the view
+    //    does not already provide the path), so both path resolution and the Landlock
+    //    rules on `/bin/…` paths land on the bound `/usr` inodes.
+    for link in ["bin", "sbin", "lib", "lib64", "lib32", "libx32"] {
+        let host = Path::new("/").join(link);
+        let Ok(target) = std::fs::read_link(&host) else {
+            continue; // not a symlink on this host (non-merged-usr) — nothing to mirror
+        };
+        let dest = under(&host);
+        if dest.symlink_metadata().is_ok() {
+            continue; // already present (e.g. bound in by a grant)
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::os::unix::fs::symlink(&target, &dest)?;
+    }
+
     // 3. The synthetic /etc: a fresh dir in the root tmpfs populated with the
     //    staged vanilla files. The host /etc is never bound in (it carries host
     //    specifics). Writes are denied by the Landlock read grant on /etc.
