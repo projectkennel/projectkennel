@@ -370,7 +370,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         socks_connect_bin: &socks_str,
         hosts: &host_grants,
     };
-    let ssh_dir = PathBuf::from("/run/kennel/e2e/.ssh");
+    // The synthetic ~/.ssh lands in the view at the shim $HOME (/home/<account>,
+    // default `kennel`), exactly where production roots it (Shared::register_ssh) and
+    // where the workload's $HOME points — not the old /run/kennel home.
+    let ssh_dir = PathBuf::from("/home/kennel/.ssh");
     let ssh_binds =
         kenneld::ssh::materialize(&ssh_stage, &ssh_dir, &ssh_params).expect("materialise ~/.ssh");
     let ssh_prep = kenneld::SshPrep {
@@ -396,7 +399,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let unix_prep = UnixPrep {
         socket_binds: vec![(
             unix_sock.clone(),
-            PathBuf::from("/run/kennel/e2e/kennel-unix.sock"),
+            PathBuf::from("/home/kennel/kennel-unix.sock"),
         )],
         env: Vec::new(),
     };
@@ -422,7 +425,9 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             // `id`/`getpwuid` to resolve without leaking the host login.
             uid,
             gid,
-            home: PathBuf::from("/run/kennel/e2e"),
+            // The passwd home is the constructed shim $HOME (/home/<account>), not the
+            // operator's real home — matches production and the workload's $HOME.
+            home: PathBuf::from("/home/kennel"),
             groups: granted
                 .map(|g| vec![(GRANTED_GROUP_NAME.to_owned(), g)])
                 .unwrap_or_default(),
@@ -556,9 +561,12 @@ fn build_workload(v4: Ipv4Addr, granted: Option<u32>, primary: u32) -> Command {
     } else {
         "&& ! test -e /dev/mem "
     };
+    // Identity is masked: the synthetic passwd/group name the account `kennel` with
+    // the masked home `/home/kennel` (§7.2 `$HOME = /home/<user>`); no operator
+    // identity leaks. (The legacy `! grep /home/` predates the /home/<user> model.)
     let id_clause = "&& grep -q '^kennel:' /etc/passwd \
          && grep -q '^kennel:' /etc/group \
-         && ! grep -q '/home/' /etc/passwd ";
+         && grep -q ':/home/kennel:' /etc/passwd ";
     // Userns group isolation: every supplementary gid is primary / overflow(65534) /
     // granted; the granted gid is present and resolves to its synthetic name.
     let groups_clause = granted.map_or_else(
