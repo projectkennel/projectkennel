@@ -97,7 +97,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     // `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`,
     // preferring the settled artefact). The kennel instance `<name>` is optional and
     // defaults to the resolved policy name (`07-paths`, resolve-by-name).
-    let (policy_file, default_name) = resolve_policy(policy_arg)?;
+    let (policy_file, default_name) = resolve_policy(policy_arg, true)?;
     let name = name_arg.map_or(default_name, str::to_owned);
 
     // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
@@ -110,10 +110,14 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     #[allow(clippy::collection_is_never_read)]
     let _temp;
     let effective_policy: PathBuf = if is_source_policy(&bytes) {
-        let key_path = key_path.ok_or(
-            "`<policy>` is a source policy: pass `--key <path>` to compile-and-sign it in \
-             memory for this run, or pre-compile it with `kennel compile`",
-        )?;
+        // A source leaf is compiled-and-signed in memory (the §9.10 dev loop). That
+        // needs a *signing* (private) key; with `--key` omitted we default to the
+        // sole key in the user key dir. A pre-compiled settled artefact takes the
+        // `else` branch and needs no key at all (the daemon verifies its signature).
+        let key_path: PathBuf = match key_path {
+            Some(p) => PathBuf::from(p),
+            None => default_signing_key()?,
+        };
         add_default_template_dirs(&mut template_dirs);
         add_system_trust_dirs(&mut trust_dirs);
         let source = FsTemplateSource {
@@ -124,7 +128,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
-        let key = load_signing_key(key_path)?;
+        let key = load_signing_key(&key_path)?;
         let doc = kennel_policy::sign_settled(&compiled.policy, &key)
             .map_err(|e| format!("signing: {e}"))?;
         let out = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
@@ -562,20 +566,30 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         }
     }
 
-    let policy_path = policy_path.ok_or(
+    let policy_arg = policy_path.ok_or(
         "usage: kennel compile <policy> [--output-path P] [--key K | --unsigned] [--template-dir D]...",
     )?;
+    // `<policy>` is a path or a name resolved from the `policies/` cascade,
+    // preferring the source `policy.toml` (the artefact we are about to compile).
+    let (policy_path, _name) = resolve_policy(policy_arg, false)?;
     if key_path.is_some() && unsigned {
         return Err("--key and --unsigned are mutually exclusive".to_owned());
     }
-    if key_path.is_none() && !unsigned {
-        return Err(
-            "provide --key <path> to sign, or --unsigned for a development build".to_owned(),
-        );
-    }
+    // Sign with the given `--key`, else the sole key in the user key dir; `--unsigned`
+    // opts out entirely (a development build). `default_signing_key` errors helpfully
+    // if there is no key or several to choose from.
+    let signing_key: Option<PathBuf> = if unsigned {
+        None
+    } else {
+        Some(match key_path {
+            Some(p) => PathBuf::from(p),
+            None => default_signing_key()?,
+        })
+    };
     add_default_template_dirs(&mut template_dirs);
 
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let bytes = std::fs::read(&policy_path)
+        .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
 
     // No installation constants here: `<tag>`/`<gid>` are deferred to spawn, where
     // the daemon fills them from the user's scope (`/etc/kennel/subkennel`). The CLI
@@ -607,7 +621,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     print_warnings(&compiled.warnings);
     let policy = &compiled.policy;
 
-    let out = output_path.unwrap_or_else(|| default_settled_path(policy_path, &policy.name));
+    let out = output_path.unwrap_or_else(|| default_settled_path(&policy_path, &policy.name));
 
     // Byte-pin the resolved references: check the fresh lockfile against any prior
     // `<name>.lock` beside the output, then (re)write it. A re-tagged/re-signed
@@ -630,11 +644,11 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             .map_err(|e| format!("writing {}: {e}", lock_path.display()))?;
     }
 
-    let doc = if unsigned {
-        kennel_policy::seal_unsigned(policy)
-    } else {
-        let key = load_signing_key(key_path.ok_or("internal: key path lost")?)?;
+    let doc = if let Some(key_path) = &signing_key {
+        let key = load_signing_key(key_path)?;
         kennel_policy::sign_settled(policy, &key).map_err(|e| format!("signing: {e}"))?
+    } else {
+        kennel_policy::seal_unsigned(policy)
     };
     let out_bytes = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
@@ -815,7 +829,7 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
         ));
     }
 
-    let key = load_signing_key(key_path)?;
+    let key = load_signing_key(Path::new(key_path))?;
     let signed = kennel_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
     let env = signed.signature.ok_or("internal: signature not produced")?;
     // Append the signature as a new top-level table, preserving the original text.
@@ -901,20 +915,23 @@ fn keygen(args: &[String]) -> Result<ExitCode, String> {
 
     eprintln!("generated Ed25519 signing key `{key_id}`:");
     eprintln!(
-        "  private seed : {}   (0600 — keep secret; pass to --key)",
+        "  private seed : {}   (0600 — keep secret; the signing key)",
         key_path.display()
     );
     eprintln!("  public key   : {}   (0644)", pub_path.display());
     eprintln!();
-    eprintln!("To let the daemon trust policies you sign with this key, install the *public* key");
-    eprintln!("into the root-owned system trust store, then compile/run:");
+    eprintln!("The daemon already trusts this key for your own run policies (it reads");
+    eprintln!("~/.config/kennel/keys), so no further setup is needed. Compile a policy once,");
+    eprintln!("then run it — neither command needs --key while this is your only key:");
+    eprintln!("  kennel compile <name>          # signs policies/<name>/<name>.settled.toml");
+    eprintln!("  kennel run <name> -- <cmd...>  # runs the settled policy (no key to run)");
+    eprintln!();
+    eprintln!("Only to let *other* users or a fleet trust policies you sign — or to sign");
+    eprintln!("*templates* (which verify against system keys only) — install the public key");
+    eprintln!("into the root-owned system trust store:");
     eprintln!(
         "  sudo install -m 0644 {} /etc/kennel/keys/{key_id}.pub",
         pub_path.display()
-    );
-    eprintln!(
-        "  kennel run <policy> <name> --key {} -- <cmd...>",
-        key_path.display()
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -1270,14 +1287,17 @@ fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
     );
 }
 
-/// Resolve a `kennel run` `<policy>` argument to a file path plus a default kennel
-/// name. An argument that names an **existing file** is used verbatim (its name
-/// derived from the path); otherwise it is treated as a **policy name** searched in
-/// the `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`),
-/// preferring `<name>/<name>.settled.toml` (the production artefact) over
-/// `<name>/policy.toml` (the source leaf). The returned name doubles as the default
-/// kennel instance name (`07-paths`, resolve-by-name).
-fn resolve_policy(arg: &str) -> Result<(PathBuf, String), String> {
+/// Resolve a `<policy>` argument to a file path plus a default kennel/policy name.
+/// An argument that names an **existing file** is used verbatim (its name derived
+/// from the path); otherwise it is a **policy name** searched in the `policies/`
+/// cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`).
+///
+/// Within a `<name>/` folder there are two candidates: the compiled
+/// `<name>.settled.toml` and the source `policy.toml`. `prefer_settled` picks the
+/// order — `kennel run` prefers the settled artefact (the production path), while
+/// `kennel compile` prefers the source it is about to compile. The returned name
+/// doubles as the default kennel instance name (`07-paths`, resolve-by-name).
+fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), String> {
     let literal = Path::new(arg);
     if literal.exists() {
         return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
@@ -1293,12 +1313,16 @@ fn resolve_policy(arg: &str) -> Result<(PathBuf, String), String> {
     {
         let base = dir.join(arg);
         let settled = base.join(format!("{arg}.settled.toml"));
-        if settled.is_file() {
-            return Ok((settled, arg.to_owned()));
-        }
         let source = base.join("policy.toml");
-        if source.is_file() {
-            return Ok((source, arg.to_owned()));
+        let ordered = if prefer_settled {
+            [settled, source]
+        } else {
+            [source, settled]
+        };
+        for candidate in ordered {
+            if candidate.is_file() {
+                return Ok((candidate, arg.to_owned()));
+            }
         }
     }
     Err(format!(
@@ -1339,10 +1363,8 @@ fn is_valid_policy_name(name: &str) -> bool {
 }
 
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
-fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
-    let dir = Path::new(policy_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+fn default_settled_path(policy_path: &Path, name: &str) -> PathBuf {
+    let dir = policy_path.parent().unwrap_or_else(|| Path::new("."));
     dir.join(format!("{name}.settled.toml"))
 }
 
@@ -1388,16 +1410,56 @@ fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_policy::KeySet, String> {
 
 /// Load a signing key from a file holding the base64 of a 32-byte Ed25519 seed.
 /// The key id is the file stem, mirroring the `.pub` trust-store convention.
-fn load_signing_key(path: &str) -> Result<kennel_policy::SigningKey, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {path}: {e}"))?;
+fn load_signing_key(path: &Path) -> Result<kennel_policy::SigningKey, String> {
+    let shown = path.display();
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {shown}: {e}"))?;
     let seed = kennel_policy::b64::decode(text.trim().as_bytes())
-        .ok_or_else(|| format!("key {path} is not valid base64"))?;
-    let key_id = Path::new(path)
+        .ok_or_else(|| format!("key {shown} is not valid base64"))?;
+    let key_id = path
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("cannot derive a key id from {path}"))?;
+        .ok_or_else(|| format!("cannot derive a key id from {shown}"))?;
     kennel_policy::SigningKey::from_seed(key_id, &seed)
-        .map_err(|e| format!("loading key {path}: {e}"))
+        .map_err(|e| format!("loading key {shown}: {e}"))
+}
+
+/// The signing key to use when an operation must sign (`compile`, or `run`'s
+/// in-memory compile-and-sign) and `--key` was omitted: the **sole** `*.key` in
+/// the user key dir (`default_key_dir`). Signing is deliberate, so we auto-pick
+/// only when there is exactly one candidate; zero or several is an error asking
+/// the user to be explicit. The matching `.pub` is trusted for run policies, so
+/// the single-key dev case needs no `--key` at all.
+fn default_signing_key() -> Result<PathBuf, String> {
+    let dir = default_key_dir();
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir).map_or_else(
+        |_| Vec::new(),
+        |entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("key"))
+                .collect()
+        },
+    );
+    found.sort();
+    match found.as_slice() {
+        [] => Err(format!(
+            "no signing key in {} — generate one with `kennel keygen <key-id>`, or pass --key <path>",
+            dir.display()
+        )),
+        [only] => Ok(only.clone()),
+        many => {
+            let ids: Vec<&str> = many
+                .iter()
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()))
+                .collect();
+            Err(format!(
+                "multiple signing keys in {} ({}); pass --key <path> to choose",
+                dir.display(),
+                ids.join(", ")
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1500,7 +1562,7 @@ signed_fields = []
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("loose.settled.toml");
         std::fs::write(&file, b"x").expect("write");
-        let (path, name) = resolve_policy(file.to_str().expect("utf8")).expect("resolve");
+        let (path, name) = resolve_policy(file.to_str().expect("utf8"), true).expect("resolve");
         assert_eq!(path, file);
         assert_eq!(name, "loose");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1509,7 +1571,7 @@ signed_fields = []
     #[test]
     fn resolve_policy_rejects_an_unknown_name() {
         // A name that resolves nowhere (and is not a path) is an error, not a panic.
-        let err = resolve_policy("definitely-no-such-policy-xyz").expect_err("must fail");
+        let err = resolve_policy("definitely-no-such-policy-xyz", true).expect_err("must fail");
         assert!(err.contains("no policy named"), "got {err}");
     }
 
