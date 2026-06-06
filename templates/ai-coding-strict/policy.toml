@@ -5,7 +5,7 @@
 #
 # Strict confinement for an AI coding agent on a single project tree. Adds, on
 # top of base-confined: the interpreters/tools an agent needs, the common package
-# registries + git hosts, a per-kennel ssh-agent, .env-style scrubbing, and an
+# registries + git hosts, a per-kennel gpg-agent, and an
 # 8-hour TTL. The PROJECT PATH and the LLM API endpoint are deliberately NOT here
 # — the user's leaf policy adds them (see README.md / TEMPLATE-ai-coding-strict.md
 # at the repo root for the full annotated reference and a sample leaf policy).
@@ -50,20 +50,10 @@ allow = [
 ]
 
 
-# --- Filesystem: scrub credential-shaped files in the (user-granted) project ---
-# The project tree itself is granted by the user's leaf policy. Within any granted
-# directory, these patterns are masked (appear empty) so the agent cannot read
-# secrets committed into the tree. Best-effort against direct reads (T2.3); a
-# determined agent can still recover via git object history.
-[fs.scrub]
-patterns = [
-    ".env", ".env.*", ".envrc",
-    "secrets.yml", "secrets.yaml", "credentials.json", "service-account*.json",
-    "*.pem", "*.key", "*.p12", "*.pfx",
-    "terraform.tfstate", "terraform.tfstate.backup",
-]
-mode = "empty"   # empty file rather than ENOENT (build systems tolerate empty)
-
+# NOTE: there is no credential "scrubbing" of the project tree. That was a
+# `[fs.scrub]` section the runtime never implemented (it would compile-warn and do
+# nothing), so it is removed rather than shipped as false assurance. Don't grant a
+# tree you don't want the agent to read; secrets in a granted tree are readable.
 
 # --- Network: the common registries + git hosts ------------------------------
 # These extend base-confined's allowlist (which is empty). The LLM API is added
@@ -139,4 +129,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "/fgGJeU5kH+pJBKf1axKZwPuKnXWa8fdxLED0Iv4/e5MmGrsYA8pSd9fcNz0nHztBv7XNFVPo4Efk7fTUyGlAQ=="
+signature = "Wz0Vl/W4uUJcUS3FhTjJsxJDIss3iGuRc12UENYG/Nz19u7yi6I7ewX+Hdy5a7cCzKZlbOMWH6+8yEJizu4+BQ=="

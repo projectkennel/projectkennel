@@ -60,4 +60,4 @@ ttl_action = "exit"
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "f87+PZSYrJlpXrdwIVAgTMV1CVf9GIToKI02PnREBYPwVggx3Xv4CGywbiZL2RTLiG27ZM4Olt70EmbIyqchCA=="
+signature = "NZtVjXO8ebR5XrbiPRwWlNa6GmCtOktySNbDQ8i/xEiZescswyLCo4JkWI530eFbuaAScUS8kDBCdmeda9f0Dw=="
