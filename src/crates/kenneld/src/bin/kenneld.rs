@@ -35,7 +35,17 @@ fn run() -> Result<(), String> {
         kennel_config::Deployment::load().map_err(|e| format!("loading deployment config: {e}"))?;
     let identity = build_identity(&deployment)?;
     let privileged = HelperClient::new(deployment.privhelper());
-    let loader = policy::TrustStoreLoader::from_dir(deployment.trust_dir()).map_err(|e| {
+    // Settled run policies verify against the system trust store **then** the calling
+    // user's own keys (the trust split, 07-paths): a user may run a policy signed with
+    // their own key, but a user key cannot shadow a system key id (system is first, so
+    // it wins). Templates are a separate, system-only trust at compile time.
+    let mut trust_dirs: Vec<std::path::PathBuf> = vec![deployment.trust_dir().to_path_buf()];
+    if let Some(user_keys) = kennel_config::user_key_dir() {
+        trust_dirs.push(user_keys);
+    }
+    let dir_refs: Vec<&std::path::Path> =
+        trust_dirs.iter().map(std::path::PathBuf::as_path).collect();
+    let loader = policy::TrustStoreLoader::from_dirs(&dir_refs).map_err(|e| {
         format!(
             "loading trust store {}: {e}",
             deployment.trust_dir().display()

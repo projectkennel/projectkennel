@@ -3,11 +3,18 @@
 //! The daemon's production [`crate::server::PolicyLoader`]. The
 //! trust store is a directory of Ed25519 public keys — one `*.pub` file per
 //! signer, the file stem its key id and the contents its base64-encoded 32-byte
-//! public key — root-managed, like `/etc/kennel/subkennel`. Its location comes
-//! from the root-owned deployment config ([`kennel_config::Deployment::trust_dir`],
-//! default `/etc/kennel/keys`) — never a user-writable or environment override,
-//! since that would let the user trust their own signing key. Loading a policy
-//! reads the file, verifies its single signature against the trust store,
+//! public key. The **system** store comes from the root-owned deployment config
+//! ([`kennel_config::Deployment::trust_dir`], default `/etc/kennel/keys`, plus the
+//! vendor `/usr/lib/kennel/keys`) — never a user/environment override.
+//!
+//! The trust split (`07-paths`): a **settled run policy** the daemon enforces may be
+//! signed by a system key **or** the calling user's own `~/.config/kennel/keys`
+//! (a leaf only narrows within the template's re-asserted invariants and runs with
+//! the user's own authority, so its own key grants no escalation). So the daemon
+//! loads system keys **then** the user's keys ([`TrustStoreLoader::from_dirs`]),
+//! system winning on a duplicate id. **Templates** — the security baseline — are a
+//! separate, **system-only** trust enforced at compile time, never here. Loading a
+//! policy reads the file, verifies its single signature against the trust store,
 //! substitutes the per-instance placeholders, and translates the result into a
 //! [`Plan`] — all via [`kennel_spawn::prepare`].
 
@@ -17,6 +24,32 @@ use kennel_policy::KeySet;
 use kennel_spawn::{Plan, RuntimeSubstitutions};
 
 use crate::server::{Loaded, PolicyLoader};
+
+/// Load every `*.pub` in `dir` into `keys`, the file stem as key id. A key id
+/// already present is **skipped**, so when called over an ordered list the first
+/// dir wins (the system store, loaded first, cannot be shadowed by a later user key).
+fn load_dir_into(keys: &mut KeySet, dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pub") {
+            continue;
+        }
+        let Some(key_id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if keys.get(key_id).is_some() {
+            continue; // an earlier (system) dir already defined this id; do not shadow
+        }
+        let contents = std::fs::read_to_string(&path)?;
+        keys.insert_b64(key_id, contents.trim()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("bad key {key_id}: {e:?}"),
+            )
+        })?;
+    }
+    Ok(())
+}
 
 /// A [`PolicyLoader`] backed by a trust store of public keys.
 pub struct TrustStoreLoader {
@@ -31,21 +64,30 @@ impl TrustStoreLoader {
     /// file's contents are not a valid base64 Ed25519 public key.
     pub fn from_dir(dir: &Path) -> std::io::Result<Self> {
         let mut keys = KeySet::new();
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("pub") {
-                continue;
+        load_dir_into(&mut keys, dir)?;
+        Ok(Self { keys })
+    }
+
+    /// Build a loader from several key dirs, **earlier dirs winning** on a duplicate
+    /// key id; a missing dir is skipped (not an error).
+    ///
+    /// Pass the system trust dir(s) **first**, then the user's
+    /// `~/.config/kennel/keys`: a settled run policy may be signed by a system key
+    /// **or** the user's own key (`07-paths`, the trust split), but a user key can
+    /// never shadow a system key of the same id (system is inserted first and wins).
+    /// Templates are a separate, system-only trust handled at compile time, not here.
+    ///
+    /// # Errors
+    /// An OS error if a present dir cannot be read, or `InvalidData` for a malformed key.
+    pub fn from_dirs(dirs: &[&Path]) -> std::io::Result<Self> {
+        let mut keys = KeySet::new();
+        for dir in dirs {
+            match load_dir_into(&mut keys, dir) {
+                Ok(()) => {}
+                // A missing layer (e.g. a user with no ~/.config/kennel/keys) is fine.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
             }
-            let Some(key_id) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let contents = std::fs::read_to_string(&path)?;
-            keys.insert_b64(key_id, contents.trim()).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("bad key {key_id}: {e:?}"),
-                )
-            })?;
         }
         Ok(Self { keys })
     }
@@ -194,6 +236,51 @@ mod tests {
         std::fs::write(dir.join("broken.pub"), "not base64!!!").expect("write");
         assert!(TrustStoreLoader::from_dir(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_dirs_loads_user_keys_but_system_wins_a_clash() {
+        // The trust split: settled policies verify against system keys then the user's
+        // own. A user-only key is loaded; a user key reusing a system id cannot shadow
+        // the system key (system dir is passed first and wins).
+        let system = temp_dir("split-sys");
+        let user = temp_dir("split-usr");
+        let sys_key = SigningKey::from_seed("shared", &[1u8; 32]).expect("sys key");
+        let usr_key = SigningKey::from_seed("shared", &[2u8; 32]).expect("usr key");
+        write_pubkey(&system, &sys_key);
+        write_pubkey(&user, &usr_key);
+        let mine = SigningKey::from_seed("mine", &[3u8; 32]).expect("user-only key");
+        write_pubkey(&user, &mine);
+
+        let loader = TrustStoreLoader::from_dirs(&[&system, &user]).expect("from_dirs");
+        assert_eq!(
+            loader.key_count(),
+            2,
+            "clashing id deduped; user-only added"
+        );
+        assert!(
+            loader.keys.get("mine").is_some(),
+            "user-only key is trusted"
+        );
+        let got = loader.keys.get("shared").expect("shared id present");
+        let got_b64 = kennel_policy::b64::encode(&**got);
+        let want_b64 = kennel_policy::b64::encode(&sys_key.public_key_bytes());
+        assert_eq!(got_b64, want_b64, "the system key wins the id clash");
+
+        let _ = std::fs::remove_dir_all(&system);
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    #[test]
+    fn from_dirs_skips_a_missing_dir() {
+        let system = temp_dir("split-present");
+        let key = SigningKey::from_seed("k", &[7u8; 32]).expect("key");
+        write_pubkey(&system, &key);
+        let missing = system.join("no-such-user-keys");
+        let loader =
+            TrustStoreLoader::from_dirs(&[&system, &missing]).expect("missing dir is not an error");
+        assert_eq!(loader.key_count(), 1);
+        let _ = std::fs::remove_dir_all(&system);
     }
 
     #[test]

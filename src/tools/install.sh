@@ -110,6 +110,10 @@ install_config() {
 	# deployment file's libexec_dir is rewritten to wherever we actually
 	# installed, so a --prefix relocation stays coherent without hand-editing.
 	run install -d -m 0755 "$vendor_dir"
+	# Vendor cascade layers for keys/templates/policies so the lowest-priority
+	# search dir always exists (kennel-config 3-layer cascade; 07-paths). No
+	# reference policies are shipped — policies are user/org content.
+	run install -d -m 0755 "$vendor_dir/keys" "$vendor_dir/templates" "$vendor_dir/policies"
 	run install -m 0644 "$repo_root/dist/config/system.toml" "$vendor_dir/system.toml"
 	run install -m 0644 "$repo_root/dist/config/config.toml" "$vendor_dir/config.toml"
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then

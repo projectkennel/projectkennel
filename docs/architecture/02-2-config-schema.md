@@ -277,10 +277,13 @@ Substitution does not perform shell expansion: `$HOME` in a policy field is not 
 
 Policies live under `~/.config/kennel/`:
 
-- `~/.config/kennel/kennels/<name>.toml` — leaf policies.
-- `~/.config/kennel/kennels/<name>.lock` — the lockfile beside each leaf policy.
+- `~/.config/kennel/policies/<name>/policy.toml` — the source leaf policy (folder per policy).
+- `~/.config/kennel/policies/<name>/<name>.settled.toml` — the compiled, signed settled policy (what runs).
+- `~/.config/kennel/policies/<name>/<name>.lock` — the lockfile beside the policy.
 - `~/.config/kennel/templates/<name>@<version>.toml` — local templates and fragments (cached or hand-installed). The filename encodes the versioned reference, so multiple versions of one name coexist.
 - `~/.config/kennel/keys/` — installed signing keys (public only).
+
+`kennel run <name>` resolves a run policy **by name** across the `policies/` cascade (`~/.config/kennel` → `/etc/kennel` → `/usr/lib/kennel`); a literal path still works. See `07-paths.md` §Run-policy resolution.
 
 System-installed templates and fragments live under `/etc/kennel/templates/`. The search order for resolving a `<name>@<version>` reference is: user templates → system templates → built-in templates. The exact version must be found; the resolver does not fall back to a different version of the same name (that would defeat the pin). A template at a higher-priority location shadows the *same `name@version`* at lower priority, and the shadowing is logged at load time.
 
@@ -411,7 +414,11 @@ This is the one place the runtime deliberately repeats compile-time work, and it
 
 ### On-disk
 
-Settled policies live beside their source under `~/.config/kennel/kennels/<name>.settled.toml` in development mode, or are pushed to `/etc/kennel/settled/<name>.settled.toml` (or a fleet-tool-chosen path) in attested deployments. `07-paths.md` is authoritative.
+Settled policies live beside their source inside the policy folder: `<config>/policies/<name>/<name>.settled.toml`, across the cascade `~/.config/kennel` → `/etc/kennel` → `/usr/lib/kennel`. A fleet tool stages a `policies/<name>/` under `/etc/kennel` for an attested deployment. `07-paths.md` is authoritative.
+
+### Trust split
+
+The signature trust differs by artefact (`07-paths.md` §Policy-signing trust split, `04-trust-boundaries.md`): **templates** verify only against **system keys** (`/etc/kennel/keys`, `/usr/lib/kennel/keys`) — a user key cannot sign a template; **settled run policies** verify against **system keys *or* the user's own `~/.config/kennel/keys`**, so a user may run a policy signed with their own `kennel keygen` key while the template chain it derives from still verifies against system keys.
 
 ---
 

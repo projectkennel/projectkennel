@@ -69,8 +69,8 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let head = args.get(..sep).unwrap_or(&[]);
     let command = args.get(sep.saturating_add(1)..).unwrap_or(&[]);
 
-    let mut policy_path: Option<&str> = None;
-    let mut name: Option<&str> = None;
+    let mut policy_arg: Option<&str> = None;
+    let mut name_arg: Option<&str> = None;
     let mut key_path: Option<&str> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
@@ -83,22 +83,28 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             }
             "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if policy_path.is_none() => policy_path = Some(v),
-            v if name.is_none() => name = Some(v),
+            v if policy_arg.is_none() => policy_arg = Some(v),
+            v if name_arg.is_none() => name_arg = Some(v),
             _ => return Err("unexpected extra argument before `--`".to_owned()),
         }
     }
-    let policy_path = policy_path
-        .ok_or("usage: kennel run <policy> <name> [--key K] [--template-dir D]... -- <cmd...>")?;
-    let name = name.ok_or("usage: kennel run <policy> <name> -- <cmd...>")?;
+    let policy_arg = policy_arg
+        .ok_or("usage: kennel run <policy> [<name>] [--key K] [--template-dir D]... -- <cmd...>")?;
     if command.is_empty() {
         return Err("no command given after `--`".to_owned());
     }
+    // `<policy>` is a literal path if it exists, else a **name** resolved from the
+    // `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`,
+    // preferring the settled artefact). The kennel instance `<name>` is optional and
+    // defaults to the resolved policy name (`07-paths`, resolve-by-name).
+    let (policy_file, default_name) = resolve_policy(policy_arg)?;
+    let name = name_arg.map_or(default_name, str::to_owned);
 
     // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
     // artefact is passed straight through. `_temp` keeps the on-disk settled file
     // alive for the daemon to read, and removes it when this function returns.
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
     // Held only for its `Drop` (removes the temp settled file when the run returns);
     // never read, hence the allow.
     #[allow(clippy::collection_is_never_read)]
@@ -109,33 +115,36 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
              memory for this run, or pre-compile it with `kennel compile`",
         )?;
         add_default_template_dirs(&mut template_dirs);
-        add_default_trust_dirs(&mut trust_dirs);
+        add_system_trust_dirs(&mut trust_dirs);
         let source = FsTemplateSource {
             dirs: template_dirs,
         };
         let keys = load_trust_store(&trust_dirs)?;
         let trust = kennel_policy::Trust::allow_unsigned(Some(&keys));
         let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
-            .map_err(|e| format!("compiling {policy_path}: {e}"))?;
+            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
         let key = load_signing_key(key_path)?;
         let doc = kennel_policy::sign_settled(&compiled.policy, &key)
             .map_err(|e| format!("signing: {e}"))?;
         let out = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
-        let temp = TempSettled::write(name, &out)?;
+        let temp = TempSettled::write(&name, &out)?;
         let path = temp.path().to_path_buf();
-        eprintln!("kennel: compiled `{policy_path}` in memory for this run");
+        eprintln!(
+            "kennel: compiled `{}` in memory for this run",
+            policy_file.display()
+        );
         _temp = Some(temp);
         path
     } else {
         _temp = None;
-        PathBuf::from(policy_path)
+        policy_file
     };
 
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let request = Request::Start(StartRequest {
         policy: effective_policy,
-        kennel: name.to_owned(),
+        kennel: name.clone(),
         argv: command.to_vec(),
         cwd,
     });
@@ -580,7 +589,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     // verifies against the trust store (`--trust-dir`, else the default key dirs);
     // otherwise unsigned templates resolve (development), still verifying any present
     // signature against whatever keys are loaded.
-    add_default_trust_dirs(&mut trust_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
     let keys = load_trust_store(&trust_dirs)?;
     let trust = if require_signed {
         kennel_policy::Trust::require(&keys)
@@ -742,7 +751,7 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
     let policy_path = policy_path
         .ok_or("usage: kennel validate <policy> [--template-dir D] [--require-signed]")?;
     add_default_template_dirs(&mut template_dirs);
-    add_default_trust_dirs(&mut trust_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
     let source = FsTemplateSource {
@@ -1261,6 +1270,74 @@ fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
     );
 }
 
+/// Resolve a `kennel run` `<policy>` argument to a file path plus a default kennel
+/// name. An argument that names an **existing file** is used verbatim (its name
+/// derived from the path); otherwise it is treated as a **policy name** searched in
+/// the `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`),
+/// preferring `<name>/<name>.settled.toml` (the production artefact) over
+/// `<name>/policy.toml` (the source leaf). The returned name doubles as the default
+/// kennel instance name (`07-paths`, resolve-by-name).
+fn resolve_policy(arg: &str) -> Result<(PathBuf, String), String> {
+    let literal = Path::new(arg);
+    if literal.exists() {
+        return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
+    }
+    if !is_valid_policy_name(arg) {
+        return Err(format!(
+            "`{arg}` is not an existing file, and not a valid policy name (no `/`, `..`, or whitespace)"
+        ));
+    }
+    for dir in kennel_config::User::load()
+        .unwrap_or_default()
+        .policy_dirs()
+    {
+        let base = dir.join(arg);
+        let settled = base.join(format!("{arg}.settled.toml"));
+        if settled.is_file() {
+            return Ok((settled, arg.to_owned()));
+        }
+        let source = base.join("policy.toml");
+        if source.is_file() {
+            return Ok((source, arg.to_owned()));
+        }
+    }
+    Err(format!(
+        "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
+         /usr/lib/kennel); pass a path, or compile one with `kennel compile`"
+    ))
+}
+
+/// Derive a kennel name from a policy file path: `policies/<name>/policy.toml` and
+/// `policies/<name>/<name>.settled.toml` both yield `<name>`; any other file yields
+/// its stem with a trailing `.settled` stripped.
+fn policy_name_from_path(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("kennel");
+    if stem == "policy" {
+        if let Some(parent) = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+        {
+            return parent.to_owned();
+        }
+    }
+    stem.strip_suffix(".settled").unwrap_or(stem).to_owned()
+}
+
+/// A policy name is a single safe path component: non-empty, no `/`, no `..`, no
+/// whitespace (it is joined into the trust-rooted `policies/` cascade and also
+/// defaults the kennel instance name).
+fn is_valid_policy_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains("..")
+        && !name.chars().any(char::is_whitespace)
+}
+
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
 fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
     let dir = Path::new(policy_path)
@@ -1269,12 +1346,19 @@ fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
     dir.join(format!("{name}.settled.toml"))
 }
 
-/// Append the default trust-store (authoring) directories: the user
-/// `config.toml`'s `key_dirs` if set, else the built-in default (user config
-/// dir, then system). This is the CLI's *authoring* trust store; the daemon
-/// re-verifies against its own locked [`kennel_config::Deployment::trust_dir`].
-fn add_default_trust_dirs(dirs: &mut Vec<PathBuf>) {
-    dirs.extend(kennel_config::User::load().unwrap_or_default().key_dirs());
+/// Append the default **template-trust** directories: the system stores only
+/// (`/etc/kennel/keys`, then the vendor `/usr/lib/kennel/keys`), or the user
+/// `config.toml`'s `key_dirs` override if set. Templates are the security baseline
+/// (the framework invariants + confinement floor) and must be org/vendor-signed —
+/// never a user's own `~/.config/kennel/keys` (the trust split, `07-paths`). The
+/// daemon separately trusts the user's own keys for **settled run** policies.
+/// `--trust-dir` flags still append, so an operator can add an org key dir.
+fn add_system_trust_dirs(dirs: &mut Vec<PathBuf>) {
+    dirs.extend(
+        kennel_config::User::load()
+            .unwrap_or_default()
+            .system_key_dirs(),
+    );
 }
 
 /// Load a trust store: every `<key_id>.pub` (base64 32-byte public key) under each
@@ -1377,6 +1461,56 @@ signed_fields = []
         // A line with no ts is its own key (no panic).
         assert_eq!(novel_key("{}"), "{}");
         assert_eq!(extract_ts("{}"), None);
+    }
+
+    #[test]
+    fn policy_name_derives_from_the_path_shape() {
+        // policies/<name>/policy.toml and policies/<name>/<name>.settled.toml -> <name>.
+        assert_eq!(
+            policy_name_from_path(Path::new("/c/policies/ai-coding/policy.toml")),
+            "ai-coding"
+        );
+        assert_eq!(
+            policy_name_from_path(Path::new("/c/policies/ai-coding/ai-coding.settled.toml")),
+            "ai-coding"
+        );
+        // A loose file falls back to its stem, minus a trailing `.settled`.
+        assert_eq!(
+            policy_name_from_path(Path::new("/tmp/demo.settled.toml")),
+            "demo"
+        );
+        assert_eq!(policy_name_from_path(Path::new("/tmp/demo.toml")), "demo");
+    }
+
+    #[test]
+    fn policy_names_reject_traversal_and_separators() {
+        assert!(is_valid_policy_name("ai-coding"));
+        assert!(is_valid_policy_name("my_policy.v2"));
+        assert!(!is_valid_policy_name(""));
+        assert!(!is_valid_policy_name(".."));
+        assert!(!is_valid_policy_name("a/b"));
+        assert!(!is_valid_policy_name("../escape"));
+        assert!(!is_valid_policy_name("has space"));
+    }
+
+    #[test]
+    fn resolve_policy_uses_a_literal_path_verbatim() {
+        // An existing file is used as-is and bypasses name resolution.
+        let dir = std::env::temp_dir().join(format!("kennel-resolve-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("loose.settled.toml");
+        std::fs::write(&file, b"x").expect("write");
+        let (path, name) = resolve_policy(file.to_str().expect("utf8")).expect("resolve");
+        assert_eq!(path, file);
+        assert_eq!(name, "loose");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_policy_rejects_an_unknown_name() {
+        // A name that resolves nowhere (and is not a path) is an error, not a panic.
+        let err = resolve_policy("definitely-no-such-policy-xyz").expect_err("must fail");
+        assert!(err.contains("no policy named"), "got {err}");
     }
 
     #[test]

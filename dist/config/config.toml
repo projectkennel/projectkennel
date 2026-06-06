@@ -9,9 +9,19 @@
 # policies. The daemon enforces against its own locked trust store
 # (system.toml's trust_dir) regardless of anything here.
 
-# Where `kennel compile` / `kennel validate` search for templates and signing
-# keys. Absolute paths only (no ~ expansion). A set list REPLACES the built-in
-# default (<user-config>/templates + /etc/kennel/templates, and .../keys).
+# Where the CLI searches for templates, signing keys, and run policies. Absolute
+# paths only (no ~ expansion). A set list REPLACES the built-in 3-layer default,
+# which is <user-config>/<leaf> + /etc/kennel/<leaf> + /usr/lib/kennel/<leaf> for
+# each of templates/, keys/, and policies/.
+#
+#   template_dirs — where `kennel compile`/`validate` resolve <name>@<version>.
+#   key_dirs      — the trust store used while authoring. NOTE the trust split:
+#                   templates verify only against the SYSTEM stores (/etc, /usr/lib),
+#                   never ~/.config/kennel/keys; run policies the daemon enforces may
+#                   be signed by a system key OR the user's own ~/.config/kennel/keys.
+#   policy_dirs   — where `kennel run <name>` resolves a policy by name
+#                   (policies/<name>/<name>.settled.toml, else policies/<name>/policy.toml).
 #
 # template_dirs = ["/etc/kennel/templates"]
 # key_dirs      = ["/etc/kennel/keys"]
+# policy_dirs   = ["/etc/kennel/policies"]

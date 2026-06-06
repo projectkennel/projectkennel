@@ -22,13 +22,15 @@ User configuration. Created by the CLI on first use if absent.
 
 ```
 ~/.config/kennel/
-├── kennels/                         leaf policy files (one per kennel)
-│   ├── ai-coding.toml
-│   ├── ai-coding.lock               lockfile beside each leaf policy
-│   ├── ai-coding.settled.toml       compiled settled policy (dev mode)
-│   ├── web-dev.toml
-│   ├── web-dev.lock
-│   ├── web-dev.settled.toml
+├── policies/                        run policies, one folder per policy
+│   ├── ai-coding/
+│   │   ├── policy.toml              source leaf (optionally signed)
+│   │   ├── ai-coding.settled.toml   compiled + signed settled policy (what runs)
+│   │   └── ai-coding.lock           lockfile beside the policy
+│   ├── web-dev/
+│   │   ├── policy.toml
+│   │   ├── web-dev.settled.toml
+│   │   └── web-dev.lock
 │   └── ...
 ├── templates/                       user-installed templates and fragments
 │   ├── ai-coding-strict@v4.toml     filename encodes the versioned reference
@@ -43,7 +45,7 @@ User configuration. Created by the CLI on first use if absent.
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-The `kennels/<name>.toml` filename and the policy's `name = "<name>"` field must match; the loader rejects on mismatch. The `kennels/<name>.lock` lockfile sits beside its policy and records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). The `kennels/<name>.settled.toml` is the compiled settled policy in development mode — what `kennel run` actually enforces (`02-2-config-schema.md` §The settled policy); it is regenerated when the source or lockfile changes. Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
+A run policy is a **folder** `policies/<name>/`, where `<name>` matches the policy's `name = "<name>"` field. Inside it: `policy.toml` is the source leaf; `<name>.settled.toml` is the compiled, signed settled policy — what `kennel run` actually enforces (`02-2-config-schema.md` §The settled policy); and `<name>.lock` records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). `kennel run <name>` resolves the policy **by name** across the cascade (§Run-policy resolution) without a path; `kennel compile` writes the settled artefact and lockfile back into the folder. Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
 
 ### `~/.local/state/kennel/<kennel>/`
 
@@ -132,11 +134,11 @@ System configuration. Installed by the package; managed by the administrator.
 │   ├── base-confined@v3.toml
 │   ├── ai-coding-strict@v4.toml
 │   └── ...
-├── policies/                        system-installed leaf policies (created by the installer)
-│   ├── ai-coding.policy
-│   └── ...
-├── settled/                         fleet-pushed signed settled policies (attested mode; roadmap)
-│   ├── ai-coding.settled.toml
+├── policies/                        system-installed run policies (folder per policy)
+│   ├── ai-coding/
+│   │   ├── policy.toml
+│   │   ├── ai-coding.settled.toml
+│   │   └── ai-coding.lock
 │   └── ...
 ├── keys/                            project + org signing keys (shipped or pushed)
 │   ├── kennel-maint-2026-01.pub
@@ -144,17 +146,17 @@ System configuration. Installed by the package; managed by the administrator.
 │   └── ...
 ├── audit.toml                       installation-wide audit-sink defaults
 ├── system.toml                      deployment paths: libexec_dir, trust_dir, sshd (admin layer)
-└── config.toml                      CLI conveniences: template/key search dirs (admin layer)
+└── config.toml                      CLI conveniences: template/key/policy search dirs (admin layer)
 ```
 
 Owner: root. Mode: directory `0755`, files `0644`. The `keys/` directory holds public keys only; private keys are not in this tree.
 
-The installer creates `keys/`, `templates/`, and `policies/` (it does **not** create `settled/`). In an attested deployment — a roadmap mode — `settled/` would hold the signed settled policies pushed by the organisation's central compile infrastructure, enforced directly without the `templates/`, lockfiles, or the resolver (`02-2-config-schema.md` §The settled policy); the directory is not yet wired into the installer or the run path. Today `kennel run` enforces the per-kennel settled policy under `~/.config/kennel/kennels/<name>.settled.toml`, verifying its signature against a key in `keys/`.
+The installer creates `keys/`, `templates/`, and `policies/` (and the matching vendor dirs under `/usr/lib/kennel/`). It ships no reference policies — policies are user/org content; the shipped baseline is `templates/`. A `policies/<name>/` here is a system-staged run policy, structurally identical to the user's (§`~/.config/kennel/`); `kennel run <name>` finds it when no higher-priority user policy of that name exists (§Run-policy resolution).
 
 **No install path is baked into a binary.** Deployment paths — the helper-binary directory (`libexec_dir`, default `/usr/libexec/kennel`), the daemon's signing-key `trust_dir` (default `/etc/kennel/keys`), and the host `sshd` — are expressed in `system.toml`, resolved through a cascade by the `kennel-config` crate. The cascade reads lowest-priority first, a higher layer overriding a lower one **per key**, with compiled-in fallback defaults so a host with no config files still runs:
 
 * **`system.toml`** (deployment, integrity-sensitive) resolves from **root-owned dirs only** — `/usr/lib/kennel` (vendor) then `/etc/kennel` (admin). It is deliberately **not** read from the user's `~/.config`, and honours no environment override: `kenneld` runs as the user, so letting the user redirect `trust_dir` would defeat policy signing. Each helper binary defaults to `<libexec_dir>/<name>`; an explicit per-binary key overrides one.
-* **`config.toml`** (CLI conveniences — template and key *search* dirs) resolves from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`. Safe to be user-writable: it only steers where the CLI looks while authoring; the daemon re-verifies against the locked `system.toml` `trust_dir` at run.
+* **`config.toml`** (CLI conveniences — template, key, and policy *search* dirs) resolves from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`. Safe to be user-writable: it only steers where the CLI looks while authoring; the daemon re-verifies against the locked `system.toml` `trust_dir` (plus the user's own `keys/` for run policies, §Policy-signing trust split) at run.
 
 The per-*user* loopback allocation — the 12-bit IPv4 `tag` and the 40-bit IPv6 ULA `gid` — is **not** in either file; it lives in `/etc/kennel/subkennel` (`<uid>:<tag>:<gid>:<namespace>`), kernel-trusted, and the daemon loads it from there to fill `<tag>`/`<gid>` at spawn. `kennel subkennel add` generates a valid line (collision-free `tag`/`gid`); the `<namespace>` defaults to `kennel-<user>`.
 
@@ -255,6 +257,30 @@ A versioned reference (`<name>@<version>`, `02-2-config-schema.md`) resolves aga
 3. Built-in templates compiled into the `kennel` binary (`base-confined` only, at present).
 
 The resolver requires the *exact* `<name>@<version>`; it does not fall back to a different version of the same name, since that would defeat the pin. A given `<name>@<version>` at a higher-priority location shadows the identical reference at lower priority; the shadowing is logged at policy-load time so the operator can detect surprises. The resolved artefact's signature is verified and its content hash checked against the leaf policy's lockfile before composition (`04-trust-boundaries.md` boundary 3).
+
+---
+
+## Run-policy resolution
+
+`kennel run <policy> [<name>] -- <cmd>` resolves `<policy>` to a settled artefact:
+
+1. If `<policy>` is an **existing file path**, it is used verbatim (a settled artefact is enforced as-is; a source leaf is compiled-and-signed in memory for the run, needing `--key`).
+2. Otherwise `<policy>` is a **name** searched in the `policies/` cascade (highest priority first):
+   1. `~/.config/kennel/policies/<name>/` (user).
+   2. `/etc/kennel/policies/<name>/` (system).
+   3. `/usr/lib/kennel/policies/<name>/` (vendor).
+   Within the first folder found, `<name>.settled.toml` is preferred (the production artefact); failing that, `policy.toml` is compiled-and-signed in memory (needs `--key`).
+
+The kennel instance `<name>` (second positional) is **optional** and defaults to the resolved policy name, so `kennel run ai-coding -- bash` runs `policies/ai-coding/` as a kennel named `ai-coding`. A name is a single safe path component (no `/`, `..`, or whitespace).
+
+### Policy-signing trust split
+
+Two distinct trust scopes, by layer:
+
+- **Templates** — the security baseline (framework invariants + confinement floor) — verify **only against system keys** (`/etc/kennel/keys`, `/usr/lib/kennel/keys`), never the user's `~/.config/kennel/keys`. A template signed by a user key is rejected at compile time. (`kennel-config::User::system_key_dirs`.)
+- **Run policies** — the settled leaf the daemon enforces — verify against **system keys *or* the user's own `~/.config/kennel/keys`**. A user may run a policy signed with their own key: a leaf can only narrow *within* the template's re-asserted invariants and a kennel runs with the user's own authority, so trusting the user's own run-policy signature grants no escalation. The daemon loads system keys then the user's, system winning a key-id clash (a user key cannot shadow a system key id). (`kenneld` `TrustStoreLoader::from_dirs`.)
+
+This is detailed in `04-trust-boundaries.md`.
 
 ---
 
