@@ -56,6 +56,10 @@ pub struct StartRequest {
     pub argv: Vec<String>,
     /// The working directory for the workload.
     pub cwd: PathBuf,
+    /// The caller's `TERM` (forwarded so an interactive workload gets a usable
+    /// terminal). Empty if unset. The synthesised env is otherwise built from
+    /// policy + the framework vars (`HOME`/`PATH`/`USER`/…), never inherited.
+    pub term: String,
 }
 
 /// A response from the daemon to the CLI.
@@ -217,6 +221,7 @@ impl Request {
                 put_str(&mut b, &req.kennel);
                 put_strs(&mut b, &req.argv);
                 put_str(&mut b, &req.cwd.to_string_lossy());
+                put_str(&mut b, &req.term);
             }
             Self::Stop { kennel } => {
                 put_u8(&mut b, 2);
@@ -243,6 +248,7 @@ impl Request {
                 kennel: r.string()?,
                 argv: r.strings()?,
                 cwd: PathBuf::from(r.string()?),
+                term: r.string()?,
             })),
             2 => Ok(Self::Stop {
                 kennel: r.string()?,
@@ -427,6 +433,7 @@ mod tests {
                 "--flag".to_owned(),
             ],
             cwd: PathBuf::from("/home/dev/project"),
+            term: "xterm-256color".to_owned(),
         }));
     }
 

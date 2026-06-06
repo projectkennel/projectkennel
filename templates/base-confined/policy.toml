@@ -31,20 +31,15 @@ bounding_set = []          # drop the entire capability bounding set
 
 # --- Execution (deny-by-default) --------------------------------------------
 # exec.allow is empty, which DENIES ALL EXECUTION: a merely-readable file is not
-# executable. Compose `base-interactive` (a shell + coreutils) and language/tool
-# fragments to grant execution; `permissive-exec` (a `**` entry) is the explicit
-# opt-out that restores the open posture. The deny list + deny_* flags are baseline
-# (and, with an empty allow, the deny list is redundant belt-and-braces).
+# executable. A derived template/leaf adds the binaries it needs; `permissive-exec`
+# (a `**` entry) is the explicit opt-out that restores the open posture.
+#
+# There is intentionally NO exec.deny list: under deny-by-default it would be moot
+# (sudo/su/pkexec/… are not in any allowlist, so they never run; and the deny_*
+# flags below + no_new_privs neuter setuid escalation regardless). A deny list that
+# enforces nothing is theatre, so it is omitted rather than shipped as reassurance.
 [exec]
 allow = []
-
-deny = [
-    "/usr/bin/sudo", "/usr/bin/su", "/usr/bin/pkexec", "/usr/bin/doas",
-    "/usr/bin/chsh", "/usr/bin/passwd", "/usr/bin/gpasswd", "/usr/bin/newgrp",
-    "/usr/bin/mount", "/usr/bin/umount",
-    "/usr/bin/at", "/usr/bin/crontab",   # scheduled persistence (T1.8)
-    "/usr/sbin/**", "/sbin/**",          # admin binaries, categorically
-]
 
 deny_setuid = true         # refuse setuid binaries at execve (framework invariant)
 deny_setgid = true         # refuse setgid binaries (framework invariant)
@@ -71,38 +66,17 @@ read = [
     "/sys/devices/system/cpu/**",        # processor-count detection
 ]
 
-# Write baseline: none. The workload's writable space is the private /tmp (below);
-# a usable template or leaf grants its project write paths. base-confined is the
-# root template and is not run directly.
+# Write baseline: none. The workload's writable space is the constructed $HOME and
+# the private /tmp (below); a usable template or leaf grants its project write paths.
 write = []
 
-# Categorical denies. Most are redundant with the constructed view (the paths are
-# simply not bound in), but explicit deny is belt-and-braces against template/leaf
-# bugs. Defends T1.1 (reconnaissance) and T2.1 (host-control deactivation).
-deny = [
-    # Credentials (T1.1)
-    "~/.ssh/**", "~/.gnupg/**", "~/.aws/**", "~/.azure/**",
-    "~/.config/gcloud/**", "~/.oci/**", "~/.config/gh/**", "~/.config/glab/**",
-    "~/.netrc", "~/.npmrc", "~/.pypirc", "~/.cargo/credentials",
-    "~/.cargo/credentials.toml", "~/.docker/config.json", "~/.kube/config",
-    "~/.terraform.d/credentials.tfrc.json", "~/.password-store/**",
-    "~/.config/keepassxc/**", "~/.config/1Password/**",
-    "~/.local/share/keyrings/**", "~/.gnome2/keyrings/**",
-    # Browser / messaging / wallet state (T1.1)
-    "~/.mozilla/**", "~/.config/google-chrome/**", "~/.config/chromium/**",
-    "~/.config/BraveSoftware/**", "~/.config/Signal/**", "~/.config/Slack/**",
-    "~/.thunderbird/**", "~/.electrum/**", "~/.ethereum/**", "~/.bitcoin/**",
-    # Shell / tool histories (T1.1)
-    "~/.bash_history", "~/.zsh_history", "~/.python_history",
-    "~/.node_repl_history", "~/.psql_history", "~/.mysql_history",
-    "~/.lesshst", "~/.viminfo",
-    # Host security configuration (T2.1)
-    "/etc/ssh/**", "/etc/sudoers*", "/etc/shadow", "/etc/security/**",
-    "/etc/pam.d/**", "/etc/apparmor.d/**", "/etc/selinux/**",
-    # Kernel/hardware surfaces categorically not for confined contexts
-    "/proc/sys/kernel/**", "/sys/kernel/**",
-    "/dev/mem", "/dev/kmem", "/dev/port", "/boot/**",
-]
+# There is intentionally NO fs.deny list. The constructed view is deny-by-default:
+# only fs.read/fs.write paths exist in it at all, so the host's ~/.ssh, ~/.aws,
+# /etc/shadow, /dev/mem, … are simply absent — not present-but-denied. And a deny
+# that fell *inside* a granted directory could not be enforced anyway (Landlock is
+# allow-only and cannot subtract a single path). A long credential denylist here
+# would be reassurance theatre; the real control is granting narrowly, not denying
+# broadly. (T1.1/T2.1 are defended by the view's absence-by-default, not a denylist.)
 
 # The constructed $HOME (T1.1). HOME is /home/<user> (the masked [identity].user,
 # default `kennel`); granted ~/ paths are bound beneath it; the Landlock ruleset
@@ -230,25 +204,14 @@ hidepid = true
 
 
 # --- Environment ------------------------------------------------------------
-# A curated environment, not the user's full shell env. Secrets are stripped;
-# framework variables are forced. (T1.1: credentials in env; T2.1: shim HOME.)
+# The environment is SYNTHESISED, not filtered. The spawn clears the inherited env
+# entirely (env_clear) and rebuilds it: the framework sets HOME, PATH, USER, LOGNAME,
+# SHELL (and forwards the caller's TERM); `set` below adds fixed extras. There is no
+# `pass`/`deny` here — a passthrough/denylist is fiction when nothing is inherited in
+# the first place (the host's secrets, AWS_*, *_TOKEN, … never reach the kennel
+# because the whole env is wiped, not because they were named in a denylist).
 [env]
-pass = [
-    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TZ",
-    "COLORTERM", "TMPDIR",
-]
-# PATH/HOME/USER/LOGNAME/SHELL are synthesised by the framework (HOME is
-# /home/<user>); only the extras the framework does not set are listed here.
 set = { TMPDIR = "/tmp", NO_PROXY = "" }
-deny = [
-    "SSH_AUTH_SOCK", "GPG_AGENT_INFO",
-    "AWS_*", "AZURE_*", "GCP_*", "GOOGLE_APPLICATION_CREDENTIALS",
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
-    "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "NPM_TOKEN", "PYPI_TOKEN",
-    "DOCKER_AUTH_CONFIG", "KUBECONFIG", "DATABASE_URL",
-    "*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "*_APIKEY", "*_PRIVATE_KEY",
-    "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY",
-]
 
 
 # --- Seccomp (defence in depth) ---------------------------------------------
@@ -280,4 +243,4 @@ deny = [
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "ZFrdu07LFr5qyYSJkhrFLbYdINJDeH8IMCH+1W3N7dJTwy2QTvaSFRg3wMMdsp/SZgnot7sXtdTlYmFunFlmDQ=="
+signature = "wU1WxDRlRuqBZ3VEyUyDdFHhZty/9SbIYrIpM4u4JUTo2m1IVsvX9xxahaoNi6U/t88VC22LbUNQdIRJ9xhVAQ=="

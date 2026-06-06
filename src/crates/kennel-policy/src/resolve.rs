@@ -685,10 +685,10 @@ mod tests {
         let cap = eff.cap.as_ref().expect("cap");
         assert_eq!(cap.no_new_privs, Some(true), "no_new_privs inherited");
         let exec = eff.exec.as_ref().expect("exec");
-        let deny = exec.deny.as_ref().expect("exec.deny inherited");
-        assert!(
-            deny.iter().any(|d| d == "/usr/bin/sudo"),
-            "base deny inherited"
+        assert_eq!(
+            exec.deny_setuid,
+            Some(true),
+            "base's deny_setuid invariant flag is inherited"
         );
         let net = eff.net.as_ref().expect("net");
         let nd = net.deny.as_ref().expect("net.deny");

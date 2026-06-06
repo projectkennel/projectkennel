@@ -757,6 +757,11 @@ fn run_kennel<P, L>(
     command.env("LOGNAME", &loaded.account);
     command.env("SHELL", &loaded.shell);
     command.env("HOME", &shim_root);
+    // Forward the caller's TERM (the one host var an interactive workload genuinely
+    // needs and cannot be synthesised); everything else is policy [env].set below.
+    if !req.term.is_empty() {
+        command.env("TERM", &req.term);
+    }
     for (key, value) in &loaded.env.vars {
         command.env(key, value);
     }
@@ -1188,6 +1193,7 @@ mod tests {
                 kennel: "sock".to_owned(),
                 argv: vec!["/bin/true".to_owned()],
                 cwd: PathBuf::from("/"),
+                term: String::new(),
             });
             let mut framed = Vec::new();
             control::write_frame(&mut framed, &request.encode()).expect("frame");
@@ -1220,6 +1226,7 @@ mod tests {
             kennel: "quick".to_owned(),
             argv: vec!["/bin/true".to_owned()],
             cwd: PathBuf::from("/"),
+            term: String::new(),
         };
         // No fds: the workload inherits this process's stdio. /bin/true exits 0
         // immediately, so run_kennel returns after writing both responses.

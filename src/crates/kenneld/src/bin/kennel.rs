@@ -154,6 +154,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         kennel: name.clone(),
         argv: command.to_vec(),
         cwd,
+        // Forward the caller's terminal type so an interactive workload renders; the
+        // rest of the workload env is synthesised by the daemon, not inherited.
+        term: std::env::var("TERM").unwrap_or_default(),
     });
 
     let mut conn = connect()?;
