@@ -1065,7 +1065,7 @@ fn subkennel_add(args: &[String]) -> Result<ExitCode, String> {
                 );
             }
             "--namespace" => {
-                namespace = Some(it.next().ok_or("--namespace needs a value")?.clone())
+                namespace = Some(it.next().ok_or("--namespace needs a value")?.clone());
             }
             "--tag" => {
                 tag_override = Some(
