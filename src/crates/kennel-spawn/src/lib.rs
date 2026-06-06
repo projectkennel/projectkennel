@@ -734,8 +734,14 @@ fn build_view_and_pivot(
 
     // 2. Bind the granted system + home paths in. Recursive, so submounts come
     //    along; read-only unless the grant is writable (those resolve to the real
-    //    host inode, the persistence guarantee).
+    //    host inode, the persistence guarantee). A bind whose **source does not
+    //    exist** is skipped (skip-missing): a grant for an absent path is vacuous (the
+    //    Landlock rule is dropped too), and an optional socket shim — e.g. a per-kennel
+    //    agent not yet launched — must not abort the whole spawn.
     for b in &view.binds {
+        if !b.source.exists() {
+            continue;
+        }
         let dest = under(&b.target);
         create_bind_target(&b.source, &dest)?;
         mount::bind(&b.source, &dest, true)?;
