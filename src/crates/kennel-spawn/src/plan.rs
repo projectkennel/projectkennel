@@ -487,12 +487,16 @@ impl Plan {
             for loader in LOADER_EXEC_DIRS {
                 let loader = Path::new(loader);
                 // Grant EXECUTE only where a read grant actually mounts the dir,
-                // so the Landlock rule's path exists in the constructed view.
+                // so the Landlock rule's path exists in the constructed view. The
+                // read entry is glob-stripped first: a grant like `/lib64/**` mounts
+                // the `/lib64` loader dir, but `/lib64`.starts_with("/lib64/**") is
+                // false — without stripping, no loader dir is ever granted EXECUTE and
+                // every dynamically-linked allowlisted binary fails `execve` (EACCES).
                 let mounted = ep
                     .fs
                     .read
                     .iter()
-                    .any(|r| loader.starts_with(PathBuf::from(r.as_str())));
+                    .any(|r| loader.starts_with(glob_root(r.as_str())));
                 if mounted {
                     landlock_fs.push((loader.to_path_buf(), exec_access));
                 }
@@ -684,6 +688,30 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glob_read_grant_mounts_the_loader_dir() {
+        // Regression: under an `exec.allow` allowlist, a loader dir gets `EXECUTE`
+        // only where an `fs.read` grant mounts it. Read grants carry a `/**` glob, so
+        // the entry must be glob-stripped before the `starts_with` check — otherwise
+        // `/lib64`.starts_with("/lib64/**") is false, NO loader dir is granted
+        // EXECUTE, and every dynamically-linked allowlisted binary fails execve.
+        let reads = ["/lib64/**".to_owned(), "/usr/**".to_owned()];
+        let loader = Path::new("/lib64");
+        assert!(
+            reads
+                .iter()
+                .any(|r| loader.starts_with(glob_root(r.as_str()))),
+            "glob-stripped read grant must mount the loader dir"
+        );
+        // The pre-fix comparison (no strip) would have missed it.
+        assert!(
+            !reads
+                .iter()
+                .any(|r| loader.starts_with(PathBuf::from(r.as_str()))),
+            "the un-stripped comparison is the bug this guards against"
+        );
+    }
 
     #[test]
     fn bind_port_min_lands_in_the_meta_pad_slot() {
