@@ -196,6 +196,27 @@ pub fn mount_proc(target: &Path, hidepid: bool) -> io::Result<()> {
     .map_err(map_err)
 }
 
+/// Mount a **fresh** `devpts` instance at `target` — its own pty namespace.
+///
+/// `newinstance` isolates the kennel's ptys from the host's; `ptmxmode=0666` makes
+/// the instance's `ptmx` openable; `mode=0620` is the standard pty mode; `nosuid,
+/// noexec`. The caller symlinks `/dev/ptmx -> pts/ptmx` so opening `/dev/ptmx`
+/// allocates a pty in this instance.
+///
+/// # Errors
+///
+/// Returns the OS error if the mount fails.
+pub fn mount_devpts(target: &Path) -> io::Result<()> {
+    nix::mount::mount(
+        Some("devpts"),
+        target,
+        Some("devpts"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+        Some("newinstance,ptmxmode=0666,mode=0620"),
+    )
+    .map_err(map_err)
+}
+
 /// `pivot_root(new_root, put_old)`: make `new_root` the process's root,
 /// relocating the old root under `put_old` (which must be beneath `new_root`).
 ///

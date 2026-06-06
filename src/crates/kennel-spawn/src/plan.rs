@@ -166,9 +166,12 @@ fn read_access(executable: bool) -> AccessFs {
 /// binaries can still load their libraries.
 const LOADER_EXEC_DIRS: &[&str] = &["/usr/lib", "/lib", "/lib64", "/usr/lib64", "/usr/local/lib"];
 
-/// Strip a trailing `/**` or `/*` glob from an `exec.allow` entry, yielding the
-/// real directory (Landlock grants a subtree) or file the rule applies to.
-fn exec_glob_root(entry: &str) -> PathBuf {
+/// Strip a trailing `/**` or `/*` glob from a grant entry, yielding the real
+/// directory (a Landlock rule and a bind both apply to the whole subtree) or file
+/// the rule applies to. A glob suffix has no inode of its own, so the bind source
+/// and the post-pivot Landlock target must both key on this root — used for
+/// `fs.read`/`fs.write` grants and `exec.allow` entries alike.
+fn glob_root(entry: &str) -> PathBuf {
     let trimmed = entry
         .strip_suffix("/**")
         .or_else(|| entry.strip_suffix("/*"))
@@ -451,7 +454,11 @@ impl Plan {
             .map(|p| (p, false))
             .chain(ep.fs.write.iter().map(|p| (p, true)));
         for (path_str, writable) in grants {
-            let source = PathBuf::from(path_str.as_str());
+            // A read/write grant may use a `/**` or `/*` glob (e.g. `/usr/**`); the
+            // bind source and Landlock target must be the real directory root — the
+            // literal glob has no inode, so binding it is `ENOENT` and the Landlock
+            // rule would be dropped by skip-missing. Strip it, exactly as exec does.
+            let source = glob_root(path_str);
             let target = remap_target(&source, home, &shim_root);
             landlock_fs.push((
                 target.clone(),
@@ -491,7 +498,7 @@ impl Plan {
                 }
             }
             for entry in &ep.exec.allow {
-                let root = exec_glob_root(entry);
+                let root = glob_root(entry);
                 // deny_writable (§7.1): a writable path must never be executable.
                 if ep.exec.deny_writable
                     && ep
@@ -520,7 +527,10 @@ impl Plan {
         }
         let mut dev_allow: Vec<PathBuf> = Vec::new();
         for d in &ep.fs.dev.allow {
-            let path = PathBuf::from(d.as_str());
+            // A device grant may use a `/**`/`/*` glob (e.g. `/dev/pts/**` for the ptys);
+            // strip it to the real node/dir — `/dev/pts` is mounted as a fresh devpts in
+            // the view, every other entry is bound as a single node.
+            let path = glob_root(d.as_str());
             if !is_safe_dev_path(&path) {
                 return Err(SpawnError::InvalidPolicy(format!(
                     "fs.dev.allow entry must be a device under /dev, got `{d}`"
