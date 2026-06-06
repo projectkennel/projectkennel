@@ -1278,6 +1278,24 @@ mod tests {
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
             == &PathBuf::from("/run/kennel/ai-coding/home")
             && acc.contains(AccessFs::WRITE_FILE)));
+        // The private /tmp is the workload's own scratch: read+write+list.
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/tmp")
+                    && acc.contains(AccessFs::WRITE_FILE)
+                    && acc.contains(AccessFs::READ_DIR)),
+            "the private /tmp is writable + listable"
+        );
+        // The view root is listable (`ls /`), READ_DIR only.
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/")
+                    && acc.contains(AccessFs::READ_DIR)
+                    && !acc.contains(AccessFs::READ_FILE)),
+            "the view root is listable but not file-readable"
+        );
 
         // Landlock net: only the single-port (443) TCP rule; the 1024-2048 range
         // is left to BPF.

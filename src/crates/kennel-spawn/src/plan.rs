@@ -563,6 +563,18 @@ impl Plan {
             landlock_fs.push((shim_root.clone(), write_access()));
         }
 
+        // The workload's own scratch space: the private `/tmp` is a fresh, ephemeral
+        // tmpfs each spawn, so grant it read+write+list. Without this the mounted
+        // `/tmp` is present but unusable (no Landlock grant) — `mktemp`, build scratch,
+        // and even `ls /tmp` would be denied.
+        if ep.fs.tmp.private {
+            landlock_fs.push((PathBuf::from("/tmp"), write_access()));
+        }
+        // Let the workload list the view root (`ls /`). READ_DIR only — the top-level
+        // entries (usr, lib, etc, dev, proc, tmp, home) are not sensitive and their
+        // contents stay separately gated. Without it, `ls /` is a jarring EACCES.
+        landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
+
         let view = Some(ShimView {
             shim_root,
             binds,
