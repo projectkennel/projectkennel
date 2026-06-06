@@ -303,27 +303,29 @@ impl ExecPolicy {
     /// Warnings for [`deny`](Self::deny) entries that cannot be enforced by Landlock.
     ///
     /// Landlock grants execution; it cannot *subtract* a path from a granted
-    /// directory. Translation already removes any deny that exactly matches an
-    /// `allow` entry (that deny is enforced — the binary is simply never granted
-    /// `EXECUTE`). What remains warnable:
+    /// directory. Execution is deny-by-default, so translation already removes any
+    /// deny that exactly matches an `allow` entry (enforced — the binary is simply
+    /// never granted `EXECUTE`), and an empty allowlist denies everything. What
+    /// remains warnable:
     ///
     /// - a deny that falls **inside an allowed directory/glob** (e.g. `allow =
     ///   ["/usr/bin/**"]`, `deny = ["/usr/bin/sudo"]`): the directory grant
     ///   re-exposes it, so the deny is advisory only; and
-    /// - **any** deny when there is **no `allow`** at all: exec is permissive, so
-    ///   Landlock is not restricting execution and the deny enforces nothing.
+    /// - **any** deny under the explicit `**` `permissive-exec` opt-in: execution is
+    ///   ungated, so Landlock cannot subtract a single path and the deny does nothing.
     ///
-    /// A deny that is neither (a path simply never granted) is enforced by omission
-    /// and yields no warning. Returns one message per warnable deny.
+    /// A deny against an empty allowlist is *redundant* (everything is already denied)
+    /// — harmless, so no warning. A deny simply never granted is enforced by omission.
+    /// Returns one message per warnable deny.
     #[must_use]
     pub fn deny_warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
+        let permissive = self.allow.iter().any(|a| matches!(a.trim(), "**" | "/**"));
         for d in &self.deny {
-            if self.allow.is_empty() {
+            if permissive {
                 out.push(format!(
-                    "exec.deny `{d}` is advisory: with no exec.allow, execution is permissive and \
-                     Landlock cannot subtract a single path — the deny enforces nothing (use exec.allow \
-                     to switch on the allowlist)"
+                    "exec.deny `{d}` is advisory: `permissive-exec` (`**`) grants all execution, so \
+                     Landlock cannot subtract a single path — the deny enforces nothing"
                 ));
             } else if let Some(dir) = self.allow.iter().find(|a| glob_covers(a, d)) {
                 out.push(format!(
@@ -331,6 +333,9 @@ impl ExecPolicy {
                      single path from a granted directory, so this deny is advisory only"
                 ));
             }
+            // else: empty allow ⇒ deny-by-default already denies everything (the deny
+            // is redundant), or the path is simply never granted (enforced by
+            // omission). Either way there is nothing to warn about.
         }
         out
     }

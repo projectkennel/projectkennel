@@ -27,11 +27,14 @@ mode = "none"
 
 
 # --- Execution: text inspection only ----------------------------------------
-# Conspicuously absent: any compiler, interpreter (python/node/perl/ruby), shell
-# scripting beyond the read tools, build tool, or package manager. The repo's
-# code cannot run.
+# A shell is allowed so a session is usable, but under the Landlock exec-allowlist
+# it can *only* invoke the read tools below — the repo's own code still cannot run.
+# Conspicuously absent: any compiler, interpreter (python/node/perl/ruby), build
+# tool, or package manager. `exec.shell` must appear in this allowlist (else the
+# kennel could not launch its own login shell), so `/bin/sh` is listed explicitly.
 [exec]
 allow = [
+    "/bin/sh", "/usr/bin/bash",
     "/usr/bin/cat", "/usr/bin/less", "/usr/bin/more",
     "/usr/bin/head", "/usr/bin/tail",
     "/usr/bin/grep", "/usr/bin/egrep", "/usr/bin/fgrep",

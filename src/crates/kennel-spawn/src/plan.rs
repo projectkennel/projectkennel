@@ -143,12 +143,14 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
 }
 
 /// The Landlock access a read-granted path subtree receives: read files and
-/// directories, plus `EXECUTE` only in the permissive (no `exec.allow`) posture.
+/// directories, plus `EXECUTE` only under the explicit `permissive-exec` (`**`)
+/// opt-in.
 ///
-/// When a policy declares an `exec.allow` list, a readable path must NOT be
-/// implicitly executable — otherwise the allowlist enforces nothing (anything
-/// under a read grant could run). In that mode reads are read-only and execution
-/// is granted separately, on the allowlist plus the loader's lib dirs (§7.1).
+/// Execution is deny-by-default (§7.1): a readable path is NOT implicitly
+/// executable — otherwise the allowlist would enforce nothing (anything under a
+/// read grant could run). Reads are read-only and execution is granted separately,
+/// on the allowlist plus the loader's lib dirs. Only an explicit `**` exec wildcard
+/// restores the open posture and re-adds `EXECUTE` to reads.
 fn read_access(executable: bool) -> AccessFs {
     let base = AccessFs::READ_FILE | AccessFs::READ_DIR;
     if executable {
@@ -177,6 +179,13 @@ fn glob_root(entry: &str) -> PathBuf {
         .or_else(|| entry.strip_suffix("/*"))
         .unwrap_or(entry);
     PathBuf::from(trimmed)
+}
+
+/// Whether an `exec.allow` entry is the explicit "allow all execution" wildcard
+/// (`**` or `/**`) — the `permissive-exec` opt-in that restores the open,
+/// pre-deny-default posture. Every other entry is a concrete path/subtree grant.
+fn is_exec_wildcard(entry: &str) -> bool {
+    matches!(entry.trim(), "**" | "/**")
 }
 
 /// The Landlock access a granted device node receives: read and write the file,
@@ -444,9 +453,14 @@ impl Plan {
         // (on the constructed `/etc`) but no bind (it is built, not bound).
         let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
         let mut binds: Vec<BindMount> = Vec::new();
-        // A non-empty `exec.allow` switches on the execution allowlist: reads
-        // lose implicit EXECUTE, and execution is granted only where §7.1 says.
-        let exec_allowlist = !ep.exec.allow.is_empty();
+        // Deny-by-default execution (§7.1), matching fs (allow-only) and net
+        // (`constrained` permits nothing): the allowlist is ALWAYS enforced — a merely
+        // readable file is NOT implicitly executable. Execution is granted only to the
+        // allowlisted binaries plus the loader's lib dirs; an empty allowlist denies
+        // ALL execution (so a bare `base-confined` cannot run anything). The sole
+        // escape hatch is an explicit `**` entry — the `permissive-exec` opt-in — which
+        // restores the open posture (reads carry EXECUTE, nothing is gated).
+        let permissive_exec = ep.exec.allow.iter().any(|e| is_exec_wildcard(e));
         let grants = ep
             .fs
             .read
@@ -465,7 +479,7 @@ impl Plan {
                 if writable {
                     write_access()
                 } else {
-                    read_access(!exec_allowlist)
+                    read_access(permissive_exec)
                 },
             ));
             if !is_constructed_etc(&source) {
@@ -477,13 +491,13 @@ impl Plan {
             }
         }
 
-        // The execution gate (§7.1). With an allowlist, grant FS_EXECUTE only on
-        // the allowlisted binaries plus the loader's lib dirs (EXECUTE, not READ
-        // — the loader maps libc/ld.so PROT_EXEC, which Landlock gates). Reads
-        // dropped EXECUTE above, so nothing else can run. An empty allowlist
-        // keeps the permissive posture (reads carry EXECUTE) and adds nothing.
+        // The execution gate (§7.1): grant FS_EXECUTE only on the allowlisted binaries
+        // plus the loader's lib dirs (EXECUTE, not READ — the loader maps libc/ld.so
+        // PROT_EXEC, which Landlock gates). Reads carry no EXECUTE (above), so nothing
+        // else can run. Skipped entirely under `permissive-exec` (`**`), where reads
+        // already carry EXECUTE and execution is ungated.
         let exec_access = AccessFs::EXECUTE | AccessFs::READ_FILE;
-        if exec_allowlist {
+        if !permissive_exec {
             for loader in LOADER_EXEC_DIRS {
                 let loader = Path::new(loader);
                 // Grant EXECUTE only where a read grant actually mounts the dir,

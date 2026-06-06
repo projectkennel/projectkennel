@@ -744,14 +744,17 @@ fn translate_exec(
         exec.and_then(|e| e.path.as_deref()).unwrap_or_default(),
         deferred,
     );
-    // The login shell (§7.7.2a): default /bin/sh, and — when an exec allowlist is
-    // enforced — it must be one of the permitted binaries, or the kennel would set
-    // a shell it then refuses to run. Caught here, at compile time (after the deny
-    // subtraction, so denying your own shell is caught as the same contradiction).
+    // The login shell (§7.7.2a): default /bin/sh. Execution is deny-by-default, so the
+    // shell must itself be allowed or the kennel would set a shell it then refuses to
+    // run. The exceptions: an empty allowlist (a no-exec floor like `base-confined` —
+    // there is no shell to run, by design), and the explicit `**` permissive opt-in
+    // (everything runs). Caught here at compile time (after the deny subtraction, so
+    // denying your own shell is caught as the same contradiction).
     let shell = exec
         .and_then(|e| e.shell.clone())
         .map_or_else(crate::settled::default_shell, |s| subst(&s, deferred));
-    if !allow.is_empty() && !allow.contains(&shell) {
+    let permits_everything = allow.iter().any(|e| matches!(e.trim(), "**" | "/**"));
+    if !allow.is_empty() && !permits_everything && !allow.contains(&shell) {
         return Err(translation(format!(
             "[exec].shell `{shell}` is not in exec.allow (the kennel would refuse to run its own shell)"
         )));
@@ -1200,14 +1203,24 @@ mod tests {
     }
 
     #[test]
-    fn exec_deny_without_any_allow_warns_as_advisory() {
+    fn exec_deny_without_any_allow_is_redundant_not_warned() {
+        // Deny-by-default: an empty allowlist denies ALL execution, so a deny names
+        // paths that are already denied — redundant and harmless, no warning.
         let src = parse(b"name = \"k\"\n[exec]\ndeny = [\"/usr/bin/sudo\"]\n").expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        assert!(ep.deny_warnings().is_empty(), "{:?}", ep.deny_warnings());
+    }
+
+    #[test]
+    fn exec_deny_under_permissive_wildcard_warns() {
+        // The only "deny enforces nothing" case now: explicit `permissive-exec` (`**`)
+        // grants all execution, so Landlock cannot subtract a single denied path.
+        let src = parse(b"name = \"k\"\n[exec]\nallow = [\"**\"]\ndeny = [\"/usr/bin/sudo\"]\n")
+            .expect("parse");
         let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
         let w = ep.deny_warnings();
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w
-            .first()
-            .is_some_and(|s| s.contains("execution is permissive")));
+        assert!(w.first().is_some_and(|s| s.contains("permissive-exec")));
     }
 
     #[test]

@@ -179,7 +179,10 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 deny_setgid: true,
                 deny_setcap: true,
                 deny_writable: true,
-                allow: Vec::new(),
+                // `**` = the permissive-exec opt-in: execution is deny-by-default now,
+                // so the vertical's workload (`/bin/sh`, `id`) needs an explicit grant.
+                // This test exercises the spawn pipeline, not the exec allowlist.
+                allow: vec!["**".to_owned()],
                 deny: Vec::new(),
                 path: Vec::new(),
                 shell: "/bin/sh".to_owned(),

@@ -1279,11 +1279,32 @@ mod tests {
     }
 
     #[test]
-    fn empty_exec_allowlist_keeps_reads_executable() {
-        // The permissive posture (no exec.allow) is unchanged: a read path stays
-        // executable, and no separate per-binary EXECUTE rule is added.
+    fn empty_exec_allowlist_denies_all_execution() {
+        // Deny-by-default: with no exec.allow, a read path is NOT executable — nothing
+        // runs. (This is what makes a bare `base-confined` a real floor.)
         let mut p = policy_with_placeholders();
         p.effective_policy.exec.allow.clear();
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        assert!(
+            !plan.landlock_fs.iter().any(
+                |(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)
+            ),
+            "with an empty allowlist, read paths must NOT carry EXECUTE"
+        );
+    }
+
+    #[test]
+    fn permissive_exec_wildcard_restores_executable_reads() {
+        // The `**` escape hatch (the `permissive-exec` opt-in) restores the open
+        // posture: read paths carry EXECUTE again and no per-binary rule is needed.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.exec.allow = vec!["**".to_owned()];
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
             7,
@@ -1295,14 +1316,7 @@ mod tests {
             plan.landlock_fs.iter().any(
                 |(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)
             ),
-            "without an exec allowlist, read paths remain executable"
-        );
-        assert!(
-            !plan
-                .landlock_fs
-                .iter()
-                .any(|(path, _)| path == &PathBuf::from("/usr/bin/python3")),
-            "no per-binary exec rule without an allowlist"
+            "`**` permissive-exec must keep read paths executable"
         );
     }
 
