@@ -101,7 +101,7 @@ pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, Poli
 ///
 /// Fills [`settled::ExecPolicy::libraries`] from `exec.allow` + the `[lib]` filter,
 /// reading the binaries from disk ([`libresolve`]). Call this at compile time — after
-/// [`compile`] / [`compile_leaf`] and **before** signing — so the resolved closure is
+/// [`compile()`] / [`compile_leaf`] and **before** signing — so the resolved closure is
 /// part of the signed artefact and the runtime never re-resolves. Returns the
 /// resolver's advisories (denied/unresolvable libraries). Idempotent.
 pub fn resolve_settled_libraries(policy: &mut SettledPolicy) -> Vec<String> {
