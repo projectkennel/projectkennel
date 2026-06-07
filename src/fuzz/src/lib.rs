@@ -51,6 +51,7 @@ pub fn fuzz_parsers(data: &[u8]) {
     // bounds-check any junk; a single parse plus the transaction-data decode.
     let _ = kennel_binder::proto::parse(data);
     let _ = kennel_binder::proto::TransactionData::from_bytes(data);
+    let _ = kennel_binder::proto::flat_binder_object_fd_value(data);
 
     // The signed-policy reader: an empty trust store means the signature check
     // fails, but the TOML parse + schema-version gate run on the untrusted bytes

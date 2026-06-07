@@ -79,6 +79,52 @@ pub const TF_ONE_WAY: u32 = 0x01;
 /// Transaction flag: replies may carry file descriptors (`TF_ACCEPT_FDS`).
 pub const TF_ACCEPT_FDS: u32 = 0x10;
 
+/// Size of `struct flat_binder_object` (hdr.type + flags + union + cookie).
+pub const FLAT_BINDER_OBJECT_SIZE: usize = 24;
+
+/// `BINDER_TYPE_FD`: a `flat_binder_object` carrying a file descriptor.
+///
+/// The kernel dups it into the receiver (`07-9`/`02-7` §The af-unix facade). The
+/// value is `B_PACK_CHARS('f', 'd', '*', B_TYPE_LARGE=0x85)`; the test cross-checks it.
+pub const BINDER_TYPE_FD: u32 = 0x6664_2a85;
+
+/// Encode a `flat_binder_object` of type `BINDER_TYPE_FD` carrying `fd`.
+///
+/// Placed in a transaction's data buffer (with an offsets entry pointing at it) so
+/// the kernel dups `fd` into the receiving process and rewrites it to that process's
+/// fd number.
+#[must_use]
+pub fn flat_binder_object_fd(fd: i32) -> [u8; FLAT_BINDER_OBJECT_SIZE] {
+    // hdr.type @0, flags @4, union (fd in low 4 of 8) @8, cookie (8) @16.
+    let seq = BINDER_TYPE_FD
+        .to_ne_bytes()
+        .into_iter()
+        .chain(0u32.to_ne_bytes()) // flags
+        .chain(u32::from_ne_bytes(fd.to_ne_bytes()).to_ne_bytes()) // union low (fd)
+        .chain(0u32.to_ne_bytes()) // union high
+        .chain(0u64.to_ne_bytes()); // cookie
+    let mut out = [0u8; FLAT_BINDER_OBJECT_SIZE];
+    for (slot, byte) in out.iter_mut().zip(seq) {
+        *slot = byte;
+    }
+    out
+}
+
+/// Decode the fd from a `flat_binder_object` at the start of `bytes`, if it is a
+/// `BINDER_TYPE_FD` object. `None` if the slice is too short or not an fd object.
+#[must_use]
+pub fn flat_binder_object_fd_value(bytes: &[u8]) -> Option<i32> {
+    let mut r = Reader::new(bytes);
+    if r.u32()? != BINDER_TYPE_FD {
+        return None;
+    }
+    let _flags = r.u32()?;
+    let fd = r.u32()?; // union low: the (translated) fd
+    let _high = r.u32()?;
+    let _cookie = r.u64()?;
+    Some(i32::from_ne_bytes(fd.to_ne_bytes()))
+}
+
 /// A `struct binder_transaction_data`.
 ///
 /// The payload of a `(BC|BR)_TRANSACTION` / `_REPLY`. Held as plain fields (not a
@@ -447,5 +493,33 @@ mod tests {
         let mut out = Vec::new();
         write_cmd(&mut out, BC_ENTER_LOOPER);
         assert_eq!(out, BC_ENTER_LOOPER.to_ne_bytes());
+    }
+
+    #[test]
+    fn binder_type_fd_matches_b_pack_chars() {
+        // Independently compute B_PACK_CHARS('f','d','*', 0x85) to verify the literal.
+        let pack = |c1: u8, c2: u8, c3: u8, c4: u8| {
+            (u32::from(c1) << 24) | (u32::from(c2) << 16) | (u32::from(c3) << 8) | u32::from(c4)
+        };
+        assert_eq!(BINDER_TYPE_FD, pack(b'f', b'd', b'*', 0x85));
+    }
+
+    #[test]
+    fn flat_binder_object_fd_round_trips() {
+        let obj = flat_binder_object_fd(7);
+        assert_eq!(obj.len(), FLAT_BINDER_OBJECT_SIZE);
+        assert_eq!(flat_binder_object_fd_value(&obj), Some(7));
+    }
+
+    #[test]
+    fn flat_binder_object_fd_value_rejects_wrong_type_and_short() {
+        // Wrong type tag.
+        let mut bad = flat_binder_object_fd(7);
+        if let Some(b) = bad.first_mut() {
+            *b ^= 0xff;
+        }
+        assert_eq!(flat_binder_object_fd_value(&bad), None);
+        // Too short.
+        assert_eq!(flat_binder_object_fd_value(&[0u8; 8]), None);
     }
 }
