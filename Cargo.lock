@@ -50,6 +50,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-binder"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "kennel-bpf"
 version = "0.1.0"
 dependencies = [

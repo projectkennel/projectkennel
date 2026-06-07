@@ -1,0 +1,19 @@
+[package]
+name = "kennel-binder"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel binder IPC: a hand-rolled binder(7)/binderfs ioctl loader over libc (the context-manager state machine and the consumer client), with no libbinder. The third crate permitted unsafe (the FFI to the binder ioctl ABI)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc = "=0.2.186"
+
+[features]
+root-tests = []
+
+[lints]
+workspace = true

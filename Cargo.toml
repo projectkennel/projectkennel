@@ -14,6 +14,7 @@ resolver = "2"
 members = [
     "src/crates/kennel-privhelper",
     "src/crates/kennel-bpf",
+    "src/crates/kennel-binder",
     "src/crates/kennel-policy",
     "src/crates/kennel-audit",
     "src/crates/kennel-config",
