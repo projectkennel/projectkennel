@@ -1083,6 +1083,19 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
     }
     plan.landlock_fs
         .push((shim_bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    // The proxy is `execv`'d directly by the seal, so it is outside the workload's
+    // compile-time library closure: grant FS_EXECUTE on its own shared-library closure
+    // (the loader maps libc/ld.so/libgcc_s `PROT_EXEC`). These paths sit in the same
+    // view library dirs as the workload's, so `skip_missing` drops any the view omits.
+    let closure = kennel_policy::libresolve::resolve_libraries(
+        &[shim_bin.to_string_lossy().into_owned()],
+        &[],
+        &[],
+    );
+    for lib in closure.libraries {
+        plan.landlock_fs
+            .push((PathBuf::from(lib), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    }
     // Register the proxy as a seal-launched aux: `kennel-afunix-shim <device>
     // <shim-path>=<name> ...`. It runs inside the sealed view, brokers by logical name
     // (which the facade resolves), and dies with the kennel's PID namespace.

@@ -198,6 +198,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::spawn_sealed;
+    use std::ffi::CString;
     use std::io;
     use std::process::Command;
 
@@ -279,5 +280,33 @@ mod tests {
         let err =
             spawn_sealed(&mut cmd, seal).expect_err("a failing inner seal must abort the spawn");
         assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[test]
+    fn launch_aux_forks_and_execs_the_binary() {
+        // launch_aux is the seal-side primitive that starts an in-kennel aux process
+        // (the af-unix proxy). Fire-and-forget: it returns Ok after the fork and the
+        // child execs independently. Prove the child actually ran by having it write a
+        // marker file, then poll for it. `/bin/sh -c 'echo > marker'` exercises the full
+        // argv (argv[0]=path, then -c and the script).
+        let marker = std::env::temp_dir().join(format!("kennel-launch-aux-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let path = CString::new("/bin/sh").expect("cstr path");
+        let dash_c = CString::new("-c").expect("cstr -c");
+        let script = CString::new(format!(":>{}", marker.display())).expect("cstr script");
+        let argv = [path.as_c_str(), dash_c.as_c_str(), script.as_c_str()];
+
+        super::launch_aux(&path, &argv).expect("launch_aux forks");
+
+        let mut appeared = false;
+        for _ in 0..100 {
+            if marker.exists() {
+                appeared = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(appeared, "the aux child did not exec (no marker file)");
+        let _ = std::fs::remove_file(&marker);
     }
 }

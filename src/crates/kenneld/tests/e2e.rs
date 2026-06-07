@@ -33,9 +33,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use kennel_policy::{
-    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
-    SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
+    AuditRuntime, BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy,
+    LifecyclePolicy, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
+    SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction, UnixRuntime,
+    UnixSocket,
 };
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
@@ -389,8 +390,11 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         socks_connect_bin: Some(socks_bin),
     };
 
-    // AF_UNIX socket shim (§7.4): a real host listener bound into the view at
-    // $HOME/kennel-unix.sock. A host echo thread serves "ping" -> "pong".
+    // AF_UNIX socket facade (§7.4 / 07-9 §7.9.5): a real host listener the facade
+    // connects on the workload's behalf. The in-kennel `kennel-afunix-shim` proxy
+    // presents it at $HOME/kennel-unix.sock and brokers each connect by name through
+    // binder node 0 (kenneld). A host echo thread serves "ping" -> "pong". No host
+    // socket path is ever bound into the view.
     let unix_listener = UnixListener::bind(&unix_sock).expect("bind unix listener");
     std::thread::spawn(move || {
         for conn in unix_listener.incoming() {
@@ -403,12 +407,40 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             }
         }
     });
+    let afunix_shim_bin = sibling_binary("kennel-afunix-shim");
+    assert!(
+        afunix_shim_bin.exists(),
+        "build kennel-afunix-shim (the runner does)"
+    );
+    let shim_path = PathBuf::from("/home/kennel/kennel-unix.sock");
     let unix_prep = UnixPrep {
-        socket_binds: vec![(
-            unix_sock.clone(),
-            PathBuf::from("/home/kennel/kennel-unix.sock"),
-        )],
+        shims: vec![kenneld::UnixShim {
+            name: "echo".to_owned(),
+            shim_path: shim_path.clone(),
+        }],
         env: Vec::new(),
+        afunix_shim_bin: Some(afunix_shim_bin),
+    };
+    // The binder facade kenneld serves (node 0): resolves the brokered name "echo" to
+    // the real host listener. Mirrors what `Shared::run_kennel` wires for a [unix]
+    // kennel. Its writer records the af-unix decisions.
+    let binder_writer = std::sync::Arc::new(kenneld::audit::build_writer(
+        "e2e",
+        &audit_base.join("e2e"),
+        &AuditRuntime::default(),
+        "e2e-uuid".to_owned(),
+    ));
+    let binder_prep = kenneld::BinderPrep {
+        policy: BinderRuntime::default(),
+        unix: UnixRuntime {
+            sockets: vec![UnixSocket {
+                name: "echo".to_owned(),
+                real: unix_sock.to_string_lossy().into_owned(),
+                shim: shim_path.to_string_lossy().into_owned(),
+                env: None,
+            }],
+        },
+        writer: binder_writer,
     };
 
     let spec = Spec {
@@ -455,7 +487,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         }),
         ssh: ssh_prep,
         unix: unix_prep,
-        binder: None,
+        binder: Some(binder_prep),
     };
 
     // The workload proves the constructed view; the group clauses below are written
@@ -559,9 +591,16 @@ fn build_workload(v4: Ipv4Addr, granted: Option<u32>, primary: u32) -> Command {
          && grep -q '^kennel-bastion ssh-ed25519 ' \"$HOME/.ssh/known_hosts\" \
          && test -f \"$HOME/.ssh/id_github.com\" \
          && test -n \"$KENNEL_SOCKS_PROXY\" ";
-    let unix_clause = "&& test -S \"$HOME/kennel-unix.sock\" \
+    // The af-unix facade: the in-kennel proxy is launched by the seal (racing this
+    // exec) and node 0 comes up shortly after spawn, so the socket appears and the
+    // first broker may briefly fail — wait for the listener, then let python retry the
+    // ping/pong. A non-granted socket is never presented (no proxy listener for it).
+    let unix_clause = "&& for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+             test -S \"$HOME/kennel-unix.sock\" && break; sleep 0.5; done \
+         && test -S \"$HOME/kennel-unix.sock\" \
          && ! test -e \"$HOME/kennel-not-granted.sock\" \
-         && test \"$(python3 -c \"import socket,os;s=socket.socket(socket.AF_UNIX);s.connect(os.environ['HOME']+'/kennel-unix.sock');s.sendall(b'ping');print(s.recv(16).decode(),end='')\")\" = pong ";
+         && test \"$(python3 -c \"import socket,os,time;\
+p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket.socket(socket.AF_UNIX);s.connect(p);s.sendall(b'ping')\n  r=s.recv(16)\n  if r==b'pong':\n   print('pong',end='');break\n except OSError:\n  pass\n time.sleep(0.25)\")\" = pong ";
     let dev_clause = if Path::new("/dev/net/tun").exists() {
         "&& test -c /dev/net/tun \
          && python3 -c \"import os;os.close(os.open('/dev/net/tun',os.O_RDWR))\" \

@@ -55,7 +55,7 @@ echo "== building binaries =="
 # Build the test binary and the supporting binaries first; the privhelper with
 # bpf-egress is built LAST so a later workspace build cannot clobber its embedded
 # BPF objects (privhelper-bpf-egress-build-gotcha).
-cargo build -p kennel-socks-connect -p kennel-netproxy
+cargo build -p kennel-socks-connect -p kennel-netproxy -p kennel-afunix-shim
 cargo test -p kenneld --features root-tests --no-run
 cargo build -p kennel-privhelper --features bpf-egress
 
