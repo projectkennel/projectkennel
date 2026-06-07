@@ -402,6 +402,13 @@ fn spawn_inner(
     //
     // [`fork_into_pid1`]: kennel_syscall::spawn::fork_into_pid1
     let mut inner_seal = move || -> io::Result<()> {
+        // Controlling terminal for job control (interactive runs), done FIRST — before
+        // Landlock could gate the `ioctl`. If our stdin is a tty (a pty the CLI
+        // allocated and passed), become its session leader so the workload's shell can
+        // manage foreground/background process groups (`^Z`/`fg`/`bg`). Best-effort: a
+        // non-tty (piped) stdin skips this, and `TIOCSCTTY` never steals a tty already
+        // owned by another session.
+        kennel_syscall::pty::adopt_stdin_as_controlling_tty();
         if does_mount {
             // Detach mount propagation from the host first (`MS_PRIVATE` — stronger
             // than the `MS_SLAVE` of §7.2.10: no propagation in either direction).

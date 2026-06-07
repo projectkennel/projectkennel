@@ -67,6 +67,7 @@ pub mod namespace;
 pub mod netlink;
 pub mod path;
 pub mod process;
+pub mod pty;
 pub mod random;
 pub mod scm;
 pub mod seccomp;

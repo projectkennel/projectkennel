@@ -16,7 +16,8 @@
 #![forbid(unsafe_code)]
 
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::io::IsTerminal as _;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -160,7 +161,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     });
 
     let mut conn = connect()?;
-    // Pass this terminal's stdio so the workload is attached to it.
+    // Interactive: when our stdin is a terminal, give the workload its own pty (so its
+    // shell has a controlling terminal for job control) and proxy this terminal to it.
+    if io::stdin().is_terminal() {
+        return run_interactive(conn, &request);
+    }
+    // Non-interactive (piped/redirected): pass our stdio straight through.
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stderr = io::stderr();
@@ -180,6 +186,80 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         Response::Error(message) => Err(message),
         other => Err(format!("unexpected response: {other:?}")),
     }
+}
+
+/// Restores the terminal to its saved (pre-raw) settings when dropped — on every
+/// return path of an interactive run, including errors and `?` early-returns.
+struct RawGuard {
+    prev: kennel_syscall::pty::Termios,
+}
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = kennel_syscall::pty::restore(io::stdin().as_fd(), &self.prev);
+    }
+}
+
+/// Interactive `kennel run`: allocate a pty, hand the workload the slave as its stdio
+/// (the daemon makes it the workload's controlling terminal), put this terminal in raw
+/// mode, and proxy bytes both ways until the workload exits. The workload's shell then
+/// has real job control (`^Z`/`fg`/`bg`); the terminal is restored on exit.
+fn run_interactive(mut conn: UnixStream, request: &Request) -> Result<ExitCode, String> {
+    use kennel_syscall::pty;
+    let real_in = io::stdin();
+    let winsize = pty::get_winsize(real_in.as_fd()).ok();
+    let p = pty::open(winsize.as_ref()).map_err(|e| format!("allocating a pty: {e}"))?;
+    // Raw mode now; the guard restores the terminal on every return below.
+    let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
+    let _restore = RawGuard { prev };
+    // Block SIGWINCH before the relay thread is spawned so it can `sigwait` it.
+    let _ = pty::block_winch();
+    // Hand the workload the slave (all three fds), then drop our slave so the master
+    // sees EOF once the workload's stdio closes.
+    {
+        let slave = p.slave.as_fd();
+        send(&conn, request, &[slave, slave, slave])?;
+    }
+    drop(p.slave);
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Started { .. } => {}
+        Response::Error(message) => return Err(message),
+        other => return Err(format!("unexpected response: {other:?}")),
+    }
+    proxy_terminal(&p.master, real_in.as_fd())?;
+    // Block until the workload exits; `_restore` then puts the terminal back.
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Exited { code } => Ok(exit_code(code)),
+        Response::Error(message) => Err(message),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+/// Spawn the background copies between this terminal and the pty `master`: stdin →
+/// master, master → stdout, and a SIGWINCH relay for live resizes. Each thread owns
+/// dup'd fds, so they outlive these borrows and are reaped when the process exits.
+fn proxy_terminal(master: &OwnedFd, real_in: BorrowedFd<'_>) -> Result<(), String> {
+    let dup = |fd: BorrowedFd<'_>| fd.try_clone_to_owned().map_err(|e| format!("fd dup: {e}"));
+    let to_workload = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
+    let from_workload = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
+    let winch_master = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
+    let stdin_dup = dup(real_in)?;
+    let stdout_dup = dup(io::stdout().as_fd())?;
+    let winch_in = dup(real_in)?;
+    // stdin → master
+    std::thread::spawn(move || {
+        let mut r = std::fs::File::from(stdin_dup);
+        let mut w = std::fs::File::from(to_workload);
+        let _ = std::io::copy(&mut r, &mut w);
+    });
+    // master → stdout
+    std::thread::spawn(move || {
+        let mut r = std::fs::File::from(from_workload);
+        let mut w = std::fs::File::from(stdout_dup);
+        let _ = std::io::copy(&mut r, &mut w);
+    });
+    // SIGWINCH → propagate the new window size to the workload
+    std::thread::spawn(move || kennel_syscall::pty::relay_winch(winch_in, winch_master));
+    Ok(())
 }
 
 /// `kennel stop <name>`
