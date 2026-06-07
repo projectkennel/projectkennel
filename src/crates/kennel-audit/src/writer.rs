@@ -71,7 +71,9 @@ impl Levels {
             Resource::Fs => self.fs,
             Resource::Exec => self.exec,
             Resource::Unix => self.unix,
-            Resource::Dbus => self.dbus,
+            // Binder IPC is per-call mediation in the D-Bus/unix family; it follows
+            // the same audit level until a dedicated `[audit].binder` knob lands.
+            Resource::Dbus | Resource::Binder => self.dbus,
             // Always-emitted classes: treated as Full so they never filter.
             Resource::Priv | Resource::Lifecycle => Level::Full,
         }

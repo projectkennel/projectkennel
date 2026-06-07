@@ -25,6 +25,9 @@ kennel-audit = { path = "../kennel-audit" }
 # audit ringbuf and drains it. No `embed-programs` — kenneld never loads BPF
 # (the privhelper does), so this stays clang-free.
 kennel-bpf = { path = "../kennel-bpf" }
+# The binder IPC context manager (07-9/02-7): kenneld owns node 0 of each kennel's
+# binderfs instance and gates the registry against the settled [binder] policy.
+kennel-binder = { path = "../kennel-binder" }
 # Writing the per-kennel egress-proxy TOML config (kenneld writes, the netproxy
 # reads). Both already vendored (kennel-policy/kennel-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }

@@ -74,6 +74,8 @@ pub enum Resource {
     Unix,
     /// D-Bus method calls.
     Dbus,
+    /// Binder IPC: service registry and per-call decisions (`07-9`/`02-7`).
+    Binder,
     /// Privileged-helper invocations and refusals.
     Priv,
     /// Kennel and daemon lifecycle.
@@ -90,6 +92,7 @@ impl Resource {
             Self::Exec => "exec",
             Self::Unix => "unix",
             Self::Dbus => "dbus",
+            Self::Binder => "binder",
             Self::Priv => "priv",
             Self::Lifecycle => "lifecycle",
         }
@@ -104,6 +107,7 @@ impl Resource {
             Self::Exec => "exec",
             Self::Unix => "unix",
             Self::Dbus => "dbus",
+            Self::Binder => "binder",
             Self::Priv => "priv",
             Self::Lifecycle => "lifecycle",
         }

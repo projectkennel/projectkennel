@@ -120,6 +120,12 @@ impl Mapping {
     }
 }
 
+// SAFETY: a `Mapping` owns its mmap region exclusively (the only pointer to it),
+// and every access is through `&self`/`&mut self` on the owning thread. Moving it to
+// another thread transfers that sole ownership with no aliasing, so it is sound to
+// send. It is deliberately **not** `Sync`: concurrent access is not provided for.
+unsafe impl Send for Mapping {}
+
 impl Drop for Mapping {
     fn drop(&mut self) {
         // SAFETY: `ptr`/`len` are exactly what `mmap` returned and we have not

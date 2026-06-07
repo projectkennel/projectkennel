@@ -215,6 +215,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         ssh: kennel_policy::SshRuntime::default(),
         unix: kennel_policy::UnixRuntime::default(),
         identity: kennel_policy::IdentityRuntime::default(),
+        binder: kennel_policy::BinderRuntime::default(),
         audit: kennel_policy::AuditRuntime::default(),
         env: kennel_policy::EnvRuntime::default(),
         ulimits: kennel_policy::UlimitsRuntime::default(),
