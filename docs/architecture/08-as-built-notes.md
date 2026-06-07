@@ -43,6 +43,14 @@ narration is kept here; the chapter named is the source of truth.
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
   tests, not mechanism.
+- **Per-kennel network namespace** (`07-3-network.md` §7.3.6, THREATS T1.6) — a kennel
+  currently shares the host network namespace (egress is gated by the cgroup BPF + proxy,
+  not net-ns isolation), so the workload can *read* host network state (interfaces, routes,
+  listening sockets, the LAN ARP table) via `/proc/net/*` and `AF_NETLINK`. Recon-only —
+  egress stays blocked — but a genuine info-disclosure residual. Closing it means unsharing
+  `CLONE_NEWNET` and keeping the proxy reachable across the boundary (veth or a passed
+  socket), which re-architects the §7.3 loopback/egress model. Deferred; accepted residual
+  for now. Would also make the network-inspection tools report the kennel's own stack.
 - **`[container]` runtime** (`05-templates.md` §5.7) — `[container]` is design-level *language*
   only (parse + compile-warn, same family as `[dbus]`/`[x11]`); there is no container-runtime
   integration. No shipped template uses it: `containerised-service` runs the service directly
