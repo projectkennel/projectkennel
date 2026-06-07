@@ -30,6 +30,7 @@ const BINDER_WRITE_READ: libc::c_ulong = ioc(DIR_RW, b'b', 1, SZ_WRITE_READ);
 const BINDER_SET_MAX_THREADS: libc::c_ulong = ioc(DIR_WRITE, b'b', 5, SZ_U32);
 const BINDER_SET_CONTEXT_MGR: libc::c_ulong = ioc(DIR_WRITE, b'b', 7, SZ_S32);
 const BINDER_VERSION: libc::c_ulong = ioc(DIR_RW, b'b', 9, SZ_VERSION);
+const BINDER_GET_EXTENDED_ERROR: libc::c_ulong = ioc(DIR_RW, b'b', 17, 12);
 /// `BINDER_CTL_ADD` (`<linux/android/binderfs.h>`): allocate a named device.
 const BINDER_CTL_ADD: libc::c_ulong = ioc(DIR_RW, b'b', 1, SZ_BINDERFS_DEVICE);
 
@@ -232,6 +233,76 @@ pub fn set_max_threads(fd: BorrowedFd<'_>, max: u32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Read the last extended-error `param` (a negative errno) for `fd`
+/// (`BINDER_GET_EXTENDED_ERROR`), to explain a `BR_FAILED_REPLY`.
+///
+/// # Errors
+///
+/// Returns the OS error if the ioctl fails (e.g. an older kernel without it).
+pub fn extended_error(fd: BorrowedFd<'_>) -> io::Result<i32> {
+    #[repr(C)]
+    struct ExtendedError {
+        id: u32,
+        command: u32,
+        param: i32,
+    }
+    let mut ee = ExtendedError {
+        id: 0,
+        command: 0,
+        param: 0,
+    };
+    // SAFETY: BINDER_GET_EXTENDED_ERROR writes a `binder_extended_error` into `ee`,
+    // a live, correctly-sized struct; not retained past the call.
+    //
+    // INVARIANTS UPHELD: `ee` outlives the call.
+    //
+    // FAILURE MODE: -1 + errno on a kernel without the command.
+    let ret = unsafe {
+        libc::ioctl(
+            fd.as_raw_fd(),
+            BINDER_GET_EXTENDED_ERROR,
+            std::ptr::from_mut(&mut ee),
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ee.param)
+}
+
+/// Wait up to `timeout_ms` for `fd` to be readable (`POLLIN`).
+///
+/// Returns whether it became readable (so a `BINDER_WRITE_READ` will have work),
+/// letting a looper wake periodically to check a stop flag instead of blocking
+/// forever.
+///
+/// # Errors
+///
+/// Returns the OS error if `poll(2)` fails for a reason other than `EINTR` (which
+/// is reported as "not readable" so the caller loops).
+pub fn poll_in(fd: BorrowedFd<'_>, timeout_ms: i32) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pfd` is a single live, initialised pollfd; `poll` reads/writes it
+    // and the count (1) matches. No pointer retained.
+    //
+    // INVARIANTS UPHELD: exactly one pollfd is described to the kernel.
+    //
+    // FAILURE MODE: -1 + errno; EINTR is mapped to "not ready" so the caller retries.
+    let ret = unsafe { libc::poll(std::ptr::from_mut(&mut pfd), 1, timeout_ms) };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(pfd.revents & libc::POLLIN != 0)
 }
 
 /// Run one `BINDER_WRITE_READ`.

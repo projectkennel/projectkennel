@@ -38,5 +38,7 @@
 #![allow(unsafe_code)]
 
 pub mod binderfs;
+pub mod client;
+pub mod ctxmgr;
 pub mod proto;
 pub mod sys;
