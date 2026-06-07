@@ -107,7 +107,7 @@ Same shape with `addr_v6`. Value identical (struct alignment lays out the same).
 
 **`deny_v4`** / **`deny_v6`** (BPF_MAP_TYPE_LPM_TRIE)
 
-Invariant deny entries (cloud metadata, RFC1918, link-local) installed by the loader as framework invariants. Same key/value layout as `allow_*`.
+Invariant deny entries (cloud metadata, link-local) installed by the loader as framework invariants. Same key/value layout as `allow_*`. (RFC1918 is reachable, not an invariant deny — design §7.3; a policy that denies it contributes ordinary `deny_*` entries.)
 
 The lookup order in the connect programs:
 

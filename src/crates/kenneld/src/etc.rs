@@ -379,6 +379,12 @@ pub fn essential_etc_subtrees() -> Vec<PathBuf> {
         "/etc/ld.so.conf",      // dynamic-linker search configuration
         "/etc/ld.so.conf.d",
         "/etc/ld.so.cache", // cache; references /usr,/lib (bound at the same paths)
+        // update-alternatives symlink farm: /usr/bin/<tool> -> /etc/alternatives/<tool>
+        // -> real binary (awk->gawk, vi, editor, pager, java, …). Without it the
+        // symlink dangles in the view and the tool is "command not found". Symlinks
+        // only (no secrets); targets live under /usr (bound). Landlock read comes from
+        // the templates' fs.read `/etc/alternatives/**`.
+        "/etc/alternatives",
     ];
     CANDIDATES
         .iter()

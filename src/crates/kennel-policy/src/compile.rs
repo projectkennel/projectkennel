@@ -114,6 +114,7 @@ pub fn compile(
     crate::identity::validate(&effective)?;
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
+    warnings.extend(unenforced_section_warnings(&effective));
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
@@ -173,7 +174,64 @@ pub fn compile_leaf(
     crate::identity::validate(&effective)?;
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
+    warnings.extend(unenforced_section_warnings(&effective));
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
+}
+
+/// Warn about policy sections the runtime does **not** enforce. They parse (so a
+/// policy still compiles) but translate drops them and nothing acts on them — which
+/// is exactly how decorative "controls" crept into the shipped templates: a
+/// `[fs.scrub]` that scrubs nothing, a `[container]` that containerises nothing,
+/// `[dbus]`/`[x11]` with no proxy behind them. Surfacing them keeps an author from
+/// believing a no-op protects them, without forbidding forward-declared sections
+/// (warn, don't refuse — `footgun-warn-dont-forbid`). One message per present section.
+fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
+    let scrub = effective
+        .fs
+        .as_ref()
+        .and_then(|f| f.scrub.as_ref())
+        .is_some();
+    [
+        (
+            effective.dbus.is_some(),
+            "[dbus]",
+            "no D-Bus proxy exists yet",
+        ),
+        (
+            effective.x11.is_some(),
+            "[x11]",
+            "no X11 mediation exists yet",
+        ),
+        (
+            effective.ptrace.is_some(),
+            "[ptrace]",
+            "ptrace scoping comes from the PID namespace + seccomp, not this section",
+        ),
+        (
+            effective.signal.is_some(),
+            "[signal]",
+            "signal scoping comes from the PID namespace, not this section",
+        ),
+        (
+            effective.container.is_some(),
+            "[container]",
+            "container orchestration is not implemented",
+        ),
+        (
+            scrub,
+            "[fs.scrub]",
+            "credential scrubbing is not implemented",
+        ),
+    ]
+    .into_iter()
+    .filter(|(present, _, _)| *present)
+    .map(|(_, section, what)| {
+        format!(
+            "{section} is declared but NOT enforced by the runtime ({what}) — it is dropped at \
+             compile and has no effect"
+        )
+    })
+    .collect()
 }
 
 /// Resolve and apply included fragments additively, in listed order.
@@ -367,6 +425,29 @@ mod tests {
         compile(&entry, &src(), &Trust::dev(), "test-0.0.0")
             .expect("compile")
             .policy
+    }
+
+    #[test]
+    fn decorative_sections_warn_as_unenforced() {
+        use crate::source::{FsScrub, FsSection, SourcePolicy};
+        let sp = SourcePolicy {
+            dbus: Some(crate::source::DbusSection::default()),
+            container: Some(crate::source::ContainerSection::default()),
+            fs: Some(FsSection {
+                scrub: Some(FsScrub::default()),
+                ..FsSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        let w = unenforced_section_warnings(&sp);
+        assert_eq!(w.len(), 3, "one warning per decorative section: {w:?}");
+        assert!(w
+            .iter()
+            .any(|s| s.contains("[dbus]") && s.contains("NOT enforced")));
+        assert!(w.iter().any(|s| s.contains("[container]")));
+        assert!(w.iter().any(|s| s.contains("[fs.scrub]")));
+        // A clean policy (no decorative sections) warns about none of this.
+        assert!(unenforced_section_warnings(&SourcePolicy::default()).is_empty());
     }
 
     #[test]

@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
@@ -503,13 +503,21 @@ where
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
             Ok(()) => return run_kennel(shared, &req, fds, conn),
-            Err(e) => Response::Error(e),
+            Err(e) => {
+                eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
+                Response::Error(e)
+            }
         },
         Request::Stop { kennel } => match validate_kennel_name(&kennel) {
             Ok(()) => shared.stop(&kennel),
-            Err(e) => Response::Error(e),
+            Err(e) => {
+                eprintln!("kenneld: rejected stop of `{kennel}`: {e}");
+                Response::Error(e)
+            }
         },
         Request::List => shared.list(),
+        // AuthorizedKeys errors are routine (sshd polls for keys the bastion may not
+        // hold), so they are not logged here to avoid spamming the journal.
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),
     };
     let _ = control::send_response(conn, &response);
@@ -573,6 +581,12 @@ fn run_kennel<P, L>(
     let ctx = match shared.reserve(&req.kennel) {
         Ok(ctx) => ctx,
         Err(resp) => {
+            if let Response::Error(msg) = &resp {
+                eprintln!(
+                    "kenneld: kennel `{}` failed to start [reserve]: {msg}",
+                    req.kennel
+                );
+            }
             let _ = control::send_response(conn, &resp);
             return;
         }
@@ -591,13 +605,26 @@ fn run_kennel<P, L>(
         ula_gid: shared.identity.scope.ula_gid(),
     };
 
-    let loaded = match shared.loader.load(&req.policy, &subst) {
+    let mut loaded = match shared.loader.load(&req.policy, &subst) {
         Ok(loaded) => loaded,
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
+        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
     };
-    let mut command = match command_for(&req.argv, &req.cwd, fds) {
-        Ok(command) => command,
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
+    // Interactive runs pass ONE connected socket (over which the seal returns a
+    // controlling pty allocated inside the kennel's devpts); non-interactive runs
+    // pass the three stdio fds. `return_sock` must outlive the spawn so the forked
+    // child inherits it during the pre-exec seal — it stays in scope below.
+    let mut return_sock: Option<OwnedFd> = None;
+    let mut command = if req.interactive {
+        return_sock = fds.into_iter().next();
+        match command_for_interactive(&req.argv, &req.cwd) {
+            Ok(command) => command,
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
+        }
+    } else {
+        match command_for(&req.argv, &req.cwd, fds) {
+            Ok(command) => command,
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
+        }
     };
     // Prepare SSH egress (§7.8): mint synthetic keys, register the edges with the
     // per-user bastion, and build the synthetic ~/.ssh for the view. The ~/.ssh is
@@ -610,7 +637,16 @@ fn run_kennel<P, L>(
     let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, &Response::Error(reason)),
+        Err(reason) => {
+            return fail(
+                shared,
+                &req.kennel,
+                ctx,
+                conn,
+                "register ssh egress",
+                reason,
+            )
+        }
     };
     // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
@@ -660,6 +696,11 @@ fn run_kennel<P, L>(
         compress_after_seconds: audit_runtime.file.compress_after_seconds,
         retain_count: audit_runtime.file.retain_count,
     });
+
+    // Hand the seal the interactive return socket's raw fd (it sends the pty master
+    // back over it during pre-exec). `return_sock` keeps the fd open until after the
+    // spawn returns, so the forked child still has it.
+    loaded.plan.interactive_return_fd = return_sock.as_ref().map(AsRawFd::as_raw_fd);
 
     let id = &shared.identity;
     let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
@@ -734,6 +775,11 @@ fn run_kennel<P, L>(
     command.env("LOGNAME", &loaded.account);
     command.env("SHELL", &loaded.shell);
     command.env("HOME", &shim_root);
+    // Forward the caller's TERM (the one host var an interactive workload genuinely
+    // needs and cannot be synthesised); everything else is policy [env].set below.
+    if !req.term.is_empty() {
+        command.env("TERM", &req.term);
+    }
     for (key, value) in &loaded.env.vars {
         command.env(key, value);
     }
@@ -750,7 +796,8 @@ fn run_kennel<P, L>(
                 &req.kennel,
                 ctx,
                 conn,
-                &Response::Error(e.to_string()),
+                "spawn workload",
+                e.to_string(),
             );
         }
     };
@@ -811,19 +858,25 @@ fn run_kennel<P, L>(
     );
 }
 
-/// Release the reservation and report an error (a bring-up step failed).
+/// Release the reservation, **log the reason**, and report it (a bring-up step
+/// failed). The CLI only receives the terse `Response::Error`, so without this log
+/// a failed start is invisible to the operator; kenneld runs as a systemd user unit,
+/// so stderr lands in the journal — `journalctl --user -u kenneld` shows `stage` and
+/// `reason`. Returns the same `Response::Error(reason)` it logged.
 fn fail<P: Privileged + Clone, L: PolicyLoader>(
     shared: &Shared<P, L>,
     name: &str,
     ctx: u16,
     conn: &mut UnixStream,
-    response: &Response,
+    stage: &str,
+    reason: String,
 ) {
+    eprintln!("kenneld: kennel `{name}` failed to start [{stage}]: {reason}");
     // Drop any SSH edges registered before the failing step (a no-op otherwise), so
     // a failed bring-up leaves no synthetic key in the bastion.
     shared.deregister_ssh(name);
     shared.release(name, ctx);
-    let _ = control::send_response(conn, response);
+    let _ = control::send_response(conn, &Response::Error(reason));
 }
 
 /// The exit code to report: the process's code, `128 + signal` if it was killed,
@@ -895,6 +948,21 @@ fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
     }
+    Ok(command)
+}
+
+/// Build the workload command for an **interactive** run. Stdio is `null` here — the
+/// spawn seal allocates a controlling pty inside the kennel's devpts and `dup2`s its
+/// slave onto fds 0/1/2 (§7.7.2), so any inherited stdio would be overwritten anyway.
+fn command_for_interactive(argv: &[String], cwd: &Path) -> Result<Command, String> {
+    let (program, rest) = argv.split_first().ok_or_else(|| "empty argv".to_owned())?;
+    let mut command = Command::new(program);
+    command
+        .args(rest)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     Ok(command)
 }
 
@@ -990,6 +1058,7 @@ mod tests {
                 file_binds: Vec::new(),
                 supplementary_groups: None,
                 ulimits: Vec::new(),
+                interactive_return_fd: None,
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,
@@ -1158,6 +1227,8 @@ mod tests {
                 kennel: "sock".to_owned(),
                 argv: vec!["/bin/true".to_owned()],
                 cwd: PathBuf::from("/"),
+                term: String::new(),
+                interactive: false,
             });
             let mut framed = Vec::new();
             control::write_frame(&mut framed, &request.encode()).expect("frame");
@@ -1190,6 +1261,8 @@ mod tests {
             kennel: "quick".to_owned(),
             argv: vec!["/bin/true".to_owned()],
             cwd: PathBuf::from("/"),
+            term: String::new(),
+            interactive: false,
         };
         // No fds: the workload inherits this process's stdio. /bin/true exits 0
         // immediately, so run_kennel returns after writing both responses.

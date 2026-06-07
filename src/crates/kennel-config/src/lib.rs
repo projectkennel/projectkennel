@@ -297,9 +297,12 @@ impl Deployment {
 /// The raw, all-optional `config.toml` schema (one parsed layer).
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+// The `_dirs` suffix is the TOML key (`template_dirs` etc.), not noise to strip.
+#[allow(clippy::struct_field_names)]
 struct RawUser {
     template_dirs: Option<Vec<PathBuf>>,
     key_dirs: Option<Vec<PathBuf>>,
+    policy_dirs: Option<Vec<PathBuf>>,
 }
 
 impl RawUser {
@@ -307,15 +310,18 @@ impl RawUser {
         Self {
             template_dirs: higher.template_dirs.or(self.template_dirs),
             key_dirs: higher.key_dirs.or(self.key_dirs),
+            policy_dirs: higher.policy_dirs.or(self.policy_dirs),
         }
     }
 }
 
 /// Resolved user conveniences for the `kennel` CLI.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_field_names)] // `_dirs` is the field's meaning, not a shared noise suffix.
 pub struct User {
     template_dirs: Option<Vec<PathBuf>>,
     key_dirs: Option<Vec<PathBuf>>,
+    policy_dirs: Option<Vec<PathBuf>>,
 }
 
 impl User {
@@ -346,11 +352,12 @@ impl User {
         Ok(Self {
             template_dirs: raw.template_dirs,
             key_dirs: raw.key_dirs,
+            policy_dirs: raw.policy_dirs,
         })
     }
 
     /// Template search dirs: the configured list, else the built-in default
-    /// (`<user-config>/templates` then `/etc/kennel/templates`).
+    /// (`<user-config>/templates`, `/etc/kennel/templates`, `/usr/lib/kennel/templates`).
     #[must_use]
     pub fn template_dirs(&self) -> Vec<PathBuf> {
         self.template_dirs
@@ -358,25 +365,69 @@ impl User {
             .unwrap_or_else(|| default_search_dirs("templates"))
     }
 
-    /// Key (authoring trust) search dirs: the configured list, else the built-in
-    /// default (`<user-config>/keys` then `/etc/kennel/keys`).
+    /// Key search dirs (all layers): the configured list, else the built-in default
+    /// (`<user-config>/keys`, `/etc/kennel/keys`, `/usr/lib/kennel/keys`). Used to
+    /// verify artefacts a user may legitimately sign (run policies), so it includes
+    /// the user's own keys — unlike [`Self::system_key_dirs`].
     #[must_use]
     pub fn key_dirs(&self) -> Vec<PathBuf> {
         self.key_dirs
             .clone()
             .unwrap_or_else(|| default_search_dirs("keys"))
     }
+
+    /// **System-only** key search dirs (`/etc/kennel/keys`, `/usr/lib/kennel/keys`) —
+    /// the user's `~/.config/kennel/keys` is deliberately excluded. Templates (the
+    /// security baseline) must be signed by a system/vendor key; a user key may not
+    /// sign a template. Honours a configured `key_dirs` only for its non-user entries.
+    #[must_use]
+    pub fn system_key_dirs(&self) -> Vec<PathBuf> {
+        self.key_dirs
+            .as_ref()
+            .map_or_else(|| system_search_dirs("keys"), Clone::clone)
+    }
+
+    /// Policy search dirs (all layers): the configured list, else the built-in default
+    /// (`<user-config>/policies`, `/etc/kennel/policies`, `/usr/lib/kennel/policies`).
+    /// Where `kennel run` resolves a policy named (not pathed) on the command line.
+    #[must_use]
+    pub fn policy_dirs(&self) -> Vec<PathBuf> {
+        self.policy_dirs
+            .clone()
+            .unwrap_or_else(|| default_search_dirs("policies"))
+    }
 }
 
-/// The built-in CLI search-dir default for `leaf` (`templates`/`keys`): the
-/// user config dir first, then the system dir.
+/// The built-in CLI search-dir default for `leaf` (`templates`/`keys`/`policies`):
+/// the user config dir first, then the system dir, then the vendor dir (highest
+/// priority first).
 fn default_search_dirs(leaf: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(user) = user_config_dir() {
         dirs.push(user.join(leaf));
     }
-    dirs.push(PathBuf::from(SYSTEM_DIR).join(leaf));
+    dirs.extend(system_search_dirs(leaf));
     dirs
+}
+
+/// The system (root-owned) search dirs for `leaf`: `/etc/kennel/<leaf>` then the
+/// vendor `/usr/lib/kennel/<leaf>`. No user layer — the trust baseline for templates.
+fn system_search_dirs(leaf: &str) -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(SYSTEM_DIR).join(leaf),
+        PathBuf::from(VENDOR_DIR).join(leaf),
+    ]
+}
+
+/// The calling user's signing-key dir, or `None` if neither env var is set.
+///
+/// `$XDG_CONFIG_HOME/kennel/keys`, else `$HOME/.config/kennel/keys`. The daemon adds
+/// this to its **settled-policy** trust store so a user can run a policy signed with
+/// their own key (the trust split, `07-paths`); it is **not** consulted for template
+/// trust.
+#[must_use]
+pub fn user_key_dir() -> Option<PathBuf> {
+    user_config_dir().map(|d| d.join("keys"))
 }
 
 #[cfg(test)]
@@ -470,5 +521,51 @@ mod tests {
         write(&user, USER_FILE, "template_dirs = [\"/srv/templates\"]\n");
         let u = User::load_from_dirs(&[user]).expect("load");
         assert_eq!(u.template_dirs(), vec![PathBuf::from("/srv/templates")]);
+    }
+
+    #[test]
+    fn default_search_dirs_are_three_layer() {
+        // The vendor layer is always present; the user layer is present iff a config
+        // dir resolves. The last two are the system + vendor dirs in priority order.
+        let dirs = default_search_dirs("policies");
+        let tail = dirs
+            .get(dirs.len().saturating_sub(2)..)
+            .expect("at least the two system layers");
+        assert_eq!(
+            tail,
+            [
+                PathBuf::from("/etc/kennel/policies"),
+                PathBuf::from("/usr/lib/kennel/policies"),
+            ]
+        );
+    }
+
+    #[test]
+    fn system_key_dirs_exclude_the_user_layer() {
+        // Templates verify only against system/vendor keys — never ~/.config.
+        let u = User::default();
+        assert_eq!(
+            u.system_key_dirs(),
+            vec![
+                PathBuf::from("/etc/kennel/keys"),
+                PathBuf::from("/usr/lib/kennel/keys"),
+            ]
+        );
+        // The all-layers key_dirs always contains the system store too (plus, when a
+        // config dir resolves, the user layer that system_key_dirs omits).
+        assert!(u.key_dirs().contains(&PathBuf::from("/etc/kennel/keys")));
+        assert!(u
+            .key_dirs()
+            .contains(&PathBuf::from("/usr/lib/kennel/keys")));
+    }
+
+    #[test]
+    fn user_key_override_drives_system_key_dirs() {
+        // An explicit key_dirs override is honoured even for the system-only view
+        // (an operator pointing trust at an org key dir).
+        let user = tmp("keyoverride");
+        write(&user, USER_FILE, "key_dirs = [\"/org/keys\"]\n");
+        let u = User::load_from_dirs(&[user]).expect("load");
+        assert_eq!(u.system_key_dirs(), vec![PathBuf::from("/org/keys")]);
     }
 }

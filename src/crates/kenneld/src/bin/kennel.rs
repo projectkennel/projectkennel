@@ -16,7 +16,9 @@
 #![forbid(unsafe_code)]
 
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::io::IsTerminal as _;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -44,8 +46,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         Some((cmd, rest)) if cmd == "compile" => compile(rest),
         Some((cmd, rest)) if cmd == "validate" => validate(rest),
         Some((cmd, rest)) if cmd == "sign" => sign(rest),
+        Some((cmd, rest)) if cmd == "keygen" => keygen(rest),
+        Some((cmd, rest)) if cmd == "subkennel" => subkennel(rest),
         Some((cmd, rest)) if cmd == "audit" => audit(rest),
-        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K | kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]".to_owned()),
+        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K | kennel keygen <key-id> [--dir D] [--force] | kennel subkennel <add|check> [...] | kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]".to_owned()),
     }
 }
 
@@ -66,8 +70,8 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let head = args.get(..sep).unwrap_or(&[]);
     let command = args.get(sep.saturating_add(1)..).unwrap_or(&[]);
 
-    let mut policy_path: Option<&str> = None;
-    let mut name: Option<&str> = None;
+    let mut policy_arg: Option<&str> = None;
+    let mut name_arg: Option<&str> = None;
     let mut key_path: Option<&str> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
@@ -80,65 +84,90 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             }
             "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if policy_path.is_none() => policy_path = Some(v),
-            v if name.is_none() => name = Some(v),
+            v if policy_arg.is_none() => policy_arg = Some(v),
+            v if name_arg.is_none() => name_arg = Some(v),
             _ => return Err("unexpected extra argument before `--`".to_owned()),
         }
     }
-    let policy_path = policy_path
-        .ok_or("usage: kennel run <policy> <name> [--key K] [--template-dir D]... -- <cmd...>")?;
-    let name = name.ok_or("usage: kennel run <policy> <name> -- <cmd...>")?;
+    let policy_arg = policy_arg
+        .ok_or("usage: kennel run <policy> [<name>] [--key K] [--template-dir D]... -- <cmd...>")?;
     if command.is_empty() {
         return Err("no command given after `--`".to_owned());
     }
+    // `<policy>` is a literal path if it exists, else a **name** resolved from the
+    // `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`,
+    // preferring the settled artefact). The kennel instance `<name>` is optional and
+    // defaults to the resolved policy name (`07-paths`, resolve-by-name).
+    let (policy_file, default_name) = resolve_policy(policy_arg, true)?;
+    let name = name_arg.map_or(default_name, str::to_owned);
 
     // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
     // artefact is passed straight through. `_temp` keeps the on-disk settled file
     // alive for the daemon to read, and removes it when this function returns.
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
     // Held only for its `Drop` (removes the temp settled file when the run returns);
     // never read, hence the allow.
     #[allow(clippy::collection_is_never_read)]
     let _temp;
     let effective_policy: PathBuf = if is_source_policy(&bytes) {
-        let key_path = key_path.ok_or(
-            "`<policy>` is a source policy: pass `--key <path>` to compile-and-sign it in \
-             memory for this run, or pre-compile it with `kennel compile`",
-        )?;
+        // A source leaf is compiled-and-signed in memory (the §9.10 dev loop). That
+        // needs a *signing* (private) key; with `--key` omitted we default to the
+        // sole key in the user key dir. A pre-compiled settled artefact takes the
+        // `else` branch and needs no key at all (the daemon verifies its signature).
+        let key_path: PathBuf = match key_path {
+            Some(p) => PathBuf::from(p),
+            None => default_signing_key()?,
+        };
         add_default_template_dirs(&mut template_dirs);
-        add_default_trust_dirs(&mut trust_dirs);
+        add_system_trust_dirs(&mut trust_dirs);
         let source = FsTemplateSource {
             dirs: template_dirs,
         };
         let keys = load_trust_store(&trust_dirs)?;
         let trust = kennel_policy::Trust::allow_unsigned(Some(&keys));
-        let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
-            .map_err(|e| format!("compiling {policy_path}: {e}"))?;
+        let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
-        let key = load_signing_key(key_path)?;
+        print_warnings(&kennel_policy::resolve_settled_libraries(
+            &mut compiled.policy,
+        ));
+        let key = load_signing_key(&key_path)?;
         let doc = kennel_policy::sign_settled(&compiled.policy, &key)
             .map_err(|e| format!("signing: {e}"))?;
         let out = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
-        let temp = TempSettled::write(name, &out)?;
+        let temp = TempSettled::write(&name, &out)?;
         let path = temp.path().to_path_buf();
-        eprintln!("kennel: compiled `{policy_path}` in memory for this run");
+        eprintln!(
+            "kennel: compiled `{}` in memory for this run",
+            policy_file.display()
+        );
         _temp = Some(temp);
         path
     } else {
         _temp = None;
-        PathBuf::from(policy_path)
+        policy_file
     };
 
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let request = Request::Start(StartRequest {
         policy: effective_policy,
-        kennel: name.to_owned(),
+        kennel: name.clone(),
         argv: command.to_vec(),
         cwd,
+        // Forward the caller's terminal type so an interactive workload renders; the
+        // rest of the workload env is synthesised by the daemon, not inherited.
+        term: std::env::var("TERM").unwrap_or_default(),
+        // Interactive when stdin is a terminal: the seal allocates the workload's own
+        // pty (job control) and hands its master back for us to proxy.
+        interactive: io::stdin().is_terminal(),
     });
 
     let mut conn = connect()?;
-    // Pass this terminal's stdio so the workload is attached to it.
+    if io::stdin().is_terminal() {
+        return run_interactive(conn, &request);
+    }
+    // Non-interactive (piped/redirected): pass our stdio straight through.
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stderr = io::stderr();
@@ -158,6 +187,97 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         Response::Error(message) => Err(message),
         other => Err(format!("unexpected response: {other:?}")),
     }
+}
+
+/// Restores the terminal to its saved (pre-raw) settings when dropped — on every
+/// return path of an interactive run, including errors and `?` early-returns.
+struct RawGuard {
+    prev: kennel_syscall::pty::Termios,
+}
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = kennel_syscall::pty::restore(io::stdin().as_fd(), &self.prev);
+    }
+}
+
+/// Interactive `kennel run`: the workload's controlling pty is allocated by the spawn
+/// seal inside the kennel's *own* devpts (so `ttyname(3)`/`tty` resolve it), and the
+/// seal hands its master back to us over a socketpair. We put this terminal in raw
+/// mode and proxy bytes both ways until the workload exits. The workload's shell then
+/// has real job control (`^Z`/`fg`/`bg`); the terminal is restored on exit.
+fn run_interactive(mut conn: UnixStream, request: &Request) -> Result<ExitCode, String> {
+    use kennel_syscall::pty;
+    let real_in = io::stdin();
+    // Raw mode now; the guard restores the terminal on every return below.
+    let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
+    let _restore = RawGuard { prev };
+    // Block SIGWINCH before the relay thread is spawned so it can `sigwait` it.
+    let _ = pty::block_winch();
+
+    // A socketpair the seal returns the pty master over: we keep `ours`, the daemon
+    // passes `theirs` (over SCM_RIGHTS) down into the workload's pre-exec seal.
+    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    send(&conn, request, &[theirs.as_fd()])?;
+    drop(theirs);
+
+    // The daemon confirms the launch (or reports a bring-up failure). On success the
+    // seal has, by now, sent the master over `ours`; reading the response first means a
+    // failed bring-up does not leave us blocking on a master that will never arrive.
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Started { .. } => {}
+        Response::Error(message) => return Err(message),
+        other => return Err(format!("unexpected response: {other:?}")),
+    }
+    let master = recv_pty_master(&ours)?;
+    // Size the workload's terminal to ours, then proxy until it exits.
+    if let Ok(ws) = pty::get_winsize(real_in.as_fd()) {
+        let _ = pty::set_winsize(master.as_fd(), &ws);
+    }
+    proxy_terminal(&master, real_in.as_fd())?;
+    // Block until the workload exits; `_restore` then puts the terminal back.
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Exited { code } => Ok(exit_code(code)),
+        Response::Error(message) => Err(message),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+/// Receive the workload's controlling-pty master, sent by the spawn seal over `sock`
+/// as a single `SCM_RIGHTS` fd (with a one-byte payload).
+fn recv_pty_master(sock: &UnixStream) -> Result<OwnedFd, String> {
+    let mut buf = [0u8; 1];
+    let (_, mut fds) = kennel_syscall::scm::recv_with_fds(sock.as_fd(), &mut buf)
+        .map_err(|e| format!("receiving the workload pty: {e}"))?;
+    fds.pop()
+        .ok_or_else(|| "the workload did not return a controlling terminal".to_owned())
+}
+
+/// Spawn the background copies between this terminal and the pty `master`: stdin →
+/// master, master → stdout, and a SIGWINCH relay for live resizes. Each thread owns
+/// dup'd fds, so they outlive these borrows and are reaped when the process exits.
+fn proxy_terminal(master: &OwnedFd, real_in: BorrowedFd<'_>) -> Result<(), String> {
+    let dup = |fd: BorrowedFd<'_>| fd.try_clone_to_owned().map_err(|e| format!("fd dup: {e}"));
+    let to_workload = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
+    let from_workload = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
+    let winch_master = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
+    let stdin_dup = dup(real_in)?;
+    let stdout_dup = dup(io::stdout().as_fd())?;
+    let winch_in = dup(real_in)?;
+    // stdin → master
+    std::thread::spawn(move || {
+        let mut r = std::fs::File::from(stdin_dup);
+        let mut w = std::fs::File::from(to_workload);
+        let _ = std::io::copy(&mut r, &mut w);
+    });
+    // master → stdout
+    std::thread::spawn(move || {
+        let mut r = std::fs::File::from(from_workload);
+        let mut w = std::fs::File::from(stdout_dup);
+        let _ = std::io::copy(&mut r, &mut w);
+    });
+    // SIGWINCH → propagate the new window size to the workload
+    std::thread::spawn(move || kennel_syscall::pty::relay_winch(winch_in, winch_master));
+    Ok(())
 }
 
 /// `kennel stop <name>`
@@ -550,20 +670,30 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         }
     }
 
-    let policy_path = policy_path.ok_or(
+    let policy_arg = policy_path.ok_or(
         "usage: kennel compile <policy> [--output-path P] [--key K | --unsigned] [--template-dir D]...",
     )?;
+    // `<policy>` is a path or a name resolved from the `policies/` cascade,
+    // preferring the source `policy.toml` (the artefact we are about to compile).
+    let (policy_path, _name) = resolve_policy(policy_arg, false)?;
     if key_path.is_some() && unsigned {
         return Err("--key and --unsigned are mutually exclusive".to_owned());
     }
-    if key_path.is_none() && !unsigned {
-        return Err(
-            "provide --key <path> to sign, or --unsigned for a development build".to_owned(),
-        );
-    }
+    // Sign with the given `--key`, else the sole key in the user key dir; `--unsigned`
+    // opts out entirely (a development build). `default_signing_key` errors helpfully
+    // if there is no key or several to choose from.
+    let signing_key: Option<PathBuf> = if unsigned {
+        None
+    } else {
+        Some(match key_path {
+            Some(p) => PathBuf::from(p),
+            None => default_signing_key()?,
+        })
+    };
     add_default_template_dirs(&mut template_dirs);
 
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let bytes = std::fs::read(&policy_path)
+        .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
 
     // No installation constants here: `<tag>`/`<gid>` are deferred to spawn, where
     // the daemon fills them from the user's scope (`/etc/kennel/subkennel`). The CLI
@@ -577,7 +707,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     // verifies against the trust store (`--trust-dir`, else the default key dirs);
     // otherwise unsigned templates resolve (development), still verifying any present
     // signature against whatever keys are loaded.
-    add_default_trust_dirs(&mut trust_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
     let keys = load_trust_store(&trust_dirs)?;
     let trust = if require_signed {
         kennel_policy::Trust::require(&keys)
@@ -585,7 +715,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         kennel_policy::Trust::allow_unsigned(Some(&keys))
     };
 
-    let compiled = match build_settled(&bytes, &source, &trust, version) {
+    let mut compiled = match build_settled(&bytes, &source, &trust, version) {
         Ok(compiled) => compiled,
         Err(e) => {
             eprintln!("kennel: {e}");
@@ -593,9 +723,14 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         }
     };
     print_warnings(&compiled.warnings);
+    // Resolve the shared-library closure of the allowlist into the settled artefact
+    // (reads the binaries from disk; deny-by-default execution, 07-1) before signing.
+    print_warnings(&kennel_policy::resolve_settled_libraries(
+        &mut compiled.policy,
+    ));
     let policy = &compiled.policy;
 
-    let out = output_path.unwrap_or_else(|| default_settled_path(policy_path, &policy.name));
+    let out = output_path.unwrap_or_else(|| default_settled_path(&policy_path, &policy.name));
 
     // Byte-pin the resolved references: check the fresh lockfile against any prior
     // `<name>.lock` beside the output, then (re)write it. A re-tagged/re-signed
@@ -618,11 +753,11 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             .map_err(|e| format!("writing {}: {e}", lock_path.display()))?;
     }
 
-    let doc = if unsigned {
-        kennel_policy::seal_unsigned(policy)
-    } else {
-        let key = load_signing_key(key_path.ok_or("internal: key path lost")?)?;
+    let doc = if let Some(key_path) = &signing_key {
+        let key = load_signing_key(key_path)?;
         kennel_policy::sign_settled(policy, &key).map_err(|e| format!("signing: {e}"))?
+    } else {
+        kennel_policy::seal_unsigned(policy)
     };
     let out_bytes = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
@@ -739,7 +874,7 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
     let policy_path = policy_path
         .ok_or("usage: kennel validate <policy> [--template-dir D] [--require-signed]")?;
     add_default_template_dirs(&mut template_dirs);
-    add_default_trust_dirs(&mut trust_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
     let source = FsTemplateSource {
@@ -803,7 +938,7 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
         ));
     }
 
-    let key = load_signing_key(key_path)?;
+    let key = load_signing_key(Path::new(key_path))?;
     let signed = kennel_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
     let env = signed.signature.ok_or("internal: signature not produced")?;
     // Append the signature as a new top-level table, preserving the original text.
@@ -823,6 +958,415 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
         kennel_policy::b64::encode(&key.public_key_bytes())
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel keygen <key-id> [--dir DIR] [--force]`
+///
+/// Generate an Ed25519 signing key and write it into the user key dir (default
+/// `$XDG_CONFIG_HOME/kennel/keys`, else `~/.config/kennel/keys`). `<key-id>.key` is
+/// the private seed (mode `0600`) you pass to `--key` (`sign`/`compile`/`run`);
+/// `<key-id>.pub` is the public key the daemon must trust. Refuses to overwrite an
+/// existing seed without `--force` — replacing a signing key invalidates everything
+/// signed with the old one. The `<key-id>` is both the filename and the signature
+/// `key_id`, so it is restricted to a safe character set.
+fn keygen(args: &[String]) -> Result<ExitCode, String> {
+    let mut key_id: Option<&str> = None;
+    let mut dir: Option<PathBuf> = None;
+    let mut force = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--dir" => dir = Some(it.next().ok_or("--dir needs a value")?.into()),
+            "--force" => force = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            value if key_id.is_none() => key_id = Some(value),
+            _ => return Err("only one <key-id> may be given".to_owned()),
+        }
+    }
+    let key_id = key_id.ok_or("usage: kennel keygen <key-id> [--dir DIR] [--force]")?;
+    if !is_valid_key_id(key_id) {
+        return Err(format!(
+            "invalid key id `{key_id}`: 1-64 chars of letters, digits, `.`, `-`, `_` \
+             (it is both a filename and the signature key_id)"
+        ));
+    }
+    let dir = dir.unwrap_or_else(default_key_dir);
+    let key_path = dir.join(format!("{key_id}.key"));
+    let pub_path = dir.join(format!("{key_id}.pub"));
+    if key_path.exists() && !force {
+        return Err(format!(
+            "{} already exists; refusing to overwrite a signing key \
+             (pass --force to replace it, which invalidates everything signed with the old key)",
+            key_path.display()
+        ));
+    }
+
+    // 32 bytes from the OS CSPRNG (`getrandom`) → the Ed25519 seed.
+    let mut seed = [0u8; 32];
+    kennel_syscall::random::fill(&mut seed).map_err(|e| format!("reading OS randomness: {e}"))?;
+    let key = kennel_policy::SigningKey::from_seed(key_id, &seed)
+        .map_err(|e| format!("deriving key: {e}"))?;
+
+    // The key dir holds secret seeds: 0700.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    write_secret(&key_path, &kennel_policy::b64::encode(&seed), 0o600)
+        .map_err(|e| format!("writing {}: {e}", key_path.display()))?;
+    write_secret(
+        &pub_path,
+        &kennel_policy::b64::encode(&key.public_key_bytes()),
+        0o644,
+    )
+    .map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
+
+    eprintln!("generated Ed25519 signing key `{key_id}`:");
+    eprintln!(
+        "  private seed : {}   (0600 — keep secret; the signing key)",
+        key_path.display()
+    );
+    eprintln!("  public key   : {}   (0644)", pub_path.display());
+    eprintln!();
+    eprintln!("The daemon already trusts this key for your own run policies (it reads");
+    eprintln!("~/.config/kennel/keys), so no further setup is needed. Compile a policy once,");
+    eprintln!("then run it — neither command needs --key while this is your only key:");
+    eprintln!("  kennel compile <name>          # signs policies/<name>/<name>.settled.toml");
+    eprintln!("  kennel run <name> -- <cmd...>  # runs the settled policy (no key to run)");
+    eprintln!();
+    eprintln!("Only to let *other* users or a fleet trust policies you sign — or to sign");
+    eprintln!("*templates* (which verify against system keys only) — install the public key");
+    eprintln!("into the root-owned system trust store:");
+    eprintln!(
+        "  sudo install -m 0644 {} /etc/kennel/keys/{key_id}.pub",
+        pub_path.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A key id is both a filename and the signature `key_id`; restrict it to a safe,
+/// portable set so it cannot escape the key dir or smuggle odd bytes into a policy.
+fn is_valid_key_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s != "."
+        && s != ".."
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// The default user key directory: `$XDG_CONFIG_HOME/kennel/keys`, else
+/// `~/.config/kennel/keys` (matching the CLI's default key search).
+fn default_key_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("kennel").join("keys")
+}
+
+/// Write base64 `text` (plus a trailing newline) to `path`, creating it with `mode`
+/// and enforcing `mode` even if it already existed (`.mode` only applies on create).
+fn write_secret(path: &Path, text: &str, mode: u32) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)?;
+    f.write_all(text.as_bytes())?;
+    f.write_all(b"\n")?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+/// The system per-user allocation file.
+const SUBKENNEL_FILE: &str = "/etc/kennel/subkennel";
+
+/// Largest valid `tag` — the 12-bit IPv4 `/20` selector. Tag 0 is reserved (its
+/// `/20`, `127.0.0.0/20`, contains `127.0.0.1`). Mirrors
+/// `kennel-privhelper::validate::TAG_MAX`; the format is `kennel-privhelper::alloc`.
+const SUBKENNEL_TAG_MAX: u16 = 0x0FFF;
+
+/// One parsed `/etc/kennel/subkennel` allocation (`uid:tag:gid:namespace`).
+struct Alloc {
+    uid: u32,
+    tag: u16,
+    gid_hex: String,
+    namespace: String,
+}
+
+/// `kennel subkennel <add|check> ...` — manage the per-user allocation file. A user
+/// with no (or a malformed) line cannot start kenneld, so `add` generates a
+/// provably-valid line (collision-free `tag`/`gid`) and `check` validates the file.
+fn subkennel(args: &[String]) -> Result<ExitCode, String> {
+    match args.split_first() {
+        Some((cmd, rest)) if cmd == "add" => subkennel_add(rest),
+        Some((cmd, rest)) if cmd == "check" => subkennel_check(rest),
+        _ => Err("usage: kennel subkennel add [--uid N] [--namespace NS] [--tag N] [--file PATH] | kennel subkennel check [--uid N] [--file PATH]".to_owned()),
+    }
+}
+
+/// Parse a subkennel line into an [`Alloc`], matching `kennel-privhelper::alloc`
+/// (first four `:`-separated fields; extra fields ignored, as the daemon does).
+fn parse_alloc_line(line: &str) -> Result<Alloc, String> {
+    let mut f = line.split(':');
+    let uid = f
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or("field 1 (uid) is not a number")?;
+    let tag = f
+        .next()
+        .ok_or("missing field 2 (tag)")?
+        .parse::<u16>()
+        .map_err(|_| "field 2 (tag) is not a number".to_owned())?;
+    if tag > SUBKENNEL_TAG_MAX {
+        return Err(format!(
+            "tag {tag} exceeds the 12-bit max {SUBKENNEL_TAG_MAX}"
+        ));
+    }
+    let gid_hex = f.next().ok_or("missing field 3 (gid)")?;
+    if gid_hex.len() != 10 || u64::from_str_radix(gid_hex, 16).is_err() {
+        return Err("field 3 (gid) must be exactly 10 hex digits".to_owned());
+    }
+    let namespace = f.next().ok_or("missing field 4 (namespace)")?;
+    if namespace.is_empty() {
+        return Err("field 4 (namespace) is empty".to_owned());
+    }
+    Ok(Alloc {
+        uid,
+        tag,
+        gid_hex: gid_hex.to_owned(),
+        namespace: namespace.to_owned(),
+    })
+}
+
+/// Parse a subkennel file: the valid allocations, and the malformed lines (with
+/// their 1-based line number and reason) for `check` to report.
+fn parse_subkennel(text: &str) -> (Vec<Alloc>, Vec<(usize, String, String)>) {
+    let mut ok = Vec::new();
+    let mut bad = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match parse_alloc_line(line) {
+            Ok(a) => ok.push(a),
+            Err(reason) => bad.push((i.saturating_add(1), raw.to_owned(), reason)),
+        }
+    }
+    (ok, bad)
+}
+
+/// The username for the default namespace (`kennel-<user>`). The CLI is not setuid,
+/// so reading `$USER` is fine here (the privhelper, which is, never does this — the
+/// namespace is stored in the file precisely so the helper needs no lookup). Falls
+/// back to the uid when `$USER` is unset/unusable.
+fn default_user_label(uid: u32) -> String {
+    std::env::var("USER")
+        .ok()
+        .filter(|s| !s.is_empty() && !s.contains(':'))
+        .unwrap_or_else(|| uid.to_string())
+}
+
+/// `kennel subkennel add [--uid N] [--namespace NS] [--tag N] [--file PATH]`
+///
+/// Generate a valid allocation line for a user (default: the current uid). The
+/// namespace defaults to `kennel-<user>`; `--namespace` only overrides it. The `tag`
+/// is the lowest free 12-bit value (from 1; 0 is reserved) unless `--tag` is given,
+/// and the `gid` is a fresh random 40-bit ULA id — both checked against existing
+/// lines so two users never collide. Prints the line plus the exact `sudo` command
+/// to append it (the file is root-owned, so the CLI never writes it itself).
+fn subkennel_add(args: &[String]) -> Result<ExitCode, String> {
+    let mut uid: Option<u32> = None;
+    let mut namespace: Option<String> = None;
+    let mut tag_override: Option<u16> = None;
+    let mut file = PathBuf::from(SUBKENNEL_FILE);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--uid" => {
+                uid = Some(
+                    it.next()
+                        .ok_or("--uid needs a value")?
+                        .parse()
+                        .map_err(|_| "--uid must be a number".to_owned())?,
+                );
+            }
+            "--namespace" => {
+                namespace = Some(it.next().ok_or("--namespace needs a value")?.clone());
+            }
+            "--tag" => {
+                tag_override = Some(
+                    it.next()
+                        .ok_or("--tag needs a value")?
+                        .parse()
+                        .map_err(|_| {
+                            format!("--tag must be a number in 1..={SUBKENNEL_TAG_MAX}")
+                        })?,
+                );
+            }
+            "--file" => file = it.next().ok_or("--file needs a value")?.into(),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            _ => return Err("kennel subkennel add takes no positional arguments".to_owned()),
+        }
+    }
+    let uid = uid.unwrap_or_else(kennel_syscall::unistd::real_uid);
+
+    // Existing allocations (an absent file just means none yet).
+    let existing = std::fs::read_to_string(&file).unwrap_or_default();
+    let (allocs, _bad) = parse_subkennel(&existing);
+    if let Some(a) = allocs.iter().find(|a| a.uid == uid) {
+        return Err(format!(
+            "uid {uid} already has an allocation in {} (`{}:{}:{}:{}`); kenneld uses the first \
+             line for a uid, so edit that line instead of adding another",
+            file.display(),
+            a.uid,
+            a.tag,
+            a.gid_hex,
+            a.namespace
+        ));
+    }
+    let used_tags: std::collections::BTreeSet<u16> = allocs.iter().map(|a| a.tag).collect();
+    let tag = match tag_override {
+        Some(0) => return Err("tag 0 is reserved (its /20 contains 127.0.0.1)".to_owned()),
+        Some(t) if t > SUBKENNEL_TAG_MAX => {
+            return Err(format!(
+                "tag {t} exceeds the 12-bit max {SUBKENNEL_TAG_MAX}"
+            ))
+        }
+        Some(t) if used_tags.contains(&t) => {
+            return Err(format!("tag {t} is already allocated to another user"))
+        }
+        Some(t) => t,
+        None => (1..=SUBKENNEL_TAG_MAX)
+            .find(|t| !used_tags.contains(t))
+            .ok_or("no free tag remains (all 4095 are allocated)")?,
+    };
+
+    // A fresh random 40-bit ULA id, not colliding with an existing one.
+    let used_gids: std::collections::BTreeSet<&str> =
+        allocs.iter().map(|a| a.gid_hex.as_str()).collect();
+    let gid_hex = loop {
+        let mut g = [0u8; 5];
+        kennel_syscall::random::fill(&mut g).map_err(|e| format!("reading OS randomness: {e}"))?;
+        if g == [0u8; 5] {
+            continue; // avoid the degenerate all-zero ULA id
+        }
+        let hex = format!(
+            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+            g[0], g[1], g[2], g[3], g[4]
+        );
+        if !used_gids.contains(hex.as_str()) {
+            break hex;
+        }
+    };
+
+    let namespace = namespace.unwrap_or_else(|| format!("kennel-{}", default_user_label(uid)));
+    if namespace.is_empty() || namespace.contains(':') {
+        return Err("namespace must be non-empty and contain no `:`".to_owned());
+    }
+
+    let line = format!("{uid}:{tag}:{gid_hex}:{namespace}");
+    // The line we emit must parse back identically — a guard against a future format slip.
+    parse_alloc_line(&line)
+        .map_err(|e| format!("internal: generated a line that does not parse ({e})"))?;
+
+    eprintln!("allocation for uid {uid}: tag {tag}, gid {gid_hex}, namespace `{namespace}`");
+    println!("{line}");
+    eprintln!();
+    eprintln!("Install it into the root-owned allocation file, then (re)start the daemon:");
+    eprintln!(
+        "  echo '{line}' | sudo tee -a {} >/dev/null",
+        file.display()
+    );
+    eprintln!("  systemctl --user restart kenneld.socket");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel subkennel check [--uid N] [--file PATH]`
+///
+/// Validate the allocation file: report every malformed line and any duplicate
+/// `uid`/`tag`/`gid` (which would silently shadow or collide), then the named user's
+/// status. Exits non-zero if that user has no valid allocation — i.e. kenneld would
+/// refuse to start for them.
+fn subkennel_check(args: &[String]) -> Result<ExitCode, String> {
+    let mut uid: Option<u32> = None;
+    let mut file = PathBuf::from(SUBKENNEL_FILE);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--uid" => {
+                uid = Some(
+                    it.next()
+                        .ok_or("--uid needs a value")?
+                        .parse()
+                        .map_err(|_| "--uid must be a number".to_owned())?,
+                );
+            }
+            "--file" => file = it.next().ok_or("--file needs a value")?.into(),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            _ => return Err("kennel subkennel check takes no positional arguments".to_owned()),
+        }
+    }
+    let uid = uid.unwrap_or_else(kennel_syscall::unistd::real_uid);
+    let text = std::fs::read_to_string(&file).map_err(|e| {
+        format!(
+            "reading {}: {e} (run `kennel subkennel add`)",
+            file.display()
+        )
+    })?;
+    let (allocs, bad) = parse_subkennel(&text);
+
+    for (n, raw, reason) in &bad {
+        eprintln!("line {n}: MALFORMED — {reason}: {raw}");
+    }
+    // Duplicates: the daemon takes the first line per uid; collisions break isolation.
+    report_dups("uid", allocs.iter().map(|a| a.uid.to_string()));
+    report_dups("tag", allocs.iter().map(|a| a.tag.to_string()));
+    report_dups("gid", allocs.iter().map(|a| a.gid_hex.clone()));
+
+    eprintln!(
+        "{}: {} valid allocation(s), {} malformed line(s)",
+        file.display(),
+        allocs.len(),
+        bad.len()
+    );
+    allocs.iter().find(|a| a.uid == uid).map_or_else(
+        || {
+            Err(format!(
+                "uid {uid}: NO valid allocation — kenneld will refuse to start for this user; \
+                 run `kennel subkennel add`"
+            ))
+        },
+        |a| {
+            eprintln!(
+                "uid {uid}: OK — tag {}, gid {}, namespace `{}`",
+                a.tag, a.gid_hex, a.namespace
+            );
+            Ok(ExitCode::SUCCESS)
+        },
+    )
+}
+
+/// Warn about repeated values in `field` (uid/tag/gid).
+fn report_dups(field: &str, values: impl Iterator<Item = String>) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut dup = std::collections::BTreeSet::new();
+    for v in values {
+        if !seen.insert(v.clone()) {
+            dup.insert(v);
+        }
+    }
+    for v in dup {
+        eprintln!("warning: duplicate {field} `{v}` — only the first line is used; the rest are dead or collide");
+    }
 }
 
 /// Map a compile-time [`kennel_policy::PolicyError`] to a CLI exit code (`02-1`).
@@ -852,20 +1396,100 @@ fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
     );
 }
 
+/// Resolve a `<policy>` argument to a file path plus a default kennel/policy name.
+/// An argument that names an **existing file** is used verbatim (its name derived
+/// from the path); otherwise it is a **policy name** searched in the `policies/`
+/// cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`).
+///
+/// Within a `<name>/` folder there are two candidates: the compiled
+/// `<name>.settled.toml` and the source `policy.toml`. `prefer_settled` picks the
+/// order — `kennel run` prefers the settled artefact (the production path), while
+/// `kennel compile` prefers the source it is about to compile. The returned name
+/// doubles as the default kennel instance name (`07-paths`, resolve-by-name).
+fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), String> {
+    let literal = Path::new(arg);
+    if literal.exists() {
+        return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
+    }
+    if !is_valid_policy_name(arg) {
+        return Err(format!(
+            "`{arg}` is not an existing file, and not a valid policy name (no `/`, `..`, or whitespace)"
+        ));
+    }
+    for dir in kennel_config::User::load()
+        .unwrap_or_default()
+        .policy_dirs()
+    {
+        let base = dir.join(arg);
+        let settled = base.join(format!("{arg}.settled.toml"));
+        let source = base.join("policy.toml");
+        let ordered = if prefer_settled {
+            [settled, source]
+        } else {
+            [source, settled]
+        };
+        for candidate in ordered {
+            if candidate.is_file() {
+                return Ok((candidate, arg.to_owned()));
+            }
+        }
+    }
+    Err(format!(
+        "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
+         /usr/lib/kennel); pass a path, or compile one with `kennel compile`"
+    ))
+}
+
+/// Derive a kennel name from a policy file path: `policies/<name>/policy.toml` and
+/// `policies/<name>/<name>.settled.toml` both yield `<name>`; any other file yields
+/// its stem with a trailing `.settled` stripped.
+fn policy_name_from_path(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("kennel");
+    if stem == "policy" {
+        if let Some(parent) = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+        {
+            return parent.to_owned();
+        }
+    }
+    stem.strip_suffix(".settled").unwrap_or(stem).to_owned()
+}
+
+/// A policy name is a single safe path component: non-empty, no `/`, no `..`, no
+/// whitespace (it is joined into the trust-rooted `policies/` cascade and also
+/// defaults the kennel instance name).
+fn is_valid_policy_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains("..")
+        && !name.chars().any(char::is_whitespace)
+}
+
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
-fn default_settled_path(policy_path: &str, name: &str) -> PathBuf {
-    let dir = Path::new(policy_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+fn default_settled_path(policy_path: &Path, name: &str) -> PathBuf {
+    let dir = policy_path.parent().unwrap_or_else(|| Path::new("."));
     dir.join(format!("{name}.settled.toml"))
 }
 
-/// Append the default trust-store (authoring) directories: the user
-/// `config.toml`'s `key_dirs` if set, else the built-in default (user config
-/// dir, then system). This is the CLI's *authoring* trust store; the daemon
-/// re-verifies against its own locked [`kennel_config::Deployment::trust_dir`].
-fn add_default_trust_dirs(dirs: &mut Vec<PathBuf>) {
-    dirs.extend(kennel_config::User::load().unwrap_or_default().key_dirs());
+/// Append the default **template-trust** directories: the system stores only
+/// (`/etc/kennel/keys`, then the vendor `/usr/lib/kennel/keys`), or the user
+/// `config.toml`'s `key_dirs` override if set. Templates are the security baseline
+/// (the framework invariants + confinement floor) and must be org/vendor-signed —
+/// never a user's own `~/.config/kennel/keys` (the trust split, `07-paths`). The
+/// daemon separately trusts the user's own keys for **settled run** policies.
+/// `--trust-dir` flags still append, so an operator can add an org key dir.
+fn add_system_trust_dirs(dirs: &mut Vec<PathBuf>) {
+    dirs.extend(
+        kennel_config::User::load()
+            .unwrap_or_default()
+            .system_key_dirs(),
+    );
 }
 
 /// Load a trust store: every `<key_id>.pub` (base64 32-byte public key) under each
@@ -895,16 +1519,56 @@ fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_policy::KeySet, String> {
 
 /// Load a signing key from a file holding the base64 of a 32-byte Ed25519 seed.
 /// The key id is the file stem, mirroring the `.pub` trust-store convention.
-fn load_signing_key(path: &str) -> Result<kennel_policy::SigningKey, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {path}: {e}"))?;
+fn load_signing_key(path: &Path) -> Result<kennel_policy::SigningKey, String> {
+    let shown = path.display();
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {shown}: {e}"))?;
     let seed = kennel_policy::b64::decode(text.trim().as_bytes())
-        .ok_or_else(|| format!("key {path} is not valid base64"))?;
-    let key_id = Path::new(path)
+        .ok_or_else(|| format!("key {shown} is not valid base64"))?;
+    let key_id = path
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("cannot derive a key id from {path}"))?;
+        .ok_or_else(|| format!("cannot derive a key id from {shown}"))?;
     kennel_policy::SigningKey::from_seed(key_id, &seed)
-        .map_err(|e| format!("loading key {path}: {e}"))
+        .map_err(|e| format!("loading key {shown}: {e}"))
+}
+
+/// The signing key to use when an operation must sign (`compile`, or `run`'s
+/// in-memory compile-and-sign) and `--key` was omitted: the **sole** `*.key` in
+/// the user key dir (`default_key_dir`). Signing is deliberate, so we auto-pick
+/// only when there is exactly one candidate; zero or several is an error asking
+/// the user to be explicit. The matching `.pub` is trusted for run policies, so
+/// the single-key dev case needs no `--key` at all.
+fn default_signing_key() -> Result<PathBuf, String> {
+    let dir = default_key_dir();
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir).map_or_else(
+        |_| Vec::new(),
+        |entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("key"))
+                .collect()
+        },
+    );
+    found.sort();
+    match found.as_slice() {
+        [] => Err(format!(
+            "no signing key in {} — generate one with `kennel keygen <key-id>`, or pass --key <path>",
+            dir.display()
+        )),
+        [only] => Ok(only.clone()),
+        many => {
+            let ids: Vec<&str> = many
+                .iter()
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()))
+                .collect();
+            Err(format!(
+                "multiple signing keys in {} ({}); pass --key <path> to choose",
+                dir.display(),
+                ids.join(", ")
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -968,6 +1632,56 @@ signed_fields = []
         // A line with no ts is its own key (no panic).
         assert_eq!(novel_key("{}"), "{}");
         assert_eq!(extract_ts("{}"), None);
+    }
+
+    #[test]
+    fn policy_name_derives_from_the_path_shape() {
+        // policies/<name>/policy.toml and policies/<name>/<name>.settled.toml -> <name>.
+        assert_eq!(
+            policy_name_from_path(Path::new("/c/policies/ai-coding/policy.toml")),
+            "ai-coding"
+        );
+        assert_eq!(
+            policy_name_from_path(Path::new("/c/policies/ai-coding/ai-coding.settled.toml")),
+            "ai-coding"
+        );
+        // A loose file falls back to its stem, minus a trailing `.settled`.
+        assert_eq!(
+            policy_name_from_path(Path::new("/tmp/demo.settled.toml")),
+            "demo"
+        );
+        assert_eq!(policy_name_from_path(Path::new("/tmp/demo.toml")), "demo");
+    }
+
+    #[test]
+    fn policy_names_reject_traversal_and_separators() {
+        assert!(is_valid_policy_name("ai-coding"));
+        assert!(is_valid_policy_name("my_policy.v2"));
+        assert!(!is_valid_policy_name(""));
+        assert!(!is_valid_policy_name(".."));
+        assert!(!is_valid_policy_name("a/b"));
+        assert!(!is_valid_policy_name("../escape"));
+        assert!(!is_valid_policy_name("has space"));
+    }
+
+    #[test]
+    fn resolve_policy_uses_a_literal_path_verbatim() {
+        // An existing file is used as-is and bypasses name resolution.
+        let dir = std::env::temp_dir().join(format!("kennel-resolve-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("loose.settled.toml");
+        std::fs::write(&file, b"x").expect("write");
+        let (path, name) = resolve_policy(file.to_str().expect("utf8"), true).expect("resolve");
+        assert_eq!(path, file);
+        assert_eq!(name, "loose");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_policy_rejects_an_unknown_name() {
+        // A name that resolves nowhere (and is not a path) is an error, not a panic.
+        let err = resolve_policy("definitely-no-such-policy-xyz", true).expect_err("must fail");
+        assert!(err.contains("no policy named"), "got {err}");
     }
 
     #[test]

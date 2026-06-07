@@ -10,7 +10,7 @@ A kennel's relationship to the network is one of:
 |---|---|---|
 | `none` | No `connect()`, no `bind()` to inet families, no inet socket creation at all | Untrusted post-install scripts, untrusted-code inspection |
 | `constrained` | Specific allowlist of destinations, via per-kennel proxy | AI agents, package installs from known registries |
-| `open` | Public internet via proxy; specific denylist (cloud metadata, RFC1918, host loopback) | Build-from-source kennels that genuinely need open egress |
+| `open` | Public internet via proxy; the invariant denylist only (cloud metadata + link-local) | Build-from-source kennels that genuinely need open egress |
 
 The default in defensible templates is `constrained`. `open` is documented as weaker and used only where the workflow truly requires it. `none` is the strongest and appropriate for several common cases (npm post-install, repo inspection).
 
@@ -105,17 +105,25 @@ protocol = "tcp"
 cidr = "10.0.0.0/24"        # raw CIDR (rare; internal network exceptions)
 ports = [443]
 
-# Categorical denies. Evaluated before allow.
-[[net.deny]]
+# Invariant denies. Mandatory and non-removable (a leaf cannot delete them),
+# evaluated before allow and enforced even in `open` mode. Deliberately NARROW:
+# cloud metadata (the SSRF crown jewel) and link-local only.
+[[net.deny.invariant]]
 cidr = "169.254.169.254/32"     # IPv4 cloud metadata
-[[net.deny]]
+[[net.deny.invariant]]
 cidr = "fd00:ec2::254/128"      # AWS IMDSv6
-[[net.deny]]
+[[net.deny.invariant]]
 cidr = "fe80::/10"              # IPv6 link-local
+
+# Optional policy denies. A policy MAY subtract address space it knows it never
+# needs; these are NOT mandatory. RFC1918 / CGNAT / ULA are intentionally NOT
+# invariant denies — making private space permanently unreachable is self-defeating
+# (a kennel routinely needs a local dev server, a LAN database, an internal
+# registry). In `constrained` mode nothing private is reachable anyway unless a
+# `[[net.allow]]` names it; in `open` mode the operator has opted into arbitrary
+# egress. Either way it is the policy author's call, not an immovable floor.
 [[net.deny]]
-cidr = "fc00::/7"               # other ULAs (kennel's own /64 is allowed by allow)
-[[net.deny]]
-cidr = "10.0.0.0/8"
+cidr = "10.0.0.0/8"             # example: this policy chooses to deny RFC1918
 [[net.deny]]
 cidr = "172.16.0.0/12"
 [[net.deny]]
@@ -169,7 +177,7 @@ The kennel does not run DNS at all. Clients use `socks5h://` which defers resolu
 
 **Name resolution happens in the proxy.** On a request to `github.com`, the proxy resolves the name via the OS resolver and dials the resulting address. There is no hand-rolled resolver and no configurable upstream: the proxy delegates resolution to the OS and makes its security decision on the *answer*.
 
-**Answer-vetting is the security property.** The name must clear the allowlist (`net.allow`), and every address the OS resolver returns is then re-checked against the deny rules and the special-use refusals (cloud metadata, RFC1918, link-local, host loopback) before the proxy dials it. A poisoned or rebinding answer that resolves an allowlisted name to a denied address is refused at dial time — the kennel never holds an address, only a name, and the proxy resolves and vets under policy on every request.
+**Answer-vetting is the security property.** The name must clear the allowlist (`net.allow`), and every address the OS resolver returns is then re-checked against the policy's deny rules and the invariant refusals (cloud metadata, link-local) before the proxy dials it. A poisoned or rebinding answer that resolves an allowlisted name to a denied address is refused at dial time — the kennel never holds an address, only a name, and the proxy resolves and vets under policy on every request. (A policy that also denies RFC1918 — its choice, not a mandatory floor — gets the same rebinding protection for those ranges.)
 
 **The allowlist is by name, not IP.** The user writes `github.com`; the proxy enforces against whatever the name resolves to, then vets each resolved address against the denies. This is the right level of abstraction — IPs change, names are stable — and the answer-vetting means a malicious resolver answer cannot smuggle the kennel onto a denied address.
 
@@ -213,6 +221,8 @@ For users unwilling to grant `CAP_NET_ADMIN` to any helper: IPv4 still works ful
 - Same-uid processes outside the kennel can reach it. This is the limitation worth being honest about: IP-level isolation is between *kennels*, not between *processes within a uid*.
 
 The cleaner story for same-uid isolation: cgroup-aware connect-side policy. A connection from outside the kennel to `127.42.7.1:3000` fires a cgroup BPF hook on the *connecting* side; Project Kennel's policy decides "the default context may always reach kennels' loopback" (typical), or "only the kennel that spawned this one may reach it" (stricter), or "no other kennel may reach it" (strictest, breaks browser-tab-to-dev-server workflows).
+
+**Network-state visibility (a recon residual).** Because the kennel shares the host *network namespace* — the whole egress model above lives on the host stack: per-kennel addresses on the host `lo`, the cgroup BPF on the host connect path, the proxy reachable on the host loopback — the workload can also *read* host network state: interfaces, routes, the listening-socket table, and the LAN neighbour (ARP) table, via both `/proc/net/*` and `AF_NETLINK`. This is reconnaissance only — egress is still gated, so the workload cannot act on what it sees from inside — but it is a genuine information-disclosure surface (T1.6). It is not closable by masking `/proc/net` alone (netlink is an independent vector); the complete fix is a per-kennel **network namespace**, which would also let the network-inspection tools report the kennel's own stack instead of the host's. That re-architects the egress/loopback model (the proxy would need a veth or passed-socket bridge to stay reachable) and is deferred — tracked in `08-as-built-notes.md` §8.1.
 
 ## 7.3.7 Bind semantics
 
@@ -296,6 +306,6 @@ For each invariant, a regression test in `tests/net/`:
 15. Context attempts `AF_NETLINK` socket creation; expect EACCES.
 16. Context exceeds `bytes_per_second` rate limit; expect proxy throttles.
 17. Context attempts to bind privileged port (`80`); expect EACCES (min_port).
-18. DNS rebinding test: an allowlisted name resolves to a denied address (e.g. RFC1918 or cloud metadata); expect the proxy refuses at dial time (answer-vetting).
+18. DNS rebinding test: an allowlisted name resolves to a denied address (the cloud-metadata invariant, or an RFC1918 range the policy chose to deny); expect the proxy refuses at dial time (answer-vetting).
 
 The full network test corpus is approximately 50 cases. The list above is the core invariants.

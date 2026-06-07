@@ -3,81 +3,100 @@
 # Inherits: base-confined@v1
 # Threat catalogue: THREATS.md v0.3
 #
-# A long-lived containerised service for local development — a Postgres, a Redis,
-# a message broker. The goals: the service is reachable from the developer's
-# workstation but NOT the LAN, its data and credentials are confined to a chosen
-# path, and the container cannot be run with the escape-hatch flags
-# (--privileged / --pid=host / --network=host).
+# A long-lived local service for development — a Postgres, a Redis, a message
+# broker, an internal API. There is NO container runtime here: the kennel itself
+# IS the container. The user/mount/PID/IPC namespaces, the constructed view +
+# Landlock, the cgroup-BPF egress filter, and the loopback bind-rewrite give the
+# service the same isolation a container would — enforced by Project Kennel
+# directly, with no Docker/Podman daemon in the trust path.
 #
-# *** DESIGN-LEVEL — NOT YET ENFORCED. *** The [container] section below has no
-# runtime behind it: Project Kennel has no container-runtime integration today
-# (templates/README.md, docs/architecture/08-as-built-notes.md §8.2). The fs/net/cap
-# parts inherited from base-confined are enforced; the container orchestration is
-# the design contract for when that integration lands. This template is included
-# for completeness of the executive-summary set and to pin the intended shape.
+# The shape this template pins:
+#   * reachable from the developer's workstation, NOT the LAN. base-confined
+#     rewrites a wildcard bind (0.0.0.0 / ::) to the kennel's OWN private
+#     loopback address (computed from <tag>/<ctx>), so the service answers within
+#     the kennel's address space but is invisible to the LAN (T3.3). Binding the
+#     host's 0.0.0.0 is refused; privileged ports are refused.
+#   * data confined to ONE path. The leaf grants a single writable, persisted
+#     data directory; everything else in the view is ephemeral or absent (T1.1).
+#   * deny-by-default execution. exec.allow is empty here (inherited); the leaf
+#     adds exactly the server binary it runs, and the compiler resolves that
+#     binary's library closure (`[lib]`, inherited). This template is a posture,
+#     not a runnable kennel on its own — the service binary is the user's choice.
 #
-# Defends: T3.3 (LAN exposure of a dev service), T3.4, T1.1 (partial). Residuals:
-# T3.2 (container escape via a runtime/kernel CVE — out of any userspace
-# framework's reach); T3.5 (root-with-host-UID — mitigated only if Docker runs
-# with userns-remap).
+# Defends: T3.3 (LAN exposure of a dev service — the loopback bind-rewrite),
+# T1.1 (the service sees only its data path + the read baseline). Residuals:
+# secrets (DB passwords, …) come from the user's secret store at run time, never
+# from the policy file; a kernel/Landlock CVE is beyond any userspace framework.
+#
+# See docs/design/05-templates.md and templates/README.md.
 # ============================================================================
 
-template_base = "base-confined@v1"
 template_name = "containerised-service"
 template_version = "1"
+template_base = "base-confined@v1"
 
 
-# --- The container (DESIGN-LEVEL; see header) -------------------------------
-[container]
-# image + digest are pinned; the leaf supplies the concrete digest.
-image = "docker.io/library/postgres:17"
-# image_digest = "sha256:..."   # pinned by the leaf policy
-# Escape-hatch flags are forbidden — these are template invariants the leaf
-# cannot remove.
-allow_privileged = false        # invariant: never --privileged
-allow_pid_host = false          # invariant: never --pid=host
-allow_network_host = false      # invariant: never --network=host
-run_as_nonroot = true           # use the image's non-root user where supported
-
-# Published ports bind to the kennel's OWN loopback address (computed from
-# <tag>/<ctx>), so the service is reachable from the developer's default context
-# but invisible to the LAN (T3.3). 0.0.0.0 publishing is refused.
-[[container.published_ports]]
-container_port = 5432
-host_offset = 1                 # host bind = the kennel's loopback :5432 (computed)
-host_port = 5432
-reason = "Postgres reachable from the workstation, not the LAN"
-threats.mitigated = ["T3.3"]
-
-# Data volume: the only host path the container can touch. The leaf supplies the
-# real host directory.
-[[container.volumes]]
-host = "<home>/data/<kennel>"
-container = "/var/lib/postgresql/data"
-reason = "service data persistence"
+# --- Execution --------------------------------------------------------------
+# Deny-by-default is inherited (base-confined's exec.allow is empty). Add the
+# service binary in your leaf — that is the one thing this template cannot know:
+#
+#   template_base = "containerised-service@v1"
+#   [exec]
+#   allow = ["/usr/lib/postgresql/17/bin/postgres"]
+#
+# The compiler then grants EXECUTE on exactly the libraries that binary links.
 
 
-# --- Filesystem: the data directory is writable -----------------------------
-# The leaf grants the concrete data path; the template documents the shape.
+# --- Filesystem -------------------------------------------------------------
+# Re-list base-confined's read baseline (a template's fs.read replaces, not adds)
+# so a dynamically-linked service starts. The leaf adds any read-only config or
+# socket directory its server needs.
 [fs]
+read = [
+    "/usr/**", "/lib/**", "/lib64/**",
+    "/etc/ssl/**", "/etc/pki/**",
+    "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    "/etc/alternatives/**",   # update-alternatives symlink farm (else awk/vi/… dangle)
+    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/version",
+    "/sys/devices/system/cpu/**",
+]
+
+# The service's data directory: the one persistent, writable host path. A ~/ write
+# grant binds the real host inode read-write beneath the constructed $HOME, so the
+# data survives across runs (a DB that lost its data on restart would be useless).
+# <kennel> expands to this kennel's name, so two services never share a directory.
 write = [
-    "<home>/data/<kennel>/**",
+    "~/data/<kennel>/**",
 ]
 
 
-# --- Network: constrained (image pull + the service's own egress) -----------
-# Inherits base-confined's proxy-only egress + invariant denies. The leaf adds
-# the registry the image is pulled from and any egress the service legitimately
-# needs (most dev services need none).
+# --- Network ----------------------------------------------------------------
+# Constrained is inherited from base-confined: the cgroup BPF denies direct egress
+# (fail-closed) and a wildcard bind is rewritten to the kennel's loopback. Most dev
+# services need NO outbound egress; if yours pulls from a registry or calls a
+# dependency, add a `[[net.allow]]` for exactly that destination in your leaf.
 [net]
 mode = "constrained"
 
 
-# --- Lifecycle: long-lived ---------------------------------------------------
+# --- Resource limits --------------------------------------------------------
+# A long-lived service typically wants more open files than the login default and a
+# bound on processes so a runaway worker pool cannot exhaust the host. setrlimit(2)
+# caps applied in the seal; raise/lower per service in your leaf.
+[ulimits]
+nofile = "16384"
+nproc = "512"
+
+
+# --- Lifecycle --------------------------------------------------------------
+# Long-lived: no hard stop. ttl_action = "warn" surfaces an advisory once the
+# (optional) TTL elapses without reaping the service. Set a concrete `ttl` in your
+# leaf if you want the warning; omit it for an open-ended service.
 [lifecycle]
 ttl_action = "warn"
+
 
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "QYySO1qjTleb38T+tY6TglZKTDFRZV9cjKUX1NAneAHrX+RZt1nbwze8lL/EWIJUoRR8KWW2Srmp6Y2Vm7awAA=="
+signature = "xi5Iun8dYX01LOozCIlYpR3WaUX0jjauahrUBXO5ws2gwJwyHY1vSnXU6LdkO6JoTgFIAWhc+YbsByXw0kfwBw=="

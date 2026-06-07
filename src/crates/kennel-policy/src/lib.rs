@@ -35,6 +35,7 @@ pub mod identity;
 pub mod invariant;
 pub mod keys;
 pub mod leaf;
+pub mod libresolve;
 pub mod lock;
 pub mod resolve;
 pub mod settled;
@@ -94,6 +95,20 @@ pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, Poli
     verify_signature(&canonical, &doc.signature, keys)?;
     validate(&doc.policy).map_err(PolicyError::InvariantViolations)?;
     Ok(doc.policy)
+}
+
+/// Resolve and fill the settled policy's shared-library `EXECUTE` grant set.
+///
+/// Fills [`settled::ExecPolicy::libraries`] from `exec.allow` + the `[lib]` filter,
+/// reading the binaries from disk ([`libresolve`]). Call this at compile time — after
+/// [`compile()`] / [`compile_leaf`] and **before** signing — so the resolved closure is
+/// part of the signed artefact and the runtime never re-resolves. Returns the
+/// resolver's advisories (denied/unresolvable libraries). Idempotent.
+pub fn resolve_settled_libraries(policy: &mut SettledPolicy) -> Vec<String> {
+    let exec = &policy.effective_policy.exec;
+    let resolution = libresolve::resolve_libraries(&exec.allow, &exec.lib_allow, &exec.lib_deny);
+    policy.effective_policy.exec.libraries = resolution.libraries;
+    resolution.warnings
 }
 
 /// Sign a settled policy, producing the on-disk document. Used by the compiler
@@ -187,6 +202,9 @@ mod tests {
                     deny: Vec::new(),
                     path: vec!["/usr/bin".to_owned()],
                     shell: settled::default_shell(),
+                    lib_allow: Vec::new(),
+                    lib_deny: Vec::new(),
+                    libraries: Vec::new(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,

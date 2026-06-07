@@ -39,6 +39,22 @@ narration is kept here; the chapter named is the source of truth.
 - **`kennel_meta` read-only sealing + readback verification** (`02-5-bpf-abi.md`) — the map
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
+- **Composable fragment catalogue** (`05-templates.md` §5.10) — the `include` mechanism is
+  built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
+  `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
+  tests, not mechanism.
+- **Per-kennel network namespace** (`07-3-network.md` §7.3.6, THREATS T1.6) — a kennel
+  currently shares the host network namespace (egress is gated by the cgroup BPF + proxy,
+  not net-ns isolation), so the workload can *read* host network state (interfaces, routes,
+  listening sockets, the LAN ARP table) via `/proc/net/*` and `AF_NETLINK`. Recon-only —
+  egress stays blocked — but a genuine info-disclosure residual. Closing it means unsharing
+  `CLONE_NEWNET` and keeping the proxy reachable across the boundary (veth or a passed
+  socket), which re-architects the §7.3 loopback/egress model. Deferred; accepted residual
+  for now. Would also make the network-inspection tools report the kennel's own stack.
+- **`[container]` runtime** (`05-templates.md` §5.7) — `[container]` is design-level *language*
+  only (parse + compile-warn, same family as `[dbus]`/`[x11]`); there is no container-runtime
+  integration. No shipped template uses it: `containerised-service` runs the service directly
+  under the kennel (the kennel *is* the container).
 
 ### Built — now described in the chapters
 
@@ -68,8 +84,20 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   `02-2-config-schema.md`, `01-process-model.md`, design `07-2-filesystem.md` §7.2.5/§7.2.12.
 - **TTL runtime reaper** (`exit`/`warn`/`renew`): `05-state-and-supervision.md`, design
   `09-policy-lifecycle.md` §9.7.
-- **`exec.deny` composition** — exact-match subtraction + unenforceable-deny warnings
-  (printed at compile/validate, re-derived by kenneld at load): design `07-1-exec.md` §7.1.4.
+- **Deny-by-default execution + the compile-time library closure** — an empty `exec.allow`
+  denies all execution; `**` is the warned `permissive-exec` opt-out; there is no `exec.deny`
+  (moot under deny-by-default). The compiler resolves each allowlisted binary's `PT_INTERP` +
+  transitive `DT_NEEDED` closure (via the vendored `object` crate), filters it through `[lib]`
+  allow/deny, settles it into `exec.libraries`, and the seal grants `FS_EXECUTE` on exactly
+  those files: design `07-1-exec.md` §7.1.4/§7.1.7.
+- **Narrowed net invariant** — the non-removable deny set is cloud-metadata + link-local only;
+  RFC1918/CGNAT/ULA are reachable (by `[[net.allow]]` in `constrained`, freely in `open`). A
+  policy may still author its own RFC1918 `[[net.deny]]`: design `07-3-network.md` §7.3.
+- **Interactive controlling terminal** — the seal allocates the workload's pty inside the
+  kennel's own post-`pivot_root` devpts (so `ttyname`/`tty` resolve and the operator's tty is
+  never exposed), `setsid` + `TIOCSCTTY` + `dup2`s it onto stdio, and hands the master back to
+  the CLI over a socketpair for proxying; non-interactive runs pass stdio straight through:
+  design `07-7-other.md` §7.7.5a.
 - **Bind-port policy** — `min_port` floor + `allowed_ports`, enforced in `bind4`/`bind6`:
   `02-5-bpf-abi.md`, design `07-3-network.md` §7.3.7.
 - **ssh-agent footgun** — warned (at validate/compile/runtime), not forbidden: design

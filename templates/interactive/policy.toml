@@ -1,0 +1,100 @@
+# ============================================================================
+# Template: interactive  (v1)  — a credible human-driven shell.
+#
+# A confined but genuinely usable workstation shell: bash + the standard coreutils,
+# text tools, editors, archives, process inspection, and the common network tools,
+# with OPEN egress (a human is at the keyboard; the cloud-metadata invariant still
+# applies). Execution is deny-by-default — the toolset below is exactly what runs;
+# the compiler resolves each tool's library closure (`[lib]`, inherited).
+#
+# $HOME and /tmp are writable (ephemeral); grant a project dir + persistence in your
+# own leaf. For an offline shell, derive base-confined instead (or set net.mode).
+#
+#   # run it directly:
+#   kennel run interactive -- /bin/bash
+#   # or derive it and add your project:
+#   #   template_base = "interactive@v1"
+#   #   [[fs.write.add]] path = "~/work"
+# ============================================================================
+
+template_name = "interactive"
+template_version = "1"
+template_base = "base-confined@v1"
+
+# Open egress: a human-driven shell needs the network (curl, git clone, ssh, …).
+# The cloud-metadata invariant deny still applies even in open mode.
+[net]
+mode = "open"
+
+# Re-list base-confined's read baseline (a template's fs.read replaces, not adds) and
+# widen /proc to the whole namespaced procfs so `ps`/`top`/`free` see this kennel's
+# own processes (the PID namespace already hides everything else).
+[fs]
+read = [
+    "/usr/**", "/lib/**", "/lib64/**",
+    "/etc/ssl/**", "/etc/pki/**",
+    "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    "/etc/alternatives/**",   # awk→gawk, vi, editor, pager … symlink farm (else dangles)
+    "/proc/**",
+    "/sys/devices/system/cpu/**",
+]
+
+[exec]
+shell = "/bin/bash"
+allow = [
+    # Shells
+    "/bin/sh", "/bin/bash",
+    # Coreutils + everyday file management
+    "/usr/bin/ls", "/usr/bin/cat", "/usr/bin/cp", "/usr/bin/mv", "/usr/bin/rm",
+    "/usr/bin/mkdir", "/usr/bin/rmdir", "/usr/bin/ln", "/usr/bin/touch",
+    "/usr/bin/chmod", "/usr/bin/readlink", "/usr/bin/realpath", "/usr/bin/basename",
+    "/usr/bin/dirname", "/usr/bin/stat", "/usr/bin/du", "/usr/bin/df",
+    "/usr/bin/mktemp", "/usr/bin/sync", "/usr/bin/env", "/usr/bin/printenv",
+    "/usr/bin/date", "/usr/bin/sleep", "/usr/bin/seq", "/usr/bin/tee",
+    "/usr/bin/id", "/usr/bin/whoami", "/usr/bin/groups", "/usr/bin/uname",
+    "/usr/bin/nproc", "/usr/bin/hostname", "/usr/bin/tty", "/usr/bin/clear",
+    # Text + search
+    "/usr/bin/grep", "/usr/bin/egrep", "/usr/bin/fgrep", "/usr/bin/sed",
+    "/usr/bin/awk", "/usr/bin/less", "/usr/bin/more", "/usr/bin/head",
+    "/usr/bin/tail", "/usr/bin/wc", "/usr/bin/sort", "/usr/bin/uniq",
+    "/usr/bin/cut", "/usr/bin/tr", "/usr/bin/nl", "/usr/bin/tac", "/usr/bin/rev",
+    "/usr/bin/column", "/usr/bin/fmt", "/usr/bin/find", "/usr/bin/xargs",
+    "/usr/bin/diff", "/usr/bin/cmp", "/usr/bin/file", "/usr/bin/strings",
+    "/usr/bin/xxd", "/usr/bin/hexdump", "/usr/bin/od",
+    # Editors
+    "/usr/bin/nano", "/usr/bin/vim", "/usr/bin/vim.basic", "/usr/bin/vi",
+    # Archives / compression
+    "/usr/bin/tar", "/usr/bin/gzip", "/usr/bin/gunzip", "/usr/bin/zcat",
+    "/usr/bin/bzip2", "/usr/bin/xz", "/usr/bin/zstd", "/usr/bin/zip",
+    "/usr/bin/unzip",
+    # Process / system inspection
+    "/usr/bin/ps", "/usr/bin/top", "/usr/bin/free", "/usr/bin/uptime",
+    "/usr/bin/kill", "/usr/bin/pkill", "/usr/bin/pgrep", "/usr/bin/pidof",
+    "/usr/bin/watch", "/usr/bin/timeout",
+    # Network + source control (open egress)
+    "/usr/bin/curl", "/usr/bin/wget", "/usr/bin/ssh", "/usr/bin/scp",
+    "/usr/bin/git", "/usr/lib/git-core/**",
+    # Network inspection. NOTE: a kennel shares the host network namespace
+    # (egress is gated by the cgroup BPF + proxy, not net-ns isolation, §7.3), so
+    # these report the HOST's interfaces/routes/sockets/neighbours — useful for a
+    # human at their own workstation, but a deliberate host-network view. iproute2
+    # (ip/ss) lives in /usr/bin; net-tools (ifconfig/route/arp) in /usr/sbin.
+    "/usr/bin/ip", "/usr/bin/ss", "/usr/bin/netstat",
+    "/usr/sbin/ifconfig", "/usr/sbin/route", "/usr/sbin/arp",
+    # A scripting interpreter for quick work
+    "/usr/bin/python3",
+]
+# net-tools (ifconfig/route/arp) live in /usr/sbin; put it on PATH so they resolve
+# by name. Landlock EXECUTE is independent of PATH (the absolute allow entries above
+# are what grant execution); this is purely so `ifconfig` is found.
+path = ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
+
+[lifecycle]
+ttl = "12h"
+ttl_action = "warn"
+
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "BPO+kNoDjuouqTCyKIg5BIMAXWR5Gow/ur0wkxwy5JyoEWXFRnG3z97n1nNZVHC3rr8Y/i4x3k3WkwpQvHYoDg=="

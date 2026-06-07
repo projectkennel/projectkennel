@@ -296,6 +296,18 @@ where
     spawn_inner(plan, command, Some(Box::new(map_gids)))
 }
 
+/// Tag a seal-step failure with *which* syscall failed before std collapses the
+/// error to a bare errno across its `pre_exec` pipe (an `os error 13` with no name
+/// is useless to diagnose). The forked child's stderr is the workload's stderr —
+/// the operator's terminal on a foreground `kennel run` — so this is where "which
+/// step bombed" actually reaches the user. Logs only on error; success is silent.
+fn step<T>(label: &str, r: io::Result<T>) -> io::Result<T> {
+    if let Err(e) = &r {
+        eprintln!("kennel: spawn seal step `{label}` failed: {e}");
+    }
+    r
+}
+
 /// The shared body of [`spawn`] and [`spawn_with_gid_map`]. With `mapper` `Some`
 /// and a userns plan, the spawn child defers its `gid_map` and the handshake runs;
 /// otherwise the child writes its own single-line `gid_map` and `mapper` is unused.
@@ -378,6 +390,7 @@ fn spawn_inner(
     let landlock_net = plan.landlock_net.clone();
     let supplementary_groups = plan.supplementary_groups.clone();
     let ulimits = plan.ulimits.clone();
+    let interactive_return_fd = plan.interactive_return_fd;
     let does_mount = seal_ns.contains(Namespaces::MOUNT);
 
     // The **inner seal** — the irreversible confinement that must run in the process
@@ -390,24 +403,56 @@ fn spawn_inner(
     //
     // [`fork_into_pid1`]: kennel_syscall::spawn::fork_into_pid1
     let mut inner_seal = move || -> io::Result<()> {
+        // Controlling terminal for job control on the NON-view fallback (interactive
+        // runs), done FIRST — before Landlock could gate the `ioctl`. If our stdin is a
+        // tty become its session leader so the workload's shell can manage
+        // foreground/background process groups (`^Z`/`fg`/`bg`). The view path takes the
+        // richer route below (its own devpts, so `ttyname` resolves), so it is skipped
+        // here. Best-effort: a non-tty (piped) stdin is a no-op, and `TIOCSCTTY` never
+        // steals a tty already owned by another session.
+        if interactive_return_fd.is_none() {
+            kennel_syscall::pty::adopt_stdin_as_controlling_tty();
+        }
         if does_mount {
             // Detach mount propagation from the host first (`MS_PRIVATE` — stronger
             // than the `MS_SLAVE` of §7.2.10: no propagation in either direction).
-            kennel_syscall::mount::make_root_private()?;
+            step(
+                "make-root-private",
+                kennel_syscall::mount::make_root_private(),
+            )?;
             if let (Some(v), Some(root)) = (&view, &new_root) {
                 // The constructed view: build a fresh root, bind the granted paths
                 // into it, construct the synthetic `/etc` + `/dev` + `/proc` +
                 // `/tmp`, then `pivot_root` so non-granted path *names* are absent.
                 // The fresh `/proc` mount is why this runs as PID 1 on the userns path.
-                build_view_and_pivot(v, root, &file_binds)?;
+                step(
+                    "build-view-and-pivot",
+                    build_view_and_pivot(v, root, &file_binds),
+                )?;
             } else {
                 // Fallback (no view/staging): in-place fresh `/proc` + private
                 // `/tmp` + the single-file shadow binds. Landlock still denies
                 // access to non-granted paths; only the name-hiding is absent.
-                kennel_syscall::mount::mount_special("proc", Path::new("/proc"))?;
-                kennel_syscall::mount::mount_special("tmpfs", Path::new("/tmp"))?;
-                apply_file_binds(&file_binds)?;
+                step(
+                    "mount-proc",
+                    kennel_syscall::mount::mount_special("proc", Path::new("/proc")),
+                )?;
+                step(
+                    "mount-tmp",
+                    kennel_syscall::mount::mount_special("tmpfs", Path::new("/tmp")),
+                )?;
+                step("apply-file-binds", apply_file_binds(&file_binds))?;
             }
+        }
+        // Interactive controlling terminal (§7.7.2), AFTER the view is built so
+        // `/dev/ptmx` resolves to the kennel's own freshly-mounted devpts: allocate a
+        // pty there, make its slave this process's controlling tty + stdio, and hand
+        // the master back to the CLI to proxy. Because the slave is a node in the
+        // view's devpts, `ttyname(3)` (the `tty` command) resolves it — a host-side pty
+        // would not. Done before Landlock/seccomp clamp down (the `ioctl`s would be
+        // gated). The non-interactive path leaves stdio as the controller passed it.
+        if let Some(fd) = interactive_return_fd {
+            step("setup-view-pty", kennel_syscall::pty::setup_view_pty(fd))?;
         }
         // Drop the inherited host supplementary groups (§7.2). Two regimes:
         //
@@ -424,13 +469,19 @@ fn spawn_inner(
         //   limited to the single effective gid); that is handled out of band.
         if !use_userns {
             if let Some(groups) = &supplementary_groups {
-                kennel_syscall::unistd::set_supplementary_groups(groups)?;
+                step(
+                    "set-supplementary-groups",
+                    kennel_syscall::unistd::set_supplementary_groups(groups),
+                )?;
             }
         }
         // no_new_privs next: seccomp requires it (Landlock sets it again, idempotently).
-        kennel_syscall::process::set_no_new_privs()?;
+        step(
+            "set-no-new-privs",
+            kennel_syscall::process::set_no_new_privs(),
+        )?;
         if let Some(f) = filter.as_ref() {
-            f.install()?;
+            step("install-seccomp", f.install())?;
         }
         // The ruleset: the parent-built one for the fallback path, or built here
         // (post-`pivot_root`, so the fds reference the constructed view's inodes)
@@ -438,14 +489,20 @@ fn spawn_inner(
         // (vacuous — the path the workload would reach does not exist).
         let rs = match parent_ruleset.take() {
             Some(rs) => rs,
-            None => build_ruleset(&landlock_fs, &landlock_net, true)?,
+            None => step(
+                "build-landlock",
+                build_ruleset(&landlock_fs, &landlock_net, true),
+            )?,
         };
-        rs.restrict_current_process()?;
+        step("apply-landlock", rs.restrict_current_process())?;
         // Resource limits last (§7.2): after the Landlock ruleset is built, so
         // lowering `RLIMIT_NOFILE` cannot starve the per-path rule opens, and just
         // before `execve` so the workload inherits exactly the policy's limits.
         for (resource, soft, hard) in &ulimits {
-            kennel_syscall::process::set_rlimit(*resource, *soft, *hard)?;
+            step(
+                "set-rlimit",
+                kennel_syscall::process::set_rlimit(*resource, *soft, *hard),
+            )?;
         }
         Ok(())
     };
@@ -460,7 +517,7 @@ fn spawn_inner(
         // credentials, in the host mount namespace (cgroupfs visible), before the
         // user namespace or Landlock could deny it.
         if let Some(cgroup) = &cgroup_join {
-            join_cgroup(cgroup)?;
+            step("join-cgroup", join_cgroup(cgroup))?;
         }
         if use_userns {
             // The unprivileged foundation: establish an identity-mapped user
@@ -474,7 +531,10 @@ fn spawn_inner(
                 // until it has written the multi-gid map (via the privhelper, which
                 // holds `CAP_SETGID` in the init userns) and acked proceed. An abort
                 // (or a closed pipe) fails the seal closed — the workload never execs.
-                kennel_syscall::namespace::establish_userns_defer_gid_map(uid)?;
+                step(
+                    "establish-userns",
+                    kennel_syscall::namespace::establish_userns_defer_gid_map(uid),
+                )?;
                 kennel_syscall::handshake::send_ready(rw.as_fd(), std::process::id())?;
                 match kennel_syscall::handshake::recv_ack(pr.as_fd())? {
                     Some(kennel_syscall::handshake::ACK_PROCEED) => {}
@@ -488,9 +548,12 @@ fn spawn_inner(
             } else {
                 // Default path: the single-line identity `gid_map` drops every
                 // inherited supplementary group to the overflow gid, for free.
-                kennel_syscall::namespace::establish_identity_userns(
-                    uid,
-                    kennel_syscall::unistd::real_gid(),
+                step(
+                    "establish-userns",
+                    kennel_syscall::namespace::establish_identity_userns(
+                        uid,
+                        kennel_syscall::unistd::real_gid(),
+                    ),
                 )?;
             }
             // Unshare mount/IPC/PID here; the PID unshare only takes effect for the
@@ -498,14 +561,20 @@ fn spawn_inner(
             // execs. Returns Ok in the grandchild (std then execs the workload);
             // never returns in this process, which reaps the grandchild and exits.
             if !seal_ns.is_empty() {
-                kennel_syscall::namespace::unshare(seal_ns)?;
+                step(
+                    "unshare-namespaces",
+                    kennel_syscall::namespace::unshare(seal_ns),
+                )?;
             }
             kennel_syscall::spawn::fork_into_pid1(&mut inner_seal)
         } else {
             // Privileged path: PID was unshared in the parent, so the child
             // std forked is already in the new PID namespace. No second fork.
             if !seal_ns.is_empty() {
-                kennel_syscall::namespace::unshare(seal_ns)?;
+                step(
+                    "unshare-namespaces",
+                    kennel_syscall::namespace::unshare(seal_ns),
+                )?;
             }
             inner_seal()
         }
@@ -686,14 +755,42 @@ fn build_view_and_pivot(
 
     // 2. Bind the granted system + home paths in. Recursive, so submounts come
     //    along; read-only unless the grant is writable (those resolve to the real
-    //    host inode, the persistence guarantee).
+    //    host inode, the persistence guarantee). A bind whose **source does not
+    //    exist** is skipped (skip-missing): a grant for an absent path is vacuous (the
+    //    Landlock rule is dropped too), and an optional socket shim — e.g. a per-kennel
+    //    agent not yet launched — must not abort the whole spawn.
     for b in &view.binds {
+        if !b.source.exists() {
+            continue;
+        }
         let dest = under(&b.target);
         create_bind_target(&b.source, &dest)?;
         mount::bind(&b.source, &dest, true)?;
         if !b.writable {
             mount::remount_readonly(&dest)?;
         }
+    }
+
+    // 2b. Merged-usr compat symlinks (`/bin -> usr/bin`, `/lib64 -> usr/lib`, …).
+    //    On modern systems these top-level dirs are symlinks into `/usr`; the view's
+    //    bound content lives under `/usr`, so without replicating them `/bin/sh`,
+    //    `#!/bin/sh` shebangs, and the `/lib64/ld-linux…` loader all `ENOENT`.
+    //    Mirror exactly the host's links (only where the host has one and the view
+    //    does not already provide the path), so both path resolution and the Landlock
+    //    rules on `/bin/…` paths land on the bound `/usr` inodes.
+    for link in ["bin", "sbin", "lib", "lib64", "lib32", "libx32"] {
+        let host = Path::new("/").join(link);
+        let Ok(target) = std::fs::read_link(&host) else {
+            continue; // not a symlink on this host (non-merged-usr) — nothing to mirror
+        };
+        let dest = under(&host);
+        if dest.symlink_metadata().is_ok() {
+            continue; // already present (e.g. bound in by a grant)
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::os::unix::fs::symlink(&target, &dest)?;
     }
 
     // 3. The synthetic /etc: a fresh dir in the root tmpfs populated with the
@@ -720,8 +817,22 @@ fn build_view_and_pivot(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::File::create(&dest)?;
-        mount::bind(node, &dest, false)?;
+        // A directory dev grant (e.g. `/dev/pts`) is a pty filesystem, not a node:
+        // mount a fresh, isolated `devpts` and symlink `/dev/ptmx -> pts/ptmx` so the
+        // workload can allocate ptys (the symlink resolves into the Landlock-granted
+        // `/dev/pts` subtree). Every other entry is a single node bound from the host.
+        if node.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+            mount::mount_devpts(&dest)?;
+            if node == Path::new("/dev/pts") {
+                let ptmx = under(Path::new("/dev/ptmx"));
+                let _ = std::fs::remove_file(&ptmx);
+                std::os::unix::fs::symlink("pts/ptmx", &ptmx)?;
+            }
+        } else {
+            std::fs::File::create(&dest)?;
+            mount::bind(node, &dest, false)?;
+        }
     }
 
     // 5. Fresh /proc (reflecting the PID namespace) and the private /tmp.
@@ -945,6 +1056,9 @@ mod tests {
                     deny: Vec::new(),
                     path: Vec::new(),
                     shell: "/bin/sh".to_owned(),
+                    lib_allow: Vec::new(),
+                    lib_deny: Vec::new(),
+                    libraries: Vec::new(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,
@@ -1132,7 +1246,10 @@ mod tests {
 
     #[test]
     fn plan_translates_policy() {
-        let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+        let mut p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+        // The resolved library closure (settled at compile) is what carries EXECUTE for
+        // libraries now — not a read-grant heuristic. Seed one to exercise the grant.
+        p.effective_policy.exec.libraries = vec!["/usr/lib/x86_64-linux-gnu/libc.so.6".to_owned()];
         let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
         // Namespaces: user (the unprivileged foundation) + mount/pid/ipc, never net.
@@ -1166,15 +1283,40 @@ mod tests {
             "the allowlisted binary gets EXECUTE"
         );
         assert!(
-            plan.landlock_fs
+            plan.landlock_fs.iter().any(|(path, acc)| path
+                == &PathBuf::from("/usr/lib/x86_64-linux-gnu/libc.so.6")
+                && acc.contains(AccessFs::EXECUTE)),
+            "a resolved library (settled exec.libraries) gets EXECUTE"
+        );
+        assert!(
+            !plan
+                .landlock_fs
                 .iter()
                 .any(|(path, acc)| path == &PathBuf::from("/usr/lib")
                     && acc.contains(AccessFs::EXECUTE)),
-            "the loader's lib dir (covered by the /usr read grant) gets EXECUTE"
+            "a bare read-grant lib dir is NOT executable — only the resolved closure is"
         );
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
             == &PathBuf::from("/run/kennel/ai-coding/home")
             && acc.contains(AccessFs::WRITE_FILE)));
+        // The private /tmp is the workload's own scratch: read+write+list.
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/tmp")
+                    && acc.contains(AccessFs::WRITE_FILE)
+                    && acc.contains(AccessFs::READ_DIR)),
+            "the private /tmp is writable + listable"
+        );
+        // The view root is listable (`ls /`), READ_DIR only.
+        assert!(
+            plan.landlock_fs
+                .iter()
+                .any(|(path, acc)| path == &PathBuf::from("/")
+                    && acc.contains(AccessFs::READ_DIR)
+                    && !acc.contains(AccessFs::READ_FILE)),
+            "the view root is listable but not file-readable"
+        );
 
         // Landlock net: only the single-port (443) TCP rule; the 1024-2048 range
         // is left to BPF.
@@ -1217,11 +1359,32 @@ mod tests {
     }
 
     #[test]
-    fn empty_exec_allowlist_keeps_reads_executable() {
-        // The permissive posture (no exec.allow) is unchanged: a read path stays
-        // executable, and no separate per-binary EXECUTE rule is added.
+    fn empty_exec_allowlist_denies_all_execution() {
+        // Deny-by-default: with no exec.allow, a read path is NOT executable — nothing
+        // runs. (This is what makes a bare `base-confined` a real floor.)
         let mut p = policy_with_placeholders();
         p.effective_policy.exec.allow.clear();
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        assert!(
+            !plan.landlock_fs.iter().any(
+                |(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)
+            ),
+            "with an empty allowlist, read paths must NOT carry EXECUTE"
+        );
+    }
+
+    #[test]
+    fn permissive_exec_wildcard_restores_executable_reads() {
+        // The `**` escape hatch (the `permissive-exec` opt-in) restores the open
+        // posture: read paths carry EXECUTE again and no per-binary rule is needed.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.exec.allow = vec!["**".to_owned()];
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
             7,
@@ -1233,14 +1396,7 @@ mod tests {
             plan.landlock_fs.iter().any(
                 |(path, acc)| path == &PathBuf::from("/usr") && acc.contains(AccessFs::EXECUTE)
             ),
-            "without an exec allowlist, read paths remain executable"
-        );
-        assert!(
-            !plan
-                .landlock_fs
-                .iter()
-                .any(|(path, _)| path == &PathBuf::from("/usr/bin/python3")),
-            "no per-binary exec rule without an allowlist"
+            "`**` permissive-exec must keep read paths executable"
         );
     }
 
@@ -1260,6 +1416,49 @@ mod tests {
         )
         .expect_err("an allowlisted binary under a writable path must be rejected");
         assert!(matches!(err, SpawnError::InvalidPolicy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn glob_grants_bind_the_directory_root() {
+        // A `/**` or `/*` read/write/dev grant must bind its real directory root, not
+        // the literal glob (which has no inode → ENOENT at mount). Regression for the
+        // base-confined `/usr/**` / `/dev/pts/**` spawn failures.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.read.push("/opt/tools/**".to_owned());
+        p.effective_policy.fs.dev.allow = vec!["/dev/pts/**".to_owned()];
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        let view = plan
+            .view
+            .as_ref()
+            .expect("a policy-derived plan carries a view");
+        assert!(
+            view.binds
+                .iter()
+                .any(|b| b.source == Path::new("/opt/tools")),
+            "a `/opt/tools/**` grant binds the stripped root, got {:?}",
+            view.binds
+                .iter()
+                .map(|b| b.source.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !view
+                .binds
+                .iter()
+                .any(|b| b.source.to_string_lossy().contains('*')),
+            "no bind source may contain a glob"
+        );
+        assert!(
+            view.dev_allow.iter().any(|d| d == Path::new("/dev/pts")),
+            "a `/dev/pts/**` dev grant strips to /dev/pts, got {:?}",
+            view.dev_allow
+        );
     }
 
     #[test]
@@ -1568,6 +1767,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 
@@ -1701,6 +1901,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         // Granted file readable through $HOME; the non-granted sibling's name absent;
@@ -1812,6 +2013,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: vec![(Resource::RLIMIT_NOFILE, 64, 64)],
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -1901,6 +2103,7 @@ mod tests {
             // the group grant instead.
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -2043,6 +2246,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -2122,6 +2326,7 @@ mod root_tests {
             file_binds: vec![(src.clone(), target.clone()), (src, missing)],
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/cat");
@@ -2221,6 +2426,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         // Granted file readable through $HOME, and the non-granted sibling's name
@@ -2294,6 +2500,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 
@@ -2397,6 +2604,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/cat");

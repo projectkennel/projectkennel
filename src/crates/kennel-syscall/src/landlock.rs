@@ -397,7 +397,20 @@ impl Ruleset {
     /// Returns the OS error if `path` cannot be opened.
     pub fn allow_path(&mut self, path: &Path, access: AccessFs) -> io::Result<()> {
         let file = open_o_path(path)?;
-        self.path_rules.push((file, access & self.handled_fs));
+        let mut access = access & self.handled_fs;
+        // Landlock rejects directory-only rights (READ_DIR, MAKE_*, REMOVE_*, REFER) on
+        // a regular file with EINVAL. Mask the access to the file-applicable subset when
+        // the grant target is not a directory, so a read/write grant naming a file (e.g.
+        // `/etc/ld.so.cache`) yields a valid rule rather than a fatal EINVAL. `fstat` is
+        // permitted on the `O_PATH` fd.
+        if !file.metadata()?.is_dir() {
+            access &= AccessFs::EXECUTE
+                | AccessFs::WRITE_FILE
+                | AccessFs::READ_FILE
+                | AccessFs::TRUNCATE
+                | AccessFs::IOCTL_DEV;
+        }
+        self.path_rules.push((file, access));
         Ok(())
     }
 
@@ -447,6 +460,42 @@ impl Ruleset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_grant_drops_directory_only_rights() {
+        // Landlock rejects a path rule on a regular file that requests directory-only
+        // rights (READ_DIR, MAKE_*, REMOVE_*, REFER) with EINVAL — so `allow_path` must
+        // mask them off for a non-directory. Regression for the `/etc/ld.so.cache`
+        // spawn failure: a read grant carries READ_FILE|READ_DIR|EXECUTE.
+        let Ok(mut rs) = Ruleset::new() else {
+            return; // no Landlock on this host
+        };
+        // current_exe() is a regular file; granting it directory rights must mask them.
+        let exe = std::env::current_exe().expect("current_exe");
+        rs.allow_path(
+            &exe,
+            AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE,
+        )
+        .expect("allow_path on a file");
+        let (_, access) = rs.path_rules.last().expect("a path rule was recorded");
+        assert!(
+            !access.contains(AccessFs::READ_DIR),
+            "READ_DIR (a directory-only right) must be masked off a regular file, got {access:?}"
+        );
+        assert!(
+            access.contains(AccessFs::READ_FILE) && access.contains(AccessFs::EXECUTE),
+            "file-applicable rights must survive, got {access:?}"
+        );
+
+        // A directory grant keeps its directory rights.
+        rs.allow_path(Path::new("/"), AccessFs::READ_FILE | AccessFs::READ_DIR)
+            .expect("allow_path on a dir");
+        let (_, access) = rs.path_rules.last().expect("a path rule");
+        assert!(
+            access.contains(AccessFs::READ_DIR),
+            "READ_DIR must survive on a directory, got {access:?}"
+        );
+    }
 
     #[test]
     fn abi_version_is_reported_by_the_kernel() {

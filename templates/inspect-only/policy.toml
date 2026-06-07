@@ -27,11 +27,14 @@ mode = "none"
 
 
 # --- Execution: text inspection only ----------------------------------------
-# Conspicuously absent: any compiler, interpreter (python/node/perl/ruby), shell
-# scripting beyond the read tools, build tool, or package manager. The repo's
-# code cannot run.
+# A shell is allowed so a session is usable, but under the Landlock exec-allowlist
+# it can *only* invoke the read tools below — the repo's own code still cannot run.
+# Conspicuously absent: any compiler, interpreter (python/node/perl/ruby), build
+# tool, or package manager. `exec.shell` must appear in this allowlist (else the
+# kennel could not launch its own login shell), so `/bin/sh` is listed explicitly.
 [exec]
 allow = [
+    "/bin/sh", "/usr/bin/bash",
     "/usr/bin/cat", "/usr/bin/less", "/usr/bin/more",
     "/usr/bin/head", "/usr/bin/tail",
     "/usr/bin/grep", "/usr/bin/egrep", "/usr/bin/fgrep",
@@ -50,4 +53,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "g9d+RWwi51FC/jyATwsLCkLq/aDRGlhuObtxuJrVyknGE7zz9eaHtQjogW6w1OExXsTL/AW6yLog/7T0Dr7TCQ=="
+signature = "9ew9xHba5gCRSZFKm42u2MAMnDTgZuP6sLDCsy57NOgTE/6Q4J8bbL0cR1K/4YERqTboxlwZYmJGGHa1kX/4DQ=="

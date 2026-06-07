@@ -8,6 +8,7 @@
 //! needs a fork/exec primitive in `kennel-syscall` (no `unsafe` lives here).
 
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::fd::RawFd;
 use std::path::{Component, Path, PathBuf};
 
 use kennel_syscall::landlock::{AccessFs, AccessNet};
@@ -143,12 +144,14 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
 }
 
 /// The Landlock access a read-granted path subtree receives: read files and
-/// directories, plus `EXECUTE` only in the permissive (no `exec.allow`) posture.
+/// directories, plus `EXECUTE` only under the explicit `permissive-exec` (`**`)
+/// opt-in.
 ///
-/// When a policy declares an `exec.allow` list, a readable path must NOT be
-/// implicitly executable — otherwise the allowlist enforces nothing (anything
-/// under a read grant could run). In that mode reads are read-only and execution
-/// is granted separately, on the allowlist plus the loader's lib dirs (§7.1).
+/// Execution is deny-by-default (§7.1): a readable path is NOT implicitly
+/// executable — otherwise the allowlist would enforce nothing (anything under a
+/// read grant could run). Reads are read-only and execution is granted separately,
+/// on the allowlist plus the loader's lib dirs. Only an explicit `**` exec wildcard
+/// restores the open posture and re-adds `EXECUTE` to reads.
 fn read_access(executable: bool) -> AccessFs {
     let base = AccessFs::READ_FILE | AccessFs::READ_DIR;
     if executable {
@@ -158,22 +161,24 @@ fn read_access(executable: bool) -> AccessFs {
     }
 }
 
-/// The dynamic loader's library directories. Under Landlock these need
-/// `FS_EXECUTE`, not merely read: the loader maps `libc`/`ld.so` with
-/// `PROT_EXEC`, which Landlock gates (proven by kennel-syscall's
-/// `landlock_exec_semantics` test; this corrects design §7.1.7). They are
-/// granted `EXECUTE` wherever a read grant mounts them, so allowlisted dynamic
-/// binaries can still load their libraries.
-const LOADER_EXEC_DIRS: &[&str] = &["/usr/lib", "/lib", "/lib64", "/usr/lib64", "/usr/local/lib"];
-
-/// Strip a trailing `/**` or `/*` glob from an `exec.allow` entry, yielding the
-/// real directory (Landlock grants a subtree) or file the rule applies to.
-fn exec_glob_root(entry: &str) -> PathBuf {
+/// Strip a trailing `/**` or `/*` glob from a grant entry, yielding the real
+/// directory (a Landlock rule and a bind both apply to the whole subtree) or file
+/// the rule applies to. A glob suffix has no inode of its own, so the bind source
+/// and the post-pivot Landlock target must both key on this root — used for
+/// `fs.read`/`fs.write` grants and `exec.allow` entries alike.
+fn glob_root(entry: &str) -> PathBuf {
     let trimmed = entry
         .strip_suffix("/**")
         .or_else(|| entry.strip_suffix("/*"))
         .unwrap_or(entry);
     PathBuf::from(trimmed)
+}
+
+/// Whether an `exec.allow` entry is the explicit "allow all execution" wildcard
+/// (`**` or `/**`) — the `permissive-exec` opt-in that restores the open,
+/// pre-deny-default posture. Every other entry is a concrete path/subtree grant.
+fn is_exec_wildcard(entry: &str) -> bool {
+    matches!(entry.trim(), "**" | "/**")
 }
 
 /// The Landlock access a granted device node receives: read and write the file,
@@ -302,11 +307,14 @@ fn remap_target(path: &Path, home: &Path, shim_root: &Path) -> PathBuf {
         .map_or_else(|_| path.to_path_buf(), |rel| shim_root.join(rel))
 }
 
-/// Whether `path` is served by the constructed synthetic `/etc` (and so is *not*
-/// bound from the host). Matches `/etc` and anything beneath it on a component
-/// boundary (`/etcfoo` does not match).
-fn is_constructed_etc(path: &Path) -> bool {
-    path.starts_with("/etc")
+/// Whether `path` is served by a constructed/special mount and so is *not* bound
+/// from the host: the synthetic `/etc`, or the freshly-mounted namespaced `/proc`.
+/// A read grant under either still gets its Landlock rule (on the constructed inode,
+/// post-pivot) — it just must not bind the host's version over it (which for `/proc`
+/// would recursively bind the host's whole procfs before the fresh mount shadows it).
+/// Matches on a component boundary (`/etcfoo` / `/procfoo` do not match).
+fn is_special_mount(path: &Path) -> bool {
+    path.starts_with("/etc") || path.starts_with("/proc")
 }
 
 /// Whether `mode` is a safe tmpfs `mode=` value: 3 or 4 octal digits and nothing
@@ -392,6 +400,14 @@ pub struct Plan {
     /// opens). Each entry is `(resource, soft, hard)`; [`RLIM_INFINITY`] is unlimited.
     /// Derived from the settled `[ulimits]`; empty ⇒ nothing applied.
     pub ulimits: Vec<(Resource, u64, u64)>,
+    /// Interactive controlling-terminal hand-off (§7.7.2): the raw fd of a connected
+    /// socket over which the seal returns a freshly-allocated controlling pty's
+    /// master. `Some` for an interactive `kennel run` — the seal allocates the pty
+    /// from the kennel's own (post-`pivot_root`) `devpts` so `ttyname(3)` resolves it,
+    /// then sends the master back for the CLI to proxy. `None` (the default) keeps the
+    /// non-interactive path, where stdio is whatever the controller passed. Not
+    /// policy-derived — kenneld sets it at bring-up, like [`new_root`](Self::new_root).
+    pub interactive_return_fd: Option<RawFd>,
 }
 
 impl Plan {
@@ -441,9 +457,14 @@ impl Plan {
         // (on the constructed `/etc`) but no bind (it is built, not bound).
         let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
         let mut binds: Vec<BindMount> = Vec::new();
-        // A non-empty `exec.allow` switches on the execution allowlist: reads
-        // lose implicit EXECUTE, and execution is granted only where §7.1 says.
-        let exec_allowlist = !ep.exec.allow.is_empty();
+        // Deny-by-default execution (§7.1), matching fs (allow-only) and net
+        // (`constrained` permits nothing): the allowlist is ALWAYS enforced — a merely
+        // readable file is NOT implicitly executable. Execution is granted only to the
+        // allowlisted binaries plus the loader's lib dirs; an empty allowlist denies
+        // ALL execution (so a bare `base-confined` cannot run anything). The sole
+        // escape hatch is an explicit `**` entry — the `permissive-exec` opt-in — which
+        // restores the open posture (reads carry EXECUTE, nothing is gated).
+        let permissive_exec = ep.exec.allow.iter().any(|e| is_exec_wildcard(e));
         let grants = ep
             .fs
             .read
@@ -451,17 +472,21 @@ impl Plan {
             .map(|p| (p, false))
             .chain(ep.fs.write.iter().map(|p| (p, true)));
         for (path_str, writable) in grants {
-            let source = PathBuf::from(path_str.as_str());
+            // A read/write grant may use a `/**` or `/*` glob (e.g. `/usr/**`); the
+            // bind source and Landlock target must be the real directory root — the
+            // literal glob has no inode, so binding it is `ENOENT` and the Landlock
+            // rule would be dropped by skip-missing. Strip it, exactly as exec does.
+            let source = glob_root(path_str);
             let target = remap_target(&source, home, &shim_root);
             landlock_fs.push((
                 target.clone(),
                 if writable {
                     write_access()
                 } else {
-                    read_access(!exec_allowlist)
+                    read_access(permissive_exec)
                 },
             ));
-            if !is_constructed_etc(&source) {
+            if !is_special_mount(&source) {
                 binds.push(BindMount {
                     source,
                     target,
@@ -470,28 +495,17 @@ impl Plan {
             }
         }
 
-        // The execution gate (§7.1). With an allowlist, grant FS_EXECUTE only on
-        // the allowlisted binaries plus the loader's lib dirs (EXECUTE, not READ
-        // — the loader maps libc/ld.so PROT_EXEC, which Landlock gates). Reads
-        // dropped EXECUTE above, so nothing else can run. An empty allowlist
-        // keeps the permissive posture (reads carry EXECUTE) and adds nothing.
+        // The execution gate (§7.1): grant FS_EXECUTE only on the allowlisted binaries
+        // and on the exact shared libraries those binaries link — the closure resolved
+        // and settled at compile time (`exec.libraries`, `kennel_policy::libresolve`),
+        // EXECUTE not READ since the loader maps libc/ld.so PROT_EXEC. Reads carry no
+        // EXECUTE (above), so nothing else — including a binary planted in a lib dir —
+        // can run. Skipped under `permissive-exec` (`**`), where reads already carry
+        // EXECUTE and execution is ungated.
         let exec_access = AccessFs::EXECUTE | AccessFs::READ_FILE;
-        if exec_allowlist {
-            for loader in LOADER_EXEC_DIRS {
-                let loader = Path::new(loader);
-                // Grant EXECUTE only where a read grant actually mounts the dir,
-                // so the Landlock rule's path exists in the constructed view.
-                let mounted = ep
-                    .fs
-                    .read
-                    .iter()
-                    .any(|r| loader.starts_with(PathBuf::from(r.as_str())));
-                if mounted {
-                    landlock_fs.push((loader.to_path_buf(), exec_access));
-                }
-            }
+        if !permissive_exec {
             for entry in &ep.exec.allow {
-                let root = exec_glob_root(entry);
+                let root = glob_root(entry);
                 // deny_writable (§7.1): a writable path must never be executable.
                 if ep.exec.deny_writable
                     && ep
@@ -505,6 +519,12 @@ impl Plan {
                     )));
                 }
                 landlock_fs.push((remap_target(&root, home, &shim_root), exec_access));
+            }
+            // The resolved library closure: exact paths, already filtered by the
+            // `[lib]` allow/deny globs at compile time. `skip_missing` drops any the
+            // view does not contain.
+            for lib in &ep.exec.libraries {
+                landlock_fs.push((remap_target(Path::new(lib), home, &shim_root), exec_access));
             }
         }
 
@@ -520,7 +540,10 @@ impl Plan {
         }
         let mut dev_allow: Vec<PathBuf> = Vec::new();
         for d in &ep.fs.dev.allow {
-            let path = PathBuf::from(d.as_str());
+            // A device grant may use a `/**`/`/*` glob (e.g. `/dev/pts/**` for the ptys);
+            // strip it to the real node/dir — `/dev/pts` is mounted as a fresh devpts in
+            // the view, every other entry is bound as a single node.
+            let path = glob_root(d.as_str());
             if !is_safe_dev_path(&path) {
                 return Err(SpawnError::InvalidPolicy(format!(
                     "fs.dev.allow entry must be a device under /dev, got `{d}`"
@@ -551,6 +574,18 @@ impl Plan {
         if !ep.fs.home_readonly {
             landlock_fs.push((shim_root.clone(), write_access()));
         }
+
+        // The workload's own scratch space: the private `/tmp` is a fresh, ephemeral
+        // tmpfs each spawn, so grant it read+write+list. Without this the mounted
+        // `/tmp` is present but unusable (no Landlock grant) — `mktemp`, build scratch,
+        // and even `ls /tmp` would be denied.
+        if ep.fs.tmp.private {
+            landlock_fs.push((PathBuf::from("/tmp"), write_access()));
+        }
+        // Let the workload list the view root (`ls /`). READ_DIR only — the top-level
+        // entries (usr, lib, etc, dev, proc, tmp, home) are not sensitive and their
+        // contents stay separately gated. Without it, `ls /` is a jarring EACCES.
+        landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
 
         let view = Some(ShimView {
             shim_root,
@@ -628,6 +663,7 @@ impl Plan {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits,
+            interactive_return_fd: None,
         })
     }
 

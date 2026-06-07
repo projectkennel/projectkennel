@@ -182,7 +182,15 @@ If `require_tiocsti_disabled = true` and `dev.tty.legacy_tiocsti = 1`, Project K
 
 On older kernels where the sysctl doesn't exist, Project Kennel applies a seccomp filter denying `ioctl(*, TIOCSTI, *)`. This is best-effort; seccomp can't always inspect the arguments safely, see §7.4 for the same caveat.
 
-**Other tty concerns.** Pty allocation, scrollback control, clipboard via terminal escape sequences (some terminals support OSC 52 for clipboard set, which is its own exfiltration channel). These are out of scope for v1; future revisions may add `tty.osc52 = "deny"` style controls. The current mitigation is "run kennels in a terminal you trust, with OSC 52 disabled in terminal config".
+**Other tty concerns.** Scrollback control and clipboard via terminal escape sequences (some terminals support OSC 52 for clipboard set, which is its own exfiltration channel) are out of scope for v1; future revisions may add `tty.osc52 = "deny"` style controls. The current mitigation is "run kennels in a terminal you trust, with OSC 52 disabled in terminal config".
+
+## 7.7.5a Interactive controlling terminal
+
+**Why it matters.** An interactive `kennel run` (a human at the keyboard, e.g. `kennel run interactive -- /bin/bash`) needs a real controlling terminal so the workload's shell has job control (`^Z`/`fg`/`bg`), full-screen editors and pagers work, and `isatty`/`ttyname` answer truthfully. Simply forwarding the operator's own terminal fds would hand the confined workload the *operator's* controlling tty — the TIOCSTI/`/dev/tty` surface §7.7.5 exists to keep away from it.
+
+**Mechanism — the pty lives inside the kennel.** The controlling pty is allocated by the spawn seal from the kennel's **own** `devpts`, after `pivot_root` (§7.2): the kennel's `/dev/pts` is a freshly-mounted, isolated `devpts` instance (`newinstance`), so the workload's terminal is a node in *its* view, not a host node. The seal `setsid`s, claims the slave as the controlling terminal (`TIOCSCTTY`), `dup2`s it onto the workload's stdio, and hands the master back to the `kennel` CLI over a socketpair (`SCM_RIGHTS`). The CLI puts the operator's real terminal into raw mode, proxies bytes both ways, relays `SIGWINCH`, and restores the terminal on exit.
+
+This is the docker-`-it`/`ssh` model, and the isolation is the point: because the slave is a node in the kennel's own `devpts`, `ttyname(3)` (the `tty` command) resolves it and the operator's controlling tty is never exposed to the confined process. A non-interactive (piped/redirected) run skips all of this — its three stdio fds are passed straight through, no pty is allocated.
 
 ## 7.7.6 Seccomp (optional system call filter)
 

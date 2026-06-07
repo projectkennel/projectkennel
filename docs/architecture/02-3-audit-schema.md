@@ -140,7 +140,7 @@ The per-kennel proxy emits one `net.egress` record per request (`kennel-netproxy
 
 ### Exec (`resource: "exec"`)
 
-- **`exec.allow`** / **`exec.deny`** — execve() attempt. Adds `binary` (resolved path), `argv_first` (truncated, sanitised), `reason` (for denies). Full argv only with `log_full_argv = true`.
+- **`exec`** (`exec.allow` / `exec.deny` outcome) — execve() attempt. `exec.deny` is the *event* for a deny-by-default refusal (there is no `exec.deny` policy list, §7.1.4). Adds `binary` (resolved path), `argv_first` (truncated, sanitised), `reason` (for denies). Full argv only with `log_full_argv = true`.
 
 ### AF_UNIX (`resource: "unix"`)
 

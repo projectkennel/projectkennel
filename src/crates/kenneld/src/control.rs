@@ -6,10 +6,13 @@
 //! then a body that begins with an op byte and continues with primitively-encoded
 //! fields. All integers are native-endian (the CLI and daemon are the same host).
 //!
-//! The workload's stdio is **not** carried here: the CLI passes its terminal fds
-//! to the daemon as `SCM_RIGHTS` ancillary data alongside the [`Request::Start`]
-//! frame, so the daemon-spawned workload is attached to the user's terminal. The
-//! fd transfer is the server/syscall layer's concern; this module is the bytes.
+//! The workload's stdio is **not** carried here: fds travel as `SCM_RIGHTS`
+//! ancillary data alongside the [`Request::Start`] frame. A non-interactive run
+//! passes three fds (the CLI's stdin/stdout/stderr). An interactive run
+//! ([`StartRequest::interactive`]) passes one connected socket instead, over which
+//! the spawn seal returns a controlling pty allocated inside the kennel's own
+//! devpts. The fd transfer is the server/syscall layer's concern; this module is
+//! the bytes.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -56,6 +59,16 @@ pub struct StartRequest {
     pub argv: Vec<String>,
     /// The working directory for the workload.
     pub cwd: PathBuf,
+    /// The caller's `TERM` (forwarded so an interactive workload gets a usable
+    /// terminal). Empty if unset. The synthesised env is otherwise built from
+    /// policy + the framework vars (`HOME`/`PATH`/`USER`/…), never inherited.
+    pub term: String,
+    /// Whether this is an interactive run. When true, the CLI passes a single
+    /// connected socket (not three stdio fds) over `SCM_RIGHTS`; the spawn seal
+    /// allocates a controlling pty inside the kennel's own devpts and hands its
+    /// master back over that socket for the CLI to proxy (§7.7.2). When false, the
+    /// three passed fds are the workload's stdio.
+    pub interactive: bool,
 }
 
 /// A response from the daemon to the CLI.
@@ -217,6 +230,8 @@ impl Request {
                 put_str(&mut b, &req.kennel);
                 put_strs(&mut b, &req.argv);
                 put_str(&mut b, &req.cwd.to_string_lossy());
+                put_str(&mut b, &req.term);
+                put_u8(&mut b, u8::from(req.interactive));
             }
             Self::Stop { kennel } => {
                 put_u8(&mut b, 2);
@@ -243,6 +258,8 @@ impl Request {
                 kennel: r.string()?,
                 argv: r.strings()?,
                 cwd: PathBuf::from(r.string()?),
+                term: r.string()?,
+                interactive: r.u8()? != 0,
             })),
             2 => Ok(Self::Stop {
                 kennel: r.string()?,
@@ -427,6 +444,8 @@ mod tests {
                 "--flag".to_owned(),
             ],
             cwd: PathBuf::from("/home/dev/project"),
+            term: "xterm-256color".to_owned(),
+            interactive: true,
         }));
     }
 

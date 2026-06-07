@@ -731,6 +731,27 @@ fn bring_up<P: Privileged + Sync>(
         };
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
 
+        // Grant Landlock read on the synthetic /etc files (passwd/group/hosts/
+        // resolv.conf/nsswitch.conf/services/protocols/host.conf). They are copied into
+        // the constructed /etc but are *not* in `fs.read`, so without this the workload —
+        // and libc NSS — cannot read them: `getpwuid` fails, `id` shows no name, and the
+        // identity mask is inert. Grant read on each synthetic file's dir (= /etc),
+        // exactly as the dotfiles and synthetic ~/.ssh below do. The constructed /etc
+        // holds only framework content (the host /etc is never bound in), so this is safe.
+        {
+            use kennel_syscall::landlock::AccessFs;
+            let mut etc_dirs = std::collections::BTreeSet::new();
+            for (_src, target) in &plan.file_binds {
+                if let Some(parent) = target.parent() {
+                    etc_dirs.insert(parent.to_path_buf());
+                }
+            }
+            for dir in etc_dirs {
+                plan.landlock_fs
+                    .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
+            }
+        }
+
         // Synthesise the user shell-init dotfiles into the kennel home (§7.7.2a):
         // copied into the fresh view root each spawn (reconstructed, non-persistent),
         // skipping any path in `home_persist`. Like the synthetic ~/.ssh, the home
@@ -1104,6 +1125,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 
@@ -1549,6 +1571,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: Some(vec![granted_gid]),
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 }

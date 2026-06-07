@@ -80,6 +80,7 @@ version = "0.1.0"
 dependencies = [
  "basic-toml",
  "ed25519-compact",
+ "object",
  "serde",
 ]
 
