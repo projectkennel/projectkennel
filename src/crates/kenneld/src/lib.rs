@@ -1125,6 +1125,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 
@@ -1570,6 +1571,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: Some(vec![granted_gid]),
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 }

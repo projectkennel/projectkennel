@@ -158,11 +158,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         // Forward the caller's terminal type so an interactive workload renders; the
         // rest of the workload env is synthesised by the daemon, not inherited.
         term: std::env::var("TERM").unwrap_or_default(),
+        // Interactive when stdin is a terminal: the seal allocates the workload's own
+        // pty (job control) and hands its master back for us to proxy.
+        interactive: io::stdin().is_terminal(),
     });
 
     let mut conn = connect()?;
-    // Interactive: when our stdin is a terminal, give the workload its own pty (so its
-    // shell has a controlling terminal for job control) and proxy this terminal to it.
     if io::stdin().is_terminal() {
         return run_interactive(conn, &request);
     }
@@ -199,39 +200,56 @@ impl Drop for RawGuard {
     }
 }
 
-/// Interactive `kennel run`: allocate a pty, hand the workload the slave as its stdio
-/// (the daemon makes it the workload's controlling terminal), put this terminal in raw
-/// mode, and proxy bytes both ways until the workload exits. The workload's shell then
+/// Interactive `kennel run`: the workload's controlling pty is allocated by the spawn
+/// seal inside the kennel's *own* devpts (so `ttyname(3)`/`tty` resolve it), and the
+/// seal hands its master back to us over a socketpair. We put this terminal in raw
+/// mode and proxy bytes both ways until the workload exits. The workload's shell then
 /// has real job control (`^Z`/`fg`/`bg`); the terminal is restored on exit.
 fn run_interactive(mut conn: UnixStream, request: &Request) -> Result<ExitCode, String> {
     use kennel_syscall::pty;
     let real_in = io::stdin();
-    let winsize = pty::get_winsize(real_in.as_fd()).ok();
-    let p = pty::open(winsize.as_ref()).map_err(|e| format!("allocating a pty: {e}"))?;
     // Raw mode now; the guard restores the terminal on every return below.
     let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
     let _restore = RawGuard { prev };
     // Block SIGWINCH before the relay thread is spawned so it can `sigwait` it.
     let _ = pty::block_winch();
-    // Hand the workload the slave (all three fds), then drop our slave so the master
-    // sees EOF once the workload's stdio closes.
-    {
-        let slave = p.slave.as_fd();
-        send(&conn, request, &[slave, slave, slave])?;
-    }
-    drop(p.slave);
+
+    // A socketpair the seal returns the pty master over: we keep `ours`, the daemon
+    // passes `theirs` (over SCM_RIGHTS) down into the workload's pre-exec seal.
+    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    send(&conn, request, &[theirs.as_fd()])?;
+    drop(theirs);
+
+    // The daemon confirms the launch (or reports a bring-up failure). On success the
+    // seal has, by now, sent the master over `ours`; reading the response first means a
+    // failed bring-up does not leave us blocking on a master that will never arrive.
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
         Response::Started { .. } => {}
         Response::Error(message) => return Err(message),
         other => return Err(format!("unexpected response: {other:?}")),
     }
-    proxy_terminal(&p.master, real_in.as_fd())?;
+    let master = recv_pty_master(&ours)?;
+    // Size the workload's terminal to ours, then proxy until it exits.
+    if let Ok(ws) = pty::get_winsize(real_in.as_fd()) {
+        let _ = pty::set_winsize(master.as_fd(), &ws);
+    }
+    proxy_terminal(&master, real_in.as_fd())?;
     // Block until the workload exits; `_restore` then puts the terminal back.
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
         Response::Exited { code } => Ok(exit_code(code)),
         Response::Error(message) => Err(message),
         other => Err(format!("unexpected response: {other:?}")),
     }
+}
+
+/// Receive the workload's controlling-pty master, sent by the spawn seal over `sock`
+/// as a single `SCM_RIGHTS` fd (with a one-byte payload).
+fn recv_pty_master(sock: &UnixStream) -> Result<OwnedFd, String> {
+    let mut buf = [0u8; 1];
+    let (_, mut fds) = kennel_syscall::scm::recv_with_fds(sock.as_fd(), &mut buf)
+        .map_err(|e| format!("receiving the workload pty: {e}"))?;
+    fds.pop()
+        .ok_or_else(|| "the workload did not return a controlling terminal".to_owned())
 }
 
 /// Spawn the background copies between this terminal and the pty `master`: stdin →

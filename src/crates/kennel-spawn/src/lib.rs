@@ -390,6 +390,7 @@ fn spawn_inner(
     let landlock_net = plan.landlock_net.clone();
     let supplementary_groups = plan.supplementary_groups.clone();
     let ulimits = plan.ulimits.clone();
+    let interactive_return_fd = plan.interactive_return_fd;
     let does_mount = seal_ns.contains(Namespaces::MOUNT);
 
     // The **inner seal** — the irreversible confinement that must run in the process
@@ -402,13 +403,16 @@ fn spawn_inner(
     //
     // [`fork_into_pid1`]: kennel_syscall::spawn::fork_into_pid1
     let mut inner_seal = move || -> io::Result<()> {
-        // Controlling terminal for job control (interactive runs), done FIRST — before
-        // Landlock could gate the `ioctl`. If our stdin is a tty (a pty the CLI
-        // allocated and passed), become its session leader so the workload's shell can
-        // manage foreground/background process groups (`^Z`/`fg`/`bg`). Best-effort: a
-        // non-tty (piped) stdin skips this, and `TIOCSCTTY` never steals a tty already
-        // owned by another session.
-        kennel_syscall::pty::adopt_stdin_as_controlling_tty();
+        // Controlling terminal for job control on the NON-view fallback (interactive
+        // runs), done FIRST — before Landlock could gate the `ioctl`. If our stdin is a
+        // tty become its session leader so the workload's shell can manage
+        // foreground/background process groups (`^Z`/`fg`/`bg`). The view path takes the
+        // richer route below (its own devpts, so `ttyname` resolves), so it is skipped
+        // here. Best-effort: a non-tty (piped) stdin is a no-op, and `TIOCSCTTY` never
+        // steals a tty already owned by another session.
+        if interactive_return_fd.is_none() {
+            kennel_syscall::pty::adopt_stdin_as_controlling_tty();
+        }
         if does_mount {
             // Detach mount propagation from the host first (`MS_PRIVATE` — stronger
             // than the `MS_SLAVE` of §7.2.10: no propagation in either direction).
@@ -439,6 +443,16 @@ fn spawn_inner(
                 )?;
                 step("apply-file-binds", apply_file_binds(&file_binds))?;
             }
+        }
+        // Interactive controlling terminal (§7.7.2), AFTER the view is built so
+        // `/dev/ptmx` resolves to the kennel's own freshly-mounted devpts: allocate a
+        // pty there, make its slave this process's controlling tty + stdio, and hand
+        // the master back to the CLI to proxy. Because the slave is a node in the
+        // view's devpts, `ttyname(3)` (the `tty` command) resolves it — a host-side pty
+        // would not. Done before Landlock/seccomp clamp down (the `ioctl`s would be
+        // gated). The non-interactive path leaves stdio as the controller passed it.
+        if let Some(fd) = interactive_return_fd {
+            step("setup-view-pty", kennel_syscall::pty::setup_view_pty(fd))?;
         }
         // Drop the inherited host supplementary groups (§7.2). Two regimes:
         //
@@ -1753,6 +1767,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 
@@ -1886,6 +1901,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         // Granted file readable through $HOME; the non-granted sibling's name absent;
@@ -1997,6 +2013,7 @@ mod tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: vec![(Resource::RLIMIT_NOFILE, 64, 64)],
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -2086,6 +2103,7 @@ mod tests {
             // the group grant instead.
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -2228,6 +2246,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -2307,6 +2326,7 @@ mod root_tests {
             file_binds: vec![(src.clone(), target.clone()), (src, missing)],
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/cat");
@@ -2406,6 +2426,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         // Granted file readable through $HOME, and the non-granted sibling's name
@@ -2479,6 +2500,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         }
     }
 
@@ -2582,6 +2604,7 @@ mod root_tests {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits: Vec::new(),
+            interactive_return_fd: None,
         };
 
         let mut cmd = Command::new("/bin/cat");

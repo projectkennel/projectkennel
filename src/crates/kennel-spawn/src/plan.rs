@@ -8,6 +8,7 @@
 //! needs a fork/exec primitive in `kennel-syscall` (no `unsafe` lives here).
 
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::fd::RawFd;
 use std::path::{Component, Path, PathBuf};
 
 use kennel_syscall::landlock::{AccessFs, AccessNet};
@@ -399,6 +400,14 @@ pub struct Plan {
     /// opens). Each entry is `(resource, soft, hard)`; [`RLIM_INFINITY`] is unlimited.
     /// Derived from the settled `[ulimits]`; empty ⇒ nothing applied.
     pub ulimits: Vec<(Resource, u64, u64)>,
+    /// Interactive controlling-terminal hand-off (§7.7.2): the raw fd of a connected
+    /// socket over which the seal returns a freshly-allocated controlling pty's
+    /// master. `Some` for an interactive `kennel run` — the seal allocates the pty
+    /// from the kennel's own (post-`pivot_root`) `devpts` so `ttyname(3)` resolves it,
+    /// then sends the master back for the CLI to proxy. `None` (the default) keeps the
+    /// non-interactive path, where stdio is whatever the controller passed. Not
+    /// policy-derived — kenneld sets it at bring-up, like [`new_root`](Self::new_root).
+    pub interactive_return_fd: Option<RawFd>,
 }
 
 impl Plan {
@@ -654,6 +663,7 @@ impl Plan {
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits,
+            interactive_return_fd: None,
         })
     }
 

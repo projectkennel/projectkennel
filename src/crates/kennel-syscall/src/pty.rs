@@ -10,7 +10,7 @@
 //! `TIOCSCTTY`) have no `nix` wrapper in this version and are the minimal exceptions.
 
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
 pub use nix::pty::Winsize;
 pub use nix::sys::termios::Termios;
@@ -107,6 +107,51 @@ pub fn set_controlling_tty(fd: BorrowedFd<'_>) -> io::Result<()> {
     if rc < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(())
+}
+
+/// Allocate a controlling pty from the current mount namespace's `/dev/ptmx`.
+///
+/// Makes its slave this process's controlling terminal and stdio, and hands the
+/// master back to the caller's controller over `return_fd` (a connected socket).
+/// This is the in-view counterpart of [`adopt_stdin_as_controlling_tty`]. Called
+/// from the spawn seal *after* `pivot_root`, so `/dev/ptmx` resolves to the
+/// kennel's own freshly-mounted, isolated `devpts` — the slave is therefore a node
+/// that exists in the workload's view, so `ttyname(3)` (the `tty` command, and any
+/// program that resolves the terminal's *path*) resolves it. A pty the controller
+/// allocated on the host would not: its node lives in the host `devpts`, absent
+/// from the view. The master travels back over `SCM_RIGHTS` so the controller can
+/// proxy the user's terminal to it.
+///
+/// Sequence: `openpty` (view `devpts`) → `setsid` (best-effort) → `TIOCSCTTY` on
+/// the slave → send the master over `return_fd` → `dup2` the slave onto fds 0/1/2.
+///
+/// # Errors
+/// The OS error if `openpty`, `TIOCSCTTY`, the master hand-off, or `dup2` fails.
+pub fn setup_view_pty(return_fd: RawFd) -> io::Result<()> {
+    let p = open(None)?;
+    // Become a session leader so we may claim a controlling terminal. Best-effort:
+    // if we already lead a session `setsid` is EPERM, and `TIOCSCTTY` still works.
+    let _ = nix::unistd::setsid();
+    // SAFETY: TIOCSCTTY with arg 0 (never steal another session's tty); `p.slave` is
+    // a fresh slave and we attempted to lead a session above.
+    let rc = unsafe { libc::ioctl(p.slave.as_raw_fd(), libc::TIOCSCTTY, 0) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Hand the master back to the controller (the CLI), which proxies the real
+    // terminal to it. One data byte is required by the SCM_RIGHTS contract.
+    // SAFETY: `return_fd` is the connected socket the controller passed in; we only
+    // borrow it for this send.
+    let ret = unsafe { BorrowedFd::borrow_raw(return_fd) };
+    crate::scm::send_with_fds(ret, &[0u8], &[p.master.as_fd()])?;
+    // The slave becomes the workload's stdio. dup2 leaves fds 0/1/2 as independent
+    // copies, so dropping `p` (master + the original slave fd) at end of scope keeps
+    // them open.
+    let slave = p.slave.as_fd();
+    nix::unistd::dup2_stdin(slave).map_err(io::Error::from)?;
+    nix::unistd::dup2_stdout(slave).map_err(io::Error::from)?;
+    nix::unistd::dup2_stderr(slave).map_err(io::Error::from)?;
     Ok(())
 }
 
