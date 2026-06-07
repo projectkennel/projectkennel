@@ -139,6 +139,11 @@ pub struct Identity {
     /// egress for this daemon. When set, a kennel with `[ssh]` grants gets a
     /// synthetic `~/.ssh` and a route to the shared `kennel-sshd`.
     pub bastion: Option<BastionSetup>,
+    /// The host path of `kennel-afunix-shim`, bound into the constructed view and
+    /// launched by the seal to broker each granted `AF_UNIX` socket through the binder
+    /// facade (§7.4 / `07-9` §7.9.5). `None` disables the facade path, so `[unix]`
+    /// grants go unserved (no host socket is exposed by other means).
+    pub afunix_shim_bin: Option<PathBuf>,
 }
 
 /// How `kenneld` runs the per-user SSH bastion (§7.8). The daemon holds one
@@ -311,17 +316,26 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         subst: &RuntimeSubstitutions,
         shim_root: &Path,
     ) -> crate::UnixPrep {
-        let mut socket_binds = Vec::new();
+        let mut shims = Vec::new();
         let mut env = Vec::new();
         for sock in &unix.sockets {
-            let source = resolve_path(&sock.real, subst, &self.identity.home);
-            let target = resolve_path(&sock.shim, subst, shim_root);
+            // The real host path is not needed here — the facade (kenneld's binder
+            // registry) resolves the name and connects; the proxy only listens at the
+            // in-view shim path and brokers by name (`07-9` §7.9.5).
+            let shim_path = resolve_path(&sock.shim, subst, shim_root);
             if let Some(var) = &sock.env {
-                env.push((var.clone(), target.to_string_lossy().into_owned()));
+                env.push((var.clone(), shim_path.to_string_lossy().into_owned()));
             }
-            socket_binds.push((source, target));
+            shims.push(crate::UnixShim {
+                name: sock.name.clone(),
+                shim_path,
+            });
         }
-        crate::UnixPrep { socket_binds, env }
+        crate::UnixPrep {
+            shims,
+            env,
+            afunix_shim_bin: self.identity.afunix_shim_bin.clone(),
+        }
     }
 
     /// Drop a kennel's SSH edges from the bastion on teardown (§7.8.2): a synthetic
@@ -764,15 +778,32 @@ fn run_kennel<P, L>(
     });
     let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
 
-    // Wire the binder context manager when the kennel declares a [binder] policy and
-    // audit is configured (the registry records every decision; §7.9.4). The plan's
-    // view already carries the binder flag, so the seal mounts binderfs regardless;
-    // this provides the daemon-side manager that takes node 0.
-    if !loaded.binder.is_empty() {
+    // Wire the binder context manager when the kennel declares a [binder] policy *or*
+    // any [unix] grant (the AF_UNIX facade rides binder; `07-9` §7.9.5) and audit is
+    // configured (the registry records every decision; §7.9.4). The plan's view already
+    // carries the binder flag in both cases, so the seal mounts binderfs regardless;
+    // this provides the daemon-side manager that takes node 0 and answers the facade.
+    if !loaded.binder.is_empty() || !loaded.unix.is_empty() {
         if let Some(writer) = &audit {
+            // The facade connects to the real host socket, so resolve each `real` path's
+            // `~`/`$XDG_RUNTIME_DIR`/placeholders against the daemon's own home now (the
+            // shim path the proxy listens at was already resolved in `prepare_unix`).
+            let facade_unix = kennel_policy::UnixRuntime {
+                sockets: loaded
+                    .unix
+                    .sockets
+                    .iter()
+                    .map(|s| kennel_policy::UnixSocket {
+                        real: resolve_path(&s.real, &subst, &shared.identity.home)
+                            .to_string_lossy()
+                            .into_owned(),
+                        ..s.clone()
+                    })
+                    .collect(),
+            };
             spec.binder = Some(crate::BinderPrep {
                 policy: loaded.binder,
-                unix: loaded.unix.clone(),
+                unix: facade_unix,
                 writer: Arc::clone(writer),
             });
         }
@@ -1077,6 +1108,7 @@ mod tests {
                 supplementary_groups: None,
                 ulimits: Vec::new(),
                 interactive_return_fd: None,
+                aux: Vec::new(),
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,
@@ -1130,6 +1162,7 @@ mod tests {
                 view_base: None,
                 audit_base: None,
                 bastion: None,
+                afunix_shim_bin: None,
             },
             OkPriv,
             FakeLoader,

@@ -412,6 +412,22 @@ pub struct Plan {
     /// non-interactive path, where stdio is whatever the controller passed. Not
     /// policy-derived — kenneld sets it at bring-up, like [`new_root`](Self::new_root).
     pub interactive_return_fd: Option<RawFd>,
+    /// Auxiliary processes to launch inside the kennel, in the seal after Landlock and
+    /// before the workload `execve`, so they inherit the confined environment and die
+    /// with the kennel's PID namespace (`07-9` §7.9.5). Used for the in-kennel proxies
+    /// (e.g. `kennel-afunix-shim`). Each binary must be bound into the view and granted
+    /// Landlock execute. Not policy-derived — kenneld sets it at bring-up.
+    pub aux: Vec<AuxProcess>,
+}
+
+/// An auxiliary in-kennel process launched by the seal (a binary path in the view and
+/// its argument vector, `argv[0]` excluded — the path is used as `argv[0]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxProcess {
+    /// The binary's path *inside the view* (bound in, Landlock-execute-granted).
+    pub path: PathBuf,
+    /// Arguments after `argv[0]`.
+    pub args: Vec<String>,
 }
 
 impl Plan {
@@ -594,8 +610,10 @@ impl Plan {
         // Binder IPC (07-9/02-7): when the kennel uses binder, the seal mounts a
         // per-kennel binderfs instance in the view; grant the workload its standard
         // `binder` device (read/write/ioctl) and read of the binderfs dir + features.
-        // `binder-control` is never granted — only the spawn allocates devices.
-        let binder = !policy.binder.is_empty();
+        // `binder-control` is never granted — only the spawn allocates devices. The
+        // `AF_UNIX` facade rides binder too (`07-9` §7.9.5), so a kennel with `[unix]`
+        // grants but no `[binder]` policy still mounts binderfs for the proxy.
+        let binder = !policy.binder.is_empty() || !policy.unix.is_empty();
         if binder {
             landlock_fs.push((PathBuf::from("/dev/binderfs/binder"), dev_access()));
             landlock_fs.push((PathBuf::from("/dev/binderfs"), AccessFs::READ_DIR));
@@ -683,6 +701,7 @@ impl Plan {
             supplementary_groups: None,
             ulimits,
             interactive_return_fd: None,
+            aux: Vec::new(),
         })
     }
 

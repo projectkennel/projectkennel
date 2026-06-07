@@ -30,6 +30,7 @@ pub mod plan;
 
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,7 +39,7 @@ use kennel_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 use kennel_syscall::namespace::Namespaces;
 
-pub use plan::{BindMount, Plan, ProxyEndpoint, ShimView};
+pub use plan::{AuxProcess, BindMount, Plan, ProxyEndpoint, ShimView};
 
 /// The per-instance values the runtime fills into a settled policy's deferred
 /// placeholders.
@@ -390,6 +391,7 @@ fn spawn_inner(
     let landlock_net = plan.landlock_net.clone();
     let supplementary_groups = plan.supplementary_groups.clone();
     let ulimits = plan.ulimits.clone();
+    let aux = plan.aux.clone();
     let interactive_return_fd = plan.interactive_return_fd;
     let does_mount = seal_ns.contains(Namespaces::MOUNT);
 
@@ -503,6 +505,15 @@ fn spawn_inner(
                 "set-rlimit",
                 kennel_syscall::process::set_rlimit(*resource, *soft, *hard),
             )?;
+        }
+        // In-kennel auxiliary processes (the af-unix proxy and future facades), launched
+        // last so they inherit the fully-sealed environment (view, Landlock, seccomp,
+        // ulimits) and, being forked from PID 1, die with the kennel's PID namespace
+        // (`07-9` §7.9.5). Each `fork`+`execv` of a view-internal binary; a launch
+        // failure is logged but does not abort the workload (the grant simply goes
+        // unserved, as a refused connect — fail-closed, not fail-to-spawn).
+        for proc in &aux {
+            launch_aux_process(proc);
         }
         Ok(())
     };
@@ -902,6 +913,39 @@ fn apply_file_binds(binds: &[(PathBuf, PathBuf)]) -> io::Result<()> {
         kennel_syscall::mount::remount_readonly(target)?;
     }
     Ok(())
+}
+
+/// Launch one auxiliary in-kennel process (`fork`+`execv`) inside the sealed seal.
+///
+/// Builds the C `argv` (`argv[0]` = the binary path, then the configured arguments,
+/// `NULL`-terminated) and delegates the `fork`/`execv` to [`kennel_syscall::spawn::launch_aux`]
+/// (the only crate permitted `unsafe`). A path or argument containing an interior NUL,
+/// or a `fork` failure, is logged and skipped — the workload still spawns; the unserved
+/// grant degrades to a refused connect (fail-closed). The child is reaped by PID 1 (the
+/// workload, after its own `execve`) and torn down with the PID namespace.
+fn launch_aux_process(proc: &AuxProcess) {
+    let Ok(path_c) = std::ffi::CString::new(proc.path.as_os_str().as_bytes()) else {
+        eprintln!(
+            "kennel-spawn: aux path has interior NUL: {}",
+            proc.path.display()
+        );
+        return;
+    };
+    let mut argv_owned = vec![path_c.clone()];
+    for arg in &proc.args {
+        let Ok(c) = std::ffi::CString::new(arg.as_bytes()) else {
+            eprintln!("kennel-spawn: aux arg has interior NUL: {arg:?}");
+            return;
+        };
+        argv_owned.push(c);
+    }
+    let argv: Vec<&std::ffi::CStr> = argv_owned.iter().map(AsRef::as_ref).collect();
+    if let Err(e) = kennel_syscall::spawn::launch_aux(&path_c, &argv) {
+        eprintln!(
+            "kennel-spawn: aux launch failed ({}): {e}",
+            proc.path.display()
+        );
+    }
 }
 
 /// Join the current process into `cgroup` by writing its own pid to
@@ -1784,6 +1828,7 @@ mod tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         }
     }
 
@@ -1919,6 +1964,7 @@ mod tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         };
 
         // Granted file readable through $HOME; the non-granted sibling's name absent;
@@ -2032,6 +2078,7 @@ mod tests {
             supplementary_groups: None,
             ulimits: vec![(Resource::RLIMIT_NOFILE, 64, 64)],
             interactive_return_fd: None,
+            aux: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -2122,6 +2169,7 @@ mod tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/sh");
@@ -2265,6 +2313,7 @@ mod root_tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         };
 
         // Report "<pid>:<number of visible /proc PID dirs>".
@@ -2345,6 +2394,7 @@ mod root_tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/cat");
@@ -2446,6 +2496,7 @@ mod root_tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         };
 
         // Granted file readable through $HOME, and the non-granted sibling's name
@@ -2520,6 +2571,7 @@ mod root_tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         }
     }
 
@@ -2624,6 +2676,7 @@ mod root_tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         };
 
         let mut cmd = Command::new("/bin/cat");

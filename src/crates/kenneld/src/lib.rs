@@ -317,22 +317,38 @@ pub struct Spec {
     pub binder: Option<BinderPrep>,
 }
 
-/// The `AF_UNIX` socket shims prepared for one kennel (§7.4).
+/// One granted `AF_UNIX` socket the in-kennel proxy presents (§7.4).
+#[derive(Debug, Clone)]
+pub struct UnixShim {
+    /// The logical service name (`[[unix.allow]]` `name`) the proxy brokers through the
+    /// binder facade; the facade resolves it to the real host socket.
+    pub name: String,
+    /// The in-view absolute path the proxy listens at, where the application connects.
+    pub shim_path: PathBuf,
+}
+
+/// The `AF_UNIX` socket shims prepared for one kennel (§7.4 via the binder facade).
 ///
 /// Built by `crate::server::Shared::prepare_unix` (path placeholders resolved) and
-/// consumed by the bring-up: each granted host socket is bind-mounted into the
-/// constructed view at its shim path so the application finds it where it expects,
-/// and any named env var is set to that in-kennel path. What is not bound in is
-/// structurally absent (default-deny); abstract-namespace connections are denied by
-/// the always-on Landlock scope regardless.
+/// consumed by the bring-up: the `kennel-afunix-shim` proxy is bound into the view and
+/// launched by the seal; it listens at each shim path so the application finds the
+/// socket where it expects, and on connect brokers to the `org.projectkennel.IAfUnix`
+/// binder facade (kenneld), which resolves the name to the real host socket and returns
+/// a connected fd (`07-9` §7.9.5). The workload never holds a path into the host
+/// `AF_UNIX` namespace. Any named env var is set to the in-kennel shim path. What is not
+/// granted is structurally absent (default-deny); abstract-namespace connections are
+/// denied by the always-on Landlock scope regardless.
 #[derive(Debug, Default, Clone)]
 pub struct UnixPrep {
-    /// `(host socket source, in-view absolute target)` pairs. Bound (not copied —
-    /// a socket cannot be copied) into the view at the target, read-only.
-    pub socket_binds: Vec<(PathBuf, PathBuf)>,
+    /// The granted sockets the proxy presents and brokers.
+    pub shims: Vec<UnixShim>,
     /// `(env var, value)` pairs set on the workload — the in-kennel shim path the
     /// application reads (e.g. `WAYLAND_DISPLAY`).
     pub env: Vec<(String, String)>,
+    /// The host path of `kennel-afunix-shim` to bind into the view and launch as the
+    /// in-kennel broker (§7.4 via the binder facade). `None` (no deployment binary)
+    /// leaves the grants unserved rather than falling back to a host-socket bind mount.
+    pub afunix_shim_bin: Option<PathBuf>,
 }
 
 /// The SSH egress prepared for one kennel (§7.8).
@@ -1008,43 +1024,76 @@ fn gid_map_set(granted: &[u32]) -> Vec<u32> {
     gids
 }
 
-/// Apply the `AF_UNIX` socket shims (§7.4): bind each granted host socket into the
-/// constructed view at its shim path (a real bind mount — a socket cannot be copied
-/// like the `file_binds` path, so unlike the synthetic `~/.ssh` it rides
-/// `view.binds`), set the env vars the application reads (e.g. `WAYLAND_DISPLAY`),
-/// and grant Landlock on each shim path and its parent so the workload can reach and
-/// connect to it.
+/// The in-view binder device the af-unix proxy transacts the facade over (the seal
+/// mounts the per-kennel binderfs here; §7.9).
+const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
+
+/// Wire the `AF_UNIX` socket facade (§7.4 / `07-9` §7.9.5): launch the in-kennel
+/// `kennel-afunix-shim` proxy so each granted socket is presented at its in-view path
+/// and brokered, on connect, to the `org.projectkennel.IAfUnix` binder facade — which
+/// resolves the name to the real host socket and returns a connected fd. No host
+/// socket path is ever bound into the view (the bind-mount shim it replaces is gone).
 ///
-/// A no-op unless `pivoting`: the shim model is structural isolation via a mount
-/// namespace + `pivot_root`, so without the constructed view there is nothing to
-/// bind into (`08 §8.1`).
+/// Sets the env vars the application reads (e.g. `WAYLAND_DISPLAY`), binds the proxy
+/// binary into the view with Landlock execute, grants Landlock on each shim path's
+/// parent directory so the proxy can `bind(2)` its listener there and the workload can
+/// connect, and registers the proxy as a seal-launched auxiliary process.
+///
+/// A no-op unless `pivoting` (the facade needs the constructed view + its binderfs) and
+/// the deployment provides the proxy binary. When grants exist but the binary is absent,
+/// it warns and serves nothing — fail-closed, never a silent host-socket bind.
 fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivoting: bool) {
     use kennel_syscall::landlock::AccessFs;
-    if unix.socket_binds.is_empty() || !pivoting {
+    if unix.shims.is_empty() || !pivoting {
         return;
     }
+    let Some(shim_bin) = unix.afunix_shim_bin.clone() else {
+        eprintln!(
+            "kenneld: warning: kennel grants [unix] sockets but no kennel-afunix-shim binary is \
+             configured (deployment `afunix_shim`); the sockets will be unserved."
+        );
+        return;
+    };
     for (var, val) in &unix.env {
         command.env(var, val);
     }
-    for (_src, target) in &unix.socket_binds {
-        if let Some(parent) = target.parent() {
+    // The proxy `bind(2)`s its listener at each shim path: grant its parent directory
+    // the rights to create the socket node (and clear a stale one), and to read/connect
+    // it. The path itself does not exist at ruleset-build time, so the grant rides the
+    // parent (a Landlock rule covers files created beneath a granted directory).
+    for shim in &unix.shims {
+        if let Some(parent) = shim.shim_path.parent() {
             plan.landlock_fs.push((
                 parent.to_path_buf(),
-                AccessFs::READ_FILE | AccessFs::READ_DIR,
+                AccessFs::READ_FILE
+                    | AccessFs::WRITE_FILE
+                    | AccessFs::READ_DIR
+                    | AccessFs::MAKE_SOCK
+                    | AccessFs::REMOVE_FILE,
             ));
         }
-        plan.landlock_fs
-            .push((target.clone(), AccessFs::READ_FILE | AccessFs::WRITE_FILE));
     }
+    // Bind the proxy binary into the view at its own path (read-only) and grant execute.
     if let Some(view) = plan.view.as_mut() {
-        for (source, target) in &unix.socket_binds {
-            view.binds.push(kennel_spawn::BindMount {
-                source: source.clone(),
-                target: target.clone(),
-                writable: false,
-            });
-        }
+        view.binds.push(kennel_spawn::BindMount {
+            source: shim_bin.clone(),
+            target: shim_bin.clone(),
+            writable: false,
+        });
     }
+    plan.landlock_fs
+        .push((shim_bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    // Register the proxy as a seal-launched aux: `kennel-afunix-shim <device>
+    // <shim-path>=<name> ...`. It runs inside the sealed view, brokers by logical name
+    // (which the facade resolves), and dies with the kennel's PID namespace.
+    let mut args = vec![IN_VIEW_BINDER_DEVICE.to_owned()];
+    for shim in &unix.shims {
+        args.push(format!("{}={}", shim.shim_path.display(), shim.name));
+    }
+    plan.aux.push(kennel_spawn::AuxProcess {
+        path: shim_bin,
+        args,
+    });
 }
 
 /// Map a helper response into the orchestration result: a non-`Ok` status is an
@@ -1226,6 +1275,7 @@ mod tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         }
     }
 
@@ -1673,6 +1723,7 @@ mod tests {
             supplementary_groups: Some(vec![granted_gid]),
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            aux: Vec::new(),
         }
     }
 }

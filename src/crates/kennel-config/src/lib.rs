@@ -154,6 +154,7 @@ struct RawDeployment {
     ssh_reorigin: Option<PathBuf>,
     socks_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
+    afunix_shim: Option<PathBuf>,
 }
 
 impl RawDeployment {
@@ -168,6 +169,7 @@ impl RawDeployment {
             ssh_reorigin: higher.ssh_reorigin.or(self.ssh_reorigin),
             socks_connect: higher.socks_connect.or(self.socks_connect),
             akc: higher.akc.or(self.akc),
+            afunix_shim: higher.afunix_shim.or(self.afunix_shim),
         }
     }
 
@@ -186,6 +188,7 @@ impl RawDeployment {
             ssh_reorigin: self.ssh_reorigin,
             socks_connect: self.socks_connect,
             akc: self.akc,
+            afunix_shim: self.afunix_shim,
         }
     }
 }
@@ -202,6 +205,7 @@ pub struct Deployment {
     ssh_reorigin: Option<PathBuf>,
     socks_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
+    afunix_shim: Option<PathBuf>,
 }
 
 impl Deployment {
@@ -284,6 +288,13 @@ impl Deployment {
     #[must_use]
     pub fn akc(&self) -> PathBuf {
         self.resolve_bin(self.akc.as_deref(), "kennel-akc")
+    }
+
+    /// The in-kennel `AF_UNIX` proxy bound into the view and launched by the seal to
+    /// broker granted sockets through the binder facade (`07-9` §7.9.5).
+    #[must_use]
+    pub fn afunix_shim(&self) -> PathBuf {
+        self.resolve_bin(self.afunix_shim.as_deref(), "kennel-afunix-shim")
     }
 
     /// An explicit override, else `<libexec_dir>/<name>`.

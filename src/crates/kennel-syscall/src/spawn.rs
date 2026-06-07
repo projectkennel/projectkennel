@@ -20,6 +20,7 @@
 //! the call. This matches how every sandbox launcher (bubblewrap, crun, …) uses
 //! a pre-exec hook.
 
+use std::ffi::CStr;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
@@ -107,6 +108,51 @@ where
             // address space, shared by fork).
             unsafe { libc::_exit(code) };
         }
+    }
+}
+
+/// Launch a sealed auxiliary process.
+///
+/// `fork`s; the child `execv`s `path` with `argv` (the full argument vector including
+/// `argv[0]`), the parent returns to continue the seal. The caller passes borrowed
+/// `CStr`s; this builds the `NULL`-terminated C pointer array, so callers need no `libc`
+/// dependency or `unsafe`.
+///
+/// Run inside the seal **after** the namespaces, view, cgroup, and Landlock are in
+/// place, and before the workload `execve`: the aux inherits the fully-confined
+/// environment, joins the kennel's cgroup, and becomes a child of the workload (PID 1
+/// of the kennel's PID namespace), so it dies with the kennel. Used to launch the
+/// in-kennel proxies (e.g. `kennel-afunix-shim`, `07-9` §7.9.5).
+///
+/// # Errors
+///
+/// Returns the OS error if `fork` fails. A child whose `execv` fails `_exit`s `127`;
+/// the parent does not observe that (the aux is fire-and-forget, reaped by the
+/// workload-as-PID-1 / the PID namespace teardown).
+pub fn launch_aux(path: &CStr, argv: &[&CStr]) -> io::Result<()> {
+    let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
+    ptrs.push(std::ptr::null());
+    // SAFETY: `fork` in the single-threaded sealed child. The child path uses only
+    // `execv` (async-signal-safe) and `_exit` on its failure; the parent returns. `ptrs`
+    // is NULL-terminated and points into `argv`'s CStrs, which outlive this call and are
+    // copied into the child by `fork`.
+    //
+    // INVARIANTS UPHELD: exactly one aux is forked per call; the parent's control flow
+    // (the rest of the seal, then the workload execve) is unchanged.
+    //
+    // FAILURE MODE: a fork failure surfaces as Err; an execv failure ends only the aux
+    // child (_exit 127), never the workload.
+    match unsafe { libc::fork() } {
+        -1 => Err(io::Error::last_os_error()),
+        0 => {
+            // SAFETY: execv replaces the child image; ptrs is NULL-terminated. On
+            // failure it returns and we _exit without unwinding kenneld's shared state.
+            unsafe {
+                libc::execv(path.as_ptr(), ptrs.as_ptr());
+                libc::_exit(127);
+            }
+        }
+        _ => Ok(()),
     }
 }
 
