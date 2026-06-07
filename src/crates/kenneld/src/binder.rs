@@ -25,8 +25,8 @@ use std::thread::JoinHandle;
 
 use kennel_audit::{Event, Outcome, Resource, Source, Value, Writer};
 use kennel_binder::client::Incoming;
-use kennel_binder::ctxmgr::ContextManager;
-use kennel_policy::BinderRuntime;
+use kennel_binder::ctxmgr::{ContextManager, Reply};
+use kennel_policy::{BinderRuntime, UnixRuntime};
 
 /// The binder buffer mapping size per instance (ample for service-name transactions).
 const MAP_SIZE: usize = 128 * 1024;
@@ -46,6 +46,9 @@ pub mod verb {
     pub const IS_DECLARED: u32 = 3;
     /// The service names the caller is granted to look up.
     pub const LIST_SERVICES: u32 = 4;
+    /// Connect a granted `AF_UNIX` socket and return the connected fd (af-unix facade,
+    /// `07-9`/`02-7`). Sent with `transact_fd`; the reply carries the socket fd.
+    pub const CONNECT_AFUNIX: u32 = 5;
 }
 
 /// Reply status byte (first byte of the reply payload).
@@ -173,6 +176,7 @@ pub fn spawn(
     device_fd: OwnedFd,
     ctx: u16,
     policy: BinderRuntime,
+    unix: UnixRuntime,
     writer: Arc<Writer>,
 ) -> io::Result<Manager> {
     let cm = ContextManager::new(device_fd, MAP_SIZE)?;
@@ -183,7 +187,7 @@ pub fn spawn(
         .spawn(move || {
             let mut registry = Registry::new(policy);
             let _ = cm.serve(POLL_MS, &worker_stop, |incoming| {
-                handle(&mut registry, incoming, ctx, &writer)
+                handle(&mut registry, &unix, incoming, ctx, &writer)
             });
         })?;
     Ok(Manager {
@@ -192,9 +196,21 @@ pub fn spawn(
     })
 }
 
-/// Decode one node-0 transaction, apply the registry decision, emit an audit event,
-/// and encode the reply payload.
-fn handle(registry: &mut Registry, incoming: &Incoming, ctx: u16, writer: &Writer) -> Vec<u8> {
+/// Decode one node-0 transaction, apply the policy decision, emit an audit event, and
+/// produce the reply (status bytes for the registry verbs, or a connected fd for the
+/// af-unix facade).
+fn handle(
+    registry: &mut Registry,
+    unix: &UnixRuntime,
+    incoming: &Incoming,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
+    // The af-unix facade returns a file descriptor, so it is handled apart from the
+    // byte-reply registry verbs.
+    if incoming.code == verb::CONNECT_AFUNIX {
+        return af_unix_connect(unix, incoming, ctx, writer);
+    }
     let name = decode_name(&incoming.data);
     let (action, outcome, reply) = match (incoming.code, name) {
         (verb::ADD_SERVICE, Some(name)) => {
@@ -232,6 +248,42 @@ fn handle(registry: &mut Registry, incoming: &Incoming, ctx: u16, writer: &Write
             .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
             .field("service", Value::untrusted(service))
             .field("ctx", Value::Uint(u64::from(ctx))),
+    );
+    Reply::Data(reply)
+}
+
+/// The af-unix facade (`07-9`/`02-7`): resolve the requested socket against the
+/// `[[unix.allow]]` grants (by its in-view `shim` path or logical `name`), connect to
+/// the real host socket, and return the connected fd. A non-granted request is denied.
+///
+/// The connect is host-side I/O run inline on the looper for now; moving it to a
+/// worker (so a slow connect cannot head-of-line-block the instance) is the hardening
+/// in `02-7-binder.md` §Threading model.
+fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
+    let requested = decode_name(&incoming.data);
+    let target = requested
+        .as_deref()
+        .and_then(|p| unix.sockets.iter().find(|s| s.shim == p || s.name == p));
+    let (outcome, reply) = target.map_or_else(
+        || (Outcome::Deny, Reply::Data(one(status::DENIED))),
+        |socket| {
+            std::os::unix::net::UnixStream::connect(&socket.real).map_or_else(
+                // Granted but unreachable (the host socket is absent/refused).
+                |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
+                |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
+            )
+        },
+    );
+    writer.emit(
+        &Event::new(
+            "binder.afunix-connect",
+            Resource::Binder,
+            outcome,
+            Source::Kenneld,
+        )
+        .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+        .field("path", Value::untrusted(requested.unwrap_or_default()))
+        .field("ctx", Value::Uint(u64::from(ctx))),
     );
     reply
 }

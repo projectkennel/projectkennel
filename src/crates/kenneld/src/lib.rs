@@ -260,6 +260,9 @@ pub struct EtcSetup {
 pub struct BinderPrep {
     /// The user-defined services this kennel may register / look up.
     pub policy: kennel_policy::BinderRuntime,
+    /// The `[[unix.allow]]` grants the af-unix facade resolves and connects (§7.4 via
+    /// the binder facade). Empty when the kennel grants no `AF_UNIX` socket.
+    pub unix: kennel_policy::UnixRuntime,
     /// The unified audit writer the registry emits through.
     pub writer: std::sync::Arc<kennel_audit::Writer>,
 }
@@ -933,6 +936,7 @@ fn acquire_binder_node0(
                     OwnedFd::from(file),
                     ctx,
                     prep.policy.clone(),
+                    prep.unix.clone(),
                     std::sync::Arc::clone(&prep.writer),
                 );
             }

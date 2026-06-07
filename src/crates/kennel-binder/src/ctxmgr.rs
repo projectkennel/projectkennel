@@ -12,11 +12,21 @@
 //! blocking forever in `BINDER_WRITE_READ`.
 
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::client::{Connection, Incoming};
 use crate::sys;
+
+/// What a node-0 handler returns for one transaction: either reply bytes, or a file
+/// descriptor (the af-unix facade returns a connected socket this way).
+pub enum Reply {
+    /// Reply with these payload bytes.
+    Data(Vec<u8>),
+    /// Reply with this file descriptor (a `BINDER_TYPE_FD` object); the kernel dups
+    /// it into the caller. Dropped after the reply (the caller owns its copy).
+    Fd(OwnedFd),
+}
 
 /// A context-manager endpoint owning node 0 of one binder instance.
 pub struct ContextManager {
@@ -58,15 +68,17 @@ impl ContextManager {
         &self,
         poll_ms: i32,
         stop: &AtomicBool,
-        mut handler: impl FnMut(&Incoming) -> Vec<u8>,
+        mut handler: impl FnMut(&Incoming) -> Reply,
     ) -> io::Result<()> {
         while !stop.load(Ordering::Acquire) {
             if !self.conn.poll(poll_ms)? {
                 continue;
             }
             for incoming in self.conn.recv()? {
-                let reply = handler(&incoming);
-                self.conn.reply_and_free(&incoming, &reply)?;
+                match handler(&incoming) {
+                    Reply::Data(data) => self.conn.reply_and_free(&incoming, &data)?,
+                    Reply::Fd(fd) => self.conn.reply_with_fd(&incoming, fd.as_fd())?,
+                }
             }
         }
         Ok(())

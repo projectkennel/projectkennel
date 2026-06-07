@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use kennel_binder::binderfs;
 use kennel_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
-use kennel_policy::{AuditRuntime, BinderProvideRuntime, BinderRuntime};
+use kennel_policy::{AuditRuntime, BinderProvideRuntime, BinderRuntime, UnixRuntime};
 use kenneld::binder::{self, status, verb};
 
 const MAP_SIZE: usize = 128 * 1024;
@@ -58,7 +58,8 @@ fn run_manager() {
     ));
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open binder device");
-    let manager = binder::spawn(fd, 7, policy, writer).expect("manager: become context manager");
+    let manager = binder::spawn(fd, 7, policy, UnixRuntime::default(), writer)
+        .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");
 
     let stop = dir.with_extension("stop");

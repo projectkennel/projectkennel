@@ -772,6 +772,7 @@ fn run_kennel<P, L>(
         if let Some(writer) = &audit {
             spec.binder = Some(crate::BinderPrep {
                 policy: loaded.binder,
+                unix: loaded.unix.clone(),
                 writer: Arc::clone(writer),
             });
         }
