@@ -1239,8 +1239,22 @@ mod tests {
     }
 
     #[test]
-    fn containerised_service_parses_design_level_container_block() {
-        let pol = parse(CONTAINERISED_SERVICE.as_bytes()).expect("parse");
+    fn design_level_container_block_still_parses() {
+        // [container] is design-level language (parse + compile-warn, no runtime),
+        // in the same family as [dbus]/[x11]/[ptrace]. No shipped template uses it
+        // any more — the containerised-service template runs the service directly
+        // under the kennel — so this exercises the parse path with an inline fixture.
+        let src = "\
+template_name = \"x\"
+[container]
+image = \"docker.io/library/postgres:17\"
+allow_privileged = false
+allow_pid_host = false
+[[container.published_ports]]
+container_port = 5432
+reason = \"Postgres reachable from the workstation\"
+";
+        let pol = parse(src.as_bytes()).expect("parse");
         let c = pol.container.expect("container");
         assert_eq!(c.allow_privileged, Some(false));
         assert_eq!(c.allow_pid_host, Some(false));
@@ -1249,6 +1263,22 @@ mod tests {
             .published_ports
             .iter()
             .all(|p| !is_blank(p.reason.as_deref())));
+    }
+
+    #[test]
+    fn containerised_service_is_an_honest_direct_service() {
+        // The rewritten template carries NO [container] block — the kennel is the
+        // container. It derives base-confined, persists one data dir, and stays
+        // deny-by-default on exec (the leaf adds the server binary).
+        let pol = parse(CONTAINERISED_SERVICE.as_bytes()).expect("parse");
+        assert!(pol.container.is_none(), "no container fiction");
+        let fs = pol.fs.expect("fs");
+        assert!(
+            fs.write
+                .as_deref()
+                .is_some_and(|w| w.iter().any(|p| p.contains("data/<kennel>"))),
+            "persists one data dir"
+        );
     }
 
     #[test]
