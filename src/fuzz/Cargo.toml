@@ -31,3 +31,4 @@ kennel-netproxy = { path = "../crates/kennel-netproxy" }
 kenneld = { path = "../crates/kenneld" }
 kennel-privhelper = { path = "../crates/kennel-privhelper" }
 kennel-policy = { path = "../crates/kennel-policy" }
+kennel-binder = { path = "../crates/kennel-binder" }

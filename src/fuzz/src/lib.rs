@@ -46,6 +46,12 @@ pub fn fuzz_parsers(data: &[u8]) {
     let _ = kenneld::control::Response::decode(data);
     let _ = kennel_privhelper::wire::Request::decode(data);
 
+    // The binder driver-return command stream: the read buffer the kernel fills
+    // carries sender-controlled transaction payloads (07-9/02-7). The decoder must
+    // bounds-check any junk; a single parse plus the transaction-data decode.
+    let _ = kennel_binder::proto::parse(data);
+    let _ = kennel_binder::proto::TransactionData::from_bytes(data);
+
     // The signed-policy reader: an empty trust store means the signature check
     // fails, but the TOML parse + schema-version gate run on the untrusted bytes
     // first, which is the surface we are fuzzing.
