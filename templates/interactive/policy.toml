@@ -73,9 +73,20 @@ allow = [
     # Network + source control (open egress)
     "/usr/bin/curl", "/usr/bin/wget", "/usr/bin/ssh", "/usr/bin/scp",
     "/usr/bin/git", "/usr/lib/git-core/**",
+    # Network inspection. NOTE: a kennel shares the host network namespace
+    # (egress is gated by the cgroup BPF + proxy, not net-ns isolation, §7.3), so
+    # these report the HOST's interfaces/routes/sockets/neighbours — useful for a
+    # human at their own workstation, but a deliberate host-network view. iproute2
+    # (ip/ss) lives in /usr/bin; net-tools (ifconfig/route/arp) in /usr/sbin.
+    "/usr/bin/ip", "/usr/bin/ss", "/usr/bin/netstat",
+    "/usr/sbin/ifconfig", "/usr/sbin/route", "/usr/sbin/arp",
     # A scripting interpreter for quick work
     "/usr/bin/python3",
 ]
+# net-tools (ifconfig/route/arp) live in /usr/sbin; put it on PATH so they resolve
+# by name. Landlock EXECUTE is independent of PATH (the absolute allow entries above
+# are what grant execution); this is purely so `ifconfig` is found.
+path = ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
 
 [lifecycle]
 ttl = "12h"
@@ -84,4 +95,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "ZwUCBHP4pH86dzJG+kby7s1YqGQptII5ACDUWhePU7AlAjODZc+kBRIo3aV/6tDWilIHw1iLnVFJJPMvOLyECg=="
+signature = "/S0uAcxzUD6Hm7stHu6MFM1wqZpgvyDC+IuowAQweBcGDlwQADvpgJ/o+chL9MvkXULGVRpAXj3syHl2mpnSBA=="
