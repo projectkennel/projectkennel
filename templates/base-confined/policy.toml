@@ -59,6 +59,11 @@ read = [
     "/usr/**", "/lib/**", "/lib64/**",
     "/etc/ssl/**", "/etc/pki/**",        # TLS root CAs (vanilla, bound read-only)
     "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    # update-alternatives symlink farm: many tools (awk→gawk, vi, editor, pager,
+    # java, …) are reached via /usr/bin/<tool> -> /etc/alternatives/<tool> -> real
+    # binary. Without /etc/alternatives in the view the symlink dangles and the tool
+    # is "command not found". It is non-sensitive (symlinks only), bound read-only.
+    "/etc/alternatives/**",
     # The libc/NSS files are SYNTHESISED per-kennel (scrubbed of host specifics),
     # not bound from the host: /etc/{hosts,resolv.conf,nsswitch.conf,services,
     # protocols,passwd,group,host.conf}. See kenneld::etc and §7.2.5.
@@ -240,7 +245,8 @@ deny = [
 #   nproc  = "512"
 #   core   = "0"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "wU1WxDRlRuqBZ3VEyUyDdFHhZty/9SbIYrIpM4u4JUTo2m1IVsvX9xxahaoNi6U/t88VC22LbUNQdIRJ9xhVAQ=="
+signature = "BLkI31d53tQklXWZbmDR8GYvnban+sUlgEpcTaQxmlypjOWxqfPsCQ98BDuISQUz3tBCaYfUMb56BAcfcyA2Bg=="

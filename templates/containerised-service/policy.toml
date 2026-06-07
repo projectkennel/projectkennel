@@ -56,6 +56,7 @@ read = [
     "/usr/**", "/lib/**", "/lib64/**",
     "/etc/ssl/**", "/etc/pki/**",
     "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    "/etc/alternatives/**",   # update-alternatives symlink farm (else awk/vi/… dangle)
     "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/version",
     "/sys/devices/system/cpu/**",
 ]
@@ -94,7 +95,8 @@ nproc = "512"
 [lifecycle]
 ttl_action = "warn"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "7ESs7y8a9099loZBhOIl8o9WdGxCXb5Kt2K3IklvF7F0FFP7jgne8foIwtMQatQyjXs1Cqb0kO8gX4UI3NtXBQ=="
+signature = "xi5Iun8dYX01LOozCIlYpR3WaUX0jjauahrUBXO5ws2gwJwyHY1vSnXU6LdkO6JoTgFIAWhc+YbsByXw0kfwBw=="

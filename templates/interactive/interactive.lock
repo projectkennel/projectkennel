@@ -1,0 +1,5 @@
+[[locked]]
+name = "base-confined"
+version = "v1"
+signing_key_id = "kennel-maint-2026"
+signature = "wU1WxDRlRuqBZ3VEyUyDdFHhZty/9SbIYrIpM4u4JUTo2m1IVsvX9xxahaoNi6U/t88VC22LbUNQdIRJ9xhVAQ=="

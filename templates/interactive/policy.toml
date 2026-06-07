@@ -34,6 +34,7 @@ read = [
     "/usr/**", "/lib/**", "/lib64/**",
     "/etc/ssl/**", "/etc/pki/**",
     "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    "/etc/alternatives/**",   # awk→gawk, vi, editor, pager … symlink farm (else dangles)
     "/proc/**",
     "/sys/devices/system/cpu/**",
 ]
@@ -92,7 +93,8 @@ path = ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
 ttl = "12h"
 ttl_action = "warn"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "/S0uAcxzUD6Hm7stHu6MFM1wqZpgvyDC+IuowAQweBcGDlwQADvpgJ/o+chL9MvkXULGVRpAXj3syHl2mpnSBA=="
+signature = "BPO+kNoDjuouqTCyKIg5BIMAXWR5Gow/ur0wkxwy5JyoEWXFRnG3z97n1nNZVHC3rr8Y/i4x3k3WkwpQvHYoDg=="
