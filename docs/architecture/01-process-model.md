@@ -10,7 +10,7 @@ Project Kennel ships the following binaries.
 
 ### `kennel` (the CLI)
 
-The user's entry point. Stateless. For `run`, it asks `kenneld` to start the kennel, passing the terminal's three stdio file descriptors over `SCM_RIGHTS`; kenneld performs the spawn sequence and attaches the workload to those descriptors. The CLI blocks until the workload exits and returns its exit code. For `compile`, `validate`, and `sign` it works purely on local policy files and never contacts kenneld.
+The user's entry point. Stateless. For `run`, it asks `kenneld` to start the kennel and passes fds over `SCM_RIGHTS`: three stdio descriptors for a non-interactive run, or a single socket for an interactive one (over which the spawn seal returns a controlling pty allocated in the kennel's own devpts, which the CLI proxies — §7.7.5a). kenneld performs the spawn sequence. The CLI blocks until the workload exits and returns its exit code. For `compile`, `validate`, and `sign` it works purely on local policy files and never contacts kenneld.
 
 The workload is a child of kenneld, not of the CLI. Signal handling is the CLI's job: `ctrl-C` reaches the CLI, which the user perceives as closing the kennel; the CLI blocks for the workload's lifetime and exits with its code. Operationally the CLI behaves like any other command the user runs.
 
@@ -23,7 +23,7 @@ Per-user daemon, socket-activated by `systemd --user` on the first `kennel run` 
 Responsibilities:
 
 - **Kennel lifecycle.** Each `kennel run` is one kennel. kenneld brings it up — allocates a context byte, creates the per-kennel cgroup in its delegated subtree, invokes the privhelper for the loopback addresses and the egress-BPF attach, writes the proxy config, launches `kennel-netproxy`, performs the spawn sequence — and tears it down immediately when the workload exits. There is no grace period, no draining state, and no per-kennel reference counting; one workload is one kennel, with its own proxy, addresses, cgroup, and constructed view.
-- **Spawning the workload.** kenneld runs the spawn sequence (`kennel-spawn`) on the CLI's behalf, attaching the workload to the stdio descriptors the CLI passed over `SCM_RIGHTS`.
+- **Spawning the workload.** kenneld runs the spawn sequence (`kennel-spawn`) on the CLI's behalf, attaching the workload to the stdio descriptors the CLI passed over `SCM_RIGHTS` — or, for an interactive run, to a controlling pty the seal allocates in the kennel's own devpts and whose master it returns to the CLI (§7.7.5a).
 - **Audit drain.** The BPF ringbuf reader drains kernel audit events; per-kennel JSONL files live under `~/.local/state/kennel/<kennel>/` (the egress proxy writes the network log, kenneld wires its path).
 - **Privhelper mediation.** kenneld issues the privhelper invocations (loopback address add/del, egress-BPF setup, and the gid-map write when a group is granted) during a kennel's bring-up and teardown. kenneld creates and removes the cgroup itself.
 
@@ -187,7 +187,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
 
 Notes on the diagram:
 
-- The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with the workload's stdio fds over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-4-ipc.md`.
+- The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with stdio fds, or the interactive pty-return socket, over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-4-ipc.md`.
 - The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is the kennel's primary loopback (`$KENNEL_SOCKS_PROXY` — host offset 1 in its `/28`, port 1080), never the control socket.
 - SSH egress is re-originated through the per-user `kennel-sshd` bastion (§7.8): the workload's `ssh` reaches it via `kennel-socks-connect` → the egress proxy, authenticating with a disposable synthetic key in its constructed `~/.ssh`. The workload holds no real key and no agent socket; the bastion uses the user's host-side key.
 - BPF programs do not push events to userspace; they write into a ringbuf. A reader in kenneld drains the ringbuf and writes JSONL events to the audit directory.

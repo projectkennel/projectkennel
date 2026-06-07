@@ -222,7 +222,7 @@ The minimum viable set of templates, each maintained as a first-class artefact:
 
 | Template | Purpose | Defends | Notable residuals |
 |---|---|---|---|
-| `base-confined` | The root of all confined templates. Minimal: `no_new_privs`, deny setuid, deny sudo, no display, no dbus, no abstract unix sockets, deny RFC1918 and cloud metadata, empty `fs.read`/`fs.write`. | T3.1, T2.7, baseline against T1.6 | Cannot be used directly (no fs scope) |
+| `base-confined` | The root of all confined templates. Deny-by-default across exec/fs/net: `no_new_privs`, deny setuid/setgid/setcap, empty `exec.allow` (runs nothing), no abstract unix sockets, the cloud-metadata + link-local invariant denies (RFC1918 stays reachable), a system read baseline + the compile-time `[lib]` closure filter. | T3.1, T2.7, baseline against T1.6 | Cannot be used directly (no exec/project scope) |
 | `ai-coding-strict` | AI agent on a single project. Worked example in `TEMPLATE-ai-coding-strict.md`. | T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7 | T1.8 (exfil via API); T2.2 (semantic regressions in code) |
 | `ai-coding-permissive` | Same shape, broader fs scope and open-net audit mode. | T1.1 partial | T1.8; weaker T2.1; documented as weaker |
 | `untrusted-build` | Build script from untrusted source. `net.mode = "none"` during install. | T1.2 strong, T1.5 strong | Needs offline mirrors for legitimate dependencies |
@@ -230,8 +230,8 @@ The minimum viable set of templates, each maintained as a first-class artefact:
 | `package-install` | Install from specific registries. Time-bounded. | T1.2 partial, T1.9 partial | TTL is the primary defence against T1.10 |
 | `dev-server` | Run a local dev server. Grants specific host loopback services. | T1.1, T1.3 | Explicit T1.6 exposures for granted services |
 | `docs-and-research` | AI agent doing web research. `net.mode = "open"` with heavy audit. | T1.1 | T1.9, T1.8; weaker than strict |
-| `containerised-service` | Long-lived containerised service (Postgres, Redis, etc). Per-kennel loopback for published ports. | T3.3, T3.4, T1.1 partial | T3.2 (container escape) is in-scope but cannot be fully mitigated; T3.5 requires `userns-remap` |
-| `containerised-tool` | Short-lived containers running build tools, linters, formatters. | T1.2, T3.3, T3.4 | Strict outbound; no published ports by default |
+| `containerised-service` | Long-lived local service (Postgres, Redis, etc) confined **directly by the kennel** — no container runtime; the kennel *is* the container. Per-kennel loopback for the service's port. | T3.3, T1.1 partial | Secrets via a run-time store; kernel/Landlock CVEs |
+| `containerised-tool` | Short-lived build tools, linters, formatters under the same direct-kennel confinement. | T1.2, T3.3 | Strict outbound; no published ports by default |
 | `ml-coding` | ML workflow with GPU. | T1.1 with GPU caveat | GPU driver surface in scope; documented |
 | `x11-isolated-dev` | Workflow needing X11. Xwayland-isolated on Wayland hosts, Xephyr-isolated on X11. | T2.6, T2.7 | Clipboard bridging off by default |
 | `mcp-server` | MCP server invoked by an agent in another kennel. | T3.6, T1.1 | Inherits parent kennel's policy by default |
@@ -245,9 +245,10 @@ The set is not closed. Organisations write their own templates (§5.15). New tem
 Templates can extend other templates. `ai-coding-strict` is defined as deltas from `base-confined`:
 
 ```
-base-confined          ← minimal: no_new_privs, deny setuid, deny sudo,
-                         deny X11, deny dbus, deny abstract unix sockets,
-                         deny RFC1918 and cloud metadata, fs scope to nothing.
+base-confined          ← minimal: no_new_privs, deny setuid, deny-by-default exec
+                         (empty exec.allow), deny abstract unix sockets, the
+                         cloud-metadata + link-local invariant denies (RFC1918
+                         stays reachable), a read baseline + the [lib] closure.
                          (Every confined template inherits from this.)
   ↓
 ai-coding-strict       ← adds: project-tree fs scope (in user delta),
@@ -404,6 +405,18 @@ Signing keys live in the trust store: `~/.config/kennel/keys/` for user-installe
 - Organisations install their own keys and sign their own templates and fragments. Organisations can require, via system-wide configuration, that policies derive only from templates and includes signed by specific keys — an attacker who installs a malicious template signed by an untrusted key cannot have it loaded.
 
 Project Kennel refuses to load any template or include whose signature is invalid. It warns but does not refuse on *missing* signatures in development mode (local unsigned templates are part of the authoring workflow); production deployments set a settings flag, pushed to managed workstations, that turns missing-signature into a hard refusal. CI verifies that every committed template and fragment version carries a valid signature and that its lockfile entry matches.
+
+### The composable fragment catalogue — roadmap
+
+The include *mechanism* above is built and exercised (resolution, signature verification, additive `[[*.add]]`/invariant deltas, lockfile byte-pinning). What is **not yet shipped** is a curated *catalogue* of à-la-carte fragments — the reusable capability bundles a leaf or template can `include` instead of hand-listing. The intended first set:
+
+- **`lang-python`** — `python3` + the stdlib's runtime libraries on `exec.allow`, `pip`'s cache dir writable, PyPI on the egress allowlist.
+- **`lang-node`** — `node`/`npm` on `exec.allow`, the npm cache writable, the registry on the egress allowlist.
+- **`toolchain-c`** — `cc`/`ld`/`make` and the build-essential set.
+- **`net-permissive`** — flips to `net.mode = "open"` (still under the invariant denies) for a workflow a human drives.
+- **`vcs-git`** — `git` + `git-core` helpers, the common host config bound read-only.
+
+Each is a signed, version-pinned fragment in the repository, composed additively so unrelated bundles combine without ordering ambiguity (a leaf is then `template_base = "base-confined@v1"` + `include = ["lang-python@v1", "vcs-git@v1"]`). The design constraint is already settled by §5.10: fragments are additive-only — anything that must *remove* or *override* belongs in the inheritance chain, not a fragment. The work owed is authoring, threat-tagging, signing, and per-fragment `tests/allow.sh`/`deny.sh`, not new mechanism. Tracked in `docs/architecture/08-as-built-notes.md` §8.1.
 
 ## 5.11 Versioning and upgrade
 

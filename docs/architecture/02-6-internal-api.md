@@ -95,7 +95,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Purpose.** One of the two crates permitted to contain `unsafe` blocks (the other is `kennel-bpf`). Wraps raw Linux syscalls, namespace operations, Landlock primitives, seccomp installation, and capability manipulation. (The `bpf(2)` FFI lives in `kennel-bpf`, not here.)
 
-**Public surface.** A module per concern, each a safe wrapper over the raw syscalls: `landlock` (the `Ruleset` builder + `Scope`/`AccessFs`/`AccessNet`), `namespace` (the userns/mount/PID unshare and `establish_identity_userns`), `mount`, `seccomp`, `process` (`set_no_new_privs`), `path` (canonical-path resolution), `netlink` (the privhelper's address ops), `scm` (`SCM_RIGHTS`), `signal`, `spawn` (`spawn_sealed`, `fork_into_pid1`), `handshake`, `listenfd`, `unistd`, and — for `kennel-audit` — `journal` (journald FFI) and `random` (UUIDv7 randomness).
+**Public surface.** A module per concern, each a safe wrapper over the raw syscalls: `landlock` (the `Ruleset` builder + `Scope`/`AccessFs`/`AccessNet`), `namespace` (the userns/mount/PID unshare and `establish_identity_userns`), `mount`, `seccomp`, `process` (`set_no_new_privs`), `path` (canonical-path resolution), `netlink` (the privhelper's address ops), `scm` (`SCM_RIGHTS`), `pty` (controlling-terminal allocation + the in-view interactive pty hand-off, design §7.7.5a), `signal`, `spawn` (`spawn_sealed`, `fork_into_pid1`), `handshake`, `listenfd`, `unistd`, and — for `kennel-audit` — `journal` (journald FFI) and `random` (UUIDv7 randomness).
 
 **Depends on.** `nix`, `libc`. (`kennel-bpf` builds its `bpf(2)` FFI on `libc` + `object` directly, not on a `-sys` crate.)
 

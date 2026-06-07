@@ -90,7 +90,7 @@ Fields that name filesystem paths use the following syntax:
 
 Tilde expansion does not happen until signature verification of the file containing the tilde-path completes. An attacker-controlled template cannot use `~/.ssh/...` to refer to the operator's keys at parse time.
 
-Paths in `fs.read`, `fs.write`, `fs.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax. Paths in `exec.allow` and `exec.deny` are absolute only — no `~` expansion, no glob `**` (specific paths or `glob` patterns within a directory only, to avoid inadvertent broad grants).
+Paths in `fs.read`, `fs.write`, `fs.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax. Paths in `exec.allow` (there is no `exec.deny` — execution is deny-by-default, §7.1.4) are absolute only — no `~` expansion — but do accept globs including `**` (e.g. `/usr/lib/git-core/**`); a bare `**`/`/**` is the explicit `permissive-exec` opt-out and is the one case the compiler warns about.
 
 ---
 
@@ -219,7 +219,7 @@ The current invariants (mechanism details in design doc §12):
 - `exec.deny_setuid = true`, `exec.deny_setgid = true`, `exec.deny_setcap = true`, `exec.deny_writable = true`. Cannot be set false.
 - `fs.home.shadow = true`. The shim is mandatory. `$HOME` is `/home/<user>` — the masked `[identity].user`, default `kennel`.
 - `[net.mode]` may be `"none"`, `"constrained"`, or `"open"`; it may not be any other value. `"none"` and `"constrained"` both translate to the settled `NetMode::Constrained` (proxy-only egress; `"none"` is "constrained with an empty allowlist"); an absent `[net.mode]` is accepted and also translates to `Constrained`. `"open"` is the permissive mode for `ai-coding-permissive`-style templates. The runtime re-assert only checks the settled mode is `Constrained` or `Open`; the "open only for permissive templates" guidance is a convention, not a validator-enforced rule.
-- `[net.deny.invariant]` entries (cloud metadata, link-local, RFC1918) are present and cannot be removed by any delta.
+- `[net.deny.invariant]` entries (cloud metadata, link-local) are present and cannot be removed by any delta. (RFC1918 is *not* invariant — design §7.3 — so it is not asserted here.)
 - `[proc.visibility] = "self"`.
 - `[fs.dev.allow]` is the default-deny list documented in design §7.7; user deltas may not add device files outside the framework-known safe set without an explicit `framework_override` flag (which is itself an invariant override and requires a separate signed envelope; see `04-trust-boundaries.md`).
 
@@ -329,7 +329,12 @@ allowlist), `net.proxy` (`offset`, `port`), and the bind-port policy
 (`bind_port_min` + `bind_allowed_ports`, §7.3.7); the settled fs section adds
 `fs.tmp` (`private`, `size_mib`, `mode`) and `fs.dev.allow`, and the proc section
 adds `proc.hidepid`. Settled `FsPolicy` uses flat field names (`home_shadow`,
-`home_persist`, `home_readonly`), not nested `fs.home.*`.
+`home_persist`, `home_readonly`), not nested `fs.home.*`. The settled exec section
+carries `exec.libraries` — the exact shared-library closure of the `exec.allow`
+binaries, resolved at compile time (ELF `PT_INTERP` + transitive `DT_NEEDED`) and
+filtered through the source-only `[lib]` allow/deny globs (§7.1.7). The spawn grants
+`FS_EXECUTE` on exactly that settled list; the `[lib]` source section itself folds
+into it and is absent from the settled form.
 
 The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
 
