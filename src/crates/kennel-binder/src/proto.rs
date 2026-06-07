@@ -16,14 +16,14 @@
 /// `BR_*` constants below match the kernel's command codes exactly.
 const fn ioc(dir: u32, ty: u8, nr: u32, size: u32) -> u32 {
     // dir<<30 | size<<16 | type<<8 | nr  (sizebits=14)
-    (dir << 30) | ((size & 0x3fff) << 16) | ((ty as u32) << 8) | nr
+    (dir << 30) | ((size & 0x3fff) << 16) | (u32::from_le_bytes([ty, 0, 0, 0]) << 8) | nr
 }
 
 const DIR_NONE: u32 = 0;
 const DIR_WRITE: u32 = 1;
 const DIR_READ: u32 = 2;
 
-/// Size of `struct binder_transaction_data` (the `BC_/BR_TRANSACTION` payload).
+/// Size of `struct binder_transaction_data` (the `(BC|BR)_TRANSACTION` payload).
 pub const TRANSACTION_DATA_SIZE: usize = 64;
 /// Size of `struct binder_ptr_cookie` (`{ binder_uintptr_t ptr; binder_uintptr_t cookie; }`).
 pub const PTR_COOKIE_SIZE: usize = 16;
@@ -32,37 +32,42 @@ pub const PTR_COOKIE_SIZE: usize = 16;
 /// 64-bit kernel).
 pub const PROTOCOL_VERSION: i32 = 8;
 
-// BC_* — driver command protocol ('c'). Issued by us into the write buffer.
 /// `BC_TRANSACTION`: begin an outbound transaction.
-pub const BC_TRANSACTION: u32 = ioc(DIR_WRITE, b'c', 0, TRANSACTION_DATA_SIZE as u32);
+pub const BC_TRANSACTION: u32 = ioc(DIR_WRITE, b'c', 0, 64);
 /// `BC_REPLY`: reply to a received `BR_TRANSACTION`.
-pub const BC_REPLY: u32 = ioc(DIR_WRITE, b'c', 1, TRANSACTION_DATA_SIZE as u32);
+pub const BC_REPLY: u32 = ioc(DIR_WRITE, b'c', 1, 64);
 /// `BC_FREE_BUFFER`: release a transaction buffer the kernel allocated in our map.
 pub const BC_FREE_BUFFER: u32 = ioc(DIR_WRITE, b'c', 3, 8);
-/// `BC_INCREFS` / `BC_ACQUIRE` / `BC_RELEASE` / `BC_DECREFS`: handle refcounting.
+/// `BC_INCREFS`: take a weak reference on a remote handle.
 pub const BC_INCREFS: u32 = ioc(DIR_WRITE, b'c', 4, 4);
+/// `BC_ACQUIRE`: take a strong reference on a remote handle.
 pub const BC_ACQUIRE: u32 = ioc(DIR_WRITE, b'c', 5, 4);
+/// `BC_RELEASE`: drop a strong reference on a remote handle.
 pub const BC_RELEASE: u32 = ioc(DIR_WRITE, b'c', 6, 4);
+/// `BC_DECREFS`: drop a weak reference on a remote handle.
 pub const BC_DECREFS: u32 = ioc(DIR_WRITE, b'c', 7, 4);
-/// `BC_INCREFS_DONE` / `BC_ACQUIRE_DONE`: ack a kernel `BR_INCREFS`/`BR_ACQUIRE`.
-pub const BC_INCREFS_DONE: u32 = ioc(DIR_WRITE, b'c', 8, PTR_COOKIE_SIZE as u32);
-pub const BC_ACQUIRE_DONE: u32 = ioc(DIR_WRITE, b'c', 9, PTR_COOKIE_SIZE as u32);
-/// `BC_REGISTER_LOOPER` / `BC_ENTER_LOOPER` / `BC_EXIT_LOOPER`: looper lifecycle.
+/// `BC_INCREFS_DONE`: ack a kernel `BR_INCREFS` on a node we own.
+pub const BC_INCREFS_DONE: u32 = ioc(DIR_WRITE, b'c', 8, 16);
+/// `BC_ACQUIRE_DONE`: ack a kernel `BR_ACQUIRE` on a node we own.
+pub const BC_ACQUIRE_DONE: u32 = ioc(DIR_WRITE, b'c', 9, 16);
+/// `BC_REGISTER_LOOPER`: register a kernel-requested looper thread.
 pub const BC_REGISTER_LOOPER: u32 = ioc(DIR_NONE, b'c', 11, 0);
+/// `BC_ENTER_LOOPER`: announce a self-started looper thread.
 pub const BC_ENTER_LOOPER: u32 = ioc(DIR_NONE, b'c', 12, 0);
+/// `BC_EXIT_LOOPER`: announce a looper thread is leaving the pool.
 pub const BC_EXIT_LOOPER: u32 = ioc(DIR_NONE, b'c', 13, 0);
 
-// BR_* — driver return protocol ('r'). Received by us from the read buffer.
+// BR_* — driver return protocol ('r'), received from the read buffer.
 const BR_ERROR: u32 = ioc(DIR_READ, b'r', 0, 4);
 const BR_OK: u32 = ioc(DIR_NONE, b'r', 1, 0);
-const BR_TRANSACTION: u32 = ioc(DIR_READ, b'r', 2, TRANSACTION_DATA_SIZE as u32);
-const BR_REPLY: u32 = ioc(DIR_READ, b'r', 3, TRANSACTION_DATA_SIZE as u32);
+const BR_TRANSACTION: u32 = ioc(DIR_READ, b'r', 2, 64);
+const BR_REPLY: u32 = ioc(DIR_READ, b'r', 3, 64);
 const BR_DEAD_REPLY: u32 = ioc(DIR_NONE, b'r', 5, 0);
 const BR_TRANSACTION_COMPLETE: u32 = ioc(DIR_NONE, b'r', 6, 0);
-const BR_INCREFS: u32 = ioc(DIR_READ, b'r', 7, PTR_COOKIE_SIZE as u32);
-const BR_ACQUIRE: u32 = ioc(DIR_READ, b'r', 8, PTR_COOKIE_SIZE as u32);
-const BR_RELEASE: u32 = ioc(DIR_READ, b'r', 9, PTR_COOKIE_SIZE as u32);
-const BR_DECREFS: u32 = ioc(DIR_READ, b'r', 10, PTR_COOKIE_SIZE as u32);
+const BR_INCREFS: u32 = ioc(DIR_READ, b'r', 7, 16);
+const BR_ACQUIRE: u32 = ioc(DIR_READ, b'r', 8, 16);
+const BR_RELEASE: u32 = ioc(DIR_READ, b'r', 9, 16);
+const BR_DECREFS: u32 = ioc(DIR_READ, b'r', 10, 16);
 const BR_NOOP: u32 = ioc(DIR_NONE, b'r', 12, 0);
 const BR_SPAWN_LOOPER: u32 = ioc(DIR_NONE, b'r', 13, 0);
 const BR_FINISHED: u32 = ioc(DIR_NONE, b'r', 14, 0);
@@ -74,9 +79,11 @@ pub const TF_ONE_WAY: u32 = 0x01;
 /// Transaction flag: replies may carry file descriptors (`TF_ACCEPT_FDS`).
 pub const TF_ACCEPT_FDS: u32 = 0x10;
 
-/// A `struct binder_transaction_data`, the payload of a `(BC|BR)_TRANSACTION` /
-/// `_REPLY`. Held as plain fields (not a cast `repr(C)`) so encode/decode is
-/// alignment-safe over the kernel's (4-byte-aligned) read buffer.
+/// A `struct binder_transaction_data`.
+///
+/// The payload of a `(BC|BR)_TRANSACTION` / `_REPLY`. Held as plain fields (not a
+/// cast `repr(C)`) so encode/decode is alignment-safe over the kernel's
+/// (4-byte-aligned) read buffer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransactionData {
     /// `target` union: the destination handle (low 32 bits) for `BC_TRANSACTION`;
@@ -107,19 +114,56 @@ impl TransactionData {
     /// Serialise to the 64-byte `struct binder_transaction_data` layout.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; TRANSACTION_DATA_SIZE] {
-        todo!("proto encode")
+        let parts = [
+            self.target.to_ne_bytes(),
+            self.cookie.to_ne_bytes(),
+            // code + flags pack into the next 8 bytes.
+            pack_u32_pair(self.code, self.flags),
+            // sender_pid (i32) + sender_euid (u32).
+            pack_u32_pair(self.sender_pid.to_ne_bytes_u32(), self.sender_euid),
+            self.data_size.to_ne_bytes(),
+            self.offsets_size.to_ne_bytes(),
+            self.buffer.to_ne_bytes(),
+            self.offsets.to_ne_bytes(),
+        ];
+        let mut out = [0u8; TRANSACTION_DATA_SIZE];
+        for (slot, byte) in out.iter_mut().zip(parts.into_iter().flatten()) {
+            *slot = byte;
+        }
+        out
     }
 
     /// Parse from the 64-byte layout. `None` if `b` is shorter than the struct.
     ///
     /// # Errors
     ///
-    /// Returns `None` (not an error type — this is a decode predicate) when the
-    /// slice is too short to hold a `binder_transaction_data`.
+    /// Returns `None` (a decode predicate, not an error type) when the slice is
+    /// too short to hold a `binder_transaction_data`.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        let _ = b;
-        todo!("proto decode")
+        let mut r = Reader::new(b);
+        let target = r.u64()?;
+        let cookie = r.u64()?;
+        let code = r.u32()?;
+        let flags = r.u32()?;
+        let sender_pid = r.i32()?;
+        let sender_euid = r.u32()?;
+        let data_size = r.u64()?;
+        let offsets_size = r.u64()?;
+        let buffer = r.u64()?;
+        let offsets = r.u64()?;
+        Some(Self {
+            target,
+            cookie,
+            code,
+            flags,
+            sender_pid,
+            sender_euid,
+            data_size,
+            offsets_size,
+            buffer,
+            offsets,
+        })
     }
 }
 
@@ -136,12 +180,35 @@ pub enum Br {
     Noop,
     /// The kernel suggests we spawn another looper thread.
     SpawnLooper,
-    /// Refcount management on a local node we own.
-    IncRefs { ptr: u64, cookie: u64 },
-    Acquire { ptr: u64, cookie: u64 },
-    Release { ptr: u64, cookie: u64 },
-    DecRefs { ptr: u64, cookie: u64 },
-    /// The transaction failed (policy refusal upstream, or a malformed request).
+    /// Take a weak reference on a local node we own.
+    IncRefs {
+        /// The node's userspace pointer.
+        ptr: u64,
+        /// The node's cookie.
+        cookie: u64,
+    },
+    /// Take a strong reference on a local node we own.
+    Acquire {
+        /// The node's userspace pointer.
+        ptr: u64,
+        /// The node's cookie.
+        cookie: u64,
+    },
+    /// Drop a strong reference on a local node we own.
+    Release {
+        /// The node's userspace pointer.
+        ptr: u64,
+        /// The node's cookie.
+        cookie: u64,
+    },
+    /// Drop a weak reference on a local node we own.
+    DecRefs {
+        /// The node's userspace pointer.
+        ptr: u64,
+        /// The node's cookie.
+        cookie: u64,
+    },
+    /// The transaction failed (a policy refusal upstream, or a malformed request).
     Failed,
     /// The target node is dead.
     Dead,
@@ -157,43 +224,124 @@ pub enum Br {
 /// number of bytes consumed (the `u32` code plus its fixed payload).
 ///
 /// Returns `None` if `buf` is empty, too short for the command's payload, or
-/// carries a command code we do not recognise (whose payload length we cannot
-/// know to skip safely) — the caller treats that as end-of-buffer / protocol stop.
+/// carries a command code we do not recognise (whose payload length we cannot know
+/// to skip safely) — the caller treats that as end-of-buffer / a protocol stop.
 #[must_use]
 pub fn parse(buf: &[u8]) -> Option<(Br, usize)> {
-    let _ = buf;
-    todo!("proto parse")
+    let mut r = Reader::new(buf);
+    let code = r.u32()?;
+    let br = match code {
+        BR_NOOP => Br::Noop,
+        BR_TRANSACTION_COMPLETE => Br::TransactionComplete,
+        BR_SPAWN_LOOPER => Br::SpawnLooper,
+        BR_FAILED_REPLY => Br::Failed,
+        BR_DEAD_REPLY => Br::Dead,
+        BR_OK | BR_FINISHED => Br::Other(code),
+        BR_TRANSACTION => Br::Transaction(read_td(&mut r)?),
+        BR_REPLY => Br::Reply(read_td(&mut r)?),
+        BR_INCREFS => ptr_cookie(&mut r, |ptr, cookie| Br::IncRefs { ptr, cookie })?,
+        BR_ACQUIRE => ptr_cookie(&mut r, |ptr, cookie| Br::Acquire { ptr, cookie })?,
+        BR_RELEASE => ptr_cookie(&mut r, |ptr, cookie| Br::Release { ptr, cookie })?,
+        BR_DECREFS => ptr_cookie(&mut r, |ptr, cookie| Br::DecRefs { ptr, cookie })?,
+        BR_DEAD_BINDER => Br::DeadBinder(r.u64()?),
+        BR_ERROR => Br::Error(r.i32()?),
+        _ => return None,
+    };
+    Some((br, r.pos))
 }
 
 /// Append a `BC_TRANSACTION` (or `BC_REPLY` when `reply`) and its
 /// `binder_transaction_data` to a write buffer.
 pub fn write_transaction(out: &mut Vec<u8>, reply: bool, td: &TransactionData) {
-    let _ = (out, reply, td);
-    todo!("proto write_transaction")
+    let cmd = if reply { BC_REPLY } else { BC_TRANSACTION };
+    out.extend_from_slice(&cmd.to_ne_bytes());
+    out.extend_from_slice(&td.to_bytes());
 }
 
 /// Append a payload-less `BC_*` command (e.g. `BC_ENTER_LOOPER`).
 pub fn write_cmd(out: &mut Vec<u8>, cmd: u32) {
-    let _ = (out, cmd);
-    todo!("proto write_cmd")
+    out.extend_from_slice(&cmd.to_ne_bytes());
 }
 
 /// Append a `BC_FREE_BUFFER` releasing the transaction buffer at `buffer_ptr`.
 pub fn write_free_buffer(out: &mut Vec<u8>, buffer_ptr: u64) {
-    let _ = (out, buffer_ptr);
-    todo!("proto write_free_buffer")
+    out.extend_from_slice(&BC_FREE_BUFFER.to_ne_bytes());
+    out.extend_from_slice(&buffer_ptr.to_ne_bytes());
 }
 
 /// Append a handle-refcount `BC_*` (`BC_INCREFS`/`ACQUIRE`/`RELEASE`/`DECREFS`).
 pub fn write_ref(out: &mut Vec<u8>, cmd: u32, handle: u32) {
-    let _ = (out, cmd, handle);
-    todo!("proto write_ref")
+    out.extend_from_slice(&cmd.to_ne_bytes());
+    out.extend_from_slice(&handle.to_ne_bytes());
 }
 
 /// Append a `{ptr, cookie}` `BC_*` (`BC_INCREFS_DONE`/`BC_ACQUIRE_DONE`).
 pub fn write_ptr_cookie(out: &mut Vec<u8>, cmd: u32, ptr: u64, cookie: u64) {
-    let _ = (out, cmd, ptr, cookie);
-    todo!("proto write_ptr_cookie")
+    out.extend_from_slice(&cmd.to_ne_bytes());
+    out.extend_from_slice(&ptr.to_ne_bytes());
+    out.extend_from_slice(&cookie.to_ne_bytes());
+}
+
+/// Read a `binder_transaction_data` from the reader, advancing past it.
+fn read_td(r: &mut Reader<'_>) -> Option<TransactionData> {
+    let bytes = r.take(TRANSACTION_DATA_SIZE)?;
+    TransactionData::from_bytes(bytes)
+}
+
+/// Read a `{ptr, cookie}` pair and map it through `f`, advancing the reader.
+fn ptr_cookie(r: &mut Reader<'_>, f: impl FnOnce(u64, u64) -> Br) -> Option<Br> {
+    let ptr = r.u64()?;
+    let cookie = r.u64()?;
+    Some(f(ptr, cookie))
+}
+
+/// Pack two little-/native-order `u32`s into the next 8 bytes in field order.
+const fn pack_u32_pair(a: u32, b: u32) -> [u8; 8] {
+    let lo = a.to_ne_bytes();
+    let hi = b.to_ne_bytes();
+    [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]]
+}
+
+/// `i32`-as-`u32` reinterpretation for the `sender_pid` slot, preserving bytes.
+trait ToNeBytesU32 {
+    fn to_ne_bytes_u32(self) -> u32;
+}
+impl ToNeBytesU32 for i32 {
+    fn to_ne_bytes_u32(self) -> u32 {
+        u32::from_ne_bytes(self.to_ne_bytes())
+    }
+}
+
+/// A bounds-checked sequential reader over a byte slice.
+struct Reader<'a> {
+    b: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    const fn new(b: &'a [u8]) -> Self {
+        Self { b, pos: 0 }
+    }
+
+    /// Take the next `n` bytes, advancing the cursor; `None` if out of range.
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let slice = self.b.get(self.pos..end)?;
+        self.pos = end;
+        Some(slice)
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_ne_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn i32(&mut self) -> Option<i32> {
+        Some(i32::from_ne_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_ne_bytes(self.take(8)?.try_into().ok()?))
+    }
 }
 
 #[cfg(test)]
@@ -202,12 +350,11 @@ mod tests {
 
     #[test]
     fn command_codes_match_the_ioc_encoding() {
-        // Cross-check a few against the _IOC layout the kernel uses, and a literal.
         assert_eq!(BC_TRANSACTION, ioc(DIR_WRITE, b'c', 0, 64));
         assert_eq!(BC_ENTER_LOOPER, ioc(DIR_NONE, b'c', 12, 0));
         // BC_ENTER_LOOPER = _IO('c',12): dir 0, type 'c'=0x63, nr 12 => 0x630c.
         assert_eq!(BC_ENTER_LOOPER, 0x0000_630c);
-        // BR_TRANSACTION = _IOR('r',2,64): dir 2<<30 | 64<<16 | 'r'<<8 | 2.
+        // BR_TRANSACTION = _IOR('r',2,64): dir 2, type 'r', nr 2, size 64.
         assert_eq!(parse_code(BR_TRANSACTION), (2, b'r', 2, 64));
     }
 
@@ -215,7 +362,7 @@ mod tests {
     fn parse_code(code: u32) -> (u32, u8, u32, u32) {
         let dir = code >> 30;
         let size = (code >> 16) & 0x3fff;
-        let ty = ((code >> 8) & 0xff) as u8;
+        let ty = u8::try_from((code >> 8) & 0xff).unwrap_or(0);
         let nr = code & 0xff;
         (dir, ty, nr, size)
     }
@@ -281,11 +428,8 @@ mod tests {
 
     #[test]
     fn parse_rejects_truncated_and_unknown() {
-        // A transaction code with no payload: too short.
         assert_eq!(parse(&BR_TRANSACTION.to_ne_bytes()), None);
-        // An unknown command code: cannot determine payload length.
         assert_eq!(parse(&0xffff_ffffu32.to_ne_bytes()), None);
-        // Empty buffer.
         assert_eq!(parse(&[]), None);
     }
 
