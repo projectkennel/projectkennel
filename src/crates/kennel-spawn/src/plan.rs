@@ -297,6 +297,10 @@ pub struct ShimView {
     pub tmp_mode: String,
     /// Mount `/proc` with `hidepid=2`.
     pub proc_hidepid: bool,
+    /// Mount a per-kennel binderfs instance in the view and expose the standard
+    /// `binder` device + `/dev/binder` symlink (`07-9`/`02-7`). Set when the settled
+    /// `[binder]` policy is non-empty; kenneld takes node 0 via `/proc` at spawn.
+    pub binder: bool,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -587,6 +591,20 @@ impl Plan {
         // contents stay separately gated. Without it, `ls /` is a jarring EACCES.
         landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
 
+        // Binder IPC (07-9/02-7): when the kennel uses binder, the seal mounts a
+        // per-kennel binderfs instance in the view; grant the workload its standard
+        // `binder` device (read/write/ioctl) and read of the binderfs dir + features.
+        // `binder-control` is never granted — only the spawn allocates devices.
+        let binder = !policy.binder.is_empty();
+        if binder {
+            landlock_fs.push((PathBuf::from("/dev/binderfs/binder"), dev_access()));
+            landlock_fs.push((PathBuf::from("/dev/binderfs"), AccessFs::READ_DIR));
+            landlock_fs.push((
+                PathBuf::from("/dev/binderfs/features"),
+                AccessFs::READ_DIR | AccessFs::READ_FILE,
+            ));
+        }
+
         let view = Some(ShimView {
             shim_root,
             binds,
@@ -594,6 +612,7 @@ impl Plan {
             tmp_size_mib: ep.fs.tmp.size_mib,
             tmp_mode: ep.fs.tmp.mode.clone(),
             proc_hidepid: ep.proc.hidepid,
+            binder,
         });
 
         // Landlock net only expresses per-port allow; map single-port TCP/Any

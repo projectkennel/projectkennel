@@ -835,6 +835,21 @@ fn build_view_and_pivot(
         }
     }
 
+    // 4b. Binder IPC (07-9/02-7): a per-kennel binderfs instance with the standard
+    //     `binder` device and the `/dev/binder` symlink libbinder opens by default.
+    //     binderfs is FS_USERNS_MOUNT, so this mounts in the kennel's own userns with
+    //     no real privilege. `binder-control` is allocated here but not Landlock-granted
+    //     to the workload; kenneld takes node 0 of this instance via `/proc` at spawn.
+    if view.binder {
+        let binderfs_dir = under(Path::new("/dev/binderfs"));
+        kennel_binder::binderfs::mount_instance(
+            &binderfs_dir,
+            kennel_binder::binderfs::DEFAULT_MAX_DEVICES,
+        )?;
+        kennel_binder::binderfs::add_binder_device(&binderfs_dir)?;
+        std::os::unix::fs::symlink("binderfs/binder", under(Path::new("/dev/binder")))?;
+    }
+
     // 5. Fresh /proc (reflecting the PID namespace) and the private /tmp.
     let proc = under(Path::new("/proc"));
     std::fs::create_dir_all(&proc)?;
@@ -1887,6 +1902,7 @@ mod tests {
                 tmp_size_mib: 64,
                 tmp_mode: "0700".to_owned(),
                 proc_hidepid: false,
+                binder: false,
             }),
             new_root: Some(new_root),
             landlock_fs,
@@ -1999,6 +2015,7 @@ mod tests {
                 tmp_size_mib: 64,
                 tmp_mode: "0700".to_owned(),
                 proc_hidepid: false,
+                binder: false,
             }),
             new_root: Some(new_root),
             landlock_fs,
@@ -2412,6 +2429,7 @@ mod root_tests {
                 tmp_size_mib: 64,
                 tmp_mode: "0700".to_owned(),
                 proc_hidepid: false,
+                binder: false,
             }),
             new_root: Some(new_root),
             landlock_fs,

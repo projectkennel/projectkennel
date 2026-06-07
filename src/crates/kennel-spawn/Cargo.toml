@@ -11,6 +11,7 @@ repository.workspace = true
 
 [dependencies]
 kennel-bpf = { path = "../kennel-bpf" }
+kennel-binder = { path = "../kennel-binder" }
 kennel-policy = { path = "../kennel-policy" }
 kennel-syscall = { path = "../kennel-syscall" }
 

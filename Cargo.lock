@@ -107,6 +107,7 @@ version = "0.1.0"
 name = "kennel-spawn"
 version = "0.1.0"
 dependencies = [
+ "kennel-binder",
  "kennel-bpf",
  "kennel-policy",
  "kennel-syscall",
