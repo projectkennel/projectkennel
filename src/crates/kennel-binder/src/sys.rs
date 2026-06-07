@@ -9,7 +9,28 @@
 
 use std::ffi::CStr;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+
+/// Wrap a raw fd the binder driver just transferred into this process (the
+/// translated fd of a received `BINDER_TYPE_FD` object) as an [`OwnedFd`].
+///
+/// # Safety
+///
+/// `raw` must be a valid, currently-open fd that this process exclusively owns —
+/// which holds for a fd the kernel just dup'd into us delivering a transaction. The
+/// caller must check `raw >= 0` first.
+#[must_use]
+pub fn own_fd(raw: i32) -> OwnedFd {
+    // SAFETY: the binder driver dup'd `raw` into this process when it delivered the
+    // BINDER_TYPE_FD object, so we are its sole owner; wrapping transfers that
+    // ownership for RAII close. The caller has checked `raw >= 0`.
+    //
+    // INVARIANTS UPHELD: exactly one OwnedFd is created per received fd.
+    //
+    // FAILURE MODE: a negative/closed `raw` would be unsound — prevented by the
+    // caller's `>= 0` check and the kernel's transfer contract.
+    unsafe { OwnedFd::from_raw_fd(raw) }
+}
 
 /// Encode an ioctl request number as `<asm-generic/ioctl.h>` does.
 const fn ioc(dir: libc::c_ulong, ty: u8, nr: libc::c_ulong, size: libc::c_ulong) -> libc::c_ulong {

@@ -9,7 +9,7 @@
 //! here; service-name semantics live a layer up in `kenneld`.
 
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::proto::{self, Br, TransactionData};
 use crate::sys::{self, BinderWriteRead, Mapping};
@@ -133,6 +133,96 @@ impl Connection {
                 }
             }
         }
+    }
+
+    /// Send a synchronous transaction expecting a file descriptor in the reply (the
+    /// af-unix facade: `CONNECT` a path, receive the connected socket — `07-9`/`02-7`).
+    /// Sets `TF_ACCEPT_FDS` so the kernel permits the reply's fd, and returns the fd
+    /// the kernel dup'd into us.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transact`], plus [`io::ErrorKind::InvalidData`] if the reply carries
+    /// no `BINDER_TYPE_FD` object or an invalid fd.
+    pub fn transact_fd(&self, handle: u32, code: u32, data: &[u8]) -> io::Result<OwnedFd> {
+        let td = TransactionData {
+            target: u64::from(handle),
+            code,
+            flags: proto::TF_ACCEPT_FDS,
+            data_size: len_u64(data.len())?,
+            buffer: data.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, false, &td);
+        let mut to_send: &[u8] = &write;
+        loop {
+            let brs = self.cycle(to_send)?;
+            to_send = &[];
+            self.ack_refcounts(&brs)?;
+            for br in brs {
+                match br {
+                    Br::Reply(reply) => return self.take_fd(reply),
+                    Br::Failed => {
+                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
+                        return Err(io::Error::other(format!(
+                            "binder fd transaction failed (BR_FAILED_REPLY, extended errno {errno})"
+                        )));
+                    }
+                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
+                    Br::Error(code) => {
+                        return Err(io::Error::other(format!("binder driver error {code}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Reply to a received transaction with a single file descriptor (a
+    /// `BINDER_TYPE_FD` object), then free its inbound buffer. The kernel dups `fd`
+    /// into the original caller. Used by the af-unix facade to return a connected
+    /// socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn reply_with_fd(&self, incoming: &Incoming, fd: BorrowedFd<'_>) -> io::Result<()> {
+        let object = proto::flat_binder_object_fd(fd.as_raw_fd());
+        let offsets: [u64; 1] = [0]; // the single object sits at offset 0 in `object`
+        let td = TransactionData {
+            flags: proto::TF_ACCEPT_FDS,
+            data_size: len_u64(object.len())?,
+            offsets_size: len_u64(std::mem::size_of_val(&offsets))?,
+            buffer: object.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, true, &td);
+        proto::write_free_buffer(&mut write, incoming.buffer);
+        self.write_only(&write)
+    }
+
+    /// Extract the fd from a `BINDER_TYPE_FD` reply, then free the reply buffer.
+    fn take_fd(&self, reply: TransactionData) -> io::Result<OwnedFd> {
+        let bytes = self
+            .map
+            .read_at(reply.buffer, proto::FLAT_BINDER_OBJECT_SIZE)
+            .ok_or_else(|| io::Error::other("reply fd-object out of range"))?;
+        let raw = proto::flat_binder_object_fd_value(bytes)
+            .filter(|&fd| fd >= 0)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "reply carried no valid fd object",
+                )
+            })?;
+        let owned = sys::own_fd(raw);
+        let mut w = Vec::new();
+        proto::write_free_buffer(&mut w, reply.buffer);
+        self.write_only(&w)?;
+        Ok(owned)
     }
 
     /// Receive any transactions delivered in one cycle (after `poll` signalled
