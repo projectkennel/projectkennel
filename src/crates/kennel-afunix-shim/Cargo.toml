@@ -1,0 +1,16 @@
+[package]
+name = "kennel-afunix-shim"
+version.workspace = true
+publish.workspace = true
+description = "In-kennel AF_UNIX proxy: presents each granted socket at its in-view path and brokers connections to the org.projectkennel.IAfUnix binder facade, so applications reach host sockets at their default paths with no key/path into the host AF_UNIX namespace (07-9 §7.9.5)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-binder = { path = "../kennel-binder" }
+
+[lints]
+workspace = true

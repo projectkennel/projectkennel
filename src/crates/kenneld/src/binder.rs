@@ -35,35 +35,9 @@ const POLL_MS: i32 = 200;
 /// A service name is bounded (binderfs's own `BINDERFS_MAX_NAME`); reject longer.
 const MAX_NAME: usize = 255;
 
-/// Node-0 transaction verbs (the `code` field). `IServiceManager`-style semantics
-/// (`02-7-binder.md` §Node 0); the numeric codes are kenneld's own.
-pub mod verb {
-    /// Register a service the caller provides.
-    pub const ADD_SERVICE: u32 = 1;
-    /// Resolve a service name.
-    pub const GET_SERVICE: u32 = 2;
-    /// Whether a service is declared for the caller.
-    pub const IS_DECLARED: u32 = 3;
-    /// The service names the caller is granted to look up.
-    pub const LIST_SERVICES: u32 = 4;
-    /// Connect a granted `AF_UNIX` socket and return the connected fd (af-unix facade,
-    /// `07-9`/`02-7`). Sent with `transact_fd`; the reply carries the socket fd.
-    pub const CONNECT_AFUNIX: u32 = 5;
-}
-
-/// Reply status byte (first byte of the reply payload).
-pub mod status {
-    /// Success (registered / found / true).
-    pub const OK: u8 = 0;
-    /// Refused by policy (not declared for this caller).
-    pub const DENIED: u8 = 1;
-    /// Permitted but no such registered service.
-    pub const NOT_FOUND: u8 = 2;
-    /// Refused: the name is in the reserved `org.projectkennel.*` namespace.
-    pub const REFUSED_RESERVED: u8 = 3;
-    /// The request was malformed (bad verb, oversized/!UTF-8 name).
-    pub const BAD_REQUEST: u8 = 4;
-}
+// The node-0 verb codes and reply status bytes are the shared wire convention
+// (`kennel_binder::service`), used by both kenneld here and the in-kennel clients.
+pub use kennel_binder::service::{status, verb};
 
 /// The per-kennel service registry, gated by the settled `[binder]` policy.
 ///
