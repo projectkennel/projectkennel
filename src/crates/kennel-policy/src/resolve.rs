@@ -44,11 +44,11 @@
 //! the `+=`/`-=` delta operators land in later increments.
 
 use crate::source::{
-    self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, CapSection,
-    ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
-    FsScrub, FsSection, FsTmp, IdentitySection, LibSection, LifecycleSection, NetAudit, NetBind,
-    NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection,
-    SourcePolicy, SshSection, UnixSection, X11Section,
+    self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
+    CapSection, ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev, FsHome,
+    FsProc, FsScrub, FsSection, FsTmp, IdentitySection, LibSection, LifecycleSection, NetAudit,
+    NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection,
+    SignalSection, SourcePolicy, SshSection, UnixSection, X11Section,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -223,6 +223,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         unix: merge(&parent.unix, &child.unix, fold_unix),
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
         identity: merge(&parent.identity, &child.identity, fold_identity),
+        binder: merge(&parent.binder, &child.binder, fold_binder),
         dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
         x11: merge(&parent.x11, &child.x11, fold_x11),
         proc: merge(&parent.proc, &child.proc, fold_proc),
@@ -503,6 +504,22 @@ fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
             p.groups.clone()
         } else {
             c.groups.clone()
+        },
+    }
+}
+
+fn fold_binder(p: &BinderSection, c: &BinderSection) -> BinderSection {
+    // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
+    BinderSection {
+        provide: if c.provide.is_empty() {
+            p.provide.clone()
+        } else {
+            c.provide.clone()
+        },
+        consume: if c.consume.is_empty() {
+            p.consume.clone()
+        } else {
+            c.consume.clone()
         },
     }
 }

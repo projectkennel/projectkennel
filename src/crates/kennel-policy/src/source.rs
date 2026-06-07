@@ -98,6 +98,12 @@ pub struct SourcePolicy {
     /// Identity section (`[identity]`) — the supplementary groups carried in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentitySection>,
+    /// Binder IPC section (`[binder]`) — user-defined services this kennel may
+    /// register (`[[binder.provide]]`) and look up (`[[binder.consume]]`). The
+    /// reserved `org.projectkennel.*` facades are enabled by their own sections,
+    /// never declared here (`07-9-ipc.md` §7.9.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binder: Option<BinderSection>,
     /// D-Bus section (`[dbus]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbus: Option<DbusSection>,
@@ -624,6 +630,59 @@ pub struct UnixAllow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
     /// Why this socket is granted (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
+}
+
+/// `[binder]` — binder IPC policy (`docs/design/07-9-ipc.md` §7.9.4).
+///
+/// Covers **user-defined** services only: the reserved `org.projectkennel.*` facades
+/// (af-unix, dbus, gpg, wayland) are enabled by their own sections and are never named
+/// here. Source-only and realised by `kenneld`'s context manager, which gates
+/// `addService`/`getService` against the resolved set.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinderSection {
+    /// `[[binder.provide]]` — services a process in this kennel may register.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provide: Vec<BinderProvide>,
+    /// `[[binder.consume]]` — services this kennel may look up (cross-instance).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consume: Vec<BinderConsume>,
+}
+
+/// One `[[binder.provide]]` entry: a service this kennel registers.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinderProvide {
+    /// The service name (must not begin with the reserved `org.projectkennel.`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Peer kennels permitted to look this service up (cross-instance, §7.9.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept_from: Vec<String>,
+    /// Why this service is provided (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
+}
+
+/// One `[[binder.consume]]` entry: a service this kennel looks up.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinderConsume {
+    /// The service name (must not begin with the reserved `org.projectkennel.`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The providing kennel (cross-instance, §7.9.6); absent for a local service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Why this service is consumed (required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Threat tags.

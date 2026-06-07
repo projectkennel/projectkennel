@@ -542,6 +542,56 @@ pub struct UnixSocket {
     pub env: Option<String>,
 }
 
+/// The per-kennel binder IPC runtime (`07-9-ipc.md` §7.9.4): the user-defined
+/// services this kennel may register and look up.
+///
+/// Like [`UnixRuntime`], a *service* input `kenneld`'s context manager realises, not
+/// part of the kernel-enforcement core: it gates `addService` against `provide` and
+/// `getService` against the local/cross-instance grant. The reserved
+/// `org.projectkennel.*` facades are not represented here (they are enabled by their
+/// own sections). Carried in the signed settled policy; omitted from the canonical
+/// form when empty, so a no-`[binder]` policy signs exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinderRuntime {
+    /// Services a process in this kennel may register (`addService`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provide: Vec<BinderProvideRuntime>,
+    /// Services this kennel may look up (`getService`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consume: Vec<BinderConsumeRuntime>,
+}
+
+impl BinderRuntime {
+    /// Whether there is no binder grant to realise.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.provide.is_empty() && self.consume.is_empty()
+    }
+}
+
+/// One registrable service: a name and the peer kennels allowed to look it up.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinderProvideRuntime {
+    /// The service name.
+    pub name: String,
+    /// Peer kennels permitted to resolve it cross-instance (empty = local only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept_from: Vec<String>,
+}
+
+/// One consumable service: a name and the providing kennel (cross-instance).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinderConsumeRuntime {
+    /// The service name.
+    pub name: String,
+    /// The providing kennel for a cross-instance lookup; absent for a local service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+}
+
 /// The workload's identity inside the kennel (`docs/design/07-2-filesystem.md`): the
 /// supplementary Unix groups it retains.
 ///
@@ -912,6 +962,11 @@ pub struct SettledPolicy {
     /// form when empty, so a policy that grants no group signs exactly as before.
     #[serde(default, skip_serializing_if = "IdentityRuntime::is_empty")]
     pub identity: IdentityRuntime,
+    /// The per-kennel binder IPC runtime (`07-9-ipc.md` §7.9.4). A table like
+    /// [`identity`](Self::identity); omitted from the canonical form when empty, so a
+    /// no-`[binder]` policy signs exactly as before.
+    #[serde(default, skip_serializing_if = "BinderRuntime::is_empty")]
+    pub binder: BinderRuntime,
     /// The per-kennel audit runtime (`02-3`). A table like [`ssh`](Self::ssh) and
     /// declared after the others; omitted from the canonical form when empty, so a
     /// policy with no (or all-default) `[audit]` signs exactly as before.

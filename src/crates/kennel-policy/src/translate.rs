@@ -38,11 +38,11 @@
 //! stays architecture-independent and no syscall-number table lives in this pure crate.
 
 use crate::settled::{
-    AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, DevPolicy, EffectivePolicy,
-    EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
-    SeccompPolicy, SshGrant, SshKnownHostPin, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime,
-    UnixRuntime, UnixSocket,
+    AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
+    BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
+    IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
+    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin,
+    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
 };
 use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
@@ -60,6 +60,8 @@ pub struct Translated {
     pub unix: UnixRuntime,
     /// The workload's in-kennel identity (§7.2) — the supplementary groups it retains.
     pub identity: IdentityRuntime,
+    /// The per-kennel binder IPC runtime (§7.9.4) — user-defined provide/consume grants.
+    pub binder: BinderRuntime,
     /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
     pub audit: AuditRuntime,
     /// The synthesised environment (§7.7.2) — the fixed `[env].set` vars.
@@ -107,6 +109,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective)?;
+    let binder = translate_binder(effective);
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
     let ulimits = translate_ulimits(effective)?;
@@ -124,11 +127,44 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         ssh,
         unix,
         identity,
+        binder,
         audit,
         env,
         ulimits,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Flatten the resolved `[binder]` section into the settled [`BinderRuntime`]: one
+/// runtime entry per `[[binder.provide]]`/`[[binder.consume]]`. Already
+/// compile-time-validated (`crate::binder`), so each entry has a non-reserved `name`.
+/// An absent or empty `[binder]` yields an empty runtime (omitted from the canonical
+/// form), so a no-`[binder]` policy signs exactly as before.
+fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
+    let Some(binder) = &src.binder else {
+        return BinderRuntime::default();
+    };
+    let provide = binder
+        .provide
+        .iter()
+        .filter_map(|p| {
+            p.name.as_ref().map(|name| BinderProvideRuntime {
+                name: name.clone(),
+                accept_from: p.accept_from.clone(),
+            })
+        })
+        .collect();
+    let consume = binder
+        .consume
+        .iter()
+        .filter_map(|c| {
+            c.name.as_ref().map(|name| BinderConsumeRuntime {
+                name: name.clone(),
+                from: c.from.clone(),
+            })
+        })
+        .collect();
+    BinderRuntime { provide, consume }
 }
 
 /// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.2). Each entry is a
@@ -1538,6 +1574,7 @@ mod tests {
             ssh: t.ssh,
             unix: t.unix,
             identity: t.identity,
+            binder: t.binder,
             audit: t.audit,
             env: t.env,
             ulimits: t.ulimits,
