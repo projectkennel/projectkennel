@@ -455,6 +455,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         }),
         ssh: ssh_prep,
         unix: unix_prep,
+        binder: None,
     };
 
     // The workload proves the constructed view; the group clauses below are written

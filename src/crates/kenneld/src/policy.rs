@@ -184,6 +184,7 @@ impl PolicyLoader for TrustStoreLoader {
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
+        let binder = substituted.binder;
         let audit = substituted.audit;
         let env = substituted.env;
         Ok(Loaded {
@@ -193,6 +194,7 @@ impl PolicyLoader for TrustStoreLoader {
             net,
             ssh,
             unix,
+            binder,
             groups,
             audit,
             env,

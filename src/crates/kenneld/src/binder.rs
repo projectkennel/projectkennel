@@ -146,6 +146,7 @@ impl Registry {
 }
 
 /// A running per-kennel binder context manager: the serve thread plus its stop flag.
+#[derive(Debug)]
 pub struct Manager {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,

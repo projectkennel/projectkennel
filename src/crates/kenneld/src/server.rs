@@ -61,6 +61,9 @@ pub struct Loaded {
     /// The per-kennel `AF_UNIX` socket shims (§7.4): the host sockets `kenneld` binds
     /// into the kennel's view. Empty for a kennel with no `[unix]` policy.
     pub unix: kennel_policy::UnixRuntime,
+    /// The per-kennel binder IPC runtime (§7.9.4): the user-defined services the
+    /// context manager gates against. Empty for a kennel with no `[binder]` policy.
+    pub binder: kennel_policy::BinderRuntime,
     /// The granted supplementary groups `(name, gid)` (§7.2): resolved and
     /// membership-checked by the loader, named in the synthetic `/etc/group`. The
     /// loader also sets `plan.supplementary_groups` to these gids (what the seal
@@ -727,7 +730,7 @@ fn run_kennel<P, L>(
         .ttl_seconds
         .map(std::time::Duration::from_secs);
     let ttl_action = loaded.lifecycle.ttl_action;
-    let spec = crate::Spec {
+    let mut spec = crate::Spec {
         id: req.kennel.clone(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
         ctx,
@@ -743,6 +746,7 @@ fn run_kennel<P, L>(
         proxy_audit,
         ssh,
         unix,
+        binder: None,
     };
 
     // Construct the per-kennel audit writer *before* start so the privileged
@@ -759,6 +763,19 @@ fn run_kennel<P, L>(
         ))
     });
     let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
+
+    // Wire the binder context manager when the kennel declares a [binder] policy and
+    // audit is configured (the registry records every decision; §7.9.4). The plan's
+    // view already carries the binder flag, so the seal mounts binderfs regardless;
+    // this provides the daemon-side manager that takes node 0.
+    if !loaded.binder.is_empty() {
+        if let Some(writer) = &audit {
+            spec.binder = Some(crate::BinderPrep {
+                policy: loaded.binder,
+                writer: Arc::clone(writer),
+            });
+        }
+    }
 
     // Synthesise the workload environment from policy (§7.7.2): clear the inherited
     // environment and build it from scratch. `PATH` (from `[exec].path`),
@@ -1076,6 +1093,7 @@ mod tests {
                 net,
                 ssh: kennel_policy::SshRuntime::default(),
                 unix: kennel_policy::UnixRuntime::default(),
+                binder: kennel_policy::BinderRuntime::default(),
                 groups: Vec::new(),
                 audit: kennel_policy::AuditRuntime::default(),
                 env: kennel_policy::EnvRuntime::default(),

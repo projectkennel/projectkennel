@@ -254,6 +254,16 @@ pub struct EtcSetup {
     pub home_persist: Vec<String>,
 }
 
+/// What kenneld needs to run a kennel's binder context manager (§7.9): the settled
+/// binder policy the registry gates against and the audit writer it records
+/// `binder.*` decisions through.
+pub struct BinderPrep {
+    /// The user-defined services this kennel may register / look up.
+    pub policy: kennel_policy::BinderRuntime,
+    /// The unified audit writer the registry emits through.
+    pub writer: std::sync::Arc<kennel_audit::Writer>,
+}
+
 /// Everything needed to bring one kennel up.
 pub struct Spec {
     /// The kennel's runtime id (`<id>` in `07-paths.md`; equal to the kennel name
@@ -297,6 +307,11 @@ pub struct Spec {
     /// at their shim paths, plus any env vars to set. Empty ([`UnixPrep::default`])
     /// for a kennel with no `[unix]` grant.
     pub unix: UnixPrep,
+    /// The prepared binder IPC context manager (§7.9): the settled binder policy and
+    /// the audit writer. `None` for a kennel with no `[binder]` grant (no context
+    /// manager is run; the seal still mounts no binderfs because the plan's view
+    /// `binder` flag is false in that case).
+    pub binder: Option<BinderPrep>,
 }
 
 /// The `AF_UNIX` socket shims prepared for one kennel (§7.4).
@@ -350,6 +365,10 @@ pub struct Kennel {
     /// teardown (the tmpfs mounted on it lived in the workload's now-gone mount
     /// namespace, so only the empty host directory remains).
     view_root: Option<PathBuf>,
+    /// The per-kennel binder context manager, if the kennel uses binder. Its serve
+    /// thread is stopped at teardown (its node-0 fd and mapping go with it; the
+    /// binderfs instance itself died with the workload's mount namespace).
+    binder: Option<crate::binder::Manager>,
 }
 
 impl Kennel {
@@ -415,6 +434,9 @@ impl Kennel {
     /// An OS error if waiting on the workload fails.
     pub fn stop<P: Privileged>(mut self, privileged: &P) -> io::Result<ExitStatus> {
         let status = self.child.wait()?;
+        if let Some(manager) = self.binder.take() {
+            manager.stop();
+        }
         teardown(
             privileged,
             self.ctx,
@@ -458,6 +480,9 @@ impl Kennel {
             None => self.child.wait()?,
             Some(ttl) => self.wait_with_ttl(ttl, action, grace, &mut on_event)?,
         };
+        if let Some(manager) = self.binder.take() {
+            manager.stop();
+        }
         teardown(
             privileged,
             self.ctx,
@@ -549,6 +574,7 @@ struct Provision {
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
     view_root: Option<PathBuf>,
+    binder: Option<crate::binder::Manager>,
 }
 
 /// Bring a kennel up. On any error the partial bring-up is unwound, so no
@@ -577,6 +603,7 @@ pub fn start<P: Privileged + Sync>(
         proxy_audit,
         ssh,
         unix,
+        binder,
     } = spec;
     let mut state = Provision::default();
 
@@ -594,6 +621,7 @@ pub fn start<P: Privileged + Sync>(
         proxy_audit.as_ref(),
         &ssh,
         &unix,
+        binder.as_ref(),
         command,
         &mut state,
     ) {
@@ -605,8 +633,12 @@ pub fn start<P: Privileged + Sync>(
             v6: state.v6,
             proxy: state.proxy,
             view_root: state.view_root,
+            binder: state.binder,
         }),
         Err(e) => {
+            if let Some(manager) = state.binder.take() {
+                manager.stop();
+            }
             teardown(
                 privileged,
                 ctx,
@@ -640,6 +672,7 @@ fn bring_up<P: Privileged + Sync>(
     proxy_audit: Option<&crate::proxy::ProxyAudit>,
     ssh: &SshPrep,
     unix: &UnixPrep,
+    binder: Option<&BinderPrep>,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<Child, Error> {
@@ -855,7 +888,69 @@ fn bring_up<P: Privileged + Sync>(
 
     // 4. spawn the workload into this cgroup (it joins itself in the seal).
     plan.cgroup = cgroup.to_path_buf();
-    spawn_workload(privileged, plan, command)
+    let wants_binder = plan.view.as_ref().is_some_and(|v| v.binder);
+    let child = spawn_workload(privileged, plan, command)?;
+
+    // 5. binder context manager (§7.9): the seal mounted the kennel's binderfs and
+    //    allocated the `binder` device; take node 0 of it from here (the daemon) via
+    //    the workload's `/proc/<pid>/root`, and run the registry serve thread. The
+    //    workload's own binder calls before this fail closed (BR_DEAD_REPLY) — safe.
+    //    Best-effort: a failure to acquire is logged, not fatal (binder stays inert).
+    if let (true, Some(prep)) = (wants_binder, binder) {
+        match acquire_binder_node0(child.id(), ctx, prep) {
+            Ok(manager) => state.binder = Some(manager),
+            Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
+        }
+    }
+    Ok(child)
+}
+
+/// Take node 0 of a freshly-spawned workload's binderfs instance and run its
+/// registry serve thread. The seal (in the workload's PID-1 grandchild) mounts the
+/// instance and allocates the `binder` device; we reach it from the daemon via the
+/// workload process's `/proc/<pid>/root`, which (post-`pivot_root`) is the view.
+///
+/// `spawn_pid` is the `Command` child (the intermediate that becomes the workload's
+/// parent); the workload itself is its child, so we resolve that and retry until its
+/// binderfs device appears (the seal runs concurrently with our return from spawn).
+fn acquire_binder_node0(
+    spawn_pid: u32,
+    ctx: u16,
+    prep: &BinderPrep,
+) -> io::Result<crate::binder::Manager> {
+    use std::os::fd::OwnedFd;
+
+    for _ in 0..50 {
+        if let Some(workload) = workload_pid(spawn_pid) {
+            let dev = format!("/proc/{workload}/root/dev/binderfs/binder");
+            // std opens files O_CLOEXEC by default on Unix.
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&dev)
+            {
+                return crate::binder::spawn(
+                    OwnedFd::from(file),
+                    ctx,
+                    prep.policy.clone(),
+                    std::sync::Arc::clone(&prep.writer),
+                );
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "workload binderfs device did not appear",
+    ))
+}
+
+/// The workload pid: the first child of the `Command`-spawned intermediate (which
+/// double-forks the PID-1 workload). `None` until the child exists.
+fn workload_pid(spawn_pid: u32) -> Option<u32> {
+    let children =
+        std::fs::read_to_string(format!("/proc/{spawn_pid}/task/{spawn_pid}/children")).ok()?;
+    children.split_whitespace().next()?.parse().ok()
 }
 
 /// Spawn the workload, routing through the privileged `gid_map` handshake (§7.2.8)
@@ -1152,6 +1247,7 @@ mod tests {
             proxy_audit: None,
             ssh: SshPrep::default(),
             unix: UnixPrep::default(),
+            binder: None,
         }
     }
 
