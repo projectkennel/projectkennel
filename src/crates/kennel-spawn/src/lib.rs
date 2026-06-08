@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod plan;
+pub mod wire;
 
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};

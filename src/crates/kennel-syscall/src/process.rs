@@ -50,6 +50,34 @@ pub fn resource_by_name(name: &str) -> Option<Resource> {
     })
 }
 
+/// The canonical name for a `setrlimit(2)` resource — the inverse of [`resource_by_name`].
+///
+/// Lets a [`Resource`] be serialised by name across a process boundary (the construction
+/// request the privhelper forwards to `kennel-init`) and decoded back. Kept in lock-step
+/// with [`resource_by_name`]; a round-trip test asserts it. Returns `None` for a resource
+/// this build does not enumerate.
+#[must_use]
+pub const fn resource_name(resource: Resource) -> Option<&'static str> {
+    Some(match resource {
+        Resource::RLIMIT_AS => "as",
+        Resource::RLIMIT_CORE => "core",
+        Resource::RLIMIT_CPU => "cpu",
+        Resource::RLIMIT_DATA => "data",
+        Resource::RLIMIT_FSIZE => "fsize",
+        Resource::RLIMIT_LOCKS => "locks",
+        Resource::RLIMIT_MEMLOCK => "memlock",
+        Resource::RLIMIT_MSGQUEUE => "msgqueue",
+        Resource::RLIMIT_NICE => "nice",
+        Resource::RLIMIT_NOFILE => "nofile",
+        Resource::RLIMIT_NPROC => "nproc",
+        Resource::RLIMIT_RTPRIO => "rtprio",
+        Resource::RLIMIT_RTTIME => "rttime",
+        Resource::RLIMIT_SIGPENDING => "sigpending",
+        Resource::RLIMIT_STACK => "stack",
+        _ => return None,
+    })
+}
+
 /// Set a `setrlimit(2)` resource limit on the current process.
 ///
 /// Use [`RLIM_INFINITY`] for "unlimited". Called in the seal, after the Landlock
