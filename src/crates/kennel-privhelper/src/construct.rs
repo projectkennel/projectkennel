@@ -53,7 +53,13 @@ const CONSTRUCT_FAILED: i32 = 125;
 /// failure), and this parent `_exit`s with the child's status once it terminates. A
 /// failure before the child exists exits [`CONSTRUCT_FAILED`].
 pub fn run_construct(chan: BorrowedFd<'_>) -> ! {
-    let code = construct(chan).unwrap_or(CONSTRUCT_FAILED);
+    let code = match construct(chan) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("kennel-privhelper: kennel construction failed: {e}");
+            CONSTRUCT_FAILED
+        }
+    };
     std::process::exit(code);
 }
 
@@ -80,24 +86,49 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // 2. The maps-written handshake pipe (child blocks until the parent writes the maps).
     let (ready_r, ready_w) = pipe_cloexec()?;
 
-    // 3. Clone the construction child — PID 1 of the new namespaces, no identity yet.
-    // The operator identity (the caller's real ids; setuid leaves the real uid as the
-    // invoking user) — never wire-supplied (security review §6).
+    // The operator identity (the caller's real ids; setcap/setuid leave the real uid as
+    // the invoking user) — never wire-supplied (sec review §6).
     let op_uid = real_uid();
     let op_gid = real_gid();
+
+    // 3. Clone the construction child as the OPERATOR (NOT escalated): this sets the new
+    //    user namespace's **owner** to the operator, so the operator `kenneld` is
+    //    privileged over the kennel's binderfs (an `FS_USERNS_MOUNT` whose `s_user_ns` is
+    //    the kennel userns) and can open it via `/proc/<init>/root`. A root-owned userns
+    //    would deny the operator that access. The child still gets full capabilities in the
+    //    new userns (a `CLONE_NEWUSER` child always does), so it can escalate to the
+    //    kennel's uid 0 itself for the root-owned construction (see below).
     let granted = half.granted_gids.clone();
+    let child_granted = granted.clone(); // the parent keeps `granted` for the maps
     let namespaces = half.namespaces; // captured before `half` moves into the child
     let child = move || {
-        // Wait until the parent has written our identity maps (so we hold uid 0 and
-        // CAP_SYS_ADMIN in the new userns); abort closed otherwise.
+        // Wait until the parent has written our identity maps (so the kennel's uid 0 is
+        // mappable); abort closed otherwise.
         if recv_ack(ready_r.as_fd()).ok().flatten() != Some(ACK_PROCEED) {
             return; // clone_pid1 backstops a returning child with _exit(127)
         }
-        // All privileged construction runs here, as the kennel's uid 0, BEFORE the
-        // hand-off — so no operator code ever runs as userns-0 and the uid-0 init never
-        // runs while the host filesystem is still visible. Any failure returns, tripping
-        // the _exit(127) backstop (fail-closed: no half-built kennel runs the workload).
+        // Become the kennel's uid 0 (inside-0 = host root via the `0 0 N` map) using the
+        // userns capabilities the clone granted, so the view/dev/binderfs are root-owned.
+        if kennel_syscall::unistd::set_gid(0).is_err()
+            || kennel_syscall::unistd::set_uid(0).is_err()
+        {
+            return;
+        }
+        // All privileged construction runs here, as the kennel's uid 0, BEFORE the hand-off
+        // — so the surfaces are root-owned and no operator code runs as userns-0. A failure
+        // returns, tripping the _exit(127) backstop (no half-built kennel runs the workload).
         if build_kennel(&half, op_uid, op_gid).is_err() {
+            return;
+        }
+        // Drop to the operator BEFORE the hand-off, so `kennel-init` runs as the operator:
+        // the view stays root-owned (built above) but init is operator-owned, matching the
+        // operator-owned userns so `kenneld` can reach `/proc/<init>/root`. Set the granted
+        // supplementary groups first (needs CAP_SETGID, lost at the uid drop); the workload
+        // inherits them. Order: groups → gid → uid.
+        if kennel_syscall::unistd::set_supplementary_groups(&child_granted).is_err()
+            || kennel_syscall::unistd::set_gid(op_gid).is_err()
+            || kennel_syscall::unistd::set_uid(op_uid).is_err()
+        {
             return;
         }
         // Hand off to the trusted root-owned init with empty argv/envp (the pull model).
@@ -106,15 +137,21 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     };
     let init_pid = clone_pid1(namespaces, child)?;
 
-    // 4. Parent (real root): write the child's identity maps, then release it.
+    // 4. Escalate the parent to real root ONLY to write the child's identity maps: mapping
+    //    host uid 0 into the kennel (`0 0 N`) requires the writer to own outside uid 0
+    //    (`verify_root_map`, euid 0) and `CAP_SETFCAP` (since Linux 5.12). This does not
+    //    change the userns owner (fixed at clone above). Then release the child and report
+    //    the init host pid to kenneld.
+    kennel_syscall::unistd::set_gid(0)
+        .map_err(|e| io::Error::new(e.kind(), format!("factory setgid(0): {e}")))?;
+    kennel_syscall::unistd::set_uid(0)
+        .map_err(|e| io::Error::new(e.kind(), format!("factory setuid(0): {e}")))?;
     write_identity_maps(init_pid, op_uid, op_gid, &granted)?;
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
     drop(ready_w); // close our write end
-
-    // 5. Tell kenneld the init host pid (so it can take node 0 / gate the lifecycle).
     send_with_fds(chan, &init_pid.to_le_bytes(), &[])?;
 
-    // 6. Stay as the child's parent; relay its exit status up the chain.
+    // 5. Stay as the child's parent; relay its exit status up the chain.
     loop {
         match wait_any()? {
             Reaped::Exited { pid, code } if pid == init_pid => return Ok(code),
@@ -150,9 +187,28 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     if let (Some(view), Some(new_root)) = (&half.view, &half.new_root) {
         // Build + pivot into the constructed view.
         build_view_and_pivot(view, new_root, &half.file_binds)?;
+        // The constructed $HOME is the WORKLOAD's private space (the ephemeral home tmpfs
+        // plus the copied dotfiles / synthetic ~/.ssh). The construction child built it as
+        // the kennel's uid 0, so it is root-owned — but the workload, the af-unix proxy, and
+        // any in-kennel tool run as the OPERATOR and must read (0600 ~/.ssh keys) and write
+        // (bind sockets) there. Chown the home subtree to the operator, staying on the home
+        // tmpfs (never descending into writable binds, which are the operator's own real
+        // inodes on other mounts). The system surfaces (/, /etc, /dev, libs) stay root-owned.
+        chown_tree_same_fs(&view.shim_root, op_uid, op_gid)?;
         // Hand the binderfs device to the operator: it was created owned by uid 0 of the
-        // (now real) userns, but the workload/proxy/kenneld act as the operator.
+        // now-real userns, but kenneld (node 0) and the workload/proxy all act as the
+        // operator. kenneld opens it itself via /proc/<init>/root (kennel-init runs as the
+        // operator — see the drop below — so the operator can reach it).
         if view.binder {
+            // Chown both the binderfs mount-root dir and the device to the operator, so the
+            // operator kenneld can traverse `/proc/<init>/root/dev/binderfs/` and open the
+            // device (the dir is otherwise owned by inside-0/host-root, unreadable to the
+            // operator since the userns owner is root, not the operator).
+            kennel_syscall::unistd::chown_to(
+                std::path::Path::new("/dev/binderfs"),
+                op_uid,
+                op_gid,
+            )?;
             kennel_syscall::unistd::chown_to(
                 std::path::Path::new("/dev/binderfs/binder"),
                 op_uid,
@@ -162,9 +218,42 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     } else {
         // Fallback (no constructed view): a private root with fresh /proc + /tmp, so the
         // PID namespace still gets a correct /proc. No binderfs without a view.
-        mount::make_root_private()?;
         mount::mount_special("proc", std::path::Path::new("/proc"))?;
         mount::mount_special("tmpfs", std::path::Path::new("/tmp"))?;
+    }
+    Ok(())
+}
+
+/// Recursively chown `root` and everything beneath it to `uid:gid`, **staying on the
+/// same filesystem** — entries on a different device (bind mounts: the operator's own
+/// real inodes) are skipped, never descended into. Used to hand the constructed `$HOME`
+/// tmpfs (and its copied dotfiles/`~/.ssh`) to the operator without touching writable
+/// home binds. Symlinks are not followed (chowned as links).
+fn chown_tree_same_fs(root: &std::path::Path, uid: u32, gid: u32) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(top) = std::fs::symlink_metadata(root) else {
+        return Ok(()); // no constructed home (e.g. fallback path)
+    };
+    let dev = top.dev();
+    kennel_syscall::unistd::chown_to(root, uid, gid)?;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.dev() != dev {
+                continue; // a sub-mount (writable bind) — leave it, don't descend
+            }
+            kennel_syscall::unistd::chown_to(&path, uid, gid)?;
+            if meta.file_type().is_dir() {
+                stack.push(path);
+            }
+        }
     }
     Ok(())
 }
@@ -179,28 +268,30 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
 /// (not denied) because `kennel-init` needs it for the workload's supplementary-group drop.
 fn write_identity_maps(pid: i32, uid: u32, gid: u32, granted: &[u32]) -> io::Result<()> {
     let (uid_map, gid_map) = build_identity_maps(uid, gid, granted);
-    std::fs::write(format!("/proc/{pid}/uid_map"), uid_map)?;
-    std::fs::write(format!("/proc/{pid}/gid_map"), gid_map)?;
+    std::fs::write(format!("/proc/{pid}/uid_map"), &uid_map)
+        .map_err(|e| io::Error::new(e.kind(), format!("uid_map write ({uid_map:?}): {e}")))?;
+    std::fs::write(format!("/proc/{pid}/gid_map"), &gid_map)
+        .map_err(|e| io::Error::new(e.kind(), format!("gid_map write ({gid_map:?}): {e}")))?;
     Ok(())
 }
 
 /// Build the `uid_map`/`gid_map` strings (pure; the write is in [`write_identity_maps`]).
+///
+/// **Single contiguous identity range** `0 0 N` per map (DECIDED 2026-06-08): the kernel's
+/// `verify_root_map` only permits mapping host uid/gid 0 as a *single* extent — the clean
+/// two-line `0 0 1` + `<operator> <operator> 1` map is `EPERM`. So to give the kennel a
+/// real uid 0 (host 0 → inside 0, owning the view/dev/binderfs) **and** a distinct
+/// non-root identity the workload drops to (the operator), without subuid, the map is the
+/// identity range covering host 0 through the operator (and, for gids, through the highest
+/// granted supplementary group so `setgroups` can map it). Inside processes never reach
+/// the unused ids in the window (init = 0, workload/facades = operator, all confined).
 fn build_identity_maps(uid: u32, gid: u32, granted: &[u32]) -> (String, String) {
-    use std::fmt::Write as _;
-    let mut uid_map = String::from("0 0 1\n");
-    if uid != 0 {
-        let _ = writeln!(uid_map, "{uid} {uid} 1");
-    }
-    let mut gid_map = String::from("0 0 1\n");
-    if gid != 0 {
-        let _ = writeln!(gid_map, "{gid} {gid} 1");
-    }
-    for &g in granted {
-        if g != 0 && g != gid {
-            let _ = writeln!(gid_map, "{g} {g} 1");
-        }
-    }
-    (uid_map, gid_map)
+    // uid window: host 0..=operator.
+    let uid_n = u64::from(uid).saturating_add(1);
+    // gid window: host 0..=max(operator gid, every granted gid).
+    let gid_top = granted.iter().copied().fold(gid, u32::max);
+    let gid_n = u64::from(gid_top).saturating_add(1);
+    (format!("0 0 {uid_n}\n"), format!("0 0 {gid_n}\n"))
 }
 
 #[cfg(test)]
@@ -208,15 +299,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_dedupe_root_and_carry_granted_groups() {
-        // Operator is root (the root-test case): a single 0 0 1 line, no overlap.
+    fn maps_are_single_extent_ranges_covering_root_operator_and_granted() {
+        // Operator is root (the root-test case): the window is just host 0.
         assert_eq!(build_identity_maps(0, 0, &[]), ("0 0 1\n".into(), "0 0 1\n".into()));
-        // Operator is a normal user: host root mapped in, then the operator's own id.
+        // Operator is a normal user: a single range host 0..=operator (a two-extent map
+        // including root is kernel-EPERM). uid window = operator+1.
         let (u, g) = build_identity_maps(1000, 1000, &[27, 44]);
-        assert_eq!(u, "0 0 1\n1000 1000 1\n");
-        assert_eq!(g, "0 0 1\n1000 1000 1\n27 27 1\n44 44 1\n");
-        // A granted gid equal to the primary (or 0) is not duplicated.
-        let (_, g2) = build_identity_maps(1000, 1000, &[1000, 0, 27]);
-        assert_eq!(g2, "0 0 1\n1000 1000 1\n27 27 1\n");
+        assert_eq!(u, "0 0 1001\n");
+        // gid window extends to cover the operator gid and every granted gid (here ≤1000).
+        assert_eq!(g, "0 0 1001\n");
+        // A granted gid ABOVE the operator widens the gid window to include it.
+        let (_, g2) = build_identity_maps(1000, 1000, &[5000]);
+        assert_eq!(g2, "0 0 5001\n");
     }
 }

@@ -63,8 +63,11 @@ fn effective_uid() -> u32 {
 
 #[test]
 fn factory_clones_maps_and_relays_the_init_exit_status() {
-    if effective_uid() != 0 {
-        eprintln!("SKIP: factory_clones_maps_and_relays needs root (run under sudo)");
+    // Runs as real root (op_uid 0) OR as the operator with a file-capped privhelper
+    // (the production posture). `KENNEL_FACTORY_OPERATOR=1` allows the non-root run.
+    let operator_ok = std::env::var("KENNEL_FACTORY_OPERATOR").as_deref() == Ok("1");
+    if effective_uid() != 0 && !operator_ok {
+        eprintln!("SKIP: factory_clones_maps_and_relays needs root or KENNEL_FACTORY_OPERATOR=1");
         return;
     }
 

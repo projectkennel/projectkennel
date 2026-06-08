@@ -19,13 +19,13 @@ use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
 ///
 /// Returns the long-lived helper process (the kennel's supervisor — wait it for the
-/// workload's exit status) and `kennel-init`'s **host pid** (`07-11` §7.11.1).
+/// workload's exit status) and `kennel-init`'s **host pid** (`07-11` §7.11.1). kennel-init
+/// runs as the operator, so `kenneld` opens the kennel's binderfs device itself via
+/// `/proc/<init>/root` — no fd needs to come back here.
 ///
 /// Spawns `helper construct` with one end of a `SOCK_SEQPACKET` pair as its stdin, sends
 /// the `construction_half` bytes plus the `kennel-init` binary fd and (optionally) the
-/// controlling-pty socket via `SCM_RIGHTS`, and reads back the init host pid. The caller
-/// keeps the returned [`Child`] (the factory stays alive as the construction child's
-/// parent) and uses `init_pid` to take binder node 0 and gate the lifecycle verbs.
+/// controlling-pty socket via `SCM_RIGHTS`, and reads back the init host pid.
 ///
 /// # Errors
 ///

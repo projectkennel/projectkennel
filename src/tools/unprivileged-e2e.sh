@@ -12,10 +12,11 @@
 # matching the project's "a skip is not a proof" rule: where a prerequisite cannot
 # be met the test skips with the precise cause rather than passing falsely.
 #
-#   1. builds the privhelper (--features bpf-egress), netproxy, socks-connect, and
-#      the test binary;
-#   2. `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid=ep` on the privhelper
-#      (the production install posture — 07-paths.md — never sudo at runtime);
+#   1. builds the privhelper (--features bpf-egress), netproxy, socks-connect,
+#      kennel-init, and the test binary;
+#   2. `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid=ep` on the
+#      privhelper (the production install posture — 07-paths.md — never sudo at
+#      runtime; cap_setuid is the factory's 0 0 1 uid_map write, 07-11);
 #   3. provisions an /etc/kennel/subkennel allocation for the operator's uid;
 #   4. loads an AppArmor profile granting `userns` to the test binary (Ubuntu's
 #      kernel.apparmor_restrict_unprivileged_userns=1; dist/apparmor/kenneld is the
@@ -63,7 +64,7 @@ echo "== building binaries =="
 # Build the test binary and the supporting binaries first; the privhelper with
 # bpf-egress is built LAST so a later workspace build cannot clobber its embedded
 # BPF objects (privhelper-bpf-egress-build-gotcha).
-cargo build -p kennel-socks-connect -p kennel-netproxy -p kennel-afunix-shim
+cargo build -p kennel-socks-connect -p kennel-netproxy -p kennel-afunix-shim -p kennel-init
 cargo test -p kenneld --features root-tests --no-run
 cargo build -p kennel-privhelper --features bpf-egress
 
@@ -77,7 +78,12 @@ echo "  privhelper: $PRIVHELPER"
 echo "  test bin:   $TESTBIN"
 
 echo "== file capabilities on the privhelper (sudo, one-time) =="
-sudo setcap cap_net_admin,cap_sys_admin,cap_setgid=ep "$PRIVHELPER"
+# The factory additions (07-11): cap_setuid maps the operator's id, and — since Linux
+# 5.12 — cap_setfcap is ALSO required to map host uid 0 into a new user namespace
+# (capabilities(7): "this capability is also needed to map user ID 0 in a new user
+# namespace"). Without cap_setfcap the kennel's `0 0 N` uid_map write is EPERM even for
+# an escalated-root writer.
+sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep "$PRIVHELPER"
 getcap "$PRIVHELPER"
 
 echo "== /etc/kennel/subkennel allocation for uid $UID_NUM (sudo) =="
@@ -104,16 +110,26 @@ echo "== AppArmor userns profile over the test binary (sudo) =="
 # sys_admin). See dist/apparmor/kenneld for the full rationale.
 # The path is left unquoted: apparmor_parser 4.0.1's lexer rejects a quoted path in
 # the `profile <name> <path>` form (the build-time deps path has no spaces anyway).
+# Two profiles, both granting userns:
+#  - the test binary (kenneld's role): creates its own userns on the legacy path.
+#  - the PRIVHELPER (factory, 07-11): it calls clone(CLONE_NEWUSER). Without a userns
+#    grant the kernel transitions the userns it creates to the restricted
+#    `unprivileged_userns` profile, which FORBIDS mapping host uid 0 into it (the
+#    `0 0 N` factory map then fails EPERM). Granting the privhelper userns makes the
+#    userns it creates "privileged", so host root can be mapped in.
 cat > "$AA_PROFILE_FILE" <<EOF
 abi <abi/4.0>,
 include <tunables/global>
 profile $AA_PROFILE_NAME $TESTBIN flags=(unconfined) {
   userns,
 }
+profile ${AA_PROFILE_NAME}_privhelper $PRIVHELPER flags=(unconfined) {
+  userns,
+}
 EOF
 if [ -e /sys/kernel/security/apparmor ]; then
     sudo apparmor_parser -r -W "$AA_PROFILE_FILE"
-    echo "  loaded $AA_PROFILE_NAME over $TESTBIN"
+    echo "  loaded $AA_PROFILE_NAME + _privhelper over the test binary and privhelper"
 else
     echo "  (AppArmor not present; relying on the kernel's userns being unrestricted)"
 fi

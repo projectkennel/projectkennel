@@ -324,13 +324,23 @@ fn lifecycle_handle(
     reply
 }
 
-/// Whether a node-0 lifecycle transaction is authorised: the kernel-stamped sender must
-/// be exactly the registered `kennel-init` host pid **and** uid 0. `init == None`
-/// (lifecycle disabled) denies everything because `Some(pid) != None`; `sender_euid == 0`
-/// is defence-in-depth atop the pid match (the pid is the binding fact).
+/// Whether a node-0 lifecycle transaction is authorised: the kernel-stamped sender pid
+/// must be exactly the registered `kennel-init` host pid. That pid is the binding fact —
+/// kernel-stamped (`task_tgid_nr_ns`), unforgeable, and unique to `kennel-init` (the
+/// workload and facades have different pids). `init == None` (lifecycle disabled) denies
+/// everything because `Some(pid) != None`.
+///
+/// `sender_euid` is no longer required to be 0: `kennel-init` runs as the **operator**
+/// (it drops from the construction child's host-root before exec so the operator `kenneld`
+/// can reach its `/proc/<init>/root` to open the binderfs device — `07-11`). The euid is
+/// kept only as a sanity gate against the kernel overflow uid (an unmapped sender).
 const fn lifecycle_authorized(init: Option<i32>, sender_pid: i32, sender_euid: u32) -> bool {
-    matches!(init, Some(pid) if pid == sender_pid) && sender_euid == 0
+    matches!(init, Some(pid) if pid == sender_pid) && sender_euid != OVERFLOW_UID
 }
+
+/// The kernel's overflow uid (`/proc/sys/kernel/overflowuid`, default 65534) — what an
+/// unmapped sender presents as. A real in-kennel process is a mapped uid, never this.
+const OVERFLOW_UID: u32 = 65534;
 
 /// The af-unix facade (`07-9`/`02-7`): resolve the requested socket against the
 /// `[[unix.allow]]` grants (by its in-view `shim` path or logical `name`), connect to
@@ -465,16 +475,16 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_gate_requires_the_exact_init_pid_and_uid0() {
-        // Served only to the registered init host pid running as uid 0.
+    fn lifecycle_gate_requires_the_exact_init_pid() {
+        // Served to the registered init host pid (kennel-init runs as the operator uid).
+        assert!(lifecycle_authorized(Some(4242), 4242, 1000));
         assert!(lifecycle_authorized(Some(4242), 4242, 0));
         // Wrong pid (a spoof from another in-kennel process) — denied.
-        assert!(!lifecycle_authorized(Some(4242), 9999, 0));
-        // Right pid but not uid 0 — denied (defence in depth).
-        assert!(!lifecycle_authorized(Some(4242), 4242, 1000));
+        assert!(!lifecycle_authorized(Some(4242), 9999, 1000));
+        // An unmapped (overflow-uid) sender is rejected even with a matching pid.
+        assert!(!lifecycle_authorized(Some(4242), 4242, 65534));
         // Lifecycle disabled (no init pid registered) — everything denied.
-        assert!(!lifecycle_authorized(None, 4242, 0));
-        assert!(!lifecycle_authorized(None, 0, 0));
+        assert!(!lifecycle_authorized(None, 4242, 1000));
     }
 
     #[test]

@@ -1021,9 +1021,10 @@ fn construct_via_factory<P: Privileged + Sync>(
     let (child, init_pid) = privileged.construct_kennel(&half_bytes, init.as_fd(), None)?;
     state.factory = true;
 
-    // Take binder node 0 of the kennel-init-mounted binderfs and serve the lifecycle
-    // (gated on the init pid) so kennel-init can pull its supervision-half. Best-effort:
-    // a failure leaves binder inert but the workload still runs.
+    // Take binder node 0 of the kennel's binderfs (mounted by the factory) and serve the
+    // lifecycle (gated on the init pid) so kennel-init can pull its supervision-half.
+    // kennel-init runs as the operator, so kenneld opens the device via /proc/<init>/root.
+    // Best-effort: a failure leaves binder inert but the workload still runs.
     if plan.view.as_ref().is_some_and(|v| v.binder) {
         let init_pid_u32 = u32::try_from(init_pid).unwrap_or(0);
         let lifecycle = crate::binder::Lifecycle {
@@ -1079,7 +1080,11 @@ fn supervision_from(
         cwd: command.get_current_dir().map(Path::to_path_buf),
         drop_uid,
         drop_gid,
-        groups: plan.supplementary_groups.clone(),
+        // None: the factory's construction child already set the kennel's supplementary
+        // groups (as uid 0, with CAP_SETGID) before dropping to the operator, so kennel-init
+        // and the workload INHERIT them. kennel-init runs as the operator (no CAP_SETGID),
+        // so it must NOT re-`setgroups` — that would EPERM and abort the workload.
+        groups: None,
         landlock_fs: plan.landlock_fs.clone(),
         landlock_net: plan.landlock_net.clone(),
         seccomp_deny: plan.seccomp_deny.clone(),
@@ -1108,15 +1113,11 @@ fn acquire_binder_node0(
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
-    for _ in 0..50 {
+    for _ in 0..150 {
         if let Some(pid) = resolve_pid() {
             let dev = format!("/proc/{pid}/root/dev/binderfs/binder");
             // std opens files O_CLOEXEC by default on Unix.
-            if let Ok(file) = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&dev)
-            {
+            if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&dev) {
                 return crate::binder::spawn(
                     OwnedFd::from(file),
                     ctx,
