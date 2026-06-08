@@ -8,10 +8,58 @@
 
 use std::io;
 use std::net::IpAddr;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+
+use kennel_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_fds};
 
 use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
+
+/// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
+///
+/// Returns the long-lived helper process (the kennel's supervisor — wait it for the
+/// workload's exit status) and `kennel-init`'s **host pid** (`07-11` §7.11.1).
+///
+/// Spawns `helper construct` with one end of a `SOCK_SEQPACKET` pair as its stdin, sends
+/// the `construction_half` bytes plus the `kennel-init` binary fd and (optionally) the
+/// controlling-pty socket via `SCM_RIGHTS`, and reads back the init host pid. The caller
+/// keeps the returned [`Child`] (the factory stays alive as the construction child's
+/// parent) and uses `init_pid` to take binder node 0 and gate the lifecycle verbs.
+///
+/// # Errors
+///
+/// Returns the OS error if the socketpair, spawn, send, or pid receive fails, or
+/// [`io::ErrorKind::InvalidData`] if the reply is not the 4-byte pid.
+pub fn construct_kennel(
+    helper: &Path,
+    construction_half: &[u8],
+    init_fd: BorrowedFd<'_>,
+    pty_fd: Option<BorrowedFd<'_>>,
+) -> io::Result<(Child, i32)> {
+    let (ours, theirs) = seqpacket_pair()?;
+    let child = Command::new(helper)
+        .arg("construct")
+        .stdin(Stdio::from(theirs))
+        .spawn()?;
+    // `theirs` is consumed by the Command (dup'd to the child's stdin); our end stays.
+
+    let mut fds = vec![init_fd];
+    if let Some(pty) = pty_fd {
+        fds.push(pty);
+    }
+    send_with_fds(ours.as_fd(), construction_half, &fds)?;
+
+    let mut buf = [0u8; 4];
+    let (n, _none) = recv_with_fds(ours.as_fd(), &mut buf)?;
+    if n != 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "factory did not return the 4-byte init pid",
+        ));
+    }
+    Ok((child, i32::from_le_bytes(buf)))
+}
 
 /// Invoke `helper`, send `request`, and return the decoded response.
 ///

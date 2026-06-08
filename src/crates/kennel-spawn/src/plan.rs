@@ -458,6 +458,9 @@ pub struct Supervision {
     /// The fully-synthesised environment (`execve` replaces the env wholesale, so this
     /// is the complete set — there is no inheritance to clear, `run-environment-design`).
     pub env: Vec<(String, String)>,
+    /// The workload's working directory (`kennel-init` `chdir`s here before `execve`);
+    /// `None` keeps the inherited cwd (the view root).
+    pub cwd: Option<std::path::PathBuf>,
     /// The masked operator uid every child is dropped to (`set_uid`, last in the drop).
     pub drop_uid: u32,
     /// The masked operator gid every child is dropped to (`set_gid`, first in the drop).

@@ -565,6 +565,13 @@ pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
         w.bytes(k.as_bytes());
         w.bytes(v.as_bytes());
     }
+    match &s.cwd {
+        None => w.bool(false),
+        Some(p) => {
+            w.bool(true);
+            w.path(p);
+        }
+    }
     w.u32(s.drop_uid);
     w.u32(s.drop_gid);
 
@@ -640,6 +647,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         let v = get_string(&mut r)?;
         env.push((k, v));
     }
+    let cwd = if r.bool()? { Some(r.path()?) } else { None };
     let drop_uid = r.u32()?;
     let drop_gid = r.u32()?;
 
@@ -701,6 +709,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         program,
         argv,
         env,
+        cwd,
         drop_uid,
         drop_gid,
         groups,
@@ -936,6 +945,7 @@ mod tests {
                 ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
                 ("TERM".to_owned(), "xterm-256color".to_owned()),
             ],
+            cwd: Some(PathBuf::from("/home/kennel")),
             drop_uid: 1000,
             drop_gid: 1000,
             groups: Some(vec![1000, 27, 44]),
@@ -974,6 +984,7 @@ mod tests {
             program: PathBuf::from("/bin/true"),
             argv: vec!["true".to_owned()],
             env: Vec::new(),
+            cwd: None,
             drop_uid: 0,
             drop_gid: 0,
             groups: None,

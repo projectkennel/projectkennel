@@ -143,6 +143,10 @@ fn spawn_all(
     let filter = (!sup.seccomp_deny.is_empty()).then(|| sup.seccomp_filter());
 
     let seal = || -> io::Result<()> {
+        // The workload's working directory (a path inside the view), before confinement.
+        if let Some(cwd) = &sup.cwd {
+            std::env::set_current_dir(cwd)?;
+        }
         // Controlling terminal FIRST, before Landlock/seccomp could gate the ioctls
         // (`07-7` §7.7.2). The interactive path allocates a pty in the view's devpts and
         // returns the master over the socket the CLI passed; otherwise adopt stdin.
@@ -309,6 +313,7 @@ mod tests {
             program: PathBuf::from("/usr/bin/claude"),
             argv: vec!["claude".to_owned()],
             env: vec![("HOME".to_owned(), "/home/kennel".to_owned())],
+            cwd: None,
             drop_uid: 1000,
             drop_gid: 1000,
             groups: Some(vec![1000]),
