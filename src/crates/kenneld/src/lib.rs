@@ -156,6 +156,29 @@ pub trait Privileged {
     /// # Errors
     /// As [`add_address`](Self::add_address).
     fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response>;
+
+    /// Construct a kennel via the privhelper **factory** (`07-11`): hand it the
+    /// `construction_half` bytes, the `kennel-init` binary fd, and (optionally) the pty
+    /// socket; receive the long-lived supervisor [`Child`] and `kennel-init`'s host pid.
+    ///
+    /// Defaults to an error: only the production [`HelperClient`] drives the real factory.
+    /// The test doubles never reach it (unit tests take the legacy in-process path,
+    /// keyed off an absent `init_bin`).
+    ///
+    /// # Errors
+    /// An OS error if the factory cannot be invoked, or [`io::ErrorKind::Unsupported`]
+    /// for an impl that does not support construction.
+    fn construct_kennel(
+        &self,
+        _construction_half: &[u8],
+        _init_fd: std::os::fd::BorrowedFd<'_>,
+        _pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
+    ) -> io::Result<(Child, i32)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "factory construction not supported by this Privileged impl",
+        ))
+    }
 }
 
 /// The production [`Privileged`] implementation: each call invokes the installed
@@ -202,6 +225,15 @@ impl Privileged for HelperClient {
 
     fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response> {
         kennel_privhelper::client::set_gid_map(&self.helper, pid, gids)
+    }
+
+    fn construct_kennel(
+        &self,
+        construction_half: &[u8],
+        init_fd: std::os::fd::BorrowedFd<'_>,
+        pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
+    ) -> io::Result<(Child, i32)> {
+        kennel_privhelper::client::construct_kennel(&self.helper, construction_half, init_fd, pty_fd)
     }
 }
 
@@ -265,6 +297,11 @@ pub struct BinderPrep {
     pub unix: kennel_policy::UnixRuntime,
     /// The unified audit writer the registry emits through.
     pub writer: std::sync::Arc<kennel_audit::Writer>,
+    /// The `kennel-init` binary the privhelper factory `fexecve`s as the kennel's uid-0
+    /// PID 1 (`07-11`). When `Some`, `bring_up` constructs the kennel via the factory
+    /// (real uid 0, binderfs chowned to the operator); when `None`, it falls back to the
+    /// legacy in-process unprivileged spawn (no real uid 0 — the binderfs `EACCES` path).
+    pub init_bin: Option<PathBuf>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -594,6 +631,10 @@ struct Provision {
     proxy: Option<Child>,
     view_root: Option<PathBuf>,
     binder: Option<crate::binder::Manager>,
+    /// The kennel was built by the privhelper factory (the returned `Child` is the
+    /// factory supervisor, not an in-process spawn). Records which path ran, for unwind
+    /// and diagnostics.
+    factory: bool,
 }
 
 /// Bring a kennel up. On any error the partial bring-up is unwound, so no
@@ -905,9 +946,23 @@ fn bring_up<P: Privileged + Sync>(
         }
     }
 
-    // 4. spawn the workload into this cgroup (it joins itself in the seal).
+    // 4. spawn the workload into this cgroup. Two paths:
+    //    * the **factory** (`07-11`), when a kennel-init binary is configured: the
+    //      privhelper clones a real-uid-0 kennel, builds the view + binderfs (chowned to
+    //      the operator), and `fexecve`s kennel-init, which pulls its supervision-half
+    //      over binder and spawns + confines the workload. This is the path that gives a
+    //      real uid 0 and fixes the binderfs EACCES.
+    //    * the **legacy** in-process unprivileged spawn otherwise (unit tests, and any
+    //      deployment without kennel-init configured).
     plan.cgroup = cgroup.to_path_buf();
     let wants_binder = plan.view.as_ref().is_some_and(|v| v.binder);
+    let init_bin = binder.and_then(|b| b.init_bin.as_deref());
+
+    if let Some(init_bin) = init_bin {
+        let prep = binder.expect("init_bin implies a BinderPrep");
+        return construct_via_factory(privileged, plan, command, init_bin, ctx, prep, state);
+    }
+
     let child = spawn_workload(privileged, plan, command)?;
 
     // 5. binder context manager (§7.9): the seal mounted the kennel's binderfs and
@@ -916,7 +971,15 @@ fn bring_up<P: Privileged + Sync>(
     //    workload's own binder calls before this fail closed (BR_DEAD_REPLY) — safe.
     //    Best-effort: a failure to acquire is logged, not fatal (binder stays inert).
     if let (true, Some(prep)) = (wants_binder, binder) {
-        match acquire_binder_node0(child.id(), ctx, prep) {
+        let spawn_pid = child.id();
+        match acquire_binder_node0(
+            || workload_pid(spawn_pid),
+            ctx,
+            prep,
+            // Lifecycle disabled on the legacy path: no real uid 0, no supervision-half
+            // to serve. (This is the binderfs-EACCES path; the factory is the fix.)
+            crate::binder::Lifecycle::default(),
+        ) {
             Ok(manager) => state.binder = Some(manager),
             Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
         }
@@ -924,24 +987,130 @@ fn bring_up<P: Privileged + Sync>(
     Ok(child)
 }
 
-/// Take node 0 of a freshly-spawned workload's binderfs instance and run its
-/// registry serve thread. The seal (in the workload's PID-1 grandchild) mounts the
-/// instance and allocates the `binder` device; we reach it from the daemon via the
-/// workload process's `/proc/<pid>/root`, which (post-`pivot_root`) is the view.
-///
-/// `spawn_pid` is the `Command` child (the intermediate that becomes the workload's
-/// parent); the workload itself is its child, so we resolve that and retry until its
-/// binderfs device appears (the seal runs concurrently with our return from spawn).
-fn acquire_binder_node0(
-    spawn_pid: u32,
+/// The factory construction path (`07-11`): split the plan into its construction- and
+/// supervision-halves, have the privhelper factory build the kennel and `fexecve`
+/// `kennel-init`, then take binder node 0 via the init pid and serve the lifecycle so
+/// `kennel-init` can pull the supervision-half. Returns the long-lived factory process
+/// (the kennel's supervisor; its exit status is the workload's).
+#[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
+fn construct_via_factory<P: Privileged + Sync>(
+    privileged: &P,
+    plan: &Plan,
+    command: &Command,
+    init_bin: &Path,
     ctx: u16,
     prep: &BinderPrep,
+    state: &mut Provision,
+) -> Result<Child, Error> {
+    use std::os::fd::AsFd;
+
+    // The masked operator identity every child is dropped to — the caller's real ids,
+    // which the construction maps identity-map in (never wire-supplied).
+    let drop_uid = kennel_syscall::unistd::real_uid();
+    let drop_gid = kennel_syscall::unistd::real_gid();
+
+    let construction = construction_half_from(plan);
+    let supervision = supervision_from(plan, command, drop_uid, drop_gid);
+    let half_bytes = kennel_spawn::wire::encode_construction(&construction);
+    let supervision_bytes = kennel_spawn::wire::encode_supervision(&supervision);
+
+    let init = std::fs::File::open(init_bin)?;
+    // The pty return socket (interactive runs) rides the binder lifecycle reply, not the
+    // factory; the non-interactive vertical passes None. (Interactive-through-factory is
+    // tracked in BINDER-NET-INTEGRATION.)
+    let (child, init_pid) = privileged.construct_kennel(&half_bytes, init.as_fd(), None)?;
+    state.factory = true;
+
+    // Take binder node 0 of the kennel-init-mounted binderfs and serve the lifecycle
+    // (gated on the init pid) so kennel-init can pull its supervision-half. Best-effort:
+    // a failure leaves binder inert but the workload still runs.
+    if plan.view.as_ref().is_some_and(|v| v.binder) {
+        let init_pid_u32 = u32::try_from(init_pid).unwrap_or(0);
+        let lifecycle = crate::binder::Lifecycle {
+            init_host_pid: Some(init_pid),
+            supervision: supervision_bytes,
+            pty_fd: None,
+        };
+        match acquire_binder_node0(|| Some(init_pid_u32), ctx, prep, lifecycle) {
+            Ok(manager) => state.binder = Some(manager),
+            Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
+        }
+    }
+    Ok(child)
+}
+
+/// Build the construction-half (the privhelper factory's input) from the plan.
+fn construction_half_from(plan: &Plan) -> kennel_spawn::ConstructionHalf {
+    kennel_spawn::ConstructionHalf {
+        namespaces: plan.namespaces,
+        cgroup: plan.cgroup.clone(),
+        cgroup_join: plan.cgroup_join,
+        view: plan.view.clone(),
+        new_root: plan.new_root.clone(),
+        file_binds: plan.file_binds.clone(),
+        // The granted supplementary gids feed the gid_map after the 0 0 1 + operator
+        // lines (the factory adds those); empty ⇒ default drop-all-groups.
+        granted_gids: plan.supplementary_groups.clone().unwrap_or_default(),
+        lo: false, // per-kennel net-ns loopback is future work (07-10)
+    }
+}
+
+/// Build the supervision-half (what kennel-init pulls) from the plan and the workload
+/// `Command`. Reads the program/argv/env/cwd back via the stable `Command` getters, so
+/// the command-building in `server.rs` is unchanged by the cutover.
+#[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
+fn supervision_from(
+    plan: &Plan,
+    command: &Command,
+    drop_uid: u32,
+    drop_gid: u32,
+) -> kennel_spawn::Supervision {
+    let program = PathBuf::from(command.get_program());
+    let mut argv = vec![command.get_program().to_string_lossy().into_owned()];
+    argv.extend(command.get_args().map(|a| a.to_string_lossy().into_owned()));
+    let env = command
+        .get_envs()
+        .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
+        .collect();
+    kennel_spawn::Supervision {
+        program,
+        argv,
+        env,
+        cwd: command.get_current_dir().map(Path::to_path_buf),
+        drop_uid,
+        drop_gid,
+        groups: plan.supplementary_groups.clone(),
+        landlock_fs: plan.landlock_fs.clone(),
+        landlock_net: plan.landlock_net.clone(),
+        seccomp_deny: plan.seccomp_deny.clone(),
+        seccomp_deny_action: plan.seccomp_deny_action,
+        ulimits: plan.ulimits.clone(),
+        aux: plan.aux.clone(),
+        interactive: plan.interactive_return_fd.is_some(),
+    }
+}
+
+/// Take node 0 of a kennel's binderfs instance and run its registry + lifecycle serve
+/// thread. The binderfs is mounted inside the kennel (by the spawn seal on the legacy
+/// path, or by the factory's construction child); we reach it from the daemon via the
+/// process's `/proc/<pid>/root`, which (post-`pivot_root`) is the view.
+///
+/// `resolve_pid` yields the pid whose `/proc/<pid>/root` holds the device, retried until
+/// the device appears (construction runs concurrently with our return). On the legacy
+/// path that is the workload (a `/children` walk from the spawn intermediate); on the
+/// factory path it is `kennel-init` directly. `lifecycle` carries the init-pid gate +
+/// supervision-half kenneld serves over node 0 (disabled on the legacy path).
+fn acquire_binder_node0(
+    resolve_pid: impl Fn() -> Option<u32>,
+    ctx: u16,
+    prep: &BinderPrep,
+    lifecycle: crate::binder::Lifecycle,
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
     for _ in 0..50 {
-        if let Some(workload) = workload_pid(spawn_pid) {
-            let dev = format!("/proc/{workload}/root/dev/binderfs/binder");
+        if let Some(pid) = resolve_pid() {
+            let dev = format!("/proc/{pid}/root/dev/binderfs/binder");
             // std opens files O_CLOEXEC by default on Unix.
             if let Ok(file) = std::fs::OpenOptions::new()
                 .read(true)
@@ -953,10 +1122,7 @@ fn acquire_binder_node0(
                     ctx,
                     prep.policy.clone(),
                     prep.unix.clone(),
-                    // Lifecycle disabled on the legacy spawn path: the factory (Stage F)
-                    // reports the init pid and stages the supervision-half. Until then the
-                    // GET_SANDBOX_PLAN/NOTIFY_* verbs are refused (no init pid to match).
-                    crate::binder::Lifecycle::default(),
+                    lifecycle,
                     std::sync::Arc::clone(&prep.writer),
                 );
             }
@@ -965,7 +1131,7 @@ fn acquire_binder_node0(
     }
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
-        "workload binderfs device did not appear",
+        "kennel binderfs device did not appear",
     ))
 }
 

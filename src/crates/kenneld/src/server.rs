@@ -144,6 +144,11 @@ pub struct Identity {
     /// facade (§7.4 / `07-9` §7.9.5). `None` disables the facade path, so `[unix]`
     /// grants go unserved (no host socket is exposed by other means).
     pub afunix_shim_bin: Option<PathBuf>,
+    /// The host path of the trusted root-owned `kennel-init` the privhelper factory
+    /// `fexecve`s as the kennel's uid-0 PID 1 (`07-11`). `Some` selects the factory
+    /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
+    /// the legacy in-process unprivileged spawn.
+    pub init_bin: Option<PathBuf>,
 }
 
 /// How `kenneld` runs the per-user SSH bastion (§7.8). The daemon holds one
@@ -805,6 +810,7 @@ fn run_kennel<P, L>(
                 policy: loaded.binder,
                 unix: facade_unix,
                 writer: Arc::clone(writer),
+                init_bin: shared.identity.init_bin.clone(),
             });
         }
     }
@@ -1163,6 +1169,7 @@ mod tests {
                 audit_base: None,
                 bastion: None,
                 afunix_shim_bin: None,
+                init_bin: None,
             },
             OkPriv,
             FakeLoader,

@@ -155,6 +155,7 @@ struct RawDeployment {
     socks_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix_shim: Option<PathBuf>,
+    init: Option<PathBuf>,
 }
 
 impl RawDeployment {
@@ -170,6 +171,7 @@ impl RawDeployment {
             socks_connect: higher.socks_connect.or(self.socks_connect),
             akc: higher.akc.or(self.akc),
             afunix_shim: higher.afunix_shim.or(self.afunix_shim),
+            init: higher.init.or(self.init),
         }
     }
 
@@ -189,6 +191,7 @@ impl RawDeployment {
             socks_connect: self.socks_connect,
             akc: self.akc,
             afunix_shim: self.afunix_shim,
+            init: self.init,
         }
     }
 }
@@ -206,6 +209,7 @@ pub struct Deployment {
     socks_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix_shim: Option<PathBuf>,
+    init: Option<PathBuf>,
 }
 
 impl Deployment {
@@ -295,6 +299,13 @@ impl Deployment {
     #[must_use]
     pub fn afunix_shim(&self) -> PathBuf {
         self.resolve_bin(self.afunix_shim.as_deref(), "kennel-afunix-shim")
+    }
+
+    /// The trusted root-owned `kennel-init` the privhelper factory `fexecve`s as the
+    /// kennel's uid-0 PID 1 (`07-11`).
+    #[must_use]
+    pub fn kennel_init(&self) -> PathBuf {
+        self.resolve_bin(self.init.as_deref(), "kennel-init")
     }
 
     /// An explicit override, else `<libexec_dir>/<name>`.

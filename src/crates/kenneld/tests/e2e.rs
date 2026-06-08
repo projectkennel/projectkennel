@@ -453,6 +453,9 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             }],
         },
         writer: binder_writer,
+        // Drive the privhelper factory (07-11): a real uid 0 builds the view + binderfs
+        // (chowned to the operator), fixing the binderfs EACCES the legacy path hit.
+        init_bin: Some(sibling_binary("kennel-init")),
     };
 
     let spec = Spec {

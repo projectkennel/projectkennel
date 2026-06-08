@@ -115,5 +115,6 @@ fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, St
         audit_base,
         bastion,
         afunix_shim_bin: Some(deployment.afunix_shim()),
+        init_bin: Some(deployment.kennel_init()),
     })
 }
