@@ -20,9 +20,16 @@ use std::process::ExitCode;
 use kennel_privhelper::wire::{
     EgressPayload, GidMapPayload, Op, Request, Response, Status, REQUEST_LEN,
 };
-use kennel_privhelper::{alloc, exec};
+use kennel_privhelper::{alloc, construct, exec};
 
 fn main() -> ExitCode {
+    // The factory mode (`07-11`): kenneld invokes `kennel-privhelper construct` with a
+    // SOCK_SEQPACKET socket as stdin. It is long-lived (stays as the construction child's
+    // parent) and passes fds, so it does not use the one-shot stdin/stdout framing below.
+    if std::env::args().nth(1).as_deref() == Some("construct") {
+        use std::os::fd::AsFd;
+        construct::run_construct(std::io::stdin().as_fd());
+    }
     let mut buf = Vec::new();
     if std::io::stdin().read_to_end(&mut buf).is_err() {
         return respond(Response::protocol());

@@ -112,6 +112,7 @@ name = "kennel-privhelper"
 version = "0.1.0"
 dependencies = [
  "kennel-bpf",
+ "kennel-spawn",
  "kennel-syscall",
 ]
 

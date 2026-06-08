@@ -18,11 +18,33 @@ use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 use nix::sys::socket::{
-    getsockopt, recvmsg, sendmsg, sockopt, ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr,
+    getsockopt, recvmsg, sendmsg, socketpair, sockopt, AddressFamily, ControlMessage,
+    ControlMessageOwned, MsgFlags, SockFlag, SockType, UnixAddr,
 };
 
 /// The largest number of fds [`recv_with_fds`] will accept in one message.
 pub const MAX_FDS: usize = 8;
+
+/// Create a connected `AF_UNIX` `SOCK_SEQPACKET` socket pair (both ends `O_CLOEXEC`).
+///
+/// The bidirectional, message-framed channel the privhelper-factory invocation rides
+/// (`07-11` §7.11.1): `kenneld` keeps one end and hands the other to the factory as its
+/// stdin, sending the construction-half plus the `kennel-init`/pty fds (`SCM_RIGHTS`) one
+/// way and receiving the init pid back. `SEQPACKET` preserves message boundaries, so each
+/// `send_with_fds`/`recv_with_fds` is one datagram.
+///
+/// # Errors
+///
+/// Returns the OS error if `socketpair(2)` fails.
+pub fn seqpacket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    socketpair(
+        AddressFamily::Unix,
+        SockType::SeqPacket,
+        None,
+        SockFlag::SOCK_CLOEXEC,
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
 
 /// The connected peer's uid on an `AF_UNIX` socket (`SO_PEERCRED`).
 ///
