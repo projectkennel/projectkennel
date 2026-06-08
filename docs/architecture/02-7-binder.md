@@ -95,6 +95,18 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 
 ### Mount sequencing within the spawn pipeline
 
+> **Superseded by the uid-0 construction model ([`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)).**
+> binderfs assigns its control/device nodes to **uid 0 of the mounting user namespace**.
+> The old pure-identity map (`{uid} {uid} 1`) had no uid 0, so the nodes landed on the
+> overflow uid (`nobody`, mode `0600`) and nothing in the kennel could open them — proven
+> by the full-vertical e2e (`add_binder_device` EACCES). The kennel now has a real uid 0
+> (host root mapped `0 0 1`, no subuid), and binderfs is mounted by the root-owned
+> **`kennel-init` (PID 1)** the privhelper `execve`s, which opens the device while uid 0,
+> then **chowns `/dev/binderfs/binder` to the workload uid** (`binder-control` stays
+> root-only). The step list below still describes the mount/allocate/become-context-manager
+> mechanics, but the *actor* is `kennel-init` under privhelper-driven construction, not the
+> old unprivileged spawn fork. Full reconciliation is owed (`BINDER-NET-INTEGRATION.md`).
+
 Each kennel gets its own binderfs instance — a fully independent mount, like devpts and
 tmpfs, sharing no nodes with any other kennel's instance. **binderfs carries
 `FS_USERNS_MOUNT`, so it mounts inside the kennel's child user namespace**, exactly where
@@ -159,15 +171,22 @@ This is purely about the **device** name. The `org.projectkennel.*` strings (§C
 binder *service-registry* names, not devices — and reverse-DNS service naming is itself the
 Android convention (cf. `android.os.*`, `vendor.*`), so those are kept as-is.
 
-### No privileged step, no privhelper op
+### Privilege: no binder-specific op, but construction is now privhelper-driven
 
-Because binderfs is `FS_USERNS_MOUNT`, the entire mount → allocate → become-context-manager
-chain runs without real privilege: the mount is namespace-local (the same category as the
-constructed view's other mounts), and the only cross-namespace action — the daemon opening
-the device fd — needs nothing beyond same-uid access to `/proc/<pid>/root`. The privhelper,
-which exists only for the host-*global* operations a user namespace cannot reach (loopback
-addresses, egress BPF attach, gid-map; `01-process-model.md`), **gains no binder operation**.
-The binder path adds no privileged surface to the spawn.
+> **Updated by the uid-0 construction model ([`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)).**
+> The original claim here — that the entire mount → allocate → become-context-manager chain
+> runs *without real privilege* — no longer holds. It rested on the spawn running uid-mapped
+> 1:1 as the operator, but binderfs nodes are owned by the mounting userns's uid 0, which a
+> pure-identity map does not provide. The kennel now maps host root `0 0 1`, which requires
+> `CAP_SETUID` and so is written by the **privhelper**, which also `execve`s the root-owned
+> `kennel-init`. The privhelper is therefore now the kennel *constructor*, not a minimal
+> add-addr/egress/gid-map helper (supersedes that framing in `01-process-model.md`).
+
+There is still **no binder-*specific* privhelper op**: binderfs is `FS_USERNS_MOUNT`, so the
+mount itself is namespace-local (the same category as the view's other mounts), and the
+device chown is done by `kennel-init` as uid 0 inside the userns. What changed is the
+*construction* privilege (the `0 0 1` map + `execve` of the trusted init), tracked in
+`BINDER-NET-INTEGRATION.md`, not a per-binder privileged surface.
 
 ---
 
@@ -239,6 +258,17 @@ Android — but the verb set and names are deliberately the same so the model is
 | 4 | `isDeclared` | workload/service → kenneld | service name | bool: does policy declare this service for this caller |
 | 5 | `getDeclaredInstances` | workload/service → kenneld | interface name | the granted instances of an interface |
 
+Two further verb groups ride node 0, gated by the unforgeable binder caller identity so a
+workload can address node 0 but cannot exercise them: the **`AF_UNIX` facade** verb
+(`CONNECT_AFUNIX`, §7.9.5) and the **`kennel-init` lifecycle** verbs
+(`NOTIFY_BOOT_SYNC`/`NOTIFY_FACADE_CRASH`/`NOTIFY_WORKLOAD_EXEC` —
+[`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)). The lifecycle verbs
+make `kennel-init` (PID 1) a binder *consumer* on the same instance kenneld manages as
+node 0, so the kennel's control plane is the binder bus itself. kenneld accepts a lifecycle
+verb only when `sender_pid` equals the init's **host** pid (learned from the privhelper at
+construction — a host-side context manager sees host pids, *not* the kennel-internal `1`)
+and `sender_euid == 0`; any other sender is a logged `Deny`. (This means binder is no
+longer confined to kenneld + `kennel-netshim` — `kennel-init` is a third participant.)
 All other transactions on node 0 are rejected with `BR_FAILED_REPLY`. The
 `listServices`/`isDeclared`/`getDeclaredInstances` verbs are the binder-surface
 introspection a workload may run on itself; there is no separate policy-introspection
