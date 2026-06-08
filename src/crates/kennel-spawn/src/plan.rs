@@ -430,6 +430,69 @@ pub struct AuxProcess {
     pub args: Vec<String>,
 }
 
+/// The **supervision-half** of a kennel's enforcement (`07-11-kennel-init.md` §7.11.3).
+///
+/// Everything `kennel-init` needs to spawn and confine the workload from *inside* the
+/// already-constructed, pivoted view.
+///
+/// The [`Plan`] is split three ways (`kennel-init-and-uid0`): `kenneld` holds the full
+/// plan, the **construction-half** goes to the privhelper factory (namespaces, maps,
+/// view, binderfs, pivot — applied *before* `kennel-init` exists), and this
+/// supervision-half is what `kennel-init` pulls back over binder (`GET_SANDBOX_PLAN`).
+/// It is a **distinct struct, not the whole `Plan`**, so the contained root parser sees
+/// only its own half — never the construction data — and so it can carry the workload
+/// program/argv/env the `Plan` never held (the old in-process path passed those as a
+/// separate [`std::process::Command`]).
+///
+/// `kennel-init` runs as the kennel's uid-0 PID 1 and forks each facade and the
+/// workload, dropping every one to the masked operator identity
+/// (`drop_gid`/`groups`/`drop_uid`, in that order) before `execve`. The facades exec
+/// unconfined (they must reach the bus); the workload additionally gets
+/// `no_new_privs` + seccomp + Landlock + ulimits + the pty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Supervision {
+    /// The workload binary's path *inside the view*.
+    pub program: PathBuf,
+    /// The workload's full argument vector, **including** `argv[0]`.
+    pub argv: Vec<String>,
+    /// The fully-synthesised environment (`execve` replaces the env wholesale, so this
+    /// is the complete set — there is no inheritance to clear, `run-environment-design`).
+    pub env: Vec<(String, String)>,
+    /// The masked operator uid every child is dropped to (`set_uid`, last in the drop).
+    pub drop_uid: u32,
+    /// The masked operator gid every child is dropped to (`set_gid`, first in the drop).
+    pub drop_gid: u32,
+    /// Supplementary groups for the drop: `Some(set)` calls `setgroups` (the granted
+    /// groups, §7.2; `Some(&[])` drops all), `None` leaves the inherited set.
+    pub groups: Option<Vec<u32>>,
+    /// The workload's Landlock filesystem rules (built post-pivot with `skip_missing`).
+    pub landlock_fs: Vec<(PathBuf, AccessFs)>,
+    /// The workload's Landlock network-port rules.
+    pub landlock_net: Vec<(u16, AccessNet)>,
+    /// The workload's seccomp denylist (syscall numbers); empty ⇒ no filter.
+    pub seccomp_deny: Vec<i64>,
+    /// The action a denied syscall triggers.
+    pub seccomp_deny_action: Action,
+    /// The workload's resource limits (`setrlimit`), applied last before `execve`.
+    pub ulimits: Vec<(Resource, u64, u64)>,
+    /// The facades to launch (af-unix proxy, future netshim/dbus/gpg), each forked and
+    /// dropped to the operator but **not** confined.
+    pub aux: Vec<AuxProcess>,
+    /// Whether a controlling-pty fd accompanies the reply (a `BINDER_TYPE_FD` object);
+    /// the real fd is injected out of band, never serialised (see [`crate::wire`]).
+    pub interactive: bool,
+}
+
+impl Supervision {
+    /// Build the workload's seccomp [`Filter`] from the denylist (mirrors
+    /// [`Plan::seccomp_filter`]). Not installed until `Filter::install` runs in the
+    /// drop seal.
+    #[must_use]
+    pub fn seccomp_filter(&self) -> Filter {
+        Filter::denylist(&self.seccomp_deny, self.seccomp_deny_action)
+    }
+}
+
 impl Plan {
     /// Build the plan from a settled policy whose deferred placeholders have
     /// already been substituted. `ctx` is the kennel's context number, and

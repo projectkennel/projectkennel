@@ -179,6 +179,65 @@ impl Connection {
         }
     }
 
+    /// Send a synchronous transaction expecting **data and, optionally, a file
+    /// descriptor** in one reply (the `kennel-init` `GET_SANDBOX_PLAN` pull: the
+    /// supervision-half bytes plus the controlling-pty fd — `07-11` §7.11.3). Sets
+    /// `TF_ACCEPT_FDS` and returns the data bytes with the fd, or `None` if the reply
+    /// carried no fd object.
+    ///
+    /// # Reply wire format (shared with the serving end)
+    ///
+    /// The reply data buffer is `[u32 data_len LE][data_len payload bytes]`, optionally
+    /// followed by padding to an 8-byte boundary and one `BINDER_TYPE_FD`
+    /// `flat_binder_object`. When an fd is present the transaction's single offset points
+    /// at that object; when absent the offsets array is empty. The explicit length prefix
+    /// lets the receiver hand the decoder *exactly* the payload, never the alignment
+    /// padding (which a strict, trailing-byte-rejecting decoder would refuse).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transact`], plus [`io::ErrorKind::InvalidData`] if the reply is shorter
+    /// than its own length prefix or its fd object is malformed.
+    pub fn transact_with_fd(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &[u8],
+    ) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
+        let td = TransactionData {
+            target: u64::from(handle),
+            code,
+            flags: proto::TF_ACCEPT_FDS,
+            data_size: len_u64(data.len())?,
+            buffer: data.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, false, &td);
+        let mut to_send: &[u8] = &write;
+        loop {
+            let brs = self.cycle(to_send)?;
+            to_send = &[];
+            self.ack_refcounts(&brs)?;
+            for br in brs {
+                match br {
+                    Br::Reply(reply) => return self.take_data_and_fd(reply),
+                    Br::Failed => {
+                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
+                        return Err(io::Error::other(format!(
+                            "binder data+fd transaction failed (BR_FAILED_REPLY, extended errno {errno})"
+                        )));
+                    }
+                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
+                    Br::Error(code) => {
+                        return Err(io::Error::other(format!("binder driver error {code}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Reply to a received transaction with a single file descriptor (a
     /// `BINDER_TYPE_FD` object), then free its inbound buffer. The kernel dups `fd`
     /// into the original caller. Used by the af-unix facade to return a connected
@@ -223,6 +282,56 @@ impl Connection {
         proto::write_free_buffer(&mut w, reply.buffer);
         self.write_only(&w)?;
         Ok(owned)
+    }
+
+    /// Extract the length-prefixed payload and the optional fd from a data-and-fd
+    /// reply (the [`Self::transact_with_fd`] format), then free the reply buffer.
+    fn take_data_and_fd(&self, reply: TransactionData) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
+        let total = usize::try_from(reply.data_size).unwrap_or(0);
+        let buf = self
+            .map
+            .read_at(reply.buffer, total)
+            .ok_or_else(|| io::Error::other("reply buffer out of range"))?;
+        // The u32 length prefix bounds the payload exactly (excludes alignment padding).
+        let len_bytes: [u8; 4] = buf
+            .get(0..4)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "reply missing length prefix"))?;
+        let payload_len = u32::from_le_bytes(len_bytes) as usize;
+        let payload = buf
+            .get(4..4usize.saturating_add(payload_len))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "reply shorter than its length prefix")
+            })?
+            .to_vec();
+
+        // An fd rides only when the reply declared at least one offset (its object
+        // position). The offsets array is a native-order u64 array (kernel convention).
+        let fd = if reply.offsets_size >= 8 {
+            let off_bytes = self
+                .map
+                .read_at(reply.offsets, 8)
+                .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                .ok_or_else(|| io::Error::other("reply offsets out of range"))?;
+            let obj_off = u64::from_ne_bytes(off_bytes);
+            let obj = self
+                .map
+                .read_at(reply.buffer.wrapping_add(obj_off), proto::FLAT_BINDER_OBJECT_SIZE)
+                .ok_or_else(|| io::Error::other("reply fd-object out of range"))?;
+            let raw = proto::flat_binder_object_fd_value(obj)
+                .filter(|&fd| fd >= 0)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "reply carried no valid fd object")
+                })?;
+            Some(sys::own_fd(raw))
+        } else {
+            None
+        };
+
+        let mut w = Vec::new();
+        proto::write_free_buffer(&mut w, reply.buffer);
+        self.write_only(&w)?;
+        Ok((payload, fd))
     }
 
     /// Receive any transactions delivered in one cycle (after `poll` signalled

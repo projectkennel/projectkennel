@@ -40,7 +40,7 @@ use kennel_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 use kennel_syscall::namespace::Namespaces;
 
-pub use plan::{AuxProcess, BindMount, Plan, ProxyEndpoint, ShimView};
+pub use plan::{AuxProcess, BindMount, Plan, ProxyEndpoint, ShimView, Supervision};
 
 /// The per-instance values the runtime fills into a settled policy's deferred
 /// placeholders.
@@ -714,12 +714,22 @@ fn combine_spawn_and_servicer(
     }
 }
 
-/// Build (but do not install) a Landlock ruleset from a plan's path and port
-/// rules. With `skip_missing`, a path that cannot be opened — absent from the
+/// Build (but do not install) a Landlock ruleset from a plan's path and port rules.
+///
+/// With `skip_missing`, a path that cannot be opened — absent from the
 /// constructed view — is skipped rather than failing the build; a grant for a
 /// path the view does not contain is vacuous. The seal builds with `skip_missing`
 /// after `pivot_root`; the fallback path builds in the parent without it.
-fn build_ruleset(
+///
+/// Public so `kennel-init` builds the workload's ruleset post-pivot from its
+/// [`Supervision`] half with the identical logic (`docs/design/07-11` §7.11.2); it is
+/// `unsafe`-free, so sharing it keeps `kennel-init` `#![forbid(unsafe_code)]`.
+///
+/// # Errors
+///
+/// Returns the OS error if the ruleset cannot be created or a path rule fails to apply
+/// (other than a `skip_missing`-tolerated absent path).
+pub fn build_ruleset(
     fs: &[(PathBuf, AccessFs)],
     net: &[(u16, AccessNet)],
     skip_missing: bool,

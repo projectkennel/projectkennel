@@ -80,6 +80,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-init"
+version = "0.1.0"
+dependencies = [
+ "kennel-binder",
+ "kennel-spawn",
+ "kennel-syscall",
+]
+
+[[package]]
 name = "kennel-netproxy"
 version = "0.1.0"
 dependencies = [

@@ -96,6 +96,65 @@ pub fn set_rlimit(resource: Resource, soft: u64, hard: u64) -> io::Result<()> {
         .map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
+/// The result of reaping one child with [`wait_any`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reaped {
+    /// A child terminated: `pid` is its host pid, `code` its exit status (an exit code,
+    /// or `128 + signal` for a signalled death — the shell convention, so a caller can
+    /// propagate a single number up the process chain).
+    Exited {
+        /// The terminated child's pid.
+        pid: i32,
+        /// Its exit code (or `128 + signal`).
+        code: i32,
+    },
+    /// There are no remaining children to reap (`ECHILD`).
+    NoChildren,
+}
+
+/// Block until any child changes to a terminal state and reap it (`wait(2)`).
+///
+/// The reaping primitive `kennel-init` (the kennel's PID 1) drives in its supervise
+/// loop: it must reap every child to prevent zombies and to learn when the workload
+/// exits. Stopped/continued transitions are not requested, so every [`Reaped::Exited`]
+/// is a real termination. `EINTR` is retried.
+///
+/// # Errors
+///
+/// Returns the OS error if `wait` fails for a reason other than `ECHILD` (reported as
+/// [`Reaped::NoChildren`]) or `EINTR` (retried).
+pub fn wait_any() -> io::Result<Reaped> {
+    loop {
+        match nix::sys::wait::wait() {
+            Ok(status) => return Ok(reaped_from(status)),
+            Err(nix::errno::Errno::ECHILD) => return Ok(Reaped::NoChildren),
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(e) => return Err(io::Error::from_raw_os_error(e as i32)),
+        }
+    }
+}
+
+/// Map a terminal [`nix::sys::wait::WaitStatus`] to a [`Reaped::Exited`]. Non-terminal
+/// statuses (stopped/continued, never requested here) collapse to code 0.
+fn reaped_from(status: nix::sys::wait::WaitStatus) -> Reaped {
+    use nix::sys::wait::WaitStatus;
+    match status {
+        WaitStatus::Exited(pid, code) => Reaped::Exited {
+            pid: pid.as_raw(),
+            code,
+        },
+        WaitStatus::Signaled(pid, sig, _) => Reaped::Exited {
+            pid: pid.as_raw(),
+            // 128 + signal, matching the shell so a killed child is distinguishable.
+            code: 128i32.saturating_add(sig as i32),
+        },
+        other => Reaped::Exited {
+            pid: other.pid().map_or(0, nix::unistd::Pid::as_raw),
+            code: 0,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

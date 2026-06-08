@@ -16,6 +16,7 @@ members = [
     "src/crates/kennel-bpf",
     "src/crates/kennel-binder",
     "src/crates/kennel-afunix-shim",
+    "src/crates/kennel-init",
     "src/crates/kennel-policy",
     "src/crates/kennel-audit",
     "src/crates/kennel-config",

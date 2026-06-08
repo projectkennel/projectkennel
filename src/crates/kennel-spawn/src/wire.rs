@@ -22,7 +22,7 @@ use kennel_syscall::namespace::Namespaces;
 use kennel_syscall::process::{resource_by_name, resource_name};
 use kennel_syscall::seccomp::Action;
 
-use crate::plan::{BindMount, Plan, ShimView};
+use crate::plan::{AuxProcess, BindMount, Plan, ShimView, Supervision};
 
 /// Maximum element count for any length-prefixed vector (a `DoS`/corruption bound).
 const MAX_ENTRIES: usize = 65_536;
@@ -544,6 +544,181 @@ fn get_lpm_v6(r: &mut Reader<'_>) -> Result<Vec<crate::plan::LpmV6Entry>, PlanWi
     Ok(v)
 }
 
+// ---- Supervision codec ----------------------------------------------------
+
+/// Encode the [`Supervision`] half to its wire bytes — the `GET_SANDBOX_PLAN` reply.
+///
+/// `kennel-init` pulls and decodes this post-pivot. Same bounded discipline as
+/// [`encode_plan`]; the pty fd rides out of band, so only `interactive` (a flag) is
+/// serialised.
+#[must_use]
+pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
+    let mut w = Writer::new();
+
+    w.path(&s.program);
+    w.count(s.argv.len());
+    for a in &s.argv {
+        w.bytes(a.as_bytes());
+    }
+    w.count(s.env.len());
+    for (k, v) in &s.env {
+        w.bytes(k.as_bytes());
+        w.bytes(v.as_bytes());
+    }
+    w.u32(s.drop_uid);
+    w.u32(s.drop_gid);
+
+    match &s.groups {
+        None => w.bool(false),
+        Some(gids) => {
+            w.bool(true);
+            w.count(gids.len());
+            for g in gids {
+                w.u32(*g);
+            }
+        }
+    }
+
+    w.count(s.landlock_fs.len());
+    for (path, access) in &s.landlock_fs {
+        w.path(path);
+        w.u64(access.bits());
+    }
+    w.count(s.landlock_net.len());
+    for (port, access) in &s.landlock_net {
+        w.u16(*port);
+        w.u64(access.bits());
+    }
+
+    w.count(s.seccomp_deny.len());
+    for n in &s.seccomp_deny {
+        w.i64(*n);
+    }
+    put_action(&mut w, s.seccomp_deny_action);
+
+    w.count(s.ulimits.len());
+    for (resource, soft, hard) in &s.ulimits {
+        w.bytes(resource_name(*resource).unwrap_or("").as_bytes());
+        w.u64(*soft);
+        w.u64(*hard);
+    }
+
+    w.count(s.aux.len());
+    for a in &s.aux {
+        w.path(&a.path);
+        w.count(a.args.len());
+        for arg in &a.args {
+            w.bytes(arg.as_bytes());
+        }
+    }
+
+    w.bool(s.interactive);
+
+    w.buf
+}
+
+/// Decode the [`Supervision`] half (the inverse of [`encode_supervision`]).
+///
+/// # Errors
+///
+/// [`PlanWireError`] if the blob is truncated, a bound is exceeded, a tag is unknown,
+/// a string is not UTF-8, or a resource name is unknown. Trailing bytes are rejected.
+// `drop_uid`/`drop_gid` and `argv`/`args` are the domain field names; the pedantic
+// similar-names heuristic flags the pairs, but renaming would only obscure them.
+#[allow(clippy::similar_names)]
+pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
+    let mut r = Reader::new(buf);
+
+    let program = r.path()?;
+    let mut argv = Vec::new();
+    for _ in 0..r.count()? {
+        argv.push(get_string(&mut r)?);
+    }
+    let mut env = Vec::new();
+    for _ in 0..r.count()? {
+        let k = get_string(&mut r)?;
+        let v = get_string(&mut r)?;
+        env.push((k, v));
+    }
+    let drop_uid = r.u32()?;
+    let drop_gid = r.u32()?;
+
+    let groups = if r.bool()? {
+        let mut gids = Vec::new();
+        for _ in 0..r.count()? {
+            gids.push(r.u32()?);
+        }
+        Some(gids)
+    } else {
+        None
+    };
+
+    let mut landlock_fs = Vec::new();
+    for _ in 0..r.count()? {
+        let path = r.path()?;
+        let access = AccessFs::from_bits_truncate(r.u64()?);
+        landlock_fs.push((path, access));
+    }
+    let mut landlock_net = Vec::new();
+    for _ in 0..r.count()? {
+        let port = r.u16()?;
+        let access = AccessNet::from_bits_truncate(r.u64()?);
+        landlock_net.push((port, access));
+    }
+
+    let mut seccomp_deny = Vec::new();
+    for _ in 0..r.count()? {
+        seccomp_deny.push(r.i64()?);
+    }
+    let seccomp_deny_action = get_action(&mut r)?;
+
+    let mut ulimits = Vec::new();
+    for _ in 0..r.count()? {
+        let name = get_string(&mut r)?;
+        let resource = resource_by_name(&name).ok_or(PlanWireError::BadResource)?;
+        let soft = r.u64()?;
+        let hard = r.u64()?;
+        ulimits.push((resource, soft, hard));
+    }
+
+    let mut aux = Vec::new();
+    for _ in 0..r.count()? {
+        let path = r.path()?;
+        let mut args = Vec::new();
+        for _ in 0..r.count()? {
+            args.push(get_string(&mut r)?);
+        }
+        aux.push(AuxProcess { path, args });
+    }
+
+    let interactive = r.bool()?;
+
+    if r.pos != buf.len() {
+        return Err(PlanWireError::TooLarge); // trailing garbage
+    }
+
+    Ok(Supervision {
+        program,
+        argv,
+        env,
+        drop_uid,
+        drop_gid,
+        groups,
+        landlock_fs,
+        landlock_net,
+        seccomp_deny,
+        seccomp_deny_action,
+        ulimits,
+        aux,
+        interactive,
+    })
+}
+
+/// Read a length-prefixed UTF-8 string (the common `bytes`→`String` pattern).
+fn get_string(r: &mut Reader<'_>) -> Result<String, PlanWireError> {
+    String::from_utf8(r.bytes()?).map_err(|_| PlanWireError::BadString)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,6 +842,86 @@ mod tests {
             back.interactive_return_fd, None,
             "the raw fd is not serialised; it is injected out of band"
         );
+    }
+
+    /// A fully-populated supervision-half touching every field the codec handles.
+    fn rich_supervision() -> Supervision {
+        Supervision {
+            program: PathBuf::from("/usr/bin/claude"),
+            argv: vec!["claude".to_owned(), "--dangerously".to_owned()],
+            env: vec![
+                ("HOME".to_owned(), "/home/kennel".to_owned()),
+                ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                ("TERM".to_owned(), "xterm-256color".to_owned()),
+            ],
+            drop_uid: 1000,
+            drop_gid: 1000,
+            groups: Some(vec![1000, 27, 44]),
+            landlock_fs: vec![
+                (
+                    PathBuf::from("/usr"),
+                    AccessFs::READ_FILE | AccessFs::EXECUTE,
+                ),
+                (PathBuf::from("/home/kennel"), AccessFs::READ_FILE),
+            ],
+            landlock_net: vec![(443, AccessNet::CONNECT_TCP)],
+            seccomp_deny: vec![101, 202],
+            seccomp_deny_action: Action::Errno(1),
+            ulimits: vec![(resource_by_name("nofile").expect("nofile"), 1024, 4096)],
+            aux: vec![AuxProcess {
+                path: PathBuf::from("/usr/libexec/kennel/kennel-afunix-shim"),
+                args: vec![
+                    "/dev/binderfs/binder".to_owned(),
+                    "/run/wl.sock=wayland".to_owned(),
+                ],
+            }],
+            interactive: true,
+        }
+    }
+
+    #[test]
+    fn round_trips_a_rich_supervision() {
+        let s = rich_supervision();
+        let back = decode_supervision(&encode_supervision(&s)).expect("decode");
+        assert_eq!(back, s, "the decoded supervision-half must equal the original");
+    }
+
+    #[test]
+    fn round_trips_a_minimal_supervision() {
+        let s = Supervision {
+            program: PathBuf::from("/bin/true"),
+            argv: vec!["true".to_owned()],
+            env: Vec::new(),
+            drop_uid: 0,
+            drop_gid: 0,
+            groups: None,
+            landlock_fs: Vec::new(),
+            landlock_net: Vec::new(),
+            seccomp_deny: Vec::new(),
+            seccomp_deny_action: Action::KillProcess,
+            ulimits: Vec::new(),
+            aux: Vec::new(),
+            interactive: false,
+        };
+        let back = decode_supervision(&encode_supervision(&s)).expect("decode");
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn truncated_supervision_is_an_error_not_a_panic() {
+        let full = encode_supervision(&rich_supervision());
+        for cut in 0..full.len() {
+            if let Some(prefix) = full.get(..cut) {
+                let _ = decode_supervision(prefix);
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_garbage_on_supervision_is_rejected() {
+        let mut bytes = encode_supervision(&rich_supervision());
+        bytes.push(0);
+        assert_eq!(decode_supervision(&bytes), Err(PlanWireError::TooLarge));
     }
 
     #[test]
