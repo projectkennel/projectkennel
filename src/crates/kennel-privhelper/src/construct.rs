@@ -187,28 +187,17 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     if let (Some(view), Some(new_root)) = (&half.view, &half.new_root) {
         // Build + pivot into the constructed view.
         build_view_and_pivot(view, new_root, &half.file_binds)?;
-        // The constructed $HOME is the WORKLOAD's private space (the ephemeral home tmpfs
-        // plus the copied dotfiles / synthetic ~/.ssh). The construction child built it as
-        // the kennel's uid 0, so it is root-owned — but the workload, the af-unix proxy, and
-        // any in-kennel tool run as the OPERATOR and must read (0600 ~/.ssh keys) and write
-        // (bind sockets) there. Chown the home subtree to the operator, staying on the home
-        // tmpfs (never descending into writable binds, which are the operator's own real
-        // inodes on other mounts). The system surfaces (/, /etc, /dev, libs) stay root-owned.
-        chown_tree_same_fs(&view.shim_root, op_uid, op_gid)?;
-        // Hand the binderfs device to the operator: it was created owned by uid 0 of the
-        // now-real userns, but kenneld (node 0) and the workload/proxy all act as the
-        // operator. kenneld opens it itself via /proc/<init>/root (kennel-init runs as the
-        // operator — see the drop below — so the operator can reach it).
+        // The constructed $HOME is the WORKLOAD's private space (the home dir on the view-root
+        // tmpfs plus the copied dotfiles / synthetic ~/.ssh). The construction child built it
+        // as the kennel's uid 0, so it is root-owned — but the workload, the af-unix proxy,
+        // and any in-kennel tool run as the OPERATOR and must read (0600 ~/.ssh keys) and
+        // write (bind sockets) there. Hand the operator only the inodes we constructed.
+        chown_constructed_home(&view.shim_root, op_uid, op_gid)?;
+        // Hand the binderfs device to the operator: it is created mode 0600 owned by uid 0 of
+        // the (now real) userns, but every binder client — kennel-init, the af-unix proxy,
+        // kenneld via /proc/<init>/root — acts as the operator. The mount-root dir is 0755
+        // (operator-traversable already), so only the device itself needs chowning.
         if view.binder {
-            // Chown both the binderfs mount-root dir and the device to the operator, so the
-            // operator kenneld can traverse `/proc/<init>/root/dev/binderfs/` and open the
-            // device (the dir is otherwise owned by inside-0/host-root, unreadable to the
-            // operator since the userns owner is root, not the operator).
-            kennel_syscall::unistd::chown_to(
-                std::path::Path::new("/dev/binderfs"),
-                op_uid,
-                op_gid,
-            )?;
             kennel_syscall::unistd::chown_to(
                 std::path::Path::new("/dev/binderfs/binder"),
                 op_uid,
@@ -224,19 +213,33 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     Ok(())
 }
 
-/// Recursively chown `root` and everything beneath it to `uid:gid`, **staying on the
-/// same filesystem** — entries on a different device (bind mounts: the operator's own
-/// real inodes) are skipped, never descended into. Used to hand the constructed `$HOME`
-/// tmpfs (and its copied dotfiles/`~/.ssh`) to the operator without touching writable
-/// home binds. Symlinks are not followed (chowned as links).
-fn chown_tree_same_fs(root: &std::path::Path, uid: u32, gid: u32) -> io::Result<()> {
+/// Hand the operator the constructed `$HOME` — and **only inodes we constructed**.
+///
+/// The home dir and the copied dotfiles / synthetic `~/.ssh` live on the **view-root tmpfs**
+/// (the privhelper built them as the kennel's uid 0, so they are root-owned), but the
+/// workload / af-unix proxy / in-kennel tools run as the operator and must read the 0600 ssh
+/// keys and bind sockets there. So chown them to the operator — but writable **binds**
+/// (persisted home paths: the operator's own real host inodes), `/dev`, `/proc`, `/tmp`, and
+/// binderfs must NEVER be touched.
+///
+/// The discriminator is the device id: the view root (`/`, post-pivot) is the constructed
+/// tmpfs; every bind/special mount has a different device. So we chown only inodes whose
+/// device matches `/`, skipping any sub-mount — and if `$HOME` *itself* is a bind (the
+/// whole-home-persist case) it is on a different device and we touch nothing under it (it is
+/// already the operator's own data). Symlinks are skipped entirely (ownership is irrelevant
+/// for them and it avoids any follow), so no `lchown` dance is needed.
+fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
-    let Ok(top) = std::fs::symlink_metadata(root) else {
-        return Ok(()); // no constructed home (e.g. fallback path)
+    // The constructed view root: only its inodes are ours to chown.
+    let root_dev = std::fs::symlink_metadata("/")?.dev();
+    let Ok(home) = std::fs::symlink_metadata(shim_root) else {
+        return Ok(()); // no constructed home (e.g. the fallback path)
     };
-    let dev = top.dev();
-    kennel_syscall::unistd::chown_to(root, uid, gid)?;
-    let mut stack = vec![root.to_path_buf()];
+    if home.file_type().is_symlink() || home.dev() != root_dev {
+        return Ok(()); // $HOME is a bind (persisted) or a symlink — not ours to chown
+    }
+    kennel_syscall::unistd::chown_to(shim_root, uid, gid)?;
+    let mut stack = vec![shim_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -246,8 +249,10 @@ fn chown_tree_same_fs(root: &std::path::Path, uid: u32, gid: u32) -> io::Result<
             let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
-            if meta.dev() != dev {
-                continue; // a sub-mount (writable bind) — leave it, don't descend
+            // Skip symlinks (don't chown, don't follow) and anything on another mount
+            // (a writable bind / special fs) — chown only constructed view-root inodes.
+            if meta.file_type().is_symlink() || meta.dev() != root_dev {
+                continue;
             }
             kennel_syscall::unistd::chown_to(&path, uid, gid)?;
             if meta.file_type().is_dir() {

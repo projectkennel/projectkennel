@@ -20,22 +20,6 @@ pub fn set_no_new_privs() -> io::Result<()> {
     nix::sys::prctl::set_no_new_privs().map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
-/// Mark the process **dumpable** (`PR_SET_DUMPABLE`), restoring operator ownership of its
-/// `/proc/<pid>` after a uid change.
-///
-/// Changing credentials (the factory's drop to the operator before `fexecve`ing
-/// `kennel-init`) clears the dumpable flag, which reverts `/proc/<pid>` to root ownership
-/// and makes `/proc/<pid>/root` reachable only with `CAP_SYS_PTRACE`. `kennel-init` sets
-/// it back so the operator `kenneld` can open the kennel's binderfs device via
-/// `/proc/<init>/root` (`07-11`). Safe: the operator already fully controls its own kennel.
-///
-/// # Errors
-///
-/// Returns the OS error if the `prctl` fails.
-pub fn set_dumpable() -> io::Result<()> {
-    nix::sys::prctl::set_dumpable(true).map_err(|e| io::Error::from_raw_os_error(e as i32))
-}
-
 pub use nix::sys::resource::{Resource, RLIM_INFINITY};
 
 /// Map a short `[ulimits]` resource name to its `setrlimit(2)` [`Resource`].

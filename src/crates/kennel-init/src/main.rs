@@ -69,10 +69,6 @@ fn main() -> ExitCode {
 
 /// Open the bus, pull the supervision-half, own the spawn, and supervise to exit.
 fn run() -> io::Result<u8> {
-    // The factory dropped us from host root to the operator before exec, which cleared the
-    // dumpable flag and reverted /proc/<self> to root ownership. Restore it so the operator
-    // kenneld can reach our /proc/<self>/root to open the kennel's binderfs device (07-11).
-    kennel_syscall::process::set_dumpable()?;
     let conn = open_bus()?;
     let (bytes, pty_fd) = pull_plan(&conn)?;
     let sup = decode_supervision(&bytes)
