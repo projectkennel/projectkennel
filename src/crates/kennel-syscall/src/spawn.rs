@@ -22,6 +22,7 @@
 
 use std::ffi::CStr;
 use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 
@@ -262,6 +263,34 @@ where
     }
 }
 
+/// Replace the current process image with the program referred to by the open file
+/// descriptor `fd` (`fexecve(2)`), passing `argv` (full vector incl. `argv[0]`) and
+/// `envp`.
+///
+/// The privhelper-factory's hand-off (`07-11` §7.11.1): it opens the trusted
+/// root-owned `kennel-init` on the host *before* `clone`, then — inside the construction
+/// child, after `pivot_root` has detached the host filesystem — `fexecve`s it. Executing
+/// by fd is essential because the host path is gone post-pivot, and it keeps the init
+/// binary out of the kennel's view entirely (it is never bound in).
+///
+/// On success this **does not return** (the image is replaced); it returns only on
+/// failure, yielding the OS error, so the caller can `_exit` fail-closed.
+#[must_use]
+pub fn fexecve(fd: BorrowedFd<'_>, argv: &[&CStr], envp: &[&CStr]) -> io::Error {
+    let mut argv_p: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
+    argv_p.push(std::ptr::null());
+    let mut envp_p: Vec<*const libc::c_char> = envp.iter().map(|e| e.as_ptr()).collect();
+    envp_p.push(std::ptr::null());
+    // SAFETY: `fexecve` replaces the process image with the program behind `fd`; both
+    // pointer arrays are NULL-terminated and point into the borrowed CStrs, which outlive
+    // this call. On success control never returns here; on failure it returns and we read
+    // errno. No shared state is mutated.
+    unsafe {
+        libc::fexecve(fd.as_raw_fd(), argv_p.as_ptr(), envp_p.as_ptr());
+    }
+    io::Error::last_os_error()
+}
+
 /// Spawn `command`, running `seal` in the forked child immediately before
 /// `execve`.
 ///
@@ -463,6 +492,32 @@ mod tests {
             matches!(status, nix::sys::wait::WaitStatus::Exited(_, 126)),
             "a failing seal must _exit(126) without execing: {status:?}"
         );
+    }
+
+    #[test]
+    fn fexecve_replaces_the_image_with_the_fd_program() {
+        // Open /bin/true and exec it BY FD in a forked child; the parent observes exit 0.
+        // Proves fexecve runs the program behind the fd (the factory's post-pivot hand-off
+        // mechanism) without needing a path.
+        use std::os::fd::AsFd;
+        let f = std::fs::File::open("/bin/true").expect("open /bin/true");
+        let argv0 = CString::new("true").expect("argv0");
+        // SAFETY: fork(); the child only fexecves (replacing its image) or _exit()s on
+        // failure — it never returns into the test harness.
+        match unsafe { nix::unistd::fork() }.expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let _err = super::fexecve(f.as_fd(), &[argv0.as_c_str()], &[]);
+                // SAFETY: only reached if fexecve failed; end the child without unwinding.
+                unsafe { libc::_exit(127) };
+            }
+            nix::unistd::ForkResult::Parent { child } => {
+                let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
+                assert!(
+                    matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
+                    "fexecve should have run /bin/true to exit 0: {status:?}"
+                );
+            }
+        }
     }
 
     #[test]
