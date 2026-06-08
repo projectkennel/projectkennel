@@ -130,6 +130,22 @@ pub fn set_uid(uid: u32) -> io::Result<()> {
     nix::unistd::setresuid(u, u, u).map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
+/// Change the owner of `path` to `uid`:`gid` (`chown(2)`).
+///
+/// The privhelper factory uses this to hand the freshly-allocated per-kennel binderfs
+/// device to the operator: a binderfs instance assigns its nodes to uid 0 of the
+/// mounting user namespace (now a real uid 0 under the `0 0 1` map), but the workload,
+/// the af-unix proxy, and `kenneld` all act as the **operator**, so the device must be
+/// operator-owned for them to open it (`07-11`; the fix for the binderfs `EACCES`).
+///
+/// # Errors
+///
+/// An OS error if the caller lacks the privilege to chown `path` or it does not exist.
+pub fn chown_to(path: &std::path::Path, uid: u32, gid: u32) -> io::Result<()> {
+    nix::unistd::chown(path, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

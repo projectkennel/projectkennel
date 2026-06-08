@@ -764,7 +764,16 @@ pub fn build_ruleset(
 /// old root.
 ///
 /// [`make_root_private`]: kennel_syscall::mount::make_root_private
-fn build_view_and_pivot(
+///
+/// Public so the privhelper factory builds the view in its construction child with the
+/// identical logic (`07-11` §7.11.1); it is `unsafe`-free (mounts go through
+/// `kennel_syscall::mount`), so sharing it keeps the factory `#![forbid(unsafe_code)]`.
+///
+/// # Errors
+///
+/// Returns the OS error if any mount, bind, `/proc`/`/tmp` setup, or the `pivot_root`
+/// fails.
+pub fn build_view_and_pivot(
     view: &ShimView,
     new_root: &Path,
     file_binds: &[(PathBuf, PathBuf)],
@@ -967,12 +976,17 @@ fn launch_aux_process(proc: &AuxProcess) {
 /// Join the current process into `cgroup` by writing its own pid to
 /// `<cgroup>/cgroup.procs`.
 ///
-/// Called in the forked child's seal. The kernel resolves the written pid in the
-/// writer's pid namespace, so writing `getpid()` is correct even after the PID
-/// namespace has been unshared (the child is pid 1 of the new namespace and the
-/// kernel maps it back). The migration is permitted because the destination is a
-/// descendant of kenneld's own delegated cgroup subtree.
-fn join_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
+/// Called in the forked child's seal (and the privhelper factory's construction child).
+/// The kernel resolves the written pid in the writer's pid namespace, so writing
+/// `getpid()` is correct even after the PID namespace has been unshared (the child is
+/// pid 1 of the new namespace and the kernel maps it back). The migration is permitted
+/// because the destination is a descendant of kenneld's own delegated cgroup subtree.
+///
+/// # Errors
+///
+/// Returns the OS error if the `cgroup.procs` write fails (e.g. the subtree is not
+/// delegated, or the cgroup was removed).
+pub fn join_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
     let procs = cgroup.join("cgroup.procs");
     std::fs::write(procs, std::process::id().to_string())
 }

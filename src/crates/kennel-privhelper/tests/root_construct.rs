@@ -84,10 +84,11 @@ fn factory_clones_maps_and_relays_the_init_exit_status() {
         .spawn()
         .expect("spawn the factory");
 
-    // Send the construction-half + the init fd. USER|PID is enough to prove the maps
-    // (a real uid 0) without a view/binderfs (those are the next increment).
+    // Send the construction-half + the init fd. The full namespace set with no view
+    // exercises the fallback construction (make_root_private + fresh /proc + /tmp) and the
+    // maps (a real uid 0); the view + binderfs path is proven by the Stage F vertical e2e.
     let half = ConstructionHalf {
-        namespaces: Namespaces::USER | Namespaces::PID,
+        namespaces: Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC,
         cgroup: std::path::PathBuf::new(),
         cgroup_join: false,
         view: None,

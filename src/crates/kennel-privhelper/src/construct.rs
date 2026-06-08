@@ -33,6 +33,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use kennel_spawn::wire::decode_construction;
+use kennel_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf};
 use kennel_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
 use kennel_syscall::namespace::clone_pid1;
 use kennel_syscall::process::{wait_any, Reaped};
@@ -85,17 +86,25 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let op_uid = real_uid();
     let op_gid = real_gid();
     let granted = half.granted_gids.clone();
+    let namespaces = half.namespaces; // captured before `half` moves into the child
     let child = move || {
-        // Wait until the parent has written our identity maps; abort closed otherwise.
+        // Wait until the parent has written our identity maps (so we hold uid 0 and
+        // CAP_SYS_ADMIN in the new userns); abort closed otherwise.
         if recv_ack(ready_r.as_fd()).ok().flatten() != Some(ACK_PROCEED) {
             return; // clone_pid1 backstops a returning child with _exit(127)
         }
-        // [E.4: cgroup join, in-ns lo, view + binderfs + pivot_root here.]
+        // All privileged construction runs here, as the kennel's uid 0, BEFORE the
+        // hand-off — so no operator code ever runs as userns-0 and the uid-0 init never
+        // runs while the host filesystem is still visible. Any failure returns, tripping
+        // the _exit(127) backstop (fail-closed: no half-built kennel runs the workload).
+        if build_kennel(&half, op_uid, op_gid).is_err() {
+            return;
+        }
         // Hand off to the trusted root-owned init with empty argv/envp (the pull model).
         let _err = fexecve(init_fd.as_fd(), &[], &[]);
         // fexecve returned ⇒ failure; fall through to the _exit(127) backstop.
     };
-    let init_pid = clone_pid1(half.namespaces, child)?;
+    let init_pid = clone_pid1(namespaces, child)?;
 
     // 4. Parent (real root): write the child's identity maps, then release it.
     write_identity_maps(init_pid, op_uid, op_gid, &granted)?;
@@ -113,6 +122,51 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             Reaped::NoChildren => return Ok(CONSTRUCT_FAILED),
         }
     }
+}
+
+/// The privileged construction the factory child runs as the kennel's uid 0, after its
+/// maps are written and before the `fexecve` (`07-11` §7.11.1): join the cgroup, build
+/// and `pivot_root` into the view, and hand the per-kennel binderfs device to the
+/// operator (the fix for the binderfs `EACCES`).
+///
+/// Runs entirely inside the construction child's namespaces; nothing here is visible to,
+/// or reversible by, the workload (it precedes the `fexecve` of `kennel-init`, which
+/// precedes the operator-identity drop).
+#[allow(clippy::similar_names)] // op_uid / op_gid are the domain names
+fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result<()> {
+    use kennel_syscall::mount;
+
+    if half.cgroup_join {
+        join_cgroup(&half.cgroup)?;
+    }
+    // In-namespace loopback is the per-kennel net-ns path (07-10); not yet built, and the
+    // kennel currently shares the host net namespace, so `lo` is always false here.
+    if half.lo {
+        return Err(io::Error::other("in-namespace loopback not yet implemented"));
+    }
+
+    // Detach mount propagation from the host before any mount in either path.
+    mount::make_root_private()?;
+    if let (Some(view), Some(new_root)) = (&half.view, &half.new_root) {
+        // Build + pivot into the constructed view.
+        build_view_and_pivot(view, new_root, &half.file_binds)?;
+        // Hand the binderfs device to the operator: it was created owned by uid 0 of the
+        // (now real) userns, but the workload/proxy/kenneld act as the operator.
+        if view.binder {
+            kennel_syscall::unistd::chown_to(
+                std::path::Path::new("/dev/binderfs/binder"),
+                op_uid,
+                op_gid,
+            )?;
+        }
+    } else {
+        // Fallback (no constructed view): a private root with fresh /proc + /tmp, so the
+        // PID namespace still gets a correct /proc. No binderfs without a view.
+        mount::make_root_private()?;
+        mount::mount_special("proc", std::path::Path::new("/proc"))?;
+        mount::mount_special("tmpfs", std::path::Path::new("/tmp"))?;
+    }
+    Ok(())
 }
 
 /// Write the construction child's `uid_map` and `gid_map` (`07-11` §7.11.1).
