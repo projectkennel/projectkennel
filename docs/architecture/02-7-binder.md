@@ -7,14 +7,17 @@ kernel ABI, how the binderfs instance slots into the spawn pipeline, kenneld's r
 and threading as context manager, the transaction wire conventions, the
 cross-instance relay, and the new control-socket operation for kennel spawning.
 
-> **Status: not yet built (roadmap).** The entire mechanism in this chapter is
-> *designed, not implemented*. Unlike the rest of the `architecture/` tree, which
-> documents the system as built (`08-as-built-notes.md` §8.1), this chapter is a
-> forward contract: the surface the implementation is to be built *to*. Every
-> "kenneld does X" below reads as "kenneld is designed to do X". When pieces land,
-> their as-built detail graduates into this chapter and the roadmap banner narrows
-> to the parts still owed, matching the convention `02-5-bpf-abi.md` uses for its
-> own roadmap remnants.
+> **Status: gateway core BUILT; cross-instance relay + network still roadmap.** The
+> inter-namespace gateway (§7.9) is built and proven end to end by the unprivileged
+> vertical (`src/tools/unprivileged-e2e.sh`): the privhelper factory mounts the per-kennel
+> binderfs instance and allocates the device; kenneld acquires node 0 via `/proc/<init>/root`
+> and serves the registry; `kennel-init` pulls its `GET_SANDBOX_PLAN` over the bus; and the
+> `org.projectkennel.IAfUnix/default` facade brokers an AF_UNIX connect, returning the
+> connected fd. What remains **roadmap** is the cross-instance/inter-kennel relay
+> (§Inter-kennel IPC), the `org.projectkennel.INet` network crossing (→
+> [`02-8-binder-net.md`](02-8-binder-net.md)), and the deferred facades (`IDBus`). Sections
+> below mark "built" vs "designed, not yet built" inline; the as-built construction actor and
+> node-0 acquisition are reconciled here, the relay/network sections remain forward contracts.
 
 ## Stability commitment
 
@@ -95,20 +98,26 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 
 ### Mount sequencing within the spawn pipeline
 
-> **Superseded by the uid-0 construction model ([`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)).**
+> **BUILT — as-built via the privhelper factory ([`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)).**
 > binderfs assigns its control/device nodes to **uid 0 of the mounting user namespace**.
 > The old pure-identity map (`{uid} {uid} 1`) had no uid 0, so the nodes landed on the
 > overflow uid (`nobody`, mode `0600`) and nothing in the kennel could open them — proven
-> by the full-vertical e2e (`add_binder_device` EACCES). The kennel now has a real uid 0
-> (host root mapped `0 0 1`, no subuid). binderfs is mounted, the device allocated, and
-> **`/dev/binderfs/binder` chowned to the operator uid** by the **privhelper factory** in its
-> post-`clone` child *before* `pivot_root` and *before* it `fexecve`s the trusted root-owned
-> **`kennel-init` (PID 1)** — so the uid-0 mount work never runs while the host fs is visible
-> (`binder-control` stays root-only). `kennel-init` (uid 0, post-pivot) merely `open`s its own
-> lifecycle client on the device and **pulls** its config from node 0 (`GET_SANDBOX_PLAN`).
-> The step list below still describes the mount/allocate/become-context-manager mechanics, but
-> the *actor* is the privhelper factory, not the old unprivileged spawn fork. Full
-> reconciliation is owed (`BINDER-NET-INTEGRATION.md`).
+> by the full-vertical e2e (`add_binder_device` EACCES). The kennel now has a real uid 0,
+> mapped by the precise two-line map `0 0 1` + `<operator> <operator> 1` (no subuid; written
+> in one `write(2)` with `CAP_SETFCAP`). The **privhelper factory**, in its post-`clone`
+> child, escalates to the kennel's uid 0, mounts binderfs, allocates the device, **chowns
+> `/dev/binderfs/binder` to the operator** (mode 0600, so operator clients can open it),
+> `pivot_root`s, drops to the operator, and `fexecve`s the trusted root-owned **`kennel-init`
+> (PID 1)** — so the uid-0 mount work never runs while the host fs is visible (`binder-control`
+> stays root-only). Crucially the **user namespace is owned by the operator** (the child clones
+> as the operator, then self-escalates), which is what lets the operator `kenneld` reach the
+> instance via `/proc/<init>/root` (step 3). `kennel-init` then `open`s its own lifecycle
+> client on the device and **pulls** its config from node 0 (`GET_SANDBOX_PLAN`).
+>
+> **As-built divergence (code-owed):** `kennel-init` is `fexecve`'d *as the operator*, not as
+> uid 0 — the construction child drops before the hand-off. The design (§7.11) models a uid-0
+> init; reconciling the two (likely by removing the drop, since the operator-owned userns
+> already grants `kenneld` `CAP_SYS_PTRACE` over the instance) is owed code work.
 
 Each kennel gets its own binderfs instance — a fully independent mount, like devpts and
 tmpfs, sharing no nodes with any other kennel's instance. **binderfs carries
@@ -137,11 +146,14 @@ The step slots into the existing spawn sequence (`kennel-spawn`, design §8.7):
    binder client finds the driver at libbinder's default path with no per-workload
    configuration (§Device naming below).
 3. kenneld (the daemon, in the initial userns) acquires a fd on `/dev/binderfs/binder`
-   for the new instance — either by opening `/proc/<spawn-child-pid>/root/dev/binderfs/binder`
-   or by the spawn child passing the fd back over the existing spawn
-   socketpair via `SCM_RIGHTS` (the same channel that already carries stdio and the
-   interactive pty master). The choice is an open question (§Open questions); both keep
-   the privileged-fd handling daemon-side.
+   for the new instance by opening `/proc/<init-host-pid>/root/dev/binderfs/binder`
+   (the init host pid comes from the privhelper over the construction socketpair). **This is
+   the as-built choice, and `SCM_RIGHTS` fd-passing was rejected:** a binder fd is bound to the
+   process that opened it (its `binder_proc`), so a passed fd cannot be `mmap`'d or made
+   context manager by a different process (`EINVAL`) — kenneld *must* open the device itself.
+   The open succeeds because the kennel userns is operator-owned, so the operator `kenneld` is
+   privileged over the instance; it retries until the factory's `pivot_root` has populated the
+   path.
 4. kenneld calls `BINDER_SET_CONTEXT_MGR` on that fd, taking ownership of node 0 for this
    instance, and starts the instance's looper thread (§Context manager). This runs in the
    daemon so one entity holds every instance's context-manager fd — the precondition for
