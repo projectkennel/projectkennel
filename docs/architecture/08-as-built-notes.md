@@ -43,14 +43,27 @@ narration is kept here; the chapter named is the source of truth.
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
   tests, not mechanism.
-- **Per-kennel network namespace** (`07-3-network.md` §7.3.6, THREATS T1.6) — a kennel
-  currently shares the host network namespace (egress is gated by the cgroup BPF + proxy,
-  not net-ns isolation), so the workload can *read* host network state (interfaces, routes,
-  listening sockets, the LAN ARP table) via `/proc/net/*` and `AF_NETLINK`. Recon-only —
-  egress stays blocked — but a genuine info-disclosure residual. Closing it means unsharing
-  `CLONE_NEWNET` and keeping the proxy reachable across the boundary (veth or a passed
-  socket), which re-architects the §7.3 loopback/egress model. Deferred; accepted residual
-  for now. Would also make the network-inspection tools report the kennel's own stack.
+- **Per-kennel network namespace** (`07-3-network.md` §7.3.6, `07-10-binder-netns.md`,
+  THREATS T1.6) — a kennel currently shares the host network namespace (egress is gated by
+  the cgroup BPF + proxy, not net-ns isolation), so the workload can *read* host network state
+  (interfaces, routes, listening sockets, the LAN ARP table) via `/proc/net/*` and
+  `AF_NETLINK`. Recon-only — egress stays blocked — but a genuine info-disclosure residual.
+  The closure path is now designed (`07-10`): unshare `CLONE_NEWNET` in the construction
+  child, configure an in-namespace `lo`, and reach the host-side proxy across the boundary via
+  the `org.projectkennel.INet` binder facade (SOCKS5 → `kennel-netshim` → `INet` `CONNECT` →
+  the `kennel-netproxy` delegate) rather than a direct loopback connect — re-architecting the
+  §7.3 loopback/egress model onto the four network modes (`none`/`constrained`/`unconstrained`/
+  `host`) + the loopback mirror. When that lands, T1.6 closes for `none`/`constrained`/
+  `unconstrained` (`mode = host` re-shares the host net-ns and deliberately reinstates the
+  recon, recorded as `threats.reinstated`); until then it remains a deferred, accepted residual.
+  Would also make the network-inspection tools report the kennel's own stack.
+- **Binder cross-instance / inter-kennel relay** (`07-9-ipc.md`, `02-7-binder.md`
+  §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
+  bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
+  kennel's services through kenneld (the MCP topology) is designed, not built. So is the
+  `org.projectkennel.IDBus/default` D-Bus facade (the binder successor to `xdg-dbus-proxy`,
+  superseding the unbuilt `07-5-dbus.md` proxy) and `SpawnKennel`-over-binder. kenneld owns
+  the reserved nodes; the relay grows kenneld's TCB and is tracked as a new threat surface.
 - **`[container]` runtime** (`05-templates.md` §5.7) — `[container]` is design-level *language*
   only (parse + compile-warn, same family as `[dbus]`/`[x11]`); there is no container-runtime
   integration. No shipped template uses it: `containerised-service` runs the service directly
@@ -75,6 +88,41 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   `02-4-ipc.md`, design `07-8-ssh.md` §7.8.
 - **`[unix]` AF_UNIX socket shim** — granted sockets bind-mounted into the view, abstract
   denied by the always-on Landlock scope: design `07-4-afunix.md` §7.4.
+- **Binder gateway core — the per-kennel inter-namespace gateway** — every kennel runs a
+  per-instance binderfs bus with kenneld as node 0, the kennel's auditable unprivileged
+  boundary crossing, carrying the construction/lifecycle control plane and the protocol
+  facades. Built and proven by the unprivileged vertical (`src/tools/unprivileged-e2e.sh`):
+  the privhelper *factory* clones the namespaces as the operator (so the userns is
+  operator-owned), its child self-escalates to the kennel's uid 0 to build the root-owned
+  view/`/dev`/library binds and binderfs, mounts binderfs + chowns the device to the operator,
+  `pivot_root`s and `fexecve`s the trusted root-owned `kennel-init` (PID 1) with empty
+  argv/envp; kenneld acquires node 0 by opening `/proc/<init-host-pid>/root/dev/binderfs/binder`
+  (SCM_RIGHTS fd-passing is rejected — binder fds are per-opener — and the operator-owned userns
+  is what makes the open succeed); `kennel-init` *pulls* its supervision-half via
+  `GET_SANDBOX_PLAN` to node 0 (kenneld identifies the kennel by the binderfs instance the txn
+  arrived on), the `NOTIFY_*` lifecycle verbs ride node 0 in the `0x100+` range gated by
+  `sender_pid == init_host_pid`, and the `org.projectkennel.IAfUnix/default` facade brokers an
+  AF_UNIX connect (returning the connected fd) in place of the bind-mount grant. New crates
+  `kennel-binder` (unsafe ABI, parallel to `kennel-bpf`) and `kennel-init`, plus the
+  `kennel-spawn::wire` Plan codec and the privhelper `ConstructKennel` op (`SOCK_SEQPACKET` +
+  `SCM_RIGHTS`): `02-7-binder.md`, design `07-9-ipc.md` §7.9, `07-11-kennel-init.md`.
+  - **Identity map — subuid rejected, `0 0 1` chosen.** binderfs assigns its nodes to uid 0
+    of the mounting userns, so the pure-identity map (`{uid} {uid} 1`) left them on the overflow
+    `nobody`/`0600` and nothing in the kennel could open them. The kennel is given a real uid 0
+    by mapping host root `0 0 1` (deliberately **no** subuid/subgid — "there be dragons"), plus
+    the operator identity line (and one line per granted gid), written by the privhelper in a
+    single `write(2)` with `CAP_SETFCAP`. There is no "0 0 N" range and no single-extent rule;
+    the only constraint was always the single write. The privhelper gains `CAP_SETUID` for this;
+    the old deferred-gid map handshake (§7.2.8) is subsumed — the maps are written once, fully,
+    by the constructor before `kennel-init` starts. The escalation hazard of a userns-0 is
+    bounded by the crux invariant: operator code never runs as userns-0 (only privhelper code
+    runs between `clone` and `fexecve`; thereafter only the trusted `kennel-init`; the workload
+    is dropped to the operator with `no_new_privs` before any operator-named `execve`). Design
+    `07-11-kennel-init.md`; rationale also `11-open-questions.md`.
+  - **As-built DIVERGENCE — `kennel-init` runs as the operator, not uid 0.** The design has
+    `kennel-init` as the uid-0 PID 1; as built (the unprivileged vertical) it runs as the
+    *operator*. This is a known divergence, code-owed to reconcile to the uid-0-init model; the
+    gateway core, node-0 acquisition, and the facade are otherwise as designed.
 - **`[[fs.dev.passthrough]]`** — specific host devices, GID-gated (not capability), merged
   into `DevPolicy.allow`: `02-2-config-schema.md`, design `07-2-filesystem.md` §7.2.8.
 - **`[identity]`** — masked `user`/`group` (default `kennel`) + supplementary `groups`

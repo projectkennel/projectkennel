@@ -38,8 +38,8 @@ Project Kennel requires the following kernel features, with version requirements
 | Mount namespace | 2.6.x | Universal |
 | PID namespace | 3.8 | Universal |
 | Network namespace | 2.6.x | Universal (used optionally) |
-| User namespace | 3.8 | **The unprivileged-spawn foundation.** Identity-mapped (the operator's real uid/gid 1:1, no subuid), it grants `CAP_SYS_ADMIN` *inside the namespace* so an unprivileged kenneld can unshare a mount/PID namespace and `mount`/`pivot_root` with no real privilege (the bubblewrap-equivalent mechanism). Established first in the spawn seal. |
-| PID namespace (via userns) | 3.8 | The workload is PID 1 of a fresh PID namespace, reached by a second fork after the userns+PID unshare (the only way to both be PID 1 and mount a fresh `/proc` unprivileged). |
+| User namespace | 3.8 | **The spawn foundation.** Created by the privhelper factory (§7.11) as the operator, so the userns is operator-owned. Its maps are precise identity lines — host root `0 0 1` + the operator `<op> <op> 1` (+ one per granted gid), no subuid — giving the kennel a real uid 0 and `CAP_SYS_ADMIN` *inside the namespace* to `mount`/`pivot_root` (the bubblewrap-equivalent mechanism). The `0 0 1` line needs `CAP_SETUID`, so construction is privileged; the privhelper's post-`clone` child does it, then `fexecve`s the trusted `kennel-init` as PID 1 / uid 0. |
+| PID namespace (via userns) | 3.8 | `CLONE_NEWPID` is in the factory's single `clone`, so the privhelper child is PID 1 of the fresh PID namespace directly — no double-fork (that was only needed when `unshare` left the unsharer in the old pidns). Being PID 1 is what lets it mount a fresh `/proc`. `kennel-init` inherits this as PID 1 and forks the operator-uid workload beneath it. |
 | `PR_SET_NO_NEW_PRIVS` | 3.5 | Universal |
 | AppArmor | Distribution-dependent | Below-ABI-6 abstract-AF_UNIX/signal fallback. **Also a deploy prerequisite** where the distro restricts unprivileged user namespaces (next paragraph). |
 | `legacy_tiocsti` sysctl | 6.2 | Defaults safe on newer kernels |
@@ -72,13 +72,19 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    - Cgroup path (/sys/fs/cgroup/kennel/<ctx>/)
    - Shim directory (/run/kennel/<ctx>/)
 
-4. Privileged-helper steps (if helper available):
+4. Privileged-helper steps:
    - Add IPv4 address to loopback (or to per-kennel dummy interface)
    - Add IPv6 ULA address
    - Create cgroup if not exists
+   - (Roadmap, §7.10) `AddLoopbackAlias`: for `constrained`/`unconstrained`
+     net-ns modes, bring the kennel's `/28`+`/64` up on the host `lo` so the
+     host-side BIND leg can mirror inbound listeners at the kennel's own IP
 
 5. Launch supporting daemons (if not already running for this kennel):
-   - SOCKS5 proxy listening on kennel's loopback address
+   - `kennel-netproxy` (the SOCKS5/CONNECT proxy) on the kennel's loopback
+     address — or, on the roadmap net-ns path (§7.10), in the host net-ns as
+     a CONNECT delegate behind a kenneld↔delegate socketpair, no longer reached
+     by a TCP loopback listener
    - xdg-dbus-proxy for session bus (if dbus.session.enabled)
    - xdg-dbus-proxy for system bus (if dbus.system.enabled)
    - Per-kennel ssh-agent (if templates reference one)
@@ -95,39 +101,82 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    On ABI 6+ kernels this is unnecessary — the scoping bits added to the
    Landlock ruleset (step 8l) cover it natively.
 
-8. Fork (the unprivileged spawn — no real privilege below):
-   parent (kenneld): wait, manage lifecycle, audit
-   child A (the forked child):
-     a. Enter cgroup (write own pid to cgroup.procs) — with the host
-        credentials, before the user namespace; membership inherits to B
-     b. Establish the identity-mapped user namespace:
-        unshare(CLONE_NEWUSER); setgroups=deny; uid_map/gid_map "<id> <id> 1"
-        (now holds CAP_SYS_ADMIN *within* the namespace)
-     c. unshare(CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWPID)
-        (network namespace optional, depending on policy)
-     d. Fork again → child B is PID 1 of the new PID namespace.
-        A closes its inherited fds (≥3) and becomes a tiny init: reaps B,
-        exits with B's status (so kenneld observes the workload's exit).
-   child B (PID 1; this is where the seal completes and the workload runs):
-     e. mount --make-rprivate / (detach from host propagation)
-     f. Construct shim view: fresh tmpfs root; bind-mount granted paths
-        (granted ~ paths remapped beneath the shim $HOME)
-     g. Synthetic /etc; constructed /dev; mount private tmpfs at /tmp
-     h. Mount /proc with hidepid=2 (permitted because B is PID 1 of its ns)
-     i. pivot_root into the new root; detach the old one
-     j. Curate environment per env.* policy
-     k. Set PR_SET_NO_NEW_PRIVS
-     l. Apply seccomp filter
-     m. Apply Landlock ruleset, including ABI-6 scoping
-        (SCOPE_ABSTRACT_UNIX_SOCKET + SCOPE_SIGNAL) where the kernel
-        supports it (final step before exec; ruleset is sealed)
-     n. execve(command)
+8. Construct (the privhelper is the factory — §7.11). The privhelper, running as
+   the operator with file caps (`CAP_SETUID`/`CAP_SETGID`/`CAP_SETFCAP`, plus
+   `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`), does all privileged construction in its own
+   post-`clone` child before handing off across one irreversible boundary. The
+   operator drives this by sending the construction-half Plan (§7.11.3) over a
+   `SOCK_SEQPACKET` socketpair (`ConstructKennel`); the construction-half is parsed
+   host-side, where there is no sandbox to manipulate it.
 
-   Supplementary groups: an unprivileged gid_map maps only the primary gid, so
-   every inherited host group collapses to the overflow gid (`nogroup`) — default
-   drop-all, for free. Re-granting a specific group (§7.2.8 device passthrough)
-   needs the privhelper to write the gid_map (it holds CAP_SETGID), since an
-   unprivileged process cannot map a second gid.
+   parent (kenneld / operator): hold the full Plan; wait, manage lifecycle, audit;
+     write nothing into the namespace except — escalating only for this — the maps
+   privhelper (host root): opens the trusted root-owned `kennel-init` binary
+     (provenance-verified: root-owned, not group/other-writable) and holds the fd;
+     `clone(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC [| CLONE_NEWNET])`
+     → child C is PID 1 of the new PID namespace directly (no double-fork). Because
+     the operator's privhelper creates the userns, the userns is **operator-owned**,
+     which is what lets kenneld later open the binder device.
+   child C (still privhelper code, full caps in the new userns):
+     a. Write the precise identity maps in one `write(2)` each:
+        uid_map / gid_map `0 0 1` + `<operator> <operator> 1` (+ one line per
+        granted gid). The `0 0 1` line gives the kennel a real uid 0 (host root
+        mapped), needed because binderfs (and the view/`/dev`/library binds) assign
+        nodes to uid 0 of the mounting userns. No subuid/subgid. setgroups handling
+        and supplementary groups are written here too, fully, in this one pass.
+     b. Join the kennel cgroup; (roadmap §7.10) for net-ns modes bring up `lo`
+        inside the net-ns with the kennel's assigned `/28`+`/64`.
+     c. Self-escalate to the kennel's uid 0 and build the root-owned surfaces:
+        mount --make-rprivate /; the constructed view (fresh tmpfs root; bind-mount
+        granted paths beneath the shim $HOME); synthetic /etc; constructed /dev;
+        private tmpfs at /tmp; /proc with hidepid=2 (permitted — C is PID 1 of its
+        ns). Mount binderfs at the view's `/dev/binderfs/`, allocate the standard
+        `binder` device, and **chown `/dev/binderfs/binder` to the operator** so the
+        operator-uid facades and workload can open it.
+     d. `pivot_root` into the view and detach the old host root — the structural
+        sever. After this the host path to `kennel-init` is gone from the mount
+        namespace.
+     e. `fexecve` the trusted `kennel-init` by the fd opened pre-`clone`, with
+        **empty argv/envp** (nothing for `/proc/<pid>/cmdline`/`environ` to leak).
+        `fexecve` also keeps the init binary out of the view. This eliminates the
+        window where a uid-0 binary runs while the host fs is still visible.
+   ─────────────────────────────────────── trust boundary (host root gone) ───
+   kennel-init (PID 1, uid 0, trapped in the pivoted view):
+     f. Open `/dev/binderfs/binder`; `GET_SANDBOX_PLAN` to node 0, retrying until
+        kenneld has claimed node 0. kenneld acquires node 0 by opening
+        `/proc/<init-host-pid>/root/dev/binderfs/binder` (the operator-owned userns
+        makes the open succeed; SCM_RIGHTS fd-passing is rejected — binder fds are
+        per-opener) and replies with the supervision-half Plan as flat
+        `kennel-spawn::wire` bytes (binder copies the buffer — no shared-memory
+        hazard), the pty return socket riding as `BINDER_TYPE_FD`. kenneld
+        identifies the kennel by the binderfs *instance* the txn arrived on.
+     g. (Roadmap §7.10) Once `INet` is registered, fork `kennel-netshim` as a
+        sibling of the workload inside the net-ns and view; it serves SOCKS5 at
+        `$KENNEL_SOCKS_PROXY` and relays `CONNECT`/`BIND` over binder. The
+        host-side BIND leg mirrors allowed binds onto the host alias; both legs are
+        kenneld↔delegate socketpairs, not binder participants.
+     h. Fork the facades, each dropped to the operator (`set_gid` → groups →
+        `set_uid`); fork the workload and drop it to the operator the same way.
+        Only `kennel-init` stays uid 0; the workload is never uid 0.
+   workload child (where the seal completes and the workload runs):
+     i. Curate environment per env.* policy
+     j. Set PR_SET_NO_NEW_PRIVS
+     k. Apply seccomp filter
+     l. Apply Landlock ruleset, including ABI-6 scoping
+        (SCOPE_ABSTRACT_UNIX_SOCKET + SCOPE_SIGNAL) where the kernel
+        supports it (final step before exec; ruleset is sealed). Landlock and
+        seccomp apply to the **workload child only** — not `kennel-init` or the
+        facades, which must stay free to fork, `waitpid`, and reach the bus.
+     m. execve(command)
+
+   Exit status rides the process chain (`kennel-init` `_exit` → privhelper →
+   kenneld), not binder, which may already be torn down; binder carries in-life
+   telemetry only.
+
+   Supplementary groups: the maps written in step (a) include one line per granted
+   gid, so device-passthrough/identity grants (§7.2.8) land in the same single
+   privileged write — no separate handshake. Groups not granted collapse to the
+   overflow gid (`nogroup`).
 
 9. Parent process supervises the kennel:
    - Reaps zombies
@@ -221,6 +270,21 @@ Two kennels running concurrently are isolated by:
 - **Different loopback addresses.** Network reachability is disjoint.
 - **Different supporting daemons.** Each kennel has its own proxy, dbus-proxy, etc.
 - **Different shim directories.** AF_UNIX socket views are disjoint.
+- **Different binderfs instances.** Each kennel mounts its own binderfs inside its
+  own user+mount namespace; two instances share no nodes (§7.9.2). A binder node
+  reference is an opaque kernel object that does not transfer between instances.
+
+The one designed exception is the **binder cross-instance relay** (roadmap, §7.9.6):
+two kennels may communicate over the binder bus, but only by an explicit *bilateral*
+declaration — the consuming kennel declares `[[binder.consume]]` naming the service and
+the providing kennel, and the providing kennel declares `[[binder.provide]]` naming the
+service and accepting the consuming kennel in `accept_from`. A unilateral declaration on
+either side yields a `getService` denial. kenneld is the sole relay; it copies a flat
+payload between instances (no shared memory — `BINDER_TYPE_FD`/`BINDER_TYPE_PTR` are
+rejected cross-instance) and audits every crossing as `binder.cross`. Kennels with no
+`[binder]` section have no IPC surface at all and remain fully isolated. This is the only
+sanctioned escape from the default; the workload still cannot reach any kennel it was not
+explicitly granted.
 
 What is *not* isolated: the user's uid is shared. A determined same-uid attacker outside both kennels can read Project Kennel's state for either kennel, signal its processes (if not in a PID namespace from the host's perspective), or read its audit logs. A stricter mode that isolates Project Kennel's daemons from the unconfined default context is a v2 question (§11.1).
 

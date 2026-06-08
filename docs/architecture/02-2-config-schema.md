@@ -58,8 +58,10 @@ The full section list:
 |---|---|---|
 | `[exec]` | What binaries the workload may execve() | §7.1 |
 | `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction, scrub patterns | §7.2 |
-| `[net]` and `[net.*]` | Network egress allowlist, proxy listen, loopback rules, bind rules, audit | §7.3 |
-| `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling | §7.4 |
+| `[net]`, `[net.proxy]`, `[net.bpf]` | Network mode (four-mode taxonomy), proxy destination allowlist + denylist, socket-capability shaping, bind rules, audit. **The four-mode taxonomy + `[net.proxy]`/`[net.bpf]` split is roadmap** (the as-built runtime still shares the host net-ns); see §The `[net]` section. | §7.3 |
+| `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-7`) | §7.4 |
+| `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-7`). **Roadmap** (cross-instance relay is not built). | §7.9 |
+| `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-7` §Kennel spawning). **Roadmap.** | §7.9 |
 | `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.8 |
 | `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.2 |
 | `[container]` | Container-mode policy surface; source-only, design-level (no runtime yet) | §7.9 |
@@ -218,8 +220,8 @@ The current invariants (mechanism details in design doc §12):
 - `cap.no_new_privs = true`. Cannot be set false.
 - `exec.deny_setuid = true`, `exec.deny_setgid = true`, `exec.deny_setcap = true`, `exec.deny_writable = true`. Cannot be set false.
 - `fs.home.shadow = true`. The shim is mandatory. `$HOME` is `/home/<user>` — the masked `[identity].user`, default `kennel`.
-- `[net.mode]` may be `"none"`, `"constrained"`, or `"open"`; it may not be any other value. `"none"` and `"constrained"` both translate to the settled `NetMode::Constrained` (proxy-only egress; `"none"` is "constrained with an empty allowlist"); an absent `[net.mode]` is accepted and also translates to `Constrained`. `"open"` is the permissive mode for `ai-coding-permissive`-style templates. The runtime re-assert only checks the settled mode is `Constrained` or `Open`; the "open only for permissive templates" guidance is a convention, not a validator-enforced rule.
-- `[net.deny.invariant]` entries (cloud metadata, link-local) are present and cannot be removed by any delta. (RFC1918 is *not* invariant — design §7.3 — so it is not asserted here.)
+- `[net.mode]` is the enforcement-mode enum. **As built** it may be `"none"`, `"constrained"`, or `"open"`; it may not be any other value. `"none"` and `"constrained"` both translate to the settled `NetMode::Constrained` (proxy-only egress; `"none"` is "constrained with an empty allowlist"); an absent `[net.mode]` is accepted and also translates to `Constrained`. `"open"` is the permissive mode for `ai-coding-permissive`-style templates. The runtime re-assert only checks the settled mode is `Constrained` or `Open`; the "open only for permissive templates" guidance is a convention, not a validator-enforced rule. **Roadmap (the net-ns redesign, §The `[net]` section):** the enum becomes the four-mode taxonomy `"none"` / `"constrained"` / `"unconstrained"` / `"host"` (replacing `"open"`); `"host"` requires `reason` and auto-instates `threats.reinstated`. The invariant statement — `[net.mode]` is enum-bounded and the proxy/invariant-deny floor cannot be removed — is unchanged across that migration.
+- The proxy invariant denylist (cloud metadata, link-local — `[net.deny.invariant]` today, `[[net.proxy.invariant_deny]]` under the roadmap split) is present and cannot be removed by any delta. (RFC1918 is *not* invariant — design §7.3 — so it is not asserted here.)
 - `[proc.visibility] = "self"`.
 - `[fs.dev.allow]` is the default-deny list documented in design §7.7; user deltas may not add device files outside the framework-known safe set without an explicit `framework_override` flag (which is itself an invariant override and requires a separate signed envelope; see `04-trust-boundaries.md`).
 
@@ -427,9 +429,133 @@ The signature trust differs by artefact (`07-paths.md` §Policy-signing trust sp
 
 ---
 
+## The `[net]` section — mode, proxy, BPF
+
+> **Roadmap.** The four-mode taxonomy and the `[net.proxy]` / `[net.bpf]` split below are the
+> network-namespace redesign (design §7.3/§7.10, architecture [`02-8-binder-net.md`](02-8-binder-net.md)).
+> The as-built runtime still **shares the host network namespace** and reads the three-mode
+> `[net]` form (the `[net.mode]` invariant above). This section is the forward schema; it
+> supersedes the standalone `net-policy.toml` reference (now retired). Field semantics are
+> design §7.3/§7.10; this is the section's structure.
+
+`[net]` is a pure header — `mode`, `reason`, `threats.reinstated`. Everything else belongs to
+`[net.proxy]` (the proxy / destination-allowlist layer) or `[net.bpf]` (the socket-capability
+layer). The four modes, in descending order of isolation:
+
+| `mode` | Net-ns | Proxy | BPF | Notes |
+|---|---|---|---|---|
+| `none` | `CLONE_NEWNET`, empty stack | absent | absent | no network surface, no `INet` node; rejects `[net.proxy]`/`[net.bpf]` |
+| `constrained` | `CLONE_NEWNET` + loopback alias | enforces the named-destination allowlist | optional (defence-in-depth) | net-ns is the enforcement primitive |
+| `unconstrained` | `CLONE_NEWNET` + loopback alias | present for audit + invariant denylist; no name allowlist | shapes traffic at the socket level | open egress, bounds retained |
+| `host` | host net-ns (no `CLONE_NEWNET`) | mandatory (audit floor) | **primary** enforcement primitive | requires `reason`; auto-instates `threats.reinstated` |
+
+`reason` is required for `mode = host`; the compiler rejects `host` without it (`02-1-cli.md`).
+
+**`threats.reinstated`.** A list of threat IDs the mode re-opens. For `mode = host` the compiler
+sets it automatically to include `"T1.6:host-recon"` (the host-network-recon threat the per-kennel
+net-ns otherwise closes — design THREATS.md, §7.10.10). It may be **extended** by the author but
+**not cleared**; declaring it explicitly is for `kennel diff` visibility only. It is the inverse of
+the informational `threats.exposed` tag (§Threat tagging): `reinstated` records a guarantee the
+chosen mode withdraws, set/enforced by the compiler rather than advisory.
+
+### `[net.proxy]`
+
+The proxy / destination-allowlist layer. Present for every mode except `none`.
+
+| Field / table | Type | Notes |
+|---|---|---|
+| `listen_v4` / `listen_v6` | bool | enable the per-family SOCKS5 listener |
+| `listen_v4_address` / `listen_v6_address` | `offset:port` | within the kennel's `/28` (v4) / `/64` (v6); absent → `1:1080` |
+| `accept_private_resolved` | bool | accept names that resolve to RFC1918/ULA (default `false`; rare) |
+| `[[net.proxy.allow]]` | table array | named/CIDR destination allowlist (`constrained`; optional in `host`) |
+| `[[net.proxy.deny]]` | table array | optional policy denylist, evaluated **before** allow |
+| `[[net.proxy.invariant_deny]]` | table array | non-removable (cloud-metadata IMDS, link-local); the framework invariant |
+| `[[net.proxy.host_services]]` | table array | exact `addr:port` literals reachable despite the host-loopback invariant deny (e.g. the SSH bastion, §7.8.4) |
+
+An `[[net.proxy.allow]]` entry carries either `name` (resolved proxy-side — `socks5h://` semantics;
+the kennel never resolves DNS itself) **or** `cidr` (raw address), plus `ports` (a list; empty = all)
+and `protocol`, and a required `reason`. `[[net.proxy.deny]]` carries `cidr` + `ports`.
+`[[net.proxy.invariant_deny]]` and `[[net.proxy.host_services]]` carry a `reason`.
+
+### `[net.bpf]`
+
+The socket-capability layer. Optional in `constrained` (defence-in-depth — the net-ns is the
+primitive), meaningful in `unconstrained`, and the **primary** enforcement primitive in `host`
+(no net-ns boundary exists). Enforced at `socket()`/`bind()`/`connect()` by cgroup BPF
+([`02-5-bpf-abi.md`](02-5-bpf-abi.md)).
+
+| Table | Fields | Notes |
+|---|---|---|
+| `[net.bpf.families]` | `allow` | `inet` / `inet6` (default both). `AF_UNIX` is governed by `[unix]`, not here; `AF_NETLINK` is not a controllable axis; `AF_PACKET` requires `CAP_NET_RAW` (root-context kennel — compiler warns if unavailable). |
+| `[net.bpf.types]` | `allow` | `stream` / `dgram` / `seqpacket` (default all three); `raw` requires `CAP_NET_RAW`. |
+| `[net.bpf.protocols]` | `allow` | default `["tcp","udp"]`; `sctp` / `dccp` / `udplite` require explicit opt-in; absence is a deny. |
+| `[net.bpf.limits]` | `max_connections`, `max_connects_per_minute` | DoS bounds (cgroup caps), not security primitives. |
+| `[[net.bpf.bind]]` | `address`, `ports`, `protocol`, `reason` | bind allow-gate; in `host` the compiler annotates each rule `host_visible = true` (cannot be set `false`) and warns the listener is on the host stack. |
+| `[[net.bpf.allow]]` / `[[net.bpf.deny]]` | `cidr`, `ports`, `protocol`/`reason` | CIDR-level allow/deny at `connect()`/`bind()`, before the proxy sees the request (no name resolution — CIDR only). |
+
+### Evaluation order (constrained / unconstrained / host)
+
+1. `[net.bpf]` — families / types / protocols / `bind` / `allow` / `deny`, at `socket()` and `bind()`.
+2. `[[net.proxy.invariant_deny]]` — cloud metadata, link-local (non-removable).
+3. `[[net.proxy.deny]]` — optional policy denylist.
+4. `[[net.proxy.allow]]` — `constrained` only; absent = open in `unconstrained` / `host`.
+
+`mode = none` has no `[net.proxy]`/`[net.bpf]` and no `INet` binder node; the compiler rejects
+either section for `mode = none`.
+
+---
+
+## The `[binder]`, `[[binder.provide]]`, `[[binder.consume]]`, and `[ipc.spawn]` sections
+
+> **Roadmap.** The cross-instance binder relay these sections drive is not built (the binder
+> *gateway core* — node 0, the `IAfUnix` facade, `kennel-init` lifecycle — is built and proven;
+> the cross-kennel relay is the forward contract in [`02-7-binder.md`](02-7-binder.md)). This is
+> the forward schema for `BinderRuntime`; field semantics are design §7.9.
+
+These sections configure the binder service registry (`02-7`). The kennel-local registry and the
+reserved `org.projectkennel.*` services need no policy — they are always available when their
+backing section is non-empty. What these sections grant is **cross-kennel** service exchange and
+kennel spawning.
+
+`[[binder.provide]]` — services this kennel offers to named peer kennels:
+
+| Field | Type | Notes |
+|---|---|---|
+| `service` | string | the service name (may **not** begin with `org.projectkennel.` — reserved) |
+| `accept_from` | array of strings | peer-kennel names permitted to consume it |
+
+`[[binder.consume]]` — services this kennel may look up from named providers:
+
+| Field | Type | Notes |
+|---|---|---|
+| `service` | string | the service name (may **not** begin with `org.projectkennel.`) |
+| `from` | string | the providing kennel's name |
+
+A cross-instance lookup succeeds only when **both** sides declare it: the consumer's
+`[[binder.consume]]` names the service and provider, and the provider's `[[binder.provide]]` names
+the service and lists the consumer in `accept_from`. A unilateral declaration denies (`02-7`
+§Cross-instance registry). Peer-kennel names live only in policy, never in the binder protocol the
+workload sees.
+
+`[ipc.spawn]` — grants the `SpawnKennel` control-socket capability (`02-7` §Kennel spawning): when
+present, the kennel may ask kenneld to spawn a child kennel whose policy is the requested template
+intersected with this kennel's own grants and any narrowings (never a superset). A spawned kennel
+has no spawn capability of its own unless its template independently declares `[ipc.spawn]`.
+
+### Reserved-namespace compile validation
+
+The `org.projectkennel.*` prefix is reserved (`02-7` §The reserved namespace). It is a **categorical
+policy-compile error** — not a runtime check (design §7.9.4) — for any `[[binder.provide]]` or
+`[[binder.consume]]` `service` to begin with `org.projectkennel.`; only kenneld registers under that
+prefix. The compiler rejects such a policy by name, the same way it rejects an out-of-range
+`[net.mode]`.
+
+---
+
 ## What this chapter does not cover
 
 - The field-by-field semantics of each section: see the corresponding design-document chapter (§7.x) or the worked example in [TEMPLATE-ai-coding-strict.md](../design/TEMPLATE-ai-coding-strict.md).
+- The binder IPC contract the `[binder]`/`[ipc.spawn]` sections feed, and the `org.projectkennel.*` service set: [`02-7-binder.md`](02-7-binder.md); the network-over-binder layer the `[net.proxy]`/`[net.bpf]` sections feed: [`02-8-binder-net.md`](02-8-binder-net.md). The standalone `net-policy.toml` schema reference is retired; its content is the §The `[net]` section above.
 - The design-level treatment of signing, versioned references, and includes: design doc §5.10.
 - The canonical-form serialisation procedure: `02-6-internal-api.md` (`kennel-policy::canonical`).
 - The signing-key store and lockfile locations on disk: `07-paths.md`.

@@ -12,6 +12,7 @@ A build needs:
 - Clang at the version pinned in `BUILD-ENV.md` (for BPF compilation against the kernel UAPI, no CO-RE).
 - The kernel UAPI headers (`linux-libc-dev`: `<linux/bpf.h>` plus the multiarch `<asm/types.h>` path) at the version pinned in `BUILD-ENV.md`.
 - `bpftool` is **optional** (inspection and the verifier-load matrix only); the loader does not depend on it.
+- The binder kernel feature for the binder test path: `CONFIG_ANDROID_BINDERFS` + `CONFIG_ANDROID_BINDER_IPC` (`=y` or a loaded/auto-loadable `binder_linux` module) and the binder UAPI headers (`linux/android/{binder,binderfs}.h`), pinned in `BUILD-ENV.md`. The plain `cargo build` does not need binder (the `kennel-binder` ABI crate compiles against vendored UAPI constants); the *test* path that mounts binderfs does (see the binder load/test matrix below).
 - Vendored Rust crates in `src/vendor/`, each in `CHECKSUMS.toml`.
 - The system `sha256sum` binary (coreutils) for the shell-script checksum verifier.
 
@@ -31,7 +32,7 @@ For a full workspace build:
 
 1. **Vendor verification.** `src/tools/verify-checksums.sh` confirms `src/vendor/` matches `CHECKSUMS.toml` and `Cargo.lock`. The Rust verifier twin (`kennel-checksum-verify`, needing vendored `sha2`) is a contingent §5.5.1 call, not yet built; the shell script is the implementation.
 2. **BPF compilation.** `kennel-bpf`'s `build.rs` invokes clang against `bpf/*.bpf.c`, producing `*.bpf.o` files in `OUT_DIR`. Each `.bpf.c` includes `<linux/bpf.h>` (kernel UAPI) and `bpf/maps.h`; **no** `vmlinux.h`, no CO-RE relocations. The `.o` is embedded into the crate; map references are left as ELF relocations the loader resolves at load time.
-3. **Rust compilation.** `cargo build --workspace` builds every crate. The workspace is twelve crates: `kennel-syscall`, `kennel-text`, `kennel-policy`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-netproxy`, `kennel-privhelper`, `kennel-spawn`, `kennel-ssh-reorigin`, `kennel-socks-connect`, and `kenneld` (which also produces the `kennel` CLI binary alongside the `kenneld` daemon, in its `src/bin/`). Order is computed by Cargo from each member's `[dependencies]` (there is no `[workspace.dependencies]` table — members pin their own external versions); the lower-layer crates (`kennel-syscall`, `kennel-text`) are built before higher layers (`kennel-spawn`, `kenneld`).
+3. **Rust compilation.** `cargo build --workspace` builds every crate. The workspace is fifteen crates: `kennel-syscall`, `kennel-text`, `kennel-policy`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-netproxy`, `kennel-privhelper`, `kennel-spawn`, `kennel-ssh-reorigin`, `kennel-socks-connect`, `kennel-afunix-shim`, `kennel-binder` (the unsafe binder ABI crate, parallel to `kennel-bpf`), `kennel-init` (the root-owned PID-1 supervisor binary, `07-11-kennel-init.md`), and `kenneld` (which also produces the `kennel` CLI binary alongside the `kenneld` daemon, in its `src/bin/`). The roadmap `kennel-netshim` crate (`02-8-binder-net.md`) is not yet present. Order is computed by Cargo from each member's `[dependencies]` (there is no `[workspace.dependencies]` table — members pin their own external versions); the lower-layer crates (`kennel-syscall`, `kennel-text`) are built before higher layers (`kennel-spawn`, `kennel-init`, `kenneld`). The full per-crate decomposition lives in `03-crate-decomposition.md`.
 4. **Binary stripping** (release only). `strip = "symbols"` in the release profile. A separate `release-with-debuginfo` profile producing parallel debug-info binaries under `target/release-with-debuginfo/` for distributions that want a `.debug` package is **roadmap** — only `[profile.release]` is defined today.
 5. **Reproducibility check** (release-build CI only). Designed so the release builds twice on two different runners and the output hashes must match. **Roadmap**: this double-build is not yet wired (it needs the pinned release image), and `cargo build --offline --frozen --locked` is the only build command in the per-PR gate.
 
@@ -95,6 +96,8 @@ A single pass feeds each seed to every parser in `fuzz_parsers`:
 - `kennel-netproxy::config::from_toml_str` — the proxy config reader (over `String::from_utf8_lossy` of the bytes).
 - `kenneld::control::Request::decode` / `Response::decode` — the kenneld control wire format.
 - `kennel-privhelper::wire::Request::decode` — the privhelper packed-struct request.
+- `kennel-binder::proto::parse` / `TransactionData::from_bytes` / `flat_binder_object_fd_value` — the binder driver-return (`BC`/`BR`) command stream and the sender-controlled transaction payload the kernel fills into the read buffer (`02-7-binder.md`).
+- `kennel-spawn::wire` — the `Plan` decoder. The same flat encoding crosses two privilege boundaries on input the operator built (the privhelper `ConstructKennel` op payload and the `kennel-init` `GET_SANDBOX_PLAN` `BC_REPLY` payload, `07-11-kennel-init.md`); the decoder is bounded by construction. **Owed:** adding it to `fuzz_parsers` (the codec exists and is bounds-checked; the harness entry is the remaining wiring).
 - `kennel-policy::verify_settled` — the signed settled-policy reader (the TOML parse and schema-version gate run on the untrusted bytes before the signature check).
 
 The property under test is robustness: for any input, every parser returns `Ok`/`Err` and never panics, hangs, or reads out of bounds. A returned `Err` on junk is a correct outcome. Round-trip and differential properties live in each crate's own unit tests, not here.
@@ -112,6 +115,10 @@ Kernel matrix (subject to change in `BUILD-ENV.md`):
 - Current stable.
 - Latest mainline.
 
+### Binder load/test matrix
+
+The binder transport (`kennel-binder`, `02-7-binder.md`) needs a kernel with `CONFIG_ANDROID_BINDERFS` + `CONFIG_ANDROID_BINDER_IPC` (built in, or a loaded/auto-loadable `binder_linux` module) and `FS_USERNS_MOUNT`, so its mount/open/transaction path is exercised on a real driver, not in isolation. The matrix mounts a per-instance binderfs inside a child user namespace, allocates the `binder` device, checks `BINDER_VERSION` (protocol version 8), and drives a node-0 transaction round trip. This is covered as part of the construction-path e2e and the `root-tests` runner below (it shares their privileged runner and the same kernel matrix as the BPF verifier job); a kernel missing the binder driver skips the binder tests rather than failing (the `kennel check` posture, `02-7-binder.md` §Kernel requirements).
+
 ---
 
 ## CI jobs
@@ -128,7 +135,9 @@ Kernel matrix (subject to change in `BUILD-ENV.md`):
 
 The `rust` job folds what would otherwise be separate fmt/clippy/test/build/doc jobs into one runner's step sequence; a step failure fails the job. All five jobs gate a PR.
 
-Owed, and **not** yet in CI (tracked in the workflow header): the Rust checksum verifier twin (needs `sha2`, §5.5.1), the reproducible-build double-build (needs the release image), the BPF verifier-load matrix on custom-kernel runners (the `bpf-compile` job is the hosted-runner compile part), and a privileged `root-tests` runner. CI must not claim to run a check it does not.
+Owed, and **not** yet in CI (tracked in the workflow header): the Rust checksum verifier twin (needs `sha2`, §5.5.1), the reproducible-build double-build (needs the release image), the BPF verifier-load matrix on custom-kernel runners (the `bpf-compile` job is the hosted-runner compile part), a privileged `root-tests` runner (which is also where the binder load/test matrix and the unprivileged construction-path e2e run), and the construction-path e2e itself. CI must not claim to run a check it does not.
+
+**Roadmap CI additions** (designed, not built — the network-namespace redesign of `02-8-binder-net.md` / `07-10-binder-netns.md` is not built; the kennel still shares the host network namespace): root tests for the per-kennel net-ns path (`CLONE_NEWNET`, the four network modes, the loopback mirror, the host-side leg, `AddLoopbackAlias`/`RemoveLoopbackAlias`); and a fuzz target for the `kennel-netshim` SOCKS5 front-end once that crate exists. The `kennel-binder` `BC`/`BR` decoder fuzz target is *already* wired into the `fuzz` job (it is built), not roadmap.
 
 CI is configured in `.github/workflows/`. The configuration is reviewed under the same discipline as code (CODING-STANDARDS.md §14).
 
@@ -158,6 +167,15 @@ A subset of integration tests need root for namespace operations, cgroup creatio
 The `root-tests` feature is defined **per crate** (`kennel-spawn`, `kennel-bpf`, `kennel-syscall`, `kennel-privhelper`, `kenneld`), not at the workspace level; it transitively enables `embed-programs`/`bpf-egress`. The real invocation is per crate, e.g. `sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features root-tests`. CI exercises the privileged paths via the all-features build (`cargo test --all-features`); a dedicated privileged `root-tests` runner is owed (see the CI-jobs section).
 
 The CI runner for `root-tests` is privileged but ephemeral: a container or VM that exists only for the duration of the test run, with a fresh kernel, and no persistent state.
+
+### The unprivileged construction-path e2e
+
+`src/tools/unprivileged-e2e.sh` drives the full vertical of the privhelper *factory* construction model (`07-11-kennel-init.md`, `02-7-binder.md`): an unprivileged, identity-mapped user namespace constructs the kennel, the privhelper mounts the per-instance binderfs and chowns the device, kenneld claims node 0 and serves the registry, `kennel-init` pulls its `GET_SANDBOX_PLAN` over the bus, and the brokered `org.projectkennel.IAfUnix/default` facade returns a connected fd. The spawn itself runs unprivileged; the script's `sudo` steps are the deployment prerequisites (reversible and local):
+
+- `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep` on the privhelper. `cap_setuid` is the factory writing the `0 0 1` host-root line of the kennel's identity uid_map; **`cap_setfcap` is *also* required since Linux 5.12 to map host uid 0 into a new user namespace** (otherwise the `0 0 1` write is `EPERM` even for a privileged process). These join the privhelper's existing `cap_setgid` / `cap_sys_admin` / `cap_net_admin` (`07-paths.md`). This is the deployed `setcap` line, not a test-only artefact.
+- A temporary **AppArmor `userns` profile** over the spawning binary *and* over the privhelper, matching the production `dist/apparmor/kenneld`. On distributions that set `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu), an unprivileged `CLONE_NEWUSER` transitions the new userns to the restricted `unprivileged_userns` profile, which forbids mapping host uid 0 in; the `flags=(unconfined) { userns, }` profile (it only *grants* `userns`; an enforcing profile cannot work because the spawn sets `no_new_privs` before exec'ing the workload, under which AppArmor denies every profile transition) makes the created userns "privileged" so host root can be mapped. The profile is unloaded on exit.
+
+The script builds the participants it needs (`kennel-init`, the facade/proxy binaries, the test binary) and is the as-built proof for the binder construction vertical. Its privileged variant shares the `root-tests` runner; the owed privileged CI runner (below) is where it runs in CI.
 
 ### Mock vs real
 

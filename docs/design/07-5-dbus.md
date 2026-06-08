@@ -1,5 +1,18 @@
 # §7.5 Policy surface: D-Bus (proxied)
 
+> **Direction: the `xdg-dbus-proxy` shim is superseded by a binder facade.** The model
+> below — per-method allowlisting between the kennel and the real bus — is the settled D-Bus
+> policy surface and is unchanged. What changes is the *mechanism*: instead of an external
+> `xdg-dbus-proxy` daemon whose socket is shimmed into the kennel view, D-Bus mediation
+> terminates in an `org.projectkennel.IDBus/default` facade on the binder gateway (§7.9.5),
+> where kenneld applies the same method allowlist per binder transaction before forwarding to
+> the real session bus. This routes D-Bus through the kennel's single auditable inter-namespace
+> chokepoint with no external dependency, no visible socket artefact in the view, and call-level
+> audit. The structured `[dbus]` policy in §7.5.4 carries over verbatim — it becomes the facade's
+> rule source. The facade is a **deferred** build; the proxy model in this chapter remains the
+> reference description of the policy surface until it lands. See §7.9.5 (facades) and §7.9.8
+> (relationship to existing sections).
+
 D-Bus is proxied, not granted directly. If a kennel needs D-Bus access, Project Kennel launches an `xdg-dbus-proxy` instance per kennel that enforces a per-method allowlist between the kennel and the real bus. The proxy's socket is shimmed into the kennel as the standard bus path. Without explicit policy enabling it, no bus socket exists in the kennel's view.
 
 ## 7.5.1 Direct D-Bus access

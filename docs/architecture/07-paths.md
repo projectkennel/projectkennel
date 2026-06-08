@@ -102,10 +102,15 @@ numeric context `<ctx>` (not the kennel name):
 ├── proxy/proxy-<ctx>.toml           the per-kennel netproxy's config (kenneld writes, netproxy reads)
 ├── etc/etc-<ctx>/                   the per-kennel synthetic /etc, staged then bind-mounted
 ├── root/root-<ctx>/                 the constructed-view new-root mountpoint (pivot_root target)
+├── ctx-<ctx>/binderfs/             the per-kennel binderfs instance staging mountpoint
 └── bpf/<id>/                        the per-kennel BPF map pins (above)
 ```
 
 Owner: user. Mode: directory `0700`, files `0600`.
+
+The per-kennel binderfs instance (`02-7-binder.md`) is staged under `ctx-<ctx>/binderfs/`. binderfs carries `FS_USERNS_MOUNT`, so the instance is mounted inside the kennel's child user namespace by the privhelper factory, then ends up at `/dev/binderfs/` in the constructed view (below); kenneld reaches it for node 0 via `/proc/<init-host-pid>/root/dev/binderfs/binder`. The staging directory disappears with the child's mount namespace on kennel exit.
+
+Inside the constructed view, the device follows the binderfs/Android convention: the instance mounts at `/dev/binderfs/`, the standard device is `/dev/binderfs/binder`, and `/dev/binder` is a symlink to it so a stock libbinder-shaped client finds the driver at its default path (`02-7-binder.md` §Device naming). These are *in-view* paths — the workload's, not the host's — and are listed here only because the device name is a stable contract; the rest of the view is out of scope for this chapter (§What this chapter does not cover). The privhelper factory chowns `/dev/binderfs/binder` to the operator uid (mode `0600`); `binder-control` stays root-only and is never granted to the workload.
 
 The per-kennel egress proxy does **not** listen on a Unix socket: it listens on a
 **TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64`
@@ -117,6 +122,15 @@ is by respawn with a fresh config file, not an on-socket control protocol — th
 is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
 *future work* (`08-as-built-notes.md`); when built, their sockets stage under this
 same per-user tree, never a shared one.
+
+**Roadmap — the host loopback alias.** The per-kennel network-namespace redesign
+(`02-8-binder-net.md`, design `07-10-binder-netns.md`) adds a *host-side* alias:
+the kennel's own `/28` (IPv4) and `/64` (IPv6) are added to the host's `lo`
+interface (the privhelper's `AddLoopbackAlias`/`RemoveLoopbackAlias` ops), so an
+allowed in-kennel bind can be mirrored to the same `ip:port` host-side for host
+observability and ingress. This is **not built**: the kennel still shares the host
+network namespace, and the kennel's `/28`+`/64` is used today only as the egress
+proxy's loopback listen address (above), not as a host `lo` alias.
 
 ---
 
@@ -239,7 +253,8 @@ into the kennel's view.
 |---|---|---|
 | `kennel` | `/usr/bin/kennel` | The CLI; user binary, no special permissions. |
 | `kenneld` | `/usr/libexec/kennel/kenneld` | Started by systemd-user or by the CLI in degraded mode; not on `PATH`. |
-| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_net_admin,cap_sys_admin,cap_setgid=ep` are a documented per-distribution alternative the installer does not itself apply. `cap_setgid` is for the `set-gid-map` op — writing a workload's user-namespace `gid_map` so it keeps a granted supplementary group (§7.2.8); the other two are for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
+| `kennel-init` | `/usr/libexec/kennel/kennel-init` | The kennel's PID 1 / supervisor (§7.11, `../design/07-11-kennel-init.md`); root-owned and non-writable (`0755`, owner root, no setuid/setcap). The privhelper verifies its root ownership + non-writability, opens it on the host pre-`clone`, and `fexecve`s it after `pivot_root`. Its path comes from the deployment config (`Deployment::kennel_init()` → libexec), never the wire. Not on `PATH`; located by absolute path. |
+| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin,cap_net_admin=ep` are a documented per-distribution alternative the installer does not itself apply. The privhelper is the kennel *constructor* (`../design/07-11-kennel-init.md`): it clones the namespaces as the operator (so the userns is operator-owned), writes the identity map (host root `0 0 1` + the operator line + one line per granted gid) in a single `write(2)`, builds the root-owned surfaces, mounts binderfs, `pivot_root`s, and `fexecve`s `kennel-init`. `cap_setuid` writes the `0 0 1` uid map (the kennel's real uid 0); `cap_setgid` writes the `gid_map` so a workload keeps a granted supplementary group (§7.2.8); `cap_setfcap` lets the single map `write(2)` land; `cap_sys_admin` mounts (view, `/dev`, binderfs) and `pivot_root`s; `cap_net_admin` is for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
 | `kennel-netproxy` | `/usr/libexec/kennel/kennel-netproxy` | Spawned by kenneld; not on `PATH`. |
 | `kennel-akc` | `/usr/libexec/kennel/kennel-akc` | The SSH bastion's root-owned `AuthorizedKeysCommand` (§7.8); installed root-owned (safe-path), queries kenneld; not on `PATH`. |
 | `kennel-socks-connect` | `/usr/libexec/kennel/kennel-socks-connect` | The `ProxyCommand` bridging a kennel's `ssh` to its egress proxy (§7.8); bound into the view with a Landlock execute grant. |
@@ -292,6 +307,7 @@ This is detailed in `04-trust-boundaries.md`.
 | `~/.local/state/kennel/<kennel>/` | kenneld (first kennel start) | Operator (audit retention) | All restarts and reboots |
 | `/run/user/<uid>/kennel/` | kenneld (startup) | logout (systemd) or kenneld (graceful shutdown) | User session |
 | `/run/user/<uid>/kennel/{proxy,etc,root}/…-<ctx>` | kenneld (kennel start) | kenneld (immediately on workload exit) | Kennel lifetime |
+| `/run/user/<uid>/kennel/ctx-<ctx>/binderfs/` | privhelper factory (kennel start) | child mount-ns teardown (workload exit) | Kennel lifetime |
 | `/sys/fs/cgroup/<namespace>/<ctx>/` | kenneld (unprivileged, in its delegated subtree) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/run/user/<uid>/kennel/bpf/<id>/` | privhelper (egress setup; pins chowned to the caller) | kenneld (immediately on workload exit) | Kennel lifetime |
 | `/etc/kennel/` | Package installation | Package removal | All restarts and reboots |

@@ -2,7 +2,7 @@
 
 This chapter describes the Cargo workspace layout: which crates exist, what each owns, how they depend on each other, and what build-time choices they expose. The *public APIs* of each crate are in `02-6-internal-api.md`; this chapter is the structural view — how the code is cut up, not what each piece exposes.
 
-The workspace has **12 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kenneld`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. `kennel-audit` is a first-class crate — the unified audit writer (the canonical event, one sanitisation pass, per-class level filtering, and the `Sink` fan-out). `kennel-config` is a first-class crate too — the layered deployment/user configuration (`system.toml` / `config.toml` cascades) that keeps install paths out of the binaries. The last two crates are standalone, std-only SSH helpers (`07-8-ssh.md` §7.8.4) that depend on no other Project Kennel crate by design — they must stay minimal and self-contained: `kennel-ssh-reorigin` is the bastion's re-origination forced command, and `kennel-socks-connect` is the `ssh` `ProxyCommand` that SOCKS5s through the egress proxy to reach the bastion. The CLI and the control/wire IPC are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, and the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`). A wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
+The workspace has **14 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-binder`, `kennel-audit`, `kennel-config`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kennel-init`, `kenneld`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. `kennel-binder` is the third unsafe-bearing crate — the hand-rolled binder ioctl ABI (the per-kennel inter-namespace gateway, `02-7-binder.md`), parallel in every structural respect to `kennel-bpf`; binder is load-bearing, so every kennel links it through kenneld and `kennel-init`. `kennel-init` is the root-owned PID-1 binary the privhelper `fexecve`s to construct and supervise each kennel (`07-11-kennel-init.md`). `kennel-audit` is a first-class crate — the unified audit writer (the canonical event, one sanitisation pass, per-class level filtering, and the `Sink` fan-out). `kennel-config` is a first-class crate too — the layered deployment/user configuration (`system.toml` / `config.toml` cascades) that keeps install paths out of the binaries. The last two crates are standalone, std-only SSH helpers (`07-8-ssh.md` §7.8.4) that depend on no other Project Kennel crate by design — they must stay minimal and self-contained: `kennel-ssh-reorigin` is the bastion's re-origination forced command, and `kennel-socks-connect` is the `ssh` `ProxyCommand` that SOCKS5s through the egress proxy to reach the bastion. The CLI and the control/wire IPC are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, and the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`). A wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
 
 ---
 
@@ -32,16 +32,18 @@ kennel/
 │   │   ├── kennel.bpf.h             shared helpers (UAPI-based; no vmlinux.h/CO-RE)
 │   │   ├── README.md                why no CO-RE; build/inspect instructions
 │   │   └── HELPERS.md               whitelist of permitted BPF helper functions
-│   ├── crates/                      Rust workspace members (12)
-│   │   ├── kennel-syscall/          the only unsafe-bearing crate (besides BPF FFI)
+│   ├── crates/                      Rust workspace members (14)
+│   │   ├── kennel-syscall/          the only unsafe-bearing crate (besides BPF/binder FFI)
 │   │   ├── kennel-text/             sanitisation helpers
 │   │   ├── kennel-policy/           TOML parsing, signature verification (settled-policy core)
 │   │   ├── kennel-bpf/              hand-rolled bpf(2) loader (object for ELF), .o, ringbuf reader
+│   │   ├── kennel-binder/           hand-rolled binder ioctl ABI (unsafe; the inter-namespace gateway)
 │   │   ├── kennel-audit/            unified audit writer: event, sanitise pass, levels, Sink fan-out
 │   │   ├── kennel-config/           layered deployment/user config (system.toml / config.toml cascades)
 │   │   ├── kennel-spawn/            policy → Plan → setup sequence (incl. the pivot_root view) → execve
 │   │   ├── kennel-netproxy/         binary + lib: SOCKS5/HTTP egress proxy (blocking, thread-per-conn)
 │   │   ├── kennel-privhelper/       binary + lib: privileged operations helper (wire format in src/wire.rs)
+│   │   ├── kennel-init/             binary: root-owned kennel PID 1 (constructor handoff target, lifecycle consumer)
 │   │   ├── kennel-ssh-reorigin/     binary + lib: SSH re-origination forced command (std-only; §7.8.4)
 │   │   ├── kennel-socks-connect/    binary + lib: SOCKS5 stdio connector for ssh ProxyCommand (std-only; §7.8.4)
 │   │   └── kenneld/                 lib + binaries: per-user supervisor (src/bin/kenneld.rs),
@@ -63,7 +65,7 @@ kennel/
 └── .github/                         CI, community-health
 ```
 
-Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), `kennel-ssh-reorigin` (`src/main.rs` + a library half holding the tested re-origination core), `kennel-socks-connect` (`src/main.rs` + a library half holding the tested SOCKS5 wire codec), and `kenneld` (a library half in `src/lib.rs` providing the orchestration its binaries share, plus `src/bin/kenneld.rs` for the daemon, `src/bin/kennel.rs` for the CLI, and `src/bin/kennel-akc.rs` for the SSH bastion's root-owned `AuthorizedKeysCommand`, which reuses `kenneld::control` to query the daemon — §7.8.7). The remaining crates are libraries (`src/lib.rs`).
+Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), `kennel-init` (`src/main.rs` — the root-owned PID-1 supervisor, no library half), `kennel-ssh-reorigin` (`src/main.rs` + a library half holding the tested re-origination core), `kennel-socks-connect` (`src/main.rs` + a library half holding the tested SOCKS5 wire codec), and `kenneld` (a library half in `src/lib.rs` providing the orchestration its binaries share, plus `src/bin/kenneld.rs` for the daemon, `src/bin/kennel.rs` for the CLI, and `src/bin/kennel-akc.rs` for the SSH bastion's root-owned `AuthorizedKeysCommand`, which reuses `kenneld::control` to query the daemon — §7.8.7). The remaining crates are libraries (`src/lib.rs`).
 
 ---
 
@@ -74,7 +76,7 @@ The workspace is acyclic and layered. Lower-level crates do not depend on higher
 ```
         kenneld (lib + bin kenneld + bin kennel + bin kennel-akc)
           |  owns control.rs (CLI<->daemon wire) + proxy.rs config writer
-          |  deps: spawn, privhelper, policy, netproxy, audit, config, syscall
+          |  deps: spawn, privhelper, policy, netproxy, audit, config, syscall, binder
           +----------------+----------------+----------------+--------------+
           |                |                |                |              |
    kennel-netproxy   kennel-spawn   kennel-privhelper   kennel-audit  kennel-config
@@ -85,14 +87,22 @@ The workspace is acyclic and layered. Lower-level crates do not depend on higher
           |          +-----+-------+--------+                |
           |          |     |       |                         |
           |     kennel-bpf |  kennel-policy            kennel-text
-          |     (leaf*)    |    (leaf)                   (leaf)
+          |  kennel-binder |    (leaf)                   (leaf)
+          |     (leaf*)    |                                 |
           |                |                                 |
           +----------------+----------- kennel-syscall ------+
                                               |
-                            (libc, nix; kennel-bpf adds object)
+                  (libc, nix; kennel-bpf adds object; kennel-binder adds nothing)
 
-  * kennel-bpf and kennel-syscall are the two unsafe-bearing crates; both are
-    leaves among the Project Kennel crates (kennel-bpf depends on no kennel crate).
+  kennel-init (bin)           ← root-owned PID 1. deps: kennel-binder (lifecycle
+                                consumer over node 0) + reuses the kennel-spawn seal
+                                (no_new_privs/seccomp/Landlock/ulimits) for the workload
+                                child it forks. The only binder participant besides kenneld.
+
+  * kennel-bpf, kennel-binder and kennel-syscall are the three unsafe-bearing crates;
+    all three are leaves among the Project Kennel crates (kennel-bpf and kennel-binder
+    depend on no kennel crate except, for kennel-binder, optionally kennel-syscall for
+    shared raw-fd helpers).
 
   kennel-ssh-reorigin (bin)   ← stands alone: std-only, no Project Kennel deps.
                                 The bastion's forced command must stay minimal
@@ -105,7 +115,8 @@ Rules:
 
 - **No cycles.** Enforced by Cargo (a cycle is a build error).
 - **No depth skipping in spirit.** A crate may depend on any layer below it, but a binary depending directly on `kennel-syscall` to bypass the safe wrappers in `kennel-spawn` is a smell that warrants a review note.
-- **`kennel-syscall` is the only `unsafe`-bearing crate** (besides `kennel-bpf` for its hand-rolled `bpf(2)` FFI surface). Every other crate carries `#![forbid(unsafe_code)]` per CODING-STANDARDS.md §4.
+- **`kennel-syscall` is the primary `unsafe`-bearing crate**, alongside `kennel-bpf` (hand-rolled `bpf(2)` FFI) and `kennel-binder` (hand-rolled binder `ioctl(2)` FFI). Every other crate carries `#![forbid(unsafe_code)]` per CODING-STANDARDS.md §4.
+- **Binder is confined to two participants.** `kennel-binder` (the binder ABI) is linked only by `kenneld` (node 0 / context manager) and `kennel-init` (PID-1 lifecycle consumer pulling its plan over node 0); no other crate links it. The roadmap `kennel-netshim` (below) becomes a third linker when the network crossing is built. The workload never links `kennel-binder`.
 - **`kennel-text` is a leaf-side utility crate** (no Project Kennel deps; stdlib only). Its single direct consumer is `kennel-audit`, which runs the one sanitisation pass on every event; other crates' untrusted text reaches that pass by emitting through the audit writer rather than by linking `kennel-text` themselves.
 - **`kennel-policy`** does not depend on `kennel-spawn`, `kennel-bpf`, or any binary crate. The policy module is purely functional: same input, same output, no runtime side-effects.
 
@@ -149,6 +160,13 @@ The full public-API description for each crate lives in `02-6-internal-api.md`. 
 - The `bpf/` programs compile against the kernel UAPI (no CO-RE/`vmlinux.h`); `object` parses the `.o` and the loader resolves map relocations by symbol name (see `06-build-and-test.md`, `bpf/README.md`).
 - The compiled `.bpf.o` files are embedded into the crate (no skeleton generation); `KENNEL_MAPS`/`KENNEL_PROGRAMS` describe the maps and programs in Rust, mirroring `bpf/maps.h`.
 
+### `kennel-binder`
+
+- The third `#![allow(unsafe_code)]` crate, parallel in every structural respect to `kennel-bpf`. `unsafe` is confined to a single `sys.rs` holding the `ioctl(2)` FFI (`BINDER_WRITE_READ`, `BINDER_SET_CONTEXT_MGR`, `BINDER_SET_MAX_THREADS`, `BINDER_VERSION`, the binderfs control `BINDER_CTL_ADD`); same review discipline as `kennel-bpf`/`kennel-syscall`. Listed in `UNSAFE-CRATES.md`. See `02-7-binder.md` for the full ABI surface.
+- **No libbinder/libbinder-ndk.** The crate binds the stable binder UAPI directly (`linux/android/{binder,binderfs}.h`), the same way `bpf/` compiles against `<linux/bpf.h>` with no CO-RE. This is the second reason it is its own crate rather than a `kennel-syscall` addition: `kennel-syscall` carries the 1500-line reviewable-in-one-sitting ceiling and no kernel-header surface. If the build vendors the binder UAPI headers, they live alongside the crate under the same pinning discipline as `bpf/` headers (`BUILD-ENV.md`).
+- **Near-leaf.** Like `kennel-bpf`, it depends on no other Project Kennel crate except (optionally) `kennel-syscall` for shared raw-fd helpers; it links `libc`/`nix` for the syscalls. No `object` (binder is an ioctl ABI, not an object format).
+- It owns mechanism only (the `binder_write_read` command/return loop, transaction framing); kenneld owns all policy. Its `BC`/`BR` decoder is a natural fuzz-target home (`06-build-and-test.md`).
+
 ### IPC (folded — no `kennel-ipc-*` crates)
 
 The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`Response` + length-prefixed `read_frame`, native-endian, `MAX_MESSAGE`-bounded) and the privhelper protocol in `kennel-privhelper::wire` (fixed-size packed structs). Each protocol is shared by exactly two binaries that ship from the same crate, so it is a module there rather than a standalone crate. Both are sync/blocking; there is no async runtime anywhere. The wire parsers are the natural fuzz-target homes.
@@ -163,12 +181,24 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 
 - Binary crate with a library half. **Sync, blocking — one thread per connection. No async runtime.**
 - The SOCKS5/HTTP server lives in `src/server.rs` (`socks5.rs`/`http.rs`); the allowlist evaluator in `src/allow.rs`; the JSONL audit formatter in `src/audit.rs`. All are unit-tested without the network.
+- **Roadmap (per-kennel net-ns, `02-8-binder-net.md`):** when the network crossing is built, the proxy is no longer reached by a TCP loopback listener — it becomes a host-net-ns CONNECT delegate behind the `org.projectkennel.INet` node, dropping its SOCKS5 *server* and gaining a delegate-socketpair reader. The SOCKS5 *server* role moves into the roadmap `kennel-netshim` crate (next item). Not built — the kennel still shares the host network namespace.
+
+### `kennel-netshim` (roadmap — not built)
+
+- A **roadmap** crate (`02-8-binder-net.md`, `07-10-binder-netns.md`): the per-kennel network shim that runs inside the kennel net-ns when the network crossing is built. It holds the **fuzzed SOCKS5** server the workload egresses through, translating to `org.projectkennel.INet` `CONNECT` transactions over the binder bus (kenneld then dispatches to the `kennel-netproxy` host-net-ns delegate). It would become the **third** binder participant after kenneld and `kennel-init`. Not built — there is no `kennel-netshim` crate in the workspace today, and the kennel still shares the host network namespace.
 
 ### `kennel-privhelper`
 
 - Binary crate. Sync, no async runtime.
 - `panic = "abort"` for release builds (inherited from the workspace `[profile.release]`, not a per-crate block); the test profile keeps cargo's default unwinding (CODING-STANDARDS.md §8.5).
 - Has its own dep list distinct from the workspace, kept deliberately small: `kennel-syscall`, and an *optional* `kennel-bpf` pulled in only under the `bpf-egress` feature (which also drags in clang at build time for the embedded `.o`). A plain build of the helper links neither `kennel-bpf` nor clang. No `serde`, no `serde_json` — the wire format is fixed-size packed structs hand-packed field-by-field (`src/wire.rs`). No async, no proc-macros.
+
+### `kennel-init`
+
+- Binary crate, no library half. The **root-owned PID 1** of every kennel: the privhelper factory `fexecve`s it (with empty argv/envp) as the trusted uid-0 process *after* `pivot_root`, so it is trapped in the sealed view from its first instruction (`07-11-kennel-init.md`). It does no policy decisions, no mount/netlink/device/fs-lookup/env code, and holds no ambient host caps — deliberately tiny and auditable, the same binary for every kennel.
+- **Links `kennel-binder`** as a lifecycle consumer: it `open`s the per-kennel binderfs device and pulls its supervision-half plan from kenneld (node 0) via `GET_SANDBOX_PLAN`, then rides node 0 for the `NOTIFY_*` lifecycle verbs. This makes it the second binder participant alongside kenneld.
+- **Reuses the `kennel-spawn` seal** — `no_new_privs` + seccomp + Landlock + ulimits + identity drop (`set_gid`/`set_uid`) — applied to the **workload child** it forks and drops to the operator, *not* to itself or the facades (which must remain free to fork, `waitpid`, and reach the bus). Only `kennel-init` stays uid 0.
+- **As-built divergence (code-owed):** as built it runs as the *operator*, not uid 0 — a known divergence from the design's uid-0 init (`07-11-kennel-init.md`), tracked for reconciliation.
 
 ### `kennel-ssh-reorigin`
 

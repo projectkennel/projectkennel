@@ -141,7 +141,11 @@ allow = [
 > `shim_root` (read-only unless the grant is writable), constructs `/dev` from
 > `fs.dev.allow` (nodes bind-mounted and Landlock-granted read/write/`IOCTL_DEV`),
 > mounts a fresh `/proc` with `hidepid=2` and a private `/tmp` (`fs.tmp` size/mode),
-> then `pivot_root`s in. The synthetic `/etc` is **constructed, never the host
+> then `pivot_root`s in. **The system surfaces are owned by a real uid 0:** the kennel's
+> user namespace maps host root (`0 0 1`) alongside the operator identity, so the view root,
+> the constructed `/dev`, and the read-only library binds are owned by a genuine root rather
+> than the overflow `nobody` — the construction child builds them as uid 0 in the userns
+> (§7.2.8). The synthetic `/etc` is **constructed, never the host
 > `/etc` bound in**: the libc/NSS files (passwd/group/hosts/
 > resolv.conf/…) are written scrubbed of host specifics, plus read-only binds of the vanilla
 > TLS/linker subtrees (`/etc/ssl`,`/etc/pki`,`/etc/ld.so.*`). **Identity is masked:**
@@ -149,9 +153,10 @@ allow = [
 > operator's login name), with the in-kennel shim `$HOME` as the home — so `id`,
 > `whoami`, and `getpwuid` reveal no host identity. The uid/gid *numbers* are
 > unchanged (they must match the host inodes of bind-mounted files). **Supplementary
-> groups are policy-defined** (`[identity].groups`, §7.2.8): the privileged seal
-> `setgroups` to exactly the granted set — by default *none*, dropping every inherited
-> host group — and each granted group is named in the synthetic `/etc/group`, so `id`
+> groups are policy-defined** (`[identity].groups`, §7.2.8): the constructor writes the
+> `gid_map` (`0 0 1` + the operator line + one line per granted group) once and fully before
+> the kennel runs, so the kennel carries exactly the granted set — by default *none*, dropping
+> every inherited host group — and each granted group is named in the synthetic `/etc/group`, so `id`
 > shows names, not the operator's full group memberships as bare numbers. Two invariants worth
 > repeating: **writable binds resolve to persistent host inodes** (work survives
 > teardown — the tmpfs holds only scaffolding), and the Landlock ruleset is applied
@@ -282,7 +287,7 @@ A passthrough is authored where the rest of a kennel's grants are — a leaf add
 
 **Access is GID, not capability.** These devices are gated by their DAC group — `dialout`/`uucp` for serial, `dip`/`modem` for `/dev/ppp`, `netdev` (or `0666`) for `/dev/net/tun` — not by a Linux capability. The kennel reaches a passed-through device only if the device's owning group is in the kennel's group set, and the user must already be a member of that group (the framework never grants a group the user lacks — that would be privilege escalation). `/dev/net/tun` and `/dev/ppp` are used the **unprivileged** way: a persistent device pre-created and owned by the user's group (the standard `tunctl`/`pppd` pattern), *not* by handing the workload `CAP_NET_ADMIN` to create fresh interfaces — which the kennel does not do, and which in the host network namespace would risk bypassing the egress proxy (§7.3).
 
-The kennel carries **only the groups policy grants**: the privileged spawn seal `setgroups` to exactly the set named by `[identity].groups` plus every passthrough `group` (default: none — all inherited host groups are dropped), and `kenneld` refuses any group the operator is not a member of (the root seal could otherwise over-grant). So a passthrough's `group` both unlocks the device's DAC *and* is the group carried into the kennel; it is named in the synthetic `/etc/group`, so `id` resolves it by name. The standalone form, for non-device group access (e.g. group-owned files) or to be explicit:
+The kennel carries **only the groups policy grants**: the kennel's user namespace `gid_map` names exactly the set named by `[identity].groups` plus every passthrough `group` (default: none — all inherited host groups are dropped), and `kenneld` refuses any group the operator is not a member of (the constructor could otherwise over-grant). The map is **written once and in full by the constructor** — the privhelper, as the factory, writes both maps (`uid_map` `0 0 1` + the operator line; `gid_map` `0 0 1` + the operator line + one line per granted group) in a single `write(2)` before the kennel's PID 1 starts. There is no deferred second-stage gid handshake: the identity, including every supplementary group, is fixed before any kennel code runs. So a passthrough's `group` both unlocks the device's DAC *and* is the group carried into the kennel; it is named in the synthetic `/etc/group`, so `id` resolves it by name. The standalone form, for non-device group access (e.g. group-owned files) or to be explicit:
 
 ```toml
 # Supplementary groups the kennel retains (resolved to GIDs, membership-checked).

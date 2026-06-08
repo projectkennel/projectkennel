@@ -27,6 +27,28 @@ Project Kennel ships the following BPF programs. Each is in `bpf/<name>.bpf.c` a
 
 All programs attach to per-kennel cgroups (one cgroup per kennel under `/sys/fs/cgroup/kennel/<id>/`). The same compiled `.o` is attached to every kennel's cgroup; per-kennel configuration is in maps, not in the program text.
 
+> **Roadmap — `[net.bpf]` socket-shaping programs (per-kennel net-ns redesign).** The
+> network-namespace redesign (design [`07-10-binder-netns.md`](../design/07-10-binder-netns.md),
+> architecture [`02-8-binder-net.md`](02-8-binder-net.md) §BPF policy enforcement) extends the
+> cgroup BPF role from the as-built egress gate to full `[net.bpf]` socket shaping for
+> `unconstrained` and `host` mode kennels. The egress programs above are **built**; everything
+> in this callout is **roadmap (designed, not built)**: the kennel still shares the host network
+> namespace.
+>
+> | Program | Attach point | Roadmap purpose |
+> |---|---|---|
+> | `sock_create` (extended) | `cgroup/sock_create` | Shape `socket(family, type, protocol)` against `[net.bpf.families]` / `[net.bpf.types]` / `[net.bpf.protocols]` — beyond the as-built family allowlist. |
+> | `bind4`/`bind6` (extended) | `cgroup/bind4`, `cgroup/bind6` | Gate the *native inside-net-ns* `bind()` against `[[net.bpf.bind]]` / `[[net.bpf.deny]]` and **report** each allowed bind to kenneld to drive the host-side loopback mirror (below). |
+> | `connect4`/`connect6` (extended) | `cgroup/connect4`, `cgroup/connect6` | Enforce `[[net.bpf.allow]]` / `[[net.bpf.deny]]` for `unconstrained`/`host`. **Egress still flows the proxy path:** the workload's actual outbound `connect()` goes SOCKS5 → `kennel-netshim` → kenneld → `kennel-netproxy` delegate, which applies the `[net.proxy]` allowlist and DNS vetting; the cgroup `connect` hook is a CIDR-level shaper layered over that, not a replacement for it. A direct `connect()` to a non-loopback address inside the net-ns has nowhere to route. |
+> | `sendmsg4`/`sendmsg6` (extended) | `cgroup/sendmsg4`, `cgroup/sendmsg6` | Same per-destination check for connectionless UDP, scoped to the per-kennel net-ns. |
+> | connection/rate limits | (existing hooks) | Enforce `[net.bpf.limits]` (connection count, rate) as DoS bounds. |
+>
+> New per-kennel maps back these checks: family/type/protocol allow-sets, the `[[net.bpf.bind]]`
+> allow/deny tries, and a per-kennel limits/counters map. The map ABI grows by addition; the
+> existing egress maps below are unchanged. For `constrained` kennels `[net.bpf]` is optional
+> defence-in-depth (the net-ns boundary is the enforcement primitive); for `host` mode it is the
+> *primary* primitive, with no net-ns boundary; `mode = none` loads no network programs.
+
 Programs are written in C against the kernel UAPI (`<linux/bpf.h>` plus our own `bpf/kennel.bpf.h` helpers) — **no** `vmlinux.h`, no CO-RE relocations (see `bpf/README.md` for why). The build environment is pinned per `CODING-STANDARDS.md §2.2`.
 
 ---
@@ -138,6 +160,17 @@ port below `kennel_meta.bind_port_min`, and — when `n_ports > 0` — deny a po
 in `allowed_ports` (a bounded, verifier-clean loop). The two halves of the
 bind-port policy: the floor rides `kennel_meta`, the allowlist rides `bind_subnet`.
 
+> **Roadmap — bind hook drives the loopback mirror.** Under the per-kennel net-ns redesign
+> ([`02-8-binder-net.md`](02-8-binder-net.md) §The host-side mirror and `BIND`), the workload
+> binds **natively inside** its own net-ns rather than having `INADDR_ANY` rewritten to a shared
+> stack, and the `bind4`/`bind6` hook gains a second job beyond enforcement: for every bind it
+> *allows* against `[[net.bpf.bind]]` it emits a report (a new ringbuf event kind carrying
+> `ctx_byte`, family, address, and port) so kenneld can raise the host-side mirror — bind the
+> same `ip:port` on the host loopback alias via its host-side leg. A *denied* bind fails at the
+> syscall (`EACCES`) and is audited; no mirror is raised. The decision is policy's alone; the
+> report is the mechanism that keeps every allowed listener observable host-side at the kennel's
+> own IP. **Roadmap, not built** — as built there is one network namespace and no mirror.
+
 ### Shared maps
 
 **`audit_ringbuf`** (BPF_MAP_TYPE_RINGBUF, capacity 1 MiB default)
@@ -196,6 +229,14 @@ struct audit_payload_connect {
 ```
 
 Strings — destination names, paths — are not included in BPF events. The kernel side has the address; name resolution to a hostname happens in the netproxy, which sees the SOCKS5 request and resolves names through the OS resolver in userspace. Audit-log enrichment correlates by the `ts_ns` and the `(addr, port)` tuple.
+
+> **Roadmap — `[net.bpf]` ringbuf kinds.** The socket-shaping roadmap (above) adds event kinds
+> for the per-kennel net-ns model: an allowed-bind *report* (drives the mirror — see the
+> `bind4`/`bind6` callout) and policy-denied `socket()`/`bind()`/`connect()` shaping events.
+> kenneld drains these on the same per-kennel `audit_ringbuf` and routes them to the canonical
+> `net.bind` (carrying `mirrored: true` once the host-side mirror is raised) and `net.bpf.deny`
+> audit events ([`02-8-binder-net.md`](02-8-binder-net.md) §Audit events). The as-built kinds
+> above (egress connect/bind/sock/setsockopt/sendmsg) are unchanged. **Roadmap, not built.**
 
 ---
 

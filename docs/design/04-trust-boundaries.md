@@ -65,7 +65,9 @@ The boundaries that must not weaken:
 
 ## 4.3 Project Kennel's own trust position
 
-Project Kennel runs primarily as the user's uid, with one narrow exception: a privileged helper for network-interface setup (per-kennel loopback subnet allocation). Project Kennel's trust position:
+Project Kennel runs primarily as the user's uid, with one privileged exception: a small root-owned helper, the *privhelper*. The privhelper is the kennel **constructor**. To build a kennel it creates the namespaces, writes the identity map that gives the kennel a real uid 0 (host root mapped `0 0 1` plus the operator's identity line, in a single `write(2)` — no `subuid`/`subgid` delegation), brings up the per-kennel loopback subnet, mounts the view and the per-kennel binderfs instance, and then `execve`s the trusted root-owned `kennel-init` supervisor as the kennel's uid-0 PID 1. The earlier framing of the helper as doing only network-interface setup is superseded by this construction role.
+
+Because the privhelper builds the kennel from a compiled policy `Plan`, it is the **largest new root-parses-operator-input surface** in the system: root code decodes operator-controlled bytes to decide what to map, mount, and run. The design contains this surface deliberately. The Plan is split so the privhelper parses only the *construction half* (the uid/gid maps, loopback config, binderfs parameters, view bind list, and pivot target), and it parses them **host-side, before any kennel namespace exists** — there is no sandbox in a position to have manipulated the bytes, and the decoder is bounded and fuzzed. The *supervision half* (the workload argv/env, facade list, Landlock ruleset, seccomp filter, ulimits, pty) is never pushed to root; the contained `kennel-init` pulls it post-pivot over the binder bus. The escalation-window analysis for the mapped uid 0 is in §2.8: no operator or workload code ever runs as userns-0, because `kennel-init` is `execve`'d only after `pivot_root` has detached the host root, holds no ambient host caps, and is trusted by provenance (root-owned, non-writable, opened by descriptor before the namespace exists). Project Kennel's trust position:
 
 - **Higher than kennels.** Owns the policy decisions, the proxy daemons, the audit log, the cgroup hierarchy.
 - **Equal to the default context.** Cannot do anything the user couldn't do in their normal shell.
@@ -84,7 +86,7 @@ The same architectural pattern appears in every resource class. Project Kennel p
 | Filesystem (§7.2) | Full `$HOME`, `/usr`, `/etc`, `/tmp`, `/mnt`, etc. | Shim `$HOME` containing only granted paths, bind-mounted from real locations; private `/tmp` tmpfs |
 | Network (§7.3) | Real loopback `127.0.0.1` and `::1`; full routing | Per-kennel IPv4 `/28` (`127 \| tag(12) \| ctx(8) \| host(4)`) and IPv6 `/64` (`0xfd \| gid(40) \| ctx(16) \| host(64)`); outbound only via proxy |
 | AF_UNIX sockets (§7.4) | All sockets in `$HOME` and `$XDG_RUNTIME_DIR` | Shim view: only granted sockets present; per-kennel service instances bind-mounted to standard paths |
-| D-Bus (§7.5) | User's session bus, system bus | Per-kennel xdg-dbus-proxy filtering every method call |
+| D-Bus (§7.5) | User's session bus, system bus | Per-kennel method-call filtering (xdg-dbus-proxy, migrating to a binder facade) |
 | Process visibility (§7.7) | Full system processes | PID namespace: only the kennel's own descendants |
 | Environment (§7.7) | Full inherited env from default shell | Curated subset; sensitive vars stripped, framework vars forced |
 
@@ -111,6 +113,8 @@ A complementary pattern: where direct access to a resource cannot be filtered at
 | ssh-agent (when used) | The agent's policy is per-key, not per-caller | Per-kennel ssh-agent instance, optionally with destination constraints |
 
 Kernel-level enforcement is simple ("you can only talk to your broker"); policy expressiveness lives in user-space code Project Kennel controls. The brokers are vetted system tools where possible (xdg-dbus-proxy, Xephyr) and small purpose-built daemons otherwise (the SOCKS5 proxy, per-kennel ssh-agent).
+
+Several of these brokers are reached not through a socket placed in the kennel's view but as **facades on the per-kennel binder bus** — the kennel's single kernel-mediated boundary, whose context manager is the Project Kennel daemon (node 0). An AF_UNIX connect facade returns a connected socket fd for granted endpoints; a future D-Bus facade replaces the external proxy. The binder boundary adds one trust property the socket-in-view model lacks: every crossing is a synchronous transaction the kernel stamps with the caller's identity (`sender_pid`/`sender_euid`), which the caller cannot forge, so the daemon authorises and audits each call against an unforgeable principal. The same bus carries the construction and lifecycle control plane between the daemon and `kennel-init` (§4.3); a lifecycle verb is honoured only from the stamped identity of the kennel's own init process. binderfs is mounted inside the kennel's user namespace, so the bus confers no host-side privilege.
 
 Brokers add latency, code complexity, and an additional process per kennel per protocol. For the threat model this is acceptable; protocol-level filtering is the property we need and there is no way to get it at the kernel level alone.
 
@@ -150,7 +154,8 @@ Each resource class requires specific kernel mechanisms to construct the view sa
 | Filesystem view | Mount namespace + Landlock | 5.13 (Landlock) |
 | Network view | Network namespace + cgroup BPF | 4.10 (cgroup BPF connect hooks) |
 | AF_UNIX view | Mount namespace + AppArmor (for abstract sockets) | 2.6+ (mount ns); AppArmor distribution-dependent |
-| D-Bus view | xdg-dbus-proxy + AF_UNIX view above | Userspace |
+| Construction + binder bus | User namespace + binderfs (`FS_USERNS_MOUNT`) | 3.8 (user ns); 5.0 (binderfs) |
+| D-Bus view | xdg-dbus-proxy or binder facade + AF_UNIX view above | Userspace |
 | Environment view | User-space spawn wrapper | None |
 | Process view | PID namespace + procfs hidepid | 3.8 (PID ns) |
 

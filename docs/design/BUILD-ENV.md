@@ -17,6 +17,13 @@ The workspace is built and the reference runtime is verified on kernel 6.17 (Lan
 - **bpftool:** optional, for inspection and the verifier-load matrix (Roadmap). The programs load via `kennel-bpf`'s own `bpf(2)` loader, not bpftool. The first verify pass used bpftool v7.4.0 (libbpf 1.4).
 - **No `vmlinux.h`, no libbpf, no aya.** The programs need no CO-RE (they touch only stable hook-context structs and our own maps), so there is no committed `vmlinux.h`. `kennel-bpf` loads them with a hand-rolled `bpf(2)` loader over `libc`, using only `object` (pinned `=0.36.7`, one §5.5-approved crate) for ELF parsing — see `bpf/README.md` and `DEPENDENCIES.md`. This deliberately avoids libbpf-rs/libbpf-sys (which vendor zlib+libelf+libbpf C, ~1435 files) and aya (19 crates).
 
+## Binder
+
+- **Kernel config:** the binder driver must be present — `CONFIG_ANDROID_BINDERFS` and `CONFIG_ANDROID_BINDER_IPC`, either `=y` or `=m` (as a module, `binder_linux` must be loaded or auto-loadable on first `mount -t binder`). Every kennel runs a per-instance binderfs bus as its inter-namespace control plane, so this is a hard prerequisite, not an option; `kennel check` reports an unavailable driver as fatal (`02-7-binder.md` §Kernel requirements). These ship as modules (`=m`) on mainstream distributions — Ubuntu's 6.17 kernel carries `CONFIG_ANDROID_BINDERFS=m` and `CONFIG_ANDROID_BINDER_IPC=m`.
+- **Binder UAPI headers:** `kennel-binder` compiles against the stable kernel UAPI directly — `<linux/android/binder.h>` and `<linux/android/binderfs.h>` (from `linux-libc-dev`), no CO-RE, the same posture as `bpf/` against `<linux/bpf.h>`. The protocol floor is binder version 8 (`kennel-binder` checks `BINDER_VERSION` at open).
+- **Privhelper file caps:** the privhelper is the construction factory — it clones the namespaces, writes the identity uid/gid maps (`0 0 1` + operator), builds the root-owned surfaces, mounts binderfs, and `fexecve`s `kennel-init`. Its file caps are `cap_setuid`, `cap_setgid`, `cap_setfcap`, `cap_sys_admin`, and `cap_net_admin` (`cap_setuid`/`cap_setfcap` are required for the `0 0 1` map write under `CAP_SETFCAP`; `02-7-binder.md`, `07-11-kennel-init.md`). The release build sets these via `setcap` on the installed binary.
+- **`kennel-init`:** a root-owned, non-writable binary installed in libexec (the kennel's trusted uid-0 PID 1). The privhelper opens it pre-clone and `fexecve`s it; its provenance — root ownership and non-writability — is verified before exec, so the build/install must preserve those permissions.
+
 ## Reproducibility inputs
 
 - `SOURCE_DATE_EPOCH` honoured; no build timestamps embedded.

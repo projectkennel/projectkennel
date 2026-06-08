@@ -1,6 +1,6 @@
 # API surfaces — internal Rust API
 
-The workspace has 12 crates: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-audit`, `kennel-config`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kenneld`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. The control protocol (CLI ↔ kenneld) lives in `kenneld::control`; the privhelper wire protocol in `kennel-privhelper::wire`; the `kennel` CLI is `kenneld/src/bin/kennel.rs`. `kennel-audit` is the unified audit writer (a first-class crate); `kennel-config` is the layered deployment/user configuration. Everything is blocking, thread-per-connection — there is no async runtime in the workspace. The authoritative per-crate API is the rustdoc (`cargo doc --no-deps`); this chapter is the review-boundary index.
+The workspace has 14 crates: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-binder`, `kennel-audit`, `kennel-config`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kennel-init`, `kenneld`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. (`kennel-binder` and `kennel-init` are built; `kennel-netshim`, the fifteenth, is roadmap — see below.) The control protocol (CLI ↔ kenneld) lives in `kenneld::control`; the privhelper wire protocol in `kennel-privhelper::wire`; the binder logic in `kenneld::binder`; the `kennel` CLI is `kenneld/src/bin/kennel.rs`. `kennel-audit` is the unified audit writer (a first-class crate); `kennel-config` is the layered deployment/user configuration. Everything is blocking, thread-per-connection — there is no async runtime in the workspace. The authoritative per-crate API is the rustdoc (`cargo doc --no-deps`); this chapter is the review-boundary index.
 
 ## Stability commitment
 
@@ -48,10 +48,12 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `prepare(bytes, keys, subst) -> Result<Plan, SpawnError>` — the runtime entry point: `verify_settled` the bytes, substitute, translate into a `Plan`.
 - `spawn(plan, command) -> Result<Child, SpawnError>` and `spawn_with_gid_map(plan, command, map_gids)` — apply the irreversible seal in the forked child immediately before `execve`; the `gid_map` variant runs the §7.2.8 privileged `gid_map` handshake on a servicer thread.
 - `SpawnError` variants for every failure point, including `Policy` (verification), `UnsubstitutedPlaceholder` (boundary 13 in `04-trust-boundaries.md`), and `Syscall`.
+- `wire` (`wire` module) — the flat `Plan` codec for the cross-process boundary: kenneld holds the full `Plan` and splits it two ways across the construction handoff (`07-11-kennel-init.md`). The construction-half rides the privhelper `ConstructKennel` op (parsed host-side); the supervision-half is the `GET_SANDBOX_PLAN` reply `kennel-init` pulls over binder and decodes post-pivot. Both decoders are bounded and fuzzed (CODING-STANDARDS §10.6).
+- `spawn_sealed` / `fork_into_pid1` (over `kennel-syscall`) — the seal `kennel-init` reuses on the workload child (the irreversible drop → `no_new_privs` → seccomp → Landlock → ulimits → pty → `execve`).
 
 **Depends on.** `kennel-policy` (for `SettledPolicy` and `verify_settled`), `kennel-syscall`, `kennel-bpf`. `#![forbid(unsafe_code)]` — every syscall routes through `kennel-syscall`/`kennel-bpf`. The namespace/mount phase is built in-crate over `kennel-syscall` (bubblewrap-style, identity-mapped user namespace); there is no subprocess delegation to an external composer.
 
-**Depended on by.** `kenneld` — kenneld performs the spawn on the CLI's behalf (the CLI passes the workload's stdio over `SCM_RIGHTS` and kenneld runs the spawn sequence).
+**Depended on by.** `kenneld` (performs the spawn on the CLI's behalf and owns the full `Plan`; the CLI passes the workload's stdio over `SCM_RIGHTS` and kenneld runs the spawn sequence) and `kennel-init` (reuses the seal and decodes the supervision-half `wire` bytes post-pivot).
 
 ### `kennel-netproxy`
 
@@ -62,6 +64,18 @@ The full workspace layout — directory structure, dependency graph, build featu
 **Depends on.** `kennel-audit` (the egress records go through the unified `Writer`). It does **not** link `kennel-policy`: the proxy parses its own per-kennel TOML config (`src/config.rs`) rather than the source/settled schema. No async runtime — the proxy is deliberately built without a `tokio`/`mio` tree (see `03-crate-decomposition.md`).
 
 **Depended on by.** `kenneld` links the crate (it shares config types and invokes the binary per kennel).
+
+**Roadmap (the net-ns redesign, `02-8-binder-net.md` §Relationship to `kennel-netproxy` crate).** When the per-kennel network namespace lands, the proxy's inbound half changes: it stops being reached by a TCP loopback SOCKS5 listener and instead becomes kenneld's **CONNECT delegate**. The SOCKS5 accept half (`src/server.rs` inbound) moves out to the new `kennel-netshim` crate (inside the kennel net-ns); `kennel-netproxy` keeps the outbound dial, allowlist, DNS-vetting, and audit logic unchanged but gains a **delegate-socketpair reader** in place of the SOCKS5 listener — one reader thread on the `kenneld`↔delegate `socketpair`, dispatching a worker per `CONNECT` request that returns the connected fd by `SCM_RIGHTS`. It stays `#![forbid(unsafe_code)]` and **does not** link `kennel-binder` (binder stays confined to kenneld + `kennel-netshim`); `[net]` becomes `[net.proxy]` in its config reader.
+
+### `kennel-netshim` *(roadmap — not yet built)*
+
+**Purpose.** The kennel-side network shim introduced by the net-ns redesign (`02-8-binder-net.md`). A thin process inside the kennel net-ns: SOCKS5 inbound state machine, binder `INet` consumer, splice loop — it carries no policy. It is the new home of the SOCKS5 accept half that leaves `kennel-netproxy`, and the only roadmap process that links `kennel-binder`.
+
+**Public surface (planned).** A binary crate with a library half: the SOCKS5 state machine (an untrusted-input parser of workload SOCKS5 requests — a fuzz target under `fuzz/` per CODING-STANDARDS §10.6), the `org.projectkennel.INet/default` consumer (`getService`, the `CONNECT`/`INBOUND` transactions), and the per-connection splice loop. One listener thread on `:1080`; one thread per accepted connection, each issuing one blocking binder transaction.
+
+**Depends on (planned).** `kennel-binder` (the `INet` consumer client). Carries no policy and links no `kennel-policy`.
+
+**Depended on by.** Nothing — a standalone binary the in-kennel reaper forks into the kennel's namespaces and view.
 
 ### `kennel-bpf`
 
@@ -79,17 +93,47 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Notes.** Crate-level `#![allow(unsafe_code)]` for the `bpf(2)` FFI boundary (confined to `sys.rs`); reviewed under §4. ELF parsing is delegated to `object`.
 
+### `kennel-binder`
+
+**Purpose.** The hand-rolled binder ioctl ABI — the third `unsafe`-bearing crate, structurally parallel to `kennel-bpf` (`02-7-binder.md` §The `kennel-binder` crate). It owns the kernel-ABI *mechanism*; policy and state live in `kenneld::binder`. Built (the inter-namespace gateway core is proven by the unprivileged vertical); the cross-instance relay and the `INet` network crossing it will also carry are roadmap.
+
+**Public surface.** (Mechanism only — no policy; the surface is a context-manager primitive plus the command-stream codec.)
+- The `binder_write_read` command loop and the `BC_*`/`BR_*` / `binder_transaction_data` encode/decode. The `BC_*`/`BR_*` decoder consumes workload-controlled bytes — an untrusted-input parser carrying a fuzz target under `fuzz/` per CODING-STANDARDS §10.6.
+- The context-manager looper primitive: looper registration (`BC_ENTER_LOOPER`), transaction receive, reply dispatch (`BC_REPLY`), `BINDER_SET_CONTEXT_MGR` / `BINDER_SET_MAX_THREADS`.
+- binderfs device allocation (the binderfs control `BINDER_CTL_ADD`) and death-notification plumbing.
+- `BINDER_VERSION` (checked at open — protocol version 8).
+
+**Depends on.** `libc`/`nix` for the syscalls; optionally `kennel-syscall` for shared raw-fd helpers. Like `kennel-bpf` it depends on no other Project Kennel crate of substance, and it does **not** link `object` (binder is an ioctl ABI, not an object format) nor any `libbinder`/`libbinder-ndk` (both carry Android-specific dependencies — the stable UAPI is bound directly).
+
+**Depended on by.** `kenneld` (the `binder` module — node 0, the registry, the looper), `kennel-init` (the lifecycle consumer; see below), and — roadmap — `kennel-netshim` (the `INet` consumer). No other process links it; binder participation is confined to these three.
+
+**Notes.** Crate-level `#![allow(unsafe_code)]`, confined to a single `sys.rs` holding the `ioctl(2)` FFI; listed in `UNSAFE-CRATES.md`; reviewed under §4. The `kennel-binder`↔`kenneld::binder` split mirrors `kennel-bpf`↔`kenneld`: the crate provides the primitive, kenneld decides what to register/resolve and drives the looper.
+
 ### `kennel-privhelper`
 
 **Purpose.** The privileged binary. Reads a fixed-layout request from stdin, validates it, performs one network/cgroup operation, writes a response to stdout, exits.
 
 **Public surface (binary + library).** The wire format is fixed-size packed structs in the `wire` module (`src/wire.rs`), documented in `02-4-ipc.md` under "kenneld ↔ privhelper protocol". The crate's library half exposes `wire` and `validate` (the request frame and its validation core), `addr` and `alloc` (the address/allocation maths the validator and `kenneld` share), `client` (the helper-invocation client `kenneld` links), and `exec` (the privileged-syscall execution, Linux-only). It is tested in-crate.
 
+Beyond the fixed-layout stdin/stdout ops (the network/cgroup ops), the privhelper is now the kennel **constructor** (the uid-0/`kennel-init` inversion, `07-11-kennel-init.md`). The `ConstructKennel` op runs over a `SOCK_SEQPACKET` socketpair (not stdin/stdout) so it can carry fds via `SCM_RIGHTS`: it takes the construction-half `kennel-spawn::wire` `Plan` in, clones the namespaces (as the operator, so the userns is operator-owned), escalates the child to the kennel's uid 0 to build the root-owned surfaces and mount/chown binderfs, `pivot_root`s, drops to the operator, `fexecve`s the trusted root-owned `kennel-init`, and relays the init/workload host pids and exit status back. (The `0 0 1` map write needs `CAP_SETUID`, so the privhelper's file caps grow accordingly — see `07-paths.md`.) The detailed wire is `02-4-ipc.md`.
+
 **Depends on.** `kennel-syscall` (for the privileged syscalls — netlink address ops), and an **optional** `kennel-bpf` pulled in only under the `bpf-egress` feature (for the egress load/attach). Not `kennel-text` and not `serde`: the IPC is fixed-layout packed structs over stdin/stdout (`wire`, packed field-by-field), and the validation core is std-only — so the crate stays `#![forbid(unsafe_code)]`. A plain build links neither `kennel-bpf` nor clang.
 
 **Depended on by.** `kenneld` links the crate's library half (`wire`/`validate`/`client`) to drive the helper; it also invokes the binary.
 
 **Notes.** Compiled with `[profile.release] panic = "abort"`; `[profile.test] panic = "unwind"` per CODING-STANDARDS.md §8.5. `clippy::expect_used` is `deny` in this crate per §8.3.
+
+### `kennel-init`
+
+**Purpose.** The kennel's PID 1 — a root-owned trusted binary the privhelper factory `fexecve`s after it constructs the namespaces and writes the maps (design [`07-11-kennel-init.md`](../design/07-11-kennel-init.md); construction record in `KENNEL-INIT-IMPLEMENTATION.md`). It is the lifecycle consumer of the binder bus: it opens `/dev/binderfs/binder`, **pulls** its supervision-half of the `Plan` from node 0 via `GET_SANDBOX_PLAN`, builds the inner surfaces, forks the facades and the workload (dropped to the operator), and supervises. Built (PID 1 + the `GET_SANDBOX_PLAN` pull + the `NOTIFY_*` lifecycle verbs are proven by the unprivileged vertical).
+
+**Public surface (binary + library).** The library half is the small, security-load-bearing core: the post-pivot `GET_SANDBOX_PLAN` pull and bounded decode of the supervision-half `kennel-spawn::wire` bytes (a fuzzed untrusted-input parser per CODING-STANDARDS §10.6), the `NOTIFY_BOOT_SYNC` / `NOTIFY_FACADE_CRASH` / `NOTIFY_WORKLOAD_EXEC` lifecycle verbs it issues to node 0, and the fork-and-drop sequence for the facades and the workload. `main.rs` is the PID-1 tail (open the device, pull, supervise, reap, relay exit status). The workload child reuses the `kennel-spawn` seal (`spawn_sealed`) for the irreversible drop → `no_new_privs` → seccomp → Landlock → ulimits → pty → `execve`.
+
+**Depends on.** `kennel-binder` (the lifecycle consumer's binder client), `kennel-spawn` (the seal applied to the workload child), and `kennel-syscall` (the fork/drop/pty primitives). `#![forbid(unsafe_code)]` — every syscall routes through `kennel-syscall`. It runs no mount/netlink/device/fs-lookup/env code; its path comes from `Deployment` (`kennel-config`), never the wire.
+
+**Depended on by.** Nothing links it — it is a standalone binary the privhelper opens (pre-clone, by root-owned non-writable path) and `fexecve`s.
+
+**As-built divergence (code-owed).** As built `kennel-init` is `fexecve`'d *as the operator*, not as the kennel's uid 0 — the construction child drops before the hand-off. The design (§7.11) models a uid-0 PID 1; reconciling the two is owed code work (`02-7-binder.md` §Mount sequencing).
 
 ### `kennel-syscall`
 
@@ -156,10 +200,13 @@ The full workspace layout — directory structure, dependency graph, build featu
 - `control` — the CLI ↔ daemon wire protocol: `Request`/`Response` plus length-prefixed `read_frame`/`write_frame` (native-endian, `MAX_MESSAGE`-bounded). The workload's stdio is passed from the CLI over `SCM_RIGHTS`.
 - `socket` — obtains the control listener (the socket-activation fd if present, else a fresh bind at the same path).
 - `proxy` — writes the per-kennel egress-proxy TOML config the netproxy reads.
+- `binder` — kenneld's context-manager logic over the `kennel-binder` primitive (`#![forbid(unsafe_code)]`): node-0 acquisition (open `/proc/<init-host-pid>/root/dev/binderfs/binder` for the operator-owned instance, then `BINDER_SET_CONTEXT_MGR`), the per-instance non-blocking looper, the per-kennel and (roadmap) cross-instance service registries, the `org.projectkennel.*` reserved services (the built `IAfUnix/default` facade; roadmap `INet`), the `GET_SANDBOX_PLAN` reply that hands `kennel-init` its supervision-half `Plan`, and the `NOTIFY_*` lifecycle verbs gated on `sender_pid == init_host_pid && sender_euid == 0`. The full contract is `02-7-binder.md`; the network-over-binder half is `02-8-binder-net.md`.
+
+The **kenneld↔delegate socketpair protocol** *(roadmap — `02-8-binder-net.md`)* is how kenneld reaches the non-binder network delegates: `kennel-netproxy` (the CONNECT delegate) and the host-side spawn leg (the BIND/mirror delegate) are **not** binder participants. kenneld's looper runs the O(1) policy check on each `INet` transaction, records a pending entry keyed by the binder transaction cookie, and forwards `{cookie, payload, target}` to the right delegate over a per-kennel `socketpair` established at spawn; the delegate does the blocking dial/bind and returns the fd by `SCM_RIGHTS`; kenneld's reply-reader matches the cookie and issues `BC_REPLY` carrying the fd via `BINDER_TYPE_FD`. A slow delegate degrades to a refusal on that one instance (bounded pending-cookie table), never a looper stall.
 
 **Public surface (binaries).** `kenneld` is socket-activated (systemd passes the bound listener as fd 3) and serves the control protocol; `kennel` is the CLI client documented in `02-1-cli.md`. The CLI parses its own arguments with hand-rolled `std::env::args` dispatch (no `clap`).
 
-**Depends on.** `kennel-policy`, `kennel-spawn` (kenneld performs the spawn on the CLI's behalf), `kennel-privhelper` (the library half + the binary, for privileged operations), `kennel-audit` (builds the `Writer` from the settled `AuditRuntime`), `kennel-config` (resolves helper/trust paths), `kennel-syscall` (`SCM_RIGHTS`, the few syscalls outside spawn), `serde` + `basic-toml` (writing the proxy config).
+**Depends on.** `kennel-policy`, `kennel-spawn` (kenneld performs the spawn on the CLI's behalf, and holds the full `Plan` it splits between the privhelper construction-half and the `kennel-init` supervision-half), `kennel-privhelper` (the library half + the binary — now the kennel *constructor*: it drives the `ConstructKennel` op that clones the namespaces and `fexecve`s `kennel-init`), `kennel-binder` (the context-manager primitive driven by `kenneld::binder`), `kennel-audit` (builds the `Writer` from the settled `AuditRuntime`), `kennel-config` (resolves helper/trust paths, incl. the `kennel-init` binary path), `kennel-syscall` (`SCM_RIGHTS`, the few syscalls outside spawn), `serde` + `basic-toml` (writing the proxy config). It does **not** link `kennel-init` (a standalone binary the privhelper `fexecve`s) nor — roadmap — `kennel-netshim`.
 
 **Notes.** The control protocol and the privhelper wire (`kennel-privhelper::wire`) are the natural fuzz-target homes. There is no separate `kennel-ipc-*` or `kennel-cli` crate — both are folded here. The Rust checksum-manifest verifier is also not a crate: the shell witness in `src/tools/verify-checksums.sh` (system `sha256sum`) is what runs today; a Rust twin is a roadmap item.
 
@@ -185,7 +232,7 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 Per CODING-STANDARDS.md §3:
 
-- Every crate has `#![forbid(unsafe_code)]` at the top of `lib.rs` or `main.rs` *except* `kennel-syscall` (and `kennel-bpf` for its hand-rolled `bpf(2)` FFI surface), which carry `#![allow(unsafe_code)]` and are listed in `UNSAFE-CRATES.md`.
+- Every crate has `#![forbid(unsafe_code)]` at the top of `lib.rs` or `main.rs` *except* `kennel-syscall`, `kennel-bpf` (its hand-rolled `bpf(2)` FFI surface), and `kennel-binder` (its hand-rolled binder `ioctl(2)` FFI surface), which carry `#![allow(unsafe_code)]` and are listed in `UNSAFE-CRATES.md`.
 - Every `pub` item carries a doc comment per §6.2.
 - Every crate's `lib.rs` carries the module-level doc comment per §6.1 — Purpose, Invariants, Threat bearing, Non-goals.
 
