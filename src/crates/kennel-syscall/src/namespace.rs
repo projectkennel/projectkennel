@@ -125,6 +125,85 @@ pub fn establish_userns_defer_gid_map(uid: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// `clone(2)` a child that is **PID 1** of a fresh PID namespace, entering all of
+/// `ns` in a single syscall, and run `child` in it.
+///
+/// This is the privhelper-factory's construction primitive (`docs/design/07-11`):
+/// where the old unprivileged path did `unshare(CLONE_NEWUSER)` then a later
+/// [`fork_into_pid1`](crate::spawn::fork_into_pid1) double-fork to reach PID 1, the
+/// factory instead `clone`s once with `NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET]`: the
+/// cloned child is itself PID 1 of the new PID namespace (a `clone(CLONE_NEWPID)`
+/// child *is* the namespace init, unlike the `unshare` caller, which is not), so no
+/// second fork is needed. The parent gets the child's **host** pid back — the fact
+/// kenneld needs to gate the binder lifecycle verbs and to open
+/// `/proc/<pid>/root/dev/binderfs/binder`.
+///
+/// # The map-write handshake (caller's responsibility)
+///
+/// With `CLONE_NEWUSER`, the child starts with **no** uid/gid mapping and therefore
+/// **no** capabilities in the new user namespace until the parent writes
+/// `/proc/<pid>/uid_map` and `gid_map`. So `child` MUST block (e.g. read a pipe)
+/// until the parent signals the maps are written before it attempts any privileged
+/// operation. This primitive does not impose that handshake — it only creates the
+/// process; the construction closure wires the synchronisation.
+///
+/// # The child closure
+///
+/// `child` runs in the cloned process and **must not return** — it either
+/// `execve`s/`fexecve`s the next image or `_exit`s. It is the same constrained
+/// post-`clone` environment as a `pre_exec` hook — single-threaded, address space
+/// shared copy-on-write with the parent — so it must keep to async-signal-safe work
+/// (and the syscalls the construction sequence needs) and not unwind into the
+/// parent's `Drop`/atexit glue. The contract cannot be expressed in the type on
+/// stable Rust (the never type is unstable in a trait bound), so a closure that
+/// does return is treated as a construction bug: the child is terminated `_exit(127)`
+/// fail-closed rather than ever continuing as a second copy of the parent.
+///
+/// # Errors
+///
+/// Returns the OS error if `clone` fails (e.g. `EPERM` where the host forbids the
+/// requested namespaces). On success the parent returns `Ok(child_pid)`; the child
+/// never returns to the caller.
+pub fn clone_pid1<F>(ns: Namespaces, child: F) -> io::Result<libc::pid_t>
+where
+    F: FnOnce(),
+{
+    // The clone flags: the namespace set plus SIGCHLD as the termination signal, so
+    // the parent can `waitpid` the child (fork() implies SIGCHLD; raw clone does not).
+    // The flag bits and SIGCHLD are kernel constants known non-negative, so
+    // `unsigned_abs` reproduces their exact bit value and `u64::from` widens totally —
+    // no cast, no panic path.
+    let flags: u64 =
+        u64::from(to_clone_flags(ns).bits().unsigned_abs()) | u64::from(libc::SIGCHLD.unsigned_abs());
+    // SAFETY: a raw `clone` syscall with a NULL child stack and all-zero
+    // parent_tid/child_tid/tls behaves like `fork()` — the child returns 0 on a
+    // copy-on-write copy of the caller's stack, the parent gets the child pid. Passing
+    // zero for every pointer argument makes the call robust to the per-arch ordering of
+    // clone's stack/tid/tls operands (only their values, all zero, would differ). The
+    // child branch runs the caller's closure under the same post-fork discipline as a
+    // pre_exec hook (module docs / spawn.rs) and then `_exit`s — it never returns into
+    // safe parent code.
+    //
+    // INVARIANTS UPHELD: exactly one child is created; the parent's only side effect is
+    // obtaining the pid.
+    //
+    // FAILURE MODE: a clone failure surfaces as Err (no child exists); a child closure
+    // that wrongly returns is terminated _exit(127) rather than continuing.
+    let ret = unsafe { libc::syscall(libc::SYS_clone, flags, 0, 0, 0, 0) };
+    match ret {
+        -1 => Err(io::Error::last_os_error()),
+        0 => {
+            child();
+            // The closure must have execed or _exited; if it returned, fail closed.
+            // SAFETY: _exit ends the child without unwinding the parent's shared state.
+            unsafe { libc::_exit(127) }
+        }
+        // A clone-returned pid is a real, small process id and always fits in pid_t.
+        pid => libc::pid_t::try_from(pid)
+            .map_err(|_| io::Error::other("clone returned an out-of-range pid")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +363,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `clone_pid1` with an empty namespace set behaves like `fork()` and needs no
+    /// privilege: the child runs the closure and `_exit`s with a code, the parent
+    /// receives the child pid and reaps it, observing that exact code. Proves the
+    /// fork-like raw-clone path and the pid return without touching any namespace.
+    #[test]
+    fn clone_pid1_empty_flags_relays_the_child_exit_code() {
+        let child = || {
+            // SAFETY: _exit ends the child without running Drop/atexit glue (shared
+            // copy-on-write with the test harness).
+            unsafe { libc::_exit(42) }
+        };
+        let pid = clone_pid1(Namespaces::empty(), child).expect("clone_pid1");
+        let status = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None).expect("waitpid");
+        assert!(
+            matches!(status, nix::sys::wait::WaitStatus::Exited(_, 42)),
+            "child should _exit(42): {status:?}"
+        );
+    }
+
+    /// With privilege, `clone_pid1(PID|USER)` produces a child that is **PID 1** of a
+    /// fresh PID namespace in a single syscall — the property the factory relies on to
+    /// skip the double fork. The child reports its in-namespace pid via its exit code
+    /// (0 ⇒ `getpid()==1`); `getpid` needs no uid mapping, so the still-empty userns
+    /// map does not matter here. Gated behind `root-tests`.
+    #[cfg(feature = "root-tests")]
+    #[test]
+    fn clone_pid1_makes_the_child_pid_namespace_init() {
+        if crate::unistd::skip_if_unprivileged("clone_pid1_makes_the_child_pid_namespace_init") {
+            return;
+        }
+        let child = || {
+            // SAFETY: getpid()/_exit are async-signal-safe; the child does nothing
+            // that needs the (still unwritten) userns maps.
+            let me = unsafe { libc::getpid() };
+            unsafe { libc::_exit(i32::from(me != 1)) }
+        };
+        let pid = clone_pid1(Namespaces::PID | Namespaces::USER, child).expect("clone_pid1");
+        let status = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None).expect("waitpid");
+        assert!(
+            matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
+            "cloned child must be PID 1 of its new PID namespace: {status:?}"
+        );
     }
 
     /// With privilege, unsharing the mount namespace gives the caller a private
