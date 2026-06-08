@@ -92,7 +92,7 @@ pub fn establish_identity_userns(uid: u32, gid: u32) -> io::Result<()> {
 }
 
 /// Establish the identity-mapped user namespace but **leave the `gid_map`
-/// unwritten**, for the granted-supplementary-group handshake (§7.2.8).
+/// unwritten**, for the granted-supplementary-group handshake (§7.4.8).
 ///
 /// Unshares `CLONE_NEWUSER`, denies `setgroups`, and writes the identity `uid_map`
 /// — exactly the prefix of [`establish_identity_userns`] — but does **not** write
@@ -308,7 +308,7 @@ mod tests {
     /// in-namespace capability: an unprivileged caller establishes the userns
     /// without a `gid_map`, observes `/proc/self/gid_map` empty, and can still
     /// `unshare(MOUNT)` — exactly the window in which the privileged helper writes
-    /// the multi-gid map (§7.2.8). Skips with the precise cause where the host
+    /// the multi-gid map (§7.4.8). Skips with the precise cause where the host
     /// forbids the userns or strips its capabilities (the same two conditions as
     /// [`identity_userns_grants_an_unprivileged_mount_namespace`]).
     #[test]

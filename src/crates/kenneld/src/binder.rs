@@ -1,4 +1,4 @@
-//! kenneld as the per-kennel binder context manager (`07-9-ipc.md` §7.9 / `02-7`).
+//! kenneld as the per-kennel binder context manager (`07-1-binder.md` §7.1 / `02-7`).
 //!
 //! kenneld owns node 0 of each kennel's binderfs instance and serves the service
 //! registry on a per-kennel thread (like [`crate::bpf_audit`]'s drain). It gates
@@ -70,7 +70,7 @@ impl Registry {
 
     /// Whether policy lets this kennel *look up* `name`: a service it provides is
     /// locally resolvable, and a declared `consume` is permitted (one kennel is one
-    /// trust domain; `consume` additionally gates cross-instance — `07-9` §7.9.6).
+    /// trust domain; `consume` additionally gates cross-instance — `07-9` §7.1.6).
     fn may_consume(&self, name: &str) -> bool {
         self.may_provide(name) || self.policy.consume.iter().any(|c| c.name == name)
     }
@@ -124,7 +124,7 @@ impl Registry {
 
 /// The lifecycle/config state `kenneld` serves to a kennel's `kennel-init` (`07-11`).
 ///
-/// Served over node 0 (§7.11.4). Disabled by default (`init_host_pid == None`): the
+/// Served over node 0 (§7.2.4). Disabled by default (`init_host_pid == None`): the
 /// lifecycle verbs are refused until the factory reports the init pid and stages the
 /// supervision-half.
 #[derive(Debug, Default)]
@@ -255,7 +255,7 @@ fn handle(
 
 /// Serve a node-0 **lifecycle/config verb**, gated on the caller's kernel-stamped
 /// identity: only `kennel-init` (the host pid the privhelper reported, running as
-/// uid 0) may pull the plan or post notifications (`07-11` §7.11.4). A caller that is
+/// uid 0) may pull the plan or post notifications (`07-11` §7.2.4). A caller that is
 /// not the registered init pid — a spoof, or any other in-kennel process — is denied
 /// and audited.
 fn lifecycle_handle(

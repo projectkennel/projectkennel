@@ -1,4 +1,4 @@
-//! Compile-time validation of `[identity].groups` (`docs/design/07-2-filesystem.md` §7.2).
+//! Compile-time validation of `[identity].groups` (`docs/design/07-4-filesystem.md` §7.4).
 //!
 //! # Purpose
 //!

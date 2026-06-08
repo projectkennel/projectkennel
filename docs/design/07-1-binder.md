@@ -1,30 +1,30 @@
-# §7.9 Binder: the inter-namespace gateway
+# §7.1 Binder: the inter-namespace gateway
 
 > **Binder is load-bearing, not an opt-in feature.** Every kennel runs a per-instance
 > binderfs bus with kenneld as its context manager (node 0), and that bus is the kennel's
 > **auditable, unprivileged inter-namespace gateway**: the single kernel-mediated chokepoint
 > through which anything crosses the kennel boundary. It carries the construction/lifecycle
-> control plane (`kennel-init` ⇄ kenneld, §7.11), the protocol facades that replace raw socket
-> grants (`IAfUnix`, future `IDBus`, §7.9.5), the service registry and inter-kennel calls
-> (§7.9.6–7.9.9), and — on the network path — the `INet` crossing (§7.10). Each crossing is a
+> control plane (`kennel-init` ⇄ kenneld, §7.2), the protocol facades that replace raw socket
+> grants (`IAfUnix`, future `IDBus`, §7.1.5), the service registry and inter-kennel calls
+> (§7.1.6–7.1.9), and — on the network path — the `INet` crossing (§7.11). Each crossing is a
 > synchronous, kernel-stamped transaction kenneld can authorize and audit per call, with no
 > ambient authority and no host-side privilege (binderfs is `FS_USERNS_MOUNT`, mounted inside
 > the kennel's own user namespace). New boundary-crossing link types attach here rather than
 > growing new ad-hoc shims — e.g. a future point-to-point **PPP** link would terminate in a
 > facade on this bus, inheriting the same unprivileged, per-call-audited model.
 >
-> The rest of this chapter develops the primitive (§7.9.2), the registry and facades it
-> enables, and the inter-kennel topology; §7.11 (`kennel-init`) and §7.10 (network) are its two
+> The rest of this chapter develops the primitive (§7.1.2), the registry and facades it
+> enables, and the inter-kennel topology; §7.2 (`kennel-init`) and §7.11 (network) are its two
 > principal consumers.
 
-## 7.9.1 Motivation
+## 7.1.1 Motivation
 
 Several resource classes Kennel must police share an architectural problem: the
 underlying protocol grants too much ambient authority to be safely forwarded raw,
 but the application expects to find a conforming socket or device at a well-known
 path. The current mitigations are a patchwork:
 
-- **D-Bus** is filtered by `xdg-dbus-proxy` (§7.5), an external dependency with
+- **D-Bus** is filtered by `xdg-dbus-proxy` (§7.7), an external dependency with
   its own socket lifecycle, shimmed into the kennel view as a visible policy
   artefact. Enforcement is at method-call granularity but the mechanism is
   external to Kennel's trust model.
@@ -32,9 +32,9 @@ path. The current mitigations are a patchwork:
   instance narrows the keyring but does not restrict signing purpose. The same
   key can sign a git commit or an email; the agent protocol has no concept of
   purpose.
-- **Wayland** carries an unresolved residual for clipboard access (§7.4.8, §11.1)
+- **Wayland** carries an unresolved residual for clipboard access (§7.6.8, §11.1)
   with no structural enforcement path.
-- **X11** is categorically denied (§7.6) because the protocol has no confinement
+- **X11** is categorically denied (§7.8) because the protocol has no confinement
   vocabulary.
 
 Each of these is the same underlying problem: Kennel needs a chokepoint at the
@@ -43,7 +43,7 @@ raw socket grants auditable at connect time. What is needed is enforcement and
 audit at call time, with kenneld as the policy decision point for every operation.
 
 A second problem is inter-kennel communication. §8.8 documents inter-kennel
-isolation as an invariant with no designed escape. The MCP topology (§7.9.9)
+isolation as an invariant with no designed escape. The MCP topology (§7.1.9)
 requires kennels to communicate — an agent kennel calling tool servers, tool
 servers spawning kennels per invocation — without any of them holding ambient
 access to each other.
@@ -52,7 +52,7 @@ Both problems have the same solution: a kernel-enforced IPC primitive where
 kenneld is the context manager, policy enforcement is per-call, and no kennel
 can reach a service it has not been explicitly granted access to.
 
-## 7.9.2 Architecture: binderfs as the IPC primitive
+## 7.1.2 Architecture: binderfs as the IPC primitive
 
 ### Choice of primitive
 
@@ -99,9 +99,9 @@ Kernel config: `CONFIG_ANDROID_BINDERFS=y`, `CONFIG_ANDROID_BINDER_IPC=y`.
 These are not enabled by default on all distributions; the reference runtime's
 kernel configuration includes them explicitly.
 
-## 7.9.3 binderfs instance lifecycle
+## 7.1.3 binderfs instance lifecycle
 
-> **Construction model updated — see [§7.11](07-11-kennel-init.md).** binderfs assigns its
+> **Construction model updated — see [§7.2](07-2-kennel-init.md).** binderfs assigns its
 > nodes to **uid 0 of the mounting userns**; a pure-identity map has no uid 0, so the nodes
 > were owned by the overflow uid and unopenable (proven in build). The kennel now has a real
 > uid 0 (host root mapped `0 0 1`). The **privhelper factory** mounts binderfs, allocates the
@@ -110,7 +110,7 @@ kernel configuration includes them explicitly.
 > (so no uid-0 binary runs while the host fs is visible). The mechanics below stand; the *actor*
 > is the privhelper factory, "no privileged step" no longer holds (the `0 0 1` map needs
 > `CAP_SETUID`), and `kennel-init` is a binder *consumer* that **pulls** its config over the
-> bus (§7.11).
+> bus (§7.2).
 
 ### Mount sequencing
 
@@ -129,7 +129,7 @@ sequence within the existing spawn pipeline (§8.7) is:
    (via `/proc/<spawn-child-pid>/root` or an `SCM_RIGHTS` hand-back over the spawn
    socketpair) and calls `BINDER_SET_CONTEXT_MGR`, taking node 0 for this instance.
    The context manager runs in the daemon so one entity owns every instance's node 0
-   — the precondition for cross-instance routing (§7.9.6).
+   — the precondition for cross-instance routing (§7.1.6).
 4. Landlock rules permit the workload read/write access to `/dev/binderfs/binder`
    (reached via the `/dev/binder` symlink) and read access to `/dev/binderfs/features/`.
    The `binder-control` device is not accessible to the workload — only the spawn
@@ -144,7 +144,7 @@ The device is the **standard binderfs device named `binder`**, not a Kennel-spec
 name: each kennel has its own isolated instance, so there is no collision a custom
 name would resolve, and a non-standard name would force every binder client in the
 workload to be specially configured — defeating the "application finds its driver at
-the default path" principle the §7.4 socket shim rests on. Kennel does not use the
+the default path" principle the §7.6 socket shim rests on. Kennel does not use the
 Android `hwbinder`/`vndbinder` contexts; one `binder` context per instance suffices.
 (The `org.projectkennel.*` strings below are service-*registry* names, not device names —
 reverse-DNS service naming is itself the Android convention.)
@@ -188,7 +188,7 @@ Two enforcement rules apply to this namespace, checked before any policy lookup:
    under this prefix receives `BR_FAILED_REPLY`. There is no policy override.
 2. `getService` for an `org.projectkennel.*` name is always resolved to kenneld's own
    node on the local instance. It is never routed to the cross-instance registry
-   (§7.9.6), regardless of what any peer kennel declares.
+   (§7.1.6), regardless of what any peer kennel declares.
 
 The reserved services use the Android `INTERFACE/INSTANCE` naming grammar: a reverse-DNS
 interface under a domain the project owns (`org.projectkennel.*`, owned exactly as `android.*`
@@ -197,12 +197,12 @@ The reserved services and their roles:
 
 | Service name | Role |
 |---|---|
-| `org.projectkennel.IAfUnix/default` | Brokered AF_UNIX connections — kenneld connects on the workload's behalf and returns the fd (§7.9.5) |
+| `org.projectkennel.IAfUnix/default` | Brokered AF_UNIX connections — kenneld connects on the workload's behalf and returns the fd (§7.1.5) |
 | `org.projectkennel.IDBus/default` | Mediated D-Bus access; method allowlist enforced per-call |
 | `org.projectkennel.IGpgAgent/default` | Mediated gpg-agent; key grip + purpose policy per transaction; closes T1.6 |
 | `org.projectkennel.IWayland/default` | Mediated Wayland; clipboard and screencopy gated; closes T2.6 |
 
-Kennel spawning is **not** a reserved service — it is a control-socket operation (§7.9.7),
+Kennel spawning is **not** a reserved service — it is a control-socket operation (§7.1.7),
 not a binder node. Policy/service introspection is **not** a reserved service either — node 0
 answers it through `listServices`/`isDeclared`/`getDeclaredInstances`, as Android's
 servicemanager does.
@@ -221,9 +221,9 @@ kenneld is a minimal Rust wrapper around this ABI — not libbinder, not
 libbinder-ndk, both of which carry Android-specific dependencies. The wrapper
 covers the context manager state machine (looper registration, transaction
 dispatch, reply handling) and is scoped to kenneld's needs as context manager.
-Service processes (§7.9.5) use the same wrapper.
+Service processes (§7.1.5) use the same wrapper.
 
-## 7.9.4 Policy surface
+## 7.1.4 Policy surface
 
 The `[binder]` policy section gates what services a kennel may register and
 what services it may look up. Service names fall into two categories:
@@ -279,7 +279,7 @@ reason = "send tool calls to the filesystem MCP server"
 `org.projectkennel.*` namespace is never declared in `[[binder.provide]]` or
 `[[binder.consume]]` — attempting to do so is a policy validation error.
 
-## 7.9.5 Service processes
+## 7.1.5 Service processes
 
 ### Two categories of service
 
@@ -305,7 +305,7 @@ access to host services.
 ### kenneld-provided service detail
 
 **`org.projectkennel.IAfUnix/default`** is the most structurally significant. The current raw
-AF_UNIX shim model (§7.4.6) grants the workload a socket path in its constructed
+AF_UNIX shim model (§7.6.6) grants the workload a socket path in its constructed
 view and audits at connect time only. `org.projectkennel.IAfUnix/default` replaces this: the
 workload issues a binder transaction to the `org.projectkennel.IAfUnix/default` node carrying
 the requested socket path as a flat string payload. kenneld validates the path
@@ -331,9 +331,9 @@ The protocol facades are:
 
 | Service | Replaces | Translation |
 |---|---|---|
-| `org.projectkennel.IDBus/default` | xdg-dbus-proxy shim + §7.5 | Speaks D-Bus wire protocol inbound; translates to binder transactions; kenneld applies method allowlist before forwarding to real session bus |
-| `org.projectkennel.IGpgAgent/default` | per-kennel gpg-agent + §7.4.7 | Speaks assuan protocol inbound; translates `PKSIGN`/`PKDECRYPT` to typed transactions; kenneld enforces key grip + purpose; closes T1.6 |
-| `org.projectkennel.IWayland/default` | raw Wayland socket grant + §7.4.8 | Speaks Wayland wire protocol inbound; forwards core rendering directly; gates `wl_data_device` and screencopy via kenneld; closes T2.6 |
+| `org.projectkennel.IDBus/default` | xdg-dbus-proxy shim + §7.7 | Speaks D-Bus wire protocol inbound; translates to binder transactions; kenneld applies method allowlist before forwarding to real session bus |
+| `org.projectkennel.IGpgAgent/default` | per-kennel gpg-agent + §7.6.7 | Speaks assuan protocol inbound; translates `PKSIGN`/`PKDECRYPT` to typed transactions; kenneld enforces key grip + purpose; closes T1.6 |
+| `org.projectkennel.IWayland/default` | raw Wayland socket grant + §7.6.8 | Speaks Wayland wire protocol inbound; forwards core rendering directly; gates `wl_data_device` and screencopy via kenneld; closes T2.6 |
 
 ### Service process lifetime
 
@@ -344,7 +344,7 @@ service name. The binder death notification for the node triggers automatically
 on crash, so callers receive `BR_DEAD_REPLY` for the in-flight transaction rather
 than a hung call. Kenneld re-registers the node once the service process restarts.
 
-## 7.9.6 Inter-kennel IPC
+## 7.1.6 Inter-kennel IPC
 
 ### Model
 
@@ -426,7 +426,7 @@ The audit record for a cross-instance transaction:
 }
 ```
 
-## 7.9.7 Kennel spawning
+## 7.1.7 Kennel spawning
 
 Spawning a new kennel on behalf of a running kennel uses the kenneld control
 socket (the existing Unix domain socket at `$XDG_RUNTIME_DIR/kennel/control.sock`,
@@ -449,17 +449,17 @@ resolution.
 The spawned kennel has no `spawn-kennel` capability by default. Further spawning
 requires an explicit `[ipc.spawn]` declaration in the spawned kennel's template.
 
-## 7.9.8 Relationship to existing sections
+## 7.1.8 Relationship to existing sections
 
-| Section | Status after §7.9 |
+| Section | Status after §7.1 |
 |---|---|
-| §7.5 D-Bus (xdg-dbus-proxy) | Policy surface unchanged. xdg-dbus-proxy is replaced by the `dbus` service process registered on the kennel's binderfs instance. |
-| §7.4.7 gpg-agent per-kennel | Raw shim replaced by the `gpg` service process. T1.6 residual closed by key grip + purpose policy enforced per transaction. |
-| §7.4.8 Wayland clipboard residual | Closed structurally by the `wayland` service process gating `wl_data_device`. |
+| §7.7 D-Bus (xdg-dbus-proxy) | Policy surface unchanged. xdg-dbus-proxy is replaced by the `dbus` service process registered on the kennel's binderfs instance. |
+| §7.6.7 gpg-agent per-kennel | Raw shim replaced by the `gpg` service process. T1.6 residual closed by key grip + purpose policy enforced per transaction. |
+| §7.6.8 Wayland clipboard residual | Closed structurally by the `wayland` service process gating `wl_data_device`. |
 | §11.1 Wayland clipboard open question | Resolved. |
 | §8.8 Inter-kennel isolation | Default unchanged. Cross-instance IPC requires explicit `[[binder.consume]]` + `[[binder.provide]]` declarations on both sides. Kennels without `[binder]` sections have no IPC surface at all. |
 
-## 7.9.9 MCP topology
+## 7.1.9 MCP topology
 
 The canonical worked example. An agent kennel calls tool server kennels via
 cross-instance binder transactions; each tool server spawns a kennel per
@@ -503,7 +503,7 @@ The audit trail:
 A security team can reconstruct which agent request caused which file access in
 which kennel from the JSONL log without any application-layer instrumentation.
 
-## 7.9.10 Residuals
+## 7.1.10 Residuals
 
 **Wayland rendering trust.** The `wayland` service process forwards core
 rendering requests without inspection. Compositor-side robustness against
@@ -531,7 +531,7 @@ on all distributions. The reference runtime's kernel configuration includes it;
 deployments on stock distribution kernels must verify or rebuild. `kennel check`
 detects the missing config and reports it as a fatal prerequisite failure.
 
-## 7.9.11 Test plan additions
+## 7.1.11 Test plan additions
 
 Tests in `tests/binder/` and `tests/facades/`:
 

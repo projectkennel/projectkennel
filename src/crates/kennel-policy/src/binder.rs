@@ -1,4 +1,4 @@
-//! Compile-time validation of the `[binder]` section (`docs/design/07-9-ipc.md` §7.9.4).
+//! Compile-time validation of the `[binder]` section (`docs/design/07-1-binder.md` §7.1.4).
 //!
 //! # Purpose
 //!
@@ -9,7 +9,7 @@
 //! against. This is the only place to reject a malformed or reserved-namespace
 //! declaration, at compile time, on the resolved source policy.
 //!
-//! # What this checks (§7.9.4)
+//! # What this checks (§7.1.4)
 //!
 //! - **No reserved name.** The `org.projectkennel.*` namespace is owned by kenneld
 //!   (the af-unix/dbus/gpg/wayland facades are enabled by their own sections, never
@@ -28,7 +28,7 @@
 use crate::source::SourcePolicy;
 use crate::PolicyError;
 
-/// The reserved service namespace kenneld owns (`07-9-ipc.md` §Naming): user-defined
+/// The reserved service namespace kenneld owns (`07-1-binder.md` §Naming): user-defined
 /// services may not begin with it.
 pub const RESERVED_PREFIX: &str = "org.projectkennel.";
 
@@ -82,7 +82,7 @@ fn check_entry(errs: &mut Vec<String>, label: &str, name: Option<&str>, reason: 
             errs.push(format!(
                 "[[{label}]] `{n}` is in the reserved `{RESERVED_PREFIX}*` namespace: reserved \
                  services are enabled by their own sections (e.g. [unix]/[dbus]/[gpg]), never \
-                 declared here (§7.9.4)"
+                 declared here (§7.1.4)"
             ));
         }
         Some(_) => {}

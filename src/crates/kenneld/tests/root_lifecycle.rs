@@ -1,7 +1,7 @@
 //! Root-gated e2e for the `kennel-init` lifecycle pull over binder node 0.
 //!
 //! Proves the novel **data-and-fd** reply path (`Reply::DataAndFd` /
-//! `reply_with_data_and_fd` ↔ `transact_with_fd`, `07-11` §7.11.3): a child holds node 0
+//! `reply_with_data_and_fd` ↔ `transact_with_fd`, `07-11` §7.2.3): a child holds node 0
 //! with a populated [`binder::Lifecycle`] (init pid = the client's pid, a supervision
 //! blob, and a pty return socket), and the client transacts `GET_SANDBOX_PLAN` and gets
 //! back the exact supervision bytes plus a working fd. The padding/length-prefix/offset

@@ -68,7 +68,7 @@ pub struct ProxyConfig {
     pub ruleset: Ruleset,
     /// Whether a name may connect to a resolved special-use address.
     pub accept_private_resolved: bool,
-    /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.3): exact
+    /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.5): exact
     /// `addr:port` literals reachable despite the host-loopback invariant deny.
     pub host_services: Vec<SocketAddr>,
     /// Where to write the JSON Lines audit stream when no `[audit]` block is
@@ -254,7 +254,7 @@ struct RawNet {
     host_services: Vec<RawHostService>,
 }
 
-/// `[[net.host_services]]` — a sanctioned host-loopback service (§7.3).
+/// `[[net.host_services]]` — a sanctioned host-loopback service (§7.5).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawHostService {

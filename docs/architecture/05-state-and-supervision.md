@@ -4,7 +4,7 @@ This chapter is the authoritative treatment of runtime state: the per-kennel lif
 
 The model is deliberately small. kenneld persists for the user session (socket-activated). Each `kennel run` is one kennel with its own context byte, cgroup, egress proxy, loopback addresses, binderfs bus, and constructed view; those resources tear down immediately when the workload exits (`kenneld::Kennel::stop`). There is no grace period, no draining state, no reclaim, and no per-kennel reference counting — one workload is one kennel.
 
-A kennel is constructed by the privhelper *factory*, not by kenneld directly: the privhelper clones the namespaces, builds the root-owned view, mounts the per-kennel binderfs instance, and `fexecve`s the trusted `kennel-init` as PID 1, which supervises the facades and the workload (`01-process-model.md`, design §7.11). Supervision of a live kennel is therefore split across two long-lived processes — the kenneld thread that serves the `Start` and holds the registry entry, and `kennel-init` inside the kennel that reaps the facades and the workload — joined by the binderfs bus (in-life control plane) and the construction process chain (exit-status path).
+A kennel is constructed by the privhelper *factory*, not by kenneld directly: the privhelper clones the namespaces, builds the root-owned view, mounts the per-kennel binderfs instance, and `fexecve`s the trusted `kennel-init` as PID 1, which supervises the facades and the workload (`01-process-model.md`, design §7.2). Supervision of a live kennel is therefore split across two long-lived processes — the kenneld thread that serves the `Start` and holds the registry entry, and `kennel-init` inside the kennel that reaps the facades and the workload — joined by the binderfs bus (in-life control plane) and the construction process chain (exit-status path).
 
 ---
 
@@ -168,5 +168,5 @@ kenneld installs no signal handlers: `run()` builds the shared state and calls `
 - The privhelper protocol invoked for address and cgroup operations: `02-4-ipc.md`.
 - The on-disk layout of the per-kennel runtime tree (`/run/user/<uid>/kennel/`): `07-paths.md`.
 - The binder bus contract, node 0, and the binderfs mount sequencing: `02-7-binder.md`; the network-over-binder roadmap: `02-8-binder-net.md`.
-- The privhelper factory, `kennel-init` PID 1, and the construction split: design §7.11 and `01-process-model.md`.
+- The privhelper factory, `kennel-init` PID 1, and the construction split: design §7.2 and `01-process-model.md`.
 - The kernel mechanisms whose enforcement is independent of kenneld: design doc §7 and §8.

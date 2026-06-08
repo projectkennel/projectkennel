@@ -3,7 +3,7 @@
 //! # Purpose
 //!
 //! The unprivileged spawn re-grants a supplementary group by deferring the
-//! workload userns `gid_map` to the privhelper (§7.2.8): the spawn child (A)
+//! workload userns `gid_map` to the privhelper (§7.4.8): the spawn child (A)
 //! establishes its user namespace, then must pause until a privileged helper
 //! (running in the init userns, where it holds `CAP_SETGID`) writes A's
 //! `gid_map`, before A proceeds to fork the PID-1 grandchild and exec. Because
@@ -27,7 +27,7 @@
 //! # Threat bearing
 //!
 //! Indirect: the handshake is what lets the `gid_map` write happen in the
-//! privileged helper rather than by relaxing the spawn's privilege (§7.2.8,
+//! privileged helper rather than by relaxing the spawn's privilege (§7.4.8,
 //! T1.6). This module carries no policy; it only moves bytes between two
 //! cooperating local processes that already share a trust domain (kenneld and
 //! its own spawn child).

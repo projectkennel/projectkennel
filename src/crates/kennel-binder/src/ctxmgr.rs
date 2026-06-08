@@ -27,7 +27,7 @@ pub enum Reply {
     /// it into the caller. Dropped after the reply (the caller owns its copy).
     Fd(OwnedFd),
     /// Reply with a length-prefixed payload and, when `Some`, a `BINDER_TYPE_FD` object
-    /// (the supervision-half bytes plus the controlling-pty fd — `07-11` §7.11.3). The
+    /// (the supervision-half bytes plus the controlling-pty fd — `07-11` §7.2.3). The
     /// receiver decodes it with [`Connection::transact_with_fd`].
     DataAndFd(Vec<u8>, Option<OwnedFd>),
 }

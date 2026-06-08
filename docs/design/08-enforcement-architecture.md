@@ -6,21 +6,21 @@ Each resource class maps to one or more kernel mechanisms. Project Kennel uses t
 
 | Resource class | Primary mechanism | Fallback / gap |
 |---|---|---|
-| Exec (§7.1) | Landlock `FS_EXECUTE` + `PR_SET_NO_NEW_PRIVS` | — |
-| Filesystem (§7.2) | Landlock filesystem ACL | Mount namespace for constructed view |
-| Network port (§7.3) | Landlock network (kernel 6.7+) | cgroup BPF for broader coverage |
-| Network address (§7.3) | cgroup BPF (inet*_connect hooks) | None — required |
-| Loopback isolation (§7.3) | cgroup BPF (rewrite/filter) | Netns for stronger isolation (optional) |
-| AF_UNIX path (§7.4) | Landlock (filesystem perms) | Mount namespace for shim view |
-| AF_UNIX abstract (§7.4) | Landlock scoping (`SCOPE_ABSTRACT_UNIX_SOCKET`, ABI 6 / kernel 6.12+) | seccomp `connect()` filter or AppArmor `unix` rules below ABI 6 |
-| Proc visibility (§7.7) | Mount namespace + `hidepid` | PID namespace for stronger |
-| Ptrace (§7.7) | PID namespace + seccomp (`SYS_ptrace`) | Yama (coarse) |
-| Signals (§7.7) | Landlock scoping (`SCOPE_SIGNAL`, ABI 6 / kernel 6.12+) + PID namespace | AppArmor `signal` below ABI 6 |
-| Env (§7.7) | User-space wrapper | None — wrapper-only |
-| Capabilities (§7.7) | `prctl`/`capset` in wrapper | None — wrapper-only |
-| Mount visibility (§7.7) | Mount namespace + Landlock | None — required |
-| TIOCSTI (§7.7) | Sysctl check at policy load + seccomp | Refuse to start if unsupported |
-| Seccomp (§7.7) | seccomp filter | None — straightforward |
+| Exec (§7.3) | Landlock `FS_EXECUTE` + `PR_SET_NO_NEW_PRIVS` | — |
+| Filesystem (§7.4) | Landlock filesystem ACL | Mount namespace for constructed view |
+| Network port (§7.5) | Landlock network (kernel 6.7+) | cgroup BPF for broader coverage |
+| Network address (§7.5) | cgroup BPF (inet*_connect hooks) | None — required |
+| Loopback isolation (§7.5) | cgroup BPF (rewrite/filter) | Netns for stronger isolation (optional) |
+| AF_UNIX path (§7.6) | Landlock (filesystem perms) | Mount namespace for shim view |
+| AF_UNIX abstract (§7.6) | Landlock scoping (`SCOPE_ABSTRACT_UNIX_SOCKET`, ABI 6 / kernel 6.12+) | seccomp `connect()` filter or AppArmor `unix` rules below ABI 6 |
+| Proc visibility (§7.9) | Mount namespace + `hidepid` | PID namespace for stronger |
+| Ptrace (§7.9) | PID namespace + seccomp (`SYS_ptrace`) | Yama (coarse) |
+| Signals (§7.9) | Landlock scoping (`SCOPE_SIGNAL`, ABI 6 / kernel 6.12+) + PID namespace | AppArmor `signal` below ABI 6 |
+| Env (§7.9) | User-space wrapper | None — wrapper-only |
+| Capabilities (§7.9) | `prctl`/`capset` in wrapper | None — wrapper-only |
+| Mount visibility (§7.9) | Mount namespace + Landlock | None — required |
+| TIOCSTI (§7.9) | Sysctl check at policy load + seccomp | Refuse to start if unsupported |
+| Seccomp (§7.9) | seccomp filter | None — straightforward |
 
 ## 8.2 Kernel feature requirements
 
@@ -38,7 +38,7 @@ Project Kennel requires the following kernel features, with version requirements
 | Mount namespace | 2.6.x | Universal |
 | PID namespace | 3.8 | Universal |
 | Network namespace | 2.6.x | Universal (used optionally) |
-| User namespace | 3.8 | **The spawn foundation.** Created by the privhelper factory (§7.11) as the operator, so the userns is operator-owned. Its maps are precise identity lines — host root `0 0 1` + the operator `<op> <op> 1` (+ one per granted gid), no subuid — giving the kennel a real uid 0 and `CAP_SYS_ADMIN` *inside the namespace* to `mount`/`pivot_root` (the bubblewrap-equivalent mechanism). The `0 0 1` line needs `CAP_SETUID`, so construction is privileged; the privhelper's post-`clone` child does it, then `fexecve`s the trusted `kennel-init` as PID 1 / uid 0. |
+| User namespace | 3.8 | **The spawn foundation.** Created by the privhelper factory (§7.2) as the operator, so the userns is operator-owned. Its maps are precise identity lines — host root `0 0 1` + the operator `<op> <op> 1` (+ one per granted gid), no subuid — giving the kennel a real uid 0 and `CAP_SYS_ADMIN` *inside the namespace* to `mount`/`pivot_root` (the bubblewrap-equivalent mechanism). The `0 0 1` line needs `CAP_SETUID`, so construction is privileged; the privhelper's post-`clone` child does it, then `fexecve`s the trusted `kennel-init` as PID 1 / uid 0. |
 | PID namespace (via userns) | 3.8 | `CLONE_NEWPID` is in the factory's single `clone`, so the privhelper child is PID 1 of the fresh PID namespace directly — no double-fork (that was only needed when `unshare` left the unsharer in the old pidns). Being PID 1 is what lets it mount a fresh `/proc`. `kennel-init` inherits this as PID 1 and forks the operator-uid workload beneath it. |
 | `PR_SET_NO_NEW_PRIVS` | 3.5 | Universal |
 | AppArmor | Distribution-dependent | Below-ABI-6 abstract-AF_UNIX/signal fallback. **Also a deploy prerequisite** where the distro restricts unprivileged user namespaces (next paragraph). |
@@ -76,13 +76,13 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    - Add IPv4 address to loopback (or to per-kennel dummy interface)
    - Add IPv6 ULA address
    - Create cgroup if not exists
-   - (Roadmap, §7.10) `AddLoopbackAlias`: for `constrained`/`unconstrained`
+   - (Roadmap, §7.11) `AddLoopbackAlias`: for `constrained`/`unconstrained`
      net-ns modes, bring the kennel's `/28`+`/64` up on the host `lo` so the
      host-side BIND leg can mirror inbound listeners at the kennel's own IP
 
 5. Launch supporting daemons (if not already running for this kennel):
    - `kennel-netproxy` (the SOCKS5/CONNECT proxy) on the kennel's loopback
-     address — or, on the roadmap net-ns path (§7.10), in the host net-ns as
+     address — or, on the roadmap net-ns path (§7.11), in the host net-ns as
      a CONNECT delegate behind a kenneld↔delegate socketpair, no longer reached
      by a TCP loopback listener
    - xdg-dbus-proxy for session bus (if dbus.session.enabled)
@@ -101,11 +101,11 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    On ABI 6+ kernels this is unnecessary — the scoping bits added to the
    Landlock ruleset (step 8l) cover it natively.
 
-8. Construct (the privhelper is the factory — §7.11). The privhelper, running as
+8. Construct (the privhelper is the factory — §7.2). The privhelper, running as
    the operator with file caps (`CAP_SETUID`/`CAP_SETGID`/`CAP_SETFCAP`, plus
    `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`), does all privileged construction in its own
    post-`clone` child before handing off across one irreversible boundary. The
-   operator drives this by sending the construction-half Plan (§7.11.3) over a
+   operator drives this by sending the construction-half Plan (§7.2.3) over a
    `SOCK_SEQPACKET` socketpair (`ConstructKennel`); the construction-half is parsed
    host-side, where there is no sandbox to manipulate it.
 
@@ -124,7 +124,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         mapped), needed because binderfs (and the view/`/dev`/library binds) assign
         nodes to uid 0 of the mounting userns. No subuid/subgid. setgroups handling
         and supplementary groups are written here too, fully, in this one pass.
-     b. Join the kennel cgroup; (roadmap §7.10) for net-ns modes bring up `lo`
+     b. Join the kennel cgroup; (roadmap §7.11) for net-ns modes bring up `lo`
         inside the net-ns with the kennel's assigned `/28`+`/64`.
      c. Self-escalate to the kennel's uid 0 and build the root-owned surfaces:
         mount --make-rprivate /; the constructed view (fresh tmpfs root; bind-mount
@@ -150,7 +150,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         `kennel-spawn::wire` bytes (binder copies the buffer — no shared-memory
         hazard), the pty return socket riding as `BINDER_TYPE_FD`. kenneld
         identifies the kennel by the binderfs *instance* the txn arrived on.
-     g. (Roadmap §7.10) Once `INet` is registered, fork `kennel-netshim` as a
+     g. (Roadmap §7.11) Once `INet` is registered, fork `kennel-netshim` as a
         sibling of the workload inside the net-ns and view; it serves SOCKS5 at
         `$KENNEL_SOCKS_PROXY` and relays `CONNECT`/`BIND` over binder. The
         host-side BIND leg mirrors allowed binds onto the host alias; both legs are
@@ -174,7 +174,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    telemetry only.
 
    Supplementary groups: the maps written in step (a) include one line per granted
-   gid, so device-passthrough/identity grants (§7.2.8) land in the same single
+   gid, so device-passthrough/identity grants (§7.4.8) land in the same single
    privileged write — no separate handshake. Groups not granted collapse to the
    overflow gid (`nogroup`).
 
@@ -271,10 +271,10 @@ Two kennels running concurrently are isolated by:
 - **Different supporting daemons.** Each kennel has its own proxy, dbus-proxy, etc.
 - **Different shim directories.** AF_UNIX socket views are disjoint.
 - **Different binderfs instances.** Each kennel mounts its own binderfs inside its
-  own user+mount namespace; two instances share no nodes (§7.9.2). A binder node
+  own user+mount namespace; two instances share no nodes (§7.1.2). A binder node
   reference is an opaque kernel object that does not transfer between instances.
 
-The one designed exception is the **binder cross-instance relay** (roadmap, §7.9.6):
+The one designed exception is the **binder cross-instance relay** (roadmap, §7.1.6):
 two kennels may communicate over the binder bus, but only by an explicit *bilateral*
 declaration — the consuming kennel declares `[[binder.consume]]` naming the service and
 the providing kennel, and the providing kennel declares `[[binder.provide]]` naming the

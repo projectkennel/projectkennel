@@ -1,4 +1,4 @@
-//! Root-gated e2e for the privhelper **factory** skeleton (`07-11` §7.11.1).
+//! Root-gated e2e for the privhelper **factory** skeleton (`07-11` §7.2.1).
 //!
 //! Proves the construction transport + the clone/maps/fexecve/relay core, ahead of the
 //! full view/binderfs construction: acting as `kenneld`, the test hands the helper a

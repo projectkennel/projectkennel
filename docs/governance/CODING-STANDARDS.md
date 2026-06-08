@@ -554,13 +554,13 @@ The privhelper crate is stricter: `.expect()` is also forbidden. The privhelper 
 
 ### 8.4 No `panic!`, `todo!`, `unimplemented!` in shipped code
 
-Lints `clippy::panic`, `clippy::todo`, `clippy::unimplemented` are `deny`. `[tool]`. These are fine in tests; they do not ship. They are also fine in the structure-phase commit on a feature branch (§7.1); CI runs against the PR head, so the lints catch any state where structure has been merged without implementation.
+Lints `clippy::panic`, `clippy::todo`, `clippy::unimplemented` are `deny`. `[tool]`. These are fine in tests; they do not ship. They are also fine in the structure-phase commit on a feature branch (§7.3); CI runs against the PR head, so the lints catch any state where structure has been merged without implementation.
 
 ### 8.5 Privhelper-specific
 
 The privhelper is compiled with `panic = "abort"` in `[profile.release]`. A panic in the privhelper is a programming error and the process must terminate immediately rather than unwind through resource cleanup that may leave the system in an inconsistent state.
 
-**`panic = "abort"` is incompatible with `catch_unwind` and with `#[should_panic]` test attributes** — both rely on the unwind machinery that `abort` removes. The privhelper's `[profile.test]` therefore overrides to `panic = "unwind"` so that documented-panic tests (§7.2) and any `catch_unwind`-based test scaffolding work. The release binary still aborts; only test binaries unwind.
+**`panic = "abort"` is incompatible with `catch_unwind` and with `#[should_panic]` test attributes** — both rely on the unwind machinery that `abort` removes. The privhelper's `[profile.test]` therefore overrides to `panic = "unwind"` so that documented-panic tests (§7.4) and any `catch_unwind`-based test scaffolding work. The release binary still aborts; only test binaries unwind.
 
 This split is recorded in the privhelper's `Cargo.toml` and is enforced by CI: a release build of the privhelper that links unwind-table support is a regression.
 
@@ -704,7 +704,7 @@ This carve-out is rare. The default is still: parse to a typed struct.
 
 ### 10.6 Fuzzing
 
-Every parser of untrusted input carries a fuzz target under `fuzz/`. The TOML parser, the policy resolver, the signature-bearing file reader, the SOCKS5 message decoder, and the IPC frame parser are the obvious cases. The fuzz cadence and corpora discipline are governed by §7.3.
+Every parser of untrusted input carries a fuzz target under `fuzz/`. The TOML parser, the policy resolver, the signature-bearing file reader, the SOCKS5 message decoder, and the IPC frame parser are the obvious cases. The fuzz cadence and corpora discipline are governed by §7.5.
 
 A new untrusted-input parser landing without a fuzz target is a missing piece, not a stylistic preference. Reviewers refuse the PR.
 
@@ -819,8 +819,8 @@ In code, comments, doc strings, commit messages, error messages, or any user-fac
 
 ### 13.1 Commits
 
-- Conventional Commits format: `<type>(<scope>): <summary>`. Types: `feat`, `fix`, `test`, `scaffold`, `docs`, `refactor`, `chore`, `build`, `ci`. Scope is the crate name or a top-level area. `scaffold` is our addition, for the structure phase of §7.1.
-- One logical change per commit. The three-phase cadence of §7.1 (`test:` → `scaffold:` → `feat:`) means up to three commits per behaviour change, and — after any permitted folding — never fewer than two.
+- Conventional Commits format: `<type>(<scope>): <summary>`. Types: `feat`, `fix`, `test`, `scaffold`, `docs`, `refactor`, `chore`, `build`, `ci`. Scope is the crate name or a top-level area. `scaffold` is our addition, for the structure phase of §7.3.
+- One logical change per commit. The three-phase cadence of §7.3 (`test:` → `scaffold:` → `feat:`) means up to three commits per behaviour change, and — after any permitted folding — never fewer than two.
 - Commit messages explain *why*. The diff explains *what*.
 - All commits are signed (GPG or SSH signature). CI verifies signatures.
 - No `WIP` commits on `main`. PR branches may carry them; squash or rebase before merge.
@@ -849,11 +849,11 @@ A PR from a non-maintainer that meets any of the following conditions is closed 
 
 **Unsolicited refactors, stylistic changes, or "optimisations."** A PR that rewrites working code without an underlying behaviour change is closed unless it is directly attached to an issue that a maintainer has triaged and approved. "Modernising" a loop, "cleaning up" a function, swapping a `for` for an `iter()`, switching a `match` to an `if let`, or any AI-suggested cleanup of code that was not broken does not qualify as a contribution. The pattern is the most common form of LLM-generated open-source spam because it requires no understanding of the system, and we will not subsidise the production of it.
 
-**PRs missing the §7.1 commit cadence.** The check is on the PR's **branch history**, not on the merge shape: a PR whose commits do not include a `test:` commit preceding the structure/implementation is closed. Because the §7.1 folding rules never collapse a PR below two commits — folding `test:`+`scaffold:` still leaves a `feat:`; folding `scaffold:`+`feat:` still leaves a `test:`; and Phase 1 is never folded away — a compliant PR always carries **at least two commits, one of which is `test:`**. A single squashed `feat:` commit is therefore never compliant, regardless of how the contributor intends it to be merged. (A maintainer may still ask to see the un-squashed history per §7.1; a contributor who squashed locally can re-push the unsquashed branch.) Standard close message:
+**PRs missing the §7.3 commit cadence.** The check is on the PR's **branch history**, not on the merge shape: a PR whose commits do not include a `test:` commit preceding the structure/implementation is closed. Because the §7.3 folding rules never collapse a PR below two commits — folding `test:`+`scaffold:` still leaves a `feat:`; folding `scaffold:`+`feat:` still leaves a `test:`; and Phase 1 is never folded away — a compliant PR always carries **at least two commits, one of which is `test:`**. A single squashed `feat:` commit is therefore never compliant, regardless of how the contributor intends it to be merged. (A maintainer may still ask to see the un-squashed history per §7.3; a contributor who squashed locally can re-push the unsquashed branch.) Standard close message:
 
-> This PR does not follow the §7.1 commit cadence required for review (`test:` → `scaffold:` → `feat:`, minimum two commits including a `test:` commit). Closing. Please resubmit with the required commit history.
+> This PR does not follow the §7.3 commit cadence required for review (`test:` → `scaffold:` → `feat:`, minimum two commits including a `test:` commit). Closing. Please resubmit with the required commit history.
 
-No further explanation is owed. The §7.1 cadence is in the standards document; the contributor is expected to have read it.
+No further explanation is owed. The §7.3 cadence is in the standards document; the contributor is expected to have read it.
 
 **PRs whose description fails the template.** The PR template requires the contributor to map the change to specific items: a threat ID from `THREATS.md`, a design-document invariant, a citable rationale. Generic text — "improves security and efficiency", "follows best practices", "fixes a bug" without naming the bug — fails the template. Standard close message:
 
@@ -890,7 +890,7 @@ Every PR carries a description following `.github/PULL_REQUEST_TEMPLATE.md`. The
 
 - **What changes.** One or two sentences naming the behaviour added, removed, or fixed, in terms a reader can verify against the diff. Not "improves X"; *names* the change.
 - **Why, in project-local terms.** Which threat ID from `THREATS.md` this addresses, which design-document invariant it implements, which open issue it closes, which user-visible behaviour it changes. Generic justifications fail the template. "T2.7 (template chain DoS) is currently unbounded in the resolver; this caps it at the documented limit" is an answer. "Best practice" is not.
-- **Phase boundaries.** Explicit identification of the `test:`, `scaffold:`, and `feat:` commits in the PR. If folded (per §7.1 notes), the reason. If only some phases are present, the reason and the tracked follow-up issue.
+- **Phase boundaries.** Explicit identification of the `test:`, `scaffold:`, and `feat:` commits in the PR. If folded (per §7.3 notes), the reason. If only some phases are present, the reason and the tracked follow-up issue.
 - **Dependency changes.** If the PR touches `Cargo.toml`, `Cargo.lock`, `src/vendor/`, or `CHECKSUMS.toml`: an explicit account of how §5.5 verification was performed. Which independent sources were consulted, what their results were, who is named as `audited-by` in the checksum entry. "I ran `cargo update`" fails the template; the §5.5 procedure is the substance.
 - **Tests.** What was tested, including test names. New behaviour without new tests fails §7.
 - **Threat-surface impact.** For any change that adds or removes a behaviour exposed to a confined workload: explicit statement of whether this expands, contracts, or leaves unchanged the workload-reachable surface, with reasoning.
@@ -905,7 +905,7 @@ The point is: the cost of compliance is the test. The PR template tests that the
 
 #### Trusted contributors
 
-A contributor who has had three PRs merged in compliance with the cadence and the template is added to `CONTRIBUTORS.md`. Their PRs are not auto-closed on first CI failure (we extend the courtesy of a comment instead). Their issues are not auto-closed on a missing tag (§13.5); they receive a comment requesting the tag. They may propose refactors without first filing an issue, provided the proposal still meets §7.1 and the template. Trust is a working assumption, not a property right; maintainers may delist by majority decision with reasoning recorded.
+A contributor who has had three PRs merged in compliance with the cadence and the template is added to `CONTRIBUTORS.md`. Their PRs are not auto-closed on first CI failure (we extend the courtesy of a comment instead). Their issues are not auto-closed on a missing tag (§13.5); they receive a comment requesting the tag. They may propose refactors without first filing an issue, provided the proposal still meets §7.3 and the template. Trust is a working assumption, not a property right; maintainers may delist by majority decision with reasoning recorded.
 
 The list is small by intent. It exists to reduce friction for repeat contributors who have demonstrated they understand the project, not to create a tiered review experience.
 
@@ -1064,7 +1064,7 @@ If `pre-push` passes, the **arrival-blocking** CI checks (§13.4) are expected t
 
 `git commit --no-verify` and `git push --no-verify` are permitted. The hooks are not the authoritative check. Appropriate uses of `--no-verify`:
 
-- Intermediate commits on a feature branch (e.g., the structure commit of §7.1, where `todo!()` legitimately fails clippy).
+- Intermediate commits on a feature branch (e.g., the structure commit of §7.3, where `todo!()` legitimately fails clippy).
 - Rebasing or reordering history, where running checks on every replayed commit is wasted cycles.
 
 Inappropriate use: bypassing the hook on a commit that will go to PR. CI will catch what the hook would have; the only thing bypassing changes is whether the developer finds out before or after pushing.
@@ -1135,7 +1135,7 @@ Exploitable specifics never go in a public issue → private channel in `SECURIT
 3. PR description fails the template's specificity bar.
 4. First CI failure on an **arrival-blocking** check: `cargo fmt`, clippy gate, offline build, both checksum verifiers. (CI-only checks — `deny`/`audit`/`vet`/`doc`/fuzz/repro/BPF-matrix/full-`test` — get a comment, not a close.)
 
-**Commit cadence (§7.1):** `test:` → `scaffold:` → `feat:`. Folding never removes `test:`; minimum two commits.
+**Commit cadence (§7.3):** `test:` → `scaffold:` → `feat:`. Folding never removes `test:`; minimum two commits.
 
 **Tool-enforced vs review-enforced (the legend, §1):**
 

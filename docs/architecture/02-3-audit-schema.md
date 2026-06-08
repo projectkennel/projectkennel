@@ -164,7 +164,7 @@ The per-kennel proxy emits one `net.egress` record per request (`kennel-netproxy
 
 ### Exec (`resource: "exec"`)
 
-- **`exec`** (`exec.allow` / `exec.deny` outcome) — execve() attempt. `exec.deny` is the *event* for a deny-by-default refusal (there is no `exec.deny` policy list, §7.1.4). Adds `binary` (resolved path), `argv_first` (truncated, sanitised), `reason` (for denies). Full argv only with `log_full_argv = true`.
+- **`exec`** (`exec.allow` / `exec.deny` outcome) — execve() attempt. `exec.deny` is the *event* for a deny-by-default refusal (there is no `exec.deny` policy list, §7.3.4). Adds `binary` (resolved path), `argv_first` (truncated, sanitised), `reason` (for denies). Full argv only with `log_full_argv = true`.
 
 ### AF_UNIX (`resource: "unix"`)
 
@@ -197,7 +197,7 @@ relay and `SpawnKennel` are **roadmap** (`02-7-binder.md`).
 
 The `binder.cross` and `kennel.spawn` records, correlated by transaction `code` and the
 calling kennel ctx, are what let a security team reconstruct *which agent request caused
-which file access in which kennel* from the JSONL log alone (design §7.9.9).
+which file access in which kennel* from the JSONL log alone (design §7.1.9).
 
 ### Kennel spawning (`resource: "lifecycle"`)
 
@@ -219,7 +219,7 @@ The `source` is `privhelper`, but kenneld writes these on the helper's behalf: t
 - **`lifecycle.workload-exit`** — Schema adds `pid`, `exit_code`, `signal`, `uptime_seconds`, `rss_max_bytes`. Today kenneld emits `pid` and `exit_code`.
 
 The binder bus carries the construction/lifecycle control plane between `kennel-init`
-(PID 1) and kenneld as node 0 (`02-7-binder.md` §Lifecycle, `07-11-kennel-init.md`).
+(PID 1) and kenneld as node 0 (`02-7-binder.md` §Lifecycle, `07-2-kennel-init.md`).
 These verbs are witnessed by kenneld directly (`source: kenneld`, `resource:
 lifecycle`) and are audited **as lifecycle events, not as `binder.cross`** — the
 binder transport is the channel, not the subject. kenneld stamps the kernel-supplied

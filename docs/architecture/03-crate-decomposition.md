@@ -2,7 +2,7 @@
 
 This chapter describes the Cargo workspace layout: which crates exist, what each owns, how they depend on each other, and what build-time choices they expose. The *public APIs* of each crate are in `02-6-internal-api.md`; this chapter is the structural view — how the code is cut up, not what each piece exposes.
 
-The workspace has **15 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-binder`, `kennel-audit`, `kennel-config`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kennel-init`, `kenneld`, `kennel-afunix-shim`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. `kennel-afunix-shim` is the in-kennel half of the `org.projectkennel.IAfUnix/default` facade (`07-4-afunix.md`): the small proxy `kennel-init` launches inside the view that brokers the workload's AF_UNIX connect through the binder gateway to kenneld. `kennel-binder` is the third unsafe-bearing crate — the hand-rolled binder ioctl ABI (the per-kennel inter-namespace gateway, `02-7-binder.md`), parallel in every structural respect to `kennel-bpf`; binder is load-bearing, so every kennel links it through kenneld and `kennel-init`. `kennel-init` is the root-owned PID-1 binary the privhelper `fexecve`s to construct and supervise each kennel (`07-11-kennel-init.md`). `kennel-audit` is a first-class crate — the unified audit writer (the canonical event, one sanitisation pass, per-class level filtering, and the `Sink` fan-out). `kennel-config` is a first-class crate too — the layered deployment/user configuration (`system.toml` / `config.toml` cascades) that keeps install paths out of the binaries. The last two crates are standalone, std-only SSH helpers (`07-8-ssh.md` §7.8.4) that depend on no other Project Kennel crate by design — they must stay minimal and self-contained: `kennel-ssh-reorigin` is the bastion's re-origination forced command, and `kennel-socks-connect` is the `ssh` `ProxyCommand` that SOCKS5s through the egress proxy to reach the bastion. The CLI and the control/wire IPC are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, and the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`). A wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
+The workspace has **15 crates**: `kennel-policy`, `kennel-syscall`, `kennel-bpf`, `kennel-binder`, `kennel-audit`, `kennel-config`, `kennel-spawn`, `kennel-netproxy`, `kennel-privhelper`, `kennel-init`, `kenneld`, `kennel-afunix-shim`, `kennel-text`, `kennel-ssh-reorigin`, and `kennel-socks-connect`. `kennel-afunix-shim` is the in-kennel half of the `org.projectkennel.IAfUnix/default` facade (`07-6-afunix.md`): the small proxy `kennel-init` launches inside the view that brokers the workload's AF_UNIX connect through the binder gateway to kenneld. `kennel-binder` is the third unsafe-bearing crate — the hand-rolled binder ioctl ABI (the per-kennel inter-namespace gateway, `02-7-binder.md`), parallel in every structural respect to `kennel-bpf`; binder is load-bearing, so every kennel links it through kenneld and `kennel-init`. `kennel-init` is the root-owned PID-1 binary the privhelper `fexecve`s to construct and supervise each kennel (`07-2-kennel-init.md`). `kennel-audit` is a first-class crate — the unified audit writer (the canonical event, one sanitisation pass, per-class level filtering, and the `Sink` fan-out). `kennel-config` is a first-class crate too — the layered deployment/user configuration (`system.toml` / `config.toml` cascades) that keeps install paths out of the binaries. The last two crates are standalone, std-only SSH helpers (`07-10-ssh.md` §7.10.4) that depend on no other Project Kennel crate by design — they must stay minimal and self-contained: `kennel-ssh-reorigin` is the bastion's re-origination forced command, and `kennel-socks-connect` is the `ssh` `ProxyCommand` that SOCKS5s through the egress proxy to reach the bastion. The CLI and the control/wire IPC are folded rather than carved into their own crates: the control protocol lives in `kenneld::control`, the privhelper wire in `kennel-privhelper::wire`, and the `kennel` CLI is a binary inside `kenneld` (`src/bin/kennel.rs`). A wire protocol shared by exactly two binaries is a module in one of them, not a third crate, and the CLI and daemon ship from the same crate so their protocol cannot drift. The whole workspace is blocking, thread-per-connection; no async runtime is linked.
 
 ---
 
@@ -44,8 +44,8 @@ kennel/
 │   │   ├── kennel-netproxy/         binary + lib: SOCKS5/HTTP egress proxy (blocking, thread-per-conn)
 │   │   ├── kennel-privhelper/       binary + lib: privileged operations helper (wire format in src/wire.rs)
 │   │   ├── kennel-init/             binary: root-owned kennel PID 1 (constructor handoff target, lifecycle consumer)
-│   │   ├── kennel-ssh-reorigin/     binary + lib: SSH re-origination forced command (std-only; §7.8.4)
-│   │   ├── kennel-socks-connect/    binary + lib: SOCKS5 stdio connector for ssh ProxyCommand (std-only; §7.8.4)
+│   │   ├── kennel-ssh-reorigin/     binary + lib: SSH re-origination forced command (std-only; §7.10.4)
+│   │   ├── kennel-socks-connect/    binary + lib: SOCKS5 stdio connector for ssh ProxyCommand (std-only; §7.10.4)
 │   │   └── kenneld/                 lib + binaries: per-user supervisor (src/bin/kenneld.rs),
 │   │                                CLI (src/bin/kennel.rs), bastion AKC (src/bin/kennel-akc.rs);
 │   │                                control protocol in src/control.rs
@@ -65,7 +65,7 @@ kennel/
 └── .github/                         CI, community-health
 ```
 
-Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), `kennel-init` (`src/main.rs` — the root-owned PID-1 supervisor, no library half), `kennel-ssh-reorigin` (`src/main.rs` + a library half holding the tested re-origination core), `kennel-socks-connect` (`src/main.rs` + a library half holding the tested SOCKS5 wire codec), and `kenneld` (a library half in `src/lib.rs` providing the orchestration its binaries share, plus `src/bin/kenneld.rs` for the daemon, `src/bin/kennel.rs` for the CLI, and `src/bin/kennel-akc.rs` for the SSH bastion's root-owned `AuthorizedKeysCommand`, which reuses `kenneld::control` to query the daemon — §7.8.7). The remaining crates are libraries (`src/lib.rs`).
+Every Rust crate in `crates/` is prefixed `kennel-` per CODING-STANDARDS.md §3. The binary-bearing crates are `kennel-netproxy` (`src/main.rs`), `kennel-privhelper` (`src/main.rs` + a library half for `wire`/`validate`), `kennel-init` (`src/main.rs` — the root-owned PID-1 supervisor, no library half), `kennel-ssh-reorigin` (`src/main.rs` + a library half holding the tested re-origination core), `kennel-socks-connect` (`src/main.rs` + a library half holding the tested SOCKS5 wire codec), and `kenneld` (a library half in `src/lib.rs` providing the orchestration its binaries share, plus `src/bin/kenneld.rs` for the daemon, `src/bin/kennel.rs` for the CLI, and `src/bin/kennel-akc.rs` for the SSH bastion's root-owned `AuthorizedKeysCommand`, which reuses `kenneld::control` to query the daemon — §7.10.7). The remaining crates are libraries (`src/lib.rs`).
 
 ---
 
@@ -106,7 +106,7 @@ The workspace is acyclic and layered. Lower-level crates do not depend on higher
 
   kennel-ssh-reorigin (bin)   ← stands alone: std-only, no Project Kennel deps.
                                 The bastion's forced command must stay minimal
-                                and self-contained (§7.8.4).
+                                and self-contained (§7.10.4).
   kennel-socks-connect (bin)  ← stands alone: std-only. The ssh ProxyCommand that
                                 SOCKS5s through the egress proxy to the bastion.
 ```
@@ -185,7 +185,7 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 
 ### `kennel-netshim` (roadmap — not built)
 
-- A **roadmap** crate (`02-8-binder-net.md`, `07-10-binder-netns.md`): the per-kennel network shim that runs inside the kennel net-ns when the network crossing is built. It holds the **fuzzed SOCKS5** server the workload egresses through, translating to `org.projectkennel.INet` `CONNECT` transactions over the binder bus (kenneld then dispatches to the `kennel-netproxy` host-net-ns delegate). It would become the **third** binder participant after kenneld and `kennel-init`. Not built — there is no `kennel-netshim` crate in the workspace today, and the kennel still shares the host network namespace.
+- A **roadmap** crate (`02-8-binder-net.md`, `07-11-binder-netns.md`): the per-kennel network shim that runs inside the kennel net-ns when the network crossing is built. It holds the **fuzzed SOCKS5** server the workload egresses through, translating to `org.projectkennel.INet` `CONNECT` transactions over the binder bus (kenneld then dispatches to the `kennel-netproxy` host-net-ns delegate). It would become the **third** binder participant after kenneld and `kennel-init`. Not built — there is no `kennel-netshim` crate in the workspace today, and the kennel still shares the host network namespace.
 
 ### `kennel-privhelper`
 
@@ -195,20 +195,20 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 
 ### `kennel-init`
 
-- Binary crate, no library half. The **root-owned PID 1** of every kennel: the privhelper factory `fexecve`s it (with empty argv/envp) as the trusted uid-0 process *after* `pivot_root`, so it is trapped in the sealed view from its first instruction (`07-11-kennel-init.md`). It does no policy decisions, no mount/netlink/device/fs-lookup/env code, and holds no ambient host caps — deliberately tiny and auditable, the same binary for every kennel.
+- Binary crate, no library half. The **root-owned PID 1** of every kennel: the privhelper factory `fexecve`s it (with empty argv/envp) as the trusted uid-0 process *after* `pivot_root`, so it is trapped in the sealed view from its first instruction (`07-2-kennel-init.md`). It does no policy decisions, no mount/netlink/device/fs-lookup/env code, and holds no ambient host caps — deliberately tiny and auditable, the same binary for every kennel.
 - **Links `kennel-binder`** as a lifecycle consumer: it `open`s the per-kennel binderfs device and pulls its supervision-half plan from kenneld (node 0) via `GET_SANDBOX_PLAN`, then rides node 0 for the `NOTIFY_*` lifecycle verbs. This makes it the second binder participant alongside kenneld.
 - **Reuses the `kennel-spawn` seal** — `no_new_privs` + seccomp + Landlock + ulimits + identity drop (`set_gid`/`set_uid`) — applied to the **workload child** it forks and drops to the operator, *not* to itself or the facades (which must remain free to fork, `waitpid`, and reach the bus). Only `kennel-init` stays uid 0.
-- **As-built divergence (code-owed):** as built it runs as the *operator*, not uid 0 — a known divergence from the design's uid-0 init (`07-11-kennel-init.md`), tracked for reconciliation.
+- **As-built divergence (code-owed):** as built it runs as the *operator*, not uid 0 — a known divergence from the design's uid-0 init (`07-2-kennel-init.md`), tracked for reconciliation.
 
 ### `kennel-ssh-reorigin`
 
-- Binary crate with a library half; **std-only, no Project Kennel deps and no external crates** — the SSH bastion's forced command must stay minimal and auditable (`07-8-ssh.md` §7.8.4).
+- Binary crate with a library half; **std-only, no Project Kennel deps and no external crates** — the SSH bastion's forced command must stay minimal and auditable (`07-10-ssh.md` §7.10.4).
 - The library (`src/lib.rs`) holds the security-load-bearing core, all pure and unit-tested: strict `--dest`/`--key` parsing (option-injection-proof), the hostname and `SHA256:` grammars, `$SSH_USER_AUTH` publickey confirmation (fail-closed), exact fingerprint→agent-identity selection, and outbound-`ssh` argv construction (`--`-terminated so the attacker-controlled `$SSH_ORIGINAL_COMMAND` can never be read as a flag). `main.rs` is the thin IO tail (`ssh-add` enumeration, identity-file write, `execvp ssh`).
 - Carries no key material: only the *public* half of the selected key is written (to a `0600` temp file), the private key stays in the user's agent/token.
 
 ### `kennel-socks-connect`
 
-- Binary crate with a library half; **std-only, no Project Kennel deps and no external crates**. The `ssh` `ProxyCommand` a confined kennel uses to reach the bastion: a kennel can `connect()` only to its egress proxy (§7.3.2), and `ssh` has no built-in SOCKS client, so this speaks SOCKS5 CONNECT to `$KENNEL_SOCKS_PROXY` and splices stdio to the stream — without depending on `nc`/`ncat` being present in the workload image.
+- Binary crate with a library half; **std-only, no Project Kennel deps and no external crates**. The `ssh` `ProxyCommand` a confined kennel uses to reach the bastion: a kennel can `connect()` only to its egress proxy (§7.5.2), and `ssh` has no built-in SOCKS client, so this speaks SOCKS5 CONNECT to `$KENNEL_SOCKS_PROXY` and splices stdio to the stream — without depending on `nc`/`ncat` being present in the workload image.
 - The library (`src/lib.rs`) holds the pure SOCKS5 wire codec (greeting, CONNECT request for IPv4/IPv6/domain, reply parsing), unit-tested. `main.rs` does the TCP + bidirectional splice; the downlink flushes per chunk (stdout is a `LineWriter` and SSH key-exchange carries no newlines — left buffered it would stall the handshake).
 
 ### `kenneld`

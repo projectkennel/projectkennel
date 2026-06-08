@@ -37,7 +37,7 @@ pub enum Request {
     /// List the running kennels.
     List,
     /// Ask for the SSH bastion's forced-command `authorized_keys` line(s) bound to
-    /// an offered public key (§7.8.7). The bastion's root-owned
+    /// an offered public key (§7.10.7). The bastion's root-owned
     /// `AuthorizedKeysCommand` (`kennel-akc`) makes this query on each auth; the
     /// daemon answers from its live, verified edge state — there is no file.
     AuthorizedKeys {
@@ -66,7 +66,7 @@ pub struct StartRequest {
     /// Whether this is an interactive run. When true, the CLI passes a single
     /// connected socket (not three stdio fds) over `SCM_RIGHTS`; the spawn seal
     /// allocates a controlling pty inside the kennel's own devpts and hands its
-    /// master back over that socket for the CLI to proxy (§7.7.2). When false, the
+    /// master back over that socket for the CLI to proxy (§7.9.2). When false, the
     /// three passed fds are the workload's stdio.
     pub interactive: bool,
 }

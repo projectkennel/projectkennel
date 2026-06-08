@@ -19,7 +19,7 @@ use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
 ///
 /// Returns the long-lived helper process (the kennel's supervisor — wait it for the
-/// workload's exit status) and `kennel-init`'s **host pid** (`07-11` §7.11.1). kennel-init
+/// workload's exit status) and `kennel-init`'s **host pid** (`07-11` §7.2.1). kennel-init
 /// runs as the operator, so `kenneld` opens the kennel's binderfs device itself via
 /// `/proc/<init>/root` — no fd needs to come back here.
 ///
@@ -115,7 +115,7 @@ pub fn setup_egress(
     exchange(helper, &bytes)
 }
 
-/// Ask the helper to write process `pid`'s user-namespace `gid_map` (§7.2.8).
+/// Ask the helper to write process `pid`'s user-namespace `gid_map` (§7.4.8).
 ///
 /// The map identity-maps `gids` — the workload's primary gid plus each granted
 /// supplementary group — so the workload keeps those groups; an unprivileged

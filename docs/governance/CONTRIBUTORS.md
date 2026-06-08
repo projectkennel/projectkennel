@@ -4,11 +4,11 @@ This file lists contributors who have earned trusted status per [CODING-STANDARD
 
 ## What trusted status means
 
-After three PRs merged in compliance with the §7.1 commit cadence and the PR template, a contributor is added here. Trusted contributors get:
+After three PRs merged in compliance with the §7.3 commit cadence and the PR template, a contributor is added here. Trusted contributors get:
 
 - A CI-failing PR receives a comment, not an immediate close.
 - An issue with a missing `[T<id>]`/`[T-NONE]` tag receives a comment, not an immediate auto-close.
-- Refactor proposals may be filed as PRs directly, without first opening a triaged issue, provided the PR still meets §7.1 and the template.
+- Refactor proposals may be filed as PRs directly, without first opening a triaged issue, provided the PR still meets §7.3 and the template.
 
 Trusted status is **not** maintainer status (see [MAINTAINERS.md](MAINTAINERS.md)). It confers no merge, signing, or review authority. It is a working assumption that this person understands the project, extended to reduce friction. It can be revoked by maintainer majority with the reason recorded.
 

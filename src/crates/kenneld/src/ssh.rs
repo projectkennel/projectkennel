@@ -1,18 +1,18 @@
 //! A kennel's synthetic `~/.ssh`: the re-origination bastion's client view.
 //!
 //! Per-kennel SSH leaves the kennel only through the re-origination bastion
-//! (`kennel-sshd`, `docs/design/07-8-ssh.md` §7.8). A confined workload that runs
+//! (`kennel-sshd`, `docs/design/07-10-ssh.md` §7.10). A confined workload that runs
 //! `git push` or `ssh -T git@github.com` needs a `~/.ssh` for the stock client to
 //! read — but it must contain **nothing real**: not the user's keys, not their
 //! `config`, not their `known_hosts`. This module renders the synthetic substitute
-//! (§7.8.5):
+//! (§7.10.5):
 //!
 //! - `config` — one stanza per granted host, every one routing `HostName` to the
 //!   bastion endpoint with `HostKeyAlias kennel-bastion`, the matching disposable
 //!   synthetic key as the sole `IdentityFile` (`IdentitiesOnly yes`), and
 //!   `StrictHostKeyChecking yes`. The destination the workload types selects which
 //!   synthetic key authenticates; the bastion's forced command — keyed to that
-//!   synthetic key — fixes the real destination (§7.8.3). The config leaks nothing:
+//!   synthetic key — fixes the real destination (§7.10.3). The config leaks nothing:
 //!   it is derived entirely from already-granted policy.
 //! - `known_hosts` — only the bastion's host key, under the alias `kennel-bastion`.
 //!   Every granted host verifies against this one pin; a real host's key never
@@ -54,7 +54,7 @@ pub struct HostGrant<'a> {
 #[derive(Debug, Clone)]
 pub struct SshParams<'a> {
     /// The bastion endpoint the kennel's `ssh` connects to — the bastion's
-    /// allowlisted loopback address, which the egress proxy forwards (§7.8.4).
+    /// allowlisted loopback address, which the egress proxy forwards (§7.10.4).
     pub bastion_host: &'a str,
     /// The bastion's listening port.
     pub bastion_port: u16,
@@ -64,7 +64,7 @@ pub struct SshParams<'a> {
     pub bastion_host_key: &'a str,
     /// The in-kennel path of the `kennel-socks-connect` binary, used as each
     /// stanza's `ProxyCommand`: a kennel can `connect()` only to its egress proxy
-    /// (§7.3.2), so `ssh` reaches the bastion by SOCKS5 through that proxy. The
+    /// (§7.5.2), so `ssh` reaches the bastion by SOCKS5 through that proxy. The
     /// proxy address is taken from `$KENNEL_SOCKS_PROXY` in the kennel's environment.
     pub socks_connect_bin: &'a str,
     /// The granted host edges — one `config` stanza each. Empty means the kennel has
@@ -83,7 +83,7 @@ pub fn config(p: &SshParams<'_>) -> String {
         "# Project Kennel synthetic ssh config — generated, read-only.\n\
          # Every granted host routes to the re-origination bastion; the real key is\n\
          # used host-side, and the destination is fixed by the bastion's forced\n\
-         # command (docs/design/07-8-ssh.md §7.8). No other host is reachable.\n",
+         # command (docs/design/07-10-ssh.md §7.10). No other host is reachable.\n",
     );
     for h in p.hosts {
         let _ = write!(
@@ -190,7 +190,7 @@ fn pub_path_of(path: &Path) -> PathBuf {
 }
 
 /// Mint a disposable synthetic ed25519 keypair into `dir` as `key_file` (private)
-/// and `key_file.pub`, returning the public-key line (§7.8.3).
+/// and `key_file.pub`, returning the public-key line (§7.10.3).
 ///
 /// The private half goes into the kennel's constructed `~/.ssh` (this `dir`); the
 /// returned public line is what the bastion binds to a forced command in its

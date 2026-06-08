@@ -63,7 +63,7 @@ pub(crate) fn skip_if_unprivileged(test: &str) -> bool {
 /// Used to membership-check a policy's `[identity].groups` before the privileged
 /// seal `setgroups` to them: `kenneld` runs as the operator, so this is the
 /// operator's group set, and a group not in it (nor the real gid) must never be
-/// granted (the root seal could otherwise over-grant, §7.2).
+/// granted (the root seal could otherwise over-grant, §7.4).
 #[must_use]
 pub fn supplementary_groups() -> Vec<u32> {
     getgroups()
@@ -88,7 +88,7 @@ pub fn group_gid(name: &str) -> io::Result<Option<u32>> {
 ///
 /// Requires `CAP_SETGID` — called in the privileged spawn seal (where the namespace
 /// `unshare` also requires privilege), to drop the inherited host groups down to the
-/// policy-granted set (§7.2). An empty slice drops all supplementary groups.
+/// policy-granted set (§7.4). An empty slice drops all supplementary groups.
 ///
 /// # Errors
 ///

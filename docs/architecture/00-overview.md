@@ -38,7 +38,7 @@ The two trees are independent products.
 
 `architecture/` describes *our* implementation. It commits to specific Rust crates, IPC formats, on-disk paths, and lifetime semantics. A different implementation would have a different `architecture/` tree; both could be valid reference runtimes for the same design.
 
-Cross-references from `architecture/` to `docs/` are common and use the `docs/` chapter numbers (§8 of the design document, §7.2 of the mechanism reference, etc.). Cross-references the other way are rare; `docs/` should not depend on implementation specifics.
+Cross-references from `architecture/` to `docs/` are common and use the `docs/` chapter numbers (§8 of the design document, §7.4 of the mechanism reference, etc.). Cross-references the other way are rare; `docs/` should not depend on implementation specifics.
 
 When `docs/` and `architecture/` disagree, `docs/` wins for what the system *should* do, and `architecture/` is amended to match. When an implementation choice diverges from the design intentionally (a deliberate simplification, a forced compromise on a specific platform), the divergence is recorded in the relevant `architecture/` chapter with a pointer to the design section it deviates from.
 
@@ -63,7 +63,7 @@ The "stable" surfaces are what a third party may rely on. The "internal" surface
 
 ## How to amend
 
-Changes to this tree follow the review discipline in [CODING-STANDARDS.md](../governance/CODING-STANDARDS.md) §13. The three-phase commit cadence (§7.1) does not apply directly — architecture documents are not test-driven — but:
+Changes to this tree follow the review discipline in [CODING-STANDARDS.md](../governance/CODING-STANDARDS.md) §13. The three-phase commit cadence (§7.3) does not apply directly — architecture documents are not test-driven — but:
 
 - Significant changes warrant an issue first, tagged with the relevant `[T<id>]` or `[T-NONE]` (§13.5).
 - The PR template's "Why, in project-local terms" applies: motivation cites specific design-document sections or threat IDs, not generic justification.

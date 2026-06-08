@@ -1,7 +1,7 @@
 //! DNS resolution seam and policy.
 //!
 //! The kennel never resolves names itself — the proxy resolves on its behalf
-//! (`docs/design/07-3-network.md` §7.3.2), so DNS rebinding is structurally defeated
+//! (`docs/design/07-5-network.md` §7.5.2), so DNS rebinding is structurally defeated
 //! (the workload never holds an address) and every resolved address is re-checked
 //! against policy before the proxy connects.
 //!

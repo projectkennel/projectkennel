@@ -4,7 +4,7 @@
 //!
 //! Every outbound connection from a kennel terminates here; direct `connect()`
 //! to anything else is denied at the kernel level by cgroup BPF
-//! (`docs/design/07-3-network.md` §7.3.2). This crate is where the *expressive* half of
+//! (`docs/design/07-5-network.md` §7.5.2). This crate is where the *expressive* half of
 //! the egress story lives: per-destination allow/deny by name or CIDR, DNS
 //! resolution under policy (the kennel never resolves names itself, so DNS
 //! rebinding is structurally impossible), and a structured audit record per

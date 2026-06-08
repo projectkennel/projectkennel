@@ -1,4 +1,4 @@
-//! The egress allowlist evaluator (`docs/design/07-3-network.md` §7.3.4).
+//! The egress allowlist evaluator (`docs/design/07-5-network.md` §7.5.4).
 //!
 //! Pure, network-free policy logic: given a destination the client asked for,
 //! decide whether the proxy may connect to it. The evaluator is split from the
@@ -229,7 +229,7 @@ pub struct DenyRule {
     pub ports: Vec<u16>,
 }
 
-/// The kennel's relationship to the network (`docs/design/07-3-network.md` §7.3.1).
+/// The kennel's relationship to the network (`docs/design/07-5-network.md` §7.5.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetMode {
     /// No egress at all.
@@ -343,7 +343,7 @@ impl Ruleset {
     #[must_use]
     pub fn decide_resolved(&self, addr: IpAddr, port: u16, _transport: Transport) -> Decision {
         // Transport is accepted for API symmetry with decide_request; deny rules
-        // are CIDR+port only (§7.3.4), so it does not affect the decision today.
+        // are CIDR+port only (§7.5.4), so it does not affect the decision today.
         if self.denied_addr(addr, port) {
             Decision::Deny(DenyReason::DeniedByRule)
         } else {
@@ -422,7 +422,7 @@ fn ends_with_label(name: &str, suffix: &str) -> bool {
 }
 
 /// Whether `port` is permitted by a rule's port set. An empty set means "any
-/// port" (`docs/design/07-3-network.md` §7.3.4 omits `ports` for portless rules).
+/// port" (`docs/design/07-5-network.md` §7.5.4 omits `ports` for portless rules).
 fn port_matches(ports: &[u16], port: u16) -> bool {
     ports.is_empty() || ports.contains(&port)
 }

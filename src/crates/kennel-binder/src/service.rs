@@ -21,7 +21,7 @@ pub mod verb {
 }
 
 /// Node-0 **lifecycle/config verbs** spoken only by `kennel-init`, the kennel's uid-0
-/// PID 1 (`docs/design/07-11-kennel-init.md` §7.11.4).
+/// PID 1 (`docs/design/07-2-kennel-init.md` §7.2.4).
 ///
 /// A distinct high code range, disjoint from the [`verb`] registry codes (1–5), so the
 /// two protocols never collide and `kenneld` can gate the lifecycle branch separately:

@@ -150,7 +150,7 @@ pub trait Privileged {
     fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response>;
 
     /// Write process `pid`'s user-namespace `gid_map`, identity-mapping each gid in
-    /// `gids`, so a workload keeps a granted supplementary group (§7.2.8). The
+    /// `gids`, so a workload keeps a granted supplementary group (§7.4.8). The
     /// helper re-checks the caller is a member of every gid and owns `pid`.
     ///
     /// # Errors
@@ -274,25 +274,25 @@ pub struct EtcSetup {
     /// Written as the `passwd` home field — never the operator's real home, which the
     /// synthetic `/etc` masks along with the account name (`kennel`).
     pub home: PathBuf,
-    /// The granted supplementary groups `(name, gid)` (§7.2) — named in `/etc/group`
+    /// The granted supplementary groups `(name, gid)` (§7.4) — named in `/etc/group`
     /// so they resolve by name; these are the gids the seal `setgroups` to. Empty by
     /// default (the kennel carries no supplementary groups unless policy grants them).
     pub groups: Vec<(String, u32)>,
-    /// The kennel's login shell (§7.7.2a) — the `passwd` `pw_shell` field. `/bin/sh`
+    /// The kennel's login shell (§7.9.2a) — the `passwd` `pw_shell` field. `/bin/sh`
     /// unless the policy set `[exec].shell`.
     pub shell: String,
-    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
+    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.9.2a
     /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
     pub home_persist: Vec<String>,
 }
 
-/// What kenneld needs to run a kennel's binder context manager (§7.9): the settled
+/// What kenneld needs to run a kennel's binder context manager (§7.1): the settled
 /// binder policy the registry gates against and the audit writer it records
 /// `binder.*` decisions through.
 pub struct BinderPrep {
     /// The user-defined services this kennel may register / look up.
     pub policy: kennel_policy::BinderRuntime,
-    /// The `[[unix.allow]]` grants the af-unix facade resolves and connects (§7.4 via
+    /// The `[[unix.allow]]` grants the af-unix facade resolves and connects (§7.6 via
     /// the binder facade). Empty when the kennel grants no `AF_UNIX` socket.
     pub unix: kennel_policy::UnixRuntime,
     /// The unified audit writer the registry emits through.
@@ -339,22 +339,22 @@ pub struct Spec {
     /// runs (not removed at teardown — they are audit data). `None` (or no proxy)
     /// leaves the proxy logging egress to stdout.
     pub proxy_audit: Option<crate::proxy::ProxyAudit>,
-    /// The prepared SSH egress (§7.8): the synthetic `~/.ssh` binds, the bastion
+    /// The prepared SSH egress (§7.10): the synthetic `~/.ssh` binds, the bastion
     /// host-service to allow, and the in-kennel connector to bind in. Empty
     /// ([`SshPrep::default`]) for a kennel with no `[ssh]` grant.
     pub ssh: SshPrep,
-    /// The prepared `AF_UNIX` socket shims (§7.4): host sockets to bind into the view
+    /// The prepared `AF_UNIX` socket shims (§7.6): host sockets to bind into the view
     /// at their shim paths, plus any env vars to set. Empty ([`UnixPrep::default`])
     /// for a kennel with no `[unix]` grant.
     pub unix: UnixPrep,
-    /// The prepared binder IPC context manager (§7.9): the settled binder policy and
+    /// The prepared binder IPC context manager (§7.1): the settled binder policy and
     /// the audit writer. `None` for a kennel with no `[binder]` grant (no context
     /// manager is run; the seal still mounts no binderfs because the plan's view
     /// `binder` flag is false in that case).
     pub binder: Option<BinderPrep>,
 }
 
-/// One granted `AF_UNIX` socket the in-kennel proxy presents (§7.4).
+/// One granted `AF_UNIX` socket the in-kennel proxy presents (§7.6).
 #[derive(Debug, Clone)]
 pub struct UnixShim {
     /// The logical service name (`[[unix.allow]]` `name`) the proxy brokers through the
@@ -364,14 +364,14 @@ pub struct UnixShim {
     pub shim_path: PathBuf,
 }
 
-/// The `AF_UNIX` socket shims prepared for one kennel (§7.4 via the binder facade).
+/// The `AF_UNIX` socket shims prepared for one kennel (§7.6 via the binder facade).
 ///
 /// Built by `crate::server::Shared::prepare_unix` (path placeholders resolved) and
 /// consumed by the bring-up: the `kennel-afunix-shim` proxy is bound into the view and
 /// launched by the seal; it listens at each shim path so the application finds the
 /// socket where it expects, and on connect brokers to the `org.projectkennel.IAfUnix`
 /// binder facade (kenneld), which resolves the name to the real host socket and returns
-/// a connected fd (`07-9` §7.9.5). The workload never holds a path into the host
+/// a connected fd (`07-9` §7.1.5). The workload never holds a path into the host
 /// `AF_UNIX` namespace. Any named env var is set to the in-kennel shim path. What is not
 /// granted is structurally absent (default-deny); abstract-namespace connections are
 /// denied by the always-on Landlock scope regardless.
@@ -383,12 +383,12 @@ pub struct UnixPrep {
     /// application reads (e.g. `WAYLAND_DISPLAY`).
     pub env: Vec<(String, String)>,
     /// The host path of `kennel-afunix-shim` to bind into the view and launch as the
-    /// in-kennel broker (§7.4 via the binder facade). `None` (no deployment binary)
+    /// in-kennel broker (§7.6 via the binder facade). `None` (no deployment binary)
     /// leaves the grants unserved rather than falling back to a host-socket bind mount.
     pub afunix_shim_bin: Option<PathBuf>,
 }
 
-/// The SSH egress prepared for one kennel (§7.8).
+/// The SSH egress prepared for one kennel (§7.10).
 ///
 /// Built by `crate::server::Shared::register_ssh` and consumed by the bring-up: it
 /// carries the synthetic `~/.ssh` to lay into the view, the bastion endpoint to
@@ -400,7 +400,7 @@ pub struct SshPrep {
     /// (`config`, `known_hosts`, the synthetic keys), copied into the constructed view.
     pub file_binds: Vec<(PathBuf, PathBuf)>,
     /// The bastion's loopback endpoint, allowed as a host-loopback service so the
-    /// egress proxy forwards the kennel's SSH to it (§7.3 host services).
+    /// egress proxy forwards the kennel's SSH to it (§7.5 host services).
     pub host_service: Option<SocketAddr>,
     /// The host path of `kennel-socks-connect`, bound into the view (read+execute)
     /// so the synthetic `config`'s `ProxyCommand` can run it. `None` when no SSH.
@@ -846,7 +846,7 @@ fn bring_up<P: Privileged + Sync>(
             }
         }
 
-        // Synthesise the user shell-init dotfiles into the kennel home (§7.7.2a):
+        // Synthesise the user shell-init dotfiles into the kennel home (§7.9.2a):
         // copied into the fresh view root each spawn (reconstructed, non-persistent),
         // skipping any path in `home_persist`. Like the synthetic ~/.ssh, the home
         // subtree is not in `fs.read`, so grant Landlock read on each dotfile's dir.
@@ -871,7 +871,7 @@ fn bring_up<P: Privileged + Sync>(
 
     // 3c-ssh. Lay the synthetic ~/.ssh into the view (config, known_hosts, the
     //     disposable synthetic keys) and point the kennel's ssh at its proxy: the
-    //     synthetic config's ProxyCommand SOCKS5s through it to the bastion (§7.8.4).
+    //     synthetic config's ProxyCommand SOCKS5s through it to the bastion (§7.10.4).
     //     Empty for a kennel with no [ssh] grant, so nothing changes for it.
     if !ssh.file_binds.is_empty() {
         // Grant Landlock read on the synthetic ~/.ssh dir(s): the files are copied
@@ -897,13 +897,13 @@ fn bring_up<P: Privileged + Sync>(
         command.env("KENNEL_SOCKS_PROXY", proxy_addr.to_string());
     }
 
-    // 3c-unix. AF_UNIX socket shims (§7.4): bind each granted socket into the view at
+    // 3c-unix. AF_UNIX socket shims (§7.6): bind each granted socket into the view at
     //     its shim path, set env vars, and grant Landlock. The shim model needs the
     //     constructed view (a mount namespace), so it engages only when pivoting.
     let unix_pivoting = view_root.is_some() && plan.view.is_some();
     apply_unix_shims(plan, unix, command, unix_pivoting);
 
-    // 3d. constructed-view wiring (§7.2.5). When the plan carries a shim view and
+    // 3d. constructed-view wiring (§7.4.5). When the plan carries a shim view and
     //     the daemon gave us a staging mountpoint: point HOME at the shim root,
     //     add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
     //     read-only — distro content, no host specifics), and hand the seal the
@@ -965,7 +965,7 @@ fn bring_up<P: Privileged + Sync>(
 
     let child = spawn_workload(privileged, plan, command)?;
 
-    // 5. binder context manager (§7.9): the seal mounted the kennel's binderfs and
+    // 5. binder context manager (§7.1): the seal mounted the kennel's binderfs and
     //    allocated the `binder` device; take node 0 of it from here (the daemon) via
     //    the workload's `/proc/<pid>/root`, and run the registry serve thread. The
     //    workload's own binder calls before this fail closed (BR_DEAD_REPLY) — safe.
@@ -1017,7 +1017,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     let init = std::fs::File::open(init_bin)?;
     // The pty return socket (interactive runs) rides the binder lifecycle reply, not the
     // factory; the non-interactive vertical passes None. (Interactive-through-factory is
-    // still owed — see docs/design/07-11-kennel-init.md.)
+    // still owed — see docs/design/07-2-kennel-init.md.)
     let (child, init_pid) = privileged.construct_kennel(&half_bytes, init.as_fd(), None)?;
     state.factory = true;
 
@@ -1144,7 +1144,7 @@ fn workload_pid(spawn_pid: u32) -> Option<u32> {
     children.split_whitespace().next()?.parse().ok()
 }
 
-/// Spawn the workload, routing through the privileged `gid_map` handshake (§7.2.8)
+/// Spawn the workload, routing through the privileged `gid_map` handshake (§7.4.8)
 /// when the kennel re-grants a supplementary group on the unprivileged userns path.
 ///
 /// The handshake engages only when the plan unshares a user namespace *and* carries
@@ -1196,10 +1196,10 @@ fn gid_map_set(granted: &[u32]) -> Vec<u32> {
 }
 
 /// The in-view binder device the af-unix proxy transacts the facade over (the seal
-/// mounts the per-kennel binderfs here; §7.9).
+/// mounts the per-kennel binderfs here; §7.1).
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
-/// Wire the `AF_UNIX` socket facade (§7.4 / `07-9` §7.9.5): launch the in-kennel
+/// Wire the `AF_UNIX` socket facade (§7.6 / `07-9` §7.1.5): launch the in-kennel
 /// `kennel-afunix-shim` proxy so each granted socket is presented at its in-view path
 /// and brokered, on connect, to the `org.projectkennel.IAfUnix` binder facade — which
 /// resolves the name to the real host socket and returns a connected fd. No host
@@ -1834,7 +1834,7 @@ mod tests {
             .is_ok_and(|s| s.trim() == "1")
     }
 
-    /// **The kenneld wiring of the `gid_map` handshake (§7.2.8).** A userns plan with a
+    /// **The kenneld wiring of the `gid_map` handshake (§7.4.8).** A userns plan with a
     /// granted supplementary group must drive `bring_up` through
     /// [`kennel_spawn::spawn_with_gid_map`], which calls [`Privileged::set_gid_map`].
     /// The granted gid here is the operator's own (so the fake's stand-in single-line

@@ -54,19 +54,19 @@ use std::collections::BTreeSet;
 pub struct Translated {
     /// The flat, runtime-enforced policy.
     pub effective_policy: EffectivePolicy,
-    /// The per-kennel SSH runtime (§7.8) — a service input, not enforcement.
+    /// The per-kennel SSH runtime (§7.10) — a service input, not enforcement.
     pub ssh: SshRuntime,
-    /// The per-kennel `AF_UNIX` socket shims (§7.4) — a service input, not enforcement.
+    /// The per-kennel `AF_UNIX` socket shims (§7.6) — a service input, not enforcement.
     pub unix: UnixRuntime,
-    /// The workload's in-kennel identity (§7.2) — the supplementary groups it retains.
+    /// The workload's in-kennel identity (§7.4) — the supplementary groups it retains.
     pub identity: IdentityRuntime,
-    /// The per-kennel binder IPC runtime (§7.9.4) — user-defined provide/consume grants.
+    /// The per-kennel binder IPC runtime (§7.1.4) — user-defined provide/consume grants.
     pub binder: BinderRuntime,
     /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
     pub audit: AuditRuntime,
-    /// The synthesised environment (§7.7.2) — the fixed `[env].set` vars.
+    /// The synthesised environment (§7.9.2) — the fixed `[env].set` vars.
     pub env: EnvRuntime,
-    /// The per-kennel resource limits (§7.2) — applied via `setrlimit` in the seal.
+    /// The per-kennel resource limits (§7.4) — applied via `setrlimit` in the seal.
     pub ulimits: UlimitsRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
@@ -167,7 +167,7 @@ fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
     BinderRuntime { provide, consume }
 }
 
-/// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.2). Each entry is a
+/// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.4). Each entry is a
 /// `setrlimit` resource name (validated against [`ULIMIT_RESOURCES`]) and a value of
 /// the form `soft` or `soft:hard`, every token a number (optional `K`/`M`/`G`, 1024-
 /// based) or `unlimited`. The value is normalised to the settled form `soft` (when
@@ -235,7 +235,7 @@ fn parse_rlim_token(field: &str, tok: &str) -> Result<String, PolicyError> {
     Ok(scaled.to_string())
 }
 
-/// Flatten the source `[env].set` into the settled [`EnvRuntime`] (§7.7.2). The
+/// Flatten the source `[env].set` into the settled [`EnvRuntime`] (§7.9.2). The
 /// environment is *synthesised* from policy, not curated from the parent: only the
 /// explicit `set` map is carried (the legacy `pass`/`deny` curation fields are
 /// ignored — there is no inheritance to filter). Placeholders in the values are
@@ -387,7 +387,7 @@ fn parse_size_bytes(s: &str) -> Result<u64, PolicyError> {
     value.checked_mul(mult).ok_or_else(bad)
 }
 
-/// Gather the workload's retained supplementary groups (§7.2): the explicit
+/// Gather the workload's retained supplementary groups (§7.4): the explicit
 /// `[identity].groups` plus every group named by a `[[fs.dev.passthrough]]` (a device
 /// is unusable without its DAC group), de-duplicated in first-seen order. `kenneld`
 /// resolves these names to GIDs and membership-checks them at spawn.
@@ -594,10 +594,10 @@ fn translate_net(
         }
     }
 
-    // The bind floor (§7.3.7): a workload bind below `min_port` is denied by the
+    // The bind floor (§7.5.7): a workload bind below `min_port` is denied by the
     // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
     let bind_port_min = net.bind.as_ref().and_then(|b| b.min_port).unwrap_or(0);
-    // The bind-port allowlist (§7.3.7): when non-empty, only these ports may be bound.
+    // The bind-port allowlist (§7.5.7): when non-empty, only these ports may be bound.
     // Capped at the bind_subnet array size; an over-long list is a translation error
     // (a hard map limit, not a footgun), so the author learns it rather than having
     // ports silently dropped.
@@ -694,7 +694,7 @@ fn translate_fs(
     };
 
     // The constructed-/dev bind set: the pseudo-device baseline (`fs.dev.allow`) plus
-    // every `[[fs.dev.passthrough]]` device path (§7.2.8). Both bind identically at
+    // every `[[fs.dev.passthrough]]` device path (§7.4.8). Both bind identically at
     // spawn; the passthrough's reason/threats/group are compile-time-only (validated
     // by `crate::dev`, then dropped — like the other informational source fields).
     let mut dev_allow = subst_each(
@@ -765,7 +765,7 @@ fn translate_exec(
         exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
         deferred,
     );
-    // exec.deny (§7.1.4) is composed up the chain (folded in resolve) and carried into
+    // exec.deny (§7.3.4) is composed up the chain (folded in resolve) and carried into
     // the settled policy for audit and runtime warning. "deny evaluated before allow":
     // a deny that exactly matches an allow entry is *subtracted* here, so Landlock never
     // grants EXECUTE on it (the only deny the allow-only LSM can actually enforce). A
@@ -780,7 +780,7 @@ fn translate_exec(
         exec.and_then(|e| e.path.as_deref()).unwrap_or_default(),
         deferred,
     );
-    // The login shell (§7.7.2a): default /bin/sh. Execution is deny-by-default, so the
+    // The login shell (§7.9.2a): default /bin/sh. Execution is deny-by-default, so the
     // shell must itself be allowed or the kennel would set a shell it then refuses to
     // run. The exceptions: an empty allowlist (a no-exec floor like `base-confined` —
     // there is no shell to run, by design), and the explicit `**` permissive opt-in
@@ -1604,7 +1604,7 @@ mod tests {
 
     #[test]
     fn net_bind_min_port_carries_into_the_settled_policy() {
-        // `[net.bind].min_port` → `NetPolicy.bind_port_min` (the BPF bind floor, §7.3.7);
+        // `[net.bind].min_port` → `NetPolicy.bind_port_min` (the BPF bind floor, §7.5.7);
         // absent ⇒ 0 (no floor).
         let with =
             parse(b"name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nmin_port = 8080\n")

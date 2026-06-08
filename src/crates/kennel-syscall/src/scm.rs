@@ -28,7 +28,7 @@ pub const MAX_FDS: usize = 8;
 /// Create a connected `AF_UNIX` `SOCK_SEQPACKET` socket pair (both ends `O_CLOEXEC`).
 ///
 /// The bidirectional, message-framed channel the privhelper-factory invocation rides
-/// (`07-11` §7.11.1): `kenneld` keeps one end and hands the other to the factory as its
+/// (`07-11` §7.2.1): `kenneld` keeps one end and hands the other to the factory as its
 /// stdin, sending the construction-half plus the `kennel-init`/pty fds (`SCM_RIGHTS`) one
 /// way and receiving the init pid back. `SEQPACKET` preserves message boundaries, so each
 /// `send_with_fds`/`recv_with_fds` is one datagram.

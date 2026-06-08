@@ -1,10 +1,10 @@
-//! `kennel-ssh-reorigin`: the SSH re-origination forced command (`docs/design/07-8-ssh.md` §7.8.4).
+//! `kennel-ssh-reorigin`: the SSH re-origination forced command (`docs/design/07-10-ssh.md` §7.10.4).
 //!
 //! # Role
 //!
 //! The per-kennel bastion (`kennel-sshd`) runs this — unprivileged, as the user — as
 //! the forced `command=` bound to a synthetic key in the bastion's `authorized_keys`
-//! (§7.8.3):
+//! (§7.10.3):
 //!
 //! ```text
 //! restrict,pty,command="kennel-ssh-reorigin --dest github.com --key SHA256:<K>" <synthetic-pub>
@@ -39,7 +39,7 @@
 //! a file or a hardware token the user has added to their agent is reached the same
 //! way; a key K that is *not* in the agent fails closed (the user must add it — there
 //! is no fallback that would let an unintended key sign). This is the one place the
-//! host-side custody model (§7.8.7) meets the tool, and it is deliberately explicit.
+//! host-side custody model (§7.10.7) meets the tool, and it is deliberately explicit.
 
 use std::fmt;
 
@@ -268,7 +268,7 @@ pub struct Outbound<'a> {
     /// configured; the outbound connection is verified against it.
     pub known_hosts_file: Option<&'a str>,
     /// A `kenneld`-owned `ssh_config` for the outbound hop (`ssh -F`), if set. This
-    /// is the host-side config seam (§7.8.7): `kenneld` controls per-destination
+    /// is the host-side config seam (§7.10.7): `kenneld` controls per-destination
     /// `HostName`/`Port`/`ProxyJump` here, and the workload cannot influence it.
     /// `None` ⇒ `ssh` uses its defaults (the destination on `:22`).
     pub config_file: Option<&'a str>,

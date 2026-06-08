@@ -1,7 +1,7 @@
 # API surfaces — network over binder (`org.projectkennel.INet`)
 
 This chapter is the implementation contract for the binder-based network service
-introduced by the network namespace redesign in [`07-10-binder-netns.md`](../design/07-10-binder-netns.md).
+introduced by the network namespace redesign in [`07-11-binder-netns.md`](../design/07-11-binder-netns.md).
 Where `07-10` says *what and why*, this chapter commits to the concrete shape: which
 processes participate on the kennel's binderfs instance, the transaction wire conventions
 for `org.projectkennel.INet/default`, the spawn sequencing changes, the thread model, and
@@ -86,7 +86,7 @@ request from kenneld instead of a direct TCP connect to a loopback listener. The
 ## The loopback mirror
 
 The kennel's assigned address space — an IPv4 `/28` from `127.0.0.0/8` and an IPv6 `/64`
-from the project ULA, allocated at spawn (design §7.3) — exists on **both** sides of the
+from the project ULA, allocated at spawn (design §7.5) — exists on **both** sides of the
 net-ns boundary as the *same* addresses:
 
 - **Inside the kennel net-ns:** the spawn configures `lo` with the kennel's `/28` + `/64`,

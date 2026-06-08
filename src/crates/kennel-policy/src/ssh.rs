@@ -1,4 +1,4 @@
-//! Compile-time validation of the `[ssh]` section (`docs/design/07-8-ssh.md` §7.8.8).
+//! Compile-time validation of the `[ssh]` section (`docs/design/07-10-ssh.md` §7.10.8).
 //!
 //! # Purpose
 //!
@@ -9,7 +9,7 @@
 //! So the *only* place the framework can reject a malformed or dead SSH grant is
 //! here, at compile time, on the resolved source policy.
 //!
-//! # What this checks (§7.8.8)
+//! # What this checks (§7.10.8)
 //!
 //! - **Every `fingerprint` is well-formed** — the modern `SHA256:<base64>` identity
 //!   `ssh-add -l` prints. A typo'd fingerprint mints a synthetic key that no real
@@ -20,7 +20,7 @@
 //!   allowlist on 22 is either a dead grant or a recon hint (a destination named in
 //!   policy the kennel can never reach). Both are author errors.
 //! - **`allow_headless = true` carries a threat tag.** Letting a non-interactive
-//!   kennel drive a real key with no per-use touch is a real exposure (§7.8.6); the
+//!   kennel drive a real key with no per-use touch is a real exposure (§7.10.6); the
 //!   policy must record it as one (`[ssh].threats.exposed`).
 //!
 //! This validation runs on the *resolved* policy (after the chain is folded, includes

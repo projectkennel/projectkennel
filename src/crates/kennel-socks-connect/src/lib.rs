@@ -3,8 +3,8 @@
 //! # Why this exists
 //!
 //! A confined kennel can `connect()` only to its egress proxy (cgroup BPF denies
-//! everything else, `docs/design/07-3-network.md` §7.3.2); all egress is SOCKS5. To
-//! reach the SSH re-origination bastion (`07-8-ssh.md` §7.8.4), the kennel's `ssh`
+//! everything else, `docs/design/07-5-network.md` §7.5.2); all egress is SOCKS5. To
+//! reach the SSH re-origination bastion (`07-10-ssh.md` §7.10.4), the kennel's `ssh`
 //! must go through that proxy — but OpenSSH has no built-in SOCKS client, only an
 //! external `ProxyCommand`. Rather than depend on `nc`/`ncat` being present in the
 //! workload image, Project Kennel ships this tiny connector and the synthetic
@@ -17,7 +17,7 @@
 //! It speaks SOCKS5 CONNECT to the kennel's proxy (`$KENNEL_SOCKS_PROXY`) for the
 //! requested host/port and splices `stdin`/`stdout` to the established stream — so
 //! `ssh` talks to the bastion as if directly connected, with the proxy enforcing the
-//! allowlist (the bastion is one allowlisted host-loopback service, §7.3 host
+//! allowlist (the bastion is one allowlisted host-loopback service, §7.5 host
 //! services). No DNS happens kennel-side: a name is sent as a SOCKS5 domain address
 //! and the proxy resolves it (`socks5h` semantics).
 //!
@@ -65,7 +65,7 @@ pub const GREETING: [u8; 3] = [0x05, 0x01, 0x00];
 ///
 /// An IPv4/IPv6 literal is sent as the matching address type; anything else is sent
 /// as a domain name (`ATYP=0x03`) for the proxy to resolve (`socks5h` — the kennel
-/// never resolves DNS itself, §7.3.2).
+/// never resolves DNS itself, §7.5.2).
 ///
 /// # Errors
 ///

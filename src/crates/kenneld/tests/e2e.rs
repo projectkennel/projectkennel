@@ -8,7 +8,7 @@
 //! constructed view) is built unprivileged via an identity-mapped user namespace,
 //! the privhelper (file-caps, never sudo) adds the per-kennel loopback addresses,
 //! attaches the egress BPF, and writes the workload's `gid_map` to re-grant a
-//! supplementary group (§7.2.8), and teardown removes it all.
+//! supplementary group (§7.4.8), and teardown removes it all.
 //!
 //! It needs one-time host setup, all performed by `src/tools/unprivileged-e2e.sh`:
 //! the privhelper built with `--features bpf-egress` and `setcap
@@ -236,7 +236,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
 }
 
 /// The constructed `/dev` allowlist: the pseudo-device baseline plus the real
-/// host-device passthrough `/dev/net/tun` (§7.2.8) when present (`0666`, so `open()`
+/// host-device passthrough `/dev/net/tun` (§7.4.8) when present (`0666`, so `open()`
 /// needs no capability or group).
 fn dev_allow() -> Vec<String> {
     let mut v = vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()];
@@ -318,7 +318,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     );
 
     // Re-grant one real supplementary group the operator holds via the gid_map
-    // handshake (§7.2.8); the privhelper (cap_setgid) writes the multi-gid map. With
+    // handshake (§7.4.8); the privhelper (cap_setgid) writes the multi-gid map. With
     // no extra group the kennel proves default drop-all instead.
     let granted = pick_granted_group();
     plan.supplementary_groups = granted.map(|g| vec![g]);
@@ -364,7 +364,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     std::fs::write(home_test.join("granted/file"), "OK\n").expect("write granted file");
     std::fs::write(home_test.join("secret/file"), "SECRET\n").expect("write secret file");
 
-    // SSH egress (§7.8): mint a synthetic key + ~/.ssh, exactly as
+    // SSH egress (§7.10): mint a synthetic key + ~/.ssh, exactly as
     // `Shared::register_ssh` does, and hand it to the bring-up via `Spec.ssh`.
     let synth_pub = kenneld::ssh::mint_synthetic_key(&ssh_stage, "id_github.com", "e2e synthetic")
         .expect("mint synthetic");
@@ -402,7 +402,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         socks_connect_bin: Some(socks_bin),
     };
 
-    // AF_UNIX socket facade (§7.4 / 07-9 §7.9.5): a real host listener the facade
+    // AF_UNIX socket facade (§7.6 / 07-9 §7.1.5): a real host listener the facade
     // connects on the workload's behalf. The in-kennel `kennel-afunix-shim` proxy
     // presents it at $HOME/kennel-unix.sock and brokers each connect by name through
     // binder node 0 (kenneld). A host echo thread serves "ping" -> "pong". No host
@@ -592,7 +592,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
 }
 
 /// Build the workload shell: the original view/etc/ssh/unix/dev clauses, plus a
-/// **userns-correct** group clause (§7.2.8). The legacy `id -G | wc -w == 2` does
+/// **userns-correct** group clause (§7.4.8). The legacy `id -G | wc -w == 2` does
 /// not hold on the userns path — `getgroups` returns every inherited group with the
 /// unmapped ones folded to the overflow gid (`nogroup`, 65534), not an emptied list.
 /// So we assert: the granted gid is present and resolves to its synthetic name, and
@@ -624,7 +624,7 @@ p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket
         "&& ! test -e /dev/mem "
     };
     // Identity is masked: the synthetic passwd/group name the account `kennel` with
-    // the masked home `/home/kennel` (§7.2 `$HOME = /home/<user>`); no operator
+    // the masked home `/home/kennel` (§7.4 `$HOME = /home/<user>`); no operator
     // identity leaks. (The legacy `! grep /home/` predates the /home/<user> model.)
     let id_clause = "&& grep -q '^kennel:' /etc/passwd \
          && grep -q '^kennel:' /etc/group \

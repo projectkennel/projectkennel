@@ -116,7 +116,7 @@ The per-kennel egress proxy does **not** listen on a Unix socket: it listens on 
 **TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64`
 (IPv6) address at the policy-given offset and port (offset 1, port 1080 by
 default), e.g. `127.<…>:1080`. The address is computed from the kennel's tag/ctx
-(`07-3-network.md` §7.3.2) and carried in the signed policy (`net.proxy`); kenneld
+(`07-5-network.md` §7.5.2) and carried in the signed policy (`net.proxy`); kenneld
 writes it into `proxy-<ctx>.toml` as the proxy's `listen` address. Reconfiguration
 is by respawn with a fresh config file, not an on-socket control protocol — there
 is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
@@ -124,7 +124,7 @@ is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
 same per-user tree, never a shared one.
 
 **Roadmap — the host loopback alias.** The per-kennel network-namespace redesign
-(`02-8-binder-net.md`, design `07-10-binder-netns.md`) adds a *host-side* alias:
+(`02-8-binder-net.md`, design `07-11-binder-netns.md`) adds a *host-side* alias:
 the kennel's own `/28` (IPv4) and `/64` (IPv6) are added to the host's `lo`
 interface (the privhelper's `AddLoopbackAlias`/`RemoveLoopbackAlias` ops), so an
 allowed in-kennel bind can be mirrored to the same `ip:port` host-side for host
@@ -253,11 +253,11 @@ into the kennel's view.
 |---|---|---|
 | `kennel` | `/usr/bin/kennel` | The CLI; user binary, no special permissions. |
 | `kenneld` | `/usr/libexec/kennel/kenneld` | Started by systemd-user or by the CLI in degraded mode; not on `PATH`. |
-| `kennel-init` | `/usr/libexec/kennel/kennel-init` | The kennel's PID 1 / supervisor (§7.11, `../design/07-11-kennel-init.md`); root-owned and non-writable (`0755`, owner root, no setuid/setcap). The privhelper verifies its root ownership + non-writability, opens it on the host pre-`clone`, and `fexecve`s it after `pivot_root`. Its path comes from the deployment config (`Deployment::kennel_init()` → libexec), never the wire. Not on `PATH`; located by absolute path. |
-| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin,cap_net_admin=ep` are a documented per-distribution alternative the installer does not itself apply. The privhelper is the kennel *constructor* (`../design/07-11-kennel-init.md`): it clones the namespaces as the operator (so the userns is operator-owned), writes the identity map (host root `0 0 1` + the operator line + one line per granted gid) in a single `write(2)`, builds the root-owned surfaces, mounts binderfs, `pivot_root`s, and `fexecve`s `kennel-init`. `cap_setuid` writes the `0 0 1` uid map (the kennel's real uid 0); `cap_setgid` writes the `gid_map` so a workload keeps a granted supplementary group (§7.2.8); `cap_setfcap` lets the single map `write(2)` land; `cap_sys_admin` mounts (view, `/dev`, binderfs) and `pivot_root`s; `cap_net_admin` is for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
+| `kennel-init` | `/usr/libexec/kennel/kennel-init` | The kennel's PID 1 / supervisor (§7.2, `../design/07-2-kennel-init.md`); root-owned and non-writable (`0755`, owner root, no setuid/setcap). The privhelper verifies its root ownership + non-writability, opens it on the host pre-`clone`, and `fexecve`s it after `pivot_root`. Its path comes from the deployment config (`Deployment::kennel_init()` → libexec), never the wire. Not on `PATH`; located by absolute path. |
+| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin,cap_net_admin=ep` are a documented per-distribution alternative the installer does not itself apply. The privhelper is the kennel *constructor* (`../design/07-2-kennel-init.md`): it clones the namespaces as the operator (so the userns is operator-owned), writes the identity map (host root `0 0 1` + the operator line + one line per granted gid) in a single `write(2)`, builds the root-owned surfaces, mounts binderfs, `pivot_root`s, and `fexecve`s `kennel-init`. `cap_setuid` writes the `0 0 1` uid map (the kennel's real uid 0); `cap_setgid` writes the `gid_map` so a workload keeps a granted supplementary group (§7.4.8); `cap_setfcap` lets the single map `write(2)` land; `cap_sys_admin` mounts (view, `/dev`, binderfs) and `pivot_root`s; `cap_net_admin` is for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
 | `kennel-netproxy` | `/usr/libexec/kennel/kennel-netproxy` | Spawned by kenneld; not on `PATH`. |
-| `kennel-akc` | `/usr/libexec/kennel/kennel-akc` | The SSH bastion's root-owned `AuthorizedKeysCommand` (§7.8); installed root-owned (safe-path), queries kenneld; not on `PATH`. |
-| `kennel-socks-connect` | `/usr/libexec/kennel/kennel-socks-connect` | The `ProxyCommand` bridging a kennel's `ssh` to its egress proxy (§7.8); bound into the view with a Landlock execute grant. |
+| `kennel-akc` | `/usr/libexec/kennel/kennel-akc` | The SSH bastion's root-owned `AuthorizedKeysCommand` (§7.10); installed root-owned (safe-path), queries kenneld; not on `PATH`. |
+| `kennel-socks-connect` | `/usr/libexec/kennel/kennel-socks-connect` | The `ProxyCommand` bridging a kennel's `ssh` to its egress proxy (§7.10); bound into the view with a Landlock execute grant. |
 
 Distributions relocate the libexec directory with `install.sh --prefix <dir>`, which installs the binaries there and rewrites `libexec_dir` in the deployment `system.toml` (and the `kenneld.service` `ExecStart` and the AppArmor profile path) to match — no path is baked into a binary. The default `/usr/libexec/kennel` matches the FHS recommendation.
 
@@ -344,7 +344,7 @@ Each path's mode and ownership are part of its security contract. The most-load-
 
 ## What this chapter does not cover
 
-- The set of paths the workload sees (the constructed shim view): TEMPLATE-ai-coding-strict.md and design doc §7.2.
+- The set of paths the workload sees (the constructed shim view): TEMPLATE-ai-coding-strict.md and design doc §7.4.
 - How paths flow through the policy parser (tilde expansion, canonicalisation, traversal-rejection): CODING-STANDARDS.md §10 and `kennel-policy::path`.
 - File-rotation algorithm for audit logs: `05-state-and-supervision.md`.
 - The install-time relocation of paths: `06-build-and-test.md` and `install.sh --prefix`, which rewrites `libexec_dir` in the deployment `system.toml`.

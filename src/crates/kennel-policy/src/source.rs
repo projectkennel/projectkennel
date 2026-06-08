@@ -101,7 +101,7 @@ pub struct SourcePolicy {
     /// Binder IPC section (`[binder]`) — user-defined services this kennel may
     /// register (`[[binder.provide]]`) and look up (`[[binder.consume]]`). The
     /// reserved `org.projectkennel.*` facades are enabled by their own sections,
-    /// never declared here (`07-9-ipc.md` §7.9.4).
+    /// never declared here (`07-1-binder.md` §7.1.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binder: Option<BinderSection>,
     /// D-Bus section (`[dbus]`).
@@ -271,7 +271,7 @@ pub struct ExecSection {
     /// `PATH` search roots the resolver records for the workload's environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<Vec<String>>,
-    /// The kennel's login shell (§7.7.2a): the synthetic-`passwd` `pw_shell` and
+    /// The kennel's login shell (§7.9.2a): the synthetic-`passwd` `pw_shell` and
     /// `$SHELL`. Default `/bin/sh`; must be in [`allow`](Self::allow) when an
     /// allowlist is enforced (compile error otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -340,7 +340,7 @@ pub struct FsHome {
     /// `[[fs.home.sanitise]]` — host config files copied in with secrets stripped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitise: Vec<FsHomeSanitise>,
-    /// Home-relative paths that **persist** across runs (§7.7.2a). By default the
+    /// Home-relative paths that **persist** across runs (§7.9.2a). By default the
     /// synthesised dotfiles are reconstructed read-only each spawn (no
     /// self-poisoning); a path named here is *not* reconstructed, so a writable
     /// home grant for it survives. Opt-in, per path — this list is where the
@@ -409,8 +409,8 @@ pub struct FsDev {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
     /// `[[fs.dev.passthrough]]` — specific *real host devices* exposed to the kennel
-    /// (a serial console, `/dev/ppp`, `/dev/net/tun`; `docs/design/07-2-filesystem.md`
-    /// §7.2.8). Each is loud: a documented `reason` and a threat tag are required,
+    /// (a serial console, `/dev/ppp`, `/dev/net/tun`; `docs/design/07-4-filesystem.md`
+    /// §7.4.8). Each is loud: a documented `reason` and a threat tag are required,
     /// because passing a hardware device through widens the kernel attack surface and
     /// its DAC group right reaches into the kennel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -418,7 +418,7 @@ pub struct FsDev {
 }
 
 /// One `[[fs.dev.passthrough]]` entry: a specific host device made available in the
-/// kennel's constructed `/dev` (§7.2.8).
+/// kennel's constructed `/dev` (§7.4.8).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DevPassthrough {
@@ -569,7 +569,7 @@ pub struct NetBind {
     /// Lowest bindable port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_port: Option<u16>,
-    /// Explicit allowlist of bindable ports (§7.3.7). When non-empty, the workload may
+    /// Explicit allowlist of bindable ports (§7.5.7). When non-empty, the workload may
     /// `bind()` only these ports (in addition to passing [`min_port`](Self::min_port));
     /// empty/absent means any port at or above `min_port`. At most
     /// [`MAX_BIND_PORTS`](crate::settled::MAX_BIND_PORTS) entries survive translation.
@@ -637,7 +637,7 @@ pub struct UnixAllow {
     pub threats: Option<Threats>,
 }
 
-/// `[binder]` — binder IPC policy (`docs/design/07-9-ipc.md` §7.9.4).
+/// `[binder]` — binder IPC policy (`docs/design/07-1-binder.md` §7.1.4).
 ///
 /// Covers **user-defined** services only: the reserved `org.projectkennel.*` facades
 /// (af-unix, dbus, gpg, wayland) are enabled by their own sections and are never named
@@ -661,7 +661,7 @@ pub struct BinderProvide {
     /// The service name (must not begin with the reserved `org.projectkennel.`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Peer kennels permitted to look this service up (cross-instance, §7.9.6).
+    /// Peer kennels permitted to look this service up (cross-instance, §7.1.6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accept_from: Vec<String>,
     /// Why this service is provided (required).
@@ -679,7 +679,7 @@ pub struct BinderConsume {
     /// The service name (must not begin with the reserved `org.projectkennel.`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The providing kennel (cross-instance, §7.9.6); absent for a local service.
+    /// The providing kennel (cross-instance, §7.1.6); absent for a local service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// Why this service is consumed (required).
@@ -690,11 +690,11 @@ pub struct BinderConsume {
     pub threats: Option<Threats>,
 }
 
-/// `[identity]` — the workload's identity inside the kennel (`docs/design/07-2-filesystem.md`).
+/// `[identity]` — the workload's identity inside the kennel (`docs/design/07-4-filesystem.md`).
 ///
 /// Source-only and realised by `kenneld`: the supplementary Unix groups the confined
 /// workload retains. By default a kennel carries **none** (the inherited host groups
-/// are dropped by the privileged seal, §7.2); each name listed here is kept — but only
+/// are dropped by the privileged seal, §7.4); each name listed here is kept — but only
 /// if the operator is actually a member (a group the user lacks is refused, never
 /// granted, since the privileged `setgroups` could otherwise over-grant). Groups named
 /// by `[[fs.dev.passthrough]]` are added automatically. The resolved set drives the
@@ -720,7 +720,7 @@ pub struct IdentitySection {
     pub groups: Vec<String>,
 }
 
-/// `[ssh]` — per-kennel SSH egress (source-only; `docs/design/07-8-ssh.md` §7.8).
+/// `[ssh]` — per-kennel SSH egress (source-only; `docs/design/07-10-ssh.md` §7.10).
 ///
 /// Resolved and folded like [`UnixSection`] and dropped from the settled
 /// `EffectivePolicy` (`translate.rs`): its effect is realised by `kenneld`'s SSH
@@ -731,7 +731,7 @@ pub struct IdentitySection {
 pub struct SshSection {
     /// Whether a granted key may be driven by a non-interactive (CI) kennel with no
     /// per-use touch/confirmation. Loud and threat-tagged; default `false`. When
-    /// `true`, [`threats`](Self::threats) must carry an `exposed` tag (§7.8.6).
+    /// `true`, [`threats`](Self::threats) must carry an `exposed` tag (§7.10.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_headless: Option<bool>,
     /// Threat tags for the section — required to carry an `exposed` tag whenever
@@ -739,11 +739,11 @@ pub struct SshSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
     /// `[[ssh.keys]]` — granted `(real-key, hosts)` edges. Each mints a disposable
-    /// synthetic key bound to a forced command on the bastion (§7.8.3).
+    /// synthetic key bound to a forced command on the bastion (§7.10.3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<SshKey>,
     /// `[[ssh.known_hosts]]` — host-key pins for granted destinations the operator's
-    /// own `known_hosts` lacks (§7.8.7). A granted host with no known key fails closed.
+    /// own `known_hosts` lacks (§7.10.7). A granted host with no known key fails closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_hosts: Vec<SshKnownHost>,
 }
@@ -1272,7 +1272,7 @@ mod tests {
         );
         let unix = pol.unix.expect("unix");
         // The shim grants a per-kennel gpg-agent (a non-SSH agent socket). SSH is
-        // NOT shimmed — it goes through the §7.8 bastion via the [ssh] section.
+        // NOT shimmed — it goes through the §7.10 bastion via the [ssh] section.
         let agent = unix
             .allow
             .iter()

@@ -1,7 +1,7 @@
 //! The per-kennel egress proxy: deriving its config and launching it.
 //!
 //! Every outbound connection from a kennel terminates at a kennel-local
-//! `kennel-netproxy` process (`docs/design/07-3-network.md` §7.3.2). The cgroup BPF
+//! `kennel-netproxy` process (`docs/design/07-5-network.md` §7.5.2). The cgroup BPF
 //! permits `connect()` to the proxy and nothing else; the proxy then enforces
 //! the per-destination allowlist. **These are two different rule sets from the
 //! one signed policy** — the BPF funnels, the proxy decides. This module owns the
@@ -96,7 +96,7 @@ struct NetToml {
     host_services: Vec<HostServiceToml>,
 }
 
-/// A sanctioned host-loopback service (the SSH bastion, §7.8.4) the proxy may reach
+/// A sanctioned host-loopback service (the SSH bastion, §7.10.4) the proxy may reach
 /// despite the host-loopback invariant deny (`[[net.host_services]]`).
 #[derive(Serialize)]
 struct HostServiceToml {

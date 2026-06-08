@@ -1,4 +1,4 @@
-//! Compile-time validation of the `[unix]` section (`docs/design/07-4-afunix.md` §7.4).
+//! Compile-time validation of the `[unix]` section (`docs/design/07-6-afunix.md` §7.6).
 //!
 //! # Purpose
 //!
@@ -10,20 +10,20 @@
 //! enforcement core. So the *only* place to reject a malformed or unsafe socket grant
 //! is here, at compile time, on the resolved source policy.
 //!
-//! # What this checks (§7.4)
+//! # What this checks (§7.6)
 //!
 //! - **`default` is not `"allow"` once resolved.** Default-deny is structural (the
-//!   shim only contains what is bound in, §7.4.2); a resolved `default = "allow"`
+//!   shim only contains what is bound in, §7.6.2); a resolved `default = "allow"`
 //!   would contradict that and is refused.
 //! - **`abstract` is `"deny"` or absent.** Abstract-namespace sockets are denied
-//!   unconditionally by the always-on Landlock scope (§7.4.3); `abstract = "allow"`
+//!   unconditionally by the always-on Landlock scope (§7.6.3); `abstract = "allow"`
 //!   cannot be honoured, so a policy claiming it is refused rather than silently lied
 //!   to. (A future ABI-gated escape hatch may revisit this.)
 //! - **Every `[[unix.allow]]` has `real` and `shim`.** A shim is a bind mount from a
 //!   real host path to a path in the view; both ends are required.
 //! - **A `[[unix.allow]]` that shims an SSH agent is a *footgun*, warned not forbidden.**
-//!   An exposed ssh-agent socket is a destination-blind signing oracle (§7.8.1); the
-//!   intended path for SSH egress is the `[ssh]` section and the §7.8 re-origination
+//!   An exposed ssh-agent socket is a destination-blind signing oracle (§7.10.1); the
+//!   intended path for SSH egress is the `[ssh]` section and the §7.10 re-origination
 //!   bastion. But a policy author *may* deliberately shim a real agent — the framework
 //!   warns loudly (here at compile, and again at runtime when `kenneld` realises the
 //!   shim) rather than amputating the choice. An entry named `ssh-agent` or setting
@@ -61,7 +61,7 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
         None | Some("deny") => {}
         Some("allow") => errs.push(
             "[unix] default = \"allow\" is forbidden once resolved — default-deny is structural \
-             (only what is bound into the shim is present, §7.4.2)"
+             (only what is bound into the shim is present, §7.6.2)"
                 .to_owned(),
         ),
         Some(other) => errs.push(format!("[unix] default `{other}` is not deny/allow")),
@@ -71,7 +71,7 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
         None | Some("deny") => {}
         Some("allow") => errs.push(
             "[unix] abstract = \"allow\" is not supported: abstract-namespace sockets are denied \
-             by the always-on Landlock scope (§7.4.3)"
+             by the always-on Landlock scope (§7.6.3)"
                 .to_owned(),
         ),
         Some(other) => errs.push(format!("[unix] abstract `{other}` is not deny/allow")),
@@ -94,7 +94,7 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
             ));
         }
         // Shimming a real ssh-agent socket is a footgun, not a crime: an exposed agent
-        // is a destination-blind signing oracle (§7.8.1) and the [ssh] bastion is the
+        // is a destination-blind signing oracle (§7.10.1) and the [ssh] bastion is the
         // intended path — but the framework warns loudly rather than forbidding it
         // (footguns are warned, not amputated). The warning fires again at runtime.
         let shims_ssh = a
@@ -105,8 +105,8 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
         if shims_ssh {
             warnings.push(format!(
                 "[[unix.allow]] `{who}` shims an SSH agent (name = \"ssh-agent\" / env = \"SSH_AUTH_SOCK\"): \
-                 an exposed agent is a destination-blind signing oracle (§7.8.1). This is the intended \
-                 job of the [ssh] section and the §7.8 re-origination bastion — shim a raw agent only if \
+                 an exposed agent is a destination-blind signing oracle (§7.10.1). This is the intended \
+                 job of the [ssh] section and the §7.10 re-origination bastion — shim a raw agent only if \
                  you accept that any code in the kennel can sign for any destination"
             ));
         }

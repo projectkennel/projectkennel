@@ -1,6 +1,6 @@
 //! The privhelper **factory**: build a kennel and `fexecve` `kennel-init` into it.
 //!
-//! The construction inversion (`docs/design/07-11-kennel-init.md` §7.11.1): rather than
+//! The construction inversion (`docs/design/07-2-kennel-init.md` §7.2.1): rather than
 //! `kenneld` (the operator) building the sandbox unprivileged, the privhelper — real
 //! root — does *all* privileged construction in its own post-`clone` child, then
 //! `fexecve`s the trusted root-owned `kennel-init` as the kennel's uid-0 PID 1. Doing it
@@ -107,7 +107,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         if recv_ack(ready_r.as_fd()).ok().flatten() != Some(ACK_PROCEED) {
             return; // clone_pid1 backstops a returning child with _exit(127)
         }
-        // Become the kennel's uid 0 (inside-0 = host root via the `0 0 N` map) using the
+        // Become the kennel's uid 0 (inside-0 = host root via the `0 0 1` map line) using the
         // userns capabilities the clone granted, so the view/dev/binderfs are root-owned.
         if kennel_syscall::unistd::set_gid(0).is_err()
             || kennel_syscall::unistd::set_uid(0).is_err()
@@ -138,7 +138,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let init_pid = clone_pid1(namespaces, child)?;
 
     // 4. Escalate the parent to real root ONLY to write the child's identity maps: mapping
-    //    host uid 0 into the kennel (`0 0 N`) requires the writer to own outside uid 0
+    //    host uid 0 into the kennel (the `0 0 1` line) requires the writer to own outside uid 0
     //    (`verify_root_map`, euid 0) and `CAP_SETFCAP` (since Linux 5.12). This does not
     //    change the userns owner (fixed at clone above). Then release the child and report
     //    the init host pid to kenneld.
@@ -162,7 +162,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 }
 
 /// The privileged construction the factory child runs as the kennel's uid 0, after its
-/// maps are written and before the `fexecve` (`07-11` §7.11.1): join the cgroup, build
+/// maps are written and before the `fexecve` (`07-11` §7.2.1): join the cgroup, build
 /// and `pivot_root` into the view, and hand the per-kennel binderfs device to the
 /// operator (the fix for the binderfs `EACCES`).
 ///
@@ -263,7 +263,7 @@ fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io
     Ok(())
 }
 
-/// Write the construction child's `uid_map` and `gid_map` (`07-11` §7.11.1).
+/// Write the construction child's `uid_map` and `gid_map` (`07-11` §7.2.1).
 ///
 /// Always maps host root in (`0 0 1`) so the kennel has a real uid 0, then the operator's
 /// own real uid/gid (so the workload's masked identity is a sane non-root id), then each

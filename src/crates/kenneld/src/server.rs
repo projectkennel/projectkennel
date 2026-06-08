@@ -39,7 +39,7 @@ const TTL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 /// The kernel-enforcement [`Plan`] (seal + BPF) and the [`NetPolicy`] the
 /// per-kennel egress proxy is configured from both derive from the same signed
 /// settled policy — the BPF funnels traffic to the proxy, the proxy enforces the
-/// per-destination allowlist (`docs/design/07-3-network.md` §7.3.2), two distinct rule
+/// per-destination allowlist (`docs/design/07-5-network.md` §7.5.2), two distinct rule
 /// sets from one source.
 #[derive(Debug)]
 pub struct Loaded {
@@ -55,16 +55,16 @@ pub struct Loaded {
     pub account_group: String,
     /// The network policy the egress proxy enforces.
     pub net: NetPolicy,
-    /// The per-kennel SSH runtime (§7.8): the bastion grants `kenneld` realises.
+    /// The per-kennel SSH runtime (§7.10): the bastion grants `kenneld` realises.
     /// Empty for a kennel with no `[ssh]` policy.
     pub ssh: kennel_policy::SshRuntime,
-    /// The per-kennel `AF_UNIX` socket shims (§7.4): the host sockets `kenneld` binds
+    /// The per-kennel `AF_UNIX` socket shims (§7.6): the host sockets `kenneld` binds
     /// into the kennel's view. Empty for a kennel with no `[unix]` policy.
     pub unix: kennel_policy::UnixRuntime,
-    /// The per-kennel binder IPC runtime (§7.9.4): the user-defined services the
+    /// The per-kennel binder IPC runtime (§7.1.4): the user-defined services the
     /// context manager gates against. Empty for a kennel with no `[binder]` policy.
     pub binder: kennel_policy::BinderRuntime,
-    /// The granted supplementary groups `(name, gid)` (§7.2): resolved and
+    /// The granted supplementary groups `(name, gid)` (§7.4): resolved and
     /// membership-checked by the loader, named in the synthetic `/etc/group`. The
     /// loader also sets `plan.supplementary_groups` to these gids (what the seal
     /// `setgroups` to). Empty when no group is granted (the kennel drops all).
@@ -73,16 +73,16 @@ pub struct Loaded {
     /// kenneld realises by constructing the `kennel-audit` writer. Empty (all
     /// defaults) for a kennel with no — or an all-default — `[audit]` section.
     pub audit: kennel_policy::AuditRuntime,
-    /// The synthesised environment (§7.7.2): the fixed `[env].set` vars the spawn
+    /// The synthesised environment (§7.9.2): the fixed `[env].set` vars the spawn
     /// applies after clearing the inherited environment. Empty for no `[env].set`.
     pub env: kennel_policy::EnvRuntime,
-    /// The `PATH` search roots (§7.1.6), synthesised into the workload's `$PATH`.
+    /// The `PATH` search roots (§7.3.6), synthesised into the workload's `$PATH`.
     /// Empty ⇒ `$PATH` is not set from policy.
     pub exec_path: Vec<String>,
-    /// The kennel's login shell (§7.7.2a): the synthetic-`passwd` `pw_shell` and
+    /// The kennel's login shell (§7.9.2a): the synthetic-`passwd` `pw_shell` and
     /// `$SHELL`. `/bin/sh` unless the policy set `[exec].shell`.
     pub shell: String,
-    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.7.2a
+    /// Home-relative paths the dotfile seeder must NOT reconstruct (§7.9.2a
     /// `[fs.home].persist`). Empty ⇒ every synthesised dotfile is reconstructed.
     pub home_persist: Vec<String>,
     /// The lifecycle policy (§9.7): the optional TTL and what to do at expiry. Drives
@@ -111,7 +111,7 @@ pub struct Identity {
     /// The user's real gid.
     pub gid: u32,
     /// The user's account name. Used host-side only — the SSH bastion's
-    /// `AuthorizedKeysCommandUser` (§7.8.7). It is **not** written into the kennel's
+    /// `AuthorizedKeysCommandUser` (§7.10.7). It is **not** written into the kennel's
     /// synthetic `/etc/passwd`, which masks the account name to `kennel` (`crate::etc`).
     pub username: String,
     /// The user's home directory (`<home>` substitution). Never written into the
@@ -132,16 +132,16 @@ pub struct Identity {
     /// fallback seal (no `pivot_root`).
     pub view_base: Option<PathBuf>,
     /// Base directory the per-kennel egress-proxy audit log is written under
-    /// (`<audit_base>/<kennel>/network.jsonl`, §7.3.4), or `None` to leave the
+    /// (`<audit_base>/<kennel>/network.jsonl`, §7.5.4), or `None` to leave the
     /// proxy logging to stderr. Persistent (state home, not the runtime dir).
     pub audit_base: Option<PathBuf>,
-    /// The per-user SSH bastion's configuration (§7.8), or `None` to disable SSH
+    /// The per-user SSH bastion's configuration (§7.10), or `None` to disable SSH
     /// egress for this daemon. When set, a kennel with `[ssh]` grants gets a
     /// synthetic `~/.ssh` and a route to the shared `kennel-sshd`.
     pub bastion: Option<BastionSetup>,
     /// The host path of `kennel-afunix-shim`, bound into the constructed view and
     /// launched by the seal to broker each granted `AF_UNIX` socket through the binder
-    /// facade (§7.4 / `07-9` §7.9.5). `None` disables the facade path, so `[unix]`
+    /// facade (§7.6 / `07-9` §7.1.5). `None` disables the facade path, so `[unix]`
     /// grants go unserved (no host socket is exposed by other means).
     pub afunix_shim_bin: Option<PathBuf>,
     /// The host path of the trusted root-owned `kennel-init` the privhelper factory
@@ -151,7 +151,7 @@ pub struct Identity {
     pub init_bin: Option<PathBuf>,
 }
 
-/// How `kenneld` runs the per-user SSH bastion (§7.8). The daemon holds one
+/// How `kenneld` runs the per-user SSH bastion (§7.10). The daemon holds one
 /// `kennel-sshd` for the session; this is its fixed configuration.
 #[derive(Debug, Clone)]
 pub struct BastionSetup {
@@ -172,7 +172,7 @@ pub struct BastionSetup {
     /// helper finds no key and fails closed.
     pub agent_sock: Option<PathBuf>,
     /// The root-owned `AuthorizedKeysCommand` the bastion vends keys through
-    /// (production, §7.8.7): it queries this running daemon for the live bindings,
+    /// (production, §7.10.7): it queries this running daemon for the live bindings,
     /// so no `authorized_keys` file is written. `None` falls back to a static
     /// user-owned file (the prototype/e2e source).
     pub akc: Option<crate::bastion::Akc>,
@@ -199,7 +199,7 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     privileged: P,
     loader: L,
     registry: Mutex<Registry>,
-    /// The per-user SSH bastion (§7.8), created lazily on the first kennel with an
+    /// The per-user SSH bastion (§7.10), created lazily on the first kennel with an
     /// `[ssh]` grant and shared by all of them. `None` until then, or always when
     /// no `bastion` is configured in [`Identity`].
     bastion: Mutex<Option<crate::bastion::Bastion>>,
@@ -218,7 +218,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Prepare a kennel's SSH egress (§7.8): mint a synthetic key per grant, register
+    /// Prepare a kennel's SSH egress (§7.10): mint a synthetic key per grant, register
     /// each `(synthetic-key → dest, real-key)` edge with the per-user bastion (lazily
     /// starting `kennel-sshd`), and materialise the synthetic `~/.ssh` for the kennel
     /// view rooted at `shim_root`. A no-op (empty [`SshPrep`]) when the kennel has no
@@ -305,7 +305,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         })
     }
 
-    /// Prepare a kennel's `AF_UNIX` socket shims (§7.4): resolve each granted socket's
+    /// Prepare a kennel's `AF_UNIX` socket shims (§7.6): resolve each granted socket's
     /// real host path and its in-view shim path (filling `<kennel>`/`<uid>`/`<home>`
     /// and expanding `~`/`$HOME`/`$XDG_RUNTIME_DIR`), and collect any env vars. The
     /// bring-up binds each host socket into the view at its shim path; what is not
@@ -326,7 +326,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         for sock in &unix.sockets {
             // The real host path is not needed here — the facade (kenneld's binder
             // registry) resolves the name and connects; the proxy only listens at the
-            // in-view shim path and brokers by name (`07-9` §7.9.5).
+            // in-view shim path and brokers by name (`07-9` §7.1.5).
             let shim_path = resolve_path(&sock.shim, subst, shim_root);
             if let Some(var) = &sock.env {
                 env.push((var.clone(), shim_path.to_string_lossy().into_owned()));
@@ -343,7 +343,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Drop a kennel's SSH edges from the bastion on teardown (§7.8.2): a synthetic
+    /// Drop a kennel's SSH edges from the bastion on teardown (§7.10.2): a synthetic
     /// key never outlives the kennel it was minted for. Best-effort.
     fn deregister_ssh(&self, kennel: &str) {
         let mut guard = self
@@ -427,7 +427,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Handle an `AuthorizedKeys` query (§7.8.7): the bastion's root-owned
+    /// Handle an `AuthorizedKeys` query (§7.10.7): the bastion's root-owned
     /// `AuthorizedKeysCommand` (`kennel-akc`) asks for the forced-command line(s)
     /// bound to an offered public key. The answer comes from the live [`Bastion`]
     /// edges — the verified, in-memory source of truth — never a file on disk. Empty
@@ -648,7 +648,7 @@ fn run_kennel<P, L>(
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     };
-    // Prepare SSH egress (§7.8): mint synthetic keys, register the edges with the
+    // Prepare SSH egress (§7.10): mint synthetic keys, register the edges with the
     // per-user bastion, and build the synthetic ~/.ssh for the view. The ~/.ssh is
     // rooted at the constructed-view HOME (the plan's shim root) when there is one.
     let shim_root = loaded
@@ -670,10 +670,10 @@ fn run_kennel<P, L>(
             )
         }
     };
-    // Prepare the AF_UNIX socket shims (§7.4): resolve each granted socket's host
+    // Prepare the AF_UNIX socket shims (§7.6): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
-    // Re-derive the compile-time footgun warning at spawn (§7.8.1): a policy may shim a
+    // Re-derive the compile-time footgun warning at spawn (§7.10.1): a policy may shim a
     // real ssh-agent socket via `[[unix.allow]]`, which the framework permits but warns
     // loudly about — an exposed agent is a destination-blind signing oracle. An operator
     // who ran a pre-compiled artefact never saw the `kennel compile` warning, so emit it
@@ -684,7 +684,7 @@ fn run_kennel<P, L>(
         if shims_ssh_agent {
             eprintln!(
                 "kenneld: warning: kennel `{}` shims an SSH agent (`{}`): an exposed agent is a \
-                 destination-blind signing oracle (§7.8.1) — any code in the kennel can sign for \
+                 destination-blind signing oracle (§7.10.1) — any code in the kennel can sign for \
                  any destination. The [ssh] re-origination bastion is the intended path.",
                 req.kennel, sock.name
             );
@@ -733,14 +733,14 @@ fn run_kennel<P, L>(
         uid: id.uid,
         gid: id.gid,
         // The synthetic /etc/passwd home is the in-kennel shim $HOME, not the
-        // operator's real home (which would re-leak the masked identity, §7.2.x).
+        // operator's real home (which would re-leak the masked identity, §7.4.x).
         home: shim_root.clone(),
-        // The resolved supplementary groups, named in /etc/group (§7.2). The loader
+        // The resolved supplementary groups, named in /etc/group (§7.4). The loader
         // already set plan.supplementary_groups to their gids (what the seal drops to).
         groups: loaded.groups.clone(),
-        // The login shell for the synthetic passwd's pw_shell field (§7.7.2a).
+        // The login shell for the synthetic passwd's pw_shell field (§7.9.2a).
         shell: loaded.shell.clone(),
-        // Home-relative paths exempt from dotfile reconstruction (§7.7.2a).
+        // Home-relative paths exempt from dotfile reconstruction (§7.9.2a).
         home_persist: loaded.home_persist.clone(),
     });
     // The TTL reaper inputs (§9.7), captured before `loaded` is consumed below.
@@ -784,8 +784,8 @@ fn run_kennel<P, L>(
     let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
 
     // Wire the binder context manager when the kennel declares a [binder] policy *or*
-    // any [unix] grant (the AF_UNIX facade rides binder; `07-9` §7.9.5) and audit is
-    // configured (the registry records every decision; §7.9.4). The plan's view already
+    // any [unix] grant (the AF_UNIX facade rides binder; `07-9` §7.1.5) and audit is
+    // configured (the registry records every decision; §7.1.4). The plan's view already
     // carries the binder flag in both cases, so the seal mounts binderfs regardless;
     // this provides the daemon-side manager that takes node 0 and answers the facade.
     if !loaded.binder.is_empty() || !loaded.unix.is_empty() {
@@ -815,7 +815,7 @@ fn run_kennel<P, L>(
         }
     }
 
-    // Synthesise the workload environment from policy (§7.7.2): clear the inherited
+    // Synthesise the workload environment from policy (§7.9.2): clear the inherited
     // environment and build it from scratch. `PATH` (from `[exec].path`),
     // `USER`/`LOGNAME` (the masked account), `SHELL` (`[exec].shell`), and `HOME`
     // (the kennel's shim home) are synthesised; `[env].set` is layered on top. The
@@ -970,7 +970,7 @@ fn recv_request_with_fds(conn: &UnixStream) -> io::Result<(Request, Vec<OwnedFd>
 
 /// Resolve a `[unix]` socket path: fill the per-instance placeholders
 /// (`<kennel>`/`<ctx>`/`<uid>`/`<home>`) and expand a leading `~`/`$HOME` against
-/// `base_home` and `$XDG_RUNTIME_DIR`/`$UID` against the uid (§7.4). `base_home` is
+/// `base_home` and `$XDG_RUNTIME_DIR`/`$UID` against the uid (§7.6). `base_home` is
 /// the real home for a `real` path, the in-view shim root for a `shim` path.
 fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> PathBuf {
     let uid = subst.uid.to_string();
@@ -1008,7 +1008,7 @@ fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command
 
 /// Build the workload command for an **interactive** run. Stdio is `null` here — the
 /// spawn seal allocates a controlling pty inside the kennel's devpts and `dup2`s its
-/// slave onto fds 0/1/2 (§7.7.2), so any inherited stdio would be overwritten anyway.
+/// slave onto fds 0/1/2 (§7.9.2), so any inherited stdio would be overwritten anyway.
 fn command_for_interactive(argv: &[String], cwd: &Path) -> Result<Command, String> {
     let (program, rest) = argv.split_first().ok_or_else(|| "empty argv".to_owned())?;
     let mut command = Command::new(program);

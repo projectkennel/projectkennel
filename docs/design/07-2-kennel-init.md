@@ -1,6 +1,6 @@
-# §7.11 `kennel-init` — the kennel's PID 1
+# §7.2 `kennel-init` — the kennel's PID 1
 
-## 7.11.1 Role and the construction split
+## 7.2.1 Role and the construction split
 
 A kennel is assembled by two trusted parties across one irreversible boundary:
 
@@ -55,7 +55,7 @@ exit path is the process chain, not binder, which may already be torn down).
 trusted init on the host *before* the clone and execs it by descriptor afterward. As a bonus
 the init binary never appears in the view; the workload cannot even see it.
 
-## 7.11.2 The binder bus is the control plane
+## 7.2.2 The binder bus is the control plane
 
 `kennel-init` is a **binder client on the same per-kennel binderfs instance** the privhelper
 mounted, transacting to **node 0 (kenneld)** for both its configuration pull and every
@@ -95,7 +95,7 @@ address node 0 but the sender-identity gate makes these verbs inert for anyone b
 `kennel-init`. (`kennel-init` is therefore a **third** binder participant alongside kenneld
 and `kennel-netshim`; the "binder confined to kenneld + netshim" note is updated.)
 
-## 7.11.3 The pull model: zero-argument `execve`, config over the bus
+## 7.2.3 The pull model: zero-argument `execve`, config over the bus
 
 Because the privhelper mounts binderfs and kenneld claims node 0 **before** `kennel-init`
 runs, the channel is open from PID 1's first instruction. So the privhelper `execve`s
@@ -136,7 +136,7 @@ Landlock and seccomp stay in `kennel-init` (applied to the **workload child** it
 in the privhelper or before `fexecve` — because applying them earlier would also confine
 `kennel-init` and the facades, which must remain free to fork, `waitpid`, and reach the bus.
 
-## 7.11.4 The `ILifecycle` verbs
+## 7.2.4 The `ILifecycle` verbs
 
 Node-0 verb codes (distinct high range), `kennel-init` ⇄ kenneld:
 
@@ -151,7 +151,7 @@ Node-0 verb codes (distinct high range), `kennel-init` ⇄ kenneld:
 binder **lifecycle** events (not `binder.cross`, which is cross-*kennel* relay). Payloads are
 bounded and parsed with the same fixed-discipline codec as the rest of the binder surface.
 
-## 7.11.5 Security invariants
+## 7.2.5 Security invariants
 
 - **Trapped from birth.** `kennel-init` is `execve`'d after `pivot_root`; the host root is not
   in its mount namespace, so host DAC on host files is impossible despite kuid 0.
@@ -173,7 +173,7 @@ bounded and parsed with the same fixed-discipline codec as the rest of the binde
 - **Fail-closed.** Any factory step or any pre-`execve` confinement step that fails aborts
   before the workload runs; the kennel never runs partially confined.
 
-## 7.11.6 Non-goals
+## 7.2.6 Non-goals
 
 No policy evaluation, no network or mount syscalls, no trust-store handling, no service
 registry (that is node 0 / kenneld), no config parsing beyond the flat supervision-half blob.

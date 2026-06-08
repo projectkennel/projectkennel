@@ -66,7 +66,7 @@ pub enum Op {
     /// ops — kenneld now manages cgroups unprivileged in its delegated subtree.)
     SetupEgress,
     /// Write a workload's user-namespace `gid_map` so it retains specific
-    /// supplementary groups (§7.2.8 device passthrough). An unprivileged process
+    /// supplementary groups (§7.4.8 device passthrough). An unprivileged process
     /// can map only its own primary gid, so a process that needs another granted
     /// group (e.g. `dialout`) cannot self-map it; the helper, holding `CAP_SETGID`
     /// in the parent (init) user namespace, writes the map for it. A variable-length
@@ -287,7 +287,7 @@ pub struct EgressPayload {
     pub allow_v6: Vec<V6Entry>,
     /// `deny_v6` LPM entries.
     pub deny_v6: Vec<V6Entry>,
-    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7) for the
+    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.5.7) for the
     /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. Capped
     /// at [`MAX_BIND_PORTS`] on decode (the BPF array is fixed-size).
     pub bind_allowed_ports: Vec<u16>,

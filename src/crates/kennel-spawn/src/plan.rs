@@ -85,7 +85,7 @@ fn meta_bytes(ctx: u16) -> [u8; 64] {
 }
 
 /// Stamp the `kennel_meta` `bind_port_min` field (the repurposed `_pad0` slot, offset
-/// 14, host byte order) — the lowest port a workload may `bind()` (§7.3.7). `0` leaves
+/// 14, host byte order) — the lowest port a workload may `bind()` (§7.5.7). `0` leaves
 /// no floor. Read by the `bind4`/`bind6` BPF; host order because it compares against a
 /// host-order bind port on the same machine that wrote it.
 fn stamp_bind_port_min(meta: &mut [u8; 64], min_port: u16) {
@@ -147,7 +147,7 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
 /// directories, plus `EXECUTE` only under the explicit `permissive-exec` (`**`)
 /// opt-in.
 ///
-/// Execution is deny-by-default (§7.1): a readable path is NOT implicitly
+/// Execution is deny-by-default (§7.3): a readable path is NOT implicitly
 /// executable — otherwise the allowlist would enforce nothing (anything under a
 /// read grant could run). Reads are read-only and execution is granted separately,
 /// on the allowlist plus the loader's lib dirs. Only an explicit `**` exec wildcard
@@ -258,7 +258,7 @@ pub struct ProxyEndpoint {
 /// Writable binds resolve to **persistent host locations** — the granted paths
 /// under the user's real `$HOME`. The workload's writes land on the real inode,
 /// so the work survives the kennel's teardown even though the new root that
-/// frames it is an ephemeral tmpfs (§7.2.5: the constructed view is scaffolding;
+/// frames it is an ephemeral tmpfs (§7.4.5: the constructed view is scaffolding;
 /// the bound content is not).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindMount {
@@ -270,7 +270,7 @@ pub struct BindMount {
     pub writable: bool,
 }
 
-/// The constructed-`$HOME` view (§7.2.5).
+/// The constructed-`$HOME` view (§7.4.5).
 ///
 /// What the mount seal needs to build a fresh root for the kennel and
 /// `pivot_root` into it, so non-granted path *names* do not exist in the view —
@@ -350,7 +350,7 @@ pub struct Plan {
     /// workload share kenneld's delegated `user@<uid>` subtree, of which the
     /// kennel cgroup is a descendant (`08-enforcement-architecture.md` §8.5).
     pub cgroup_join: bool,
-    /// The constructed-`$HOME` view (§7.2.5) the mount seal builds before
+    /// The constructed-`$HOME` view (§7.4.5) the mount seal builds before
     /// `pivot_root`, or `None` for the escape-hatch path that does not unshare a
     /// mount namespace.
     pub view: Option<ShimView>,
@@ -382,7 +382,7 @@ pub struct Plan {
     pub bpf_deny_v6: Vec<LpmV6Entry>,
     /// The `kennel_meta` map value (64 bytes) for `kennel_meta_map[0]`.
     pub bpf_meta: [u8; 64],
-    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7) to write into the
+    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.5.7) to write into the
     /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. The
     /// `min_port` floor itself rides `bpf_meta`; this is the explicit set.
     pub bind_allowed_ports: Vec<u16>,
@@ -393,7 +393,7 @@ pub struct Plan {
     /// Not derived from policy — kenneld populates it at bring-up with the
     /// per-kennel staged files.
     pub file_binds: Vec<(PathBuf, PathBuf)>,
-    /// The supplementary group IDs the workload retains (§7.2). `Some(gids)` makes the
+    /// The supplementary group IDs the workload retains (§7.4). `Some(gids)` makes the
     /// privileged seal `setgroups` to **exactly** these (empty ⇒ drop all inherited
     /// host groups); `None` leaves the inherited set untouched (the unprivileged /
     /// non-kenneld path). The names are resolved to GIDs and membership-checked by
@@ -404,7 +404,7 @@ pub struct Plan {
     /// opens). Each entry is `(resource, soft, hard)`; [`RLIM_INFINITY`] is unlimited.
     /// Derived from the settled `[ulimits]`; empty ⇒ nothing applied.
     pub ulimits: Vec<(Resource, u64, u64)>,
-    /// Interactive controlling-terminal hand-off (§7.7.2): the raw fd of a connected
+    /// Interactive controlling-terminal hand-off (§7.9.2): the raw fd of a connected
     /// socket over which the seal returns a freshly-allocated controlling pty's
     /// master. `Some` for an interactive `kennel run` — the seal allocates the pty
     /// from the kennel's own (post-`pivot_root`) `devpts` so `ttyname(3)` resolves it,
@@ -414,7 +414,7 @@ pub struct Plan {
     pub interactive_return_fd: Option<RawFd>,
     /// Auxiliary processes to launch inside the kennel, in the seal after Landlock and
     /// before the workload `execve`, so they inherit the confined environment and die
-    /// with the kennel's PID namespace (`07-9` §7.9.5). Used for the in-kennel proxies
+    /// with the kennel's PID namespace (`07-9` §7.1.5). Used for the in-kennel proxies
     /// (e.g. `kennel-afunix-shim`). Each binary must be bound into the view and granted
     /// Landlock execute. Not policy-derived — kenneld sets it at bring-up.
     pub aux: Vec<AuxProcess>,
@@ -430,7 +430,7 @@ pub struct AuxProcess {
     pub args: Vec<String>,
 }
 
-/// The **supervision-half** of a kennel's enforcement (`07-11-kennel-init.md` §7.11.3).
+/// The **supervision-half** of a kennel's enforcement (`07-2-kennel-init.md` §7.2.3).
 ///
 /// Everything `kennel-init` needs to spawn and confine the workload from *inside* the
 /// already-constructed, pivoted view.
@@ -466,7 +466,7 @@ pub struct Supervision {
     /// The masked operator gid every child is dropped to (`set_gid`, first in the drop).
     pub drop_gid: u32,
     /// Supplementary groups for the drop: `Some(set)` calls `setgroups` (the granted
-    /// groups, §7.2; `Some(&[])` drops all), `None` leaves the inherited set.
+    /// groups, §7.4; `Some(&[])` drops all), `None` leaves the inherited set.
     pub groups: Option<Vec<u32>>,
     /// The workload's Landlock filesystem rules (built post-pivot with `skip_missing`).
     pub landlock_fs: Vec<(PathBuf, AccessFs)>,
@@ -496,7 +496,7 @@ impl Supervision {
     }
 }
 
-/// The **construction-half** of a kennel's enforcement (`07-11-kennel-init.md` §7.11.1).
+/// The **construction-half** of a kennel's enforcement (`07-2-kennel-init.md` §7.2.1).
 ///
 /// Everything the **privhelper factory** needs to build the kennel host-side, in its own
 /// post-`clone` child, *before* `kennel-init` exists: the namespaces to enter, the
@@ -581,7 +581,7 @@ impl Plan {
         // (on the constructed `/etc`) but no bind (it is built, not bound).
         let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
         let mut binds: Vec<BindMount> = Vec::new();
-        // Deny-by-default execution (§7.1), matching fs (allow-only) and net
+        // Deny-by-default execution (§7.3), matching fs (allow-only) and net
         // (`constrained` permits nothing): the allowlist is ALWAYS enforced — a merely
         // readable file is NOT implicitly executable. Execution is granted only to the
         // allowlisted binaries plus the loader's lib dirs; an empty allowlist denies
@@ -619,7 +619,7 @@ impl Plan {
             }
         }
 
-        // The execution gate (§7.1): grant FS_EXECUTE only on the allowlisted binaries
+        // The execution gate (§7.3): grant FS_EXECUTE only on the allowlisted binaries
         // and on the exact shared libraries those binaries link — the closure resolved
         // and settled at compile time (`exec.libraries`, `kennel_policy::libresolve`),
         // EXECUTE not READ since the loader maps libc/ld.so PROT_EXEC. Reads carry no
@@ -630,7 +630,7 @@ impl Plan {
         if !permissive_exec {
             for entry in &ep.exec.allow {
                 let root = glob_root(entry);
-                // deny_writable (§7.1): a writable path must never be executable.
+                // deny_writable (§7.3): a writable path must never be executable.
                 if ep.exec.deny_writable
                     && ep
                         .fs
@@ -676,14 +676,14 @@ impl Plan {
             // Grant the device its Landlock access too, not just view visibility:
             // read/write plus `ioctl` (IOCTL_DEV). The ruleset handles IOCTL_DEV on
             // ABI >= 5, so without an explicit grant here a device `ioctl` (a tty
-            // TCGETS/TIOCGWINSZ, §7.7.2) is denied even on an allowlisted node;
+            // TCGETS/TIOCGWINSZ, §7.9.2) is denied even on an allowlisted node;
             // the grant makes the allowed devices usable while every non-granted
             // device — and the gated ioctls on them — stays denied.
             landlock_fs.push((path.clone(), dev_access()));
             dev_allow.push(path);
         }
 
-        // The constructed `$HOME` is writable by default (§7.2.3): grant Landlock
+        // The constructed `$HOME` is writable by default (§7.4.3): grant Landlock
         // write on the home root so the workload owns its home like any ordinary
         // user. Its safety is that it is a *fresh tmpfs* — ephemeral, reconstructed
         // each spawn, so nothing written here survives unless a path is opted into
@@ -715,7 +715,7 @@ impl Plan {
         // per-kennel binderfs instance in the view; grant the workload its standard
         // `binder` device (read/write/ioctl) and read of the binderfs dir + features.
         // `binder-control` is never granted — only the spawn allocates devices. The
-        // `AF_UNIX` facade rides binder too (`07-9` §7.9.5), so a kennel with `[unix]`
+        // `AF_UNIX` facade rides binder too (`07-9` §7.1.5), so a kennel with `[unix]`
         // grants but no `[binder]` policy still mounts binderfs for the proxy.
         let binder = !policy.binder.is_empty() || !policy.unix.is_empty();
         if binder {
@@ -764,7 +764,7 @@ impl Plan {
             .filter_map(|name| kennel_syscall::seccomp::syscall_number(name))
             .collect();
 
-        // Resource limits (§7.2): map each settled `[ulimits]` entry to its
+        // Resource limits (§7.4): map each settled `[ulimits]` entry to its
         // `setrlimit` resource + numeric soft/hard. The translator already validated
         // names and normalised values, so an unknown name here is a bug, surfaced as
         // an invalid-policy error rather than silently dropped.
@@ -780,7 +780,7 @@ impl Plan {
         let (bpf_allow_v4, bpf_allow_v6) = encode(&ep.net.allow)?;
         let (bpf_deny_v4, bpf_deny_v6) = encode(&ep.net.deny_invariant)?;
 
-        // The bind floor (§7.3.7): stamped into the kennel_meta `bind_port_min` slot
+        // The bind floor (§7.5.7): stamped into the kennel_meta `bind_port_min` slot
         // so the bind4/bind6 BPF can deny a privileged-port bind (T6).
         let mut bpf_meta = meta_bytes(ctx);
         stamp_bind_port_min(&mut bpf_meta, ep.net.bind_port_min);

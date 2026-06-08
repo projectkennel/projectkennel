@@ -3,14 +3,14 @@
 //!
 //! # Purpose
 //!
-//! The af-unix facade (`07-9-ipc.md` §7.9.5 / `02-7`) replaces the bind-mount socket
+//! The af-unix facade (`07-1-binder.md` §7.1.5 / `02-7`) replaces the bind-mount socket
 //! shim: instead of binding a host socket into the kennel's view, kenneld brokers the
 //! connection and returns a connected fd over binder, so the workload never holds a
 //! path into the host `AF_UNIX` namespace and every connect is mediated at call time.
 //! Applications still expect a socket at the standard path, so this proxy listens
 //! there: on each accept it asks the facade to `CONNECT` the named socket
 //! (`transact_fd`), receives the connected host fd, and splices the two. It is the
-//! `AF_UNIX` analogue of the `kennel-netshim` SOCKS facade (§7.10).
+//! `AF_UNIX` analogue of the `kennel-netshim` SOCKS facade (§7.11).
 //!
 //! # Invocation
 //!

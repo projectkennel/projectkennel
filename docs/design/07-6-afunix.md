@@ -1,8 +1,8 @@
-# §7.4 Policy surface: AF_UNIX sockets and the brokered-connect facade
+# §7.6 Policy surface: AF_UNIX sockets and the brokered-connect facade
 
 > **The model is the brokered-connect facade, not a socket path in the view.** AF_UNIX
 > access is mediated by the `org.projectkennel.IAfUnix/default` service on the kennel's
-> binder bus (the inter-namespace gateway, §7.9): the workload issues a binder transaction
+> binder bus (the inter-namespace gateway, §7.1): the workload issues a binder transaction
 > naming the socket it wants, kenneld validates the request against `[[unix.allow]]`,
 > performs the `connect()` on the host side, and returns the **connected fd** to the
 > workload via `BINDER_TYPE_FD`. No host AF_UNIX socket path is present in the kennel's
@@ -12,12 +12,12 @@
 > sockets) is **superseded** by the facade and retained here only to motivate it — the
 > facade subsumes its default-deny and per-kennel-renaming properties without ever placing
 > a path in the view. The migration direction is shim → facade; new grants are facade
-> grants. Abstract-namespace connections remain denied by Landlock scoping (§7.4.3),
+> grants. Abstract-namespace connections remain denied by Landlock scoping (§7.6.3),
 > which applies regardless of model.
 
-A kennel reaches the AF_UNIX sockets its policy grants through the `org.projectkennel.IAfUnix/default` facade: it asks for a socket by its policy name, kenneld connects on its behalf, and the workload receives a ready-to-use connected fd. Sockets the policy does not name cannot be reached; abstract-namespace connections are denied by default. Per-kennel service instances (gpg-agent, D-Bus) — see the dedicated facades in §7.5 and §7.9.5 — give strong isolation without breaking application defaults: the application asks for its service the usual way and Project Kennel brokers the right endpoint.
+A kennel reaches the AF_UNIX sockets its policy grants through the `org.projectkennel.IAfUnix/default` facade: it asks for a socket by its policy name, kenneld connects on its behalf, and the workload receives a ready-to-use connected fd. Sockets the policy does not name cannot be reached; abstract-namespace connections are denied by default. Per-kennel service instances (gpg-agent, D-Bus) — see the dedicated facades in §7.7 and §7.1.5 — give strong isolation without breaking application defaults: the application asks for its service the usual way and Project Kennel brokers the right endpoint.
 
-## 7.4.1 What we gate
+## 7.6.1 What we gate
 
 Every `connect()` to an AF_UNIX socket, whether path-based or abstract-namespace. Some examples of high-trust sockets on a typical workstation:
 
@@ -44,7 +44,7 @@ $XDG_RUNTIME_DIR/p11-kit/pkcs11          PKCS#11 relay
 
 Each is a capability the AI agent should not silently have. Half are unauthenticated: if you can connect, you have full access. Socket file permissions are the ACL.
 
-## 7.4.2 Why a chokepoint, not a path
+## 7.6.2 Why a chokepoint, not a path
 
 The naive approach — "Landlock deny on the real paths, allowlist specific files" — is fragile:
 
@@ -55,9 +55,9 @@ The naive approach — "Landlock deny on the real paths, allowlist specific file
 
 The **superseded shim model** answered this by giving the kennel a *constructed view* of `$HOME` and `$XDG_RUNTIME_DIR` where only the policy-granted sockets were present, bind-mounted from their real locations. That removed the enumeration and expansion hazards, but it still placed real socket *paths* in the view: the workload could see which sockets it had been granted, audit was only at connect time, and a path that appeared (even mistakenly) was a path that could be connected to.
 
-The **brokered-connect facade** closes that gap. Instead of placing a socket in the view, the kennel asks the `org.projectkennel.IAfUnix/default` node on its binder bus to connect on its behalf; kenneld is the policy decision point for every `connect()` and returns only the resulting fd (§7.9.5). The facade keeps the shim's two structural properties — default-deny (a socket not granted simply cannot be asked for) and per-kennel renaming (the policy name decouples from any host path) — while removing the path from the view entirely. Enforcement and audit move from the connection level to the call level, which is what the resource class needs.
+The **brokered-connect facade** closes that gap. Instead of placing a socket in the view, the kennel asks the `org.projectkennel.IAfUnix/default` node on its binder bus to connect on its behalf; kenneld is the policy decision point for every `connect()` and returns only the resulting fd (§7.1.5). The facade keeps the shim's two structural properties — default-deny (a socket not granted simply cannot be asked for) and per-kennel renaming (the policy name decouples from any host path) — while removing the path from the view entirely. Enforcement and audit move from the connection level to the call level, which is what the resource class needs.
 
-> **SSH is the exception.** ssh-agent is used below as the worked example of the *general* AF_UNIX mediation mechanism (which still serves gpg-agent, keyring, and the display/audio sockets, now through the facade), but per-kennel SSH is **not** exposed as an agent socket — an exposed agent is a destination-blind signing oracle. SSH is routed through the re-origination bastion of §7.8 instead. Read the ssh-agent worked example here as illustrating the mechanism, not as the SSH design.
+> **SSH is the exception.** ssh-agent is used below as the worked example of the *general* AF_UNIX mediation mechanism (which still serves gpg-agent, keyring, and the display/audio sockets, now through the facade), but per-kennel SSH is **not** exposed as an agent socket — an exposed agent is a destination-blind signing oracle. SSH is routed through the re-origination bastion of §7.10 instead. Read the ssh-agent worked example here as illustrating the mechanism, not as the SSH design.
 
 The picture below shows the **superseded shim view** — the constructed `$HOME`/`$XDG_RUNTIME_DIR` the old model exposed. Under the facade no such paths appear in the view at all; the diagram is retained to show what the facade replaces, not what the kennel now sees.
 
@@ -86,7 +86,7 @@ In the shim model the kennel saw a directory tree containing exactly the sockets
 2. **The construction is inspectable.** `kennel --kennel X --dry-run` enumerates the granted sockets and their policy names — the policy → reality mapping is visible without exposing any host path to the workload.
 3. **Per-kennel socket renaming is trivial.** A kennel's gpg-agent on the host can live at `~/.gnupg/kennels/<kennel>/S.gpg-agent`; the policy name decouples it from any path the application would otherwise hard-code. The application doesn't know it's running in a kennel — and under the facade it never sees a host path at all.
 
-## 7.4.3 Mechanism
+## 7.6.3 Mechanism
 
 ### Facade path (the model)
 
@@ -107,7 +107,7 @@ The workload reaches a host AF_UNIX socket by transaction, not by path:
    derive, a path into the host AF_UNIX namespace.
 ```
 
-There is no per-grant bind mount, no socket path placed in the view, and no constructed `$HOME`/`$XDG_RUNTIME_DIR` socket overlay. Audit is at the call (`connect()`), not inferred from the view. The transaction decoder for the `IAfUnix` request is bounded and fuzzed alongside the other binder facades (§7.9).
+There is no per-grant bind mount, no socket path placed in the view, and no constructed `$HOME`/`$XDG_RUNTIME_DIR` socket overlay. Audit is at the call (`connect()`), not inferred from the view. The transaction decoder for the `IAfUnix` request is bounded and fuzzed alongside the other binder facades (§7.1).
 
 Abstract-namespace denial below is **model-independent** — it is a Landlock property of the workload's domain and applies whether or not any path is in the view.
 
@@ -126,11 +126,11 @@ Linux's AF_UNIX has two namespaces: filesystem-path sockets (covered by Landlock
 
 The fallback is the documented path below ABI 6 only; on a supported kernel the native scoping supersedes it entirely.
 
-## 7.4.4 Policy primitives
+## 7.6.4 Policy primitives
 
 A non-empty `[unix]` section is what causes kenneld to register the
 `org.projectkennel.IAfUnix/default` facade node on the kennel's binder instance; an empty or
-absent section means the node is not present and `getService` for it is refused (§7.9.4).
+absent section means the node is not present and `getService` for it is refused (§7.1.4).
 Each `[[unix.allow]]` entry names a host socket the facade will connect to on the workload's
 behalf — the workload requests it by `name`, never by host path.
 
@@ -145,7 +145,7 @@ abstract = "deny"               # "deny" | "allow"
 #
 # NB: SSH is NOT granted here. ssh-agent over the facade is a destination-blind
 # signing oracle; per-kennel SSH goes through the re-origination bastion and the
-# [ssh] section instead (§7.8). [[unix.allow]] is for the other agent-shaped
+# [ssh] section instead (§7.10). [[unix.allow]] is for the other agent-shaped
 # services (gpg-agent, keyring) and display/audio sockets.
 
 [[unix.allow]]
@@ -193,7 +193,7 @@ note = "Required for systemctl --user; opens significant attack surface"
 
 The `name` field is the handle the workload requests and the one that appears in audit logs and `--dry-run` output; `path` is the host socket kenneld connects to and is never disclosed to the workload.
 
-## 7.4.5 The dry-run output
+## 7.6.5 The dry-run output
 
 For an `ai-coding` kennel:
 
@@ -224,33 +224,33 @@ Environment overrides:
 
 The user reads this and reasons about whether the policy is what they meant — the name → host-socket mapping is visible to the operator inspecting from the host side, while the workload sees only the names it may request. The `--dry-run`/`inspect` flag is a standard tool Project Kennel ships with, alongside `kennel validate <file>`.
 
-## 7.4.6 State placement
+## 7.6.6 State placement
 
 The facade places **no socket overlay** in the view, so the shim's "where do the bind-mounted sockets live" question is moot — there is no `/run/kennel/<ctx>/` socket overlay and no per-grant bind mount over `$HOME`/`$XDG_RUNTIME_DIR`. (In the superseded shim model the overlay lived in `/run/kennel/<ctx>/`, ephemeral, bind-mounted over the real paths; that machinery is gone with the model.)
 
 What remains is the kennel's *persistent state* — the `~/.cache/`, `~/.config/` it legitimately needs to write — which lives in `~/.local/share/kennel/<ctx>/state/`, surfaced into the kennel's view as the appropriate subdirectories. It is clearly separated from real `~` and inspectable from the host side. Socket access is brokered by the facade; only durable state needs a home on disk.
 
-## 7.4.7 Per-kennel services
+## 7.6.7 Per-kennel services
 
 The facade makes per-kennel *service instances* viable for agent-shaped services. Project Kennel owns launching them: policy names "kennel X gets service Y"; Project Kennel ensures Y is running before X starts, brokers X's connection to Y's socket through the facade (the workload asks for the service by name and receives a connected fd), and tears Y down when no kennels reference it. The application's configuration does not change — it asks for its service the usual way and reaches the right instance.
 
-- **gpg-agent per kennel**: `~/.gnupg/kennels/<ctx>/` with its own keyring, the agent socket reached through the facade. (gpg-agent is a blind signing oracle in the same way ssh-agent is; the `org.projectkennel.IGpgAgent/default` facade (§7.9.5) narrows it to key grip + purpose, closing that residual — a strictly stronger position than a raw socket grant.)
+- **gpg-agent per kennel**: `~/.gnupg/kennels/<ctx>/` with its own keyring, the agent socket reached through the facade. (gpg-agent is a blind signing oracle in the same way ssh-agent is; the `org.projectkennel.IGpgAgent/default` facade (§7.1.5) narrows it to key grip + purpose, closing that residual — a strictly stronger position than a raw socket grant.)
 - **Keyring per kennel**: an isolated `gnome-keyring-daemon` instance.
-- **D-Bus per kennel**: mediated by the `org.projectkennel.IDBus/default` facade, not raw — see §7.5.
+- **D-Bus per kennel**: mediated by the `org.projectkennel.IDBus/default` facade, not raw — see §7.7.
 
-**SSH is the exception.** SSH is *not* exposed as a per-kennel agent socket — an exposed agent is a destination-blind signing oracle. Per-kennel SSH goes through the re-origination bastion of §7.8, reached over the egress proxy rather than the AF_UNIX facade.
+**SSH is the exception.** SSH is *not* exposed as a per-kennel agent socket — an exposed agent is a destination-blind signing oracle. Per-kennel SSH goes through the re-origination bastion of §7.10, reached over the egress proxy rather than the AF_UNIX facade.
 
-## 7.4.8 Residuals
+## 7.6.8 Residuals
 
-**X11.** `/tmp/.X11-unix/X0` cannot be safely brokered to — the X protocol has no confinement vocabulary, so even a facade in front of it would forward full screen/input/clipboard authority — see §7.6. Granting it is denying Project Kennel's claim of confinement.
+**X11.** `/tmp/.X11-unix/X0` cannot be safely brokered to — the X protocol has no confinement vocabulary, so even a facade in front of it would forward full screen/input/clipboard authority — see §7.8. Granting it is denying Project Kennel's claim of confinement.
 
-**Wayland clipboard.** Even on Wayland, a kennel's window can read and write the user's clipboard through standard Wayland protocols. The `org.projectkennel.IWayland/default` facade (§7.9.5) gates `wl_data_device` and screencopy structurally; absent that facade, compositor-side mitigations exist but support varies. Documented as a known residual until the facade lands.
+**Wayland clipboard.** Even on Wayland, a kennel's window can read and write the user's clipboard through standard Wayland protocols. The `org.projectkennel.IWayland/default` facade (§7.1.5) gates `wl_data_device` and screencopy structurally; absent that facade, compositor-side mitigations exist but support varies. Documented as a known residual until the facade lands.
 
 **Abstract namespace and library defaults.** Some libraries default to abstract sockets without obvious configuration. The facade does not broker the abstract namespace; such a `connect()` hits the always-on Landlock scope. Audit log should make this loud: "kennel tried connect() to abstract socket '@gnome-shell-mutter', denied" tells the user what to investigate.
 
 **Cleanup on crash.** With the facade there are no per-grant bind mounts to reap; the connected fds are owned by the workload and close with it, and the facade node disappears with the kennel's binder instance. Framework state (which kennels running, which agents to keep alive) in `/run/` is cleared on reboot; periodic reconciliation handles orphans.
 
-## 7.4.9 Test plan additions
+## 7.6.9 Test plan additions
 
 The invariants the model must hold, each a regression test in `tests/unix/` (and, for the
 facade transactions, `tests/facades/`):
@@ -266,4 +266,4 @@ facade transactions, `tests/facades/`):
 9. Context attempts to connect to abstract ` /var/run/docker.sock`; expect EPERM from the Landlock abstract-unix scope.
 10. Kennel's `--dry-run`/`inspect --unix` output enumerates the granted name → host-socket mappings; verify against policy.
 
-The full test corpus is approximately 25 cases. (Per-kennel SSH has its own tests in §7.8.9.) The `IAfUnix` request decoder is fuzzed alongside the other binder facades (§7.9.11).
+The full test corpus is approximately 25 cases. (Per-kennel SSH has its own tests in §7.10.9.) The `IAfUnix` request decoder is fuzzed alongside the other binder facades (§7.1.11).

@@ -181,7 +181,7 @@ impl Connection {
 
     /// Send a synchronous transaction expecting **data and, optionally, a file
     /// descriptor** in one reply (the `kennel-init` `GET_SANDBOX_PLAN` pull: the
-    /// supervision-half bytes plus the controlling-pty fd — `07-11` §7.11.3). Sets
+    /// supervision-half bytes plus the controlling-pty fd — `07-11` §7.2.3). Sets
     /// `TF_ACCEPT_FDS` and returns the data bytes with the fd, or `None` if the reply
     /// carried no fd object.
     ///

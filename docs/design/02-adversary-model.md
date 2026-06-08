@@ -80,7 +80,7 @@ Within Project Kennel's claimed strength:
 - Cannot read its own policy file — the policy is not present in the kennel's constructed view of the filesystem.
 - Cannot enumerate denied resources by directory listing — denied resources are absent from the constructed view, not merely denied on access.
 - Cannot influence Project Kennel's own daemon processes beyond making them deny things they would have denied anyway. (See §2.5.)
-- Is never uid 0, even within its own user namespace. The kennel does map a real uid 0 (host root, mapped `0 0 1`), but that identity belongs solely to the trusted `kennel-init` supervisor (§7.11), not to the workload. The workload is forked by `kennel-init` and dropped to the operator's non-zero uid — gid, supplementary groups, then uid — before its `execve`, after which `no_new_privs` and seccomp make the drop irreversible. (See §2.8.)
+- Is never uid 0, even within its own user namespace. The kennel does map a real uid 0 (host root, mapped `0 0 1`), but that identity belongs solely to the trusted `kennel-init` supervisor (§7.2), not to the workload. The workload is forked by `kennel-init` and dropped to the operator's non-zero uid — gid, supplementary groups, then uid — before its `execve`, after which `no_new_privs` and seccomp make the drop irreversible. (See §2.8.)
 
 Each property is demonstrated via the test corpus (§8 and §11). A claim without a regression test is provisional and marked as such.
 
@@ -126,7 +126,7 @@ Constructing a kennel requires a real uid 0 inside the kennel's user namespace. 
 
 A uid 0 inside the namespace is a privilege-escalation hazard *if and only if* code the adversary controls can run as that uid while host-owned resources are still reachable. Project Kennel's construction model is built to deny that condition structurally, and the resulting invariant is the security crux of the whole design:
 
-**No operator-supplied or workload code ever runs as userns-0.** The only process that holds the mapped uid 0 is `kennel-init` (§7.11), a small, root-owned, trusted-by-provenance supervisor. It is `execve`'d by the privhelper *after* `pivot_root` has detached the host root from the mount namespace, so from its very first instruction the host filesystem is physically absent — host DAC on host-owned files is impossible despite the kernel-level uid 0. The dangerous window of "a uid-0-mapped binary while the host filesystem is still visible" never exists.
+**No operator-supplied or workload code ever runs as userns-0.** The only process that holds the mapped uid 0 is `kennel-init` (§7.2), a small, root-owned, trusted-by-provenance supervisor. It is `execve`'d by the privhelper *after* `pivot_root` has detached the host root from the mount namespace, so from its very first instruction the host filesystem is physically absent — host DAC on host-owned files is impossible despite the kernel-level uid 0. The dangerous window of "a uid-0-mapped binary while the host filesystem is still visible" never exists.
 
 The escalation-window analysis, stated as the adversary would probe it:
 

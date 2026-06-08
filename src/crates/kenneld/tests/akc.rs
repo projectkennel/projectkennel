@@ -1,4 +1,4 @@
-//! The `kennel-akc` helper speaks the control protocol (§7.8.7): given an offered
+//! The `kennel-akc` helper speaks the control protocol (§7.10.7): given an offered
 //! public key it asks the daemon over the control socket and prints the
 //! forced-command line(s) sshd authorises with. Root-free — a hand-rolled control
 //! server stands in for the running `kenneld`, exercising the real installed binary

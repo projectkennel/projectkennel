@@ -78,15 +78,15 @@ fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, St
     let view_base = Some(socket::runtime_dir().join("root"));
     // The per-kennel network audit log persists across runs, so it lives under
     // the state home (not the volatile runtime dir): ~/.local/state/kennel/<kennel>/
-    // network.jsonl (§7.3.4), honouring $XDG_STATE_HOME when set.
+    // network.jsonl (§7.5.4), honouring $XDG_STATE_HOME when set.
     let state_home =
         std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), PathBuf::from);
     let audit_base = Some(state_home.join("kennel"));
-    // The per-user SSH bastion (§7.8): one managed kennel-sshd for the session, on a
+    // The per-user SSH bastion (§7.10): one managed kennel-sshd for the session, on a
     // host-loopback port derived from the user's tag (so two users' daemons do not
     // clash on 127.0.0.1). Its forced commands sign with the user's own agent.
     //
-    // Keys are vended through the root-owned AuthorizedKeysCommand (§7.8.7): it queries
+    // Keys are vended through the root-owned AuthorizedKeysCommand (§7.10.7): it queries
     // this running daemon for the live forced-command bindings, so the bindings never
     // touch a file the user could rewrite. The helper is installed root-owned (OpenSSH's
     // safe-path check); it runs as the bastion user so it can reach our control socket.

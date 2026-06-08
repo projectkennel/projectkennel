@@ -1,8 +1,8 @@
-# §7.10 Network namespace isolation
+# §7.11 Network namespace isolation
 
-## 7.10.1 Motivation
+## 7.11.1 Motivation
 
-The network design in §7.3 documents an accepted residual in T1.6: a kennel shares the
+The network design in §7.5 documents an accepted residual in T1.6: a kennel shares the
 host network namespace, so despite the cgroup BPF egress gate blocking outbound
 connections, the workload can read the host's full network state — interface table,
 routing table, listening socket table, ARP/neighbour cache — via both `/proc/net/*` and
@@ -15,11 +15,11 @@ Restricting `AF_NETLINK` via seccomp breaks `getaddrinfo`'s `AI_ADDRCONFIG` path
 by many runtimes. The complete fix is a per-kennel network namespace, which makes
 `/proc/net` show only the kennel's own stack and netlink answer only about the kennel's
 own interfaces. §8.1 of `08-as-built-notes.md` defers this as a re-architecture of the
-§7.3 egress/loopback model. This chapter is that re-architecture.
+§7.5 egress/loopback model. This chapter is that re-architecture.
 
-## 7.10.2 Design constraints
+## 7.11.2 Design constraints
 
-Three constraints are non-negotiable coming out of §7.3:
+Three constraints are non-negotiable coming out of §7.5:
 
 **The SOCKS5 contract is preserved.** The workload finds a SOCKS5 listener at
 `$KENNEL_SOCKS_PROXY` and connects to it. This is the interface every tool — `curl`,
@@ -37,9 +37,9 @@ and a kernel network stack per kennel. This is the architecture every container 
 uses and it is correct — but it belongs below the userspace confinement layer Kennel
 operates at. The design avoids it.
 
-## 7.10.3 Network modes
+## 7.11.3 Network modes
 
-§7.3 defined three modes (`none`, `constrained`, `open`). This chapter introduces
+§7.5 defined three modes (`none`, `constrained`, `open`). This chapter introduces
 a four-mode taxonomy that cleanly separates the isolation axis (net-ns or not) from
 the enforcement axis (proxy allowlist, BPF, or both). The old `open` mode is retired
 and replaced by `unconstrained` and `host`.
@@ -63,10 +63,10 @@ network stack and can read its full state. The compiler auto-sets
 BPF is the primary enforcement primitive; the net-ns boundary does not exist. The proxy
 remains mandatory for audit continuity.
 
-## 7.10.4 The loopback alias model
+## 7.11.4 The loopback alias model
 
 The kennel's assigned address space (a `/28` from `127.0.0.0/8` for IPv4 and a `/64`
-from the project's ULA `/48` for IPv6, allocated at spawn by §7.3) already exists on
+from the project's ULA `/48` for IPv6, allocated at spawn by §7.5) already exists on
 both sides: kenneld knows it, `kennel-netproxy` listens on it, the workload's
 `$KENNEL_SOCKS_PROXY` points into it.
 
@@ -95,10 +95,10 @@ the existing `lo` interface. This is the only new privileged step these modes ad
 `mode = host` kennels use no loopback alias — they share the host network stack
 directly and require no address-space mirroring.
 
-## 7.10.5 The crossing point: `org.projectkennel.INet/default`
+## 7.11.5 The crossing point: `org.projectkennel.INet/default`
 
 With the kennel in its own net-ns and no veth, the workload has no network path to
-`kennel-netproxy`. The crossing point is the kennel's binderfs instance (§7.9), via
+`kennel-netproxy`. The crossing point is the kennel's binderfs instance (§7.1), via
 the reserved service `org.projectkennel.INet/default`.
 
 `org.projectkennel.INet/default` is a kenneld-owned node subject to the standard
@@ -106,7 +106,7 @@ reserved-namespace rules: only kenneld may register it; `getService` always reso
 locally.
 
 **Outbound** crosses via the node's `CONNECT` (1) transaction: the workload (via the shim —
-§7.10.6) requests a connection to a named host and port; kenneld validates mode and policy
+§7.11.6) requests a connection to a named host and port; kenneld validates mode and policy
 and relays to its host-side `kennel-netproxy` delegate, which applies the `[net.bpf]` CIDR
 rules, resolves the name, vets against the `[net.proxy]` allowlist and denylist, dials, and
 returns the connected fd. The shim splices between the workload and the fd.
@@ -131,7 +131,7 @@ fd. The delegates are not binder participants — the fd-passing mechanics are i
 The full transaction wire protocol and fd-passing conventions are in
 [`02-8-binder-net.md`](../architecture/02-8-binder-net.md).
 
-## 7.10.6 `kennel-netshim`: the SOCKS5 facade inside the kennel
+## 7.11.6 `kennel-netshim`: the SOCKS5 facade inside the kennel
 
 The workload must not know the network architecture changed. `kennel-netshim` is a
 small process the in-kennel reaper forks into the kennel's namespaces and view, a sibling
@@ -154,7 +154,7 @@ layer: SOCKS5 wire format in, binder transactions out, fds back, splice. It is a
 crate (`kennel-netshim`) and, as an untrusted-input parser (SOCKS5 from the workload),
 carries a fuzz target under `fuzz/` per CODING-STANDARDS §10.6.
 
-## 7.10.7 Per-mode behaviour
+## 7.11.7 Per-mode behaviour
 
 | Mode | Net-ns | `INet` node | Shim | Proxy | BPF |
 |---|---|---|---|---|---|
@@ -163,7 +163,7 @@ carries a fuzz target under `fuzz/` per CODING-STANDARDS §10.6.
 | `unconstrained` | `CLONE_NEWNET` + alias | present | launched | launched, invariant denylist | socket shaping + limits |
 | `host` | host net-ns | present | launched | launched, mandatory | **primary enforcement** |
 
-## 7.10.8 Spawn sequence
+## 7.11.8 Spawn sequence
 
 The full implementation detail is in `02-8-binder-net.md` §Spawn sequencing; the
 design-level summary:
@@ -176,7 +176,7 @@ inside it. For `constrained` and `unconstrained` modes, the privhelper's
 attaches to its `kenneld`↔delegate socketpair (it is a delegate, not a binder participant).
 The in-kennel reaper forks `kennel-netshim` inside the view last, once `INet` is registered.
 
-## 7.10.9 Network flow
+## 7.11.9 Network flow
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -222,7 +222,7 @@ The in-kennel reaper forks `kennel-netshim` inside the view last, once `INet` is
                     audit: net.egress
 ```
 
-## 7.10.10 Residuals
+## 7.11.10 Residuals
 
 **Host-net-ns fd in the shim.** The fd the shim receives from a `CONNECT` or accepted
 `BIND` connection is a socket in the host net-ns, held by a process in the kennel

@@ -1,13 +1,13 @@
 //! The per-kennel SSH re-origination bastion (`kennel-sshd`): config and launch.
 //!
 //! Per-kennel SSH leaves the kennel only through a managed instance of stock
-//! OpenSSH `sshd` (`docs/design/07-8-ssh.md` §7.8). It holds no keys; it is a
+//! OpenSSH `sshd` (`docs/design/07-10-ssh.md` §7.10). It holds no keys; it is a
 //! forced-command router. `kenneld` owns its lifecycle and key state, exactly as it
 //! owns the egress proxy (`proxy.rs`): this module writes the hardened `sshd_config`
 //! and the per-key forced-command `authorized_keys` lines from the resolved `[ssh]`
 //! policy, and launches the daemon as a per-user child.
 //!
-//! # The lockdown (§7.8.6)
+//! # The lockdown (§7.10.6)
 //!
 //! The generated config denies everything but a publickey login that runs the forced
 //! command with a pty: no password/kbd-interactive, no TCP/X11/agent forwarding, no
@@ -17,7 +17,7 @@
 //! the forced command (`kennel-ssh-reorigin`) can confirm which synthetic key
 //! authenticated.
 //!
-//! # `AuthorizedKeys` source (§7.8.7)
+//! # `AuthorizedKeys` source (§7.10.7)
 //!
 //! Production vends keys through an `AuthorizedKeysCommand` that queries `kenneld` —
 //! and that helper must be **root-owned** (OpenSSH's safe-path check rejects an AKC
@@ -69,7 +69,7 @@ pub struct SshdParams<'a> {
     /// The pid file path (under a safe-owned runtime dir).
     pub pid_file: &'a Path,
     /// The agent socket the forced command signs the *outbound* connection with —
-    /// the user's host-side agent holding the granted real keys (§7.8.7). Emitted as
+    /// the user's host-side agent holding the granted real keys (§7.10.7). Emitted as
     /// a server-side `SetEnv SSH_AUTH_SOCK=…` so `kennel-ssh-reorigin` inherits it
     /// (sshd otherwise hands a session no agent unless forwarding, which is denied).
     /// `None` leaves it unset (the helper then finds no key and fails closed).
@@ -78,14 +78,14 @@ pub struct SshdParams<'a> {
     pub auth: AuthSource,
 }
 
-/// Render the bastion's hardened `sshd_config` (§7.8.6).
+/// Render the bastion's hardened `sshd_config` (§7.10.6).
 #[must_use]
 pub fn sshd_config(p: &SshdParams<'_>) -> String {
     use std::fmt::Write as _;
     let mut s = String::from(
         "# kennel-sshd — per-kennel SSH re-origination bastion (generated, read-only).\n\
          # Denies everything but a publickey login running the forced command with a\n\
-         # pty; SFTP/scp/forwarding are out of scope by construction (07-8-ssh.md §7.8.6).\n",
+         # pty; SFTP/scp/forwarding are out of scope by construction (07-10-ssh.md §7.10.6).\n",
     );
     let _ = write!(
         s,
@@ -132,7 +132,7 @@ pub fn sshd_config(p: &SshdParams<'_>) -> String {
             );
         }
     }
-    // Lock the session down to the forced command + a pty (§7.8.6).
+    // Lock the session down to the forced command + a pty (§7.10.6).
     s.push_str(
         "\nAllowTcpForwarding no\n\
          X11Forwarding no\n\
@@ -147,7 +147,7 @@ pub fn sshd_config(p: &SshdParams<'_>) -> String {
 }
 
 /// Build one `authorized_keys` line binding `synthetic_pubkey` to a forced command
-/// that re-originates to `dest` with the real key `real_fp` (§7.8.3).
+/// that re-originates to `dest` with the real key `real_fp` (§7.10.3).
 ///
 /// `restrict,pty` is the per-key option set: it denies forwarding/X11/agent/user-rc
 /// while keeping a tty. The destination and real-key fingerprint are baked in, so the

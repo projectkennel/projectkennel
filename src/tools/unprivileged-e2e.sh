@@ -6,7 +6,7 @@
 # user-namespace spawn path: an unprivileged identity-mapped userns constructs the
 # sandbox, and the file-caps privhelper adds the loopback addresses, attaches the
 # egress BPF, and writes the workload's gid_map to re-grant a supplementary group
-# (08-enforcement-architecture.md §8.2/§8.3, 07-2-filesystem.md §7.2.8).
+# (08-enforcement-architecture.md §8.2/§8.3, 07-4-filesystem.md §7.4.8).
 #
 # This script performs the one-time host setup the test requires and then runs it,
 # matching the project's "a skip is not a proof" rule: where a prerequisite cannot
@@ -81,7 +81,7 @@ echo "== file capabilities on the privhelper (sudo, one-time) =="
 # The factory additions (07-11): cap_setuid maps the operator's id, and — since Linux
 # 5.12 — cap_setfcap is ALSO required to map host uid 0 into a new user namespace
 # (capabilities(7): "this capability is also needed to map user ID 0 in a new user
-# namespace"). Without cap_setfcap the kennel's `0 0 N` uid_map write is EPERM even for
+# namespace"). Without cap_setfcap the kennel's `0 0 1` uid_map write is EPERM even for
 # an escalated-root writer.
 sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep "$PRIVHELPER"
 getcap "$PRIVHELPER"
@@ -115,7 +115,7 @@ echo "== AppArmor userns profile over the test binary (sudo) =="
 #  - the PRIVHELPER (factory, 07-11): it calls clone(CLONE_NEWUSER). Without a userns
 #    grant the kernel transitions the userns it creates to the restricted
 #    `unprivileged_userns` profile, which FORBIDS mapping host uid 0 into it (the
-#    `0 0 N` factory map then fails EPERM). Granting the privhelper userns makes the
+#    `0 0 1` factory map then fails EPERM). Granting the privhelper userns makes the
 #    userns it creates "privileged", so host root can be mapped in.
 cat > "$AA_PROFILE_FILE" <<EOF
 abi <abi/4.0>,

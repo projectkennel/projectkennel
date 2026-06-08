@@ -164,12 +164,12 @@ impl PolicyLoader for TrustStoreLoader {
         let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
             .map_err(|e| e.to_string())?;
         // Resolve the policy's supplementary groups to GIDs and membership-check them
-        // (§7.2): kenneld runs as the operator, so a group the operator is not in is
+        // (§7.4): kenneld runs as the operator, so a group the operator is not in is
         // refused — the privileged seal could otherwise over-grant. The kennel always
         // drops to exactly this set (empty ⇒ no supplementary groups at all).
         let groups = resolve_groups(&substituted.identity.groups)?;
         plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
-        // Re-derive the exec.deny footgun warnings at load (§7.1.4): a deny that falls
+        // Re-derive the exec.deny footgun warnings at load (§7.3.4): a deny that falls
         // inside an allowed directory, or that is set without any allow, cannot be
         // enforced by the allow-only Landlock LSM. The `kennel compile` step already
         // warned, but an operator running a pre-compiled artefact never saw it — emit
@@ -207,7 +207,7 @@ impl PolicyLoader for TrustStoreLoader {
 }
 
 /// Resolve the policy's supplementary group names to `(name, gid)` pairs, refusing
-/// any the operator is not a member of (§7.2).
+/// any the operator is not a member of (§7.4).
 ///
 /// kenneld runs as the operator, so its own group set is the operator's. A name that
 /// does not resolve, or resolves to a group the operator does not hold, is a

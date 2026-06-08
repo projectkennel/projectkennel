@@ -121,7 +121,7 @@ pub struct NameRule {
 }
 
 /// Where the per-kennel egress proxy listens, resolved from the source policy's
-/// `proxy_listen_*_address = "offset:port"` (`docs/design/07-3-network.md` §7.3.4).
+/// `proxy_listen_*_address = "offset:port"` (`docs/design/07-5-network.md` §7.5.4).
 ///
 /// `offset` is the host offset within the kennel's own subnet (the `/28` in IPv4,
 /// the `/64` in IPv6); offset 1 is the kennel's primary address, where the proxy
@@ -153,15 +153,15 @@ impl Default for ProxyListen {
 pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
-    /// Lowest port the workload may `bind()` (`[net.bind].min_port`, §7.3.7). A bind
+    /// Lowest port the workload may `bind()` (`[net.bind].min_port`, §7.5.7). A bind
     /// below this is denied by the cgroup `bind4`/`bind6` BPF — the privileged-port
-    /// protection (T6, §7.3.9 item 17). `0` means no minimum is enforced. Carried into
+    /// protection (T6, §7.5.9 item 17). `0` means no minimum is enforced. Carried into
     /// the `kennel_meta` BPF map (the repurposed `_pad0` slot); omitted from the
     /// canonical form when `0`, so a policy without it signs unchanged. Declared before
     /// the table fields so the canonical TOML emits this scalar before them.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub bind_port_min: u16,
-    /// Explicit bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7).
+    /// Explicit bind-port allowlist (`[net.bind].allowed_ports`, §7.5.7).
     ///
     /// When non-empty, the workload may `bind()` only these ports (and still no lower
     /// than [`bind_port_min`](Self::bind_port_min)); empty means any port at or above
@@ -194,14 +194,14 @@ const fn is_zero_u16(v: &u16) -> bool {
     *v == 0
 }
 
-/// The maximum number of `[net.bind].allowed_ports` entries (§7.3.7).
+/// The maximum number of `[net.bind].allowed_ports` entries (§7.5.7).
 ///
 /// The `bind_subnet` BPF map carries a fixed-size array of this width, so a policy
 /// listing more is a translation error (the author learns the limit rather than having
 /// ports silently dropped).
 pub const MAX_BIND_PORTS: usize = 8;
 
-/// Private-`/tmp` tmpfs parameters (§7.2.6).
+/// Private-`/tmp` tmpfs parameters (§7.4.6).
 ///
 /// The settled policy carries the resolved numeric size; the source policy's
 /// human form (`size = "512M"`) is converted to mebibytes at compile time so the
@@ -220,7 +220,7 @@ pub struct TmpPolicy {
     pub mode: String,
 }
 
-/// Device-file policy (§7.2.8): which `/dev` nodes the kennel's constructed
+/// Device-file policy (§7.4.8): which `/dev` nodes the kennel's constructed
 /// `/dev` exposes.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -241,7 +241,7 @@ pub struct FsPolicy {
     pub read: Vec<String>,
     /// Paths granted write access.
     pub write: Vec<String>,
-    /// Home-relative paths that persist across runs (§7.7.2a). The synthesised
+    /// Home-relative paths that persist across runs (§7.9.2a). The synthesised
     /// dotfiles are reconstructed read-only each spawn except for the paths named
     /// here, which the dotfile seeder skips. Empty ⇒ everything is reconstructed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -278,7 +278,7 @@ pub struct ExecPolicy {
     /// enforced beyond the deny flags". Exact-match entries named in
     /// [`deny`](Self::deny) are already subtracted here at translation.
     pub allow: Vec<String>,
-    /// Denylisted absolute paths or globs (§7.1.4), composed up the template chain
+    /// Denylisted absolute paths or globs (§7.3.4), composed up the template chain
     /// and carried for audit and runtime warning. Landlock is allow-only and cannot
     /// subtract a single path from a granted directory, so a deny is *enforced* only
     /// where it removes an exact `allow` entry (done at translation) or where the
@@ -288,12 +288,12 @@ pub struct ExecPolicy {
     /// empty, so an existing policy with no `exec.deny` signs unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    /// `PATH` search roots, synthesised into the workload's `$PATH` (§7.1.6).
+    /// `PATH` search roots, synthesised into the workload's `$PATH` (§7.3.6).
     /// Empty ⇒ `$PATH` is not set from policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<String>,
     /// The kennel's login shell (synthetic-`passwd` `pw_shell` and `$SHELL`,
-    /// §7.7.2a). Defaults to `/bin/sh`; must be in [`allow`](Self::allow) when an
+    /// §7.9.2a). Defaults to `/bin/sh`; must be in [`allow`](Self::allow) when an
     /// allowlist is enforced.
     #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
     pub shell: String,
@@ -385,7 +385,7 @@ fn is_default_shell(s: &str) -> bool {
 pub struct ProcPolicy {
     /// Procfs visibility (must be `self`).
     pub visibility: ProcVisibility,
-    /// Mount `/proc` with `hidepid=2` (§7.2.7): even within the PID namespace,
+    /// Mount `/proc` with `hidepid=2` (§7.4.7): even within the PID namespace,
     /// `/proc/<pid>` is accessible only to the process owner. Belt-and-braces
     /// atop the namespace, which is the strong isolation.
     pub hidepid: bool,
@@ -446,7 +446,7 @@ pub struct EffectivePolicy {
     pub lifecycle: LifecyclePolicy,
 }
 
-/// The per-kennel SSH runtime: the bastion grants `kenneld` realises (§7.8).
+/// The per-kennel SSH runtime: the bastion grants `kenneld` realises (§7.10).
 ///
 /// Unlike the enforcement rule sets in [`EffectivePolicy`], this is a *service*
 /// input — `kenneld` mints a synthetic key per grant, runs the bastion, and builds
@@ -458,13 +458,13 @@ pub struct EffectivePolicy {
 #[serde(deny_unknown_fields)]
 pub struct SshRuntime {
     /// Whether a non-interactive kennel may drive a granted key with no per-use
-    /// touch (loud, threat-tagged at compile time; §7.8.6).
+    /// touch (loud, threat-tagged at compile time; §7.10.6).
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_headless: bool,
     /// The granted `(destination, real-key)` edges — one bastion forced command each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<SshGrant>,
-    /// Host-key pins for granted destinations the operator's store lacks (§7.8.7).
+    /// Host-key pins for granted destinations the operator's store lacks (§7.10.7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_hosts: Vec<SshKnownHostPin>,
 }
@@ -497,14 +497,14 @@ pub struct SshKnownHostPin {
     pub key: String,
 }
 
-/// The per-kennel `AF_UNIX` socket shims `kenneld` realises (`docs/design/07-4-afunix.md` §7.4).
+/// The per-kennel `AF_UNIX` socket shims `kenneld` realises (`docs/design/07-6-afunix.md` §7.6).
 ///
 /// Like [`SshRuntime`], a *service* input rather than enforcement: `kenneld` binds
 /// each granted host socket into the kennel's constructed view at its shim path and
 /// sets any named env var, so the application finds its socket at the standard path.
 /// What is *not* bound in is structurally absent (default-deny). Abstract-namespace
 /// connections are denied unconditionally by the always-on Landlock scope (ABI 6+,
-/// §7.4.3), so they are not represented here. Carried in the signed settled policy
+/// §7.6.3), so they are not represented here. Carried in the signed settled policy
 /// (so it is signed and per-instance-substituted) but kept out of the enforcement
 /// core; omitted from the canonical form when empty, so a no-`[unix]` policy signs
 /// exactly as before.
@@ -542,7 +542,7 @@ pub struct UnixSocket {
     pub env: Option<String>,
 }
 
-/// The per-kennel binder IPC runtime (`07-9-ipc.md` §7.9.4): the user-defined
+/// The per-kennel binder IPC runtime (`07-1-binder.md` §7.1.4): the user-defined
 /// services this kennel may register and look up.
 ///
 /// Like [`UnixRuntime`], a *service* input `kenneld`'s context manager realises, not
@@ -592,7 +592,7 @@ pub struct BinderConsumeRuntime {
     pub from: Option<String>,
 }
 
-/// The workload's identity inside the kennel (`docs/design/07-2-filesystem.md`): the
+/// The workload's identity inside the kennel (`docs/design/07-4-filesystem.md`): the
 /// supplementary Unix groups it retains.
 ///
 /// Like [`SshRuntime`]/[`UnixRuntime`], a *service* input `kenneld` realises, not part
@@ -856,7 +856,7 @@ impl AuditRuntime {
     }
 }
 
-/// The synthesised environment (`07-7-other.md` §7.7.2).
+/// The synthesised environment (`07-9-other.md` §7.9.2).
 ///
 /// The spawn clears the inherited environment and builds the workload's from
 /// scratch; `vars` are the fixed `KEY=value` pairs from `[env].set` (and, in
@@ -907,7 +907,7 @@ pub const ULIMIT_RESOURCES: &[&str] = &[
     "stack",
 ];
 
-/// The per-kennel resource limits (`[ulimits]`, §7.2).
+/// The per-kennel resource limits (`[ulimits]`, §7.4).
 ///
 /// A *service* input applied via `setrlimit(2)` in the seal, not a kernel-enforcement
 /// object. Each value is the normalised `soft` (when `soft == hard`) or `"soft hard"`
@@ -947,22 +947,22 @@ pub struct SettledPolicy {
     pub effective_policy: EffectivePolicy,
     /// Provenance of the resolution.
     pub provenance: Provenance,
-    /// The per-kennel SSH runtime (§7.8). Declared last: it is a table, and TOML
+    /// The per-kennel SSH runtime (§7.10). Declared last: it is a table, and TOML
     /// requires the scalar/array fields above it to serialise first. Omitted from
     /// the canonical form when empty, so a no-SSH policy signs exactly as before.
     #[serde(default, skip_serializing_if = "SshRuntime::is_empty")]
     pub ssh: SshRuntime,
-    /// The per-kennel `AF_UNIX` socket shims (§7.4). A table like [`ssh`](Self::ssh) and
+    /// The per-kennel `AF_UNIX` socket shims (§7.6). A table like [`ssh`](Self::ssh) and
     /// declared after it; omitted from the canonical form when empty, so a no-`[unix]`
     /// policy signs exactly as before.
     #[serde(default, skip_serializing_if = "UnixRuntime::is_empty")]
     pub unix: UnixRuntime,
-    /// The workload's in-kennel identity (§7.2): the supplementary groups it retains.
+    /// The workload's in-kennel identity (§7.4): the supplementary groups it retains.
     /// A table like [`ssh`](Self::ssh)/[`unix`](Self::unix); omitted from the canonical
     /// form when empty, so a policy that grants no group signs exactly as before.
     #[serde(default, skip_serializing_if = "IdentityRuntime::is_empty")]
     pub identity: IdentityRuntime,
-    /// The per-kennel binder IPC runtime (`07-9-ipc.md` §7.9.4). A table like
+    /// The per-kennel binder IPC runtime (`07-1-binder.md` §7.1.4). A table like
     /// [`identity`](Self::identity); omitted from the canonical form when empty, so a
     /// no-`[binder]` policy signs exactly as before.
     #[serde(default, skip_serializing_if = "BinderRuntime::is_empty")]
@@ -972,12 +972,12 @@ pub struct SettledPolicy {
     /// policy with no (or all-default) `[audit]` signs exactly as before.
     #[serde(default, skip_serializing_if = "AuditRuntime::is_empty")]
     pub audit: AuditRuntime,
-    /// The synthesised environment (§7.7.2). A table like [`audit`](Self::audit);
+    /// The synthesised environment (§7.9.2). A table like [`audit`](Self::audit);
     /// omitted from the canonical form when empty, so a policy with no `[env].set`
     /// signs exactly as before.
     #[serde(default, skip_serializing_if = "EnvRuntime::is_empty")]
     pub env: EnvRuntime,
-    /// The per-kennel resource limits (§7.2). A table like [`env`](Self::env) and
+    /// The per-kennel resource limits (§7.4). A table like [`env`](Self::env) and
     /// declared after it; omitted from the canonical form when empty, so a policy with
     /// no `[ulimits]` signs exactly as before.
     #[serde(default, skip_serializing_if = "UlimitsRuntime::is_empty")]

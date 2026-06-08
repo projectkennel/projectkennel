@@ -179,7 +179,7 @@ pub fn is_bpffs(path: &Path) -> io::Result<bool> {
 
 /// Mount a fresh `proc` at `target` (`nosuid,nodev`), with `hidepid=2` when
 /// `hidepid` so `/proc/<pid>` is owner-only even within the PID namespace
-/// (§7.2.7, belt-and-braces atop the namespace).
+/// (§7.4.7, belt-and-braces atop the namespace).
 ///
 /// # Errors
 ///

@@ -1,21 +1,21 @@
-# §7.5 Policy surface: D-Bus (proxied)
+# §7.7 Policy surface: D-Bus (proxied)
 
 > **Direction: the `xdg-dbus-proxy` shim is superseded by a binder facade.** The model
 > below — per-method allowlisting between the kennel and the real bus — is the settled D-Bus
 > policy surface and is unchanged. What changes is the *mechanism*: instead of an external
 > `xdg-dbus-proxy` daemon whose socket is shimmed into the kennel view, D-Bus mediation
-> terminates in an `org.projectkennel.IDBus/default` facade on the binder gateway (§7.9.5),
+> terminates in an `org.projectkennel.IDBus/default` facade on the binder gateway (§7.1.5),
 > where kenneld applies the same method allowlist per binder transaction before forwarding to
 > the real session bus. This routes D-Bus through the kennel's single auditable inter-namespace
 > chokepoint with no external dependency, no visible socket artefact in the view, and call-level
-> audit. The structured `[dbus]` policy in §7.5.4 carries over verbatim — it becomes the facade's
+> audit. The structured `[dbus]` policy in §7.7.4 carries over verbatim — it becomes the facade's
 > rule source. The facade is a **deferred** build; the proxy model in this chapter remains the
-> reference description of the policy surface until it lands. See §7.9.5 (facades) and §7.9.8
+> reference description of the policy surface until it lands. See §7.1.5 (facades) and §7.1.8
 > (relationship to existing sections).
 
 D-Bus is proxied, not granted directly. If a kennel needs D-Bus access, Project Kennel launches an `xdg-dbus-proxy` instance per kennel that enforces a per-method allowlist between the kennel and the real bus. The proxy's socket is shimmed into the kennel as the standard bus path. Without explicit policy enabling it, no bus socket exists in the kennel's view.
 
-## 7.5.1 Direct D-Bus access
+## 7.7.1 Direct D-Bus access
 
 A bare socket grant for `$XDG_RUNTIME_DIR/bus` gives the kennel every D-Bus service the user's session offers. The default session bus has dozens of services connected: notification daemon, network manager, gnome-shell or kwin, file manager, screen lock, login manager, systemd user, secret service, evolution, tracker, packagekit, polkit agent. Each exposes methods that can:
 
@@ -30,7 +30,7 @@ A bare socket grant for `$XDG_RUNTIME_DIR/bus` gives the kennel every D-Bus serv
 
 A kennel with `$XDG_RUNTIME_DIR/bus` access has essentially the same capability as the unconfined user session, by virtue of being able to ask the user's session to do things on its behalf. D-Bus is the largest single capability surface on a typical Linux desktop and direct grants are categorically wrong for kennels.
 
-## 7.5.2 The proxy: xdg-dbus-proxy
+## 7.7.2 The proxy: xdg-dbus-proxy
 
 `xdg-dbus-proxy` is the right tool, already exists, audited, and used at scale by Flatpak. It is a small daemon that:
 
@@ -51,9 +51,9 @@ Rules are bus-name + path + interface + member granularity:
 
 Default deny. Anything not listed is rejected with `org.freedesktop.DBus.Error.AccessDenied`. Project Kennel configures the proxy from structured policy and reads the proxy's audit log.
 
-## 7.5.3 How it slots in
+## 7.7.3 How it slots in
 
-Same architectural shape as the SOCKS5 proxy (§7.3). Per kennel:
+Same architectural shape as the SOCKS5 proxy (§7.5). Per kennel:
 
 ```
 Host view:
@@ -61,7 +61,7 @@ Host view:
        ← xdg-dbus-proxy listens here
          proxy connects to user's real $DBUS_SESSION_BUS_ADDRESS
 
-Context view (via §7.4 shim):
+Context view (via §7.6 shim):
   $XDG_RUNTIME_DIR/bus
        ← bind-mount from dbus-session.sock
          DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
@@ -78,7 +78,7 @@ System bus gets a second proxy instance:
 
 Shimmed to `/run/dbus/system_bus_socket` inside the kennel.
 
-## 7.5.4 Policy primitives
+## 7.7.4 Policy primitives
 
 ```toml
 [dbus]
@@ -120,7 +120,7 @@ level = "summary"                 # "off" | "summary" | "full"
 
 The user writes structured policy. Project Kennel emits the appropriate `--talk=`, `--call=`, `--broadcast=`, `--own=`, `--see=`, `--filter` flags to `xdg-dbus-proxy`. The user does not write proxy command lines directly.
 
-## 7.5.5 The portal pattern
+## 7.7.5 The portal pattern
 
 `org.freedesktop.portal.*` is worth special attention. Flatpak's portal system is the *intended* way for sandboxed applications to access user resources (files, screenshots, location, camera). Portals run in the user's session, present user-mediated dialogs, and return results to the sandboxed caller.
 
@@ -146,7 +146,7 @@ own = []
 
 This is approximately the Flatpak default and a reasonable starting point.
 
-## 7.5.6 Notifications: a worked case
+## 7.7.6 Notifications: a worked case
 
 The kennel wants to show desktop notifications (build complete, test failed, AI agent finished). This is one of the simpler legitimate D-Bus grants:
 
@@ -169,7 +169,7 @@ The capability granted: the kennel can pop notifications. The capabilities not g
 
 Worth noting: the notification daemon itself may execute actions on user clicks ("open file", "reply"). The kennel's notification can specify actions; the user's click triggers them in the user's session, not the kennel's. This is a path by which the kennel could trick the user into running something — for instance, a notification action labelled "Click to fix" that actually opens a malicious URL. Templates should consider this carefully; it is not a flaw in the proxy design, it is the inherent property of a user-facing notification capability.
 
-## 7.5.7 Template defaults
+## 7.7.7 Template defaults
 
 Most confined templates: `dbus.session.enabled = false`. The kennel has no bus socket; tools that try to connect fail at the shim layer (no socket file there).
 
@@ -181,7 +181,7 @@ Templates that need a full desktop integration story (rare for kennels): documen
 
 No templates should grant `org.freedesktop.systemd1` or `org.gnome.SessionManager` to kennels. These are categorically too powerful.
 
-## 7.5.8 Operational concerns
+## 7.7.8 Operational concerns
 
 **The proxy is a daemon.** One per kennel (plus a system-bus proxy if enabled). On modern hardware these are inexpensive (~5 MB resident each) but they accumulate if kennel lifecycles are not managed. Framework supervises lifecycle.
 
@@ -191,7 +191,7 @@ No templates should grant `org.freedesktop.systemd1` or `org.gnome.SessionManage
 
 **Activation services.** Some D-Bus services are activated on demand (`Type=Activation` units). The proxy must allow `org.freedesktop.DBus.StartServiceByName` for services the kennel is allowed to talk to. Project Kennel handles this automatically when emitting proxy config.
 
-## 7.5.9 Failure modes
+## 7.7.9 Failure modes
 
 | Situation | Behaviour |
 |---|---|
@@ -201,7 +201,7 @@ No templates should grant `org.freedesktop.systemd1` or `org.gnome.SessionManage
 | Context tries to own a name not in `own` list | `RequestName` returns DBUS_REQUEST_NAME_REPLY_NOT_ALLOWED. |
 | `dbus.session.enabled = false` but client tries to connect | Connection to bus socket fails (no socket in shim). Standard "cannot connect to bus" error. |
 
-## 7.5.10 Test plan
+## 7.7.10 Test plan
 
 For each invariant, a regression test in `tests/dbus/`:
 

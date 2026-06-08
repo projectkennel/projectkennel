@@ -120,7 +120,7 @@ impl From<PolicyError> for SpawnError {
 
 /// Replace the deferred placeholders in `s`. `user`/`group` are the policy's own
 /// masked identity (`[identity].user`/`.group`, default `kennel`), not runtime
-/// context — they are grammar-validated names (§7.2), so safe to splice into paths.
+/// context — they are grammar-validated names (§7.4), so safe to splice into paths.
 fn substitute_str(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
     let [g0, g1, g2, g3, g4] = subst.ula_gid;
     let gid = format!("{g0:02x}{g1:02x}{g2:02x}{g3:02x}{g4:02x}");
@@ -183,7 +183,7 @@ pub fn substitute(
         *shell = substitute_str(shell, subst, &user, &group);
         reject_leftover("exec.shell", shell)?;
     }
-    // The synthesised environment (§7.7.2): substitute placeholders in the values
+    // The synthesised environment (§7.9.2): substitute placeholders in the values
     // (e.g. a HOME under `/home/<user>/…`); keys are fixed var names.
     for value in p.env.vars.values_mut() {
         *value = substitute_str(value, subst, &user, &group);
@@ -270,7 +270,7 @@ const HANDSHAKE_TICK_MS: i32 = 100;
 type GidMapper<'a> = Box<dyn FnOnce(u32) -> io::Result<()> + Send + 'a>;
 
 /// Spawn `command` confined by `plan`, re-granting a supplementary group via a
-/// privileged `gid_map` handshake (§7.2.8).
+/// privileged `gid_map` handshake (§7.4.8).
 ///
 /// Identical to [`spawn`] except for the unprivileged userns path: instead of
 /// writing the single-line (drop-all) `gid_map` itself, the spawn child
@@ -363,7 +363,7 @@ fn spawn_inner(
         kennel_syscall::namespace::unshare(Namespaces::PID).map_err(SpawnError::Syscall)?;
     }
 
-    // The deferred-gid handshake (§7.2.8) engages only on the userns path and only
+    // The deferred-gid handshake (§7.4.8) engages only on the userns path and only
     // when a mapper is supplied (a granted supplementary group): the spawn child
     // defers its `gid_map` for the privhelper to write. Two close-on-exec pipes
     // carry the exchange — the child sends "ready, pid=P", then blocks for the
@@ -420,7 +420,7 @@ fn spawn_inner(
         }
         if does_mount {
             // Detach mount propagation from the host first (`MS_PRIVATE` — stronger
-            // than the `MS_SLAVE` of §7.2.10: no propagation in either direction).
+            // than the `MS_SLAVE` of §7.4.10: no propagation in either direction).
             step(
                 "make-root-private",
                 kennel_syscall::mount::make_root_private(),
@@ -449,7 +449,7 @@ fn spawn_inner(
                 step("apply-file-binds", apply_file_binds(&file_binds))?;
             }
         }
-        // Interactive controlling terminal (§7.7.2), AFTER the view is built so
+        // Interactive controlling terminal (§7.9.2), AFTER the view is built so
         // `/dev/ptmx` resolves to the kennel's own freshly-mounted devpts: allocate a
         // pty there, make its slave this process's controlling tty + stdio, and hand
         // the master back to the CLI to proxy. Because the slave is a node in the
@@ -459,7 +459,7 @@ fn spawn_inner(
         if let Some(fd) = interactive_return_fd {
             step("setup-view-pty", kennel_syscall::pty::setup_view_pty(fd))?;
         }
-        // Drop the inherited host supplementary groups (§7.2). Two regimes:
+        // Drop the inherited host supplementary groups (§7.4). Two regimes:
         //
         // * Privileged path (no USER ns): an explicit `setgroups` to the
         //   granted set — `None` leaves the set untouched, `Some([])` drops all.
@@ -500,7 +500,7 @@ fn spawn_inner(
             )?,
         };
         step("apply-landlock", rs.restrict_current_process())?;
-        // Resource limits last (§7.2): after the Landlock ruleset is built, so
+        // Resource limits last (§7.4): after the Landlock ruleset is built, so
         // lowering `RLIMIT_NOFILE` cannot starve the per-path rule opens, and just
         // before `execve` so the workload inherits exactly the policy's limits.
         for (resource, soft, hard) in &ulimits {
@@ -512,7 +512,7 @@ fn spawn_inner(
         // In-kennel auxiliary processes (the af-unix proxy and future facades), launched
         // last so they inherit the fully-sealed environment (view, Landlock, seccomp,
         // ulimits) and, being forked from PID 1, die with the kennel's PID namespace
-        // (`07-9` §7.9.5). Each `fork`+`execv` of a view-internal binary; a launch
+        // (`07-9` §7.1.5). Each `fork`+`execv` of a view-internal binary; a launch
         // failure is logged but does not abort the workload (the grant simply goes
         // unserved, as a refused connect — fail-closed, not fail-to-spawn).
         for proc in &aux {
@@ -540,7 +540,7 @@ fn spawn_inner(
             // read live — this is a fork of kenneld, which runs as the operator.
             let uid = kennel_syscall::unistd::real_uid();
             if let (Some(rw), Some(pr)) = (seal_ready_w.as_ref(), seal_proceed_r.as_ref()) {
-                // Granted-supplementary-group path (§7.2.8): establish the userns with
+                // Granted-supplementary-group path (§7.4.8): establish the userns with
                 // the `gid_map` deferred, signal our pid to the servicer, and block
                 // until it has written the multi-gid map (via the privhelper, which
                 // holds `CAP_SETGID` in the init userns) and acked proceed. An abort
@@ -724,7 +724,7 @@ fn combine_spawn_and_servicer(
 /// after `pivot_root`; the fallback path builds in the parent without it.
 ///
 /// Public so `kennel-init` builds the workload's ruleset post-pivot from its
-/// [`Supervision`] half with the identical logic (`docs/design/07-11` §7.11.2); it is
+/// [`Supervision`] half with the identical logic (`docs/design/07-11` §7.2.2); it is
 /// `unsafe`-free, so sharing it keeps `kennel-init` `#![forbid(unsafe_code)]`.
 ///
 /// # Errors
@@ -751,7 +751,7 @@ pub fn build_ruleset(
 }
 
 /// Construct the kennel's filesystem view in a fresh tmpfs root and `pivot_root`
-/// into it (§7.2.5), so non-granted path *names* are absent from the view, not
+/// into it (§7.4.5), so non-granted path *names* are absent from the view, not
 /// merely access-denied.
 ///
 /// Runs in the forked child's mount-namespace seal, after [`make_root_private`].
@@ -766,7 +766,7 @@ pub fn build_ruleset(
 /// [`make_root_private`]: kennel_syscall::mount::make_root_private
 ///
 /// Public so the privhelper factory builds the view in its construction child with the
-/// identical logic (`07-11` §7.11.1); it is `unsafe`-free (mounts go through
+/// identical logic (`07-11` §7.2.1); it is `unsafe`-free (mounts go through
 /// `kennel_syscall::mount`), so sharing it keeps the factory `#![forbid(unsafe_code)]`.
 ///
 /// # Errors
@@ -1356,7 +1356,7 @@ mod tests {
         // Landlock with the exec allowlist active (exec.allow is non-empty):
         // a read path is read-only and NOT implicitly executable; the
         // allowlisted binary and the loader's lib dirs carry EXECUTE; writes
-        // carry write access (§7.1).
+        // carry write access (§7.3).
         assert!(
             plan.landlock_fs
                 .iter()
@@ -1492,7 +1492,7 @@ mod tests {
 
     #[test]
     fn exec_allow_under_writable_path_is_rejected_when_deny_writable() {
-        // deny_writable (§7.1): refuse to make a writable path executable.
+        // deny_writable (§7.3): refuse to make a writable path executable.
         let mut p = policy_with_placeholders(); // deny_writable = true
         p.effective_policy
             .exec
@@ -2044,7 +2044,7 @@ mod tests {
         );
     }
 
-    /// **A `[ulimits]` cap reaches the workload (§7.2.12).** A userns spawn whose plan
+    /// **A `[ulimits]` cap reaches the workload (§7.4.12).** A userns spawn whose plan
     /// carries `RLIMIT_NOFILE = 64` runs `sh -c 'ulimit -n'`; the workload reports the
     /// limit the seal applied (after Landlock, before `execve`). Skips with the precise
     /// cause where the host forbids the userns, exactly like the confined-view proof.
@@ -2145,7 +2145,7 @@ mod tests {
         );
     }
 
-    /// **The `gid_map` handshake, proven unprivileged (§7.2.8).** A userns spawn goes
+    /// **The `gid_map` handshake, proven unprivileged (§7.4.8).** A userns spawn goes
     /// through [`spawn_with_gid_map`]: the child defers its `gid_map`, signals its
     /// pid, and blocks; the servicer thread runs the mapper, which writes the child's
     /// `gid_map`, then acks; only then does the workload exec. The mapper here writes
@@ -2458,7 +2458,7 @@ mod root_tests {
         if skip_if_unprivileged("pivot_root_hides_non_granted_names") {
             return;
         }
-        // The constructed view (§7.2.5) must make a non-granted sibling's NAME
+        // The constructed view (§7.4.5) must make a non-granted sibling's NAME
         // absent (ENOENT), not merely access-denied, while a granted path stays
         // readable through the shim. Staged outside /tmp (the seal tmpfs-mounts
         // /tmp). namespaces = MOUNT only, so the parent harness is undisturbed.

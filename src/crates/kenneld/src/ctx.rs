@@ -1,7 +1,7 @@
 //! Per-user context (`ctx`) allocation.
 //!
 //! Each running kennel gets a small `ctx` number that selects its loopback
-//! subnet (`07-3-network.md`) and names its cgroup. The allocator is per-user
+//! subnet (`07-5-network.md`) and names its cgroup. The allocator is per-user
 //! and in-memory: a kenneld instance owns the allocations for the kennels it is
 //! running, and they vanish when the user session (and kenneld) ends.
 //!

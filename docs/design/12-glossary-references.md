@@ -28,17 +28,17 @@
 
 **Delta.** A change relative to a template. User policies are expressed as deltas; Project Kennel's diff tool surfaces the threat impact of each delta. See §5.3.
 
-**DNS rebinding.** An attack where a name initially resolves to an allowed IP, then re-resolves to a forbidden IP, exploiting cache TTL behaviour. Project Kennel's `on_resolve_change` policy mitigates. See §7.3.5.
+**DNS rebinding.** An attack where a name initially resolves to an allowed IP, then re-resolves to a forbidden IP, exploiting cache TTL behaviour. Project Kennel's `on_resolve_change` policy mitigates. See §7.5.5.
 
 **Framework invariant.** A property Project Kennel enforces unconditionally; no template or user policy can change. See §5.5.
 
-**INADDR_ANY rewriting.** Project Kennel's cgroup BPF mechanism for rewriting `bind(0.0.0.0)` to `bind(<kennel's private loopback>)`, transparently to the application. See §7.3.7.
+**INADDR_ANY rewriting.** Project Kennel's cgroup BPF mechanism for rewriting `bind(0.0.0.0)` to `bind(<kennel's private loopback>)`, transparently to the application. See §7.5.7.
 
 **IPv4-mapped IPv6 address.** An IPv6 address of form `::ffff:a.b.c.d`, representing an IPv4 address. Treated by the kernel as IPv4 for some purposes. Project Kennel forces `IPV6_V6ONLY=1` to disambiguate.
 
 **Landlock.** A Linux LSM available since kernel 5.13, providing unprivileged sandboxing of filesystem access. Network port restrictions since 6.7. Project Kennel's primary filesystem mechanism.
 
-**Loopback subnet, per-kennel.** The IPv4 `/28` laid out `127 | tag(12) | ctx(8) | host(4)` and the IPv6 `/64` laid out `0xfd | gid(40) | ctx(16) | host(64)` assigned to a kennel for its private loopback traffic. `tag`/`gid` are the user's per-user values (from `/etc/kennel/subkennel`); `ctx` is the kennel's context. See §7.3.6.
+**Loopback subnet, per-kennel.** The IPv4 `/28` laid out `127 | tag(12) | ctx(8) | host(4)` and the IPv6 `/64` laid out `0xfd | gid(40) | ctx(16) | host(64)` assigned to a kennel for its private loopback traffic. `tag`/`gid` are the user's per-user values (from `/etc/kennel/subkennel`); `ctx` is the kennel's context. See §7.5.6.
 
 **LSM.** Linux Security Module. The kernel framework that AppArmor, SELinux, Landlock, BPF LSM, and others plug into.
 
@@ -46,7 +46,7 @@
 
 **Mount namespace.** A Linux namespace isolating the set of mounts visible to processes. Project Kennel uses mount namespaces to construct per-kennel filesystem views.
 
-**no_new_privs.** A `prctl()` flag preventing a process from gaining privileges via setuid binaries or LSM transitions. Set unconditionally in every kennel. See §7.1.8.
+**no_new_privs.** A `prctl()` flag preventing a process from gaining privileges via setuid binaries or LSM transitions. Set unconditionally in every kennel. See §7.3.8.
 
 **PID namespace.** A Linux namespace isolating process IDs. Processes in the namespace see only descendants; processes outside see all (subject to other constraints). Project Kennel uses PID namespaces for process isolation between kennels.
 
@@ -54,7 +54,7 @@
 
 **Portal (XDG portal).** A pattern, originated by Flatpak, where a sandboxed application accesses user resources via user-mediated dialogs hosted in the user's session. Method calls go via D-Bus; Project Kennel allows the portal family by default in templates that need user-mediated grants.
 
-**SOCKS5 proxy.** A protocol for proxying TCP connections (and optionally UDP). Project Kennel's per-kennel SOCKS5 proxy is where outbound network policy is enforced. See §7.3.
+**SOCKS5 proxy.** A protocol for proxying TCP connections (and optionally UDP). Project Kennel's per-kennel SOCKS5 proxy is where outbound network policy is enforced. See §7.5.
 
 **seccomp.** A Linux mechanism for filtering system calls per-process. Used here as defence-in-depth and for a few specific mechanisms (TIOCSTI on older kernels, AF_UNIX abstract-namespace deny as fallback).
 
@@ -72,11 +72,11 @@
 
 **Wayland.** A display server protocol replacing X11. Per-client capability model is stricter than X11's; Project Kennel supports Xwayland-isolated as the X11 path on Wayland hosts.
 
-**xdg-dbus-proxy.** A small daemon for filtering D-Bus traffic at the method-call level. Used here as the per-kennel D-Bus broker. See §7.5.
+**xdg-dbus-proxy.** A small daemon for filtering D-Bus traffic at the method-call level. Used here as the per-kennel D-Bus broker. See §7.7.
 
-**Xephyr.** A nested X server (X-server-inside-X-server) used for the X11-isolated path on X11 hosts. See §7.6.4.
+**Xephyr.** A nested X server (X-server-inside-X-server) used for the X11-isolated path on X11 hosts. See §7.8.4.
 
-**Xwayland.** An X server running as a Wayland client. Used for the X11-isolated path on Wayland hosts. See §7.6.3.
+**Xwayland.** An X server running as a Wayland client. Used for the X11-isolated path on Wayland hosts. See §7.8.3.
 
 **Yama.** A Linux LSM providing coarse-grained `ptrace` restrictions. Less expressive than AppArmor's per-profile ptrace rules but easier to deploy system-wide.
 
@@ -125,7 +125,7 @@
 
 ## 12.3 Versioning of this document
 
-The document is versioned with Project Kennel. Each chapter file's first line carries an implicit version tag via the document's overall version (in `00-frontmatter.md`). Section numbers (§7.3.5 etc) are stable within a published version; major-version revisions may restructure.
+The document is versioned with Project Kennel. Each chapter file's first line carries an implicit version tag via the document's overall version (in `00-frontmatter.md`). Section numbers (§7.5.5 etc) are stable within a published version; major-version revisions may restructure.
 
 T-numbers are stable within a published version of `THREATS.md`. Pre-release iteration may renumber as the catalogue is refined. Stability commitments apply at v1.0; until then, threat IDs are subject to change.
 

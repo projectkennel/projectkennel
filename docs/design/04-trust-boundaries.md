@@ -83,14 +83,14 @@ The same architectural pattern appears in every resource class. Project Kennel p
 
 | Resource class | Real host state | Constructed view inside kennel |
 |---|---|---|
-| Filesystem (§7.2) | Full `$HOME`, `/usr`, `/etc`, `/tmp`, `/mnt`, etc. | Shim `$HOME` containing only granted paths, bind-mounted from real locations; private `/tmp` tmpfs |
-| Network (§7.3) | Real loopback `127.0.0.1` and `::1`; full routing | Per-kennel IPv4 `/28` (`127 \| tag(12) \| ctx(8) \| host(4)`) and IPv6 `/64` (`0xfd \| gid(40) \| ctx(16) \| host(64)`); outbound only via proxy |
-| AF_UNIX sockets (§7.4) | All sockets in `$HOME` and `$XDG_RUNTIME_DIR` | Shim view: only granted sockets present; per-kennel service instances bind-mounted to standard paths |
-| D-Bus (§7.5) | User's session bus, system bus | Per-kennel method-call filtering (xdg-dbus-proxy, migrating to a binder facade) |
-| Process visibility (§7.7) | Full system processes | PID namespace: only the kennel's own descendants |
-| Environment (§7.7) | Full inherited env from default shell | Curated subset; sensitive vars stripped, framework vars forced |
+| Filesystem (§7.4) | Full `$HOME`, `/usr`, `/etc`, `/tmp`, `/mnt`, etc. | Shim `$HOME` containing only granted paths, bind-mounted from real locations; private `/tmp` tmpfs |
+| Network (§7.5) | Real loopback `127.0.0.1` and `::1`; full routing | Per-kennel IPv4 `/28` (`127 \| tag(12) \| ctx(8) \| host(4)`) and IPv6 `/64` (`0xfd \| gid(40) \| ctx(16) \| host(64)`); outbound only via proxy |
+| AF_UNIX sockets (§7.6) | All sockets in `$HOME` and `$XDG_RUNTIME_DIR` | Shim view: only granted sockets present; per-kennel service instances bind-mounted to standard paths |
+| D-Bus (§7.7) | User's session bus, system bus | Per-kennel method-call filtering (xdg-dbus-proxy, migrating to a binder facade) |
+| Process visibility (§7.9) | Full system processes | PID namespace: only the kennel's own descendants |
+| Environment (§7.9) | Full inherited env from default shell | Curated subset; sensitive vars stripped, framework vars forced |
 
-X11 (§7.6) is a special case. It is not directly grantable. For workflows that need X11, Project Kennel constructs an entirely separate X server per kennel (Xwayland-isolated on Wayland hosts, Xephyr-isolated on X11 hosts). The kennel's X server is unrelated to the host's; X11 clients inside the kennel can interact with each other but cannot reach the host display.
+X11 (§7.8) is a special case. It is not directly grantable. For workflows that need X11, Project Kennel constructs an entirely separate X server per kennel (Xwayland-isolated on Wayland hosts, Xephyr-isolated on X11 hosts). The kennel's X server is unrelated to the host's; X11 clients inside the kennel can interact with each other but cannot reach the host display.
 
 The unifying property: **what isn't constructed isn't there**. A kennel cannot accidentally reach something the policy author forgot to deny, because the view doesn't include it. Default-deny is structural, not the result of an exhaustive deny-list.
 
@@ -138,7 +138,7 @@ Brokers add latency, code complexity, and an additional process per kennel per p
 Nothing else. In particular:
 
 - No D-Bus signals back to the user's session bus (the dbus-proxy is one-directional in practice; the bus filters incoming as strictly as outgoing).
-- No notifications to the user's desktop unless explicitly granted (granting notifications is a meaningful capability — see §7.5).
+- No notifications to the user's desktop unless explicitly granted (granting notifications is a meaningful capability — see §7.7).
 - No clipboard access (the X11/Wayland clipboard does not bridge unless explicitly bridged).
 - No keystroke or input events delivered to other windows.
 - No `kill()` to processes outside the kennel.

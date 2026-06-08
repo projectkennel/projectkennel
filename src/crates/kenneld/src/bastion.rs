@@ -1,4 +1,4 @@
-//! The per-user SSH bastion's lifecycle and key state (`docs/design/07-8-ssh.md` §7.8.2).
+//! The per-user SSH bastion's lifecycle and key state (`docs/design/07-10-ssh.md` §7.10.2).
 //!
 //! `kenneld` runs **one** `kennel-sshd` for the session, shared by all the user's
 //! kennels — a sibling daemon, not a per-kennel child like the egress proxy. This
@@ -35,7 +35,7 @@ pub struct Edge {
     pub synthetic_pub: String,
 }
 
-/// A root-owned `AuthorizedKeysCommand` the bastion vends keys through (§7.8.7).
+/// A root-owned `AuthorizedKeysCommand` the bastion vends keys through (§7.10.7).
 ///
 /// The production source of truth: rather than write the forced-command bindings to
 /// a file the unprivileged user owns (and could rewrite without `kenneld` ever
@@ -70,7 +70,7 @@ pub struct BastionConfig {
     /// command via the config's `SetEnv`).
     pub agent_sock: Option<PathBuf>,
     /// The root-owned `AuthorizedKeysCommand` to vend keys through (production,
-    /// §7.8.7). `None` falls back to a static `AuthorizedKeysFile` the bastion-user
+    /// §7.10.7). `None` falls back to a static `AuthorizedKeysFile` the bastion-user
     /// owns — the prototype/e2e source, which writes the bindings to disk.
     pub akc: Option<Akc>,
 }
@@ -149,7 +149,7 @@ impl Bastion {
     }
 
     /// The forced-command `authorized_keys` line(s) for an offered public key,
-    /// looked up against the live edges (§7.8.7) — the query the root-owned
+    /// looked up against the live edges (§7.10.7) — the query the root-owned
     /// `AuthorizedKeysCommand` (`kennel-akc`) makes on each bastion auth.
     ///
     /// `offered_key` is the `"<type> <base64>"` sshd hands the helper (`%t %k`); the

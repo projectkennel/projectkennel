@@ -1,4 +1,4 @@
-//! Root-gated end-to-end proof of the production key source (§7.8.7): **stock
+//! Root-gated end-to-end proof of the production key source (§7.10.7): **stock
 //! OpenSSH, configured with the root-owned `AuthorizedKeysCommand`, authorises
 //! exactly the synthetic key bound to a live edge — by querying the running daemon**.
 //!

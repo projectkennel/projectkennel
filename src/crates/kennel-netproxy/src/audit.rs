@@ -4,7 +4,7 @@
 //! event. This is the security-relevant stream (§9.2), distinct from developer
 //! logging: it is what a SIEM consumes to see where confined workloads tried to
 //! reach. The proxy *is* the policy decision, so the record is authoritative —
-//! no correlation with kernel events is needed (`docs/design/07-3-network.md` §7.3.2).
+//! no correlation with kernel events is needed (`docs/design/07-5-network.md` §7.5.2).
 //!
 //! # Delivery
 //!

@@ -76,9 +76,9 @@ struct ProxyState {
     /// space (RFC1918 / ULA / loopback / ...). Default posture is `false`; set
     /// only for a kennel that legitimately reaches internal services by name.
     accept_private_resolved: bool,
-    /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.3): exact
+    /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.5): exact
     /// `addr:port` literals the kennel may reach *despite* the host-loopback
-    /// invariant deny — e.g. the SSH bastion (§7.8.4). Matched only against a literal
+    /// invariant deny — e.g. the SSH bastion (§7.10.4). Matched only against a literal
     /// destination address (never a resolved name), so there is no rebinding surface.
     host_services: Vec<SocketAddr>,
 }
@@ -136,7 +136,7 @@ impl<R: Resolver> Proxy<R> {
     }
 
     /// Add the sanctioned host-loopback services this proxy may reach despite the
-    /// host-loopback invariant deny (`[[net.host_services]]`, §7.3 — the SSH bastion
+    /// host-loopback invariant deny (`[[net.host_services]]`, §7.5 — the SSH bastion
     /// is one). A builder used at construction, before the proxy starts serving.
     #[must_use]
     pub fn with_host_services(self, host_services: Vec<SocketAddr>) -> Self {
@@ -416,7 +416,7 @@ impl<R: Resolver> Proxy<R> {
         // concurrent live-reload cannot split the host-service check from the ruleset
         // check within a single request.
         let state = self.snapshot();
-        // Sanctioned host-loopback services (the SSH bastion, §7.8.4) are an explicit
+        // Sanctioned host-loopback services (the SSH bastion, §7.10.4) are an explicit
         // allow-exception, checked ahead of the ruleset's deny-before-allow: a literal
         // bastion address would otherwise be caught by the host-loopback invariant
         // deny. Only an exact literal `addr:port` match qualifies — never a name.
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn a_host_service_is_reachable_despite_a_loopback_deny() {
-        // The bastion case (§7.8.4): the host-loopback range is invariant-denied, but
+        // The bastion case (§7.10.4): the host-loopback range is invariant-denied, but
         // a configured host service is an explicit allow-exception checked first.
         let (echo, echo_handle) = echo_server();
         let echo_port = echo.port();

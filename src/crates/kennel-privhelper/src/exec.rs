@@ -101,7 +101,7 @@ pub fn perform(
 }
 
 /// Write a workload's user-namespace `gid_map` so it keeps specific supplementary
-/// groups (§7.2.8). The security gates, in order:
+/// groups (§7.4.8). The security gates, in order:
 ///
 /// 1. **Membership** — every gid must be one the caller already holds (its own gid
 ///    set, which the helper inherits from `kenneld` = the user). Mapping a gid the
@@ -390,7 +390,7 @@ fn populate_maps(
     };
 
     update("kennel_meta_map", &0u32.to_ne_bytes(), &payload.meta)?;
-    // Per-kennel bind subnet (§7.3): the INADDR_ANY/in6addr_any rewrite target
+    // Per-kennel bind subnet (§7.5): the INADDR_ANY/in6addr_any rewrite target
     // for dev-server binds. The bind4/bind6 programs fail closed without it, so
     // a workload inside the kennel cannot bind a listening socket. The kennel's
     // own loopback addresses are already in the meta, so it derives from there.

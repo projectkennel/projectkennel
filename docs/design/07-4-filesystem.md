@@ -1,10 +1,10 @@
-# §7.2 Policy surface: filesystem
+# §7.4 Policy surface: filesystem
 
-## 7.2.1 What we gate
+## 7.4.1 What we gate
 
 Every filesystem read, write, create, delete, rename, link, and listing performed by processes in the kennel. This is the largest and most-exercised resource class because almost every operation a process performs touches the filesystem at some level (libraries, configs, logs, working files, the program's own binary).
 
-## 7.2.2 Threats addressed
+## 7.4.2 Threats addressed
 
 The default-uid threat model assumes the entire user account is reachable. The filesystem is where the user's secrets, history, configuration, and ongoing work live:
 
@@ -26,7 +26,7 @@ The default-uid threat model assumes the entire user account is reachable. The f
 
 A kennel should see exactly what it needs and nothing else. Granting read on `~/` is granting read on every credential, cookie, and document the user has accumulated.
 
-## 7.2.3 Mechanism
+## 7.4.3 Mechanism
 
 Primary: Landlock filesystem ACL. Mature, well-covered, fine-grained.
 
@@ -37,7 +37,7 @@ The combination of constructed view (mount namespace) and Landlock (filesystem A
 - Mount namespace alone: a kennel could `readlink` its way into a real path that was bind-mounted in, and Landlock isn't there to stop it.
 - Landlock alone: a kennel's `readdir` on `$HOME` would show every directory entry, including the ones it can't actually open, which is information leakage and is confusing for the user. Constructed views make `readdir` return only granted entries.
 
-## 7.2.4 Policy primitives
+## 7.4.4 Policy primitives
 
 ```toml
 [fs]
@@ -66,7 +66,7 @@ write = [
 create = []                            # default: same as write
 
 # Execute access: paths from which binaries may be executed.
-# Interacts with exec.* policy in §7.1.
+# Interacts with exec.* policy in §7.3.
 exec_allowed_from = [
     "/usr/**",
     "/lib/**",
@@ -134,7 +134,7 @@ allow = [
 # /dev/nvidia*, /dev/dri/*, /dev/snd/*, /dev/video*, /dev/input/*
 ```
 
-## 7.2.5 The constructed `$HOME`
+## 7.4.5 The constructed `$HOME`
 
 > The constructed `$HOME` view is a fresh tmpfs new root. Project Kennel binds the
 > granted system paths in place and the granted `~/…` paths remapped beneath
@@ -145,7 +145,7 @@ allow = [
 > user namespace maps host root (`0 0 1`) alongside the operator identity, so the view root,
 > the constructed `/dev`, and the read-only library binds are owned by a genuine root rather
 > than the overflow `nobody` — the construction child builds them as uid 0 in the userns
-> (§7.2.8). The synthetic `/etc` is **constructed, never the host
+> (§7.4.8). The synthetic `/etc` is **constructed, never the host
 > `/etc` bound in**: the libc/NSS files (passwd/group/hosts/
 > resolv.conf/…) are written scrubbed of host specifics, plus read-only binds of the vanilla
 > TLS/linker subtrees (`/etc/ssl`,`/etc/pki`,`/etc/ld.so.*`). **Identity is masked:**
@@ -153,7 +153,7 @@ allow = [
 > operator's login name), with the in-kennel shim `$HOME` as the home — so `id`,
 > `whoami`, and `getpwuid` reveal no host identity. The uid/gid *numbers* are
 > unchanged (they must match the host inodes of bind-mounted files). **Supplementary
-> groups are policy-defined** (`[identity].groups`, §7.2.8): the constructor writes the
+> groups are policy-defined** (`[identity].groups`, §7.4.8): the constructor writes the
 > `gid_map` (`0 0 1` + the operator line + one line per granted group) once and fully before
 > the kennel runs, so the kennel carries exactly the granted set — by default *none*, dropping
 > every inherited host group — and each granted group is named in the synthetic `/etc/group`, so `id`
@@ -205,7 +205,7 @@ This solves the problem that motivated Project Kennel: the kennel cannot enumera
 
 ### Template-level constructs built on the constructed-`$HOME` mechanism
 
-Two template-level features extend the constructed-`$HOME` pattern. They are not separate policy primitives — both compose the underlying mount-namespace + bind-mount machinery — but they are common enough that templates declare them with dedicated syntax. The semantics live here in §7.2; the template-author-facing description lives in §5.9.
+Two template-level features extend the constructed-`$HOME` pattern. They are not separate policy primitives — both compose the underlying mount-namespace + bind-mount machinery — but they are common enough that templates declare them with dedicated syntax. The semantics live here in §7.4; the template-author-facing description lives in §5.9.
 
 **`fs.home.sanitise`** constructs a sanitised copy of a host configuration file at kennel-spawn time and bind-mounts the sanitised copy into the shim at the path the agent expects. Useful for `~/.gitconfig`, `~/.npmrc`, and similar config files where the agent needs the file to operate but specific keys (credential helpers, embedded tokens, URL rewrites) must not be visible. Project Kennel reads the real file, applies the `strip` patterns to remove matching keys, writes the result to a per-user staging location, and bind-mounts that into the shim at the path the agent expects.
 
@@ -213,7 +213,7 @@ Two template-level features extend the constructed-`$HOME` pattern. They are not
 
 Both constructs are best-effort against direct reads, not against semantic-level recovery. An agent that can run `git show HEAD:.env` on a scrubbed file can recover the original contents from git's object store; an agent that can execute the build system can recover sanitised config via the build's normal credential-handling paths. Project Kennel does not claim these constructs prevent determined recovery; they prevent the casual reconnaissance pattern catalogued as T1.1 and the secret-introduction pattern catalogued as T3.1.
 
-## 7.2.6 The private `/tmp`
+## 7.4.6 The private `/tmp`
 
 A kennel gets its own tmpfs mounted at `/tmp`. The host's `/tmp` is invisible. This:
 
@@ -225,7 +225,7 @@ A kennel gets its own tmpfs mounted at `/tmp`. The host's `/tmp` is invisible. T
 
 For kennels that need to share `/tmp` with the host (rare, usually a sign that the kennel is wrong), `fs.tmp.private = false` falls back to bind-mounting the real `/tmp`. Templates do not enable this.
 
-## 7.2.7 Procfs visibility
+## 7.4.7 Procfs visibility
 
 `/proc` is a leakage channel by default: any process can see every other process's `/proc/<pid>/cmdline`, `/proc/<pid>/environ` (which often contains secrets), `/proc/<pid>/status` (containing UIDs, capabilities, etc).
 
@@ -236,7 +236,7 @@ Project Kennel mitigates this with two mechanisms:
 
 A PID namespace requires unsharing it during kennel setup (`CLONE_NEWPID` in `unshare()`). The first process in the new namespace becomes PID 1 within it, with the responsibilities and constraints that implies (reaping zombies, signal handling). Project Kennel's spawn flow handles this; the user's command doesn't see the wrinkle.
 
-## 7.2.8 Device files
+## 7.4.8 Device files
 
 Most device files are denied by default. Project Kennel's baseline allows the trivial ones (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`, `/dev/tty`, `/dev/pts/*`) and templates extend cautiously.
 
@@ -281,11 +281,11 @@ reason = "establish a userspace WireGuard tunnel"
 threats.exposed = ["T2.x"]
 ```
 
-A passthrough is authored where the rest of a kennel's grants are — a leaf adds its own device with `[[fs.dev.passthrough.add]]`, folded up the template chain like `[[net.allow.add]]`. Validation (compile time, on the resolved policy): the `path` is absolute under `/dev` with no `..`, a `reason` is present, and an `exposed` threat tag is carried. A passthrough that shims an SSH agent has no special case — SSH is the §7.8 concern, not a device.
+A passthrough is authored where the rest of a kennel's grants are — a leaf adds its own device with `[[fs.dev.passthrough.add]]`, folded up the template chain like `[[net.allow.add]]`. Validation (compile time, on the resolved policy): the `path` is absolute under `/dev` with no `..`, a `reason` is present, and an `exposed` threat tag is carried. A passthrough that shims an SSH agent has no special case — SSH is the §7.10 concern, not a device.
 
 **Mechanism.** A passthrough binds exactly like an `fs.dev.allow` entry: the host node is bind-mounted into the kennel's constructed `/dev` at the same path (its parent created for a subdirectory node like `/dev/net/tun`), preserving the device's owner/group/mode, and granted Landlock `read`/`write`/`ioctl` (`IOCTL_DEV`). Nothing else is in the constructed `/dev`, so a non-granted device is structurally absent (ENOENT). The reason/threats/group are compile-time documentation and are not carried into the settled artefact.
 
-**Access is GID, not capability.** These devices are gated by their DAC group — `dialout`/`uucp` for serial, `dip`/`modem` for `/dev/ppp`, `netdev` (or `0666`) for `/dev/net/tun` — not by a Linux capability. The kennel reaches a passed-through device only if the device's owning group is in the kennel's group set, and the user must already be a member of that group (the framework never grants a group the user lacks — that would be privilege escalation). `/dev/net/tun` and `/dev/ppp` are used the **unprivileged** way: a persistent device pre-created and owned by the user's group (the standard `tunctl`/`pppd` pattern), *not* by handing the workload `CAP_NET_ADMIN` to create fresh interfaces — which the kennel does not do, and which in the host network namespace would risk bypassing the egress proxy (§7.3).
+**Access is GID, not capability.** These devices are gated by their DAC group — `dialout`/`uucp` for serial, `dip`/`modem` for `/dev/ppp`, `netdev` (or `0666`) for `/dev/net/tun` — not by a Linux capability. The kennel reaches a passed-through device only if the device's owning group is in the kennel's group set, and the user must already be a member of that group (the framework never grants a group the user lacks — that would be privilege escalation). `/dev/net/tun` and `/dev/ppp` are used the **unprivileged** way: a persistent device pre-created and owned by the user's group (the standard `tunctl`/`pppd` pattern), *not* by handing the workload `CAP_NET_ADMIN` to create fresh interfaces — which the kennel does not do, and which in the host network namespace would risk bypassing the egress proxy (§7.5).
 
 The kennel carries **only the groups policy grants**: the kennel's user namespace `gid_map` names exactly the set named by `[identity].groups` plus every passthrough `group` (default: none — all inherited host groups are dropped), and `kenneld` refuses any group the operator is not a member of (the constructor could otherwise over-grant). The map is **written once and in full by the constructor** — the privhelper, as the factory, writes both maps (`uid_map` `0 0 1` + the operator line; `gid_map` `0 0 1` + the operator line + one line per granted group) in a single `write(2)` before the kennel's PID 1 starts. There is no deferred second-stage gid handshake: the identity, including every supplementary group, is fixed before any kennel code runs. So a passthrough's `group` both unlocks the device's DAC *and* is the group carried into the kennel; it is named in the synthetic `/etc/group`, so `id` resolves it by name. The standalone form, for non-device group access (e.g. group-owned files) or to be explicit:
 
@@ -296,7 +296,7 @@ The kennel carries **only the groups policy grants**: the kennel's user namespac
 groups = ["dialout", "plugdev"]
 ```
 
-## 7.2.9 Sysfs and other pseudo-filesystems
+## 7.4.9 Sysfs and other pseudo-filesystems
 
 `/sys/` is mostly read-only and mostly informational, but contains some attack surface:
 
@@ -309,7 +309,7 @@ Project Kennel's default is read-only access to `/sys` excluding `/sys/kernel/se
 
 `/proc/sys/` (sysctl) is similar: deny write across the board, allow read for the unprivileged majority of sysctls.
 
-## 7.2.10 Symlink and bind-mount escapes
+## 7.4.10 Symlink and bind-mount escapes
 
 A historical class of sandbox escape: the kennel creates a symlink to a forbidden path, then follows it through an allowed entry point. Landlock handles this correctly by resolving symlinks at the kernel level and applying the ruleset to the resolved path; Project Kennel relies on this.
 
@@ -319,7 +319,7 @@ Bind-mount escapes are the symmetric concern: a kennel with the ability to manip
 - Setting `MS_NODEV`, `MS_NOSUID`, `MS_NOEXEC` (where appropriate) on the constructed view's mount points.
 - Marking the kennel's mount namespace `MS_SLAVE` from the host, so the kennel cannot propagate mounts back up.
 
-## 7.2.11 Test plan
+## 7.4.11 Test plan
 
 Each is a regression test in `tests/fs/`:
 
@@ -341,7 +341,7 @@ Each is a regression test in `tests/fs/`:
 
 Roughly 30 tests total in the full corpus; the list above captures the most important invariants.
 
-## 7.2.12 Resource limits (`[ulimits]`)
+## 7.4.12 Resource limits (`[ulimits]`)
 
 A kennel may cap the workload's kernel resource limits via `[ulimits]` — a table of
 `setrlimit(2)` resources. Nothing is set by default; the section is available for a

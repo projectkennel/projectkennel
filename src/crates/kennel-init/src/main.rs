@@ -47,7 +47,7 @@ use kennel_spawn::{AuxProcess, Supervision};
 use kennel_syscall::process::{set_no_new_privs, set_rlimit, wait_any, Reaped};
 use kennel_syscall::spawn::{fork_drop_exec, fork_drop_exec_confined};
 
-/// The in-view binder device the factory mounts (`07-9` §7.9): a fixed path, because the
+/// The in-view binder device the factory mounts (`07-9` §7.1): a fixed path, because the
 /// pull model gives `kennel-init` no argv to carry it.
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 /// The binder buffer mapping size for the pull connection.
@@ -148,7 +148,7 @@ fn spawn_all(
             std::env::set_current_dir(cwd)?;
         }
         // Controlling terminal FIRST, before Landlock/seccomp could gate the ioctls
-        // (`07-7` §7.7.2). The interactive path allocates a pty in the view's devpts and
+        // (`07-7` §7.9.2). The interactive path allocates a pty in the view's devpts and
         // returns the master over the socket the CLI passed; otherwise adopt stdin.
         if let Some(raw) = pty_raw {
             kennel_syscall::pty::setup_view_pty(raw)?;

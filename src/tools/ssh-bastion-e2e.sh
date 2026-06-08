@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# End-to-end proof of the per-kennel SSH re-origination bastion (07-8-ssh.md §7.8).
+# End-to-end proof of the per-kennel SSH re-origination bastion (07-10-ssh.md §7.10).
 #
 # Stands up, with stock OpenSSH and no root, a hermetic two-hop topology:
 #
 #     client (synthetic key)  --ssh-->  BASTION sshd  --forced command-->
 #         kennel-ssh-reorigin  --ssh (real key from agent)-->  DESTINATION sshd
 #
-# and asserts the design's load-bearing properties (§7.8.9):
+# and asserts the design's load-bearing properties (§7.10.9):
 #   1. allow      — a synthetic-key login re-originates to the fixed destination,
 #                   forwarding $SSH_ORIGINAL_COMMAND.
 #   2. fixed dest — the workload cannot redirect: whatever command it sends, the
@@ -116,7 +116,7 @@ printf '[127.0.0.1]:%s %s\n' "$DEST_PORT" "$(cat "$WORK/dest_host.pub")" >"$WORK
 # 3. The kenneld-owned outbound ssh_config (reorigin's `ssh -F`, via
 #    KENNEL_SSH_CONFIG): maps the fixed destination host to the destination port.
 #    In production the destination is a real host on :22; for the test we redirect
-#    the port here. This is the host-side, kenneld-owned config seam (§7.8.7) —
+#    the port here. This is the host-side, kenneld-owned config seam (§7.10.7) —
 #    never anything the kennel can influence.
 # ---------------------------------------------------------------------------
 cat >"$WORK/outbound_ssh_config" <<EOF
@@ -236,7 +236,7 @@ esac
 
 echo
 echo "=== 5. full egress chain: ssh -> kennel-socks-connect -> netproxy (SOCKS5) -> bastion ==="
-# The real topology (§7.3/§7.8.4): a kennel can only reach its egress proxy, so its
+# The real topology (§7.5/§7.10.4): a kennel can only reach its egress proxy, so its
 # ssh uses kennel-socks-connect (shipped, no nc needed) as a ProxyCommand to SOCKS5
 # through the proxy to the bastion (one allowlisted host-loopback service). Prove the
 # whole chain with the real kennel-netproxy and kennel-socks-connect binaries.
@@ -272,4 +272,4 @@ else
 fi
 
 echo
-echo "ALL CHECKS PASSED — the re-origination bastion behaves as 07-8-ssh.md §7.8 specifies."
+echo "ALL CHECKS PASSED — the re-origination bastion behaves as 07-10-ssh.md §7.10 specifies."

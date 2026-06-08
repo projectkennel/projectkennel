@@ -1,14 +1,14 @@
 # API surfaces — Binder IPC and the kenneld context manager
 
 This chapter is the implementation contract for the binder-based IPC mechanism
-designed in [`07-9-ipc.md`](../design/07-9-ipc.md) (§7.9). Where the design chapter
+designed in [`07-1-binder.md`](../design/07-1-binder.md) (§7.1). Where the design chapter
 says *what and why*, this one commits to the concrete shape: which crate owns the
 kernel ABI, how the binderfs instance slots into the spawn pipeline, kenneld's role
 and threading as context manager, the transaction wire conventions, the
 cross-instance relay, and the new control-socket operation for kennel spawning.
 
 > **Status: gateway core BUILT; cross-instance relay + network still roadmap.** The
-> inter-namespace gateway (§7.9) is built and proven end to end by the unprivileged
+> inter-namespace gateway (§7.1) is built and proven end to end by the unprivileged
 > vertical (`src/tools/unprivileged-e2e.sh`): the privhelper factory mounts the per-kennel
 > binderfs instance and allocates the device; kenneld acquires node 0 via `/proc/<init>/root`
 > and serves the registry; `kennel-init` pulls its `GET_SANDBOX_PLAN` over the bus; and the
@@ -39,16 +39,16 @@ and will be folded into the `02-4` control-protocol table when the surfaces are 
 
 ## Why binder, in one paragraph
 
-The AF_UNIX shim (§7.4, [`02-4`](02-4-ipc.md) for its IPC, built) gates at *connect
+The AF_UNIX shim (§7.6, [`02-4`](02-4-ipc.md) for its IPC, built) gates at *connect
 time*: a granted socket is bind-mounted into the constructed view and audited when the
 workload connects. That cannot express authority that lives *inside* the protocol — a
 gpg-agent socket signs anything, a Wayland socket reads the clipboard. The double-blind
-SSH bastion (§7.8, built) was the first subsystem to reject the connection-level grant
+SSH bastion (§7.10, built) was the first subsystem to reject the connection-level grant
 outright and move enforcement to the *operation*: the credential stays host-side and is
 unaimable by the workload. Binder generalises that move. kenneld becomes the policy
 decision point for every protocol *call*, the workload holds only unforgeable binder
 node references (no path to enumerate, no abstract name to probe), and the same primitive
-carries inter-kennel IPC for the MCP topology. Rationale in full: design §7.9.1–7.9.2.
+carries inter-kennel IPC for the MCP topology. Rationale in full: design §7.1.1–7.1.2.
 
 ---
 
@@ -98,7 +98,7 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 
 ### Mount sequencing within the spawn pipeline
 
-> **BUILT — as-built via the privhelper factory ([`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)).**
+> **BUILT — as-built via the privhelper factory ([`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)).**
 > binderfs assigns its control/device nodes to **uid 0 of the mounting user namespace**.
 > The old pure-identity map (`{uid} {uid} 1`) had no uid 0, so the nodes landed on the
 > overflow uid (`nobody`, mode `0600`) and nothing in the kennel could open them — proven
@@ -115,7 +115,7 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 > client on the device and **pulls** its config from node 0 (`GET_SANDBOX_PLAN`).
 >
 > **As-built divergence (code-owed):** `kennel-init` is `fexecve`'d *as the operator*, not as
-> uid 0 — the construction child drops before the hand-off. The design (§7.11) models a uid-0
+> uid 0 — the construction child drops before the hand-off. The design (§7.2) models a uid-0
 > init; reconciling the two (likely by removing the drop, since the operator-owned userns
 > already grants `kenneld` `CAP_SYS_PTRACE` over the instance) is owed code work.
 
@@ -178,7 +178,7 @@ client) opens by default. We deliberately do **not** invent a Kennel-specific de
 each kennel already has its own isolated binderfs instance (no cross-kennel collision to
 disambiguate), so a non-standard name would buy nothing and would force every binder
 client in the workload to be specially pointed at it — defeating the same "the application
-finds its driver at the default path" principle the §7.4 socket shim rests on. Kennel does
+finds its driver at the default path" principle the §7.6 socket shim rests on. Kennel does
 not use the Android `hwbinder`/`vndbinder` contexts (HAL/vendor splits with no analogue
 here); the single `binder` context per instance is all a kennel needs.
 
@@ -188,7 +188,7 @@ Android convention (cf. `android.os.*`, `vendor.*`), so those are kept as-is.
 
 ### Privilege: no binder-specific op, but construction is now privhelper-driven
 
-> **Updated by the uid-0 construction model ([`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)).**
+> **Updated by the uid-0 construction model ([`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)).**
 > The original claim here — that the entire mount → allocate → become-context-manager chain
 > runs *without real privilege* — no longer holds. It rested on the spawn running uid-mapped
 > 1:1 as the operator, but binderfs nodes are owned by the mounting userns's uid 0, which a
@@ -276,9 +276,9 @@ Android — but the verb set and names are deliberately the same so the model is
 
 Two further verb groups ride node 0, gated by the unforgeable binder caller identity so a
 workload can address node 0 but cannot exercise them: the **`AF_UNIX` facade** verb
-(`CONNECT_AFUNIX`, §7.9.5) and the **`kennel-init` lifecycle** verbs
+(`CONNECT_AFUNIX`, §7.1.5) and the **`kennel-init` lifecycle** verbs
 (`NOTIFY_BOOT_SYNC`/`NOTIFY_FACADE_CRASH`/`NOTIFY_WORKLOAD_EXEC` —
-[`../design/07-11-kennel-init.md`](../design/07-11-kennel-init.md)). The lifecycle verbs
+[`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)). The lifecycle verbs
 make `kennel-init` (PID 1) a binder *consumer* on the same instance kenneld manages as
 node 0, so the kennel's control plane is the binder bus itself. kenneld accepts a lifecycle
 verb only when `sender_pid` equals the init's **host** pid (learned from the privhelper at
@@ -307,7 +307,7 @@ processes) is **not used**. References are issued only by kenneld as context man
 are not transferable between kennels. This drops the reference-graph complexity that makes
 Android's Binder subtle while keeping the four properties that matter: unforgeable
 references, synchronous transactions, death notifications, per-instance isolation
-(design §7.9.2).
+(design §7.1.2).
 
 ### The `org.projectkennel.*` reserved namespace
 
@@ -348,7 +348,7 @@ backed by spawned service processes that parse foreign, untrusted wire protocols
 translate to binder. Each is a new binary crate, each an untrusted-input parser requiring
 its own fuzz target, and the D-Bus one displaces an external dependency
 (`xdg-dbus-proxy`) with first-party code. They are **out of scope for this chapter** and
-get their own architecture chapter(s); §7.9.5 is the design.
+get their own architecture chapter(s); §7.1.5 is the design.
 
 ---
 
@@ -390,7 +390,7 @@ inside the same trust boundary, so fd-passing the connected af-unix socket is so
 Across instances they are **rejected**. kenneld inspects the transaction object-type field
 before relaying and returns `BR_FAILED_REPLY` for any fd or pointer object on a
 cross-instance path. Only flat scalar / `BINDER_TYPE_ARRAY` payloads cross the boundary.
-Extending shared memory cross-instance would be a separate design decision (design §7.9.10).
+Extending shared memory cross-instance would be a separate design decision (design §7.1.10).
 
 ---
 
@@ -405,7 +405,7 @@ policy on *both* sides permits, returns a node reference that tunnels through ke
 the peer instance. The workload cannot determine whether the node is local or remote — the
 transport is opaque; the policy enforcement is in kenneld.
 
-A cross-instance lookup succeeds only if **both** hold (design §7.9.6,
+A cross-instance lookup succeeds only if **both** hold (design §7.1.6,
 [`02-2-config-schema.md`](02-2-config-schema.md) for the schema):
 
 1. The consuming kennel declares `[[binder.consume]]` naming the service and the providing
@@ -423,7 +423,7 @@ an opaque reference), so the naming is an authoring concern, not a runtime leak.
 
 This is the chapter's central architectural decision and the one reviewers will press
 hardest, because it grows kenneld's role from control-plane supervisor to **synchronous
-data-path relay**. For the MCP topology (§7.9.9), *every tool call's payload passes through
+data-path relay**. For the MCP topology (§7.1.9), *every tool call's payload passes through
 kenneld.* That is a real TCB and hot-path change away from the "small supervisor + tiny
 privhelper" shape the rest of the system holds to, and it is called out here rather than
 buried so the trade is explicit.
@@ -448,7 +448,7 @@ process if the per-call cost proves material is the open question that most affe
 chapter's eventual as-built shape (§Open questions).
 
 Death and teardown: a provider crash fires the binder death notification automatically, so
-in-flight callers get `BR_DEAD_REPLY` rather than a hang (§7.9.5); kenneld restarts the
+in-flight callers get `BR_DEAD_REPLY` rather than a hang (§7.1.5); kenneld restarts the
 service process and re-registers the node. A consuming kennel's exit destroys its nodes;
 pending cross-instance transactions it owned receive `BR_DEAD_REPLY`.
 
@@ -457,7 +457,7 @@ pending cross-instance transactions it owned receive `BR_DEAD_REPLY`.
 ## Kennel spawning (new control-socket operation)
 
 Spawning a kennel on behalf of a running kennel is a **privileged kenneld operation, not a
-binder service transaction** (design §7.9.7): it goes over the existing CLI↔kenneld control
+binder service transaction** (design §7.1.7): it goes over the existing CLI↔kenneld control
 socket (`$XDG_RUNTIME_DIR/kennel/control.sock`, [`02-4-ipc.md`](02-4-ipc.md)), reached from
 inside the kennel only when policy grants it (`[ipc.spawn]`). This adds one request and one
 response to the control protocol. They are documented here and will be merged into the
@@ -527,7 +527,7 @@ the events land:
 The `binder.cross` and `kennel.spawn` records, correlated by transaction code and calling
 kennel ctx, are what let a security team reconstruct *which agent request caused which file
 access in which kennel* from the JSONL log alone, with no application-layer instrumentation
-(design §7.9.9). Payload *content* is never logged — byte counts and outcomes only, per
+(design §7.1.9). Payload *content* is never logged — byte counts and outcomes only, per
 CODING-STANDARDS §9.3.
 
 ---
@@ -539,14 +539,14 @@ the rule that `org.projectkennel.*` names are rejected in `[[binder.provide]]`/`
 at compile time, are schema additions owned by
 [`02-2-config-schema.md`](02-2-config-schema.md). This chapter consumes the settled
 `BinderRuntime` they produce; it does not define the schema. The reserved-namespace
-validation is a categorical policy-compile error, not a runtime check (design §7.9.4).
+validation is a categorical policy-compile error, not a runtime check (design §7.1.4).
 
 ---
 
 ## What this chapter does not cover
 
 - The design rationale, MCP worked example, and residuals: design
-  [`07-9-ipc.md`](../design/07-9-ipc.md).
+  [`07-1-binder.md`](../design/07-1-binder.md).
 - The `[binder]` / `[[binder.provide]]` / `[[binder.consume]]` / `[ipc.spawn]` schema:
   [`02-2-config-schema.md`](02-2-config-schema.md).
 - The JSONL field layouts for the new audit events: [`02-3-audit-schema.md`](02-3-audit-schema.md).
