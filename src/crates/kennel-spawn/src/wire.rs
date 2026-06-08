@@ -22,7 +22,7 @@ use kennel_syscall::namespace::Namespaces;
 use kennel_syscall::process::{resource_by_name, resource_name};
 use kennel_syscall::seccomp::Action;
 
-use crate::plan::{AuxProcess, BindMount, Plan, ShimView, Supervision};
+use crate::plan::{AuxProcess, BindMount, ConstructionHalf, Plan, ShimView, Supervision};
 
 /// Maximum element count for any length-prefixed vector (a `DoS`/corruption bound).
 const MAX_ENTRIES: usize = 65_536;
@@ -719,6 +719,88 @@ fn get_string(r: &mut Reader<'_>) -> Result<String, PlanWireError> {
     String::from_utf8(r.bytes()?).map_err(|_| PlanWireError::BadString)
 }
 
+// ---- ConstructionHalf codec -----------------------------------------------
+
+/// Encode the [`ConstructionHalf`] to its wire bytes — the half the factory parses.
+///
+/// Reuses [`put_view`] (`07-11` §7.11.1); the operator uid/gid are deliberately not
+/// serialised (the factory uses its own real ids).
+#[must_use]
+pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(c.namespaces.bits());
+    w.path(&c.cgroup);
+    w.bool(c.cgroup_join);
+    match &c.view {
+        None => w.bool(false),
+        Some(v) => {
+            w.bool(true);
+            put_view(&mut w, v);
+        }
+    }
+    match &c.new_root {
+        None => w.bool(false),
+        Some(path) => {
+            w.bool(true);
+            w.path(path);
+        }
+    }
+    w.count(c.file_binds.len());
+    for (src, dst) in &c.file_binds {
+        w.path(src);
+        w.path(dst);
+    }
+    w.count(c.granted_gids.len());
+    for g in &c.granted_gids {
+        w.u32(*g);
+    }
+    w.bool(c.lo);
+    w.buf
+}
+
+/// Decode the [`ConstructionHalf`] (the inverse of [`encode_construction`]).
+///
+/// # Errors
+///
+/// [`PlanWireError`] if the blob is truncated, a bound is exceeded, a tag is unknown,
+/// or a string is not UTF-8. Trailing bytes are rejected.
+pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError> {
+    let mut r = Reader::new(buf);
+    let namespaces = Namespaces::from_bits_truncate(r.u32()?);
+    let cgroup = r.path()?;
+    let cgroup_join = r.bool()?;
+    let view = if r.bool()? {
+        Some(get_view(&mut r)?)
+    } else {
+        None
+    };
+    let new_root = if r.bool()? { Some(r.path()?) } else { None };
+    let mut file_binds = Vec::new();
+    for _ in 0..r.count()? {
+        let src = r.path()?;
+        let dst = r.path()?;
+        file_binds.push((src, dst));
+    }
+    let mut granted_gids = Vec::new();
+    for _ in 0..r.count()? {
+        granted_gids.push(r.u32()?);
+    }
+    let lo = r.bool()?;
+    if r.pos != buf.len() {
+        return Err(PlanWireError::TooLarge); // trailing garbage
+    }
+    Ok(ConstructionHalf {
+        namespaces,
+        cgroup,
+        cgroup_join,
+        view,
+        new_root,
+        file_binds,
+        granted_gids,
+        lo,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,6 +1004,60 @@ mod tests {
         let mut bytes = encode_supervision(&rich_supervision());
         bytes.push(0);
         assert_eq!(decode_supervision(&bytes), Err(PlanWireError::TooLarge));
+    }
+
+    fn rich_construction() -> ConstructionHalf {
+        let p = rich_plan();
+        ConstructionHalf {
+            namespaces: p.namespaces,
+            cgroup: p.cgroup,
+            cgroup_join: p.cgroup_join,
+            view: p.view,
+            new_root: p.new_root,
+            file_binds: p.file_binds,
+            granted_gids: vec![27, 44],
+            lo: true,
+        }
+    }
+
+    #[test]
+    fn round_trips_a_rich_construction() {
+        let c = rich_construction();
+        let back = decode_construction(&encode_construction(&c)).expect("decode");
+        assert_eq!(back, c, "the decoded construction-half must equal the original");
+    }
+
+    #[test]
+    fn round_trips_a_minimal_construction() {
+        let c = ConstructionHalf {
+            namespaces: Namespaces::empty(),
+            cgroup: PathBuf::new(),
+            cgroup_join: false,
+            view: None,
+            new_root: None,
+            file_binds: Vec::new(),
+            granted_gids: Vec::new(),
+            lo: false,
+        };
+        let back = decode_construction(&encode_construction(&c)).expect("decode");
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn truncated_construction_is_an_error_not_a_panic() {
+        let full = encode_construction(&rich_construction());
+        for cut in 0..full.len() {
+            if let Some(prefix) = full.get(..cut) {
+                let _ = decode_construction(prefix);
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_garbage_on_construction_is_rejected() {
+        let mut bytes = encode_construction(&rich_construction());
+        bytes.push(0);
+        assert_eq!(decode_construction(&bytes), Err(PlanWireError::TooLarge));
     }
 
     #[test]

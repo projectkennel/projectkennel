@@ -493,6 +493,44 @@ impl Supervision {
     }
 }
 
+/// The **construction-half** of a kennel's enforcement (`07-11-kennel-init.md` §7.11.1).
+///
+/// Everything the **privhelper factory** needs to build the kennel host-side, in its own
+/// post-`clone` child, *before* `kennel-init` exists: the namespaces to enter, the
+/// identity maps, the cgroup to join, the in-namespace loopback, the view to construct +
+/// `pivot_root` into, and whether to mount + chown the per-kennel binderfs. The factory
+/// parses **only** this half (never the supervision-half), so a decoder bug there cannot
+/// reach the workload's confinement policy.
+///
+/// The operator uid/gid for the identity map are deliberately **absent**: the factory
+/// uses its own real uid/gid (the caller's, since `kenneld` `execve`s it), never a
+/// wire-supplied value (`kennel-init-and-uid0`, security review §6). The granted
+/// supplementary `gids` are carried (they are policy) but re-validated host-side against
+/// the caller's membership before any map is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstructionHalf {
+    /// The namespaces the factory `clone`s with (`USER|MOUNT|PID|IPC[|NET]`).
+    pub namespaces: Namespaces,
+    /// The kennel's cgroup; the factory writes the construction child's pid into its
+    /// `cgroup.procs` (re-validated against the caller's delegated subtree).
+    pub cgroup: PathBuf,
+    /// Whether to join the cgroup (mirrors [`Plan::cgroup_join`]).
+    pub cgroup_join: bool,
+    /// The constructed view to build and `pivot_root` into; `None` ⇒ the fallback
+    /// in-place path (fresh `/proc` + `/tmp`).
+    pub view: Option<ShimView>,
+    /// The fresh root the view is staged under before the pivot.
+    pub new_root: Option<PathBuf>,
+    /// Single-file shadow binds (`(source, target)`) applied into the view.
+    pub file_binds: Vec<(PathBuf, PathBuf)>,
+    /// The granted supplementary gids to identity-map (after the `0 0 1` and operator
+    /// lines); each re-checked against the caller's membership before the `gid_map` write.
+    pub granted_gids: Vec<u32>,
+    /// Whether to bring up the in-namespace loopback (`lo`) — the per-kennel net-ns path
+    /// (`07-10`); `false` while the kennel shares the host net namespace.
+    pub lo: bool,
+}
+
 impl Plan {
     /// Build the plan from a settled policy whose deferred placeholders have
     /// already been substituted. `ctx` is the kennel's context number, and
