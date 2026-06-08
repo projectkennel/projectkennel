@@ -202,7 +202,7 @@ mount itself is namespace-local, done by the privhelper factory in its post-`clo
 (which holds full caps in the new userns), along with the device allocation and the chown to
 the operator — all before `pivot_root` and the `fexecve` of `kennel-init`. What changed is the
 *construction* privilege (the `0 0 1` map needs `CAP_SETUID`; the factory does the mounts and
-the pivot), tracked in `BINDER-NET-INTEGRATION.md`, not a per-binder privileged surface.
+the pivot) — see [`01-process-model.md`](01-process-model.md) — not a per-binder privileged surface.
 
 ---
 

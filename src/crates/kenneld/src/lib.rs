@@ -1017,7 +1017,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     let init = std::fs::File::open(init_bin)?;
     // The pty return socket (interactive runs) rides the binder lifecycle reply, not the
     // factory; the non-interactive vertical passes None. (Interactive-through-factory is
-    // tracked in BINDER-NET-INTEGRATION.)
+    // still owed — see docs/design/07-11-kennel-init.md.)
     let (child, init_pid) = privileged.construct_kennel(&half_bytes, init.as_fd(), None)?;
     state.factory = true;
 
