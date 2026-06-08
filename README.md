@@ -23,7 +23,7 @@ Working today (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/B
 
 On distributions that restrict unprivileged user namespaces (Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), an AppArmor profile grants `userns` to the kenneld binary ([dist/apparmor/kenneld](dist/apparmor/kenneld)) — the AppArmor counterpart of the privhelper's file capabilities, a one-time install step.
 
-Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): per-kennel `[unix]` service launching (§7.4.7). The audit subsystem is complete at the userspace level (kernel-side BPF and LSM events report via the kernel's own ring buffer / `dmesg` by design, not this writer). Checksum verification is enforced today by the shell witness `src/tools/verify-checksums.sh`; a Rust twin is an optional §5.5.1 call (contingent on vendoring `sha2`), not a gap.
+Deferred (designed, not yet built — see [docs/architecture/08-as-built-notes.md](docs/architecture/08-as-built-notes.md) §8.1): per-kennel `[unix]` service launching (§7.6.7). The audit subsystem is complete at the userspace level (kernel-side BPF and LSM events report via the kernel's own ring buffer / `dmesg` by design, not this writer). Checksum verification is enforced today by the shell witness `src/tools/verify-checksums.sh`; a Rust twin is an optional §5.5.1 call (contingent on vendoring `sha2`), not a gap.
 
 ## SSH egress: double-blind re-origination
 
@@ -36,7 +36,7 @@ Project Kennel routes SSH through a per-user **re-origination bastion** (a stock
 - **The workload is blind to the credential.** Its constructed `~/.ssh` holds only a *disposable synthetic* ed25519 key — never a real key, never an agent socket. The real key never enters the kennel; it stays in the user's host-side store (agent, hardware token, or `~/.ssh`).
 - **The credential cannot be aimed by the workload.** *Which synthetic key authenticates is the destination selector*: the bastion's forced command bakes in the `(host, real-key-fingerprint)` edge, so `kennel-ssh-reorigin` re-originates a fresh `ssh` with the real key — `IdentitiesOnly`, host-key-verified — to **exactly that host and no other**. The workload cannot redirect it, cannot choose a destination, and a non-synthetic key is refused.
 
-A synthetic key is thus a capability for exactly one `(host, key)` edge: `git push` to a granted host just works, with **zero key material in the sandbox and no signing oracle to abuse**. Validated end-to-end against stock OpenSSH 9.6 (design [§7.8](docs/design/07-8-ssh.md); [`kennel-ssh-reorigin`](src/crates/kennel-ssh-reorigin/)). We have not found this double-blind arrangement — workload blind to the key, key unaimable by the workload — in another sandbox or SSH-confinement design.
+A synthetic key is thus a capability for exactly one `(host, key)` edge: `git push` to a granted host just works, with **zero key material in the sandbox and no signing oracle to abuse**. Validated end-to-end against stock OpenSSH 9.6 (design [§7.10](docs/design/07-10-ssh.md); [`kennel-ssh-reorigin`](src/crates/kennel-ssh-reorigin/)). We have not found this double-blind arrangement — workload blind to the key, key unaimable by the workload — in another sandbox or SSH-confinement design.
 
 ## Size
 
