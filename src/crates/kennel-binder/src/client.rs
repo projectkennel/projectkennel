@@ -284,6 +284,54 @@ impl Connection {
         Ok(owned)
     }
 
+    /// Reply to a received transaction with a length-prefixed payload and, when `Some`,
+    /// a single `BINDER_TYPE_FD` object — the producer side of [`Self::transact_with_fd`]
+    /// (the `kennel-init` `GET_SANDBOX_PLAN` reply: supervision bytes + the pty fd). Then
+    /// free the inbound buffer.
+    ///
+    /// The buffer is `[u32 data_len LE][data]`, optionally padded to an 8-byte boundary
+    /// and followed by the fd object; the transaction's single offset (when an fd is
+    /// present) points at that object.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails, or [`io::ErrorKind::InvalidInput`]
+    /// if the payload length does not fit the wire encoding.
+    pub fn reply_with_data_and_fd(
+        &self,
+        incoming: &Incoming,
+        data: &[u8],
+        fd: Option<BorrowedFd<'_>>,
+    ) -> io::Result<()> {
+        let data_len = u32::try_from(data.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "payload too large"))?;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(data);
+
+        let mut offsets: Vec<u64> = Vec::new();
+        if let Some(fd) = fd {
+            // The fd object must sit at an 8-byte boundary within the buffer.
+            let obj_off = buf.len().next_multiple_of(8);
+            buf.resize(obj_off, 0);
+            buf.extend_from_slice(&proto::flat_binder_object_fd(fd.as_raw_fd()));
+            offsets.push(len_u64(obj_off)?);
+        }
+
+        let td = TransactionData {
+            flags: proto::TF_ACCEPT_FDS,
+            data_size: len_u64(buf.len())?,
+            offsets_size: len_u64(offsets.len().saturating_mul(std::mem::size_of::<u64>()))?,
+            buffer: buf.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, true, &td);
+        proto::write_free_buffer(&mut write, incoming.buffer);
+        self.write_only(&write)
+    }
+
     /// Extract the length-prefixed payload and the optional fd from a data-and-fd
     /// reply (the [`Self::transact_with_fd`] format), then free the reply buffer.
     fn take_data_and_fd(&self, reply: TransactionData) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {

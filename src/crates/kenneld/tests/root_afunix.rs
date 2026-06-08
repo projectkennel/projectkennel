@@ -62,8 +62,15 @@ fn run_manager() {
     ));
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");
-    let manager = binder::spawn(fd, 7, BinderRuntime::default(), unix, writer)
-        .expect("manager: become context manager");
+    let manager = binder::spawn(
+        fd,
+        7,
+        BinderRuntime::default(),
+        unix,
+        binder::Lifecycle::default(),
+        writer,
+    )
+    .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");
 
     let stop = dir.with_extension("stop");

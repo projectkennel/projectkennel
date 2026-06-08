@@ -37,7 +37,7 @@ const MAX_NAME: usize = 255;
 
 // The node-0 verb codes and reply status bytes are the shared wire convention
 // (`kennel_binder::service`), used by both kenneld here and the in-kennel clients.
-pub use kennel_binder::service::{status, verb};
+pub use kennel_binder::service::{lifecycle, status, verb};
 
 /// The per-kennel service registry, gated by the settled `[binder]` policy.
 ///
@@ -122,6 +122,25 @@ impl Registry {
     }
 }
 
+/// The lifecycle/config state `kenneld` serves to a kennel's `kennel-init` (`07-11`).
+///
+/// Served over node 0 (§7.11.4). Disabled by default (`init_host_pid == None`): the
+/// lifecycle verbs are refused until the factory reports the init pid and stages the
+/// supervision-half.
+#[derive(Debug, Default)]
+pub struct Lifecycle {
+    /// The **host** pid of `kennel-init`, reported by the privhelper factory. The single
+    /// authority for the lifecycle gate: a host-side context manager sees the sender's
+    /// host pid (`task_tgid_nr_ns`), never the kennel-internal `1`. `None` ⇒ disabled.
+    pub init_host_pid: Option<i32>,
+    /// The encoded supervision-half (`kennel-spawn::wire::encode_supervision`) served on
+    /// `GET_SANDBOX_PLAN`.
+    pub supervision: Vec<u8>,
+    /// The controlling-pty return socket for an interactive run, handed over (once) as a
+    /// `BINDER_TYPE_FD` object on the first `GET_SANDBOX_PLAN`. `None` for non-interactive.
+    pub pty_fd: Option<OwnedFd>,
+}
+
 /// A running per-kennel binder context manager: the serve thread plus its stop flag.
 #[derive(Debug)]
 pub struct Manager {
@@ -151,6 +170,7 @@ pub fn spawn(
     ctx: u16,
     policy: BinderRuntime,
     unix: UnixRuntime,
+    lifecycle: Lifecycle,
     writer: Arc<Writer>,
 ) -> io::Result<Manager> {
     let cm = ContextManager::new(device_fd, MAP_SIZE)?;
@@ -160,8 +180,9 @@ pub fn spawn(
         .name(format!("kennel-binder-{ctx}"))
         .spawn(move || {
             let mut registry = Registry::new(policy);
+            let mut lifecycle = lifecycle;
             let _ = cm.serve(POLL_MS, &worker_stop, |incoming| {
-                handle(&mut registry, &unix, incoming, ctx, &writer)
+                handle(&mut registry, &unix, &mut lifecycle, incoming, ctx, &writer)
             });
         })?;
     Ok(Manager {
@@ -176,10 +197,16 @@ pub fn spawn(
 fn handle(
     registry: &mut Registry,
     unix: &UnixRuntime,
+    lifecycle: &mut Lifecycle,
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
+    // Lifecycle/config verbs (the high range) are spoken only by kennel-init and gated
+    // on its kernel-stamped identity — handled before the registry/af-unix dispatch.
+    if incoming.code >= lifecycle::GET_SANDBOX_PLAN {
+        return lifecycle_handle(lifecycle, incoming, ctx, writer);
+    }
     // The af-unix facade returns a file descriptor, so it is handled apart from the
     // byte-reply registry verbs.
     if incoming.code == verb::CONNECT_AFUNIX {
@@ -224,6 +251,85 @@ fn handle(
             .field("ctx", Value::Uint(u64::from(ctx))),
     );
     Reply::Data(reply)
+}
+
+/// Serve a node-0 **lifecycle/config verb**, gated on the caller's kernel-stamped
+/// identity: only `kennel-init` (the host pid the privhelper reported, running as
+/// uid 0) may pull the plan or post notifications (`07-11` §7.11.4). A caller that is
+/// not the registered init pid — a spoof, or any other in-kennel process — is denied
+/// and audited.
+fn lifecycle_handle(
+    lifecycle: &mut Lifecycle,
+    incoming: &Incoming,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
+    let authorized = lifecycle_authorized(
+        lifecycle.init_host_pid,
+        incoming.sender_pid,
+        incoming.sender_euid,
+    );
+    if !authorized {
+        writer.emit(
+            &Event::new(
+                "binder.lifecycle-denied",
+                Resource::Binder,
+                Outcome::Deny,
+                Source::Kenneld,
+            )
+            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+            .field("code", Value::Uint(u64::from(incoming.code)))
+            .field("ctx", Value::Uint(u64::from(ctx))),
+        );
+        return Reply::Data(one(status::DENIED));
+    }
+
+    let (action, outcome, reply) = match incoming.code {
+        lifecycle::GET_SANDBOX_PLAN => {
+            // The pty fd (if any) is handed over once; a length-prefixed data-and-fd
+            // reply that kennel-init decodes with transact_with_fd.
+            let bytes = lifecycle.supervision.clone();
+            (
+                "binder.get-sandbox-plan",
+                Outcome::Allow,
+                Reply::DataAndFd(bytes, lifecycle.pty_fd.take()),
+            )
+        }
+        lifecycle::NOTIFY_BOOT_SYNC => (
+            "binder.notify-boot-sync",
+            Outcome::Info,
+            Reply::Data(one(status::OK)),
+        ),
+        lifecycle::NOTIFY_FACADE_CRASH => (
+            "binder.notify-facade-crash",
+            Outcome::Error,
+            Reply::Data(one(status::OK)),
+        ),
+        lifecycle::NOTIFY_WORKLOAD_EXEC => (
+            "binder.notify-workload-exec",
+            Outcome::Info,
+            Reply::Data(one(status::OK)),
+        ),
+        _ => (
+            "binder.bad-request",
+            Outcome::Error,
+            Reply::Data(one(status::BAD_REQUEST)),
+        ),
+    };
+    writer.emit(
+        &Event::new(action, Resource::Binder, outcome, Source::Kenneld)
+            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+            .field("ctx", Value::Uint(u64::from(ctx))),
+    );
+    reply
+}
+
+/// Whether a node-0 lifecycle transaction is authorised: the kernel-stamped sender must
+/// be exactly the registered `kennel-init` host pid **and** uid 0. `init == None`
+/// (lifecycle disabled) denies everything because `Some(pid) != None`; `sender_euid == 0`
+/// is defence-in-depth atop the pid match (the pid is the binding fact).
+const fn lifecycle_authorized(init: Option<i32>, sender_pid: i32, sender_euid: u32) -> bool {
+    matches!(init, Some(pid) if pid == sender_pid) && sender_euid == 0
 }
 
 /// The af-unix facade (`07-9`/`02-7`): resolve the requested socket against the
@@ -356,6 +462,19 @@ mod tests {
     fn list_services_is_the_sorted_declared_union() {
         let r = registry(&["b"], &["a", "b"]);
         assert_eq!(r.list_services(), vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn lifecycle_gate_requires_the_exact_init_pid_and_uid0() {
+        // Served only to the registered init host pid running as uid 0.
+        assert!(lifecycle_authorized(Some(4242), 4242, 0));
+        // Wrong pid (a spoof from another in-kennel process) — denied.
+        assert!(!lifecycle_authorized(Some(4242), 9999, 0));
+        // Right pid but not uid 0 — denied (defence in depth).
+        assert!(!lifecycle_authorized(Some(4242), 4242, 1000));
+        // Lifecycle disabled (no init pid registered) — everything denied.
+        assert!(!lifecycle_authorized(None, 4242, 0));
+        assert!(!lifecycle_authorized(None, 0, 0));
     }
 
     #[test]

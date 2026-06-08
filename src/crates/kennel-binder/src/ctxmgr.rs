@@ -18,14 +18,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::client::{Connection, Incoming};
 use crate::sys;
 
-/// What a node-0 handler returns for one transaction: either reply bytes, or a file
-/// descriptor (the af-unix facade returns a connected socket this way).
+/// What a node-0 handler returns for one transaction: reply bytes, a file descriptor,
+/// or both (data with an optional fd — the `kennel-init` `GET_SANDBOX_PLAN` pull).
 pub enum Reply {
     /// Reply with these payload bytes.
     Data(Vec<u8>),
     /// Reply with this file descriptor (a `BINDER_TYPE_FD` object); the kernel dups
     /// it into the caller. Dropped after the reply (the caller owns its copy).
     Fd(OwnedFd),
+    /// Reply with a length-prefixed payload and, when `Some`, a `BINDER_TYPE_FD` object
+    /// (the supervision-half bytes plus the controlling-pty fd — `07-11` §7.11.3). The
+    /// receiver decodes it with [`Connection::transact_with_fd`].
+    DataAndFd(Vec<u8>, Option<OwnedFd>),
 }
 
 /// A context-manager endpoint owning node 0 of one binder instance.
@@ -78,6 +82,11 @@ impl ContextManager {
                 match handler(&incoming) {
                     Reply::Data(data) => self.conn.reply_and_free(&incoming, &data)?,
                     Reply::Fd(fd) => self.conn.reply_with_fd(&incoming, fd.as_fd())?,
+                    Reply::DataAndFd(data, fd) => self.conn.reply_with_data_and_fd(
+                        &incoming,
+                        &data,
+                        fd.as_ref().map(AsFd::as_fd),
+                    )?,
                 }
             }
         }

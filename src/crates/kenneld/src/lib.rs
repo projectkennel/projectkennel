@@ -953,6 +953,10 @@ fn acquire_binder_node0(
                     ctx,
                     prep.policy.clone(),
                     prep.unix.clone(),
+                    // Lifecycle disabled on the legacy spawn path: the factory (Stage F)
+                    // reports the init pid and stages the supervision-half. Until then the
+                    // GET_SANDBOX_PLAN/NOTIFY_* verbs are refused (no init pid to match).
+                    crate::binder::Lifecycle::default(),
                     std::sync::Arc::clone(&prep.writer),
                 );
             }
