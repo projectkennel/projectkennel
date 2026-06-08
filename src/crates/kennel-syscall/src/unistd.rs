@@ -17,7 +17,7 @@
 
 use std::io;
 
-use nix::unistd::{getegid, geteuid, getgid, getgroups, getuid, setgroups, Gid, Group};
+use nix::unistd::{getegid, geteuid, getgid, getgroups, getuid, setgroups, Gid, Group, Uid};
 
 /// The effective user ID of the calling process (`geteuid(2)`).
 #[must_use]
@@ -96,6 +96,38 @@ pub fn group_gid(name: &str) -> io::Result<Option<u32>> {
 pub fn set_supplementary_groups(gids: &[u32]) -> io::Result<()> {
     let gids: Vec<Gid> = gids.iter().map(|g| Gid::from_raw(*g)).collect();
     setgroups(&gids).map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Set the real, effective, and saved **gid** to `gid` (`setresgid`).
+///
+/// Used by `kennel-init` to drop the workload child from the kennel's uid-0/gid-0 init
+/// identity to the non-root operator's gid before `execve` ([`kennel-init-and-uid0`]).
+/// Set the gid (and supplementary groups) **before** the uid: dropping the uid first
+/// would forfeit `CAP_SETGID` in the userns and leave the group identity stuck at root.
+///
+/// # Errors
+///
+/// An OS error if the caller lacks `CAP_SETGID` in its user namespace (it must run
+/// before the uid drop) or the gid is unmapped.
+pub fn set_gid(gid: u32) -> io::Result<()> {
+    let g = Gid::from_raw(gid);
+    nix::unistd::setresgid(g, g, g).map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Set the real, effective, and saved **uid** to `uid` (`setresuid`).
+///
+/// The final step of the workload drop in `kennel-init`: after the gid and
+/// supplementary groups are set, drop the uid to the non-root operator. Once this
+/// returns the process holds no uid-0 capability, and the subsequent `no_new_privs` +
+/// seccomp make the drop irreversible ([`kennel-init-and-uid0`]).
+///
+/// # Errors
+///
+/// An OS error if the caller lacks `CAP_SETUID` in its user namespace or the uid is
+/// unmapped.
+pub fn set_uid(uid: u32) -> io::Result<()> {
+    let u = Uid::from_raw(uid);
+    nix::unistd::setresuid(u, u, u).map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
 #[cfg(test)]
