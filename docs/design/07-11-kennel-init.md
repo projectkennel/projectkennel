@@ -1,152 +1,180 @@
 # §7.11 `kennel-init` — the kennel's PID 1
 
-## 7.11.1 Role
+## 7.11.1 Role and the construction split
 
-`kennel-init` is the trusted, root-owned process the privhelper `execve`s as **PID 1**
-of a kennel's namespaces. It is the kennel's *only* uid-0 process and its construction
-and supervision authority. Everything else in the kennel — the protocol facades and the
-workload — is a child of `kennel-init` running as the non-root operator identity.
+A kennel is assembled by two trusted parties across one irreversible boundary:
 
-It exists because the kennel has a real uid 0 (host root mapped `0 0 1`, no subuid), and
-that uid-0 authority must be held by trusted code that the operator cannot substitute or
-reach (see `kennel-init-and-uid0`). The privhelper creates the user namespace, writes the
-maps, and `execve`s the deployment's root-owned `kennel-init`; no operator-controlled code
-ever runs as userns-0.
+- **The privhelper is the factory.** Already the host-side root utility, it does *all* the
+  privileged construction in its own post-`clone` child, **including `pivot_root`**, and only
+  then hands control on.
+- **`kennel-init` is the supervisor.** It is `execve`'d **after the host root is gone**, so it
+  is trapped inside the sealed view from its first instruction. It holds **no ambient host
+  capabilities** — being uid 0 *in the userns* (host root mapped `0 0 1`) gives it only
+  userns-scoped `CAP_SETUID`/`CAP_SETGID`, enough to drop the workload and powerless against
+  host-owned resources. It needs no `CAP_SYS_ADMIN`/`CAP_NET_ADMIN` anywhere in its lifespan.
 
-`kennel-init` does **no policy decisions**. It realises a `Plan` that kenneld already
-compiled and the privhelper already authorised. It is deliberately minimal: construct the
-view, hand the binder bus to the workload, supervise, report.
+This placement is the security crux. If `kennel-init` (or a facade) is exploited, the host
+filesystem is **physically absent from its mount namespace** — `pivot_root` already detached
+it — so host DAC on host-root-owned files is impossible even though the process is kuid 0.
+The dangerous window of "uid-0-mapped binary while the host fs is still visible" never exists.
+
+`kennel-init` does **no policy decisions** and is deliberately tiny: open the binder driver,
+pull its Plan over the bus, fork the facades and the workload, drop them to the operator,
+confine the workload, supervise, report. No mount, netlink, device-provisioning, filesystem
+lookup, or environment-scrubbing code.
+
+### The factory sequence
+
+```
+privhelper (real host root)
+  1. parse the construction half of the Plan (host-side, before any namespace exists)
+  2. open() the trusted kennel-init binary on the host  → hold the fd
+  3. clone(CLONE_NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET])  → child C is PID 1 of the new pidns
+  └─ in C (still privhelper code, full caps in the new userns):
+       4. write uid_map "0 0 1\n<op> <op> 1", gid_map "0 0 1\n<op> <op> 1" + granted groups
+       5. join the kennel cgroup; bring up loopback; mount the view; mount binderfs,
+          allocate the `binder` device, chown /dev/binderfs/binder to the operator uid
+       6. pivot_root into the view and detach the old host root   ← the structural sever
+       7. fexecve(initfd)  ← the host path is gone; exec by the fd opened in step 2
+─────────────────────────────────────────────────────────────── trust boundary
+kennel-init (PID 1, uid 0, trapped in the pivoted view, zero argv/envp)
+  8. open /dev/binderfs/binder; GET_SANDBOX_PLAN from node 0 (retry until kenneld answers)
+  9. fork facades (PIDs 2,3,…), each dropped to the operator; NOTIFY_BOOT_SYNC
+ 10. NOTIFY_WORKLOAD_EXEC; fork the workload, drop to operator, no_new_privs + seccomp +
+     Landlock + ulimits + pty, execve
+ 11. waitpid loop: NOTIFY_FACADE_CRASH on a facade death; on workload exit, _exit its status
+```
+
+Single `clone(CLONE_NEWPID|…)` — the child is PID 1 directly; no double-fork (that was only
+needed when `unshare` left the unsharer in the old pidns). The privhelper stays C's parent,
+reaps it, and relays the exit status to kenneld over the construction socketpair (the reliable
+exit path is the process chain, not binder, which may already be torn down).
+
+**`fexecve`, not a path exec, is load-bearing:** after `pivot_root` the host path
+`<libexec>/kennel-init` is absent from the mount namespace, so the privhelper opens the
+trusted init on the host *before* the clone and execs it by descriptor afterward. As a bonus
+the init binary never appears in the view; the workload cannot even see it.
 
 ## 7.11.2 The binder bus is the control plane
 
-`kennel-init` is a **binder client on the same per-kennel binderfs instance** it mounts,
-transacting to **node 0 (kenneld)** for every lifecycle event. This replaces ad-hoc
-control channels (anonymous pipes, `stderr` scraping, an early UNIX socket) with the one
-IPC mechanism the kennel already runs.
+`kennel-init` is a **binder client on the same per-kennel binderfs instance** the privhelper
+mounted, transacting to **node 0 (kenneld)** for both its configuration pull and every
+lifecycle event. This is the one IPC mechanism the kennel already runs; no ad-hoc pipes,
+`stderr` scraping, or early UNIX socket.
 
-The decisive property is **kernel-stamped, unforgeable caller identity**. The binder
-driver injects the sender's pid and euid into every transaction (`binder_transaction_data`
-`sender_pid`/`sender_euid`); a process cannot lie about them. kenneld validates each
-lifecycle transaction against the init it is expecting and drops anything else.
+The decisive property is **kernel-stamped, unforgeable caller identity**: the binder driver
+injects `sender_pid`/`sender_euid` into every transaction; a process cannot lie about them.
 
-### Correcting the identity check
+### The identity gate (corrected)
 
-The naive gate `sender_pid == 1` is **wrong** for this topology, and shipping it would
-reject every legitimate lifecycle event. kenneld is the context manager **from the host
-(init) PID namespace** — it acquires node 0 via `/proc/<pid>/root`. The binder driver
-reports `sender_pid` relative to the *target's* PID namespace
-(`task_tgid_nr_ns(sender, target_pidns)`), so kenneld sees `kennel-init`'s **host PID**,
-not `1`. The kennel-internal PID-1-ness is invisible to a host-side receiver.
-
-The correct gate uses facts kenneld already holds. The privhelper, having forked the
-userns/PID-1 chain, reports `kennel-init`'s **host pid** to kenneld over the construction
-socketpair (the bootstrap channel, §7.11.4). kenneld then enforces, on every lifecycle
-transaction:
+The naive `sender_pid == 1` is **wrong** for this topology. kenneld is the context manager
+**from the host PID namespace** (it acquires node 0 via `/proc/<pid>/root`), and the driver
+reports `sender_pid` relative to the *target's* pidns (`task_tgid_nr_ns`), so kenneld sees
+`kennel-init`'s **host pid**, not the kennel-internal `1`. The gate uses facts kenneld already
+holds: the privhelper, having `clone`d the chain, reports `kennel-init`'s **host pid** over the
+construction socketpair, and kenneld enforces on every lifecycle/config transaction:
 
 ```rust
-// init_host_pid: learned from the privhelper at construction (not from the wire).
+// init_host_pid: from the privhelper at construction (not from the wire).
 if tr.sender_pid != init_host_pid || tr.sender_euid != 0 {
     audit("binder.lifecycle-forged", Outcome::Deny, tr.sender_pid);
     return Br::FAILED_REPLY;
 }
 ```
 
-`sender_euid == 0` is defense-in-depth: `kennel-init` is the only uid-0 process (host
-kuid 0 via the `0 0 1` map → kenneld, in the host userns, sees euid `0`); the facades and
-workload run as the operator's non-zero uid and so can never present euid 0. The pid match
-is the primary, exact gate.
+`sender_euid == 0` is defense-in-depth: `kennel-init` is the only uid-0 process (host kuid 0
+via `0 0 1`; the facades and workload run as the operator's non-zero uid), so it cannot be
+impersonated. The pid match is the primary, exact gate.
 
-### Lifecycle verbs ride node 0
+### Lifecycle/config verbs ride node 0, in their own code range
 
-Lifecycle is **reserved verb codes on node 0**, not a separate node — consistent with the
-`AF_UNIX` facade (`CONNECT_AFUNIX`, §7.9.5) and avoiding node-handle distribution. The
-workload can address node 0 too, but the sender-identity gate makes the lifecycle verbs
-inert for anyone but `kennel-init`; a workload attempt is a logged `Deny`, never an action.
-(A distinct `org.projectkennel.ILifecycle/default` node is the alternative — cleaner
-separation at the cost of vending its handle only to init and refusing it to the workload;
-the sender-identity gate already provides the security boundary, so the reserved-verb form
-is preferred.)
+Lifecycle is **reserved verb codes on node 0**, consistent with the `AF_UNIX` facade
+(`CONNECT_AFUNIX`). Node 0's registry verbs occupy 1–5 and `CONNECT_AFUNIX` is 5, so the
+lifecycle verbs sit in a **distinct high range** (`0x100+`) to avoid collision. A workload can
+address node 0 but the sender-identity gate makes these verbs inert for anyone but
+`kennel-init`. (`kennel-init` is therefore a **third** binder participant alongside kenneld
+and `kennel-netshim`; the "binder confined to kenneld + netshim" note is updated.)
 
-## 7.11.3 File-descriptor and uid mechanics (open-then-chown)
+## 7.11.3 The pull model: zero-argument `execve`, config over the bus
 
-`kennel-init` is a binder *consumer* and the binderfs *owner*, which it reconciles by
-acquiring its own client descriptor **before** it relinquishes path ownership:
+Because the privhelper mounts binderfs and kenneld claims node 0 **before** `kennel-init`
+runs, the channel is open from PID 1's first instruction. So the privhelper `execve`s
+`kennel-init` with **empty `argv` and `envp`** — no serialized Plan shoved through arguments
+or the environment, and nothing for host-side `ps`/`/proc/<pid>/cmdline`/`environ` to leak.
 
-1. **Open while uid 0.** In the privileged phase, still mapped to host root, `kennel-init`
-   mounts binderfs, allocates the `binder` device, and `open(2)`s `/dev/binderfs/binder`,
-   keeping the fd in its execution context. `binder-control` stays root-owned (only uid 0
-   allocates devices — the Android model).
-2. **Chown the path, keep the fd.** Only then does it `chown` `/dev/binderfs/binder` to the
-   operator (workload) uid, so the facades and the workload can later `open` their own
-   independent client descriptors. `kennel-init`'s already-open fd is unaffected by the
-   ownership change.
+`kennel-init` **pulls** its configuration:
 
-A single binderfs instance, one `binder` device, many openers (each `open` is a distinct
-`binder_proc`): `kennel-init`'s privileged early client, plus the workload's and each
-facade's after the chown.
+1. Open the standard `/dev/binderfs/binder` (a compile-time constant path).
+2. `GET_SANDBOX_PLAN` to node 0, **retrying** until kenneld has claimed node 0 (kenneld opens
+   `/proc/<init>/root/dev/binderfs/binder` after the pivot; the retry closes the race with no
+   extra handshake).
+3. kenneld looks up the **supervision half** of the pre-compiled Plan **by the binderfs
+   instance the transaction arrived on** — each kennel has its own node-0 fd and looper, so a
+   transaction on that queue is unambiguously that kennel; no token, cookie, or handshake is
+   needed to identify the requester.
+4. kenneld writes the flat Plan bytes (the `kennel-spawn::wire` encoding, §Stage 0) into the
+   `BC_REPLY`. Binder **copies** the buffer into the target's mmap'd region — cross-instance
+   transactions reject `BINDER_TYPE_PTR`/raw pointers — so the Plan is forced into a localized
+   flat buffer with no host↔sandbox shared-memory hazard. The interactive pty-return socket,
+   when present, rides the same reply as a `BINDER_TYPE_FD`.
+5. `kennel-init` decodes with the zero-dependency binary decoder and knows exactly which
+   facades to fork and which workload to launch.
 
-## 7.11.4 Lifecycle phases
+### The `Plan` splits three ways
 
-`kennel-init` runs a fixed sequence. The privhelper→init **construction socketpair** is the
-bootstrap channel (it carries the serialised `Plan` in and the init/workload host pids
-back to kenneld); the **binder bus** carries the in-life events once node 0 is reachable.
+kenneld holds the full Plan and never serialises all of it to one place:
 
-- **P0 — Entry.** `execve`d as PID 1, userns uid 0, with the `Plan` blob on a fixed
-  inherited fd and the privhelper control socket on another. Decode (`kennel-spawn::wire`)
-  and re-validate the `Plan` (it is operator-authored; the privhelper validated what it
-  acts on, init re-validates the whole — §7.11.6).
-- **P1 — Privileged construction (uid 0).** Join the cgroup; `make_root_private`; build the
-  view + `pivot_root` (root dir, `/dev`, RO library binds, synthetic `/etc`, fresh `/proc`,
-  private `/tmp`) — all owned by **uid 0**, the headline outcome. Mount binderfs, allocate
-  the device, **open it (§7.11.3)**, chown it to the operator.
-- **P2 — Boot sync.** Using its early fd, transact `NOTIFY_BOOT_SYNC` to node 0, **retrying**
-  until kenneld has acquired node 0 (kenneld polls `/proc/<init>/root/dev/binderfs/binder`
-  on the pid the privhelper gave it; the retry closes the race with no extra channel).
-- **P3 — Launch facades.** Fork each infrastructure facade (the `AF_UNIX` proxy today;
-  `netshim`, dbus/gpg facades as they land), **each dropping to the operator identity**
-  before `execve` — only `kennel-init` stays uid 0. Report the facades' internal pids in the
-  `NOTIFY_BOOT_SYNC` payload so kenneld attributes host telemetry to true in-namespace pids.
-- **P4 — Launch the workload.** Transact `NOTIFY_WORKLOAD_EXEC`, then fork the workload
-  child: drop gid → supplementary groups → uid to the operator (`set_gid`/`set_uid`), then
-  `no_new_privs`, seccomp, Landlock, ulimits, the interactive pty, and `execve`. After the
-  drop + `no_new_privs` + seccomp the workload can never regain uid 0.
-- **P5 — Supervise.** A `waitpid` reaper loop. A facade exit dispatches `NOTIFY_FACADE_CRASH`
-  (kenneld emits a `service.crash` audit event off the workload's hot path). The workload's
-  exit ends the kennel: `kennel-init` `_exit`s with the workload's status, which propagates
-  through the privhelper chain to kenneld (the **reliable exit-status path is the process
-  chain, not binder** — binder may already be torn down).
+- **Construction half → privhelper** (the `ConstructKennel` request): the uid/gid maps, the
+  loopback config, the binderfs params, the view bind list, and the pivot target. Parsed
+  host-side, where there is no sandbox to manipulate it.
+- **Supervision half → `kennel-init`** (the `GET_SANDBOX_PLAN` reply): the facade list
+  (paths+args), the workload argv/env, the operator uid/gid to drop to, the Landlock ruleset,
+  the seccomp filter, the ulimits, and the pty fd. Parsed **post-pivot**, so even a decoder bug
+  is contained to the sealed view.
 
-## 7.11.5 The `ILifecycle` verbs
+Landlock and seccomp stay in `kennel-init` (applied to the **workload child** it forks) — not
+in the privhelper or before `fexecve` — because applying them earlier would also confine
+`kennel-init` and the facades, which must remain free to fork, `waitpid`, and reach the bus.
 
-Node-0 verb codes, init→kenneld, reply is a status byte unless noted:
+## 7.11.4 The `ILifecycle` verbs
 
-| Verb | Payload | Meaning |
-|---|---|---|
-| `NOTIFY_BOOT_SYNC` | facade name→in-namespace pid map | construction complete; the kennel reached its target state (closes the loop with no host-side polling) |
-| `NOTIFY_FACADE_CRASH` | facade id (enum) + exit status + telemetry | a supervised facade died; kenneld logs `service.crash` |
-| `NOTIFY_WORKLOAD_EXEC` | none | crossing the pre-`execve` boundary into unprivileged execution |
+Node-0 verb codes (distinct high range), `kennel-init` ⇄ kenneld:
 
-Payloads are bounded and parsed with the same fixed-discipline codec as the rest of the
-binder surface (`02-7` threat model; untrusted-shaped even though the sender is trusted).
+| Verb | Dir | Payload | Reply |
+|---|---|---|---|
+| `GET_SANDBOX_PLAN` | init → kenneld | none (identity is the instance) | the supervision-half Plan (flat `kennel-spawn::wire` bytes) + optional pty `BINDER_TYPE_FD` |
+| `NOTIFY_BOOT_SYNC` | init → kenneld | facade name → in-namespace pid map | status |
+| `NOTIFY_FACADE_CRASH` | init → kenneld | facade id + exit status + telemetry | status |
+| `NOTIFY_WORKLOAD_EXEC` | init → kenneld | none | status |
 
-## 7.11.6 Security invariants
+`GET_SANDBOX_PLAN` is request/reply; the `NOTIFY_*` are fire-and-forget. All are audited as
+binder **lifecycle** events (not `binder.cross`, which is cross-*kennel* relay). Payloads are
+bounded and parsed with the same fixed-discipline codec as the rest of the binder surface.
 
+## 7.11.5 Security invariants
+
+- **Trapped from birth.** `kennel-init` is `execve`'d after `pivot_root`; the host root is not
+  in its mount namespace, so host DAC on host files is impossible despite kuid 0.
+- **No ambient host caps.** All `CAP_SYS_ADMIN`/`CAP_NET_ADMIN` work is done by the privhelper
+  pre-`execve`; `kennel-init` holds only userns-scoped `CAP_SETUID`/`CAP_SETGID` for the drop.
 - **Only `kennel-init` is uid 0.** Facades and the workload drop to the operator before
-  `execve`; no path lets them regain it (`no_new_privs` + seccomp).
-- **The init binary is trusted by provenance, never by the wire.** Its path comes from the
-  root-owned deployment config (`Deployment::kennel_init()`); the privhelper verifies it is
-  root-owned and not group/other-writable before `execve`. The operator cannot substitute a
-  uid-0 init.
-- **Lifecycle authority is the pid gate.** kenneld acts on a lifecycle verb only from
-  `sender_pid == init_host_pid && sender_euid == 0`; everything else is a logged `Deny`.
-- **`Plan` is operator data parsed by root** (init decodes it as uid 0): every length
-  bounded, every path validated absolute/`..`-free, fail-closed; a fuzz target covers the
-  decoder (§10.6).
-- **Fail-closed construction.** Any P0–P4 step that fails aborts before the workload
-  `execve`; the kennel never runs partially confined.
+  `execve` (`set_gid` → groups → `set_uid`), then `no_new_privs` + seccomp make it
+  irreversible; nothing regains uid 0.
+- **The init binary is trusted by provenance.** Its path comes from the root-owned deployment
+  config (`Deployment::kennel_init()`); the privhelper verifies it is root-owned and not
+  group/other-writable, opens it pre-clone, and `fexecve`s it. The operator cannot substitute
+  a uid-0 init.
+- **Lifecycle/config authority is the pid gate.** kenneld serves `GET_SANDBOX_PLAN` and acts on
+  a `NOTIFY_*` only from `sender_pid == init_host_pid && sender_euid == 0`; anything else is a
+  logged `Deny`.
+- **Root parses operator data only in safe places.** The construction half is parsed host-side
+  (no sandbox yet); the supervision half is parsed by `kennel-init` post-pivot (contained).
+  Both decoders are bounded and fuzzed (§10.6).
+- **Fail-closed.** Any factory step or any pre-`execve` confinement step that fails aborts
+  before the workload runs; the kennel never runs partially confined.
 
-## 7.11.7 Non-goals
+## 7.11.6 Non-goals
 
-No policy evaluation, no network, no trust-store handling beyond what construction needs,
-no service registry (that is node 0 / kenneld). `kennel-init` is scaffolding and a
-supervisor — small, auditable, and the same binary for every kennel.
+No policy evaluation, no network or mount syscalls, no trust-store handling, no service
+registry (that is node 0 / kenneld), no config parsing beyond the flat supervision-half blob.
+`kennel-init` is a small, auditable supervisor — the same binary for every kennel.

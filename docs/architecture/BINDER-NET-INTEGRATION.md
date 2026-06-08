@@ -123,18 +123,36 @@ add-addr / egress / gid-map" model. It supersedes that framing wherever it appea
   Written by the privhelper (gains `CAP_SETUID`; already has `CAP_SETGID`). The old gid-map
   handshake (§7.2.8, deferred-gid) is subsumed: the maps are written once, fully, by the
   constructor before `kennel-init` starts.
-- **The privhelper is the kennel constructor**: new op (e.g. `ConstructKennel`) over a
-  `SOCK_SEQPACKET` socketpair (it must pass fds via `SCM_RIGHTS` and return the init/workload
-  host pids and exit status). The `Plan` crosses kenneld→privhelper→`kennel-init` as bytes
-  (`kennel-spawn::wire`, built); the privhelper forwards it, `kennel-init` (root) decodes +
-  re-validates it — operator data parsed by root, fuzzed (§10.6).
+- **The privhelper is the FACTORY** — it does *all* privileged construction in its own
+  post-`clone` child, **including `pivot_root`**, before handing off. New op (e.g.
+  `ConstructKennel`) over a `SOCK_SEQPACKET` socketpair: single `clone(NEWUSER|NEWNS|NEWPID|
+  NEWIPC[|NEWNET])` (child C = PID 1, no double-fork); write the maps; join cgroup; bring up
+  `lo`; mount the view; mount binderfs + allocate + chown the device to the operator;
+  `pivot_root` + detach host root; then **`fexecve`** the trusted `kennel-init` (opened on the
+  host *before* the clone — the host path is gone post-pivot; `fexecve` also keeps it out of
+  the view). Returns the init/workload host pids and relays exit status. This eliminates the
+  window where a uid-0 binary runs while the host fs is still visible.
+- **`kennel-init` holds NO ambient host caps** — trapped post-pivot from birth; uid-0-in-userns
+  gives only userns-scoped `CAP_SETUID`/`CAP_SETGID` for the drop. No `CAP_SYS_ADMIN`/
+  `CAP_NET_ADMIN`. It runs no mount/netlink/device/fs-lookup/env code.
+- **Pull model, zero-arg `execve`** — the privhelper execs `kennel-init` with empty argv/envp
+  (no leak via `/proc/<pid>/cmdline`/`environ`). `kennel-init` opens `/dev/binderfs/binder` and
+  **pulls** its config: `GET_SANDBOX_PLAN` → node 0; kenneld identifies the kennel by the
+  binderfs *instance* the txn arrived on (per-instance fd/looper — no token) and replies with
+  the flat `kennel-spawn::wire` bytes (binder copies — no `BINDER_TYPE_PTR` → copy-isolation);
+  the pty return socket rides the reply as `BINDER_TYPE_FD`. `kennel-init` retries until kenneld
+  has claimed node 0.
+- **The `Plan` splits THREE ways** (kenneld holds the full Plan): construction-half →
+  privhelper (`ConstructKennel`, parsed host-side, no sandbox to manipulate it); supervision-half
+  → `kennel-init` (the `GET_SANDBOX_PLAN` reply, parsed post-pivot/contained). Both decoders are
+  bounded + fuzzed (§10.6).
 - **`kennel-init` is root-owned and trusted by provenance**: its path comes from the
   deployment config (`Deployment::kennel_init()` → libexec), never the wire; the privhelper
-  verifies root ownership + non-writability before `execve`. The operator cannot substitute a
-  uid-0 init.
+  verifies root ownership + non-writability, opens it pre-clone, and `fexecve`s it.
 - **The workload is never uid 0**: `kennel-init` forks it and drops gid → groups → uid to the
   operator (`set_gid`/`set_uid`), then `no_new_privs` + seccomp + Landlock + ulimits + pty +
-  `execve` — irreversible. Facades drop the same way; only `kennel-init` stays uid 0.
+  `execve` — irreversible. Facades drop the same way; **Landlock/seccomp apply to the workload
+  child only** (not init/facades). Only `kennel-init` stays uid 0.
 - **Lifecycle identity gate**: kenneld accepts a lifecycle verb only from
   `sender_pid == init_host_pid` (a host-side context manager sees host pids, **not** the
   kennel-internal `1`) `&& sender_euid == 0`. The init host pid is the privhelper bootstrap
@@ -149,7 +167,7 @@ add-addr / egress / gid-map" model. It supersedes that framing wherever it appea
 | [`01-process-model.md`](01-process-model.md) | Rewrite the fork tree and PID-1 semantics: the **privhelper** forks the userns/PID-1 chain and `execve`s **`kennel-init`** (PID 1, uid 0); `kennel-init` forks the facades + the workload (operator uid). Privilege table: privhelper gains **`CAP_SETUID`** and becomes the **constructor** (drop the "minimal add-addr/egress/gid-map only" claim). New trusted binary `kennel-init`. IPC topology gains the construction socketpair (Plan in, pids/status back) and the binder lifecycle channel (init→node 0). | 07-11 |
 | design [`01-thesis.md`](../design/01-thesis.md), [`02-adversary-model.md`](../design/02-adversary-model.md), [`03-problem-statement.md`](../design/03-problem-statement.md), [`04-trust-boundaries.md`](../design/04-trust-boundaries.md) | **Binder becomes integral**, not an opt-in IPC facade: every kennel runs a binder bus as its control plane (init↔kenneld), so the thesis/problem framing must present binder as load-bearing. The adversary model gains: host uid 0 mapped into the userns (safe only because no operator code reaches userns-0 — state the invariant + the escalation-window analysis), and the workload-vs-init uid-0 separation. Trust boundaries: the privhelper is now the constructor parsing an operator `Plan` (largest new root-parses-operator-input surface). | 07-11, 02-7 |
 | architecture [`04-trust-boundaries.md`](04-trust-boundaries.md) | Boundary 1 (operator↔privhelper) is now a *construction* boundary: the privhelper holds `CAP_SETUID`, maps host root, parses the operator `Plan`, and `execve`s a trusted init. Add the escalation-window analysis (operator code never runs as userns-0) and the `kennel-init`-path provenance trust. | 07-11 |
-| [`02-4-ipc.md`](02-4-ipc.md) | New privhelper `ConstructKennel` op (socketpair, `SCM_RIGHTS` fds, Plan blob in, init/workload pids + exit status out). Document the `kennel-spawn::wire` Plan encoding as the op payload. | 07-11 |
+| [`02-4-ipc.md`](02-4-ipc.md) | New privhelper `ConstructKennel` op (socketpair, `SCM_RIGHTS` fds, **construction-half** Plan in, init/workload pids + exit status out). The **supervision-half** is not pushed here — `kennel-init` pulls it over binder (`GET_SANDBOX_PLAN`, → 02-7/07-11). Document the `kennel-spawn::wire` encoding as both the op payload and the `BC_REPLY` payload. | 07-11, 02-7 |
 | [`03-crate-decomposition.md`](03-crate-decomposition.md) | Add the **`kennel-init`** crate (root-owned PID-1 binary); `kennel-init` links `kennel-binder` (lifecycle consumer) + reuses the `kennel-spawn` seal. Update the "binder confined to kenneld + netshim" dep-graph note to include `kennel-init`. | 07-11 |
 | [`07-paths.md`](07-paths.md) | `kennel-init` in libexec (root-owned, non-writable); the privhelper gains `cap_setuid` (alongside `cap_sys_admin`/`cap_net_admin`/`cap_setgid`). | 07-11 |
 | [`06-build-and-test.md`](06-build-and-test.md) | `cap_setuid` in the privhelper `setcap` line; build `kennel-init`; the construction-path root e2e; fuzz the Plan decoder (`kennel-spawn::wire`). | 07-11 |

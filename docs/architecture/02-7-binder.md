@@ -100,12 +100,15 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 > The old pure-identity map (`{uid} {uid} 1`) had no uid 0, so the nodes landed on the
 > overflow uid (`nobody`, mode `0600`) and nothing in the kennel could open them — proven
 > by the full-vertical e2e (`add_binder_device` EACCES). The kennel now has a real uid 0
-> (host root mapped `0 0 1`, no subuid), and binderfs is mounted by the root-owned
-> **`kennel-init` (PID 1)** the privhelper `execve`s, which opens the device while uid 0,
-> then **chowns `/dev/binderfs/binder` to the workload uid** (`binder-control` stays
-> root-only). The step list below still describes the mount/allocate/become-context-manager
-> mechanics, but the *actor* is `kennel-init` under privhelper-driven construction, not the
-> old unprivileged spawn fork. Full reconciliation is owed (`BINDER-NET-INTEGRATION.md`).
+> (host root mapped `0 0 1`, no subuid). binderfs is mounted, the device allocated, and
+> **`/dev/binderfs/binder` chowned to the operator uid** by the **privhelper factory** in its
+> post-`clone` child *before* `pivot_root` and *before* it `fexecve`s the trusted root-owned
+> **`kennel-init` (PID 1)** — so the uid-0 mount work never runs while the host fs is visible
+> (`binder-control` stays root-only). `kennel-init` (uid 0, post-pivot) merely `open`s its own
+> lifecycle client on the device and **pulls** its config from node 0 (`GET_SANDBOX_PLAN`).
+> The step list below still describes the mount/allocate/become-context-manager mechanics, but
+> the *actor* is the privhelper factory, not the old unprivileged spawn fork. Full
+> reconciliation is owed (`BINDER-NET-INTEGRATION.md`).
 
 Each kennel gets its own binderfs instance — a fully independent mount, like devpts and
 tmpfs, sharing no nodes with any other kennel's instance. **binderfs carries
@@ -183,10 +186,11 @@ Android convention (cf. `android.os.*`, `vendor.*`), so those are kept as-is.
 > add-addr/egress/gid-map helper (supersedes that framing in `01-process-model.md`).
 
 There is still **no binder-*specific* privhelper op**: binderfs is `FS_USERNS_MOUNT`, so the
-mount itself is namespace-local (the same category as the view's other mounts), and the
-device chown is done by `kennel-init` as uid 0 inside the userns. What changed is the
-*construction* privilege (the `0 0 1` map + `execve` of the trusted init), tracked in
-`BINDER-NET-INTEGRATION.md`, not a per-binder privileged surface.
+mount itself is namespace-local, done by the privhelper factory in its post-`clone` child
+(which holds full caps in the new userns), along with the device allocation and the chown to
+the operator — all before `pivot_root` and the `fexecve` of `kennel-init`. What changed is the
+*construction* privilege (the `0 0 1` map needs `CAP_SETUID`; the factory does the mounts and
+the pivot), tracked in `BINDER-NET-INTEGRATION.md`, not a per-binder privileged surface.
 
 ---
 
