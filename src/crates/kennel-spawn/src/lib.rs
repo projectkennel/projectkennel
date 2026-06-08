@@ -856,9 +856,12 @@ fn build_view_and_pivot(
         kennel_binder::binderfs::mount_instance(
             &binderfs_dir,
             kennel_binder::binderfs::DEFAULT_MAX_DEVICES,
-        )?;
-        kennel_binder::binderfs::add_binder_device(&binderfs_dir)?;
-        std::os::unix::fs::symlink("binderfs/binder", under(Path::new("/dev/binder")))?;
+        )
+        .map_err(|e| io::Error::new(e.kind(), format!("binderfs mount_instance: {e}")))?;
+        kennel_binder::binderfs::add_binder_device(&binderfs_dir)
+            .map_err(|e| io::Error::new(e.kind(), format!("binderfs add_binder_device: {e}")))?;
+        std::os::unix::fs::symlink("binderfs/binder", under(Path::new("/dev/binder")))
+            .map_err(|e| io::Error::new(e.kind(), format!("binderfs symlink: {e}")))?;
     }
 
     // 5. Fresh /proc (reflecting the PID namespace) and the private /tmp.

@@ -214,7 +214,19 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             resolved_artifacts: Vec::new(),
         },
         ssh: kennel_policy::SshRuntime::default(),
-        unix: kennel_policy::UnixRuntime::default(),
+        // One [unix] grant so the derived plan mounts binderfs and grants the binder
+        // device (the af-unix facade rides binder). The `real` here is a placeholder —
+        // the bring-up's `binder_prep` carries the actual host listener path the facade
+        // connects; what matters for the plan is that `unix` is non-empty (mirrors a
+        // production settled policy that carries [unix]).
+        unix: kennel_policy::UnixRuntime {
+            sockets: vec![kennel_policy::UnixSocket {
+                name: "echo".to_owned(),
+                real: "/placeholder.sock".to_owned(),
+                shim: "/home/kennel/kennel-unix.sock".to_owned(),
+                env: None,
+            }],
+        },
         identity: kennel_policy::IdentityRuntime::default(),
         binder: kennel_policy::BinderRuntime::default(),
         audit: kennel_policy::AuditRuntime::default(),

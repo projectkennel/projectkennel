@@ -41,12 +41,20 @@ fi
 SUBKENNEL_LINE="${UID_NUM}:42:0000000002:kennel-dev"
 AA_PROFILE_NAME="kennel_e2e_test"
 AA_PROFILE_FILE="$(mktemp /tmp/kennel-e2e-aa.XXXXXX)"
+# Set when the runner temporarily rewrites a pre-existing, mismatched subkennel line
+# for this uid (e.g. a real allocation): the original is saved here and restored on exit.
+SUBKENNEL_SAVED=""
 
 cleanup() {
     # Unload the temporary AppArmor profile (best-effort).
     if [ -f "$AA_PROFILE_FILE" ]; then
         sudo apparmor_parser -R "$AA_PROFILE_FILE" 2>/dev/null || true
         rm -f "$AA_PROFILE_FILE"
+    fi
+    # Restore the operator's original subkennel line if we swapped it in.
+    if [ -n "$SUBKENNEL_SAVED" ]; then
+        sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_SAVED}|" /etc/kennel/subkennel 2>/dev/null || true
+        echo "  restored original subkennel line for uid $UID_NUM"
     fi
 }
 trap cleanup EXIT
@@ -74,8 +82,17 @@ getcap "$PRIVHELPER"
 
 echo "== /etc/kennel/subkennel allocation for uid $UID_NUM (sudo) =="
 sudo mkdir -p /etc/kennel
-if ! sudo grep -qE "^${UID_NUM}:" /etc/kennel/subkennel 2>/dev/null; then
+sudo touch /etc/kennel/subkennel
+EXISTING="$(sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel 2>/dev/null | head -1 || true)"
+if [ -z "$EXISTING" ]; then
+    # No line for this uid: append the test allocation (left in place — it is ours).
     echo "$SUBKENNEL_LINE" | sudo tee -a /etc/kennel/subkennel >/dev/null
+elif [ "$EXISTING" != "$SUBKENNEL_LINE" ]; then
+    # A different line exists (likely a real allocation): swap to the test line for the
+    # run and restore the original on exit (see cleanup).
+    SUBKENNEL_SAVED="$EXISTING"
+    echo "  temporarily replacing existing line: $EXISTING"
+    sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_LINE}|" /etc/kennel/subkennel
 fi
 sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel
 
@@ -85,15 +102,18 @@ echo "== AppArmor userns profile over the test binary (sudo) =="
 # no-new-privs before exec'ing the workload, under which AppArmor denies every profile
 # transition (so the workload could only inherit, gaining the sandbox's mount/userns/
 # sys_admin). See dist/apparmor/kenneld for the full rationale.
+# The path is left unquoted: apparmor_parser 4.0.1's lexer rejects a quoted path in
+# the `profile <name> <path>` form (the build-time deps path has no spaces anyway).
 cat > "$AA_PROFILE_FILE" <<EOF
 abi <abi/4.0>,
 include <tunables/global>
-profile $AA_PROFILE_NAME "$TESTBIN" flags=(unconfined) {
+profile $AA_PROFILE_NAME $TESTBIN flags=(unconfined) {
   userns,
 }
 EOF
 if [ -e /sys/kernel/security/apparmor ]; then
     sudo apparmor_parser -r -W "$AA_PROFILE_FILE"
+    echo "  loaded $AA_PROFILE_NAME over $TESTBIN"
 else
     echo "  (AppArmor not present; relying on the kernel's userns being unrestricted)"
 fi
