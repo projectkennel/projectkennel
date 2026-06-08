@@ -277,21 +277,29 @@ fn write_identity_maps(pid: i32, uid: u32, gid: u32, granted: &[u32]) -> io::Res
 
 /// Build the `uid_map`/`gid_map` strings (pure; the write is in [`write_identity_maps`]).
 ///
-/// **Single contiguous identity range** `0 0 N` per map (DECIDED 2026-06-08): the kernel's
-/// `verify_root_map` only permits mapping host uid/gid 0 as a *single* extent — the clean
-/// two-line `0 0 1` + `<operator> <operator> 1` map is `EPERM`. So to give the kennel a
-/// real uid 0 (host 0 → inside 0, owning the view/dev/binderfs) **and** a distinct
-/// non-root identity the workload drops to (the operator), without subuid, the map is the
-/// identity range covering host 0 through the operator (and, for gids, through the highest
-/// granted supplementary group so `setgroups` can map it). Inside processes never reach
-/// the unused ids in the window (init = 0, workload/facades = operator, all confined).
+/// **Precise multi-extent map** — exactly host uid/gid 0 (the kennel's real root) plus the
+/// operator's own id (the masked identity the workload runs as), plus each granted
+/// supplementary gid. NOT a `0 0 N` range: the kernel allows a multi-extent map mapping
+/// host 0 as long as it is written in a **single `write(2)`** (which `write_identity_maps`
+/// does) and the writer holds `CAP_SETFCAP` (Linux 5.12+) — so the kennel never maps the
+/// unrelated host system uids between 0 and the operator. The operator line is omitted when
+/// the operator *is* root (the lines would overlap — the root-test case).
 fn build_identity_maps(uid: u32, gid: u32, granted: &[u32]) -> (String, String) {
-    // uid window: host 0..=operator.
-    let uid_n = u64::from(uid).saturating_add(1);
-    // gid window: host 0..=max(operator gid, every granted gid).
-    let gid_top = granted.iter().copied().fold(gid, u32::max);
-    let gid_n = u64::from(gid_top).saturating_add(1);
-    (format!("0 0 {uid_n}\n"), format!("0 0 {gid_n}\n"))
+    use std::fmt::Write as _;
+    let mut uid_map = String::from("0 0 1\n");
+    if uid != 0 {
+        let _ = writeln!(uid_map, "{uid} {uid} 1");
+    }
+    let mut gid_map = String::from("0 0 1\n");
+    if gid != 0 {
+        let _ = writeln!(gid_map, "{gid} {gid} 1");
+    }
+    for &g in granted {
+        if g != 0 && g != gid {
+            let _ = writeln!(gid_map, "{g} {g} 1");
+        }
+    }
+    (uid_map, gid_map)
 }
 
 #[cfg(test)]
@@ -299,17 +307,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_are_single_extent_ranges_covering_root_operator_and_granted() {
-        // Operator is root (the root-test case): the window is just host 0.
+    fn maps_are_precise_root_plus_operator_plus_granted() {
+        // Operator is root (the root-test case): a single 0 0 1 line, no overlap.
         assert_eq!(build_identity_maps(0, 0, &[]), ("0 0 1\n".into(), "0 0 1\n".into()));
-        // Operator is a normal user: a single range host 0..=operator (a two-extent map
-        // including root is kernel-EPERM). uid window = operator+1.
+        // Operator is a normal user: host root + the operator's own id — NOT the whole
+        // 0..operator range (multi-extent is fine in one write() with CAP_SETFCAP).
         let (u, g) = build_identity_maps(1000, 1000, &[27, 44]);
-        assert_eq!(u, "0 0 1001\n");
-        // gid window extends to cover the operator gid and every granted gid (here ≤1000).
-        assert_eq!(g, "0 0 1001\n");
-        // A granted gid ABOVE the operator widens the gid window to include it.
-        let (_, g2) = build_identity_maps(1000, 1000, &[5000]);
-        assert_eq!(g2, "0 0 5001\n");
+        assert_eq!(u, "0 0 1\n1000 1000 1\n");
+        assert_eq!(g, "0 0 1\n1000 1000 1\n27 27 1\n44 44 1\n");
+        // A granted gid equal to the primary (or 0) is not duplicated.
+        let (_, g2) = build_identity_maps(1000, 1000, &[1000, 0, 27]);
+        assert_eq!(g2, "0 0 1\n1000 1000 1\n27 27 1\n");
     }
 }
