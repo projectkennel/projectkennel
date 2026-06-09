@@ -46,6 +46,22 @@ pub mod lifecycle {
     pub const NOTIFY_WORKLOAD_EXEC: u32 = 0x103;
     /// `kennel-init` reports it re-forked a crashed facade (payload: the new host pid).
     pub const NOTIFY_FACADE_RESTART: u32 = 0x104;
+    /// `kennel-init`'s TTL timer fired (§9.7) — a **blocking** request.
+    ///
+    /// kenneld freezes the kennel's cgroup (atomic suspend — kennel-init is mid-call, so it just
+    /// blocks), audits, and decides per the policy's expiry action. The **reply** byte is
+    /// [`ttl::RESUME`] (kenneld thawed; the call returns and the kennel picks up where it left
+    /// off) or [`ttl::TERMINATE`] (kennel-init should exit; kenneld may also kill the frozen
+    /// cgroup outright). No payload.
+    pub const NOTIFY_TTL_EXPIRED: u32 = 0x105;
+}
+
+/// The reply byte to a [`lifecycle::NOTIFY_TTL_EXPIRED`] call.
+pub mod ttl {
+    /// Resume: kenneld thawed the cgroup; the workload continues (`warn`/`renew`).
+    pub const RESUME: u8 = 0;
+    /// Terminate: the kennel should stop (`exit`); kenneld has frozen and will kill it.
+    pub const TERMINATE: u8 = 1;
 }
 
 /// Reply status byte (the first byte of a data reply).

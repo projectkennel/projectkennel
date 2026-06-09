@@ -67,11 +67,13 @@ pub enum SeccompAction {
 }
 
 /// What to do when a kennel's TTL expires (`docs/design/09-policy-lifecycle.md` §9.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TtlAction {
-    /// Terminate the kennel cleanly: SIGTERM the workload, then SIGKILL after a grace
-    /// period. The default for a policy that sets a `ttl` without an action.
+    /// Terminate the kennel cleanly. The default for a policy that sets a `ttl` without an
+    /// action. (With the cgroup freezer this is an atomic freeze-then-kill — no SIGTERM grace
+    /// race — but the intent is unchanged: the kennel stops at its deadline.)
+    #[default]
     Exit,
     /// Leave the workload running; emit an audit event only.
     Warn,

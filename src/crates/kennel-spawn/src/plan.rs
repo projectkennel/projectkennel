@@ -418,6 +418,14 @@ pub struct Plan {
     /// (e.g. `kennel-afunix-shim`). Each binary must be bound into the view and granted
     /// Landlock execute. Not policy-derived — kenneld sets it at bring-up.
     pub aux: Vec<AuxProcess>,
+    /// The kennel's time-to-live in seconds (`[lifecycle].ttl`); `None` ⇒ no TTL. `kennel-init`
+    /// runs the timer (it rides the supervision-half) and, at expiry, makes a blocking binder
+    /// call to kenneld to suspend-or-stop the kennel (§9.7; the cgroup freezer).
+    pub ttl_seconds: Option<u64>,
+    /// What kenneld does when the TTL expires (`[lifecycle].on-expiry`): freeze + warn/renew
+    /// (resume) or terminate. Decided kenneld-side (it owns the cgroup), so it rides the binder
+    /// lifecycle, not the supervision-half.
+    pub ttl_action: kennel_policy::TtlAction,
 }
 
 /// An auxiliary in-kennel process launched by the seal (a binary path in the view and
@@ -484,6 +492,11 @@ pub struct Supervision {
     /// Whether a controlling-pty fd accompanies the reply (a `BINDER_TYPE_FD` object);
     /// the real fd is injected out of band, never serialised (see [`crate::wire`]).
     pub interactive: bool,
+    /// The kennel's TTL in seconds (`None` ⇒ none). `kennel-init` runs this timer and, at
+    /// expiry, makes a blocking `NOTIFY_TTL_EXPIRED` binder call to kenneld, which freezes the
+    /// cgroup and decides whether to resume or terminate (§9.7). The action itself is decided
+    /// kenneld-side, so it is not carried here.
+    pub ttl_seconds: Option<u64>,
 }
 
 impl Supervision {
@@ -824,6 +837,8 @@ impl Plan {
             ulimits,
             interactive_return_fd: None,
             aux: Vec::new(),
+            ttl_seconds: ep.lifecycle.ttl_seconds,
+            ttl_action: ep.lifecycle.ttl_action,
         })
     }
 

@@ -37,7 +37,7 @@ const MAX_NAME: usize = 255;
 
 // The node-0 verb codes and reply status bytes are the shared wire convention
 // (`kennel_binder::service`), used by both kenneld here and the in-kennel clients.
-pub use kennel_binder::service::{lifecycle, status, verb};
+pub use kennel_binder::service::{lifecycle, status, ttl, verb};
 
 /// The per-kennel service registry, gated by the settled `[binder]` policy.
 ///
@@ -138,6 +138,12 @@ pub struct Lifecycle {
     /// passes the return socket on the construction channel and `kennel-init` inherits it at
     /// `PTY_RETURN_FD` — `07-2`, decoupled from the bus.)
     pub supervision: Vec<u8>,
+    /// The kennel's cgroup (kenneld's delegated subtree). On `NOTIFY_TTL_EXPIRED` kenneld
+    /// freezes/thaws/kills this cgroup — the TTL custodian's mechanism stays in the trusted
+    /// daemon, never exposed to the sandbox (§9.7). Empty on a lifecycle with no TTL.
+    pub cgroup: std::path::PathBuf,
+    /// What to do when the TTL expires (`[lifecycle].on-expiry`), decided kenneld-side.
+    pub ttl_action: kennel_policy::TtlAction,
 }
 
 /// A running per-kennel binder context manager: the serve thread plus its stop flag.
@@ -313,6 +319,36 @@ fn lifecycle_handle(
             Outcome::Info,
             Reply::Data(one(status::OK)),
         ),
+        lifecycle::NOTIFY_TTL_EXPIRED => {
+            // The kennel's TTL fired (§9.7). kennel-init is blocked in this very call, so
+            // freezing the cgroup atomically suspends the whole kennel (no act-past-deadline
+            // race) without deadlocking — the BC_TRANSACTION already reached us. Then decide:
+            let _ = crate::cgroup::freeze_cgroup(&lifecycle.cgroup);
+            match lifecycle.ttl_action {
+                kennel_policy::TtlAction::Exit => {
+                    // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-init is
+                    // killed, so it never reads the reply; the reply byte is moot.
+                    let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
+                    (
+                        "binder.ttl-terminate",
+                        Outcome::Allow,
+                        Reply::Data(one(ttl::TERMINATE)),
+                    )
+                }
+                action @ (kennel_policy::TtlAction::Warn | kennel_policy::TtlAction::Renew) => {
+                    // Thaw, then reply RESUME — the *same* blocking call returns and the kennel
+                    // picks up where it left off (a momentary atomic pause + an audit event).
+                    // `renew` behaves as a louder warn until the interactive prompt is wired.
+                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
+                    let name = if matches!(action, kennel_policy::TtlAction::Renew) {
+                        "binder.ttl-renew"
+                    } else {
+                        "binder.ttl-warn"
+                    };
+                    (name, Outcome::Info, Reply::Data(one(ttl::RESUME)))
+                }
+            }
+        }
         _ => (
             "binder.bad-request",
             Outcome::Error,

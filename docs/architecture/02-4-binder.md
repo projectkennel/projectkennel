@@ -278,8 +278,9 @@ Android — but the verb set and names are deliberately the same so the model is
 Two further verb groups ride node 0, gated by the unforgeable binder caller identity so a
 workload can address node 0 but cannot exercise them: the **`AF_UNIX` facade** verb
 (`CONNECT_AFUNIX`, §7.1.5) and the **`kennel-init` lifecycle** verbs
-(`NOTIFY_BOOT_SYNC`/`NOTIFY_FACADE_CRASH`/`NOTIFY_WORKLOAD_EXEC` —
-[`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)). The lifecycle verbs
+(`NOTIFY_BOOT_SYNC`/`NOTIFY_FACADE_CRASH`/`NOTIFY_WORKLOAD_EXEC`/`NOTIFY_FACADE_RESTART`, and
+the blocking `NOTIFY_TTL_EXPIRED` by which the in-kennel TTL custodian asks kenneld to freeze
++ decide — §9.7; [`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)). The lifecycle verbs
 make `kennel-init` (PID 1) a binder *consumer* on the same instance kenneld manages as
 node 0, so the kennel's control plane is the binder bus itself. kenneld accepts a lifecycle
 verb only when `sender_pid` equals the init's **host** pid (learned from the privhelper at

@@ -858,6 +858,164 @@ fn no_ipc_kennel_runs_through_the_factory() {
     let _ = std::fs::remove_dir_all(&audit_base);
 }
 
+/// Bring up a kennel with a **1-second TTL** and `action`, running `argv`, and return
+/// `(elapsed, exit_code)` — or `None` to skip on an under-privileged runner. Proves the §9.7
+/// path end to end: `kennel-init`'s timer → the blocking `NOTIFY_TTL_EXPIRED` call → kenneld
+/// freezes the cgroup and, per `action`, kills it (`exit`) or thaws + replies RESUME (`warn`).
+fn run_ttl_kennel(
+    name: &str,
+    action: kennel_policy::TtlAction,
+    argv: Vec<String>,
+) -> Option<(std::time::Duration, i32)> {
+    use kenneld::control::{recv_response, Response, StartRequest};
+    use kenneld::policy::TrustStoreLoader;
+    use kenneld::server::{run_kennel, Identity, Shared};
+    use std::os::unix::net::UnixStream;
+
+    let uid = kennel_syscall::unistd::real_uid();
+    let gid = kennel_syscall::unistd::real_gid();
+    let _ = kennel_syscall::process::set_child_subreaper();
+    if uid == 0 {
+        eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    if !subkennel_has_line(uid) {
+        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
+        return None;
+    }
+    let base = own_cgroup_base()?;
+    if std::fs::create_dir_all(&base).is_err() {
+        eprintln!("SKIP: cgroup base not writable — run under the e2e runner");
+        return None;
+    }
+
+    let mut policy = no_ipc_policy(&home);
+    policy.effective_policy.lifecycle.ttl_seconds = Some(1);
+    policy.effective_policy.lifecycle.ttl_action = action;
+
+    let key = SigningKey::from_seed("ttl-key", &[8u8; 32]).expect("key");
+    let signed = kennel_policy::sign_settled(&policy, &key).expect("sign");
+    let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_policy::KeySet::new();
+    keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
+
+    let run = runtime_dir();
+    let tag = std::process::id();
+    let policy_file = run.join(format!("kenneld-ttl-{name}-{tag}.bin"));
+    std::fs::write(&policy_file, &bytes).expect("write policy");
+    let etc_base = run.join(format!("kenneld-ttl-etc-{name}-{tag}"));
+    let view_root = run.join(format!("kenneld-ttl-root-{name}-{tag}"));
+    let audit_base = run.join(format!("kenneld-ttl-audit-{name}-{tag}"));
+    for p in [&etc_base, &view_root, &audit_base] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+    let cleanup = |a: &Path, b: &Path, c: &Path| {
+        let _ = std::fs::remove_dir_all(a);
+        let _ = std::fs::remove_dir_all(b);
+        let _ = std::fs::remove_dir_all(c);
+    };
+
+    let identity = Identity {
+        uid,
+        gid,
+        username: "dev".to_owned(),
+        home,
+        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        cgroup_base: base,
+        proxy: None,
+        etc_base: Some(etc_base.clone()),
+        view_base: Some(view_root.clone()),
+        audit_base: Some(audit_base.clone()),
+        bastion: None,
+        afunix_shim_bin: Some(sibling_binary("kennel-afunix-shim")),
+        init_bin: Some(sibling_binary("kennel-init")),
+    };
+    let shared = Shared::new(
+        identity,
+        HelperClient::new(privhelper_path()),
+        TrustStoreLoader::from_keys(keys),
+    );
+
+    let req = StartRequest {
+        policy: policy_file,
+        kennel: name.to_owned(),
+        argv,
+        cwd: PathBuf::from("/"),
+        term: String::new(),
+        interactive: false,
+    };
+
+    let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+    let started_at = std::time::Instant::now();
+    run_kennel(&shared, &req, Vec::new(), &mut server);
+    let elapsed = started_at.elapsed();
+
+    match recv_response(&mut client).expect("a first response") {
+        Response::Started { .. } => {}
+        Response::Error(msg) => {
+            let lower = msg.to_lowercase();
+            if ["userns", "permission", "capabilit", "privhelper", "eperm"]
+                .iter()
+                .any(|n| lower.contains(n))
+            {
+                eprintln!("SKIP: environment not privileged enough for the factory: {msg}");
+                cleanup(&etc_base, &view_root, &audit_base);
+                return None;
+            }
+            panic!("ttl bring-up failed: {msg}");
+        }
+        other => panic!("expected Started, got {other:?}"),
+    }
+    let code = match recv_response(&mut client).expect("an exit response") {
+        Response::Exited { code } => code,
+        other => panic!("expected Exited, got {other:?}"),
+    };
+    cleanup(&etc_base, &view_root, &audit_base);
+    Some((elapsed, code))
+}
+
+/// **TTL `exit`, end to end (§9.7).** A `sleep 30` workload under a 1s exit-TTL: `kennel-init`'s
+/// timer fires the blocking `NOTIFY_TTL_EXPIRED`, kenneld freezes + kills the cgroup, and the
+/// kennel dies ~1s in (not 30s) with a killed status.
+#[test]
+fn ttl_exit_terminates_the_kennel_at_the_deadline() {
+    let Some((elapsed, code)) = run_ttl_kennel(
+        "ttlexit",
+        kennel_policy::TtlAction::Exit,
+        vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+    ) else {
+        return;
+    };
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "the 1s TTL must terminate the kennel well before the 30s sleep (took {elapsed:?})"
+    );
+    assert_ne!(code, 0, "an exit-action TTL terminates the kennel (got a clean {code})");
+}
+
+/// **TTL `warn`, end to end (the suspend→resume symmetry).** A `sleep 3; exit 0` workload under
+/// a 1s warn-TTL: at 1s the kennel is frozen, audited, thawed, and the blocking call returns
+/// RESUME — so the workload survives the TTL and completes cleanly at ~3s.
+#[test]
+fn ttl_warn_suspends_then_resumes_the_workload() {
+    let Some((elapsed, code)) = run_ttl_kennel(
+        "ttlwarn",
+        kennel_policy::TtlAction::Warn,
+        vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 3; exit 0".to_owned()],
+    ) else {
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "a warn-action TTL leaves the workload running; it exits cleanly (got {code})"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(2),
+        "the workload ran its full ~3s (it was not killed at the 1s TTL) (took {elapsed:?})"
+    );
+}
+
 /// **Interactive pty through the factory, end to end.** Drives the real `run_kennel` with
 /// `interactive: true` and a return socket; the workload runs on a controlling tty allocated
 /// in the kennel's own devpts, and its pty master is handed back over the return socket. This

@@ -41,9 +41,8 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::time::{Duration, Instant};
 
-use kennel_policy::{NetPolicy, TtlAction};
+use kennel_policy::NetPolicy;
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response};
@@ -454,112 +453,10 @@ impl Kennel {
         Ok(status)
     }
 
-    /// Wait for the workload to exit, arming the TTL reaper (§9.7), then tear down.
-    ///
-    /// With no `ttl` this is exactly [`stop`](Self::stop) — a single blocking wait.
-    /// With a `ttl`, the wait polls so the reaper can act at expiry; `on_event` is
-    /// called as each [`TtlEvent`] occurs (kenneld maps them to audit events):
-    ///
-    /// - [`TtlAction::Exit`] — at expiry, SIGTERM every cgroup member
-    ///   ([`TtlEvent::Terminating`]); if the workload is still alive after `grace`,
-    ///   SIGKILL the cgroup ([`TtlEvent::Killed`]). This is the only action that ends
-    ///   the kennel.
-    /// - [`TtlAction::Warn`] — emit [`TtlEvent::Warned`] once and leave it running.
-    /// - [`TtlAction::Renew`] — emit [`TtlEvent::RenewRequested`] once and leave it
-    ///   running (the interactive session prompt is not yet wired; §8.1).
-    ///
-    /// The reaper acts on the live handle's own cgroup, so it never races a released
-    /// context: teardown runs only after the wait returns.
-    ///
-    /// # Errors
-    /// An OS error if waiting on the workload fails.
-    pub fn stop_with_ttl<P: Privileged>(
-        mut self,
-        privileged: &P,
-        ttl: Option<Duration>,
-        action: TtlAction,
-        grace: Duration,
-        mut on_event: impl FnMut(TtlEvent),
-    ) -> io::Result<i32> {
-        let status = match ttl {
-            None => kennel_syscall::process::wait_pid(self.init_pid)?,
-            Some(ttl) => self.wait_with_ttl(ttl, action, grace, &mut on_event)?,
-        };
-        if let Some(manager) = self.binder.take() {
-            manager.stop();
-        }
-        teardown(
-            privileged,
-            self.ctx,
-            Some(self.cgroup.as_path()),
-            self.v4,
-            self.v6,
-            self.proxy.take(),
-            self.view_root.as_deref(),
-        );
-        Ok(status)
-    }
-
-    /// The TTL-aware wait loop. Polls the workload while tracking the deadline; for
-    /// `Exit`, runs the SIGTERM→(grace)→SIGKILL escalation against the cgroup.
-    fn wait_with_ttl(
-        &self,
-        ttl: Duration,
-        action: TtlAction,
-        grace: Duration,
-        on_event: &mut impl FnMut(TtlEvent),
-    ) -> io::Result<i32> {
-        /// How often the wait loop wakes to re-check the deadline and the workload.
-        const POLL: Duration = Duration::from_millis(200);
-        let start = Instant::now();
-        let mut fired = false; // warn/renew emitted, or SIGTERM sent
-        let mut terminating_since: Option<Instant> = None;
-        loop {
-            if let Some(status) = kennel_syscall::process::try_wait_pid(self.init_pid)? {
-                return Ok(status);
-            }
-            let expired = start.elapsed() >= ttl;
-            match action {
-                TtlAction::Warn if expired && !fired => {
-                    on_event(TtlEvent::Warned);
-                    fired = true;
-                }
-                TtlAction::Renew if expired && !fired => {
-                    on_event(TtlEvent::RenewRequested);
-                    fired = true;
-                }
-                TtlAction::Exit if expired => match terminating_since {
-                    None => {
-                        on_event(TtlEvent::Terminating);
-                        let _ = cgroup::terminate_cgroup(&self.cgroup);
-                        terminating_since = Some(Instant::now());
-                    }
-                    Some(since) if since.elapsed() >= grace => {
-                        on_event(TtlEvent::Killed);
-                        let _ = cgroup::kill_cgroup(&self.cgroup);
-                        // Next iteration's try_wait reaps the now-killed workload.
-                    }
-                    Some(_) => {}
-                },
-                _ => {}
-            }
-            std::thread::sleep(POLL);
-        }
-    }
-}
-
-/// A TTL-reaper milestone (`docs/design/09-policy-lifecycle.md` §9.7), reported by
-/// [`Kennel::stop_with_ttl`] so the caller can audit it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TtlEvent {
-    /// `warn` action: the TTL elapsed; the workload is left running.
-    Warned,
-    /// `renew` action: the TTL elapsed; renewal is requested, workload left running.
-    RenewRequested,
-    /// `exit` action: the TTL elapsed; the workload was sent SIGTERM (grace started).
-    Terminating,
-    /// `exit` action: the grace period elapsed; the cgroup was `SIGKILL`ed.
-    Killed,
+    // TTL is enforced inside the kennel now (§9.7): `kennel-init` runs the timer and makes the
+    // blocking `NOTIFY_TTL_EXPIRED` call that kenneld's node-0 handler services (freeze + decide
+    // per `ttl_action`). So there is no external poll/reaper here — `stop` is a plain wait, and
+    // on the `exit` action the handler kills the frozen cgroup, which that wait observes.
 }
 
 /// Kill and reap an egress-proxy child (best-effort; an already-exited proxy is
@@ -932,6 +829,10 @@ fn bring_up<P: Privileged + Sync>(
         let lifecycle = crate::binder::Lifecycle {
             init_host_pid: Some(init_pid),
             supervision: supervision_bytes,
+            // The TTL custodian's inputs: kennel-init's timer fires NOTIFY_TTL_EXPIRED and the
+            // node-0 handler freezes/thaws/kills this cgroup per the action (§9.7).
+            cgroup: plan.cgroup.clone(),
+            ttl_action: plan.ttl_action,
         };
         match acquire_binder_node0(|| Some(init_pid_u32), ctx, prep, lifecycle) {
             Ok(manager) => state.binder = Some(manager),
@@ -1038,6 +939,9 @@ fn supervision_from(
         ulimits: plan.ulimits.clone(),
         aux: plan.aux.clone(),
         interactive: plan.interactive_return_fd.is_some(),
+        // kennel-init runs this timer and, at expiry, makes the blocking NOTIFY_TTL_EXPIRED
+        // call to kenneld (which freezes + decides). The action is decided kenneld-side.
+        ttl_seconds: plan.ttl_seconds,
     }
 }
 

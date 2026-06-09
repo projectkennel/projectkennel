@@ -350,7 +350,34 @@ pub fn encode_plan(p: &Plan) -> Vec<u8> {
         }
     }
 
+    match p.ttl_seconds {
+        None => w.bool(false),
+        Some(secs) => {
+            w.bool(true);
+            w.u64(secs);
+        }
+    }
+    w.u8(ttl_action_byte(p.ttl_action));
+
     w.buf
+}
+
+/// The wire byte for a [`kennel_policy::TtlAction`] (stable; mirrors `ttl_action_from_byte`).
+const fn ttl_action_byte(a: kennel_policy::TtlAction) -> u8 {
+    match a {
+        kennel_policy::TtlAction::Exit => 0,
+        kennel_policy::TtlAction::Warn => 1,
+        kennel_policy::TtlAction::Renew => 2,
+    }
+}
+
+/// Decode a [`kennel_policy::TtlAction`] wire byte (unknown ⇒ the safe `Exit`).
+const fn ttl_action_from_byte(b: u8) -> kennel_policy::TtlAction {
+    match b {
+        1 => kennel_policy::TtlAction::Warn,
+        2 => kennel_policy::TtlAction::Renew,
+        _ => kennel_policy::TtlAction::Exit,
+    }
 }
 
 fn put_view(w: &mut Writer, v: &ShimView) {
@@ -463,6 +490,9 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         aux.push(crate::plan::AuxProcess { path, args });
     }
 
+    let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
+    let ttl_action = ttl_action_from_byte(r.u8()?);
+
     if r.pos != buf.len() {
         return Err(PlanWireError::TooLarge); // trailing garbage
     }
@@ -488,6 +518,8 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         ulimits,
         interactive_return_fd: None,
         aux,
+        ttl_seconds,
+        ttl_action,
     };
     Ok((plan, interactive))
 }
@@ -621,6 +653,14 @@ pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
 
     w.bool(s.interactive);
 
+    match s.ttl_seconds {
+        None => w.bool(false),
+        Some(secs) => {
+            w.bool(true);
+            w.u64(secs);
+        }
+    }
+
     w.buf
 }
 
@@ -700,6 +740,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
     }
 
     let interactive = r.bool()?;
+    let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
 
     if r.pos != buf.len() {
         return Err(PlanWireError::TooLarge); // trailing garbage
@@ -720,6 +761,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         ulimits,
         aux,
         interactive,
+        ttl_seconds,
     })
 }
 
@@ -912,6 +954,8 @@ mod tests {
                     "/home/kennel/wl.sock=echo".to_owned(),
                 ],
             }],
+            ttl_seconds: Some(3600),
+            ttl_action: kennel_policy::TtlAction::Warn,
         }
     }
 
@@ -946,6 +990,8 @@ mod tests {
             ulimits: Vec::new(),
             interactive_return_fd: None,
             aux: Vec::new(),
+            ttl_seconds: None,
+            ttl_action: kennel_policy::TtlAction::Exit,
         };
         let (back, _) = decode_plan(&encode_plan(&p)).expect("decode");
         assert_eq!(back, p);
@@ -996,6 +1042,7 @@ mod tests {
                 ],
             }],
             interactive: true,
+            ttl_seconds: Some(3600),
         }
     }
 
@@ -1023,6 +1070,7 @@ mod tests {
             ulimits: Vec::new(),
             aux: Vec::new(),
             interactive: false,
+            ttl_seconds: None,
         };
         let back = decode_supervision(&encode_supervision(&s)).expect("decode");
         assert_eq!(back, s);

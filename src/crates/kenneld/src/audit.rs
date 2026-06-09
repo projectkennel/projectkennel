@@ -223,22 +223,6 @@ pub fn kennel_exit(reason: &'static str) -> Event {
     .field("reason", Value::str(reason))
 }
 
-/// `lifecycle.ttl-expired`: a kennel's TTL elapsed (§9.7).
-///
-/// `stage` records what the reaper did — `warn`/`renew` (left running),
-/// `terminating` (SIGTERM sent, grace started), or `killed` (SIGKILL after grace).
-#[must_use]
-pub fn ttl_expired(pid: u32, stage: &'static str) -> Event {
-    Event::new(
-        "lifecycle.ttl-expired",
-        Resource::Lifecycle,
-        Outcome::Info,
-        Source::Kenneld,
-    )
-    .pid(pid)
-    .field("stage", Value::str(stage))
-}
-
 /// `priv.invoke`: a privileged operation the helper performed (`02-3`).
 ///
 /// `source` is `privhelper` (the originator) even though kenneld writes the

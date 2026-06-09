@@ -29,10 +29,6 @@ use crate::control::{self, KennelInfo, Request, Response, StartRequest};
 use crate::ctx::CtxAllocator;
 use crate::{cgroup, start, Privileged};
 
-/// Grace between the TTL reaper's SIGTERM and its SIGKILL for `ttl_action = "exit"`
-/// (§9.7): the workload gets this long to exit cleanly before the cgroup is killed.
-const TTL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// A loaded, verified policy, split into the two artefacts kenneld applies.
 ///
 /// The kernel-enforcement [`Plan`] (seal + BPF) and the [`NetPolicy`] the
@@ -746,12 +742,10 @@ pub fn run_kennel<P, L>(
         // Home-relative paths exempt from dotfile reconstruction (§7.9.2a).
         home_persist: loaded.home_persist.clone(),
     });
-    // The TTL reaper inputs (§9.7), captured before `loaded` is consumed below.
-    let ttl = loaded
-        .lifecycle
-        .ttl_seconds
-        .map(std::time::Duration::from_secs);
-    let ttl_action = loaded.lifecycle.ttl_action;
+    // TTL is enforced inside the kennel now (§9.7): `kennel-init` runs the timer and, at
+    // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
+    // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
+    // binder Lifecycle), so kenneld no longer polls from out here.
     let mut spec = crate::Spec {
         id: req.kennel.clone(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
@@ -880,26 +874,12 @@ pub fn run_kennel<P, L>(
     });
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
-    // Block until the workload exits (on its own, via `stop`, or via the TTL reaper),
-    // then tear down. With a `ttl` the wait polls so the reaper can act at expiry
-    // (§9.7); each milestone is recorded through the audit writer. The audited
-    // privileged records the teardown's `del_address` refusals too.
-    let ttl_writer = audit.as_ref();
-    let status = kennel.stop_with_ttl(&audited, ttl, ttl_action, TTL_GRACE, |ev| {
-        let stage = match ev {
-            crate::TtlEvent::Warned => "warn",
-            crate::TtlEvent::RenewRequested => "renew",
-            crate::TtlEvent::Terminating => "terminating",
-            crate::TtlEvent::Killed => "killed",
-        };
-        eprintln!(
-            "kenneld: kennel `{}` TTL elapsed (action {ttl_action:?}): {stage}",
-            req.kennel
-        );
-        if let Some(writer) = ttl_writer {
-            writer.emit(&crate::audit::ttl_expired(pid, stage));
-        }
-    });
+    // Block until the kennel exits, then tear down. TTL is enforced inside the kennel (§9.7):
+    // `kennel-init`'s timer makes the blocking `NOTIFY_TTL_EXPIRED` call, which the node-0
+    // handler services (freeze + decide; the `ttl-warn`/`ttl-terminate` audit events come from
+    // there). So this is a plain wait — on `exit` the handler kills the frozen cgroup, and this
+    // wait returns the resulting status. The audited privileged records the teardown too.
+    let status = kennel.stop(&audited);
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
         writer.emit(&crate::audit::kennel_exit("stopped"));
@@ -1107,6 +1087,8 @@ mod tests {
                 ulimits: Vec::new(),
                 interactive_return_fd: None,
                 aux: Vec::new(),
+                ttl_seconds: None,
+                ttl_action: kennel_policy::TtlAction::Exit,
             };
             let net = NetPolicy {
                 mode: kennel_policy::NetMode::Constrained,

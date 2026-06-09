@@ -47,7 +47,7 @@ use kennel_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
 use kennel_binder::service::lifecycle;
 use kennel_spawn::wire::decode_supervision;
 use kennel_spawn::{AuxProcess, Supervision};
-use kennel_syscall::process::{set_no_new_privs, set_rlimit, wait_any, Reaped};
+use kennel_syscall::process::{set_no_new_privs, set_rlimit, wait_any_interruptible, Reaped};
 use kennel_syscall::spawn::{fork_drop_exec, fork_drop_exec_confined};
 
 /// The in-view binder device the factory mounts (`07-1` §7.1): a fixed path, because the
@@ -284,8 +284,33 @@ fn supervise(
         })
         .collect();
 
+    // TTL (§9.7): arm a one-shot alarm. When it fires it interrupts the reap wait below; we
+    // then make the *blocking* NOTIFY_TTL_EXPIRED call to kenneld, which freezes this whole
+    // cgroup (suspending us mid-call) and, on resume, thaws + replies so the same call returns.
+    if let Some(secs) = sup.ttl_seconds {
+        if let Ok(secs) = u32::try_from(secs) {
+            if let Err(e) = kennel_syscall::process::arm_ttl_alarm(secs) {
+                eprintln!("kennel-init: could not arm the TTL alarm: {e}; running without a TTL");
+            }
+        }
+    }
+
     loop {
-        match wait_any()? {
+        // The TTL alarm fired: make the blocking call. kenneld freezes the cgroup here, audits,
+        // and decides — `warn`/`renew` thaw and the call returns (we carry on); `exit` kills the
+        // frozen cgroup, so we simply die here. We carry on regardless of the reply: termination
+        // is kenneld's *atomic kill*, not a cooperative action the sandbox could refuse (a
+        // compromised PID 1 must not be able to evade its deadline). The freezer can also EINTR
+        // the blocked binder ioctl — that, too, just means "resume".
+        if kennel_syscall::process::ttl_alarm_fired() {
+            let _ = conn.transact(CONTEXT_MANAGER_HANDLE, lifecycle::NOTIFY_TTL_EXPIRED, &[]);
+            continue;
+        }
+        // `None` ⇒ EINTR (e.g. the TTL alarm) — loop back and re-check the alarm flag.
+        let Some(reaped) = wait_any_interruptible()? else {
+            continue;
+        };
+        match reaped {
             Reaped::Exited { pid, code } if pid == workload_pid => {
                 return Ok(u8::try_from(code & 0xff).unwrap_or(1));
             }
@@ -471,6 +496,7 @@ mod tests {
             ulimits: Vec::new(),
             aux: Vec::new(),
             interactive: false,
+            ttl_seconds: None,
         };
         let bytes = kennel_spawn::wire::encode_supervision(&sup);
         let back = decode_supervision(&bytes).expect("decode");

@@ -60,6 +60,8 @@ fn run_manager() {
     let lifecycle = binder::Lifecycle {
         init_host_pid: Some(init_pid),
         supervision: SUPERVISION.to_vec(),
+        cgroup: std::path::PathBuf::new(),
+        ttl_action: kennel_policy::TtlAction::Exit,
     };
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");

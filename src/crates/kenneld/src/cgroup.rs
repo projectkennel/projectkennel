@@ -100,6 +100,29 @@ pub fn terminate_cgroup(cgroup: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// **Atomically suspend** every process in `cgroup` (cgroup v2 `cgroup.freeze` ← `1`).
+///
+/// The TTL custodian's primitive (§9.7): writing `1` quiesces the whole subtree in one
+/// step — no fork-escape race, unlike a per-pid `SIGSTOP` sweep — and it is reversible via
+/// [`thaw_cgroup`]. kenneld owns the kennel cgroup (its delegated subtree), so the write
+/// needs no privilege; this keeps the freezer in the trusted daemon, never exposed to the
+/// sandbox. Frozen processes cannot run (so cannot act past their deadline) until thawed.
+///
+/// # Errors
+/// An OS error if the cgroup has no `cgroup.freeze` (pre-5.2 kernel) or the write fails.
+pub fn freeze_cgroup(cgroup: &Path) -> io::Result<()> {
+    std::fs::write(cgroup.join("cgroup.freeze"), "1")
+}
+
+/// Thaw a [`freeze_cgroup`]'d cgroup (`cgroup.freeze` ← `0`), resuming every member exactly
+/// where it was suspended.
+///
+/// # Errors
+/// An OS error if the write fails (e.g. the cgroup was removed).
+pub fn thaw_cgroup(cgroup: &Path) -> io::Result<()> {
+    std::fs::write(cgroup.join("cgroup.freeze"), "0")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +179,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("cgroup.kill")).expect("read"),
             "1"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn freeze_then_thaw_writes_one_then_zero_to_cgroup_freeze() {
+        let dir = std::env::temp_dir().join(format!("kennel-cgfreeze-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        freeze_cgroup(&dir).expect("write cgroup.freeze=1");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cgroup.freeze")).expect("read"),
+            "1"
+        );
+        thaw_cgroup(&dir).expect("write cgroup.freeze=0");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cgroup.freeze")).expect("read"),
+            "0"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

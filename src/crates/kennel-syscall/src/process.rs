@@ -134,6 +134,57 @@ pub fn wait_any() -> io::Result<Reaped> {
     }
 }
 
+/// Like [`wait_any`] but returns `Ok(None)` on `EINTR` instead of retrying.
+///
+/// Lets the caller service a signal between reaps — `kennel-init` checks [`ttl_alarm_fired`]
+/// after a [`arm_ttl_alarm`] SIGALRM interrupts the wait, then makes its blocking TTL call.
+///
+/// # Errors
+/// The OS error if `wait` fails for a reason other than `ECHILD`/`EINTR`.
+pub fn wait_any_interruptible() -> io::Result<Option<Reaped>> {
+    match nix::sys::wait::wait() {
+        Ok(status) => Ok(Some(reaped_from(status))),
+        Err(nix::errno::Errno::ECHILD) => Ok(Some(Reaped::NoChildren)),
+        Err(nix::errno::Errno::EINTR) => Ok(None),
+        Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+/// Set when the [`arm_ttl_alarm`] SIGALRM fires; consumed by [`ttl_alarm_fired`].
+static TTL_ALARM_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// SIGALRM handler: only stores to an atomic (async-signal-safe).
+extern "C" fn on_ttl_alarm(_: i32) {
+    TTL_ALARM_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Arm a **one-shot** `SIGALRM` `secs` from now (the kennel's TTL, §9.7).
+///
+/// On fire it sets an internal flag (read once by [`ttl_alarm_fired`]) and, because the handler
+/// installs without `SA_RESTART`, interrupts a blocking [`wait_any_interruptible`] with `EINTR`
+/// — so the supervise loop wakes, sees the flag, and makes its blocking `NOTIFY_TTL_EXPIRED`
+/// call. A handler is required so the default `SIGALRM` disposition (terminate) won't kill PID 1.
+///
+/// # Errors
+/// The OS error if installing the handler fails.
+pub fn arm_ttl_alarm(secs: u32) -> io::Result<()> {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let action = SigAction::new(
+        SigHandler::Handler(on_ttl_alarm),
+        SaFlags::empty(), // no SA_RESTART: the wait must surface EINTR
+        SigSet::empty(),
+    );
+    // SAFETY: the handler only stores to an AtomicBool, which is async-signal-safe.
+    unsafe { sigaction(Signal::SIGALRM, &action) }.map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    nix::unistd::alarm::set(secs);
+    Ok(())
+}
+
+/// Whether the [`arm_ttl_alarm`] SIGALRM has fired since the last check (consumes the flag).
+pub fn ttl_alarm_fired() -> bool {
+    TTL_ALARM_FIRED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Mark this process as a **child subreaper** (`PR_SET_CHILD_SUBREAPER`).
 ///
 /// An orphaned descendant then reparents to this process instead of to init. kenneld sets

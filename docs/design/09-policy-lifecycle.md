@@ -121,13 +121,13 @@ ttl = "2h"           # kennel auto-exits after this duration
 ttl_action = "exit"  # "exit" | "warn" | "renew"
 ```
 
-Reaches the TTL, Project Kennel either:
+The deadline is held **inside** the kennel — `kennel-init` (PID 1) runs the timer — and enforced with the **cgroup v2 freezer**, not an external polling reaper. At expiry `kennel-init` makes a single blocking call out to the daemon, which owns the kennel's cgroup; the daemon **atomically freezes** the whole kennel (so nothing runs past the deadline — there is no "acts during the grace window" race) and then, per `ttl_action`:
 
-- `exit`: terminates the kennel cleanly (SIGTERM, then SIGKILL after grace).
-- `warn`: logs a warning, asks the user to renew, continues.
-- `renew`: prompts the user via the user's session (notification or terminal) for confirmation to extend.
+- `exit`: terminate the frozen kennel. The freeze is atomic and the kill reaches frozen tasks, so termination is immediate and race-free — and it is the *daemon's* kill, which a compromised in-kennel PID 1 cannot refuse.
+- `warn`: a momentary atomic pause, an audit event, then **resume** — the workload keeps running. The same blocking call returns and the kennel picks up exactly where it was suspended.
+- `renew`: freeze and request renewal via the user's session (the interactive prompt is the remaining piece; until it is wired this behaves as a louder `warn` — freeze, audit, resume).
 
-Default is `exit` for templates that don't override.
+Default is `exit` for templates that don't override. The freezer makes "suspend, decide, resume" a first-class operation: a kennel can be paused at its deadline and continued, not just killed.
 
 Time-bounded kennels address T1.10 (long-lived workload capability creep). A `package-install` kennel with a 30-minute TTL cannot accumulate capability over months because it cannot exist for months. Users who need long-lived kennels use templates without TTLs (`ai-coding-strict` has none); the explicit non-TTL is itself a documented choice.
 
