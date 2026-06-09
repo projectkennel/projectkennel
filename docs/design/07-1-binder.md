@@ -101,16 +101,15 @@ kernel configuration includes them explicitly.
 
 ## 7.1.3 binderfs instance lifecycle
 
-> **Construction model updated — see [§7.2](07-2-kennel-init.md).** binderfs assigns its
-> nodes to **uid 0 of the mounting userns**; a pure-identity map has no uid 0, so the nodes
-> were owned by the overflow uid and unopenable (proven in build). The kennel now has a real
-> uid 0 (host root mapped `0 0 1`). The **privhelper factory** mounts binderfs, allocates the
-> device, and **chowns `/dev/binderfs/binder` to the operator** in its post-`clone` child —
-> before `pivot_root` and before it `fexecve`s the trusted root-owned **`kennel-init` (PID 1)**
-> (so no uid-0 binary runs while the host fs is visible). The mechanics below stand; the *actor*
-> is the privhelper factory, "no privileged step" no longer holds (the `0 0 1` map needs
-> `CAP_SETUID`), and `kennel-init` is a binder *consumer* that **pulls** its config over the
-> bus (§7.2).
+> **The construction model is [§7.2](07-2-kennel-init.md).** binderfs assigns its nodes to
+> **uid 0 of the mounting user namespace**, so the kennel needs a real uid 0 (host root mapped
+> `0 0 1`) for the nodes to be owned by a proper root rather than the overflow uid. The
+> privhelper factory therefore mounts binderfs, allocates the device, and **chowns
+> `/dev/binderfs/binder` to the operator** in its post-`clone` child — before `pivot_root` and
+> before it `fexecve`s the trusted root-owned **`kennel-init` (PID 1)**, so no uid-0 binary
+> runs while the host filesystem is still visible. The map needs `CAP_SETUID`, so this work is
+> the privhelper's; `kennel-init` is a binder *consumer* that **pulls** its config over the bus
+> (§7.2). The lifecycle mechanics below describe the steady-state bus.
 
 ### Mount sequencing
 

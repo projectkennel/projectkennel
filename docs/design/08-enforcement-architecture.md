@@ -81,10 +81,9 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
      host-side BIND leg can mirror inbound listeners at the kennel's own IP
 
 5. Launch supporting daemons (if not already running for this kennel):
-   - `kennel-netproxy` (the SOCKS5/CONNECT proxy) on the kennel's loopback
-     address — or, on the roadmap net-ns path (§7.11), in the host net-ns as
-     a CONNECT delegate behind a kenneld↔delegate socketpair, no longer reached
-     by a TCP loopback listener
+   - the egress proxy — on the kennel's loopback address, or, under the
+     network-namespace model (§7.11), in the host net-ns as a CONNECT delegate
+     behind a kenneld↔delegate socketpair rather than a TCP loopback listener
    - xdg-dbus-proxy for session bus (if dbus.session.enabled)
    - xdg-dbus-proxy for system bus (if dbus.system.enabled)
    - Per-kennel ssh-agent (if templates reference one)
@@ -124,8 +123,8 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         mapped), needed because binderfs (and the view/`/dev`/library binds) assign
         nodes to uid 0 of the mounting userns. No subuid/subgid. setgroups handling
         and supplementary groups are written here too, fully, in this one pass.
-     b. Join the kennel cgroup; (roadmap §7.11) for net-ns modes bring up `lo`
-        inside the net-ns with the kennel's assigned `/28`+`/64`.
+     b. Join the kennel cgroup; for the network-namespace modes (§7.11) bring up
+        `lo` inside the net-ns with the kennel's assigned `/28`+`/64`.
      c. Self-escalate to the kennel's uid 0 and build the root-owned surfaces:
         mount --make-rprivate /; the constructed view (fresh tmpfs root; bind-mount
         granted paths beneath the shim $HOME); synthetic /etc; constructed /dev;
@@ -146,12 +145,13 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         kenneld has claimed node 0. kenneld acquires node 0 by opening
         `/proc/<init-host-pid>/root/dev/binderfs/binder` (the operator-owned userns
         makes the open succeed; SCM_RIGHTS fd-passing is rejected — binder fds are
-        per-opener) and replies with the supervision-half Plan as flat
-        `kennel-spawn::wire` bytes (binder copies the buffer — no shared-memory
-        hazard), the pty return socket riding as `BINDER_TYPE_FD`. kenneld
-        identifies the kennel by the binderfs *instance* the txn arrived on.
-     g. (Roadmap §7.11) Once `INet` is registered, fork `kennel-netshim` as a
-        sibling of the workload inside the net-ns and view; it serves SOCKS5 at
+        per-opener) and replies with the supervision-half Plan as a flat
+        serialized buffer (binder copies it — no shared-memory hazard), the pty
+        return socket riding as a passed file descriptor. kenneld identifies the
+        kennel by the binderfs *instance* the txn arrived on.
+     g. Under the network-namespace model (§7.11), once `INet` is registered, fork
+        the in-kennel SOCKS5 facade as a sibling of the workload inside the net-ns
+        and view; it serves SOCKS5 at
         `$KENNEL_SOCKS_PROXY` and relays `CONNECT`/`BIND` over binder. The
         host-side BIND leg mirrors allowed binds onto the host alias; both legs are
         kenneld↔delegate socketpairs, not binder participants.
@@ -274,7 +274,7 @@ Two kennels running concurrently are isolated by:
   own user+mount namespace; two instances share no nodes (§7.1.2). A binder node
   reference is an opaque kernel object that does not transfer between instances.
 
-The one designed exception is the **binder cross-instance relay** (roadmap, §7.1.6):
+The one designed exception is the **binder cross-instance relay** (§7.1.6):
 two kennels may communicate over the binder bus, but only by an explicit *bilateral*
 declaration — the consuming kennel declares `[[binder.consume]]` naming the service and
 the providing kennel, and the providing kennel declares `[[binder.provide]]` naming the

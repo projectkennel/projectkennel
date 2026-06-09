@@ -14,8 +14,7 @@ Masking `/proc/net` alone does not close it — netlink is an independent vector
 Restricting `AF_NETLINK` via seccomp breaks `getaddrinfo`'s `AI_ADDRCONFIG` path used
 by many runtimes. The complete fix is a per-kennel network namespace, which makes
 `/proc/net` show only the kennel's own stack and netlink answer only about the kennel's
-own interfaces. §8.1 of `08-as-built-notes.md` defers this as a re-architecture of the
-§7.5 egress/loopback model. This chapter is that re-architecture.
+own interfaces. This is a re-architecture of the §7.5 egress/loopback model, set out here.
 
 ## 7.11.2 Design constraints
 
@@ -119,17 +118,13 @@ the hook reports it to kenneld. For every *allowed* bind, kenneld raises the **m
 host-side delegate binds the same `ip:port` on the host alias — so the port is observable and
 reachable from the host at the kennel's own IP, with host inbound relayed into the kennel
 through the shim. The mirror is automatic for allowed binds; the decision to allow is
-policy's, never the workload's. Implementation detail is in
-[`02-5-binder-net.md`](../architecture/02-5-binder-net.md).
+policy's, never the workload's.
 
 kenneld owns the `INet` node and is never in the data path. It relays each transaction to
-the appropriate delegate, receives the fd in the reply, and forwards it to the shim via
-`BINDER_TYPE_FD`. Once the shim has the fd, data flows directly between the workload and the
-fd. The delegates are not binder participants — the fd-passing mechanics are in
-[`02-5-binder-net.md`](../architecture/02-5-binder-net.md).
-
-The full transaction wire protocol and fd-passing conventions are in
-[`02-5-binder-net.md`](../architecture/02-5-binder-net.md).
+the appropriate delegate, receives the connected file descriptor in the reply, and forwards
+it to the shim. Once the shim has the fd, data flows directly between the workload and the
+fd. The delegates are not binder participants — they reach kenneld over a per-kennel
+socketpair, not the bus.
 
 ## 7.11.6 `kennel-netshim`: the SOCKS5 facade inside the kennel
 
@@ -148,11 +143,11 @@ For each incoming SOCKS5 session:
   accept loop with one thread per accepted connection, splice each back to the SOCKS5
   session.
 
-The shim does no policy enforcement, no DNS resolution, no audit. These remain in
-`kennel-netproxy` and kenneld as before. The shim is purely a protocol translation
-layer: SOCKS5 wire format in, binder transactions out, fds back, splice. It is a new
-crate (`kennel-netshim`) and, as an untrusted-input parser (SOCKS5 from the workload),
-carries a fuzz target under `fuzz/` per CODING-STANDARDS §10.6.
+The shim does no policy enforcement, no DNS resolution, no audit; those stay in the proxy
+delegate and kenneld. It is purely a protocol translation layer: SOCKS5 wire format in,
+binder transactions out, fds back, splice. Because it parses untrusted workload input
+(SOCKS5 from the workload), it is a security-sensitive parser and is kept correspondingly
+small.
 
 ## 7.11.7 Per-mode behaviour
 
@@ -165,8 +160,7 @@ carries a fuzz target under `fuzz/` per CODING-STANDARDS §10.6.
 
 ## 7.11.8 Spawn sequence
 
-The full implementation detail is in `02-5-binder-net.md` §Spawn sequencing; the
-design-level summary:
+The design-level summary of how the network namespace and its facades come up:
 
 `CLONE_NEWNET` is included in the namespace set at spawn — the kennel's network
 namespace is empty from the moment of creation; no host network state is ever visible

@@ -96,8 +96,8 @@ reason = ""                 # required (non-empty) only when mode = "host";
 [net.proxy]
 # The proxy delegate dials from the host stack and the shim listens inside the
 # net-ns at the kennel's loopback :1080 (the address $KENNEL_SOCKS_PROXY points at,
-# computed from the kennel's tag and ctx — §7.5.2). There is no longer a
-# proxy_listen_* address: the workload-facing listener is the shim's, not the proxy's.
+# computed from the kennel's tag and ctx — §7.5.2). There is no proxy_listen_*
+# address: the workload-facing listener is the shim's, not the proxy's.
 
 # Name resolution is not configured in policy: the proxy uses the OS resolver and
 # vets the answers (the name must clear net.proxy.allow; the resolved address is
