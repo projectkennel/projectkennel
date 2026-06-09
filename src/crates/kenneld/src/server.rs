@@ -586,12 +586,16 @@ fn validate_kennel_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Bring a kennel up, report it `Started`, block until the workload exits, tear
-/// it down, and report `Exited`.
+/// Bring one kennel up for a `Start` request: report `Started`, block until the workload
+/// exits, tear it down, and report `Exited`.
+///
+/// This is the production per-kennel path the daemon's [`serve`] loop calls — and the entry
+/// point the self-hosting e2e drives directly (real privhelper + a real [`TrustStoreLoader`]),
+/// so the test exercises the same wiring production does, not a hand-built replica.
 // allow: one linear request lifecycle (reserve, load, ssh/unix/audit prep, spawn,
 // block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.
 #[allow(clippy::too_many_lines)]
-fn run_kennel<P, L>(
+pub fn run_kennel<P, L>(
     shared: &Shared<P, L>,
     req: &StartRequest,
     fds: Vec<OwnedFd>,

@@ -415,6 +415,22 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
         self.record("set-gid-map", params, started, &result);
         result
     }
+
+    /// Forward factory construction to the inner privhelper.
+    ///
+    /// Not recorded as a `priv.*` event here: construction is a long-lived process whose
+    /// outcome is the kennel's exit status, audited through the lifecycle chain, not a single
+    /// request/response op. Without this forward the decorator falls through to the trait
+    /// default and refuses the factory — which is exactly the production path `run_kennel`
+    /// takes (so the decorator, not just the raw helper, must support it).
+    fn construct_kennel(
+        &self,
+        construction_half: &[u8],
+        init_fd: std::os::fd::BorrowedFd<'_>,
+        pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
+    ) -> io::Result<(std::process::Child, i32)> {
+        self.inner.construct_kennel(construction_half, init_fd, pty_fd)
+    }
 }
 
 #[cfg(test)]

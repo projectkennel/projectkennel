@@ -137,7 +137,8 @@ fi
 echo "== running the unprivileged e2e under a delegated cgroup =="
 # systemd-run --user --scope -p Delegate=yes runs the test in a transient scope
 # under user@<uid>.service whose cgroup subtree the operator may write — so kenneld
-# can create the kennel's cgroup. --test-threads=1: one cohesive scenario.
+# can create the kennel's cgroup. --test-threads=1: each test is a cohesive scenario
+# that constructs a real kennel, so they must not run concurrently. No name filter —
+# run every self-hosting test in the binary (full vertical, no-IPC, …).
 systemd-run --user --scope -p Delegate=yes --quiet -- \
-    "$TESTBIN" full_vertical_brings_up_and_tears_down_a_kennel_unprivileged \
-    --exact --nocapture --test-threads=1
+    "$TESTBIN" --nocapture --test-threads=1

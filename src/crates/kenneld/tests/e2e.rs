@@ -719,3 +719,135 @@ fn cleanup_paths(dirs: &[&PathBuf], home_test: &Path, unix_sock: &Path) {
     let _ = std::fs::remove_dir_all(home_test);
     let _ = std::fs::remove_file(unix_sock);
 }
+
+/// A no-IPC settled policy: no `[unix]`/`[ssh]`/`[binder]`, net mode `none`. Used to prove
+/// the factory + binder bus are **universal** — even a kennel granting no IPC is built by
+/// the privhelper factory and gets a binderfs instance for the `kennel-init` pull.
+fn no_ipc_policy(home: &Path) -> SettledPolicy {
+    let mut p = minimal_policy(home);
+    p.unix = kennel_policy::UnixRuntime::default(); // no af-unix grant (ssh/binder already empty)
+    p
+}
+
+/// Self-hosting: drive the **real** `run_kennel` (the production per-kennel path the daemon
+/// runs) with the real privhelper and a real `TrustStoreLoader`, for a no-IPC kennel.
+///
+/// Unlike `full_vertical` (which calls `start` with a hand-built `Spec`/`BinderPrep` — a
+/// replica of `run_kennel`'s wiring that can drift), this exercises the exact production
+/// orchestration: load+verify the policy, build the plan, decide the factory, construct via
+/// the privhelper. It is the gate proving the universal-factory gating (`run_kennel` builds a
+/// `BinderPrep` for **every** kennel) and that a plain kennel actually constructs + runs via
+/// the factory — coverage the hand-wired test cannot give.
+#[test]
+fn no_ipc_kennel_runs_through_the_factory() {
+    use kenneld::control::{recv_response, Response, StartRequest};
+    use kenneld::policy::TrustStoreLoader;
+    use kenneld::server::{run_kennel, Identity, Shared};
+    use std::os::unix::net::UnixStream;
+
+    let uid = kennel_syscall::unistd::real_uid();
+    let gid = kennel_syscall::unistd::real_gid();
+    if uid == 0 {
+        eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    if !subkennel_has_line(uid) {
+        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
+        return;
+    }
+    let Some(base) = own_cgroup_base() else {
+        eprintln!("SKIP: cannot read a delegated cgroup base");
+        return;
+    };
+    if std::fs::create_dir_all(&base).is_err() {
+        eprintln!("SKIP: cgroup base not writable — run under the e2e runner");
+        return;
+    }
+
+    // Sign the no-IPC policy and trust the key (the real verify path runs in the loader).
+    let key = SigningKey::from_seed("noipc-key", &[7u8; 32]).expect("key");
+    let signed = kennel_policy::sign_settled(&no_ipc_policy(&home), &key).expect("sign");
+    let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_policy::KeySet::new();
+    keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
+
+    let run = runtime_dir();
+    let tag = std::process::id();
+    let policy_file = run.join(format!("kenneld-noipc-policy-{tag}.bin"));
+    std::fs::write(&policy_file, &bytes).expect("write policy");
+    let etc_base = run.join(format!("kenneld-noipc-etc-{tag}"));
+    let view_root = run.join(format!("kenneld-noipc-root-{tag}"));
+    let audit_base = run.join(format!("kenneld-noipc-audit-{tag}"));
+    for p in [&etc_base, &view_root, &audit_base] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    let identity = Identity {
+        uid,
+        gid,
+        username: "dev".to_owned(),
+        home,
+        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        cgroup_base: base,
+        proxy: None,
+        etc_base: Some(etc_base.clone()),
+        view_base: Some(view_root.clone()),
+        audit_base: Some(audit_base.clone()),
+        bastion: None,
+        afunix_shim_bin: Some(sibling_binary("kennel-afunix-shim")),
+        init_bin: Some(sibling_binary("kennel-init")),
+    };
+    let shared = Shared::new(
+        identity,
+        HelperClient::new(privhelper_path()),
+        TrustStoreLoader::from_keys(keys),
+    );
+
+    let req = StartRequest {
+        policy: policy_file,
+        kennel: "noipc".to_owned(),
+        // The workload proves it ran inside a factory-built view: a binderfs device exists
+        // (the factory mounted it even with no IPC granted) and the synthetic /etc/passwd
+        // carries the masked `kennel` account.
+        argv: vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "test -e /dev/binderfs/binder && grep -q '^kennel:' /etc/passwd".to_owned(),
+        ],
+        cwd: PathBuf::from("/"),
+        term: String::new(),
+        interactive: false,
+    };
+
+    let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+    run_kennel(&shared, &req, Vec::new(), &mut server);
+
+    match recv_response(&mut client).expect("a first response") {
+        Response::Started { .. } => {}
+        Response::Error(msg) => {
+            let lower = msg.to_lowercase();
+            if ["userns", "permission", "capabilit", "privhelper", "eperm"]
+                .iter()
+                .any(|n| lower.contains(n))
+            {
+                eprintln!("SKIP: environment not privileged enough for the factory: {msg}");
+                return;
+            }
+            panic!("no-IPC bring-up failed: {msg}");
+        }
+        other => panic!("expected Started, got {other:?}"),
+    }
+    assert_eq!(
+        recv_response(&mut client).expect("an exit response"),
+        Response::Exited { code: 0 },
+        "the no-IPC kennel ran through the factory (binderfs present + masked /etc/passwd)"
+    );
+
+    let _ = std::fs::remove_dir_all(&etc_base);
+    let _ = std::fs::remove_dir_all(&view_root);
+    let _ = std::fs::remove_dir_all(&audit_base);
+}
