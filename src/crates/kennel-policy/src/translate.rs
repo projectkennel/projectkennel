@@ -795,18 +795,9 @@ fn translate_exec(
             "[exec].shell `{shell}` is not in exec.allow (the kennel would refuse to run its own shell)"
         )));
     }
-    // The `[lib]` allow/deny filter (subst applied for `<…>` placeholders, though lib
-    // paths rarely use them). The resolved `libraries` set is filled at compile time by
-    // `kennel_policy::libresolve` (it reads the binaries from disk), so it is empty here.
-    let lib = src.lib.as_ref();
-    let lib_allow = subst_each(
-        lib.and_then(|l| l.allow.as_deref()).unwrap_or_default(),
-        deferred,
-    );
-    let lib_deny = subst_each(
-        lib.and_then(|l| l.deny.as_deref()).unwrap_or_default(),
-        deferred,
-    );
+    // The resolved `loaders` set (each allowlisted dynamic binary's PT_INTERP) is filled at
+    // compile time by `kennel_policy::libresolve` (it reads the binaries from disk), so it is
+    // empty here. There is no `[lib]` section: libraries are not execute-gated (`07-3-exec`).
     Ok(ExecPolicy {
         deny_setuid: flag(|e| e.deny_setuid),
         deny_setgid: flag(|e| e.deny_setgid),
@@ -816,9 +807,7 @@ fn translate_exec(
         deny,
         path,
         shell,
-        lib_allow,
-        lib_deny,
-        libraries: Vec::new(),
+        loaders: Vec::new(),
     })
 }
 

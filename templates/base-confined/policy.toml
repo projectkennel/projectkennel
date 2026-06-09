@@ -113,24 +113,16 @@ allow = [
 ]
 
 
-# --- Libraries (the shared-library filter) ----------------------------------
-# Execution is deny-by-default, so a library is made executable (mmap PROT_EXEC by
-# the loader) only when an allowlisted binary actually links it: the compiler walks
-# each exec.allow binary's PT_INTERP + transitive DT_NEEDED closure and grants
-# EXECUTE on exactly those files. `allow` bounds where they may come from; `deny`
-# refuses some even when linked. This is a FILTER over the closure, never a grant —
-# a binary planted under /usr/lib is never executable because nothing links it. The
-# universal libraries (ld-linux, libc, libm, libgcc_s, libselinux, libpcre2, the NSS
-# backends) fall out of every binary's closure and are permitted by the dirs below.
-[lib]
-allow = [
-    "/lib/*-linux-gnu/**", "/usr/lib/*-linux-gnu/**",
-    "/lib64/**", "/usr/lib64/**",
-    "/lib/**", "/usr/lib/**",
-]
-deny = [
-    "/usr/lib/pam*/**", "/lib/security/**", "/usr/lib/security/**",
-]
+# --- Libraries --------------------------------------------------------------
+# There is no library allowlist, by design. Execution is gated by Landlock FS_EXECUTE,
+# which the kernel enforces only at execve(2): on the allowlisted binary AND its dynamic
+# loader (PT_INTERP/ld.so, resolved by the compiler from each exec.allow binary). Shared
+# libraries are mmap'd by the loader, which Landlock does NOT gate, so they load with READ
+# alone (07-3-exec) — the fs.read grants above (/usr, /lib, /lib64) already make them
+# readable. A library therefore cannot be "execute-gated" under Landlock; the kennel makes
+# no such claim rather than ship an unenforceable filter. (To stop a workload running NEW
+# programs, that is exec.allow — default-deny; to stop it loading code in-process, the
+# workload must not be an interpreter you handed arbitrary input.)
 
 
 # --- Network ----------------------------------------------------------------

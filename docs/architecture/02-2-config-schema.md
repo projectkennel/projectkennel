@@ -332,11 +332,12 @@ allowlist), `net.proxy` (`offset`, `port`), and the bind-port policy
 `fs.tmp` (`private`, `size_mib`, `mode`) and `fs.dev.allow`, and the proc section
 adds `proc.hidepid`. Settled `FsPolicy` uses flat field names (`home_shadow`,
 `home_persist`, `home_readonly`), not nested `fs.home.*`. The settled exec section
-carries `exec.libraries` — the exact shared-library closure of the `exec.allow`
-binaries, resolved at compile time (ELF `PT_INTERP` + transitive `DT_NEEDED`) and
-filtered through the source-only `[lib]` allow/deny globs (§7.3.7). The spawn grants
-`FS_EXECUTE` on exactly that settled list; the `[lib]` source section itself folds
-into it and is absent from the settled form.
+carries `exec.loaders` — each `exec.allow` dynamic binary's ELF `PT_INTERP` (its
+`ld.so`), resolved at compile time. The spawn grants `FS_EXECUTE` on the allowlisted
+binaries **and** these loaders, because the kernel opens both `FMODE_EXEC` during
+`execve`. It grants nothing for the binaries' shared libraries: Landlock does not gate
+`mmap`, so libraries load via the ordinary `fs.read` grants and cannot be execute-gated
+(§7.3.7). There is no `[lib]` source section.
 
 The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
 

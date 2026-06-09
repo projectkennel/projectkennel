@@ -297,19 +297,15 @@ pub struct ExecPolicy {
     /// allowlist is enforced.
     #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
     pub shell: String,
-    /// `[lib].allow` globs: the filter bounding where a resolved library may be
-    /// `EXECUTE`-granted from (`07-1-execution`). Carried for audit and re-resolution.
+    /// The **resolved dynamic loaders** of [`allow`](Self::allow): the absolute `PT_INTERP`
+    /// (`ld.so`) path of each allowlisted dynamic binary, computed at compile time
+    /// ([`crate::libresolve`]). The runtime grants `EXECUTE` on these in addition to the
+    /// binaries, because the kernel opens a dynamic binary's loader `FMODE_EXEC` during
+    /// `execve` and Landlock gates it (`07-3-exec`). The binary's *libraries* are NOT listed:
+    /// the loader `mmap`s them and Landlock does not gate `mmap`, so they load via `READ`
+    /// alone — the kennel makes no (unenforceable) execute claim over them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lib_allow: Vec<String>,
-    /// `[lib].deny` globs: libraries refused even when linked by an allowlisted binary.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lib_deny: Vec<String>,
-    /// The **resolved** shared-library closure of [`allow`](Self::allow): the exact
-    /// absolute library paths to `EXECUTE`-grant, computed at compile time
-    /// ([`crate::libresolve`]) and filtered by [`lib_allow`](Self::lib_allow) /
-    /// [`lib_deny`](Self::lib_deny). The runtime grants EXECUTE on exactly these.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub libraries: Vec<String>,
+    pub loaders: Vec<String>,
 }
 
 impl ExecPolicy {

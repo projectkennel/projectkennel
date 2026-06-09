@@ -132,12 +132,15 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   `02-2-config-schema.md`, `01-process-model.md`, design `07-4-filesystem.md` §7.4.5/§7.4.12.
 - **TTL runtime reaper** (`exit`/`warn`/`renew`): `05-state-and-supervision.md`, design
   `09-policy-lifecycle.md` §9.7.
-- **Deny-by-default execution + the compile-time library closure** — an empty `exec.allow`
-  denies all execution; `**` is the warned `permissive-exec` opt-out; there is no `exec.deny`
-  (moot under deny-by-default). The compiler resolves each allowlisted binary's `PT_INTERP` +
-  transitive `DT_NEEDED` closure (via the vendored `object` crate), filters it through `[lib]`
-  allow/deny, settles it into `exec.libraries`, and the seal grants `FS_EXECUTE` on exactly
-  those files: design `07-3-exec.md` §7.3.4/§7.3.7.
+- **Deny-by-default `execve` + per-binary loader resolution** — an empty `exec.allow` denies
+  all `execve`; `**` is the warned `permissive-exec` opt-out; there is no `exec.deny` (moot
+  under deny-by-default). `FS_EXECUTE` gates `execve` only (the kernel opens a dynamic binary
+  AND its `PT_INTERP` `FMODE_EXEC`), so the compiler resolves each allowlisted binary's loader
+  (`PT_INTERP`, via the vendored `object` crate), settles it into `exec.loaders`, and the seal
+  grants `FS_EXECUTE` on the binaries + their loaders. It does **not** execute-gate libraries:
+  Landlock has no `mmap` hook, so they load via `READ` — there is no `[lib]` section and no
+  closure (the earlier filter was unenforceable). Boundary verified by `kennel-spawn`'s
+  `exec_gating` test; design `07-3-exec.md` §7.3.4/§7.3.7.
 - **Narrowed net invariant** — the non-removable deny set is cloud-metadata + link-local only;
   RFC1918/CGNAT/ULA are reachable (by `[[net.allow]]` in `constrained`, freely in `open`). A
   policy may still author its own RFC1918 `[[net.deny]]`: design `07-5-network.md` §7.5.

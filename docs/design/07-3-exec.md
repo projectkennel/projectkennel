@@ -29,10 +29,10 @@ For systems with AppArmor available and a system policy framework willing to loa
 ```toml
 [exec]
 # Explicit path allowlist. Glob patterns supported. Execution is DENY-BY-DEFAULT,
-# the same posture as fs and net: an EMPTY allow denies ALL execution (a merely
-# readable file is not executable — the loader cannot even map it PROT_EXEC), so a
-# bare base template runs nothing and a derived template/leaf adds exactly the
-# binaries it needs.
+# the same posture as fs and net: an EMPTY allow denies ALL execve (nothing can be
+# launched as a new program), so a bare base template runs nothing and a derived
+# template/leaf adds exactly the binaries it needs. (This gates execve, not in-process
+# code loading — see §7.3.7.)
 allow = [
     "/usr/bin/git",
     "/usr/lib/git-core/**",
@@ -91,25 +91,15 @@ path = ["/usr/bin", "/usr/local/bin"]
 
 This becomes the kennel's `$PATH`. Combined with deny-by-default `exec.allow`, even if the kennel invokes `sudo` by name the `execve` fails — `sudo` is simply not on the allowlist, so Landlock denies `FS_EXECUTE` regardless of where it sits on `PATH`. The Landlock enforcement is independent of `$PATH`; setting `$PATH` explicitly is purely for user experience (clear errors when a tool isn't available, rather than mysterious lookups).
 
-## 7.3.7 Dynamic linker and the library closure
+## 7.3.7 Dynamic linker: what `FS_EXECUTE` actually gates
 
-A dynamically-linked binary cannot run on `FS_EXECUTE` of the binary alone: the dynamic loader maps `libc`, the other shared objects, and the ELF interpreter (`ld.so`) itself with `PROT_EXEC`, and Landlock gates `mmap(PROT_EXEC)` of a file with `FS_EXECUTE` — not merely with read. The execute right on the libraries a binary links is therefore a precondition for any allowlisted dynamic binary to run.
+What Landlock `FS_EXECUTE` gates is precise, and narrower than it first appears: the kernel checks it at **`execve(2)`** — on the opened-for-exec (`FMODE_EXEC`) file. That is *two* files for a dynamically-linked program: the binary itself, **and** its ELF interpreter (`PT_INTERP` / `ld.so`), which the kernel opens `FMODE_EXEC` to run it. So an allowlisted dynamic binary needs `FS_EXECUTE` on its loader as well as on itself.
 
-Under deny-by-default this cannot be a blanket "execute-grant the lib dirs" — that would re-open exactly the door §7.3.4 closes (anything readable under `/usr/lib` becomes runnable). So the **library set is resolved at compile time, per binary, to the exact closure each `exec.allow` entry needs**, and only those files are `FS_EXECUTE`-granted. The compiler is the right place: it already has the fully-enumerated allowlist in front of it, and the workload's `execve` set is fixed.
+It does **not** extend to the shared libraries the loader then pulls in. Those are loaded with `dlopen`-style `mmap`, and **Landlock has no `mmap`/`mprotect` hook** — a file mapped `PROT_EXEC` is never checked against `FS_EXECUTE`. A library therefore loads on `READ` alone, and *no* `FS_EXECUTE` grant on it changes that (verified directly; see the `kennel-spawn` `exec_gating` test). The corollary is the important one for the threat model:
 
-The closure is computed by inspecting each allowlisted binary's ELF with the vendored `object` crate (no `ldd`, which would *run* the loader): read `PT_INTERP` (the `ld.so` to grant) and walk the transitive `DT_NEEDED` graph from `.dynamic`/`.dynstr`, resolving each soname against the standard library directories. The set is seeded with the handful of libraries `libc` `dlopen`s rather than links (the NSS backends `libnss_files`/`libnss_dns`/`libnss_compat`, `libresolv`) so name resolution works. The result settles into `exec.libraries` in the signed policy, so the runtime grant is fixed and auditable — not re-derived per spawn.
+> **Execution control here means `execve`, default-deny — *which programs the kennel may launch*. It is not a control over in-process code loading.** A program the kennel is allowed to run can `dlopen` (or `mmap`+execute) any *readable* file; Landlock cannot prevent it. The honest boundary is "you cannot spawn a new program that is not on the allowlist," not "you cannot run code that isn't on the allowlist." (For an interpreter workload — Python, Node — the distinction is moot anyway: it evaluates code by design.)
 
-Two policy knobs **filter** the closure (they never add to it):
-
-```toml
-[lib]
-allow = ["/lib/*-linux-gnu/**", "/usr/lib/*-linux-gnu/**", "/lib64/**", "/usr/lib64/**"]
-deny  = ["/usr/lib/pam*/**", "/lib/security/**"]   # refuse even if linked
-```
-
-`allow` bounds *where* a resolved library may come from; `deny` refuses specific ones even when a binary links them. Because the input is the closure of the allowlist, a binary *planted* under `/usr/lib` is never executable — nothing in `exec.allow` links it, so it is never in the set, `[lib].allow` notwithstanding. The universal libraries (`ld-linux`, `libc`, `libm`, `libgcc_s`, `libselinux`, `libpcre2`, the NSS backends) fall out of every closure and are admitted by the default `allow` dirs in `base-confined`.
-
-Statically-linked binaries simply contribute no `DT_NEEDED` entries — no over-grant, no special case, no ELF-linkage guesswork at spawn time.
+Consequently the kennel resolves and grants **only the loaders**, never a "library set." At compile time it inspects each `exec.allow` binary's ELF with the vendored `object` crate (no `ldd`, which would *run* the loader) and reads its `PT_INTERP`; the distinct loader paths settle into `exec.loaders` in the signed policy, fixed and auditable. A statically-linked binary has no `PT_INTERP` and contributes none. The libraries themselves are simply *readable* via the ordinary `fs.read` grants that already cover `/usr`, `/lib`, `/lib64` — there is no `[lib]` section, and there is deliberately no execute-allowlist over libraries: it would be an unenforceable, blind policy target.
 
 ## 7.3.8 Interaction with `no_new_privs`
 
@@ -133,7 +123,7 @@ The combined effect of the exec policy:
 - Binaries in writable paths may not run.
 - Setuid behaviour is neutralised even if a setuid binary somehow runs.
 - `PATH` lookups find only the policy-permitted directories.
-- The dynamic linker can load libraries (because exactly the libraries each allowlisted binary links are execute-granted — the compile-time closure, §7.3.7).
+- An allowlisted dynamic binary runs (its binary and its loader are execute-granted; its libraries load via `READ`, §7.3.7). Conversely, library/in-process code loading is *not* execute-gated — the boundary is `execve`, default-deny.
 
 ## 7.3.10 Test plan
 
@@ -143,10 +133,9 @@ For each invariant, a regression test in Project Kennel's `tests/exec/` director
 2. Run a setuid binary from a kennel with `deny_setuid = true`; expect EACCES.
 3. Run a setuid binary from a kennel with `deny_setuid = false` but `no_new_privs` set; expect execve to succeed but the binary's effective uid to equal the calling uid (verify via `/proc/self/status`).
 4. Copy a static binary to a writable path, attempt to execute it from a kennel with `deny_writable = true`; expect EACCES.
-5. Run a binary in `exec.allow`; expect success — the compiler resolved its library closure (§7.3.7) and granted `FS_EXECUTE` on exactly those files.
+5. Run a *dynamic* binary in `exec.allow`; expect success — the compiler resolved its loader (`PT_INTERP`, §7.3.7) and granted `FS_EXECUTE` on the binary and that loader, while its libraries load via `READ`. Removing the loader's execute grant must make the `execve` fail; the libraries needing no execute grant is verified by `kennel-spawn`'s `exec_gating` test.
 5a. With an empty `exec.allow`, attempt to run any binary; expect EACCES (deny-by-default). Add a `**` `permissive-exec` entry; expect success and a compile-time warning.
-5b. Plant an unrelated `.so` under a `[lib].allow` directory that no allowlisted binary links; confirm it is *not* execute-granted (closure-only, not dir-grant).
-6. Run an interpreter in `exec.allow`, pass it a script that attempts to `execve()` a denied binary; expect the script's execve to fail with EACCES.
+6. Run an interpreter in `exec.allow`, pass it a script that attempts to `execve()` a denied binary; expect the script's execve to fail with EACCES. (Note the boundary: the interpreter `dlopen`ing a readable library is *not* prevented — Landlock does not gate `mmap`; only the `execve` of a new program is, §7.3.7.)
 7. Attempt `setsockopt(IPV6_V6ONLY, 0)` after setting `no_new_privs`; the prctl should have prevented this from affecting privilege, verify the socket behaves as v6-only (this is a no_new_privs sanity test, not exec-specific, but lives in this section).
 8. Confirm `no_new_privs` cannot be set false via policy: policy validator rejects the configuration.
 

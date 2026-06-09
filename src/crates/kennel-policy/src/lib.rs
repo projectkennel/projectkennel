@@ -98,17 +98,18 @@ pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, Poli
     Ok(doc.policy)
 }
 
-/// Resolve and fill the settled policy's shared-library `EXECUTE` grant set.
+/// Resolve and fill the settled policy's dynamic-loader `EXECUTE` grant set.
 ///
-/// Fills [`settled::ExecPolicy::libraries`] from `exec.allow` + the `[lib]` filter,
-/// reading the binaries from disk ([`libresolve`]). Call this at compile time — after
-/// [`compile()`] / [`compile_leaf`] and **before** signing — so the resolved closure is
-/// part of the signed artefact and the runtime never re-resolves. Returns the
-/// resolver's advisories (denied/unresolvable libraries). Idempotent.
-pub fn resolve_settled_libraries(policy: &mut SettledPolicy) -> Vec<String> {
-    let exec = &policy.effective_policy.exec;
-    let resolution = libresolve::resolve_libraries(&exec.allow, &exec.lib_allow, &exec.lib_deny);
-    policy.effective_policy.exec.libraries = resolution.libraries;
+/// Fills [`settled::ExecPolicy::loaders`] with each allowlisted dynamic binary's `PT_INTERP`
+/// (`ld.so`), reading the binaries from disk ([`libresolve`]). Call this at compile time —
+/// after [`compile()`] / [`compile_leaf`] and **before** signing — so the loader set is part
+/// of the signed artefact and the runtime never re-resolves. Returns the resolver's
+/// advisories (binaries it could not read). Idempotent. Libraries are deliberately *not*
+/// resolved or granted: they load via `READ` and Landlock cannot gate their `mmap`
+/// (`07-3-exec`).
+pub fn resolve_settled_loaders(policy: &mut SettledPolicy) -> Vec<String> {
+    let resolution = libresolve::resolve_loaders(&policy.effective_policy.exec.allow);
+    policy.effective_policy.exec.loaders = resolution.loaders;
     resolution.warnings
 }
 
@@ -203,9 +204,7 @@ mod tests {
                     deny: Vec::new(),
                     path: vec!["/usr/bin".to_owned()],
                     shell: settled::default_shell(),
-                    lib_allow: Vec::new(),
-                    lib_deny: Vec::new(),
-                    libraries: Vec::new(),
+                    loaders: Vec::new(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,

@@ -619,13 +619,14 @@ impl Plan {
             }
         }
 
-        // The execution gate (§7.3): grant FS_EXECUTE only on the allowlisted binaries
-        // and on the exact shared libraries those binaries link — the closure resolved
-        // and settled at compile time (`exec.libraries`, `kennel_policy::libresolve`),
-        // EXECUTE not READ since the loader maps libc/ld.so PROT_EXEC. Reads carry no
-        // EXECUTE (above), so nothing else — including a binary planted in a lib dir —
-        // can run. Skipped under `permissive-exec` (`**`), where reads already carry
-        // EXECUTE and execution is ungated.
+        // The execution gate (§7.3): grant FS_EXECUTE on the allowlisted binaries and on
+        // each one's dynamic loader (`PT_INTERP`/`ld.so`, resolved at compile time into
+        // `exec.loaders`). Both are needed because the kernel opens a dynamic binary AND its
+        // loader `FMODE_EXEC` during `execve`, which Landlock gates. The binaries' shared
+        // libraries are deliberately NOT granted EXECUTE: the loader `mmap`s them and
+        // Landlock has no `mmap` hook, so they load via READ alone (07-3-exec) — granting
+        // execute would be unenforceable, so the kennel makes no such claim. Skipped under
+        // `permissive-exec` (`**`), where reads already carry EXECUTE.
         let exec_access = AccessFs::EXECUTE | AccessFs::READ_FILE;
         if !permissive_exec {
             for entry in &ep.exec.allow {
@@ -644,11 +645,10 @@ impl Plan {
                 }
                 landlock_fs.push((remap_target(&root, home, &shim_root), exec_access));
             }
-            // The resolved library closure: exact paths, already filtered by the
-            // `[lib]` allow/deny globs at compile time. `skip_missing` drops any the
-            // view does not contain.
-            for lib in &ep.exec.libraries {
-                landlock_fs.push((remap_target(Path::new(lib), home, &shim_root), exec_access));
+            // The resolved dynamic loaders (each allowlisted binary's PT_INTERP): exact
+            // paths settled at compile time. `skip_missing` drops any the view omits.
+            for loader in &ep.exec.loaders {
+                landlock_fs.push((remap_target(Path::new(loader), home, &shim_root), exec_access));
             }
         }
 

@@ -222,7 +222,7 @@ The minimum viable set of templates, each maintained as a first-class artefact:
 
 | Template | Purpose | Defends | Notable residuals |
 |---|---|---|---|
-| `base-confined` | The root of all confined templates. Deny-by-default across exec/fs/net: `no_new_privs`, deny setuid/setgid/setcap, empty `exec.allow` (runs nothing), no abstract unix sockets, the cloud-metadata + link-local invariant denies (RFC1918 stays reachable), a system read baseline + the compile-time `[lib]` closure filter. | T3.1, T2.7, baseline against T1.6 | Cannot be used directly (no exec/project scope) |
+| `base-confined` | The root of all confined templates. Deny-by-default across exec/fs/net: `no_new_privs`, deny setuid/setgid/setcap, empty `exec.allow` (runs nothing), no abstract unix sockets, the cloud-metadata + link-local invariant denies (RFC1918 stays reachable), a system read baseline covering the lib dirs (libraries load via READ — no `[lib]` execute-allowlist, §7.3.7). | T3.1, T2.7, baseline against T1.6 | Cannot be used directly (no exec/project scope) |
 | `ai-coding-strict` | AI agent on a single project. Worked example in `TEMPLATE-ai-coding-strict.md`. | T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7 | T1.8 (exfil via API); T2.2 (semantic regressions in code) |
 | `ai-coding-permissive` | Same shape, broader fs scope and open-net audit mode. | T1.1 partial | T1.8; weaker T2.1; documented as weaker |
 | `untrusted-build` | Build script from untrusted source. `net.mode = "none"` during install. | T1.2 strong, T1.5 strong | Needs offline mirrors for legitimate dependencies |
@@ -248,7 +248,8 @@ Templates can extend other templates. `ai-coding-strict` is defined as deltas fr
 base-confined          ← minimal: no_new_privs, deny setuid, deny-by-default exec
                          (empty exec.allow), deny abstract unix sockets, the
                          cloud-metadata + link-local invariant denies (RFC1918
-                         stays reachable), a read baseline + the [lib] closure.
+                         stays reachable), a read baseline covering the system
+                         lib dirs (libraries load via READ; §7.3.7).
                          (Every confined template inherits from this.)
   ↓
 ai-coding-strict       ← adds: project-tree fs scope (in user delta),

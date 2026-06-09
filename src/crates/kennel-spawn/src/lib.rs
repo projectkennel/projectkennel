@@ -583,9 +583,7 @@ mod tests {
                     deny: Vec::new(),
                     path: Vec::new(),
                     shell: "/bin/sh".to_owned(),
-                    lib_allow: Vec::new(),
-                    lib_deny: Vec::new(),
-                    libraries: Vec::new(),
+                    loaders: Vec::new(),
                 },
                 proc: ProcPolicy {
                     visibility: ProcVisibility::SelfOnly,
@@ -775,9 +773,9 @@ mod tests {
     #[test]
     fn plan_translates_policy() {
         let mut p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        // The resolved library closure (settled at compile) is what carries EXECUTE for
-        // libraries now — not a read-grant heuristic. Seed one to exercise the grant.
-        p.effective_policy.exec.libraries = vec!["/usr/lib/x86_64-linux-gnu/libc.so.6".to_owned()];
+        // The resolved loaders (each binary's PT_INTERP, settled at compile) carry EXECUTE
+        // alongside the binaries; libraries do NOT (07-3-exec). Seed one to exercise it.
+        p.effective_policy.exec.loaders = vec!["/lib64/ld-linux-x86-64.so.2".to_owned()];
         let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
         // Namespaces: user (the unprivileged foundation) + mount/pid/ipc, never net.
@@ -793,7 +791,7 @@ mod tests {
 
         // Landlock with the exec allowlist active (exec.allow is non-empty):
         // a read path is read-only and NOT implicitly executable; the
-        // allowlisted binary and the loader's lib dirs carry EXECUTE; writes
+        // allowlisted binary and its dynamic loader carry EXECUTE; writes
         // carry write access (§7.3).
         assert!(
             plan.landlock_fs
@@ -812,9 +810,9 @@ mod tests {
         );
         assert!(
             plan.landlock_fs.iter().any(|(path, acc)| path
-                == &PathBuf::from("/usr/lib/x86_64-linux-gnu/libc.so.6")
+                == &PathBuf::from("/lib64/ld-linux-x86-64.so.2")
                 && acc.contains(AccessFs::EXECUTE)),
-            "a resolved library (settled exec.libraries) gets EXECUTE"
+            "the resolved loader (settled exec.loaders) gets EXECUTE"
         );
         assert!(
             !plan
@@ -822,7 +820,7 @@ mod tests {
                 .iter()
                 .any(|(path, acc)| path == &PathBuf::from("/usr/lib")
                     && acc.contains(AccessFs::EXECUTE)),
-            "a bare read-grant lib dir is NOT executable — only the resolved closure is"
+            "a bare read-grant lib dir is NOT executable — only the binary and its loader are"
         );
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
             == &PathBuf::from("/run/kennel/ai-coding/home")

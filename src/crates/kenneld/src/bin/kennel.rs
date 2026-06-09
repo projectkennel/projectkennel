@@ -129,7 +129,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
-        print_warnings(&kennel_policy::resolve_settled_libraries(
+        print_warnings(&kennel_policy::resolve_settled_loaders(
             &mut compiled.policy,
         ));
         let key = load_signing_key(&key_path)?;
@@ -725,7 +725,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     print_warnings(&compiled.warnings);
     // Resolve the shared-library closure of the allowlist into the settled artefact
     // (reads the binaries from disk; deny-by-default execution, 07-3) before signing.
-    print_warnings(&kennel_policy::resolve_settled_libraries(
+    print_warnings(&kennel_policy::resolve_settled_loaders(
         &mut compiled.policy,
     ));
     let policy = &compiled.policy;
