@@ -19,7 +19,7 @@ use std::os::fd::AsFd as _;
 use std::process::ExitCode;
 
 use kennel_privhelper::wire::{
-    EgressPayload, GidMapPayload, Op, Request, Response, Status, REQUEST_LEN,
+    EgressPayload, Op, Request, Response, Status, REQUEST_LEN,
 };
 use kennel_privhelper::{alloc, construct, exec};
 
@@ -59,8 +59,7 @@ fn main() -> ExitCode {
     let Ok(request) = Request::decode(head) else {
         return respond(Response::protocol());
     };
-    // SetupEgress and SetGidMap each carry a variable-length payload appended after
-    // the fixed request; the tail is parsed per op.
+    // SetupEgress carries a variable-length payload appended after the fixed request.
     let tail = buf.get(REQUEST_LEN..).unwrap_or(&[]);
     let egress = if request.op == Op::SetupEgress {
         match EgressPayload::decode(tail) {
@@ -70,22 +69,9 @@ fn main() -> ExitCode {
     } else {
         None
     };
-    let gidmap = if request.op == Op::SetGidMap {
-        match GidMapPayload::decode(tail) {
-            Ok(p) => Some(p),
-            Err(_) => return respond(Response::protocol()),
-        }
-    } else {
-        None
-    };
     // The caller's real UID is the trusted identity; look up its allocation.
     let scope = alloc::load(kennel_syscall::unistd::real_uid());
-    respond(exec::perform(
-        &request,
-        egress.as_ref(),
-        gidmap.as_ref(),
-        scope.as_ref(),
-    ))
+    respond(exec::perform(&request, egress.as_ref(), scope.as_ref()))
 }
 
 /// Write the response and map its status to the process exit code (matching the

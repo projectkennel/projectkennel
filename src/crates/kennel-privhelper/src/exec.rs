@@ -8,8 +8,8 @@
 
 use std::ffi::CString;
 
-use crate::validate::{validate_addr, validate_gid_map, AddrRequest, Refusal, ReservedScope};
-use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
+use crate::validate::{validate_addr, AddrRequest, Refusal, ReservedScope};
+use crate::wire::{EgressPayload, Op, Request, Response};
 
 /// Stable refusal codes carried on the wire (`Response::refusal`).
 const fn refusal_code(r: &Refusal) -> u8 {
@@ -18,8 +18,6 @@ const fn refusal_code(r: &Refusal) -> u8 {
         Refusal::AddrOutOfScope => 2,
         Refusal::InterfaceNotAllowed => 3,
         Refusal::InterfaceNameTooLong => 4,
-        Refusal::GidNotMember { .. } => 5,
-        Refusal::EmptyGidMap => 6,
     }
 }
 
@@ -35,10 +33,6 @@ pub const REFUSAL_NO_SCOPE: u8 = 100;
 /// attaching BPF to another user's or a system cgroup.
 pub const REFUSAL_CGROUP_NOT_OWNED: u8 = 101;
 
-/// A refusal code for "the target process of a `gid_map` request is not owned by
-/// the caller" — a user may only write the `gid_map` of its own process's userns.
-pub const REFUSAL_PID_NOT_OWNED: u8 = 102;
-
 /// A short, stable description of a wire refusal code.
 ///
 /// For the `message` field of a `priv.refuse` audit event (`02-3`). Mirrors the
@@ -52,11 +46,8 @@ pub const fn refusal_message(code: u8) -> &'static str {
         2 => "address is outside the reserved per-kennel subnet",
         3 => "interface is not `lo` or a `<namespace>-<id>` dummy",
         4 => "interface name exceeds the kernel length limit",
-        5 => "caller is not a member of a requested gid",
-        6 => "gid_map request carried no gids",
         REFUSAL_NO_SCOPE => "helper has no configured reserved scope for this user",
         REFUSAL_CGROUP_NOT_OWNED => "target cgroup is not owned by the caller",
-        REFUSAL_PID_NOT_OWNED => "target process is not owned by the caller",
         _ => "refused",
     }
 }
@@ -79,7 +70,6 @@ fn errno_of(e: &std::io::Error) -> i32 {
 pub fn perform(
     req: &Request,
     egress: Option<&EgressPayload>,
-    gidmap: Option<&GidMapPayload>,
     scope: Option<&ReservedScope>,
 ) -> Response {
     let Some(scope) = scope else {
@@ -93,56 +83,6 @@ pub fn perform(
         Op::SetupEgress => {
             egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload))
         }
-        // SetGidMap likewise carries a variable payload. The scope gates *whether*
-        // the caller may act; the gids are gated by membership and the pid by
-        // ownership, inside perform_set_gid_map.
-        Op::SetGidMap => gidmap.map_or_else(Response::protocol, perform_set_gid_map),
-    }
-}
-
-/// Write a workload's user-namespace `gid_map` so it keeps specific supplementary
-/// groups (§7.4.8). The security gates, in order:
-///
-/// 1. **Membership** — every gid must be one the caller already holds (its own gid
-///    set, which the helper inherits from `kenneld` = the user). Mapping a gid the
-///    user is not in would let the workload act as that group (the map is identity).
-/// 2. **Ownership** — `/proc/<pid>` must be owned by the caller's real uid, so a
-///    user can only write the `gid_map` of its own process's namespace.
-///
-/// Only then is the map written: one identity line (`<gid> <gid> 1`) per gid. The
-/// helper holds `CAP_SETGID` in the parent (init) user namespace, which is what
-/// lets it write a multi-gid map an unprivileged process could not.
-fn perform_set_gid_map(payload: &GidMapPayload) -> Response {
-    use std::fmt::Write as _;
-    use std::os::unix::fs::MetadataExt as _;
-
-    // The caller's group set: real gid + supplementary groups. The helper is a
-    // child of kenneld (the user), and setuid/file-caps leave the gid set untouched.
-    let mut caller_groups = kennel_syscall::unistd::supplementary_groups();
-    caller_groups.push(kennel_syscall::unistd::real_gid());
-    if let Err(r) = validate_gid_map(&payload.gids, &caller_groups) {
-        return Response::refused(refusal_code(&r));
-    }
-
-    // The target process must belong to the caller.
-    let proc_dir = format!("/proc/{}", payload.pid);
-    let owner = match std::fs::metadata(&proc_dir) {
-        Ok(m) => m.uid(),
-        Err(e) => return Response::internal(errno_of(&e)),
-    };
-    if owner != kennel_syscall::unistd::real_uid() {
-        return Response::refused(REFUSAL_PID_NOT_OWNED);
-    }
-
-    // Identity-map each gid (`<gid> <gid> 1`). The kernel accepts multiple lines
-    // because the helper has CAP_SETGID in the parent user namespace.
-    let mut map = String::new();
-    for g in &payload.gids {
-        let _ = writeln!(map, "{g} {g} 1");
-    }
-    match std::fs::write(format!("{proc_dir}/gid_map"), map) {
-        Ok(()) => Response::ok(),
-        Err(e) => Response::internal(errno_of(&e)),
     }
 }
 

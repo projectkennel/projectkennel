@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 
 use kennel_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_fds};
 
-use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
+use crate::wire::{EgressPayload, Op, Request, Response};
 
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
 ///
@@ -112,28 +112,6 @@ pub fn setup_egress(
     exchange(helper, &bytes)
 }
 
-/// Ask the helper to write process `pid`'s user-namespace `gid_map` (§7.4.8).
-///
-/// The map identity-maps `gids` — the workload's primary gid plus each granted
-/// supplementary group — so the workload keeps those groups; an unprivileged
-/// process could map only its own primary gid. The helper re-checks the caller is
-/// a member of every gid and owns `pid` before writing.
-///
-/// # Errors
-///
-/// As [`invoke`].
-pub fn set_gid_map(helper: &Path, pid: u32, gids: &[u32]) -> io::Result<Response> {
-    let mut bytes = gidmap_request().encode();
-    bytes.extend_from_slice(
-        &GidMapPayload {
-            pid,
-            gids: gids.to_vec(),
-        }
-        .encode(),
-    );
-    exchange(helper, &bytes)
-}
-
 /// Ask the helper to add `addr/prefix` on `interface` for kennel `ctx`.
 ///
 /// # Errors
@@ -168,19 +146,6 @@ pub fn del_address(
         helper,
         &addr_request(Op::DelAddr, ctx, interface, addr, prefix),
     )
-}
-
-/// A bare `SetGidMap` request: the operation lives entirely in the appended
-/// [`GidMapPayload`] tail, so the fixed fields are unused placeholders.
-const fn gidmap_request() -> Request {
-    Request {
-        op: Op::SetGidMap,
-        ctx: 0,
-        addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        prefix: 0,
-        interface: String::new(),
-        cgroup_path: PathBuf::new(),
-    }
 }
 
 const fn cgroup_request(op: Op, path: PathBuf) -> Request {
