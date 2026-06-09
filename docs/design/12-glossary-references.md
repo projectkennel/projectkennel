@@ -42,8 +42,6 @@
 
 **LSM.** Linux Security Module. The kernel framework that AppArmor, SELinux, Landlock, BPF LSM, and others plug into.
 
-**MITM (proxy).** Man-in-the-middle. In Project Kennel's context, refers to the optional TLS-inspection mode where the SOCKS5 proxy terminates TLS, inspects the request, and re-originates a new TLS connection. Off by default.
-
 **Mount namespace.** A Linux namespace isolating the set of mounts visible to processes. Project Kennel uses mount namespaces to construct per-kennel filesystem views.
 
 **no_new_privs.** A `prctl()` flag preventing a process from gaining privileges via setuid binaries or LSM transitions. Set unconditionally in every kennel. See §7.3.8.

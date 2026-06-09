@@ -51,7 +51,6 @@ Why this is the right primitive:
 - **Policy lives in user-space** where it can be expressive: per-host rate limits, structured audit, name-resolution vetting. kenneld is the policy decision point for every `INet` transaction; the kernel just enforces the namespace boundary.
 - **DNS is the proxy's problem.** The kennel cannot resolve names itself; the proxy delegate resolves on its behalf (via the OS resolver) and vets the answers against the allowlist before dialling. DNS rebinding is structurally impossible — the kennel never holds an address, only a name, and the proxy resolves and vets under policy.
 - **Audit is free.** The proxy logs every request with the requesting kennel, destination, byte counts, duration. No need to correlate kernel events with policy decisions; the proxy is the policy decision.
-- **TLS inspection is a future enterprise layer.** A MITM-capable proxy (own CA installed in the kennel's trust store) would enable certificate pinning and request logging. Costs: complexity, breaks TLS-pinning apps, requires CA management. Roadmap, not in the v1 surface.
 - **Composes with loopback isolation** (§7.5.6). The kennel's `127.42.x.1` is where the shim listens. The kennel cannot reach the user's `127.0.0.1` services — they are in a different network namespace — except by naming them as host services the proxy delegate dials on its behalf.
 
 What the kernel still enforces, via cgroup BPF inside the net-ns, is socket-level shaping rather than per-destination routing:
@@ -80,7 +79,7 @@ The SOCKS5 wire format is preserved end-to-end so the workload sees no change �
 - Universally supported. `curl`, `wget`, `git`, `pip`, `npm`, `cargo`, `ssh` (via `ProxyCommand`), every browser.
 - Crucially: `socks5h://` (with the `h`) means "let the proxy resolve the name". The kennel never resolves DNS itself.
 
-What SOCKS5 doesn't natively cover, the proxy adds: per-destination policy beyond allow/deny (rate limits, byte caps, time windows), structured audit. TLS inspection is a future enterprise layer.
+What SOCKS5 doesn't natively cover, the proxy adds: per-destination policy beyond allow/deny (rate limits, byte caps, time windows), structured audit.
 
 ## 7.5.4 Policy primitives
 

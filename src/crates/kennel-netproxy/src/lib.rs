@@ -48,8 +48,6 @@
 //!
 //! - This crate does not enforce the kernel-level "talk only to the proxy" rule
 //!   (that is cgroup BPF, set up by `kennel-spawn`/`kennel-privhelper`).
-//! - It does not perform TLS inspection. That is an explicit `open question`
-//!   (`docs/design/11-open-questions.md`) and is off in v1.
 //! - It does not load or verify the signed policy (that is `kennel-policy`); it
 //!   consumes an already-resolved allowlist.
 //!
