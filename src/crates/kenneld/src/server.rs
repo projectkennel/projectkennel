@@ -1090,9 +1090,6 @@ mod tests {
         fn setup_egress(&self, _: &Path, _: &EgressPayload) -> io::Result<HelperResponse> {
             Ok(HelperResponse::ok())
         }
-        fn set_gid_map(&self, _: u32, _: &[u32]) -> io::Result<HelperResponse> {
-            Ok(HelperResponse::ok())
-        }
     }
 
     struct FakeLoader;

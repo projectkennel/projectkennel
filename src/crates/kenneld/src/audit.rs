@@ -402,20 +402,6 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
         result
     }
 
-    fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response> {
-        let started = Instant::now();
-        let result = self.inner.set_gid_map(pid, gids);
-        let params = Value::object(vec![
-            ("pid", Value::Uint(u64::from(pid))),
-            (
-                "gids",
-                Value::Array(gids.iter().map(|g| Value::Uint(u64::from(*g))).collect()),
-            ),
-        ]);
-        self.record("set-gid-map", params, started, &result);
-        result
-    }
-
     /// Forward factory construction to the inner privhelper.
     ///
     /// Not recorded as a `priv.*` event here: construction is a long-lived process whose
@@ -447,9 +433,6 @@ mod tests {
             Ok(self.0)
         }
         fn setup_egress(&self, _: &Path, _: &EgressPayload) -> io::Result<Response> {
-            Ok(self.0)
-        }
-        fn set_gid_map(&self, _: u32, _: &[u32]) -> io::Result<Response> {
             Ok(self.0)
         }
     }
@@ -542,10 +525,10 @@ mod tests {
         let addr = "127.0.0.1".parse::<IpAddr>().expect("addr");
         let _ = audited.add_address(7, "lo", addr, 28);
 
-        // A success on set_gid_map.
+        // A success (invoke) on add_address.
         let ok = FixedPriv(Response::ok());
         let audited_ok = AuditedPrivileged::new(&ok, Some(&writer));
-        let _ = audited_ok.set_gid_map(1234, &[20, 44]);
+        let _ = audited_ok.add_address(8, "lo", addr, 28);
 
         // Dropping the writer joins the buffered sink so priv.jsonl is flushed.
         drop(writer);
@@ -558,13 +541,7 @@ mod tests {
         assert!(body.contains("reserved per-kennel subnet"), "{body}");
         assert!(body.contains(r#""params":{"ctx":7,"#), "{body}");
         assert!(body.contains(r#""addr":"127.0.0.1""#), "{body}");
-
         assert!(body.contains(r#""event":"priv.invoke""#), "{body}");
-        assert!(body.contains(r#""operation":"set-gid-map""#), "{body}");
-        assert!(
-            body.contains(r#""params":{"pid":1234,"gids":[20,44]}"#),
-            "{body}"
-        );
         assert!(body.contains(r#""duration_ms":"#), "{body}");
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -63,68 +63,6 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
     nix::sched::unshare(to_clone_flags(ns)).map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
-/// Establish an identity-mapped **user namespace** for the calling process.
-///
-/// The unprivileged foundation of the spawn — the bubblewrap-equivalent mechanism
-/// (`docs/architecture/01-process-model.md`, `docs/design/08-enforcement-architecture.md`).
-/// Unshares `CLONE_NEWUSER` and maps the caller's `uid`/`gid` **1:1** into the new
-/// namespace — the real uid is preserved (not subuid; `design/04-trust-boundaries.md`).
-/// The caller then holds `CAP_SYS_ADMIN` *within the new namespace*, so it can unshare
-/// a mount/IPC namespace and `mount`/`pivot_root` **with no real privilege** — this is
-/// what lets an unprivileged `kenneld` build the constructed view without root or
-/// sudo. The privhelper stays reserved for the host-global operations a user namespace
-/// cannot reach (loopback addresses, cgroup BPF).
-///
-/// Ordering is load-bearing for an unprivileged user namespace: `setgroups` must be
-/// **denied** before `gid_map` is written, then each map is written once. Because
-/// `setgroups` is denied, supplementary-group selection is expressed through the
-/// `gid_map` (mapped gids retain identity; unmapped ones fall to the overflow gid),
-/// **not** a later `setgroups`.
-///
-/// # Errors
-///
-/// An OS error if the `CLONE_NEWUSER` unshare is refused (e.g. the distro disables
-/// unprivileged user namespaces) or any `/proc/self` map write fails.
-pub fn establish_identity_userns(uid: u32, gid: u32) -> io::Result<()> {
-    establish_userns_defer_gid_map(uid)?;
-    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
-    Ok(())
-}
-
-/// Establish the identity-mapped user namespace but **leave the `gid_map`
-/// unwritten**, for the granted-supplementary-group handshake (§7.4.8).
-///
-/// Unshares `CLONE_NEWUSER`, denies `setgroups`, and writes the identity `uid_map`
-/// — exactly the prefix of [`establish_identity_userns`] — but does **not** write
-/// the `gid_map`. After this returns the caller already holds `CAP_SYS_ADMIN`
-/// *within* the new namespace (the `uid_map` is what grants it), so it can unshare
-/// mount/IPC and `mount`/`pivot_root`; the `gid_map`, however, is still empty.
-///
-/// This is used when a specific supplementary group is re-granted into the kennel:
-/// an unprivileged `gid_map` can map only the caller's own primary gid, so a
-/// privileged helper (holding `CAP_SETGID` in the init userns) writes the
-/// multi-gid map against this process's pid out of band. The caller MUST complete
-/// that write — and so MUST NOT rely on group identity, nor fork the workload —
-/// before the helper has written the map (the workload would otherwise see every
-/// group, primary included, fall to the overflow gid). The single-line default
-/// (drop every supplementary group to the overflow gid, for free) is the
-/// `gid`-writing [`establish_identity_userns`] instead.
-///
-/// # Errors
-///
-/// An OS error if the `CLONE_NEWUSER` unshare is refused (e.g. the distro disables
-/// unprivileged user namespaces, or Ubuntu's `AppArmor` restriction strips the
-/// capability — the `setgroups`/`uid_map` write then fails `EACCES`).
-pub fn establish_userns_defer_gid_map(uid: u32) -> io::Result<()> {
-    unshare(Namespaces::USER)?;
-    // Unprivileged userns: deny setgroups before writing gid_map (a kernel rule that
-    // prevents using a new userns to drop groups for a privilege check).
-    std::fs::write("/proc/self/setgroups", "deny")?;
-    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
-    // gid_map intentionally NOT written here — the privileged helper writes it.
-    Ok(())
-}
-
 /// `clone(2)` a child that is **PID 1** of a fresh PID namespace, entering all of
 /// `ns` in a single syscall, and run `child` in it.
 ///

@@ -149,14 +149,6 @@ pub trait Privileged {
     /// As [`add_address`](Self::add_address).
     fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response>;
 
-    /// Write process `pid`'s user-namespace `gid_map`, identity-mapping each gid in
-    /// `gids`, so a workload keeps a granted supplementary group (§7.4.8). The
-    /// helper re-checks the caller is a member of every gid and owns `pid`.
-    ///
-    /// # Errors
-    /// As [`add_address`](Self::add_address).
-    fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response>;
-
     /// Construct a kennel via the privhelper **factory** (`07-2`): hand it the
     /// `construction_half` bytes, the `kennel-init` binary fd, and (optionally) the pty
     /// socket; receive the long-lived supervisor [`Child`] and `kennel-init`'s host pid.
@@ -221,10 +213,6 @@ impl Privileged for HelperClient {
 
     fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
         kennel_privhelper::client::setup_egress(&self.helper, cgroup.to_path_buf(), payload)
-    }
-
-    fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response> {
-        kennel_privhelper::client::set_gid_map(&self.helper, pid, gids)
     }
 
     fn construct_kennel(
