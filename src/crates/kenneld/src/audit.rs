@@ -69,6 +69,22 @@ pub fn build_writer(
     writer(ctx, levels_from(runtime), &cfg)
 }
 
+/// A writer with **no sinks** — discards every event.
+///
+/// Used when a kennel has no audit state directory configured: every kennel now runs the
+/// factory + binder bus (`07-1`), so the registry/lifecycle always needs *a* writer, but
+/// with nothing to write to it is a sink-less drain. (Empty `SinkConfig.kinds` would default
+/// to the file sink, so this uses the lower-level `Writer::new` with an empty sink vector.)
+#[must_use]
+pub fn noop_writer(name: &str, kennel_uuid: String) -> Writer {
+    let ctx = WriterContext {
+        kennel: name.to_owned(),
+        kennel_uuid,
+        host: kennel_audit::hostname(),
+    };
+    Writer::new(ctx, Levels::default(), Vec::new())
+}
+
 /// The maximum size of an `audit.toml` defaults file (a sanity guard).
 const MAX_AUDIT_TOML: u64 = 64 * 1024;
 

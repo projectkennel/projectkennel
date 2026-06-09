@@ -471,16 +471,18 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_gate_requires_the_exact_init_pid() {
-        // Served to the registered init host pid (kennel-init runs as the operator uid).
-        assert!(lifecycle_authorized(Some(4242), 4242, 1000));
+    fn lifecycle_gate_requires_the_exact_init_pid_and_uid0() {
+        // `kennel-init` is the only uid-0 process; the gate is the exact init host pid AND
+        // euid 0.
         assert!(lifecycle_authorized(Some(4242), 4242, 0));
+        // Right pid but a non-zero euid (the operator-uid workload/facades) — denied.
+        assert!(!lifecycle_authorized(Some(4242), 4242, 1000));
         // Wrong pid (a spoof from another in-kennel process) — denied.
-        assert!(!lifecycle_authorized(Some(4242), 9999, 1000));
+        assert!(!lifecycle_authorized(Some(4242), 9999, 0));
         // An unmapped (overflow-uid) sender is rejected even with a matching pid.
         assert!(!lifecycle_authorized(Some(4242), 4242, 65534));
         // Lifecycle disabled (no init pid registered) — everything denied.
-        assert!(!lifecycle_authorized(None, 4242, 1000));
+        assert!(!lifecycle_authorized(None, 4242, 0));
     }
 
     #[test]

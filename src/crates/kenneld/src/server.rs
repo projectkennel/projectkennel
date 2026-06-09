@@ -783,36 +783,39 @@ fn run_kennel<P, L>(
     });
     let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
 
-    // Wire the binder context manager when the kennel declares a [binder] policy *or*
-    // any [unix] grant (the AF_UNIX facade rides binder; `07-1` §7.1.5) and audit is
-    // configured (the registry records every decision; §7.1.4). The plan's view already
-    // carries the binder flag in both cases, so the seal mounts binderfs regardless;
-    // this provides the daemon-side manager that takes node 0 and answers the facade.
-    if !loaded.binder.is_empty() || !loaded.unix.is_empty() {
-        if let Some(writer) = &audit {
-            // The facade connects to the real host socket, so resolve each `real` path's
-            // `~`/`$XDG_RUNTIME_DIR`/placeholders against the daemon's own home now (the
-            // shim path the proxy listens at was already resolved in `prepare_unix`).
-            let facade_unix = kennel_policy::UnixRuntime {
-                sockets: loaded
-                    .unix
-                    .sockets
-                    .iter()
-                    .map(|s| kennel_policy::UnixSocket {
-                        real: resolve_path(&s.real, &subst, &shared.identity.home)
-                            .to_string_lossy()
-                            .into_owned(),
-                        ..s.clone()
-                    })
-                    .collect(),
-            };
-            spec.binder = Some(crate::BinderPrep {
-                policy: loaded.binder,
-                unix: facade_unix,
-                writer: Arc::clone(writer),
-                init_bin: shared.identity.init_bin.clone(),
-            });
-        }
+    // Every kennel runs the privhelper factory + a per-kennel binder bus: binder is the
+    // universal control plane (`kennel-init` pulls its supervision-half over node 0), not an
+    // opt-in for [binder]/[unix] kennels (`07-1`/`07-2`). So always wire the daemon-side
+    // context manager — it takes node 0, serves the lifecycle pull, and answers any facade.
+    // The registry's policy/facade sets are simply empty for a kennel that grants no IPC.
+    {
+        // The facade connects to the real host socket, so resolve each `real` path's
+        // `~`/`$XDG_RUNTIME_DIR`/placeholders against the daemon's own home now (the
+        // shim path the proxy listens at was already resolved in `prepare_unix`).
+        let facade_unix = kennel_policy::UnixRuntime {
+            sockets: loaded
+                .unix
+                .sockets
+                .iter()
+                .map(|s| kennel_policy::UnixSocket {
+                    real: resolve_path(&s.real, &subst, &shared.identity.home)
+                        .to_string_lossy()
+                        .into_owned(),
+                    ..s.clone()
+                })
+                .collect(),
+        };
+        // The registry records every decision (§7.1.4). With no audit state dir, a sink-less
+        // writer keeps the bus running without recording.
+        let writer = audit
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone())));
+        spec.binder = Some(crate::BinderPrep {
+            policy: loaded.binder,
+            unix: facade_unix,
+            writer,
+            init_bin: shared.identity.init_bin.clone(),
+        });
     }
 
     // Synthesise the workload environment from policy (§7.9.2): clear the inherited

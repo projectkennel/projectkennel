@@ -711,21 +711,18 @@ impl Plan {
         // contents stay separately gated. Without it, `ls /` is a jarring EACCES.
         landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
 
-        // Binder IPC (07-1/02-4): when the kennel uses binder, the seal mounts a
-        // per-kennel binderfs instance in the view; grant the workload its standard
-        // `binder` device (read/write/ioctl) and read of the binderfs dir + features.
-        // `binder-control` is never granted — only the spawn allocates devices. The
-        // `AF_UNIX` facade rides binder too (`07-1` §7.1.5), so a kennel with `[unix]`
-        // grants but no `[binder]` policy still mounts binderfs for the proxy.
-        let binder = !policy.binder.is_empty() || !policy.unix.is_empty();
-        if binder {
-            landlock_fs.push((PathBuf::from("/dev/binderfs/binder"), dev_access()));
-            landlock_fs.push((PathBuf::from("/dev/binderfs"), AccessFs::READ_DIR));
-            landlock_fs.push((
-                PathBuf::from("/dev/binderfs/features"),
-                AccessFs::READ_DIR | AccessFs::READ_FILE,
-            ));
-        }
+        // Binder IPC (07-1/02-4): the binder bus is the universal control plane — every
+        // kennel mounts a per-kennel binderfs instance so `kennel-init` can pull its
+        // supervision-half over node 0, whether or not the policy grants any IPC facade. The
+        // workload always gets its standard `binder` device (read/write/ioctl) and read of
+        // the binderfs dir + features; `binder-control` is never granted (only the factory
+        // allocates devices).
+        landlock_fs.push((PathBuf::from("/dev/binderfs/binder"), dev_access()));
+        landlock_fs.push((PathBuf::from("/dev/binderfs"), AccessFs::READ_DIR));
+        landlock_fs.push((
+            PathBuf::from("/dev/binderfs/features"),
+            AccessFs::READ_DIR | AccessFs::READ_FILE,
+        ));
 
         let view = Some(ShimView {
             shim_root,
@@ -734,7 +731,7 @@ impl Plan {
             tmp_size_mib: ep.fs.tmp.size_mib,
             tmp_mode: ep.fs.tmp.mode.clone(),
             proc_hidepid: ep.proc.hidepid,
-            binder,
+            binder: true,
         });
 
         // Landlock net only expresses per-port allow; map single-port TCP/Any
