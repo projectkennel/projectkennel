@@ -118,7 +118,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
     bounded by the crux invariant: operator code never runs as userns-0 (only privhelper code
     runs between `clone` and `fexecve`; thereafter only the trusted `kennel-init`; the workload
     is dropped to the operator with `no_new_privs` before any operator-named `execve`). Design
-    `07-2-kennel-init.md`; rationale also `11-open-questions.md`.
+    `07-2-kennel-init.md`; the no-subuid decision is in `../design/04-trust-boundaries.md`.
   - **`kennel-init` runs as the kennel's uid 0** (as designed): PID 1 holds a different uid
     from the operator-uid workload and facades, so they cannot signal or `ptrace` it. kenneld
     still acquires node 0 via `/proc/<init>/root` because the kennel userns is operator-owned

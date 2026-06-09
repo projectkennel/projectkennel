@@ -10,41 +10,17 @@
 
 **Syscall filtering as primary mechanism.** Some confinement frameworks (Firejail, Bubblewrap) use seccomp as their primary mechanism. Project Kennel treats seccomp as defence-in-depth (§7.9.6). Open question: should an "extra-strict" template family use comprehensive seccomp filters as a primary defence, accepting the brittleness and compatibility cost?
 
-**Stricter daemon isolation from the default context.** A kennel reaches the services Project Kennel runs on its behalf only through the binder gateway, and lives in its own user, mount, PID, and IPC namespaces — so a kennel cannot `ptrace`, signal, or `/proc`-inspect those host-side components. They remain reachable, however, by same-uid processes in the *default context* (the user's normal shell), which is the user's own trust root. A stricter mode that isolates the daemons even from the default context is open for users who want stronger protection against same-uid attacks they might inadvertently introduce.
-
-**Server vs per-kennel mediators.** Each kennel has its own egress proxy and other per-kennel mediators. For users with many kennels, this is many processes. An alternative: shared mediators with per-kennel credentials and policy lookup. Pros: fewer processes, lower memory. Cons: a shared mediator is a shared attack surface; its compromise affects all kennels. Open question: at what number of kennels does sharing make sense, and what is the right abstraction?
-
 **Compositor-level Wayland mediation.** A future direction: Project Kennel's per-kennel grant for Wayland goes through a compositor-aware proxy that filters Wayland protocol messages. Mature proposals exist (e.g. the security-context-v1 protocol). Open question: when does compositor support reach "good enough" to depend on, and what does Project Kennel's policy surface look like for compositor-mediated access?
 
 **Post-run inspection of persistent writes.** This is the intended primary control for T2.8 (cross-context persistence via workspace triggers, THREATS.md), and it is deliberately not in the first release. A workload with legitimate write access to its project tree can plant a git hook, redirect `core.hooksPath` into the writable tree, or add a build/IDE task that later fires in the user's *unconfined* shell; filesystem policy closes this only partially, because the build and IDE files that carry triggers must stay writable for the agent to function. The capability: at kennel teardown, diff everything the workload wrote to the persistent writable binds against the pre-run state and flag newly-introduced *execution triggers* — hook files, `core.hooksPath` changes, `Makefile`/`package.json` script entries, `.vscode`/`.idea` task definitions — for operator review before the user next acts on the tree. This is broader than the commit-time `kennel review` of T2.2 / design §9: persistence can be planted without ever passing through a git commit, so the inspection must run on the raw written file set, not the git diff. Open questions: the canonical set of "execution trigger" patterns to flag and how to keep it current as toolchains evolve; how to scope the diff cheaply for large trees (writable binds resolve to persistent host inodes, so a naive full re-scan is the fallback); whether inspection blocks at teardown or produces a reviewable report the user must acknowledge; and how it composes with the commit-time review so the two are one coherent `kennel review` surface rather than two tools.
 
 ## 11.2 Explicitly out of scope
 
-The following are not in scope for any planned version of Project Kennel:
+Only the boundaries the framework's own claims might invite the reader to assume are stated here. The universal limits of any user-space tool — side channels, hardware and physical attacks, and bugs in the kernel or in the vetted building blocks it relies on (Landlock, `xdg-dbus-proxy`, Xephyr) — are assumptions of the threat model, catalogued in [`THREATS.md`](THREATS.md) (X7–X8), not re-listed here.
 
-**Kernel-level CVE defence.** Project Kennel assumes kernel correctness for the features it relies on. A Landlock bypass via a kernel CVE defeats Project Kennel's filesystem confinement. Mitigation is at the kernel-update level, not Project Kennel level.
+**The user is the trust root.** Project Kennel is built on user-space trust: a process in the user's default context (the unconfined shell) can read Project Kennel's state, signal its components, and edit its policies. Cross-kennel isolation of the mediating components is structural — a kennel reaches them only through the binder gateway and cannot see host pids — but isolating them from the user's *own* default context is not a goal, because that context is the trust root itself. By the same token Project Kennel cannot stop a user from editing policies, disabling enforcement, or bypassing the framework entirely; **mandatory** enforcement against the user is a different administrative layer.
 
-**Side-channel defence.** Cache timing, electromagnetic emanation, Spectre-class attacks, microarchitectural side channels. Project Kennel offers no defence; these are out of any user-space tool's reach.
-
-**Hardware attacks.** Cold boot, DMA, peripheral compromise, firmware-level attacks. Out of any user-space tool's reach.
-
-**Physical access.** The user's threat model does not include "an attacker has physical access to the workstation". Mitigations for that case are at the disk-encryption, boot-security, and physical-security layers.
-
-**Network-level inbound attacks.** Project Kennel defends *what the kennel can do outbound*. Inbound attacks against host-exposed services (the host running an exposed SSH or web service) are a different threat model with different mitigations (firewalls, fail2ban, host hardening).
-
-**Multi-user isolation.** Different uids on the same host are isolated by existing Unix permissions. Project Kennel adds nothing.
-
-**Same-uid attacks against Project Kennel itself, from the default context.** A process in the user's default context (the unconfined shell) can read Project Kennel's state, signal its daemons, modify its policies. Project Kennel is built on user-space trust; the user is the trust root. Cross-kennel isolation of daemons (so kennels cannot attack Project Kennel's daemons) is built in; isolation from the user's default context remains a stricter-mode open question per §11.1.
-
-**Anti-AI-agent measures.** Project Kennel treats AI agents as one class of workload subject to the catalogue's threats. It does not specifically detect or counter agent-like behaviour (LLM API patterns, agent-typical syscall sequences). The mechanism is the same whether the workload is an AI agent, a container, or a script; the threat model is mechanism-based, not actor-based.
-
-**Defence against compromised vetted dependencies.** If `xdg-dbus-proxy`, `Xephyr`, the kernel's Landlock implementation, or other building blocks are themselves compromised, Project Kennel's guarantees are compromised. Project Kennel assumes its building blocks are sound (THREATS.md X7, X8).
-
-**Cross-host enforcement.** A kennel on host A and a kennel on host B are not aware of each other. Project Kennel is per-host.
-
-**Encryption of audit logs.** Project Kennel writes audit logs as plain JSONL. At-rest encryption is the user's responsibility (full-disk encryption, encrypted home directory). Project Kennel does not encrypt its own logs.
-
-**Mandatory enforcement.** Project Kennel cannot prevent a user with full access to their own files from editing policies, disabling enforcement, or bypassing Project Kennel entirely. Mandatory enforcement is at a different administrative layer.
+**Workloads are confined by mechanism, not identified by type.** Project Kennel treats an AI agent as one class of workload subject to the catalogue's threats; it does not detect or counter agent-like behaviour (LLM API patterns, agent-typical syscall sequences). The confinement is the same whether the workload is an AI agent, a container, or a script.
 
 ## 11.3 In scope, despite appearances
 

@@ -68,7 +68,7 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
 /// The unprivileged foundation of the spawn — the bubblewrap-equivalent mechanism
 /// (`docs/architecture/01-process-model.md`, `docs/design/08-enforcement-architecture.md`).
 /// Unshares `CLONE_NEWUSER` and maps the caller's `uid`/`gid` **1:1** into the new
-/// namespace — the real uid is preserved (not subuid; `design/11-open-questions.md`).
+/// namespace — the real uid is preserved (not subuid; `design/04-trust-boundaries.md`).
 /// The caller then holds `CAP_SYS_ADMIN` *within the new namespace*, so it can unshare
 /// a mount/IPC namespace and `mount`/`pivot_root` **with no real privilege** — this is
 /// what lets an unprivileged `kenneld` build the constructed view without root or
