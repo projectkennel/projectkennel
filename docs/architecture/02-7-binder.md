@@ -114,10 +114,11 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 > instance via `/proc/<init>/root` (step 3). `kennel-init` then `open`s its own lifecycle
 > client on the device and **pulls** its config from node 0 (`GET_SANDBOX_PLAN`).
 >
-> **As-built divergence (code-owed):** `kennel-init` is `fexecve`'d *as the operator*, not as
-> uid 0 — the construction child drops before the hand-off. The design (§7.2) models a uid-0
-> init; reconciling the two (likely by removing the drop, since the operator-owned userns
-> already grants `kenneld` `CAP_SYS_PTRACE` over the instance) is owed code work.
+> `kennel-init` is `fexecve`'d **as the kennel's uid 0** (the construction child does not drop
+> before the hand-off): PID 1 stays a different uid from the operator-uid workload/facades, so
+> they cannot signal or `ptrace` it. The operator `kenneld` still opens the device via
+> `/proc/<init>/root` because the kennel userns is operator-owned (it holds `CAP_SYS_PTRACE`
+> there); `kennel-init` itself drops the workload and facades to the operator.
 
 Each kennel gets its own binderfs instance — a fully independent mount, like devpts and
 tmpfs, sharing no nodes with any other kennel's instance. **binderfs carries

@@ -99,7 +99,6 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    new userns (a `CLONE_NEWUSER` child always does), so it can escalate to the
     //    kennel's uid 0 itself for the root-owned construction (see below).
     let granted = half.granted_gids.clone();
-    let child_granted = granted.clone(); // the parent keeps `granted` for the maps
     let namespaces = half.namespaces; // captured before `half` moves into the child
     let child = move || {
         // Wait until the parent has written our identity maps (so the kennel's uid 0 is
@@ -120,18 +119,12 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         if build_kennel(&half, op_uid, op_gid).is_err() {
             return;
         }
-        // Drop to the operator BEFORE the hand-off, so `kennel-init` runs as the operator:
-        // the view stays root-owned (built above) but init is operator-owned, matching the
-        // operator-owned userns so `kenneld` can reach `/proc/<init>/root`. Set the granted
-        // supplementary groups first (needs CAP_SETGID, lost at the uid drop); the workload
-        // inherits them. Order: groups → gid → uid.
-        if kennel_syscall::unistd::set_supplementary_groups(&child_granted).is_err()
-            || kennel_syscall::unistd::set_gid(op_gid).is_err()
-            || kennel_syscall::unistd::set_uid(op_uid).is_err()
-        {
-            return;
-        }
-        // Hand off to the trusted root-owned init with empty argv/envp (the pull model).
+        // Hand off to the trusted root-owned init **as the kennel's uid 0** (no drop): PID 1
+        // must NOT share the operator uid, or the operator-uid workload/facades could signal
+        // or ptrace it (07-11 §7.2.5). `kennel-init` itself drops the workload and facades to
+        // the operator. kenneld still reaches `/proc/<init>/root` because the kennel userns is
+        // operator-owned, so the operator kenneld holds CAP_SYS_PTRACE in it. Empty argv/envp
+        // (the pull model).
         let _err = fexecve(init_fd.as_fd(), &[], &[]);
         // fexecve returned ⇒ failure; fall through to the _exit(127) backstop.
     };

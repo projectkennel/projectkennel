@@ -55,8 +55,7 @@ Mapping host root into the userns is a privilege-escalation hazard *only if oper
 - The **factory child is the only transient uid-0 actor**. It self-escalates inside the new userns to build root-owned surfaces, and it **never runs while the host filesystem is visible**: it `pivot_root`s and detaches the old host root *before* control leaves privhelper code. There is therefore no window in which a uid-0-mapped process can exercise host DAC against host-root-owned files.
 - The only uid-0 process that outlives construction is `kennel-init`, and it is `execve`'d **after** `pivot_root` — trapped in the sealed view from its first instruction, holding no ambient host caps (only userns-scoped `cap_setuid`/`cap_setgid` for the workload drop). Host DAC on host files is physically impossible despite kuid 0, because the host root is absent from its mount namespace.
 - The **workload is never uid 0**: `kennel-init` forks it and drops gid → groups → uid to the operator, then `no_new_privs` + seccomp + Landlock make the drop irreversible.
-
-*(As-built divergence, code-owed: `kennel-init` is currently `fexecve`'d as the operator rather than uid 0 — the construction child drops before the hand-off. The escalation-window property above holds either way; the design models a uid-0 init and reconciling the two is owed code work — `02-7-binder.md` §binderfs instance lifecycle.)*
+- **`kennel-init` stays uid 0** so PID 1 is a different uid from the operator-uid workload and facades, which therefore cannot signal or `ptrace` it.
 
 ### `kennel-init`-path provenance
 

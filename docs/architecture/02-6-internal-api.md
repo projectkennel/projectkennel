@@ -131,9 +131,7 @@ Beyond the fixed-layout stdin/stdout ops (the network/cgroup ops), the privhelpe
 
 **Depends on.** `kennel-binder` (the lifecycle consumer's binder client), `kennel-spawn` (the seal applied to the workload child), and `kennel-syscall` (the fork/drop/pty primitives). `#![forbid(unsafe_code)]` — every syscall routes through `kennel-syscall`. It runs no mount/netlink/device/fs-lookup/env code; its path comes from `Deployment` (`kennel-config`), never the wire.
 
-**Depended on by.** Nothing links it — it is a standalone binary the privhelper opens (pre-clone, by root-owned non-writable path) and `fexecve`s.
-
-**As-built divergence (code-owed).** As built `kennel-init` is `fexecve`'d *as the operator*, not as the kennel's uid 0 — the construction child drops before the hand-off. The design (§7.2) models a uid-0 PID 1; reconciling the two is owed code work (`02-7-binder.md` §Mount sequencing).
+**Depended on by.** Nothing links it — it is a standalone binary the privhelper opens (pre-clone, by root-owned non-writable path) and `fexecve`s. It runs as the kennel's **uid 0** (a different uid from the operator-uid workload/facades, so they cannot signal or `ptrace` PID 1); it drops each child it forks to the operator.
 
 ### `kennel-syscall`
 

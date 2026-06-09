@@ -119,10 +119,10 @@ chapter (and the design § for the mechanism). No build notes are kept here.
     runs between `clone` and `fexecve`; thereafter only the trusted `kennel-init`; the workload
     is dropped to the operator with `no_new_privs` before any operator-named `execve`). Design
     `07-2-kennel-init.md`; rationale also `11-open-questions.md`.
-  - **As-built DIVERGENCE — `kennel-init` runs as the operator, not uid 0.** The design has
-    `kennel-init` as the uid-0 PID 1; as built (the unprivileged vertical) it runs as the
-    *operator*. This is a known divergence, code-owed to reconcile to the uid-0-init model; the
-    gateway core, node-0 acquisition, and the facade are otherwise as designed.
+  - **`kennel-init` runs as the kennel's uid 0** (as designed): PID 1 holds a different uid
+    from the operator-uid workload and facades, so they cannot signal or `ptrace` it. kenneld
+    still acquires node 0 via `/proc/<init>/root` because the kennel userns is operator-owned
+    (kenneld holds `CAP_SYS_PTRACE` there); `kennel-init` drops each child to the operator.
 - **`[[fs.dev.passthrough]]`** — specific host devices, GID-gated (not capability), merged
   into `DevPolicy.allow`: `02-2-config-schema.md`, design `07-4-filesystem.md` §7.4.8.
 - **`[identity]`** — masked `user`/`group` (default `kennel`) + supplementary `groups`

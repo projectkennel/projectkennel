@@ -110,7 +110,7 @@ Each kennel runs its own binderfs instance — the auditable inter-namespace gat
 
 **Teardown.** No explicit unmount and no kenneld reclaim step: the instance is a mount in the child mount namespace and disappears with it when the kennel's last process exits. Pending transactions receive death notifications and all nodes are destroyed. This rides the immediate, no-grace teardown described above. Because the bus may already be gone when the workload exits, the reliable exit-status path is the process chain (`kennel-init` → privhelper → kenneld), not the bus — the bus carries in-life telemetry only.
 
-**`kennel-init` supervision.** `kennel-init` is PID 1 in the kennel's PID namespace: it forks the facades (operator uid) and the workload (operator uid, sealed), then runs a `waitpid` loop. A facade death emits `NOTIFY_FACADE_CRASH` to node 0; on workload exit it `_exit`s the workload's status, ending the kennel. As built, `kennel-init` runs as the operator rather than uid 0 — a known divergence from the design's uid-0 init (`02-7-binder.md` §binderfs instance lifecycle), code-owed to reconcile; it does not affect this lifecycle.
+**`kennel-init` supervision.** `kennel-init` is PID 1 in the kennel's PID namespace: it forks the facades (operator uid) and the workload (operator uid, sealed), then runs a `waitpid` loop. A facade death emits `NOTIFY_FACADE_CRASH` to node 0; on workload exit it `_exit`s the workload's status, ending the kennel. `kennel-init` runs as the kennel's uid 0 — a different uid from the operator-uid children it supervises, so they cannot signal or `ptrace` PID 1.
 
 ## kenneld restart
 

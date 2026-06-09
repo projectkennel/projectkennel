@@ -1080,11 +1080,9 @@ fn supervision_from(
         cwd: command.get_current_dir().map(Path::to_path_buf),
         drop_uid,
         drop_gid,
-        // None: the factory's construction child already set the kennel's supplementary
-        // groups (as uid 0, with CAP_SETGID) before dropping to the operator, so kennel-init
-        // and the workload INHERIT them. kennel-init runs as the operator (no CAP_SETGID),
-        // so it must NOT re-`setgroups` — that would EPERM and abort the workload.
-        groups: None,
+        // kennel-init runs as the kennel's uid 0 (it holds CAP_SETGID in the userns), so it
+        // sets the granted supplementary groups on each child as it drops it to the operator.
+        groups: plan.supplementary_groups.clone(),
         landlock_fs: plan.landlock_fs.clone(),
         landlock_net: plan.landlock_net.clone(),
         seccomp_deny: plan.seccomp_deny.clone(),

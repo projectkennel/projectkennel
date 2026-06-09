@@ -330,17 +330,13 @@ fn lifecycle_handle(
 /// workload and facades have different pids). `init == None` (lifecycle disabled) denies
 /// everything because `Some(pid) != None`.
 ///
-/// `sender_euid` is no longer required to be 0: `kennel-init` runs as the **operator**
-/// (it drops from the construction child's host-root before exec so the operator `kenneld`
-/// can reach its `/proc/<init>/root` to open the binderfs device — `07-11`). The euid is
-/// kept only as a sanity gate against the kernel overflow uid (an unmapped sender).
+/// `sender_euid == 0` is defense-in-depth alongside the pid match: `kennel-init` is the
+/// only uid-0 process in the kennel (host root via the `0 0 1` map; the workload and facades
+/// run as the operator's non-zero uid), so a lifecycle verb from a non-zero euid is never
+/// `kennel-init` and is denied (`07-11` §7.2.2). The pid match is the primary, exact gate.
 const fn lifecycle_authorized(init: Option<i32>, sender_pid: i32, sender_euid: u32) -> bool {
-    matches!(init, Some(pid) if pid == sender_pid) && sender_euid != OVERFLOW_UID
+    matches!(init, Some(pid) if pid == sender_pid) && sender_euid == 0
 }
-
-/// The kernel's overflow uid (`/proc/sys/kernel/overflowuid`, default 65534) — what an
-/// unmapped sender presents as. A real in-kennel process is a mapped uid, never this.
-const OVERFLOW_UID: u32 = 65534;
 
 /// The af-unix facade (`07-9`/`02-7`): resolve the requested socket against the
 /// `[[unix.allow]]` grants (by its in-view `shim` path or logical `name`), connect to
