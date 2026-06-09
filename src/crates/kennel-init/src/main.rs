@@ -69,12 +69,36 @@ fn main() -> ExitCode {
 
 /// Open the bus, pull the supervision-half, own the spawn, and supervise to exit.
 fn run() -> io::Result<u8> {
+    require_kennel_userns()?;
     let conn = open_bus()?;
     let (bytes, pty_fd) = pull_plan(&conn)?;
     let sup = decode_supervision(&bytes)
         .map_err(|e| io::Error::other(format!("supervision-half decode failed: {e:?}")))?;
     let workload_pid = spawn_all(&conn, &sup, pty_fd.as_ref())?;
     supervise(&conn, workload_pid)
+}
+
+/// Refuse to run anywhere but a kennel's user namespace.
+///
+/// `kennel-init` is only ever `fexecve`d by the privhelper factory as PID 1 of a fresh,
+/// restricted user namespace whose `uid_map` maps host root as a single id (`0 0 1`, the
+/// factory's signature — `07-2`/`construct.rs`). Run in the **initial** user namespace
+/// instead (`uid_map` = `0 0 4294967295`) it would be real host root with no kennel to
+/// supervise and no confinement context — so fail closed rather than execute privileged and
+/// purposeless. The check positively asserts the factory's map (fail-closed if `uid_map` is
+/// unreadable or unexpected), not merely "not the initial ns".
+fn require_kennel_userns() -> io::Result<()> {
+    let map = std::fs::read_to_string("/proc/self/uid_map")
+        .map_err(|e| io::Error::new(e.kind(), format!("read /proc/self/uid_map: {e}")))?;
+    let first: Vec<&str> = map.split_whitespace().take(3).collect();
+    if first != ["0", "0", "1"] {
+        return Err(io::Error::other(format!(
+            "refusing to run outside a kennel user namespace: /proc/self/uid_map first \
+             mapping is {first:?}, expected [\"0\", \"0\", \"1\"] — kennel-init is launched \
+             only by the privhelper factory"
+        )));
+    }
+    Ok(())
 }
 
 /// Open the in-view binder device and establish a client connection to it.
