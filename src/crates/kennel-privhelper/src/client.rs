@@ -18,8 +18,10 @@ use crate::wire::{EgressPayload, Op, Request, Response};
 
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
 ///
-/// Returns the long-lived helper process (the kennel's supervisor — wait it for the
-/// workload's exit status) and `kennel-init`'s **host pid** (`07-2` §7.2.1). kennel-init
+/// Returns the (short-lived) helper [`Child`] and `kennel-init`'s **host pid** (`07-2`
+/// §7.2.1). The helper exits as soon as it has reported the pid — it is not a reaper proxy;
+/// kenneld (a `set_child_subreaper`) adopts the orphaned `kennel-init` and waits it for the
+/// workload's exit status. The caller reaps this `Child` (it has already exited). kennel-init
 /// runs as the operator, so `kenneld` opens the kennel's binderfs device itself via
 /// `/proc/<init>/root` — no fd needs to come back here.
 ///

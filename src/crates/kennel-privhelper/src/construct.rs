@@ -39,7 +39,6 @@ use kennel_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf};
 use kennel_syscall::fd::dup_onto;
 use kennel_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
 use kennel_syscall::namespace::clone_pid1;
-use kennel_syscall::process::{wait_any, Reaped};
 use kennel_syscall::pty::PTY_RETURN_FD;
 use kennel_syscall::scm::{recv_with_fds, send_with_fds};
 use kennel_syscall::spawn::fexecve;
@@ -180,10 +179,10 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 
     // Drop straight back to the operator now that the maps are written: the parent escalated
     // ONLY to write them. setgid before setuid (the uid drop to a non-zero value is what
-    // clears the capability sets — capabilities(7)); for the rest of its life (the reap loop
-    // below) the factory parent is the unprivileged operator, not a long-lived host-root
-    // process (sec review: minimise the privileged window). A no-op when the operator is root
-    // (the root-test case, op_uid == 0).
+    // clears the capability sets — capabilities(7)); for its brief remaining life (report the
+    // pid, then exit) the factory parent is the unprivileged operator, never a long-lived
+    // host-root process (sec review: minimise the privileged window). A no-op when the operator
+    // is root (the root-test case, op_uid == 0).
     kennel_syscall::unistd::set_gid(op_gid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setgid({op_gid}): {e}")))?;
     kennel_syscall::unistd::set_uid(op_uid)
@@ -193,14 +192,14 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     drop(ready_w); // close our write end
     send_with_fds(chan, &init_pid.to_le_bytes(), &[])?;
 
-    // 5. Stay as the child's parent; relay its exit status up the chain.
-    loop {
-        match wait_any()? {
-            Reaped::Exited { pid, code } if pid == init_pid => return Ok(code),
-            Reaped::Exited { .. } => {} // some other reaped child; keep waiting for init
-            Reaped::NoChildren => return Ok(CONSTRUCT_FAILED),
-        }
-    }
+    // 5. Done. The factory's whole job was to build the kennel, write the maps, and report
+    //    the init pid — `kennel-init` is now PID 1 of the new namespace and an autonomous
+    //    daemon, so there is nothing left for this process to do. It exits immediately rather
+    //    than lingering as a reaper proxy: `kennel-init` outlives it (a PID namespace is tied
+    //    to its own PID 1, not to the cloner), and kenneld — a `set_child_subreaper` — adopts
+    //    the orphaned init and `waitpid`s it directly for the workload's exit status. One
+    //    fewer resident host process per kennel.
+    Ok(0)
 }
 
 /// The privileged construction the factory child runs as the kennel's uid 0, after its

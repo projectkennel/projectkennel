@@ -134,6 +134,81 @@ pub fn wait_any() -> io::Result<Reaped> {
     }
 }
 
+/// Mark this process as a **child subreaper** (`PR_SET_CHILD_SUBREAPER`).
+///
+/// An orphaned descendant then reparents to this process instead of to init. kenneld sets
+/// this at startup so that when the privhelper **factory** exits — its job done once it has
+/// written the maps and reported the init pid (`07-2`) — the now-orphaned `kennel-init`
+/// reparents to kenneld, which can therefore `waitpid` it for the workload's exit status
+/// (and reap it, no zombie). Without this, init would reparent to `systemd --user` and
+/// kenneld could never collect the status.
+///
+/// # Errors
+/// The OS error if the `prctl` fails (it does not on a kernel ≥ 3.4).
+pub fn set_child_subreaper() -> io::Result<()> {
+    nix::sys::prctl::set_child_subreaper(true).map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// `SIGKILL` process `pid`. A process that is already gone (`ESRCH`) is success.
+///
+/// # Errors
+/// The OS error if signalling fails for a reason other than the process being gone.
+pub fn kill_pid(pid: i32) -> io::Result<()> {
+    use nix::sys::signal::{kill, Signal};
+    match kill(nix::unistd::Pid::from_raw(pid), Signal::SIGKILL) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+/// Block until child `pid` terminates and reap it; return its exit code (or `128 + signal`).
+///
+/// `pid` must be a child of the calling process — for `kennel-init` this holds because
+/// kenneld is a [`set_child_subreaper`] and the orphaned init reparented to it. `ECHILD`
+/// (already gone / not ours) yields `0`. `EINTR` is retried.
+///
+/// # Errors
+/// The OS error if `waitpid` fails for a reason other than `ECHILD`/`EINTR`.
+pub fn wait_pid(pid: i32) -> io::Result<i32> {
+    let p = nix::unistd::Pid::from_raw(pid);
+    loop {
+        match nix::sys::wait::waitpid(p, None) {
+            Ok(status) => return Ok(code_of(status)),
+            Err(nix::errno::Errno::ECHILD) => return Ok(0),
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(e) => return Err(io::Error::from_raw_os_error(e as i32)),
+        }
+    }
+}
+
+/// Non-blocking check on child `pid`, reaping it if it has terminated.
+///
+/// `Ok(None)` while it runs, `Ok(Some(code))` once terminated (the exit code, or `128 +
+/// signal`). `ECHILD` yields `Some(0)`; `EINTR` is reported as `None` (the caller's poll loop
+/// retries).
+///
+/// # Errors
+/// The OS error if `waitpid` fails for a reason other than `ECHILD`/`EINTR`.
+pub fn try_wait_pid(pid: i32) -> io::Result<Option<i32>> {
+    use nix::sys::wait::{WaitPidFlag, WaitStatus};
+    let p = nix::unistd::Pid::from_raw(pid);
+    match nix::sys::wait::waitpid(p, Some(WaitPidFlag::WNOHANG)) {
+        // Still running, or interrupted before any state change — the poll loop tries again.
+        Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => Ok(None),
+        Ok(status) => Ok(Some(code_of(status))),
+        Err(nix::errno::Errno::ECHILD) => Ok(Some(0)),
+        Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+/// The exit code (or `128 + signal`) of a terminal wait status.
+fn code_of(status: nix::sys::wait::WaitStatus) -> i32 {
+    match reaped_from(status) {
+        Reaped::Exited { code, .. } => code,
+        Reaped::NoChildren => 0,
+    }
+}
+
 /// Map a terminal [`nix::sys::wait::WaitStatus`] to a [`Reaped::Exited`]. Non-terminal
 /// statuses (stopped/continued, never requested here) collapse to code 0.
 fn reaped_from(status: nix::sys::wait::WaitStatus) -> Reaped {

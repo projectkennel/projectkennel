@@ -40,7 +40,7 @@ pub mod sshd;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use kennel_policy::{NetPolicy, TtlAction};
@@ -395,7 +395,11 @@ pub struct SshPrep {
 /// A running kennel: the workload plus what must be torn down when it stops.
 #[derive(Debug)]
 pub struct Kennel {
-    child: Child,
+    /// `kennel-init`'s host pid. The privhelper factory exits as soon as it has reported
+    /// this (it is not a reaper proxy); the orphaned init reparented to kenneld (a
+    /// `set_child_subreaper`), so kenneld `waitpid`s this pid directly for the workload's
+    /// exit status (`07-2`).
+    init_pid: i32,
     cgroup: PathBuf,
     ctx: u16,
     v4: Option<Ipv4Addr>,
@@ -413,10 +417,10 @@ pub struct Kennel {
 }
 
 impl Kennel {
-    /// The workload's process id.
+    /// `kennel-init`'s host process id.
     #[must_use]
     pub fn id(&self) -> u32 {
-        self.child.id()
+        u32::try_from(self.init_pid).unwrap_or(0)
     }
 
     /// The kennel's cgroup path.
@@ -442,13 +446,11 @@ impl Kennel {
         // Best-effort: a pre-5.14 kernel or an already-removed cgroup falls through
         // to signalling the handle (which also covers the no-cgroup unit-test path).
         let via_cgroup = cgroup::kill_cgroup(&self.cgroup).is_ok();
-        match self.child.kill() {
+        match kennel_syscall::process::kill_pid(self.init_pid) {
             Ok(()) => Ok(()),
-            // The handle already exited — fine, especially once cgroup.kill landed.
-            Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            // The cgroup kill succeeded; a failure to also signal the (already dying) init
+            // is not fatal.
             Err(e) if via_cgroup => {
-                // The cgroup kill succeeded; a failure to also signal the (already
-                // dying) init handle is not fatal.
                 let _ = e;
                 Ok(())
             }
@@ -456,13 +458,13 @@ impl Kennel {
         }
     }
 
-    /// Check whether the workload has exited, without blocking. `Some(status)`
-    /// once it has, `None` while it is still running.
+    /// Check whether the kennel has exited, without blocking. `Some(code)` once it has
+    /// (the exit code, or `128 + signal`), `None` while it is still running.
     ///
     /// # Errors
     /// An OS error if the status check fails.
-    pub fn try_finished(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
+    pub fn try_finished(&mut self) -> io::Result<Option<i32>> {
+        kennel_syscall::process::try_wait_pid(self.init_pid)
     }
 
     /// Wait for the workload to exit, then tear the kennel down: remove the
@@ -473,8 +475,8 @@ impl Kennel {
     ///
     /// # Errors
     /// An OS error if waiting on the workload fails.
-    pub fn stop<P: Privileged>(mut self, privileged: &P) -> io::Result<ExitStatus> {
-        let status = self.child.wait()?;
+    pub fn stop<P: Privileged>(mut self, privileged: &P) -> io::Result<i32> {
+        let status = kennel_syscall::process::wait_pid(self.init_pid)?;
         if let Some(manager) = self.binder.take() {
             manager.stop();
         }
@@ -516,9 +518,9 @@ impl Kennel {
         action: TtlAction,
         grace: Duration,
         mut on_event: impl FnMut(TtlEvent),
-    ) -> io::Result<ExitStatus> {
+    ) -> io::Result<i32> {
         let status = match ttl {
-            None => self.child.wait()?,
+            None => kennel_syscall::process::wait_pid(self.init_pid)?,
             Some(ttl) => self.wait_with_ttl(ttl, action, grace, &mut on_event)?,
         };
         if let Some(manager) = self.binder.take() {
@@ -539,19 +541,19 @@ impl Kennel {
     /// The TTL-aware wait loop. Polls the workload while tracking the deadline; for
     /// `Exit`, runs the SIGTERM→(grace)→SIGKILL escalation against the cgroup.
     fn wait_with_ttl(
-        &mut self,
+        &self,
         ttl: Duration,
         action: TtlAction,
         grace: Duration,
         on_event: &mut impl FnMut(TtlEvent),
-    ) -> io::Result<ExitStatus> {
+    ) -> io::Result<i32> {
         /// How often the wait loop wakes to re-check the deadline and the workload.
         const POLL: Duration = Duration::from_millis(200);
         let start = Instant::now();
         let mut fired = false; // warn/renew emitted, or SIGTERM sent
         let mut terminating_since: Option<Instant> = None;
         loop {
-            if let Some(status) = self.child.try_wait()? {
+            if let Some(status) = kennel_syscall::process::try_wait_pid(self.init_pid)? {
                 return Ok(status);
             }
             let expired = start.elapsed() >= ttl;
@@ -670,8 +672,8 @@ pub fn start<P: Privileged + Sync>(
         command,
         &mut state,
     ) {
-        Ok(child) => Ok(Kennel {
-            child,
+        Ok(init_pid) => Ok(Kennel {
+            init_pid,
             cgroup,
             ctx,
             v4: state.v4,
@@ -720,7 +722,7 @@ fn bring_up<P: Privileged + Sync>(
     binder: Option<&BinderPrep>,
     command: &mut Command,
     state: &mut Provision,
-) -> Result<Child, Error> {
+) -> Result<i32, Error> {
     // 1. cgroup (unprivileged: within kenneld's delegated subtree).
     std::fs::create_dir_all(cgroup)?;
     state.made_cgroup = true;
@@ -960,7 +962,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     ctx: u16,
     prep: &BinderPrep,
     state: &mut Provision,
-) -> Result<Child, Error> {
+) -> Result<i32, Error> {
     // The masked operator identity every child is dropped to — the caller's real ids,
     // which the construction maps identity-map in (never wire-supplied).
     let drop_uid = kennel_syscall::unistd::real_uid();
@@ -976,8 +978,14 @@ fn construct_via_factory<P: Privileged + Sync>(
     // socket (the workload's pty master is sent back over it); the construction child re-homes
     // it at `PTY_RETURN_FD` for `kennel-init`. The fd lives in the plan and is kept open by the
     // caller (`run_kennel`'s `return_sock`) for the duration of construction.
-    let (child, init_pid) = privileged.construct_kennel(&half_bytes, plan.interactive_return_fd)?;
+    let (mut child, init_pid) = privileged.construct_kennel(&half_bytes, plan.interactive_return_fd)?;
     state.factory = true;
+
+    // The factory's job is done the moment it reports the init pid (it is no longer a reaper
+    // proxy — `07-2`): reap it now (it exits immediately). Reaping it here, before we return,
+    // means `kennel-init` has already reparented to kenneld (the `set_child_subreaper`), so the
+    // `Kennel` handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
+    let _ = child.wait();
 
     // Take binder node 0 of the kennel's binderfs (mounted by the factory) and serve the
     // lifecycle (gated on the init pid) so kennel-init can pull its supervision-half.
@@ -994,7 +1002,7 @@ fn construct_via_factory<P: Privileged + Sync>(
             Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
         }
     }
-    Ok(child)
+    Ok(init_pid)
 }
 
 /// Build the construction-half (the privhelper factory's input) from the plan.

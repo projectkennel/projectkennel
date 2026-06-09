@@ -35,8 +35,9 @@ fn main() -> ExitCode {
     }
 
     // The factory mode (`07-2`): kenneld invokes `kennel-privhelper construct` with a
-    // SOCK_SEQPACKET socket as stdin. It is long-lived (stays as the construction child's
-    // parent) and passes fds, so it does not use the one-shot stdin/stdout framing below.
+    // SOCK_SEQPACKET socket as stdin. It passes fds (so not the one-shot stdin/stdout framing
+    // below) and exits as soon as it has built the kennel and reported the init pid — it is not
+    // a reaper proxy; kenneld (a subreaper) adopts and waits the orphaned `kennel-init`.
     if std::env::args().nth(1).as_deref() == Some("construct") {
         // Gate the factory on the caller holding a subkennel allocation, exactly as every
         // one-shot op is gated below: an unallocated user performs no privileged operation

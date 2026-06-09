@@ -23,7 +23,7 @@ Per-user daemon, socket-activated by `systemd --user` on the first `kennel run` 
 Responsibilities:
 
 - **Kennel lifecycle.** Each `kennel run` is one kennel. kenneld brings it up — allocates a context byte, creates the per-kennel cgroup in its delegated subtree, invokes the privhelper for the loopback addresses and the egress-BPF attach, writes the proxy config, launches `kennel-netproxy`, builds the full Plan and drives the privhelper **construct-kennel** factory op — and tears it down immediately when the workload exits. There is no grace period, no draining state, and no per-kennel reference counting; one workload is one kennel, with its own proxy, addresses, cgroup, and constructed view.
-- **Constructing the kennel.** kenneld no longer runs the namespace/mount construction itself. It compiles the Plan, splits it into a **construction half** (uid/gid maps, loopback, binderfs params, view binds, pivot target) and a **supervision half** (facades, workload argv/env, operator identity, Landlock/seccomp/ulimits, pty), and passes the construction half — with the stdio descriptors the CLI passed over `SCM_RIGHTS`, or the interactive pty-return socket (§7.9.5a) — to the privhelper construct-kennel op. The privhelper factory builds the namespaces and `fexecve`s `kennel-init`, which **pulls** the supervision half from kenneld over the binder bus (`GET_SANDBOX_PLAN` to node 0); kenneld serves it, gated by the init's host pid (learned from the privhelper at construction).
+- **Constructing the kennel.** kenneld no longer runs the namespace/mount construction itself. It compiles the Plan, splits it into a **construction half** (uid/gid maps, loopback, binderfs params, view binds, pivot target) and a **supervision half** (facades, workload argv/env, operator identity, Landlock/seccomp/ulimits, pty), and passes the construction half — with the stdio descriptors the CLI passed over `SCM_RIGHTS`, or the interactive pty-return socket (§7.9.5a) — to the privhelper construct-kennel op. The privhelper factory builds the namespaces and `fexecve`s `kennel-init`, which **pulls** the supervision half from kenneld over the binder bus (`GET_SANDBOX_PLAN` to node 0); kenneld serves it, gated by the init's host pid (learned from the privhelper at construction). The factory then **exits** (it is not a reaper proxy); kenneld marks itself a **child subreaper** at startup, so the orphaned `kennel-init` reparents to it and kenneld `waitpid`s it directly for the workload's exit status — one fewer resident host process per kennel.
 - **Binder context manager.** kenneld acquires **node 0** of the per-kennel binderfs instance by opening `/proc/<init-host-pid>/root/dev/binderfs/binder` (the open succeeds because the kennel userns is operator-owned). It runs the non-blocking looper, services the `org.projectkennel.*` service registry, the `IAfUnix` facade verb, and the `kennel-init` lifecycle/config verbs.
 - **Audit drain.** The BPF ringbuf reader drains kernel audit events; per-kennel JSONL files live under `~/.local/state/kennel/<kennel>/` (the egress proxy writes the network log, kenneld wires its path).
 - **Privhelper mediation.** kenneld issues the privhelper invocations (loopback address add/del, egress-BPF setup, and the construct-kennel factory op) during a kennel's bring-up and teardown. kenneld creates and removes the cgroup itself; the privhelper factory child *joins* it. The granted supplementary groups are written into the kennel's `gid_map` in one shot by the factory at construction, so there is no separate gid-map handshake.
@@ -36,7 +36,7 @@ Small binary plus the `kennel-syscall` dependency. The installer installs it set
 
 The privhelper is the kennel **factory**: it does *all* privileged construction in a child it `clone`s, then hands off to a trusted root-owned `kennel-init`. Operations (the `Op` enum in `kennel-privhelper::wire`):
 
-- **construct-kennel** — the long-lived construction op. Over a `SOCK_SEQPACKET` socketpair the caller sends the **construction half** of the Plan (the uid/gid maps, the loopback config, the binderfs params, the view bind list, the pivot target) plus any fds (`SCM_RIGHTS`). The privhelper parses it host-side (no namespace yet), provenance-checks and `open`s the `kennel-init` binary, then `clone(NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET])` so the child is PID 1 of the new PID namespace. In that child it writes the maps, joins the kennel cgroup, brings up in-namespace `lo`, builds the view, mounts binderfs and chowns the device to the operator, `pivot_root`s and detaches the host root, then `fexecve`s `kennel-init` (empty argv/envp; by descriptor because the host path is gone post-pivot). The op stays alive as the child's parent: it returns the `init`/workload host pids and relays the final exit status. The user namespace is **operator-owned** (the child clones as the operator, self-escalates to construct), which is what lets the unprivileged `kenneld` reach the binderfs instance via `/proc/<init>/root`.
+- **construct-kennel** — the construction op. Over a `SOCK_SEQPACKET` socketpair the caller sends the **construction half** of the Plan (the uid/gid maps, the loopback config, the binderfs params, the view bind list, the pivot target) plus any fds (`SCM_RIGHTS`). The privhelper parses it host-side (no namespace yet), provenance-checks and `open`s the `kennel-init` binary, then `clone(NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET])` so the child is PID 1 of the new PID namespace. In that child it writes the maps, joins the kennel cgroup, brings up in-namespace `lo`, builds the view, mounts binderfs and chowns the device to the operator, `pivot_root`s and detaches the host root, then `fexecve`s `kennel-init` (empty argv/envp; by descriptor because the host path is gone post-pivot). It then reports the init host pid and **exits** — it is not a reaper proxy. `kennel-init` (PID 1 of its own namespace) outlives it; the orphaned init reparents to `kenneld`, which set itself a child subreaper at startup, and `kenneld` `waitpid`s it directly for the workload's exit status. So there is no resident factory process per kennel. The user namespace is **operator-owned** (the child clones as the operator, self-escalates to construct), which is what lets the unprivileged `kenneld` reach the binderfs instance via `/proc/<init>/root`.
 - **add-addr** — add a per-kennel loopback address (IPv4 in the kennel's `/28`, or IPv6 ULA in its `/64`).
 - **del-addr** — remove a per-kennel address on kennel teardown.
 - **setup-egress** — load, populate, and attach the egress BPF programs to the kennel's cgroup (the cgroup path is in the request; the helper validates the caller owns it).
@@ -122,7 +122,7 @@ These are dependencies, not source. Their versions are pinned in the build envir
 | `xdg-dbus-proxy` | user | none | external |
 | Workload | user | bounding set cleared per policy | `PR_SET_NO_NEW_PRIVS` set unconditionally; Landlock sealed; cgroup BPF attached; `setrlimit` caps applied (`[ulimits]`, after Landlock) |
 
-Only `kennel-privhelper` operates with host-elevated privilege; the address and egress ops are transient per invocation, and the construct-kennel op lasts only as long as the kennel it parents. `kennel-init` is uid 0 *in the userns only* (no ambient host caps, trapped post-pivot), and as built it runs as the operator regardless. Project Kennel does not run any long-lived privileged daemon shared across kennels. The bounded duration and scope of privilege is a deliberate constraint.
+Only `kennel-privhelper` operates with host-elevated privilege; the address and egress ops are transient per invocation, and the construct-kennel op is host-root only for the single map-writing step and then exits (it does not linger for the kennel's lifetime — kenneld, a child subreaper, owns the running kennel). `kennel-init` is uid 0 *in the userns only* (no ambient host caps, trapped post-pivot), and as built it runs as the operator regardless. Project Kennel does not run any long-lived privileged daemon shared across kennels. The bounded duration and scope of privilege is a deliberate constraint.
 
 ---
 
@@ -131,30 +131,28 @@ Only `kennel-privhelper` operates with host-elevated privilege; the address and 
 A representative process tree for a user running two concurrent kennels (`ai-coding` and `web-dev`):
 
 ```
-systemd --user                                              (user, supervisor)
-├── kenneld                                                 (user)
+systemd --user                                              (user, subreaper of last resort)
+├── kenneld                                                 (user; child subreaper — adopts each kennel-init)
 │   ├── kennel-netproxy [ai-coding]                         (user)
-│   ├── kennel-privhelper construct-kennel [ai-coding]      (root; factory, parents the kennel)
-│   │   └── kennel-init [ai-coding]                         (PID 1; operator as built / uid 0 by design)
-│   │       ├── kennel-afunix-shim (facade)                 (operator)
-│   │       └── bash [inside ai-coding kennel]              (operator, in cgroup, Landlock applied)
-│   │           └── ... workload subprocesses ...
+│   ├── kennel-init [ai-coding]                             (PID 1; reparented to kenneld once the factory exited)
+│   │   ├── kennel-afunix-shim (facade)                     (operator)
+│   │   └── bash [inside ai-coding kennel]                  (operator, in cgroup, Landlock applied)
+│   │       └── ... workload subprocesses ...
 │   ├── kennel-netproxy [web-dev]                           (user)
-│   └── kennel-privhelper construct-kennel [web-dev]        (root; factory, parents the kennel)
-│       └── kennel-init [web-dev]                           (PID 1)
-│           └── npm [inside web-dev kennel]                 (operator, in cgroup, Landlock applied)
-│               └── ... build subprocesses ...
+│   └── kennel-init [web-dev]                               (PID 1; reparented to kenneld)
+│       └── npm [inside web-dev kennel]                     (operator, in cgroup, Landlock applied)
+│           └── ... build subprocesses ...
 │
 └── bash (the user's shell)                                 (user)
     ├── kennel run ai-coding.settled.toml ai-coding -- bash (user, client; blocks on the workload)
     └── kennel run web-dev.settled.toml web-dev -- npm test (user, client; blocks on the workload)
 ```
 
-The short-lived `kennel-privhelper` ops (add-addr, del-addr, setup-egress) do not appear: each is invoked on demand, performs one operation, and exits before the workload runs. The **construct-kennel** privhelper invocation, by contrast, persists — it is the factory that `clone`d the kennel and stays alive as the parent of `kennel-init` (PID 1) to reap it and relay the exit status.
+**Every** `kennel-privhelper` op is short-lived and absent from the steady-state tree — the address/egress ops perform one operation and exit before the workload runs, and **construct-kennel** likewise exits as soon as it has built the kennel and reported the init pid. It is not a reaper proxy: `kennel-init` (PID 1 of its own namespace) outlives it and reparents to `kenneld` (which marked itself a child subreaper at startup), so each running kennel shows as a direct child of kenneld with no resident factory process behind it.
 
 Two structural points worth naming:
 
-1. **kenneld owns the workload's lifecycle**, not the `kennel run` invocation. kenneld drives the construction and is the connection endpoint; the CLI is a client that holds the connection open for the workload's lifetime and forwards its exit code. The workload is not literally kenneld's child: kenneld calls the privhelper's **construct-kennel** op, which `clone`s the namespace chain so the construction child is PID 1 of the new PID namespace directly (no double-fork — the single `clone(NEWPID|…)` makes it PID 1), then builds the view, pivots, and `fexecve`s **`kennel-init`** in place as that PID 1. `kennel-init` forks the facades and the workload (process B) and supervises them, `_exit`ing with B's status when the workload exits. That status rides the process chain `kennel-init` → privhelper → kenneld → CLI, so the CLI and kenneld see the workload's true exit status, while the workload's immediate parent is PID-1 `kennel-init`.
+1. **kenneld owns the workload's lifecycle**, not the `kennel run` invocation. kenneld drives the construction and is the connection endpoint; the CLI is a client that holds the connection open for the workload's lifetime and forwards its exit code. The workload is not literally kenneld's child: kenneld calls the privhelper's **construct-kennel** op, which `clone`s the namespace chain so the construction child is PID 1 of the new PID namespace directly (no double-fork — the single `clone(NEWPID|…)` makes it PID 1), then builds the view, pivots, and `fexecve`s **`kennel-init`** in place as that PID 1. `kennel-init` forks the facades and the workload (process B) and supervises them, `_exit`ing with B's status when the workload exits. The factory that `clone`d `kennel-init` has already exited, so `kennel-init` reparents to `kenneld` (a child subreaper); `kenneld` `waitpid`s it and forwards its status to the CLI. The status path is thus `kennel-init` → kenneld → CLI (no privhelper middleman), and the workload's immediate parent is PID-1 `kennel-init`.
 2. **Each `kennel run` is one kennel** with its own `kennel-netproxy` child of kenneld. Kennels are not shared by name and per-kennel resources are not reference-counted: a second `kennel run` is a separate kennel with its own proxy, addresses, cgroup, and view.
 
 ---

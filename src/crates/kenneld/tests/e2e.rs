@@ -248,6 +248,9 @@ fn dev_allow() -> Vec<String> {
 fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let uid = kennel_syscall::unistd::real_uid();
     let gid = kennel_syscall::unistd::real_gid();
+    // Play kenneld's role: become a subreaper so the orphaned kennel-init (the factory exits as
+    // soon as it reports the pid) reparents to this process and `wait_pid` can collect its status.
+    let _ = kennel_syscall::process::set_child_subreaper();
     assert_ne!(
         uid, 0,
         "this is the UNPRIVILEGED vertical — run it as the operator, not root (see the runner)"
@@ -556,10 +559,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     );
 
     let status = kennel.stop(&helper).expect("stop");
-    assert!(
-        status.success(),
+    assert_eq!(
+        status, 0,
         "the constructed view held (synthetic /etc + ~/.ssh, granted readable, sibling ENOENT, the \
-         AF_UNIX shim connectable, the granted group re-granted via the gid_map handshake) (got {status:?})"
+         AF_UNIX shim connectable, the granted group re-granted via the gid_map handshake) (got {status})"
     );
 
     assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
@@ -744,6 +747,9 @@ fn no_ipc_kennel_runs_through_the_factory() {
 
     let uid = kennel_syscall::unistd::real_uid();
     let gid = kennel_syscall::unistd::real_gid();
+    // Play kenneld's role: become a subreaper so the orphaned kennel-init (the factory exits as
+    // soon as it reports the pid) reparents to this process and `wait_pid` can collect its status.
+    let _ = kennel_syscall::process::set_child_subreaper();
     if uid == 0 {
         eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
         return;
@@ -867,6 +873,9 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
 
     let uid = kennel_syscall::unistd::real_uid();
     let gid = kennel_syscall::unistd::real_gid();
+    // Play kenneld's role: become a subreaper so the orphaned kennel-init (the factory exits as
+    // soon as it reports the pid) reparents to this process and `wait_pid` can collect its status.
+    let _ = kennel_syscall::process::set_child_subreaper();
     if uid == 0 {
         eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
         return;

@@ -28,6 +28,13 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    // Become a child subreaper so an orphaned `kennel-init` reparents to us: the privhelper
+    // factory exits as soon as it has reported the init pid (it is not a reaper proxy), and we
+    // must remain able to `waitpid` the kennel for its exit status (`07-2`). Set once, before
+    // any kennel is constructed.
+    kennel_syscall::process::set_child_subreaper()
+        .map_err(|e| format!("set_child_subreaper: {e}"))?;
+
     // Deployment paths (helper binaries, the trust store) come from the
     // root-owned config cascade — never baked in, never user-overridable
     // (07-paths.md; kennel_config::Deployment).

@@ -17,9 +17,8 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use kennel_policy::NetPolicy;
@@ -941,15 +940,10 @@ fn fail<P: Privileged + Clone, L: PolicyLoader>(
     let _ = control::send_response(conn, &Response::Error(reason));
 }
 
-/// The exit code to report: the process's code, `128 + signal` if it was killed,
-/// or `-1` if the wait itself failed.
-fn exit_code(status: &io::Result<ExitStatus>) -> i32 {
-    status.as_ref().map_or(-1, |status| {
-        status
-            .code()
-            .or_else(|| status.signal().map(|s| 128_i32.saturating_add(s)))
-            .unwrap_or(-1)
-    })
+/// The exit code to report: the kennel's exit code (`128 + signal` if it was killed, as
+/// [`kennel_syscall::process::wait_pid`] already encodes), or `-1` if the wait itself failed.
+fn exit_code(status: &io::Result<i32>) -> i32 {
+    *status.as_ref().unwrap_or(&-1)
 }
 
 /// Read one framed request, plus any stdio fds, from a single `recvmsg`.
