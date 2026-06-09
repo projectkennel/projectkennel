@@ -53,34 +53,28 @@ pub type V4Entry = ([u8; 8], [u8; 8]);
 pub type V6Entry = ([u8; 20], [u8; 8]);
 
 /// The privileged operation a request asks for.
+///
+/// Only the teardown address-delete remains as a standalone op: the address *add* and the
+/// egress-BPF *attach* (former byte-1 `AddAddr` and byte-5 `SetupEgress`) are folded into the
+/// factory's `construct` op, and bytes 3/4 were the retired cgroup create/delete ops (kenneld
+/// now manages cgroups unprivileged in its delegated subtree). The byte values are left as-is
+/// so the wire encoding is stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    /// Add a per-kennel loopback address.
-    AddAddr,
-    /// Remove a per-kennel loopback address.
+    /// Remove a per-kennel loopback address (teardown).
     DelAddr,
-    /// Load, populate, and attach the egress BPF programs to a kennel's cgroup.
-    /// The fixed [`Request`] carries the cgroup path (the helper validates the
-    /// caller owns it); a variable-length [`EgressPayload`] tail carries the map
-    /// contents. (Op byte 5; bytes 3 and 4 were the retired cgroup create/delete
-    /// ops — kenneld now manages cgroups unprivileged in its delegated subtree.)
-    SetupEgress,
 }
 
 impl Op {
     const fn to_byte(self) -> u8 {
         match self {
-            Self::AddAddr => 1,
             Self::DelAddr => 2,
-            Self::SetupEgress => 5,
         }
     }
 
     const fn from_byte(b: u8) -> Option<Self> {
         match b {
-            1 => Some(Self::AddAddr),
             2 => Some(Self::DelAddr),
-            5 => Some(Self::SetupEgress),
             _ => None,
         }
     }
@@ -246,10 +240,12 @@ impl Request {
     }
 }
 
-/// The variable-length tail of a [`Op::SetupEgress`] request: the BPF map
-/// contents the helper writes into the egress programs' maps before attaching.
+/// The BPF map contents the factory writes into the egress programs' maps before attaching.
 ///
-/// Layout (appended directly after the fixed [`Request`] bytes):
+/// The egress tail of the `construct` datagram (`construct.rs`; it was the retired
+/// `SetupEgress` op's payload).
+///
+/// Layout (a self-describing byte blob):
 ///
 /// ```text
 ///   0..64    meta            [u8; 64]   kennel_meta_map[0]
@@ -587,7 +583,7 @@ mod tests {
     #[test]
     fn request_round_trips_v4() {
         let req = Request {
-            op: Op::AddAddr,
+            op: Op::DelAddr,
             ctx: 7,
             addr: "127.7.3.1".parse().expect("v4"),
             prefix: 24,
@@ -602,7 +598,7 @@ mod tests {
     #[test]
     fn request_round_trips_v6_and_egress() {
         let req = Request {
-            op: Op::SetupEgress,
+            op: Op::DelAddr,
             ctx: 3,
             addr: "fd00:1:2::1".parse().expect("v6"),
             prefix: 64,
@@ -699,11 +695,8 @@ mod tests {
     }
 
     #[test]
-    fn setup_egress_op_round_trips() {
-        assert_eq!(
-            Op::from_byte(Op::SetupEgress.to_byte()),
-            Some(Op::SetupEgress)
-        );
+    fn del_addr_op_round_trips() {
+        assert_eq!(Op::from_byte(Op::DelAddr.to_byte()), Some(Op::DelAddr));
     }
 
     #[test]
@@ -722,7 +715,7 @@ mod tests {
     fn decode_rejects_bad_length_and_op() {
         assert_eq!(Request::decode(&[0u8; 10]), Err(WireError::BadLength));
         let mut bytes = Request {
-            op: Op::AddAddr,
+            op: Op::DelAddr,
             ctx: 0,
             addr: "0.0.0.0".parse().expect("v4"),
             prefix: 24,

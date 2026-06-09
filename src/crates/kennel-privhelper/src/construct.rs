@@ -35,7 +35,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use kennel_spawn::wire::decode_construction;
-use kennel_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf};
+use kennel_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf, LoopbackAddr};
 use kennel_syscall::fd::dup_onto;
 use kennel_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
 use kennel_syscall::namespace::clone_pid1;
@@ -44,8 +44,15 @@ use kennel_syscall::scm::{recv_with_fds, send_with_fds};
 use kennel_syscall::spawn::fexecve;
 use kennel_syscall::unistd::{real_gid, real_uid};
 
-/// Receive buffer for the construction-half datagram (the half is small and bounded).
-const RECV_CAP: usize = 1 << 16;
+use crate::validate::{validate_addr, AddrRequest, ReservedScope};
+use crate::wire::EgressPayload;
+
+/// The interface the per-kennel loopback addresses live on (shared host net namespace).
+const LOOPBACK: &str = "lo";
+
+/// Receive buffer for the construction datagram: the length-prefixed construction-half plus
+/// the (variable-length) egress payload tail. Sized for a large allow/deny ruleset.
+const RECV_CAP: usize = 1 << 18;
 
 /// Exit code when construction fails before the child is running (parsing, clone, maps).
 const CONSTRUCT_FAILED: i32 = 125;
@@ -80,16 +87,53 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    leaves only stdout/stderr inherited.
     kennel_syscall::fd::set_cloexec(chan)?;
 
-    // 1. Receive the construction-half. For an interactive run the datagram also carries the
-    //    controlling-pty **return socket** as the sole `SCM_RIGHTS` fd (the binary to run as
-    //    uid 0 is NOT taken from the wire — see step 1b). It arrives `MSG_CMSG_CLOEXEC`; the
-    //    construction child re-homes it at `PTY_RETURN_FD` (clearing close-on-exec) just before
-    //    `fexecve` so the argv-less `kennel-init` inherits it there.
+    // 1. Receive the construction datagram. Framing: `[u32 ch_len][construction-half][egress]`
+    //    — the fixed construction-half (length-prefixed so its decoder gets exactly its bytes)
+    //    followed by the optional egress payload tail. For an interactive run the datagram also
+    //    carries the controlling-pty **return socket** as the sole `SCM_RIGHTS` fd (the binary
+    //    to run as uid 0 is NOT taken from the wire — see step 1b). It arrives
+    //    `MSG_CMSG_CLOEXEC`; the construction child re-homes it at `PTY_RETURN_FD` (clearing
+    //    close-on-exec) just before `fexecve` so the argv-less `kennel-init` inherits it there.
     let mut buf = vec![0u8; RECV_CAP];
     let (n, mut wire_fds) = recv_with_fds(chan, &mut buf)?;
     let pty_fd: Option<OwnedFd> = (!wire_fds.is_empty()).then(|| wire_fds.remove(0));
-    let half = decode_construction(buf.get(..n).unwrap_or(&[]))
+    let msg = buf.get(..n).unwrap_or(&[]);
+    let ch_len = msg
+        .get(0..4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(u32::from_le_bytes)
+        .map(|v| v as usize)
+        .ok_or_else(|| io::Error::other("construction datagram missing length prefix"))?;
+    let ch_end = 4usize.saturating_add(ch_len);
+    let ch_bytes = msg
+        .get(4..ch_end)
+        .ok_or_else(|| io::Error::other("construction datagram shorter than its length prefix"))?;
+    let egress_bytes = msg.get(ch_end..).unwrap_or(&[]);
+    let half = decode_construction(ch_bytes)
         .map_err(|e| io::Error::other(format!("construction-half decode: {e:?}")))?;
+
+    // 1a. Provision the kennel's host-side network resources — folded into this one op (the
+    //     former separate `add-addr`/`setup-egress` privhelper invocations are gone). Runs as
+    //     the operator with the helper's file caps (`cap_net_admin` + the BPF caps), before any
+    //     privilege change, in the host net namespace (the kennel still shares it). Each
+    //     loopback address is re-validated against the caller's reserved subnet — the operator
+    //     does not get to pick arbitrary addresses — then added on `lo`; the egress BPF, if
+    //     present, is attached to the kennel cgroup (whose ownership the attach re-checks).
+    let Some(scope) = crate::alloc::load(real_uid()) else {
+        return Err(io::Error::other("caller has no reserved scope"));
+    };
+    add_loopback_addresses(&half.loopback, half.ctx, &scope)?;
+    if !egress_bytes.is_empty() {
+        let payload = EgressPayload::decode(egress_bytes)
+            .map_err(|e| io::Error::other(format!("egress payload decode: {e:?}")))?;
+        let resp = crate::exec::attach_egress_programs(&half.cgroup, &payload);
+        if resp.status != crate::wire::Status::Ok {
+            return Err(io::Error::other(format!(
+                "egress attach refused (code {})",
+                resp.refusal
+            )));
+        }
+    }
 
     // 1b. Resolve and open the trusted `kennel-init` from the **root-owned** deployment
     //     cascade (`/usr/lib/kennel` → `/etc/kennel`; never a user-writable dir or the
@@ -200,6 +244,38 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    the orphaned init and `waitpid`s it directly for the workload's exit status. One
     //    fewer resident host process per kennel.
     Ok(0)
+}
+
+/// Validate each loopback address against the caller's reserved `scope`, then add it on `lo`
+/// via netlink (host net namespace, the helper's `cap_net_admin`). The operator supplies the
+/// addresses but the factory does not trust them: one outside the per-kennel subnet is refused
+/// — the same [`validate_addr`] gate the standalone `add-addr` op used before this fold.
+fn add_loopback_addresses(
+    addrs: &[LoopbackAddr],
+    ctx: u16,
+    scope: &ReservedScope,
+) -> io::Result<()> {
+    if addrs.is_empty() {
+        return Ok(());
+    }
+    let cname = std::ffi::CString::new(LOOPBACK).map_err(|_| io::Error::other("bad ifname"))?;
+    let ifindex = kennel_syscall::netlink::if_index(&cname)?;
+    for lb in addrs {
+        let req = AddrRequest {
+            ctx,
+            interface: LOOPBACK.to_owned(),
+            addr: lb.addr,
+            prefix: lb.prefix,
+        };
+        if let Err(refusal) = validate_addr(&req, scope) {
+            return Err(io::Error::other(format!(
+                "loopback address {} refused: {refusal}",
+                lb.addr
+            )));
+        }
+        kennel_syscall::netlink::add_address(ifindex, lb.addr, lb.prefix)?;
+    }
+    Ok(())
 }
 
 /// The privileged construction the factory child runs as the kennel's uid 0, after its

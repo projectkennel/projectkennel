@@ -676,15 +676,18 @@ fn userns_skip_reason(started: &Result<kenneld::Kennel, Error>) -> Option<String
     }
 }
 
-/// If `started` failed because the privhelper could not perform a privileged op
-/// (most likely it lacks the file capabilities), the precise skip reason; else
-/// `None`. A capability-less helper's netlink/BPF op fails with `EPERM`.
+/// If `started` failed because the privhelper factory could not provision the kennel (most
+/// likely it lacks the file capabilities), the precise skip reason; else `None`. The factory
+/// now does the netlink add + BPF attach itself, so a capability-less helper fails *inside*
+/// `construct` (its `EPERM` netlink/BPF op) before reporting the init pid — surfacing here as
+/// an `Error::Io`. (On the real runner the caps are applied, so `start` succeeds and this never
+/// triggers; it only gives a graceful off-runner skip.)
 fn privhelper_skip_reason(started: &Result<kenneld::Kennel, Error>) -> Option<String> {
-    let Err(Error::Privileged { op, response }) = started else {
+    let Err(Error::Io(e)) = started else {
         return None;
     };
     Some(format!(
-        "privhelper op `{op}` failed ({response:?}) — most likely the helper lacks file capabilities; \
+        "factory construction failed ({e}) — most likely the helper lacks file capabilities; \
          run src/tools/unprivileged-e2e.sh (it applies `setcap cap_net_admin,cap_sys_admin,cap_setgid=ep`)"
     ))
 }

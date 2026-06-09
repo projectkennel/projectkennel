@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 use kennel_policy::{NetPolicy, TtlAction};
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
-use kennel_privhelper::wire::{EgressPayload, Response, Status};
+use kennel_privhelper::wire::{EgressPayload, Response};
 use kennel_spawn::{Plan, ProxyEndpoint, SpawnError};
 
 /// The default proxy host offset within the kennel's subnet (`…|0001` / `::1`).
@@ -70,13 +70,6 @@ const LOOPBACK: &str = "lo";
 pub enum Error {
     /// A filesystem operation (cgroup create/remove) failed.
     Io(io::Error),
-    /// A privileged helper operation was refused or failed.
-    Privileged {
-        /// Which operation failed (for diagnostics/audit).
-        op: &'static str,
-        /// The helper's response.
-        response: Response,
-    },
     /// The workload could not be spawned.
     Spawn(SpawnError),
     /// The egress proxy's config could not be derived from the policy.
@@ -89,9 +82,6 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "cgroup filesystem operation failed: {e}"),
-            Self::Privileged { op, response } => {
-                write!(f, "privileged operation `{op}` failed: {response:?}")
-            }
             Self::Spawn(e) => write!(f, "workload spawn failed: {e}"),
             Self::ProxyConfig(m) => write!(f, "egress proxy config could not be derived: {m}"),
             Self::Proxy(e) => write!(f, "egress proxy could not be launched: {e}"),
@@ -104,7 +94,7 @@ impl std::error::Error for Error {
         match self {
             Self::Io(e) | Self::Proxy(e) => Some(e),
             Self::Spawn(e) => Some(e),
-            Self::Privileged { .. } | Self::ProxyConfig(_) => None,
+            Self::ProxyConfig(_) => None,
         }
     }
 }
@@ -119,22 +109,12 @@ impl From<io::Error> for Error {
 /// orchestration sequence and its unwind are testable without root or the real
 /// setuid binary.
 pub trait Privileged {
-    /// Add `addr/prefix` on `interface` for kennel `ctx`.
+    /// Remove `addr/prefix` on `interface` for kennel `ctx` (teardown). The per-kennel
+    /// loopback *adds* and the egress-BPF *attach* are folded into the factory's one
+    /// `construct_kennel` op, so the only standalone privileged op left is this teardown del.
     ///
     /// # Errors
     /// An OS error if the helper cannot be invoked or its response is malformed.
-    fn add_address(
-        &self,
-        ctx: u16,
-        interface: &str,
-        addr: IpAddr,
-        prefix: u8,
-    ) -> io::Result<Response>;
-
-    /// Remove `addr/prefix` on `interface` for kennel `ctx`.
-    ///
-    /// # Errors
-    /// As [`add_address`](Self::add_address).
     fn del_address(
         &self,
         ctx: u16,
@@ -142,12 +122,6 @@ pub trait Privileged {
         addr: IpAddr,
         prefix: u8,
     ) -> io::Result<Response>;
-
-    /// Load, populate, and attach the egress BPF programs to `cgroup`.
-    ///
-    /// # Errors
-    /// As [`add_address`](Self::add_address).
-    fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response>;
 
     /// Construct a kennel via the privhelper **factory** (`07-2`): hand it the
     /// `construction_half` bytes and (optionally) the pty socket; receive the long-lived
@@ -162,6 +136,7 @@ pub trait Privileged {
     fn construct_kennel(
         &self,
         _construction_half: &[u8],
+        _egress: Option<&[u8]>,
         _pty_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(Child, i32)> {
         Err(io::Error::new(
@@ -189,16 +164,6 @@ impl HelperClient {
 }
 
 impl Privileged for HelperClient {
-    fn add_address(
-        &self,
-        ctx: u16,
-        interface: &str,
-        addr: IpAddr,
-        prefix: u8,
-    ) -> io::Result<Response> {
-        kennel_privhelper::client::add_address(&self.helper, ctx, interface, addr, prefix)
-    }
-
     fn del_address(
         &self,
         ctx: u16,
@@ -209,16 +174,13 @@ impl Privileged for HelperClient {
         kennel_privhelper::client::del_address(&self.helper, ctx, interface, addr, prefix)
     }
 
-    fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
-        kennel_privhelper::client::setup_egress(&self.helper, cgroup.to_path_buf(), payload)
-    }
-
     fn construct_kennel(
         &self,
         construction_half: &[u8],
+        egress: Option<&[u8]>,
         pty_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(Child, i32)> {
-        kennel_privhelper::client::construct_kennel(&self.helper, construction_half, pty_fd)
+        kennel_privhelper::client::construct_kennel(&self.helper, construction_half, egress, pty_fd)
     }
 }
 
@@ -732,19 +694,24 @@ fn bring_up<P: Privileged + Sync>(
     //    fits the 8-bit field it carries; a higher ctx is a v6-only kennel.
     let offset = net.proxy.offset;
     let port = net.proxy.port;
+    // Compute the per-kennel loopback addresses. The factory adds them on `lo` itself (folded
+    // into the one construct op — it re-validates each against the caller's reserved subnet),
+    // so here we only collect them for the construction-half and record them in `state` for
+    // teardown's `del_address`.
+    let mut loopback: Vec<kennel_spawn::LoopbackAddr> = Vec::new();
     if let Ok(c) = u8::try_from(ctx) {
         let addr = loopback_v4(scope.tag(), c, offset);
-        expect_ok(
-            "add_address v4",
-            privileged.add_address(ctx, LOOPBACK, addr.into(), V4_PREFIX),
-        )?;
+        loopback.push(kennel_spawn::LoopbackAddr {
+            addr: addr.into(),
+            prefix: V4_PREFIX,
+        });
         state.v4 = Some(addr);
     }
     let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
-    expect_ok(
-        "add_address v6",
-        privileged.add_address(ctx, LOOPBACK, addr6.into(), V6_PREFIX),
-    )?;
+    loopback.push(kennel_spawn::LoopbackAddr {
+        addr: addr6.into(),
+        prefix: V6_PREFIX,
+    });
     state.v6 = Some(addr6);
 
     // Stamp the egress proxy into the plan before deriving the BPF payload: this
@@ -758,7 +725,10 @@ fn bring_up<P: Privileged + Sync>(
         port,
     });
 
-    // 3. egress BPF (privileged: load + attach in the helper).
+    // 3. egress BPF. The factory attaches it (folded into the one construct op); here we just
+    //    build and encode the payload to ride the construction datagram. The helper pins this
+    //    kennel's maps under the owner's `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can
+    //    drain the audit ringbuf and the owner can inspect the maps (§02-7).
     let payload = EgressPayload {
         meta: plan.bpf_meta,
         allow_v4: plan.bpf_allow_v4.clone(),
@@ -766,19 +736,14 @@ fn bring_up<P: Privileged + Sync>(
         allow_v6: plan.bpf_allow_v6.clone(),
         deny_v6: plan.bpf_deny_v6.clone(),
         bind_allowed_ports: plan.bind_allowed_ports.clone(),
-        // The helper pins this kennel's maps under the owner's
-        // `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can drain the audit ringbuf
-        // and the owner can inspect the maps (§02-7).
         pin_id: id.to_owned(),
     };
-    expect_ok("setup_egress", privileged.setup_egress(cgroup, &payload))?;
+    let egress_bytes = payload.encode();
 
-    // 3b. launch the per-kennel egress proxy, before the workload, so it is
-    //     listening on the kennel's address when the first connect() lands. The
-    //     proxy is unprivileged (kenneld's child, in the host net namespace); the
-    //     BPF already permits the workload to reach it. Skipped when no proxy is
-    //     configured (unit tests).
-    if let Some(setup) = proxy {
+    // 3b. Build + write the per-kennel egress proxy config (no spawn yet): the proxy binds the
+    //     kennel's loopback addresses, which only exist once the factory has added them, so the
+    //     actual launch is deferred to *after* construct (below). Skipped with no proxy.
+    let proxy_config: Option<PathBuf> = if let Some(setup) = proxy {
         let listen = proxy_listen(state.v4, addr6, port);
         // The per-kennel audit dir persists across runs; create it but never
         // remove it at teardown (it is audit data, not scratch).
@@ -791,8 +756,10 @@ fn bring_up<P: Privileged + Sync>(
         std::fs::create_dir_all(&setup.config_dir)?;
         let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
         std::fs::write(&config_path, config)?;
-        state.proxy = Some(crate::proxy::spawn(&setup.binary, &config_path).map_err(Error::Proxy)?);
-    }
+        Some(config_path)
+    } else {
+        None
+    };
 
     // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
     //     binds that shadow them over the kennel's view. Built here because it
@@ -933,12 +900,12 @@ fn bring_up<P: Privileged + Sync>(
         }
     }
 
-    // 4. Construct the kennel via the privhelper **factory** (`07-2`) — the one spawn path:
-    //    the privhelper clones a real-uid-0 kennel, builds the view + binderfs (chowned to the
-    //    operator), and `fexecve`s `kennel-init`, which pulls its supervision-half over binder
-    //    and spawns + confines the workload. Every kennel runs the factory + a binder bus, so a
-    //    `BinderPrep` is required. The privhelper resolves `kennel-init` from its own root-owned
-    //    config (never the wire), so kenneld needs no kennel-init path of its own here.
+    // 4. Construct the kennel via the privhelper **factory** (`07-2`) — the one privileged op,
+    //    which now provisions everything in a single invocation: it adds the loopback addresses
+    //    (re-validating each), attaches the egress BPF, clones the namespaces, builds the view +
+    //    binderfs (chowned to the operator), and `fexecve`s `kennel-init`. Every kennel runs the
+    //    factory + a binder bus, so a `BinderPrep` is required. The privhelper resolves
+    //    `kennel-init` from its own root-owned config (never the wire), so kenneld needs none here.
     plan.cgroup = cgroup.to_path_buf();
     let Some(prep) = binder else {
         return Err(Error::Io(io::Error::new(
@@ -946,51 +913,20 @@ fn bring_up<P: Privileged + Sync>(
             "a kennel must be constructed via the factory, which requires a BinderPrep",
         )));
     };
-    construct_via_factory(privileged, plan, command, ctx, prep, state)
-}
+    let (init_pid, supervision_bytes) =
+        construct_via_factory(privileged, plan, command, ctx, &loopback, &egress_bytes, state)?;
 
-/// The factory construction path (`07-2`): split the plan into its construction- and
-/// supervision-halves, have the privhelper factory build the kennel and `fexecve`
-/// `kennel-init`, then take binder node 0 via the init pid and serve the lifecycle so
-/// `kennel-init` can pull the supervision-half. Returns the long-lived factory process
-/// (the kennel's supervisor; its exit status is the workload's).
-#[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
-fn construct_via_factory<P: Privileged + Sync>(
-    privileged: &P,
-    plan: &Plan,
-    command: &Command,
-    ctx: u16,
-    prep: &BinderPrep,
-    state: &mut Provision,
-) -> Result<i32, Error> {
-    // The masked operator identity every child is dropped to — the caller's real ids,
-    // which the construction maps identity-map in (never wire-supplied).
-    let drop_uid = kennel_syscall::unistd::real_uid();
-    let drop_gid = kennel_syscall::unistd::real_gid();
-
-    let construction = construction_half_from(plan);
-    let supervision = supervision_from(plan, command, drop_uid, drop_gid);
-    let half_bytes = kennel_spawn::wire::encode_construction(&construction);
-    let supervision_bytes = kennel_spawn::wire::encode_supervision(&supervision);
-
-    // The privhelper resolves + opens `kennel-init` itself from root-owned config (never the
-    // wire), so kenneld passes no init fd. For an interactive run it does pass the pty return
-    // socket (the workload's pty master is sent back over it); the construction child re-homes
-    // it at `PTY_RETURN_FD` for `kennel-init`. The fd lives in the plan and is kept open by the
-    // caller (`run_kennel`'s `return_sock`) for the duration of construction.
-    let (mut child, init_pid) = privileged.construct_kennel(&half_bytes, plan.interactive_return_fd)?;
-    state.factory = true;
-
-    // The factory's job is done the moment it reports the init pid (it is no longer a reaper
-    // proxy — `07-2`): reap it now (it exits immediately). Reaping it here, before we return,
-    // means `kennel-init` has already reparented to kenneld (the `set_child_subreaper`), so the
-    // `Kennel` handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
-    let _ = child.wait();
+    // The factory has added the loopback addresses, so the egress proxy can now bind them.
+    // Launch it *before* serving the binder pull (which is what lets kennel-init start the
+    // workload), so the proxy is listening before the workload's first connect().
+    if let (Some(setup), Some(config_path)) = (proxy, proxy_config.as_ref()) {
+        state.proxy = Some(crate::proxy::spawn(&setup.binary, config_path).map_err(Error::Proxy)?);
+    }
 
     // Take binder node 0 of the kennel's binderfs (mounted by the factory) and serve the
-    // lifecycle (gated on the init pid) so kennel-init can pull its supervision-half.
-    // kennel-init runs as the operator, so kenneld opens the device via /proc/<init>/root.
-    // Best-effort: a failure leaves binder inert but the workload still runs.
+    // lifecycle (gated on the init pid) so kennel-init can pull its supervision-half. kennel-init
+    // runs as the operator, so kenneld opens the device via /proc/<init>/root. Best-effort: a
+    // failure leaves binder inert but the workload still runs.
     if plan.view.as_ref().is_some_and(|v| v.binder) {
         let init_pid_u32 = u32::try_from(init_pid).unwrap_or(0);
         let lifecycle = crate::binder::Lifecycle {
@@ -1005,8 +941,53 @@ fn construct_via_factory<P: Privileged + Sync>(
     Ok(init_pid)
 }
 
-/// Build the construction-half (the privhelper factory's input) from the plan.
-fn construction_half_from(plan: &Plan) -> kennel_spawn::ConstructionHalf {
+/// The factory construction step (`07-2`): build the construction- and supervision-halves and
+/// have the privhelper factory provision the kennel — loopback adds, egress attach, the
+/// namespace clone, the view, and binderfs — then `fexecve` `kennel-init`. Returns
+/// `kennel-init`'s host pid and the encoded supervision-half (the caller serves it over binder
+/// node 0). The factory exits as soon as it has reported the pid, so it is reaped here, and the
+/// orphaned init has reparented to kenneld (the `set_child_subreaper`) before we return.
+#[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
+fn construct_via_factory<P: Privileged + Sync>(
+    privileged: &P,
+    plan: &Plan,
+    command: &Command,
+    ctx: u16,
+    loopback: &[kennel_spawn::LoopbackAddr],
+    egress_bytes: &[u8],
+    state: &mut Provision,
+) -> Result<(i32, Vec<u8>), Error> {
+    let drop_uid = kennel_syscall::unistd::real_uid();
+    let drop_gid = kennel_syscall::unistd::real_gid();
+
+    let construction = construction_half_from(plan, ctx, loopback);
+    let supervision = supervision_from(plan, command, drop_uid, drop_gid);
+    let half_bytes = kennel_spawn::wire::encode_construction(&construction);
+    let supervision_bytes = kennel_spawn::wire::encode_supervision(&supervision);
+
+    // The privhelper resolves + opens `kennel-init` from root-owned config (never the wire), so
+    // kenneld passes no init fd. For an interactive run it passes the pty return socket (the
+    // workload's pty master is sent back over it), re-homed at `PTY_RETURN_FD`; the egress payload
+    // rides the same datagram. The pty fd lives in the plan and is kept open by the caller
+    // (`run_kennel`'s `return_sock`) for the construction.
+    let (mut child, init_pid) =
+        privileged.construct_kennel(&half_bytes, Some(egress_bytes), plan.interactive_return_fd)?;
+    state.factory = true;
+
+    // The factory exits the moment it reports the pid (not a reaper proxy — `07-2`): reap it
+    // now. By the time we return, `kennel-init` has reparented to kenneld, so the `Kennel`
+    // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
+    let _ = child.wait();
+    Ok((init_pid, supervision_bytes))
+}
+
+/// Build the construction-half (the privhelper factory's input) from the plan, the kennel's
+/// `ctx`, and the per-kennel `loopback` addresses the factory adds on `lo`.
+fn construction_half_from(
+    plan: &Plan,
+    ctx: u16,
+    loopback: &[kennel_spawn::LoopbackAddr],
+) -> kennel_spawn::ConstructionHalf {
     kennel_spawn::ConstructionHalf {
         namespaces: plan.namespaces,
         cgroup: plan.cgroup.clone(),
@@ -1018,6 +999,8 @@ fn construction_half_from(plan: &Plan) -> kennel_spawn::ConstructionHalf {
         // lines (the factory adds those); empty ⇒ default drop-all-groups.
         granted_gids: plan.supplementary_groups.clone().unwrap_or_default(),
         lo: false, // per-kennel net-ns loopback is future work (07-11)
+        ctx,
+        loopback: loopback.to_vec(),
     }
 }
 
@@ -1181,17 +1164,6 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
         path: shim_bin,
         args,
     });
-}
-
-/// Map a helper response into the orchestration result: a non-`Ok` status is an
-/// [`Error::Privileged`].
-fn expect_ok(op: &'static str, response: io::Result<Response>) -> Result<(), Error> {
-    let response = response?;
-    if response.status == Status::Ok {
-        Ok(())
-    } else {
-        Err(Error::Privileged { op, response })
-    }
 }
 
 /// The socket address the egress proxy listens on: the kennel's primary v4

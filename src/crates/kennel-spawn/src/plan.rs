@@ -532,6 +532,27 @@ pub struct ConstructionHalf {
     /// Whether to bring up the in-namespace loopback (`lo`) — the per-kennel net-ns path
     /// (`07-11`); `false` while the kennel shares the host net namespace.
     pub lo: bool,
+    /// The kennel's context number — re-supplied so the factory can re-validate each
+    /// [`loopback`](Self::loopback) address against the caller's reserved per-kennel subnet.
+    pub ctx: u16,
+    /// The per-kennel loopback addresses to add on host `lo` (`127.<tag>.<ctx>.x/28` and
+    /// `fd<gid>:<tag>:<ctx>::/64`). The factory adds these itself (folding the former
+    /// separate `add-addr` privhelper ops into the one `construct` op), re-validating each is
+    /// within the caller's reserved scope before the netlink add. Empty ⇒ no loopback adds.
+    pub loopback: Vec<LoopbackAddr>,
+}
+
+/// A per-kennel loopback address for the factory to add on host `lo` (§7.3).
+///
+/// Carries the address and its fixed family prefix. The interface is always `lo` (the
+/// shared-net-namespace path); the factory re-validates the address is inside the caller's
+/// reserved subnet before the netlink add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopbackAddr {
+    /// The loopback address (v4 or v6).
+    pub addr: std::net::IpAddr,
+    /// The subnet prefix length (28 for v4, 64 for v6).
+    pub prefix: u8,
 }
 
 impl Plan {

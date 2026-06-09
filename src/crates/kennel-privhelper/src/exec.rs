@@ -60,40 +60,19 @@ fn errno_of(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(0)
 }
 
-/// Validate and perform `req`.
+/// Validate and perform `req` — the one remaining standalone op, `Op::DelAddr` (teardown).
 ///
-/// Every operation is confined to the caller's allocation (`scope`), so a user
-/// with no allocation can do nothing. A [`Op::SetupEgress`] request additionally
-/// carries an `egress` payload (the BPF map contents); the other ops ignore it.
-/// Returns the [`Response`] to send back.
+/// (The address *add* and the egress-BPF *attach* are folded into the factory's
+/// `construct_kennel` op — see `construct.rs`.) Confined to the caller's allocation (`scope`),
+/// so a user with no allocation can do nothing. Returns the [`Response`] to send back.
 #[must_use]
-pub fn perform(
-    req: &Request,
-    egress: Option<&EgressPayload>,
-    scope: Option<&ReservedScope>,
-) -> Response {
+pub fn perform(req: &Request, scope: Option<&ReservedScope>) -> Response {
     let Some(scope) = scope else {
         return Response::refused(REFUSAL_NO_SCOPE);
     };
     match req.op {
-        Op::AddAddr | Op::DelAddr => perform_addr(req, scope),
-        // SetupEgress needs the variable payload; without it the request is malformed.
-        // The scope still gates *whether* the caller may act (the None check above);
-        // the cgroup itself is gated by directory ownership inside perform_egress.
-        Op::SetupEgress => {
-            egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload))
-        }
+        Op::DelAddr => perform_addr(req, scope),
     }
-}
-
-/// Load, populate, and attach the egress BPF programs to the target cgroup.
-///
-/// The cross-user boundary is **directory ownership**: the caller must own the
-/// cgroup directory (`attach_egress_programs` checks `st_uid`). The map contents
-/// are not checked — they only shape the kennel's own egress, which the user
-/// already controls.
-fn perform_egress(req: &Request, payload: &EgressPayload) -> Response {
-    attach_egress_programs(&req.cgroup_path, payload)
 }
 
 /// Load every egress program against ONE shared map set, populate it from
@@ -109,7 +88,8 @@ fn perform_egress(req: &Request, payload: &EgressPayload) -> Response {
 /// opened once and `fstat`ed, so the ownership check and the attach use the same
 /// inode (no TOCTOU).
 #[cfg(feature = "bpf-egress")]
-fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Response {
+#[must_use]
+pub fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Response {
     use std::os::fd::AsFd as _;
     use std::os::unix::fs::MetadataExt as _;
 
@@ -352,9 +332,10 @@ fn populate_maps(
     Ok(())
 }
 
-/// Built without egress support: the helper cannot honour `SetupEgress`.
+/// Built without egress support: the factory cannot attach the egress BPF.
 #[cfg(not(feature = "bpf-egress"))]
-const fn attach_egress_programs(_path: &std::path::Path, _payload: &EgressPayload) -> Response {
+#[must_use]
+pub const fn attach_egress_programs(_path: &std::path::Path, _payload: &EgressPayload) -> Response {
     Response::internal(ENOSYS)
 }
 
@@ -376,11 +357,8 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
         Ok(i) => i,
         Err(e) => return Response::internal(errno_of(&e)),
     };
-    let result = match req.op {
-        Op::AddAddr => kennel_syscall::netlink::add_address(ifindex, req.addr, req.prefix),
-        _ => kennel_syscall::netlink::del_address(ifindex, req.addr, req.prefix),
-    };
-    match result {
+    // The only standalone address op is the teardown delete; the add is folded into construct.
+    match kennel_syscall::netlink::del_address(ifindex, req.addr, req.prefix) {
         Ok(()) => Response::ok(),
         Err(e) => Response::internal(errno_of(&e)),
     }

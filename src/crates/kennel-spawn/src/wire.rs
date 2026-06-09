@@ -764,6 +764,16 @@ pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {
         w.u32(*g);
     }
     w.bool(c.lo);
+    w.u16(c.ctx);
+    w.count(c.loopback.len());
+    for lb in &c.loopback {
+        // The address octets carry the family by length (4 = v4, 16 = v6); then the prefix.
+        match lb.addr {
+            std::net::IpAddr::V4(a) => w.bytes(&a.octets()),
+            std::net::IpAddr::V6(a) => w.bytes(&a.octets()),
+        }
+        w.u8(lb.prefix);
+    }
     w.buf
 }
 
@@ -795,6 +805,22 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         granted_gids.push(r.u32()?);
     }
     let lo = r.bool()?;
+    let ctx = r.u16()?;
+    let mut loopback = Vec::new();
+    for _ in 0..r.count()? {
+        let octets = r.bytes()?;
+        let addr = match octets.as_slice() {
+            v4 if v4.len() == 4 => {
+                std::net::IpAddr::V4(<[u8; 4]>::try_from(v4).unwrap_or([0; 4]).into())
+            }
+            v6 if v6.len() == 16 => {
+                std::net::IpAddr::V6(<[u8; 16]>::try_from(v6).unwrap_or([0; 16]).into())
+            }
+            _ => return Err(PlanWireError::BadTag),
+        };
+        let prefix = r.u8()?;
+        loopback.push(crate::plan::LoopbackAddr { addr, prefix });
+    }
     if r.pos != buf.len() {
         return Err(PlanWireError::TooLarge); // trailing garbage
     }
@@ -807,6 +833,8 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         file_binds,
         granted_gids,
         lo,
+        ctx,
+        loopback,
     })
 }
 
@@ -1028,6 +1056,17 @@ mod tests {
             file_binds: p.file_binds,
             granted_gids: vec![27, 44],
             lo: true,
+            ctx: 7,
+            loopback: vec![
+                crate::plan::LoopbackAddr {
+                    addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 7, 0, 1)),
+                    prefix: 28,
+                },
+                crate::plan::LoopbackAddr {
+                    addr: std::net::IpAddr::V6("fd00:7:0::1".parse().expect("v6 literal")),
+                    prefix: 64,
+                },
+            ],
         }
     }
 
@@ -1049,6 +1088,8 @@ mod tests {
             file_binds: Vec::new(),
             granted_gids: Vec::new(),
             lo: false,
+            ctx: 0,
+            loopback: Vec::new(),
         };
         let back = decode_construction(&encode_construction(&c)).expect("decode");
         assert_eq!(back, c);

@@ -1027,7 +1027,7 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
 
-    use kennel_privhelper::wire::{EgressPayload, Response as HelperResponse};
+    use kennel_privhelper::wire::Response as HelperResponse;
     use kennel_syscall::landlock::AccessFs;
     use kennel_syscall::namespace::Namespaces;
     use kennel_syscall::seccomp::Action;
@@ -1075,13 +1075,7 @@ mod tests {
     #[derive(Clone)]
     struct OkPriv;
     impl Privileged for OkPriv {
-        fn add_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<HelperResponse> {
-            Ok(HelperResponse::ok())
-        }
         fn del_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<HelperResponse> {
-            Ok(HelperResponse::ok())
-        }
-        fn setup_egress(&self, _: &Path, _: &EgressPayload) -> io::Result<HelperResponse> {
             Ok(HelperResponse::ok())
         }
     }

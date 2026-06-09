@@ -17,7 +17,7 @@ use kennel_audit::{
 };
 use kennel_policy::{AuditRuntime, AuditSinkKind};
 use kennel_privhelper::exec::refusal_message;
-use kennel_privhelper::wire::{EgressPayload, Response, Status};
+use kennel_privhelper::wire::{Response, Status};
 
 use crate::Privileged;
 
@@ -347,29 +347,7 @@ fn addr_params(ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Value {
     ])
 }
 
-fn count(n: usize) -> Value {
-    Value::Uint(u64::try_from(n).unwrap_or(u64::MAX))
-}
-
 impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
-    fn add_address(
-        &self,
-        ctx: u16,
-        interface: &str,
-        addr: IpAddr,
-        prefix: u8,
-    ) -> io::Result<Response> {
-        let started = Instant::now();
-        let result = self.inner.add_address(ctx, interface, addr, prefix);
-        self.record(
-            "add-addr",
-            addr_params(ctx, interface, addr, prefix),
-            started,
-            &result,
-        );
-        result
-    }
-
     fn del_address(
         &self,
         ctx: u16,
@@ -388,20 +366,6 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
         result
     }
 
-    fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
-        let started = Instant::now();
-        let result = self.inner.setup_egress(cgroup, payload);
-        let params = Value::object(vec![
-            ("cgroup", Value::str(cgroup.display().to_string())),
-            ("allow_v4", count(payload.allow_v4.len())),
-            ("deny_v4", count(payload.deny_v4.len())),
-            ("allow_v6", count(payload.allow_v6.len())),
-            ("deny_v6", count(payload.deny_v6.len())),
-        ]);
-        self.record("setup-egress", params, started, &result);
-        result
-    }
-
     /// Forward factory construction to the inner privhelper.
     ///
     /// Not recorded as a `priv.*` event here: construction is a long-lived process whose
@@ -412,9 +376,10 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
     fn construct_kennel(
         &self,
         construction_half: &[u8],
+        egress: Option<&[u8]>,
         pty_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(std::process::Child, i32)> {
-        self.inner.construct_kennel(construction_half, pty_fd)
+        self.inner.construct_kennel(construction_half, egress, pty_fd)
     }
 }
 
@@ -425,13 +390,7 @@ mod tests {
     /// A `Privileged` that returns one fixed response for every operation.
     struct FixedPriv(Response);
     impl Privileged for FixedPriv {
-        fn add_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
-            Ok(self.0)
-        }
         fn del_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
-            Ok(self.0)
-        }
-        fn setup_egress(&self, _: &Path, _: &EgressPayload) -> io::Result<Response> {
             Ok(self.0)
         }
     }
@@ -518,16 +477,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let writer = build_writer("ai-coding", &dir, &AuditRuntime::default(), "u7".to_owned());
 
-        // A refusal (code 2 = AddrOutOfScope) on add_address.
+        // A refusal (code 2 = AddrOutOfScope) on del_address (the one standalone priv op left).
         let refusing = FixedPriv(Response::refused(2));
         let audited = AuditedPrivileged::new(&refusing, Some(&writer));
         let addr = "127.0.0.1".parse::<IpAddr>().expect("addr");
-        let _ = audited.add_address(7, "lo", addr, 28);
+        let _ = audited.del_address(7, "lo", addr, 28);
 
-        // A success (invoke) on add_address.
+        // A success (invoke) on del_address.
         let ok = FixedPriv(Response::ok());
         let audited_ok = AuditedPrivileged::new(&ok, Some(&writer));
-        let _ = audited_ok.add_address(8, "lo", addr, 28);
+        let _ = audited_ok.del_address(8, "lo", addr, 28);
 
         // Dropping the writer joins the buffered sink so priv.jsonl is flushed.
         drop(writer);
@@ -535,7 +494,7 @@ mod tests {
 
         assert!(body.contains(r#""event":"priv.refuse""#), "{body}");
         assert!(body.contains(r#""source":"privhelper""#), "{body}");
-        assert!(body.contains(r#""operation":"add-addr""#), "{body}");
+        assert!(body.contains(r#""operation":"del-addr""#), "{body}");
         assert!(body.contains(r#""code":2"#), "{body}");
         assert!(body.contains("reserved per-kennel subnet"), "{body}");
         assert!(body.contains(r#""params":{"ctx":7,"#), "{body}");

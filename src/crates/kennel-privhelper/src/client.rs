@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 
 use kennel_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_raw_fds};
 
-use crate::wire::{EgressPayload, Op, Request, Response};
+use crate::wire::{Op, Request, Response};
 
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
 ///
@@ -37,6 +37,7 @@ use crate::wire::{EgressPayload, Op, Request, Response};
 pub fn construct_kennel(
     helper: &Path,
     construction_half: &[u8],
+    egress: Option<&[u8]>,
     pty_fd: Option<RawFd>,
 ) -> io::Result<(Child, i32)> {
     let (ours, theirs) = seqpacket_pair()?;
@@ -46,10 +47,18 @@ pub fn construct_kennel(
         .spawn()?;
     // `theirs` is consumed by the Command (dup'd to the child's stdin); our end stays.
 
-    // The pty return socket (interactive runs) travels as the sole SCM fd; it lives as a
-    // RawFd in the spawn plan, kept open by the caller for the duration of this call.
+    // One datagram, framed `[u32 ch_len][construction-half][egress]`: the length-prefix lets
+    // the factory hand its decoder exactly the construction-half bytes, with the (optional)
+    // egress payload as the tail. The pty return socket (interactive runs) travels as the sole
+    // SCM fd; it lives as a RawFd in the spawn plan, kept open by the caller for this call.
+    let mut data = Vec::with_capacity(construction_half.len().saturating_add(4));
+    data.extend_from_slice(&u32::try_from(construction_half.len()).unwrap_or(u32::MAX).to_le_bytes());
+    data.extend_from_slice(construction_half);
+    if let Some(eg) = egress {
+        data.extend_from_slice(eg);
+    }
     let fds: Vec<RawFd> = pty_fd.into_iter().collect();
-    send_with_raw_fds(ours.as_fd(), construction_half, &fds)?;
+    send_with_raw_fds(ours.as_fd(), &data, &fds)?;
 
     let mut buf = [0u8; 4];
     let (n, _none) = recv_with_fds(ours.as_fd(), &mut buf)?;
@@ -98,43 +107,10 @@ fn exchange(helper: &Path, bytes: &[u8]) -> io::Result<Response> {
     })
 }
 
-/// Load, populate, and attach the egress BPF programs to a kennel's cgroup.
+/// Ask the helper to remove `addr/prefix` on `interface` for kennel `ctx` (teardown).
 ///
-/// Asks the helper to attach the egress programs to the cgroup at `cgroup`;
-/// `payload` carries the resolved map contents (built from the spawn `Plan`).
-///
-/// # Errors
-///
-/// As [`invoke`].
-pub fn setup_egress(
-    helper: &Path,
-    cgroup: PathBuf,
-    payload: &EgressPayload,
-) -> io::Result<Response> {
-    let mut bytes = cgroup_request(Op::SetupEgress, cgroup).encode();
-    bytes.extend_from_slice(&payload.encode());
-    exchange(helper, &bytes)
-}
-
-/// Ask the helper to add `addr/prefix` on `interface` for kennel `ctx`.
-///
-/// # Errors
-///
-/// As [`invoke`].
-pub fn add_address(
-    helper: &Path,
-    ctx: u16,
-    interface: &str,
-    addr: IpAddr,
-    prefix: u8,
-) -> io::Result<Response> {
-    invoke(
-        helper,
-        &addr_request(Op::AddAddr, ctx, interface, addr, prefix),
-    )
-}
-
-/// Ask the helper to remove `addr/prefix` on `interface` for kennel `ctx`.
+/// The address *add* and the egress-BPF *attach* are folded into the `construct_kennel` op, so
+/// this is the only standalone one-shot op left.
 ///
 /// # Errors
 ///
@@ -150,17 +126,6 @@ pub fn del_address(
         helper,
         &addr_request(Op::DelAddr, ctx, interface, addr, prefix),
     )
-}
-
-const fn cgroup_request(op: Op, path: PathBuf) -> Request {
-    Request {
-        op,
-        ctx: 0,
-        addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        prefix: 0,
-        interface: String::new(),
-        cgroup_path: path,
-    }
 }
 
 fn addr_request(op: Op, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Request {

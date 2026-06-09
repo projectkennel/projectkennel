@@ -36,7 +36,8 @@ use kennel_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 
 pub use plan::{
-    AuxProcess, BindMount, ConstructionHalf, Plan, ProxyEndpoint, ShimView, Supervision,
+    AuxProcess, BindMount, ConstructionHalf, LoopbackAddr, Plan, ProxyEndpoint, ShimView,
+    Supervision,
 };
 
 /// The per-instance values the runtime fills into a settled policy's deferred
