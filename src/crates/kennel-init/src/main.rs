@@ -429,7 +429,9 @@ mod tests {
         let mut starts = vec![now; START_LIMIT_BURST];
         assert!(!may_restart(&mut starts, now));
         // Starts older than the window are pruned, so the budget recovers.
-        let stale = now - START_LIMIT_INTERVAL - Duration::from_secs(1);
+        let stale = now
+            .checked_sub(START_LIMIT_INTERVAL + Duration::from_secs(1))
+            .expect("test Instant is well past boot");
         let mut starts = vec![stale; START_LIMIT_BURST];
         assert!(may_restart(&mut starts, now));
         assert!(starts.is_empty(), "stale starts are pruned out of the window");

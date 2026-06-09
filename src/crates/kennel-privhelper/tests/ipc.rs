@@ -14,14 +14,13 @@ fn run(req: &Request) -> Response {
         .expect("invoke privhelper")
 }
 
-fn cgroup_request(op: Op, path: &str) -> Request {
+fn bare_request(op: Op) -> Request {
     Request {
         op,
         ctx: 0,
         addr: "0.0.0.0".parse().expect("placeholder addr"),
         prefix: 0,
         interface: String::new(),
-        cgroup_path: path.into(),
     }
 }
 
@@ -29,7 +28,7 @@ fn cgroup_request(op: Op, path: &str) -> Request {
 fn an_unallocated_user_is_refused() {
     // The test user has no /etc/kennel/subkennel allocation, so every operation
     // is refused before any privileged syscall — no privilege needed to verify.
-    let resp = run(&cgroup_request(Op::DelAddr, ""));
+    let resp = run(&bare_request(Op::DelAddr));
     assert_eq!(
         resp.status,
         Status::Refused,
@@ -94,7 +93,7 @@ fn removes_an_in_scope_address_and_refuses_out_of_scope() {
         .args(["addr", "add", &format!("{addr_str}/28"), "dev", "lo"])
         .status();
 
-    let mut req = cgroup_request(Op::DelAddr, "");
+    let mut req = bare_request(Op::DelAddr);
     req.ctx = 5;
     req.addr = addr.into();
     req.prefix = 28;

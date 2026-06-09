@@ -30,8 +30,8 @@ pub mod ringbuf;
 pub mod sys;
 
 pub use loader::{
-    create_maps, load_program, load_program_against, Loaded, MapSpec, ProgramSpec, KENNEL_MAPS,
-    KENNEL_PROGRAMS,
+    create_maps, load_program, load_program_against, update_kennel_map, Loaded, MapSpec,
+    ProgramSpec, KENNEL_MAPS, KENNEL_PROGRAMS,
 };
 pub use ringbuf::RingBuffer;
 

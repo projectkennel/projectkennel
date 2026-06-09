@@ -371,6 +371,45 @@ pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd
     Ok(maps)
 }
 
+/// Insert into one of the kennel's shared maps (from `create_maps(KENNEL_MAPS)`), if present.
+///
+/// A **safe** wrapper over the unsafe [`sys::map_update`]: it validates `key`/`value` against the
+/// named map's [`KENNEL_MAPS`] spec geometry before the call, so the kernel's read stays in
+/// bounds. This lets the `#![forbid(unsafe_code)]` privhelper populate the egress maps without an
+/// `unsafe` block of its own. A `name` not in `maps` is a no-op (the program set may omit it).
+///
+/// # Errors
+///
+/// An error if `name` is not a known kennel map, if `key`/`value` are shorter than its geometry,
+/// or the OS error if the kernel rejects the update.
+pub fn update_kennel_map(
+    maps: &BTreeMap<String, OwnedFd>,
+    name: &str,
+    key: &[u8],
+    value: &[u8],
+    flags: u64,
+) -> io::Result<()> {
+    let Some(fd) = maps.get(name) else {
+        return Ok(());
+    };
+    let spec = KENNEL_MAPS
+        .iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| other(format!("`{name}` is not a known kennel map")))?;
+    if key.len() < spec.key_size as usize || value.len() < spec.value_size as usize {
+        return Err(other(format!(
+            "map `{name}`: key/value too short ({}/{} bytes < required {}/{})",
+            key.len(),
+            value.len(),
+            spec.key_size,
+            spec.value_size
+        )));
+    }
+    // SAFETY: validated above that `key`/`value` are at least the map's key_size/value_size, so
+    // the kernel reads only in-bounds bytes from each.
+    unsafe { sys::map_update(fd.as_fd(), key, value, flags) }
+}
+
 /// Load `prog` from `elf` against the pre-created shared `maps`.
 ///
 /// Patches the program's map relocations against the shared `maps` (from

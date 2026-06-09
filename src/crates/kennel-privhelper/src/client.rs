@@ -9,7 +9,7 @@
 use std::io;
 use std::net::IpAddr;
 use std::os::fd::{AsFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use kennel_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_raw_fds};
@@ -135,6 +135,5 @@ fn addr_request(op: Op, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> 
         addr,
         prefix,
         interface: interface.to_owned(),
-        cgroup_path: PathBuf::new(),
     }
 }

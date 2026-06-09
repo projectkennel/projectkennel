@@ -299,18 +299,13 @@ fn populate_maps(
     maps: &std::collections::BTreeMap<String, std::os::fd::OwnedFd>,
     payload: &EgressPayload,
 ) -> std::io::Result<()> {
-    use kennel_bpf::sys::{map_update, BPF_ANY};
-    use std::os::fd::AsFd as _;
+    use kennel_bpf::sys::BPF_ANY;
 
+    // The safe `update_kennel_map` validates each (key, value) against the named map's
+    // KENNEL_MAPS geometry and does the unsafe `map_update` internally — so this
+    // `#![forbid(unsafe_code)]` crate needs no unsafe block of its own.
     let update = |name: &str, key: &[u8], value: &[u8]| -> std::io::Result<()> {
-        if let Some(fd) = maps.get(name) {
-            // SAFETY: every (key, value) below is built to the geometry of the named
-            // `KENNEL_MAPS` map (the `kennel_meta`/LPM/`bind_subnet` layouts in `bpf/maps.h`),
-            // so each slice is at least the map's key_size/value_size — the kernel's read stays
-            // in bounds.
-            unsafe { map_update(fd.as_fd(), key, value, BPF_ANY)? };
-        }
-        Ok(())
+        kennel_bpf::update_kennel_map(maps, name, key, value, BPF_ANY)
     };
 
     update("kennel_meta_map", &0u32.to_ne_bytes(), &payload.meta)?;

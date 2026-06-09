@@ -12,15 +12,15 @@
 //! helper and its caller are the same machine.
 //!
 //! ```text
-//! Request (294 bytes):
-//!   0      op           u8     (1 add-addr, 2 del-addr, 5 setup-egress, 6 set-gid-map)
-//!   1      family       u8     (4 or 6; 0 for the egress op)
+//! Request (38 bytes) — the only standalone op is `del-addr` (the address add + egress
+//! attach are folded into the factory's construct datagram):
+//!   0      op           u8     (2 del-addr)
+//!   1      family       u8     (4 or 6)
 //!   2      prefix       u8
 //!   3      _reserved    u8     (0)
 //!   4..6   ctx          u16    (16-bit kennel context; v4 uses ctx <= 255)
 //!   6..22  addr         [u8;16] (v4 in the first 4 bytes)
 //!   22..38 interface    [u8;16] (NUL-padded; kernel IFNAMSIZ)
-//!   38..294 cgroup_path [u8;256] (NUL-padded; the egress op's target cgroup)
 //!
 //! Response (6 bytes):
 //!   0      status       u8     (0 ok, 1 refused, 2 protocol, 3 internal)
@@ -29,15 +29,13 @@
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
 
 /// The on-wire length of a [`Request`].
-pub const REQUEST_LEN: usize = 294;
+pub const REQUEST_LEN: usize = 38;
 /// The on-wire length of a [`Response`].
 pub const RESPONSE_LEN: usize = 6;
 
 const INTERFACE_FIELD: usize = 16;
-const PATH_FIELD: usize = 256;
 
 /// Length of the `kennel_meta` map value (`bpf/maps.h`).
 pub const META_LEN: usize = 64;
@@ -121,14 +119,12 @@ pub struct Request {
     pub op: Op,
     /// The per-kennel context (16-bit; a v4-enabled kennel uses `ctx <= 255`).
     pub ctx: u16,
-    /// The address (for address ops; `0.0.0.0` is the placeholder for cgroup ops).
+    /// The address to remove.
     pub addr: IpAddr,
-    /// The subnet prefix length (for address ops).
+    /// The subnet prefix length.
     pub prefix: u8,
-    /// The interface name (for address ops).
+    /// The interface name (`lo`).
     pub interface: String,
-    /// The cgroup path (for cgroup ops).
-    pub cgroup_path: PathBuf,
 }
 
 /// A failure to decode a message.
@@ -182,9 +178,6 @@ impl Request {
         b.extend_from_slice(&self.ctx.to_ne_bytes());
         b.extend_from_slice(&addr16);
         b.extend_from_slice(&pad_field::<INTERFACE_FIELD>(self.interface.as_bytes()));
-        b.extend_from_slice(&pad_field::<PATH_FIELD>(
-            self.cgroup_path.as_os_str().as_encoded_bytes(),
-        ));
         b
     }
 
@@ -227,15 +220,12 @@ impl Request {
             _ => return Err(WireError::BadFamily),
         };
         let interface = read_string(buf.get(22..38).ok_or(WireError::BadLength)?)?;
-        let cgroup_path =
-            PathBuf::from(read_string(buf.get(38..294).ok_or(WireError::BadLength)?)?);
         Ok(Self {
             op,
             ctx,
             addr,
             prefix,
             interface,
-            cgroup_path,
         })
     }
 }
@@ -588,7 +578,6 @@ mod tests {
             addr: "127.7.3.1".parse().expect("v4"),
             prefix: 24,
             interface: "lo".to_owned(),
-            cgroup_path: PathBuf::new(),
         };
         let bytes = req.encode();
         assert_eq!(bytes.len(), REQUEST_LEN);
@@ -603,7 +592,6 @@ mod tests {
             addr: "fd00:1:2::1".parse().expect("v6"),
             prefix: 64,
             interface: "kennel-abc".to_owned(),
-            cgroup_path: PathBuf::from("/sys/fs/cgroup/kennel/3"),
         };
         let bytes = req.encode();
         assert_eq!(Request::decode(&bytes), Ok(req));
@@ -720,7 +708,6 @@ mod tests {
             addr: "0.0.0.0".parse().expect("v4"),
             prefix: 24,
             interface: String::new(),
-            cgroup_path: PathBuf::new(),
         }
         .encode();
         // Corrupt the op byte.
