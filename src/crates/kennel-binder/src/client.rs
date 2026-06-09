@@ -277,7 +277,9 @@ impl Connection {
                     "reply carried no valid fd object",
                 )
             })?;
-        let owned = sys::own_fd(raw);
+        // SAFETY: `raw` was just transferred to us by the binder driver (a translated
+        // BINDER_TYPE_FD object) and filtered `>= 0` above, so it is a valid fd we solely own.
+        let owned = unsafe { sys::own_fd(raw) };
         let mut w = Vec::new();
         proto::write_free_buffer(&mut w, reply.buffer);
         self.write_only(&w)?;
@@ -371,7 +373,9 @@ impl Connection {
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "reply carried no valid fd object")
                 })?;
-            Some(sys::own_fd(raw))
+            // SAFETY: `raw` is a fd the binder driver just transferred to us, filtered `>= 0`
+            // above — a valid fd we solely own.
+            Some(unsafe { sys::own_fd(raw) })
         } else {
             None
         };
@@ -481,7 +485,9 @@ impl Connection {
             read_consumed: 0,
             read_buffer: 0,
         };
-        sys::write_read(self.fd.as_fd(), &mut bwr)
+        // SAFETY: `write_buffer` points at `write` (live for the call) with `write_size` set to
+        // its length; the read side is zero-sized. The kernel reads only those `write_size` bytes.
+        unsafe { sys::write_read(self.fd.as_fd(), &mut bwr) }
     }
 
     /// Run one `BINDER_WRITE_READ`: hand the driver `write` (`BC_*` commands) and
@@ -496,7 +502,9 @@ impl Connection {
             read_consumed: 0,
             read_buffer: read.as_mut_ptr() as u64,
         };
-        sys::write_read(self.fd.as_fd(), &mut bwr)?;
+        // SAFETY: `write_buffer`/`read_buffer` point at `write`/`read`, both live for the call,
+        // with `write_size`/`read_size` set to their exact lengths; the kernel honours both.
+        unsafe { sys::write_read(self.fd.as_fd(), &mut bwr)? };
         let n = usize::try_from(bwr.read_consumed).unwrap_or(0);
         let mut rest = read.get(..n).unwrap_or(&[]);
         let mut out = Vec::new();

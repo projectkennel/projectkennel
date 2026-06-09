@@ -184,6 +184,10 @@ pub struct Loaded {
     pub program: OwnedFd,
     /// The created maps, by name.
     pub maps: BTreeMap<String, OwnedFd>,
+    /// Per-map `(key_size, value_size)`, so [`update_map`](Self::update_map) can validate slice
+    /// lengths before the kernel reads them — which is what keeps that method a sound *safe*
+    /// wrapper over the unsafe [`sys::map_update`].
+    geometry: BTreeMap<String, (u32, u32)>,
 }
 
 impl Loaded {
@@ -197,18 +201,32 @@ impl Loaded {
     }
 
     /// Insert or overwrite an element of the named map (`BPF_MAP_UPDATE_ELEM`).
-    /// `key`/`value` must match the map's declared key/value sizes.
+    ///
+    /// A **safe** wrapper over the unsafe [`sys::map_update`]: it validates `key`/`value` are at
+    /// least the map's declared `key_size`/`value_size` before the call, so the kernel's read
+    /// stays in bounds (a too-short slice returns an error, never undefined behaviour).
     ///
     /// # Errors
     ///
-    /// Returns an error if the program did not reference a map of that name, or
-    /// the OS error if the kernel rejects the update.
+    /// Returns an error if the program did not reference a map of that name, if `key`/`value` are
+    /// shorter than the map's geometry, or the OS error if the kernel rejects the update.
     pub fn update_map(&self, name: &str, key: &[u8], value: &[u8], flags: u64) -> io::Result<()> {
         let map = self
             .maps
             .get(name)
             .ok_or_else(|| other(format!("no map `{name}` in this program")))?;
-        sys::map_update(map.as_fd(), key, value, flags)
+        if let Some(&(key_size, value_size)) = self.geometry.get(name) {
+            if key.len() < key_size as usize || value.len() < value_size as usize {
+                return Err(other(format!(
+                    "map `{name}`: key/value too short ({}/{} bytes < required {key_size}/{value_size})",
+                    key.len(),
+                    value.len()
+                )));
+            }
+        }
+        // SAFETY: validated above that `key`/`value` are at least the map's key_size/value_size,
+        // so the kernel reads only in-bounds bytes from each.
+        unsafe { sys::map_update(map.as_fd(), key, value, flags) }
     }
 
     /// Detach this program's `attach_type` from `cgroup` (`BPF_PROG_DETACH`).
@@ -398,6 +416,7 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
     let (mut insns, relocs) = section_relocations(&file, prog.section)?;
 
     let mut maps: BTreeMap<String, OwnedFd> = BTreeMap::new();
+    let mut geometry: BTreeMap<String, (u32, u32)> = BTreeMap::new();
     for (off, name) in &relocs {
         // Create the map once, then patch this instruction with its fd.
         if !maps.contains_key(name) {
@@ -413,6 +432,7 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
                 spec.map_flags,
             )?;
             maps.insert(name.clone(), fd);
+            geometry.insert(name.clone(), (spec.key_size, spec.value_size));
         }
         let fd = maps.get(name).ok_or_else(|| other("map vanished"))?.as_fd();
         let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
@@ -420,7 +440,11 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
     }
 
     let program = finish_load(prog, &insns)?;
-    Ok(Loaded { program, maps })
+    Ok(Loaded {
+        program,
+        maps,
+        geometry,
+    })
 }
 
 #[cfg(all(test, feature = "e2e"))]

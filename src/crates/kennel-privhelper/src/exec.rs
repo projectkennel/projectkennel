@@ -304,7 +304,11 @@ fn populate_maps(
 
     let update = |name: &str, key: &[u8], value: &[u8]| -> std::io::Result<()> {
         if let Some(fd) = maps.get(name) {
-            map_update(fd.as_fd(), key, value, BPF_ANY)?;
+            // SAFETY: every (key, value) below is built to the geometry of the named
+            // `KENNEL_MAPS` map (the `kennel_meta`/LPM/`bind_subnet` layouts in `bpf/maps.h`),
+            // so each slice is at least the map's key_size/value_size — the kernel's read stays
+            // in bounds.
+            unsafe { map_update(fd.as_fd(), key, value, BPF_ANY)? };
         }
         Ok(())
     };

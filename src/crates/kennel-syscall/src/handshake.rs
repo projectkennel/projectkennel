@@ -1,36 +1,32 @@
-//! A tiny anonymous-pipe handshake for the spawn-time `gid_map` exchange.
+//! A tiny anonymous-pipe **ready/ack** handshake between two cooperating local processes.
 //!
 //! # Purpose
 //!
-//! The unprivileged spawn re-grants a supplementary group by deferring the
-//! workload userns `gid_map` to the privhelper (§7.4.8): the spawn child (A)
-//! establishes its user namespace, then must pause until a privileged helper
-//! (running in the init userns, where it holds `CAP_SETGID`) writes A's
-//! `gid_map`, before A proceeds to fork the PID-1 grandchild and exec. Because
-//! `Command::spawn` blocks the parent until A execs, kenneld services the pause
-//! on a separate thread (`gid-map-handshake-design`, design (a)). This module is
-//! the two-pipe primitive that carries the exchange:
+//! The live user is the privhelper **factory**'s clone sequence (`kennel-privhelper`'s
+//! `construct.rs`): the construction child is `clone(CLONE_NEWUSER|…)`'d with **no** identity
+//! map yet, so it cannot `set_uid(0)` into the kennel's uid 0 until the parent has written its
+//! `/proc/<pid>/uid_map` + `gid_map` (you cannot become a uid the user namespace has not mapped).
+//! The parent writes the maps, then sends `ACK_PROCEED`; the child blocks on the read until then
+//! — the canonical bubblewrap/runc map-write handshake. This module is that one-byte ack carried
+//! over a close-on-exec pipe (plus a cancellable, `poll`-based wait for the servicer side).
 //!
-//! * A → servicer: a 4-byte **ready** signal carrying A's pid.
-//! * servicer → A: a 1-byte **ack** (proceed / abort).
+//! It was originally written for the deferred-`gid_map` exchange of the legacy unprivileged
+//! spawn (§7.4.8): the spawn child paused until a privileged helper wrote its `gid_map`. That
+//! path is **gone** — the factory now writes the full identity map (granted groups included) in
+//! one shot — but the primitive is reused, unchanged, for the maps-written handshake above.
 //!
 //! # Why nix here
 //!
-//! These are four trivial syscalls (`pipe2`/`poll`/`read`/`write`). Rather than
-//! own the `unsafe` for them, this module uses nix's safe wrappers
-//! (`nix::unistd::{pipe2, read, write}` and `nix::poll`) — the §4 "prefer a vetted
-//! crate to our own `unsafe`" rule. The cancellable wait genuinely needs `poll`,
-//! so the crate enables nix's `poll` feature (it pulls no new dependency); the
-//! module is itself `unsafe`-free, which keeps `kennel-spawn`
-//! `#![forbid(unsafe_code)]` for free.
+//! These are four trivial syscalls (`pipe2`/`poll`/`read`/`write`). Rather than own the `unsafe`
+//! for them, this module uses nix's safe wrappers — the §4 "prefer a vetted crate to our own
+//! `unsafe`" rule. The cancellable wait genuinely needs `poll`, so the crate enables nix's
+//! `poll` feature (it pulls no new dependency); the module is itself `unsafe`-free.
 //!
 //! # Threat bearing
 //!
-//! Indirect: the handshake is what lets the `gid_map` write happen in the
-//! privileged helper rather than by relaxing the spawn's privilege (§7.4.8,
-//! T1.6). This module carries no policy; it only moves bytes between two
-//! cooperating local processes that already share a trust domain (kenneld and
-//! its own spawn child).
+//! Indirect: it carries no policy, only bytes between two processes that already share a trust
+//! domain. The map-write sync it gates is what lets the privileged map write and the child's
+//! drop into the kennel's uid 0 happen in the right order.
 
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};

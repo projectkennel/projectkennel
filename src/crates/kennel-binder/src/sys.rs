@@ -20,7 +20,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 /// which holds for a fd the kernel just dup'd into us delivering a transaction. The
 /// caller must check `raw >= 0` first.
 #[must_use]
-pub fn own_fd(raw: i32) -> OwnedFd {
+pub unsafe fn own_fd(raw: i32) -> OwnedFd {
     // SAFETY: the binder driver dup'd `raw` into this process when it delivered the
     // BINDER_TYPE_FD object, so we are its sole owner; wrapping transfers that
     // ownership for RAII close. The caller has checked `raw >= 0`.
@@ -335,14 +335,19 @@ pub fn poll_in(fd: BorrowedFd<'_>, timeout_ms: i32) -> io::Result<bool> {
 /// Run one `BINDER_WRITE_READ`.
 ///
 /// On success `bwr.write_consumed`/`read_consumed` are updated by the driver.
-/// `write_buffer`/`read_buffer` must point at live buffers of at least
-/// `write_size`/`read_size` bytes.
+///
+/// # Safety
+///
+/// `bwr.write_buffer`/`read_buffer` must point at live buffers of at least
+/// `write_size`/`read_size` bytes (the kernel reads the write buffer and writes the read
+/// buffer up to those lengths); the struct itself must be a live, correctly-sized
+/// `binder_write_read`. Garbage pointers/sizes are undefined behaviour.
 ///
 /// # Errors
 ///
 /// Returns the OS error if the ioctl fails. `EINTR` is surfaced to the caller to
 /// retry.
-pub fn write_read(fd: BorrowedFd<'_>, bwr: &mut BinderWriteRead) -> io::Result<()> {
+pub unsafe fn write_read(fd: BorrowedFd<'_>, bwr: &mut BinderWriteRead) -> io::Result<()> {
     // SAFETY: BINDER_WRITE_READ reads/updates the `binder_write_read` at `bwr` and
     // reads `write_size` bytes from `write_buffer` / writes up to `read_size` bytes
     // to `read_buffer`. The caller guarantees those pointers are live for the

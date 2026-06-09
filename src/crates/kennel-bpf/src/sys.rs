@@ -145,14 +145,17 @@ pub fn map_create(
 
 /// Insert or overwrite one element of a map (`BPF_MAP_UPDATE_ELEM`).
 ///
-/// `key` must be at least the map's `key_size` bytes and `value` at least its
-/// `value_size` bytes — the kernel reads exactly those many from each pointer.
+/// # Safety
+///
+/// `key` must be at least the map's `key_size` bytes and `value` at least its `value_size`
+/// bytes — the kernel reads exactly those many from each pointer, so a shorter slice is an
+/// out-of-bounds read (undefined behaviour). The caller must know the target map's geometry.
 ///
 /// # Errors
 ///
 /// Returns the OS error if the fd is out of range or the kernel rejects the
-/// update (e.g. the map is read-only, or `key`/`value` are too short to read).
-pub fn map_update(map: BorrowedFd<'_>, key: &[u8], value: &[u8], flags: u64) -> io::Result<()> {
+/// update (e.g. the map is read-only).
+pub unsafe fn map_update(map: BorrowedFd<'_>, key: &[u8], value: &[u8], flags: u64) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let attr = MapElemAttr {
         map_fd: u32::try_from(map.as_raw_fd())
