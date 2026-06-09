@@ -305,6 +305,11 @@ fn lifecycle_handle(
             Outcome::Error,
             Reply::Data(one(status::OK)),
         ),
+        lifecycle::NOTIFY_FACADE_RESTART => (
+            "binder.notify-facade-restart",
+            Outcome::Info,
+            Reply::Data(one(status::OK)),
+        ),
         lifecycle::NOTIFY_WORKLOAD_EXEC => (
             "binder.notify-workload-exec",
             Outcome::Info,

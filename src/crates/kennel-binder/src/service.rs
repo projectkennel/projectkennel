@@ -42,6 +42,8 @@ pub mod lifecycle {
     pub const NOTIFY_FACADE_CRASH: u32 = 0x102;
     /// `kennel-init` reports it is about to `execve` the workload.
     pub const NOTIFY_WORKLOAD_EXEC: u32 = 0x103;
+    /// `kennel-init` reports it re-forked a crashed facade (payload: the new host pid).
+    pub const NOTIFY_FACADE_RESTART: u32 = 0x104;
 }
 
 /// Reply status byte (the first byte of a data reply).
