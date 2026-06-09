@@ -110,6 +110,15 @@ pub fn set_controlling_tty(fd: BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
+/// The fixed descriptor at which `kennel-init` finds the interactive pty **return socket**.
+///
+/// `kennel-init` is `fexecve`'d with empty argv, so it cannot be told a descriptor number on
+/// the command line. For an interactive run the privhelper factory places the return socket
+/// (over which the workload's pty master is sent back to the CLI) at this well-known fd before
+/// the `fexecve`, and the seal passes it to [`setup_view_pty`] when the supervision-half says
+/// the run is interactive (`07-2`/`07-9`). 0/1/2 are stdio; 3 is the first free slot.
+pub const PTY_RETURN_FD: RawFd = 3;
+
 /// Allocate a controlling pty from the current mount namespace's `/dev/ptmx`.
 ///
 /// Makes its slave this process's controlling terminal and stdio, and hands the

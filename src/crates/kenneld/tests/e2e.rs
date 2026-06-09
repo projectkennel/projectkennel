@@ -848,3 +848,161 @@ fn no_ipc_kennel_runs_through_the_factory() {
     let _ = std::fs::remove_dir_all(&view_root);
     let _ = std::fs::remove_dir_all(&audit_base);
 }
+
+/// **Interactive pty through the factory, end to end.** Drives the real `run_kennel` with
+/// `interactive: true` and a return socket; the workload runs on a controlling tty allocated
+/// in the kennel's own devpts, and its pty master is handed back over the return socket. This
+/// proves the construction-socket pty path: kenneld passes the return socket on the construct
+/// channel → the factory re-homes it at `PTY_RETURN_FD` → `kennel-init` inherits it across
+/// `fexecve` → the seal's `setup_view_pty` allocates the pty and sends the master back. The
+/// workload's `test -t 1` confirms its stdout really is a tty.
+#[test]
+fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
+    use kenneld::control::{recv_response, Response, StartRequest};
+    use kenneld::policy::TrustStoreLoader;
+    use kenneld::server::{run_kennel, Identity, Shared};
+    use std::io::Read as _;
+    use std::os::fd::{AsFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    let uid = kennel_syscall::unistd::real_uid();
+    let gid = kennel_syscall::unistd::real_gid();
+    if uid == 0 {
+        eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    if !subkennel_has_line(uid) {
+        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
+        return;
+    }
+    let Some(base) = own_cgroup_base() else {
+        eprintln!("SKIP: cannot read a delegated cgroup base");
+        return;
+    };
+    if std::fs::create_dir_all(&base).is_err() {
+        eprintln!("SKIP: cgroup base not writable — run under the e2e runner");
+        return;
+    }
+
+    // An interactive kennel needs a devpts in its view: granting the `/dev/pts` directory makes
+    // build_view_and_pivot mount a fresh `devpts` + symlink `/dev/ptmx`, so `openpty` works.
+    let mut policy = no_ipc_policy(&home);
+    policy
+        .effective_policy
+        .fs
+        .dev
+        .allow
+        .extend(["/dev/pts/**".to_owned(), "/dev/tty".to_owned()]);
+
+    let key = SigningKey::from_seed("pty-key", &[5u8; 32]).expect("key");
+    let signed = kennel_policy::sign_settled(&policy, &key).expect("sign");
+    let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_policy::KeySet::new();
+    keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
+
+    let run = runtime_dir();
+    let tag = std::process::id();
+    let policy_file = run.join(format!("kenneld-pty-policy-{tag}.bin"));
+    std::fs::write(&policy_file, &bytes).expect("write policy");
+    let etc_base = run.join(format!("kenneld-pty-etc-{tag}"));
+    let view_root = run.join(format!("kenneld-pty-root-{tag}"));
+    let audit_base = run.join(format!("kenneld-pty-audit-{tag}"));
+    for p in [&etc_base, &view_root, &audit_base] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    let identity = Identity {
+        uid,
+        gid,
+        username: "dev".to_owned(),
+        home,
+        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        cgroup_base: base,
+        proxy: None,
+        etc_base: Some(etc_base.clone()),
+        view_base: Some(view_root.clone()),
+        audit_base: Some(audit_base.clone()),
+        bastion: None,
+        afunix_shim_bin: Some(sibling_binary("kennel-afunix-shim")),
+        init_bin: Some(sibling_binary("kennel-init")),
+    };
+    let shared = Shared::new(
+        identity,
+        HelperClient::new(privhelper_path()),
+        TrustStoreLoader::from_keys(keys),
+    );
+
+    // The CLI's return socket: the kennel sends the workload's pty master back over `child`;
+    // the test reads it from `ours`.
+    let (ours, child) = UnixStream::pair().expect("return socketpair");
+    let req = StartRequest {
+        policy: policy_file,
+        kennel: "pty".to_owned(),
+        // `test -t 1` proves stdout is a tty (the pty slave); the echo lands on the master.
+        argv: vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "test -t 1 && echo KENNEL_PTY_OK".to_owned(),
+        ],
+        cwd: PathBuf::from("/"),
+        term: "xterm".to_owned(),
+        interactive: true,
+    };
+
+    let (mut control, mut server) = UnixStream::pair().expect("control socketpair");
+    // A real controller holds the pty master open for the workload's whole life — an unheld
+    // master hangs up the session (SIGHUP). So receive + hold + drain the master on a thread
+    // while `run_kennel` (which blocks until the workload exits) runs on this one.
+    let output = std::thread::scope(|s| {
+        let reader = s.spawn(|| -> Vec<u8> {
+            let mut byte = [0u8; 1];
+            let Ok((_n, fds)) = kennel_syscall::scm::recv_with_fds(ours.as_fd(), &mut byte) else {
+                return Vec::new();
+            };
+            let Some(master) = fds.into_iter().next() else {
+                return Vec::new();
+            };
+            // Holds the master for the workload's run; read_to_end drains until the slave's EIO.
+            let mut out = Vec::new();
+            let _ = std::fs::File::from(master).read_to_end(&mut out);
+            out
+        });
+        run_kennel(&shared, &req, vec![OwnedFd::from(child)], &mut server);
+        reader.join().expect("pty reader thread")
+    });
+
+    match recv_response(&mut control).expect("a first response") {
+        Response::Started { .. } => {}
+        Response::Error(msg) => {
+            let lower = msg.to_lowercase();
+            if ["userns", "permission", "capabilit", "privhelper", "eperm"]
+                .iter()
+                .any(|n| lower.contains(n))
+            {
+                eprintln!("SKIP: environment not privileged enough for the factory: {msg}");
+                return;
+            }
+            panic!("interactive bring-up failed: {msg}");
+        }
+        other => panic!("expected Started, got {other:?}"),
+    }
+    assert_eq!(
+        recv_response(&mut control).expect("an exit response"),
+        Response::Exited { code: 0 },
+        "`test -t 1` succeeds ⇒ the workload's stdout is a controlling tty"
+    );
+
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("KENNEL_PTY_OK"),
+        "the workload's tty output came back over the pty master: {text:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&etc_base);
+    let _ = std::fs::remove_dir_all(&view_root);
+    let _ = std::fs::remove_dir_all(&audit_base);
+}

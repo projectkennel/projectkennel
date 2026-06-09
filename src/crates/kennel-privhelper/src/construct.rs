@@ -32,13 +32,15 @@
 //! path or fd the operator supplies (sec review: trusted init source).
 
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use kennel_spawn::wire::decode_construction;
 use kennel_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf};
+use kennel_syscall::fd::dup_onto;
 use kennel_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
 use kennel_syscall::namespace::clone_pid1;
 use kennel_syscall::process::{wait_any, Reaped};
+use kennel_syscall::pty::PTY_RETURN_FD;
 use kennel_syscall::scm::{recv_with_fds, send_with_fds};
 use kennel_syscall::spawn::fexecve;
 use kennel_syscall::unistd::{real_gid, real_uid};
@@ -79,12 +81,14 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    leaves only stdout/stderr inherited.
     kennel_syscall::fd::set_cloexec(chan)?;
 
-    // 1. Receive the construction-half. (The datagram may also carry fds — a legacy init fd
-    //    kenneld still sends, and, later, a pty socket — but the binary to run as the kennel's
-    //    uid 0 is NOT taken from the wire; see step 1b. Received fds are `MSG_CMSG_CLOEXEC`,
-    //    so dropping them here is enough — they cannot survive the fexecve.)
+    // 1. Receive the construction-half. For an interactive run the datagram also carries the
+    //    controlling-pty **return socket** as the sole `SCM_RIGHTS` fd (the binary to run as
+    //    uid 0 is NOT taken from the wire — see step 1b). It arrives `MSG_CMSG_CLOEXEC`; the
+    //    construction child re-homes it at `PTY_RETURN_FD` (clearing close-on-exec) just before
+    //    `fexecve` so the argv-less `kennel-init` inherits it there.
     let mut buf = vec![0u8; RECV_CAP];
-    let (n, _wire_fds) = recv_with_fds(chan, &mut buf)?;
+    let (n, mut wire_fds) = recv_with_fds(chan, &mut buf)?;
+    let pty_fd: Option<OwnedFd> = (!wire_fds.is_empty()).then(|| wire_fds.remove(0));
     let half = decode_construction(buf.get(..n).unwrap_or(&[]))
         .map_err(|e| io::Error::other(format!("construction-half decode: {e:?}")))?;
 
@@ -142,6 +146,15 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // returns, tripping the _exit(127) backstop (no half-built kennel runs the workload).
         if build_kennel(&half, op_uid, op_gid).is_err() {
             return;
+        }
+        // Interactive run: re-home the pty return socket at the fixed `PTY_RETURN_FD` so it
+        // survives the `fexecve` (dup2 clears close-on-exec) and the argv-less `kennel-init`
+        // inherits it there. Done last, after the handshake pipe is finished with, so the
+        // dup target cannot clobber a still-needed descriptor.
+        if let Some(pty) = &pty_fd {
+            if dup_onto(pty.as_fd(), PTY_RETURN_FD).is_err() {
+                return;
+            }
         }
         // Hand off to the trusted `kennel-init` (resolved from root-owned config, not the
         // wire) **as the kennel's uid 0** (no drop): PID 1 must NOT share the operator uid, or

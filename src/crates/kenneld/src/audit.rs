@@ -412,7 +412,7 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
     fn construct_kennel(
         &self,
         construction_half: &[u8],
-        pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
+        pty_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(std::process::Child, i32)> {
         self.inner.construct_kennel(construction_half, pty_fd)
     }

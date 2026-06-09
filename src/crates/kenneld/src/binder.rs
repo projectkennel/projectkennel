@@ -134,11 +134,10 @@ pub struct Lifecycle {
     /// host pid (`task_tgid_nr_ns`), never the kennel-internal `1`. `None` ⇒ disabled.
     pub init_host_pid: Option<i32>,
     /// The encoded supervision-half (`kennel-spawn::wire::encode_supervision`) served on
-    /// `GET_SANDBOX_PLAN`.
+    /// `GET_SANDBOX_PLAN`. (The interactive pty does NOT ride binder: the privhelper factory
+    /// passes the return socket on the construction channel and `kennel-init` inherits it at
+    /// `PTY_RETURN_FD` — `07-2`, decoupled from the bus.)
     pub supervision: Vec<u8>,
-    /// The controlling-pty return socket for an interactive run, handed over (once) as a
-    /// `BINDER_TYPE_FD` object on the first `GET_SANDBOX_PLAN`. `None` for non-interactive.
-    pub pty_fd: Option<OwnedFd>,
 }
 
 /// A running per-kennel binder context manager: the serve thread plus its stop flag.
@@ -180,9 +179,9 @@ pub fn spawn(
         .name(format!("kennel-binder-{ctx}"))
         .spawn(move || {
             let mut registry = Registry::new(policy);
-            let mut lifecycle = lifecycle;
+            let lifecycle = lifecycle;
             let _ = cm.serve(POLL_MS, &worker_stop, |incoming| {
-                handle(&mut registry, &unix, &mut lifecycle, incoming, ctx, &writer)
+                handle(&mut registry, &unix, &lifecycle, incoming, ctx, &writer)
             });
         })?;
     Ok(Manager {
@@ -197,7 +196,7 @@ pub fn spawn(
 fn handle(
     registry: &mut Registry,
     unix: &UnixRuntime,
-    lifecycle: &mut Lifecycle,
+    lifecycle: &Lifecycle,
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
@@ -259,7 +258,7 @@ fn handle(
 /// not the registered init pid — a spoof, or any other in-kennel process — is denied
 /// and audited.
 fn lifecycle_handle(
-    lifecycle: &mut Lifecycle,
+    lifecycle: &Lifecycle,
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
@@ -286,13 +285,12 @@ fn lifecycle_handle(
 
     let (action, outcome, reply) = match incoming.code {
         lifecycle::GET_SANDBOX_PLAN => {
-            // The pty fd (if any) is handed over once; a length-prefixed data-and-fd
-            // reply that kennel-init decodes with transact_with_fd.
-            let bytes = lifecycle.supervision.clone();
+            // The supervision-half only; the interactive pty rides the construction channel
+            // (kennel-init inherits the return socket at PTY_RETURN_FD), not this reply.
             (
                 "binder.get-sandbox-plan",
                 Outcome::Allow,
-                Reply::DataAndFd(bytes, lifecycle.pty_fd.take()),
+                Reply::Data(lifecycle.supervision.clone()),
             )
         }
         lifecycle::NOTIFY_BOOT_SYNC => (

@@ -162,7 +162,7 @@ pub trait Privileged {
     fn construct_kennel(
         &self,
         _construction_half: &[u8],
-        _pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
+        _pty_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(Child, i32)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -216,7 +216,7 @@ impl Privileged for HelperClient {
     fn construct_kennel(
         &self,
         construction_half: &[u8],
-        pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
+        pty_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(Child, i32)> {
         kennel_privhelper::client::construct_kennel(&self.helper, construction_half, pty_fd)
     }
@@ -972,9 +972,11 @@ fn construct_via_factory<P: Privileged + Sync>(
     let supervision_bytes = kennel_spawn::wire::encode_supervision(&supervision);
 
     // The privhelper resolves + opens `kennel-init` itself from root-owned config (never the
-    // wire), so kenneld passes no init fd. The pty return socket (interactive runs) is still
-    // owed — None here (see docs/design/07-2-kennel-init.md).
-    let (child, init_pid) = privileged.construct_kennel(&half_bytes, None)?;
+    // wire), so kenneld passes no init fd. For an interactive run it does pass the pty return
+    // socket (the workload's pty master is sent back over it); the construction child re-homes
+    // it at `PTY_RETURN_FD` for `kennel-init`. The fd lives in the plan and is kept open by the
+    // caller (`run_kennel`'s `return_sock`) for the duration of construction.
+    let (child, init_pid) = privileged.construct_kennel(&half_bytes, plan.interactive_return_fd)?;
     state.factory = true;
 
     // Take binder node 0 of the kennel's binderfs (mounted by the factory) and serve the
@@ -986,7 +988,6 @@ fn construct_via_factory<P: Privileged + Sync>(
         let lifecycle = crate::binder::Lifecycle {
             init_host_pid: Some(init_pid),
             supervision: supervision_bytes,
-            pty_fd: None,
         };
         match acquire_binder_node0(|| Some(init_pid_u32), ctx, prep, lifecycle) {
             Ok(manager) => state.binder = Some(manager),

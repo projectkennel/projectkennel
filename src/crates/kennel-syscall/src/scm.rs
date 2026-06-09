@@ -76,6 +76,22 @@ pub fn send_with_fds(
     data: &[u8],
     fds: &[BorrowedFd<'_>],
 ) -> io::Result<usize> {
+    let raw: Vec<RawFd> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+    send_with_raw_fds(sock, data, &raw)
+}
+
+/// As [`send_with_fds`], but the descriptors are given as raw numbers.
+///
+/// The caller asserts each is a valid, open descriptor for the duration of the call (this is
+/// not `unsafe` in the Rust sense — `SCM_RIGHTS` validity is a runtime contract). Used where
+/// the descriptor exists only as a [`RawFd`] (e.g. the interactive pty return socket carried
+/// in the spawn plan), so a caller in a `#![forbid(unsafe_code)]` crate need not conjure a
+/// `BorrowedFd` from it.
+///
+/// # Errors
+/// An OS error if `sendmsg` fails, or `InvalidInput` if `data` is empty or there are more
+/// than [`MAX_FDS`] fds.
+pub fn send_with_raw_fds(sock: BorrowedFd<'_>, data: &[u8], fds: &[RawFd]) -> io::Result<usize> {
     if data.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -87,12 +103,11 @@ pub fn send_with_fds(
     }
 
     // nix builds and sizes the SCM_RIGHTS control message for us from this slice.
-    let raw: Vec<RawFd> = fds.iter().map(AsRawFd::as_raw_fd).collect();
     let iov = [IoSlice::new(data)];
-    let cmsgs = [ControlMessage::ScmRights(&raw)];
+    let cmsgs = [ControlMessage::ScmRights(fds)];
     // No fds: send a plain message with no control data (matching the SCM_RIGHTS
     // contract that an empty rights message is pointless).
-    let cmsgs: &[ControlMessage<'_>] = if raw.is_empty() { &[] } else { &cmsgs };
+    let cmsgs: &[ControlMessage<'_>] = if fds.is_empty() { &[] } else { &cmsgs };
 
     // `UnixAddr` only names the (unused) address type; a connected socket needs no
     // destination, so `addr` is None.

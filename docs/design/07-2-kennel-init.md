@@ -109,8 +109,10 @@ or the environment, and nothing for host-side `ps`/`/proc/<pid>/cmdline`/`enviro
 4. kenneld replies with the supervision half as a **flat serialized buffer**. Binder
    **copies** it into the target's mapped region — a binder transaction carries no shared
    pointers — so the Plan arrives as a localized flat buffer with no host↔sandbox
-   shared-memory hazard. The interactive pty-return socket, when present, rides the same reply
-   as a passed file descriptor.
+   shared-memory hazard. The interactive pty-return socket does **not** ride this reply: the
+   factory passes it on the construction channel and `kennel-init` inherits it at a fixed
+   descriptor (decoupled from the bus, §7.9.5a), so the supervision half carries only an
+   `interactive` flag telling the seal to use it.
 5. `kennel-init` decodes the flat buffer and knows exactly which facades to fork and which
    workload to launch.
 
@@ -123,8 +125,9 @@ kenneld holds the full Plan and never serialises all of it to one place:
   host-side, where there is no sandbox to manipulate it.
 - **Supervision half → `kennel-init`** (the `GET_SANDBOX_PLAN` reply): the facade list
   (paths+args), the workload argv/env, the operator uid/gid to drop to, the Landlock ruleset,
-  the seccomp filter, the ulimits, and the pty fd. Parsed **post-pivot**, so even a decoder bug
-  is contained to the sealed view.
+  the seccomp filter, the ulimits, and an `interactive` flag (the pty return socket itself
+  rides the construction channel, inherited at `PTY_RETURN_FD`). Parsed **post-pivot**, so even
+  a decoder bug is contained to the sealed view.
 
 Landlock and seccomp stay in `kennel-init` (applied to the **workload child** it forks) — not
 in the privhelper or before `fexecve` — because applying them earlier would also confine

@@ -8,11 +8,11 @@
 
 use std::io;
 use std::net::IpAddr;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use kennel_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_fds};
+use kennel_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_raw_fds};
 
 use crate::wire::{EgressPayload, Op, Request, Response};
 
@@ -35,7 +35,7 @@ use crate::wire::{EgressPayload, Op, Request, Response};
 pub fn construct_kennel(
     helper: &Path,
     construction_half: &[u8],
-    pty_fd: Option<BorrowedFd<'_>>,
+    pty_fd: Option<RawFd>,
 ) -> io::Result<(Child, i32)> {
     let (ours, theirs) = seqpacket_pair()?;
     let child = Command::new(helper)
@@ -44,8 +44,10 @@ pub fn construct_kennel(
         .spawn()?;
     // `theirs` is consumed by the Command (dup'd to the child's stdin); our end stays.
 
-    let fds: Vec<BorrowedFd<'_>> = pty_fd.into_iter().collect();
-    send_with_fds(ours.as_fd(), construction_half, &fds)?;
+    // The pty return socket (interactive runs) travels as the sole SCM fd; it lives as a
+    // RawFd in the spawn plan, kept open by the caller for the duration of this call.
+    let fds: Vec<RawFd> = pty_fd.into_iter().collect();
+    send_with_raw_fds(ours.as_fd(), construction_half, &fds)?;
 
     let mut buf = [0u8; 4];
     let (n, _none) = recv_with_fds(ours.as_fd(), &mut buf)?;

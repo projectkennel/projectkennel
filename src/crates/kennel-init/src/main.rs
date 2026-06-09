@@ -16,8 +16,9 @@
 //!
 //! 1. **Pulls** its supervision-half over binder (`GET_SANDBOX_PLAN` to node 0), the
 //!    in-view binder device being the one the factory mounted. The reply carries the
-//!    `kennel-spawn::wire::encode_supervision` bytes and, for an interactive run, the
-//!    controlling-pty return socket as a `BINDER_TYPE_FD` object.
+//!    `kennel-spawn::wire::encode_supervision` bytes (a plain data reply). For an interactive
+//!    run the controlling-pty return socket is NOT pulled here — the factory placed it at
+//!    `kennel_syscall::pty::PTY_RETURN_FD`, which this process inherited across the `fexecve`.
 //! 2. Acts as the **spawn owner**: forks each facade and the workload, dropping every
 //!    one to the masked operator identity (`set_gid` → `set_supplementary_groups` →
 //!    `set_uid`) before `execve`. Facades exec unconfined (they must reach the bus); the
@@ -37,7 +38,6 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::ExitCode;
@@ -93,13 +93,15 @@ fn main() -> ExitCode {
 fn run() -> io::Result<u8> {
     require_kennel_userns()?;
     let conn = open_bus()?;
-    let (bytes, pty_fd) = pull_plan(&conn)?;
+    let bytes = pull_plan(&conn)?;
     let sup = decode_supervision(&bytes)
         .map_err(|e| io::Error::other(format!("supervision-half decode failed: {e:?}")))?;
     // One synthesised environment, shared by the facades, the workload, and any facade the
     // supervisor re-forks (execve replaces env, so a borrow is enough). Built once here.
     let envp = env_cstrings(&sup.env)?;
-    let (workload_pid, facade_pids) = spawn_all(&conn, &sup, &envp, pty_fd.as_ref())?;
+    // The interactive pty return socket (when `sup.interactive`) was placed at `PTY_RETURN_FD`
+    // by the factory before our `fexecve` — it is not pulled over the bus.
+    let (workload_pid, facade_pids) = spawn_all(&conn, &sup, &envp)?;
     supervise(&conn, workload_pid, &sup, &envp, &facade_pids)
 }
 
@@ -135,12 +137,13 @@ fn open_bus() -> io::Result<Connection> {
     Connection::open(fd.into(), MAP_SIZE)
 }
 
-/// Pull the supervision-half (and the optional pty fd) from node 0, retrying while
-/// `kenneld` is still claiming the context-manager node (`BR_DEAD_REPLY`).
-fn pull_plan(conn: &Connection) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
+/// Pull the supervision-half from node 0, retrying while `kenneld` is still claiming the
+/// context-manager node (`BR_DEAD_REPLY`). (No fd rides this reply — the interactive pty is
+/// inherited at `PTY_RETURN_FD` from the construction channel, not the bus.)
+fn pull_plan(conn: &Connection) -> io::Result<Vec<u8>> {
     let mut last = None;
     for _ in 0..PULL_RETRIES {
-        match conn.transact_with_fd(CONTEXT_MANAGER_HANDLE, lifecycle::GET_SANDBOX_PLAN, &[]) {
+        match conn.transact(CONTEXT_MANAGER_HANDLE, lifecycle::GET_SANDBOX_PLAN, &[]) {
             Ok(reply) => return Ok(reply),
             Err(e) if is_node0_not_ready(&e) => {
                 last = Some(e);
@@ -164,7 +167,6 @@ fn spawn_all(
     conn: &Connection,
     sup: &Supervision,
     envp: &[CString],
-    pty_fd: Option<&OwnedFd>,
 ) -> io::Result<(i32, Vec<i32>)> {
     let groups = sup.groups.as_deref();
     let envp_ref = borrow(envp);
@@ -184,7 +186,7 @@ fn spawn_all(
     let program = cstr_path(&sup.program)?;
     let argv = to_cstrings(&sup.argv)?;
     let argv_ref = borrow(&argv);
-    let pty_raw: Option<RawFd> = pty_fd.map(AsRawFd::as_raw_fd);
+    let interactive = sup.interactive;
     let filter = (!sup.seccomp_deny.is_empty()).then(|| sup.seccomp_filter());
 
     let seal = || -> io::Result<()> {
@@ -193,10 +195,11 @@ fn spawn_all(
             std::env::set_current_dir(cwd)?;
         }
         // Controlling terminal FIRST, before Landlock/seccomp could gate the ioctls
-        // (`07-9` §7.9.2). The interactive path allocates a pty in the view's devpts and
-        // returns the master over the socket the CLI passed; otherwise adopt stdin.
-        if let Some(raw) = pty_raw {
-            kennel_syscall::pty::setup_view_pty(raw)?;
+        // (`07-9` §7.9.2). An interactive run allocates a pty in the view's devpts and returns
+        // the master over the return socket the factory placed at `PTY_RETURN_FD`; otherwise
+        // adopt stdin.
+        if interactive {
+            kennel_syscall::pty::setup_view_pty(kennel_syscall::pty::PTY_RETURN_FD)?;
         } else {
             kennel_syscall::pty::adopt_stdin_as_controlling_tty();
         }

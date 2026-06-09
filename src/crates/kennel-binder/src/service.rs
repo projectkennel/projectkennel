@@ -32,8 +32,10 @@ pub mod verb {
 pub mod lifecycle {
     /// `kennel-init` pulls its supervision-half.
     ///
-    /// The reply carries the `kennel-spawn::wire::encode_supervision` bytes and, if
-    /// interactive, the controlling-pty fd as a `BINDER_TYPE_FD` object (data-and-fd).
+    /// The reply carries the `kennel-spawn::wire::encode_supervision` bytes as a plain data
+    /// reply. (The interactive pty does NOT ride binder: the privhelper factory passes the
+    /// return socket on the construction channel and `kennel-init` inherits it at
+    /// `kennel_syscall::pty::PTY_RETURN_FD` — `07-2`, decoupled from the bus.)
     pub const GET_SANDBOX_PLAN: u32 = 0x100;
     /// `kennel-init` reports the facades are up (the facade→pid map), before it execs
     /// the workload.

@@ -1,12 +1,12 @@
 //! Root-gated e2e for the `kennel-init` lifecycle pull over binder node 0.
 //!
-//! Proves the novel **data-and-fd** reply path (`Reply::DataAndFd` /
-//! `reply_with_data_and_fd` ↔ `transact_with_fd`, `07-2` §7.2.3): a child holds node 0
-//! with a populated [`binder::Lifecycle`] (init pid = the client's pid, a supervision
-//! blob, and a pty return socket), and the client transacts `GET_SANDBOX_PLAN` and gets
-//! back the exact supervision bytes plus a working fd. The padding/length-prefix/offset
+//! A child holds node 0 with a populated [`binder::Lifecycle`] (init pid = the client's
+//! pid + a supervision blob); the client transacts `GET_SANDBOX_PLAN` and gets back the
+//! exact supervision bytes as a plain data reply (`07-2` §7.2.3). The length-prefix/offset
 //! encoding is what this exercises; the authorisation *decision* is unit-tested in
-//! `binder.rs`.
+//! `binder.rs`, and the data-**and-fd** reply path is exercised by the af-unix tests. The
+//! interactive pty no longer rides this reply — it travels on the construction channel
+//! (`interactive_pty` in `tests/e2e.rs`).
 //!
 //! ```text
 //! cargo test -p kenneld --features e2e --no-run
@@ -15,9 +15,6 @@
 
 #![cfg(feature = "e2e")]
 
-use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -34,12 +31,9 @@ const MAP_SIZE: usize = 128 * 1024;
 /// A supervision blob whose length (13) is deliberately not 8-aligned, so the reply
 /// must pad before the fd object — exercising the alignment path.
 const SUPERVISION: &[u8] = b"sup-half-13!!";
-/// The marker the manager writes through its retained pty-socket end; the client must
-/// read it back through the fd it received, proving the fd was transferred.
-const PTY_MARKER: &[u8] = b"PTY!";
 
 #[test]
-fn init_pulls_the_supervision_half_and_pty_fd() {
+fn init_pulls_the_supervision_half() {
     if std::env::var(ROLE_ENV).as_deref() == Ok("manager") {
         run_manager();
     } else {
@@ -47,8 +41,7 @@ fn init_pulls_the_supervision_half_and_pty_fd() {
     }
 }
 
-/// Child: own node 0 with a lifecycle gated on the client's pid, serving the
-/// supervision blob and a pty socket.
+/// Child: own node 0 with a lifecycle gated on the client's pid, serving the supervision blob (no pty).
 fn run_manager() {
     let dir = PathBuf::from(std::env::var_os(DIR_ENV).expect("manager: missing dir env"));
     let init_pid: i32 = std::env::var(INIT_PID_ENV)
@@ -64,15 +57,9 @@ fn run_manager() {
         "uuid-e2e".to_owned(),
     ));
 
-    // A socketpair: keep `mine`, hand `theirs` to the kennel as the pty return socket.
-    // Write the marker now; it stays buffered for the client to read through the fd.
-    let (mut mine, theirs) = UnixStream::pair().expect("manager: socketpair");
-    mine.write_all(PTY_MARKER).expect("manager: write pty marker");
-
     let lifecycle = binder::Lifecycle {
         init_host_pid: Some(init_pid),
         supervision: SUPERVISION.to_vec(),
-        pty_fd: Some(OwnedFd::from(theirs)),
     };
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");
@@ -94,12 +81,11 @@ fn run_manager() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    drop(mine); // signal EOF after the buffered marker
     manager.stop();
 }
 
 /// Parent: mount binderfs, run the manager child gated on *this* process's pid, and
-/// pull the plan, asserting both the bytes and the fd.
+/// pull the plan, asserting the supervision bytes.
 fn run_client() {
     let dir = std::env::temp_dir().join(format!("kennel-lifecycle-{}", std::process::id()));
 
@@ -109,7 +95,7 @@ fn run_client() {
 
     let exe = std::env::current_exe().expect("current_exe");
     let mut manager = std::process::Command::new(&exe)
-        .args(["--exact", "init_pulls_the_supervision_half_and_pty_fd", "--nocapture"])
+        .args(["--exact", "init_pulls_the_supervision_half", "--nocapture"])
         .env(ROLE_ENV, "manager")
         .env(DIR_ENV, &dir)
         // The gate matches the transactor's host pid: ours, since we share the pid ns.
@@ -127,7 +113,9 @@ fn run_client() {
     }
     assert!(ready.exists(), "manager child did not become ready");
 
-    // Pull: GET_SANDBOX_PLAN returns the supervision bytes and the pty fd.
+    // Pull: GET_SANDBOX_PLAN returns the supervision bytes as a plain data reply. (The
+    // interactive pty rides the construction channel now — kennel-init inherits the return
+    // socket at PTY_RETURN_FD — not this reply; see interactive_pty in tests/e2e.rs.)
     let device = dir.join("binder");
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -135,16 +123,10 @@ fn run_client() {
         .open(&device)
         .expect("open binder device");
     let conn = Connection::open(file.into(), MAP_SIZE).expect("client connection");
-    let (bytes, fd) = conn
-        .transact_with_fd(CONTEXT_MANAGER_HANDLE, lifecycle::GET_SANDBOX_PLAN, &[])
+    let bytes = conn
+        .transact(CONTEXT_MANAGER_HANDLE, lifecycle::GET_SANDBOX_PLAN, &[])
         .expect("pull the supervision-half");
-
     assert_eq!(bytes, SUPERVISION, "the supervision bytes did not round-trip");
-    let mut pty = UnixStream::from(fd.expect("an interactive pull must return a pty fd"));
-    let mut marker = [0u8; PTY_MARKER.len()];
-    pty.read_exact(&mut marker)
-        .expect("read the marker through the transferred fd");
-    assert_eq!(&marker, PTY_MARKER, "the transferred fd was not the pty socket");
 
     // Teardown.
     std::fs::File::create(dir.with_extension("stop")).expect("stop file");
