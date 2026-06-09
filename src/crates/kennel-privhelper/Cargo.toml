@@ -29,9 +29,9 @@ kennel-bpf = { path = "../kennel-bpf", optional = true }
 bpf-egress = ["dep:kennel-bpf", "kennel-bpf/embed-programs"]
 
 # Tests that need privilege (real cgroup/address/BPF ops). Implies bpf-egress so
-# the egress root-test can attach real programs. Run via:
-#   sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features root-tests
-root-tests = ["bpf-egress"]
+# the egress e2e test can attach real programs. Run via:
+#   sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features e2e
+e2e = ["bpf-egress"]
 
 [dev-dependencies]
 # The integration tests use the effective-uid primitive to skip the

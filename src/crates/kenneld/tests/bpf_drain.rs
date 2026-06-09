@@ -10,9 +10,9 @@
 //! parse → unified writer end to end.
 //!
 //! Run via `sudo`: build the gated binary with
-//! `cargo test -p kenneld --features root-tests --no-run`, then run it as root.
+//! `cargo test -p kenneld --features e2e --no-run`, then run it as root.
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::ffi::CString;
 use std::io;

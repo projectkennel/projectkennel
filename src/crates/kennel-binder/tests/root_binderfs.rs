@@ -8,11 +8,11 @@
 //! which leaves root-owned files in `target/`):
 //!
 //! ```text
-//! cargo test -p kennel-binder --features root-tests --no-run
+//! cargo test -p kennel-binder --features e2e --no-run
 //! sudo unshare -m ./target/debug/deps/root_binderfs-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::os::fd::AsFd;
 

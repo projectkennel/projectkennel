@@ -13,7 +13,7 @@ repository.workspace = true
 libc = "=0.2.186"
 
 [features]
-root-tests = []
+e2e = []
 
 [lints]
 workspace = true

@@ -9,11 +9,11 @@
 //! binderfs instance the parent mounted.
 //!
 //! ```text
-//! cargo test -p kennel-binder --features root-tests --no-run
+//! cargo test -p kennel-binder --features e2e --no-run
 //! sudo unshare -m ./target/debug/deps/root_transact-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,7 +52,7 @@ fn run_manager() {
         let mut reply = b"reply:".to_vec();
         reply.extend_from_slice(&incoming.data);
         stop.store(true, Ordering::Release); // one-shot: exit after this reply
-        reply
+        kennel_binder::ctxmgr::Reply::Data(reply)
     })
     .expect("manager: serve loop");
 }

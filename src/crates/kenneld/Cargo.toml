@@ -45,7 +45,7 @@ libc = "=0.2.186"
 # End-to-end orchestration test that drives the real setuid privhelper and
 # performs real privileged operations (addresses, BPF attach). Requires root and
 # the privhelper built with its bpf-egress feature.
-root-tests = ["kennel-spawn/root-tests", "kennel-bpf/embed-programs"]
+e2e = ["kennel-spawn/e2e", "kennel-bpf/embed-programs"]
 # Build the journald audit sink (links libsystemd via kennel-syscall's FFI).
 audit-journald = ["kennel-audit/audit-journald"]
 

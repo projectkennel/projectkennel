@@ -18,8 +18,8 @@ kennel-syscall = { path = "../kennel-syscall" }
 [features]
 # Tests that need privilege (namespace unshare, cgroup BPF attach). Pulls the
 # embedded BPF programs (clang at build time). Run via:
-#   sudo -E env PATH=$PATH cargo test -p kennel-spawn --features root-tests
-root-tests = ["kennel-bpf/embed-programs"]
+#   sudo -E env PATH=$PATH cargo test -p kennel-spawn --features e2e
+e2e = ["kennel-bpf/embed-programs"]
 
 [lints]
 workspace = true

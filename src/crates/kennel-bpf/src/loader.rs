@@ -423,9 +423,9 @@ pub fn load_program(elf: &[u8], prog: &ProgramSpec, map_specs: &[MapSpec]) -> io
     Ok(Loaded { program, maps })
 }
 
-#[cfg(all(test, feature = "root-tests"))]
+#[cfg(all(test, feature = "e2e"))]
 mod root_tests {
-    //! Run via `sudo -E cargo test -p kennel-bpf --features root-tests`. Compiles
+    //! Run via `sudo -E cargo test -p kennel-bpf --features e2e`. Compiles
     //! connect4 against UAPI headers (no CO-RE), loads it through this loader,
     //! attaches it to a fresh cgroup, and confirms it enforces: with empty maps
     //! connect4 fails closed, so a connect from inside the cgroup is denied.
@@ -436,10 +436,10 @@ mod root_tests {
     use std::process::Command;
 
     /// Skip a root-only test when not running as root, matching the
-    /// skip-with-cause convention of the other crates' root-tests (a skip is not
+    /// skip-with-cause convention of the other crates' e2e (a skip is not
     /// a proof). BPF cgroup load needs privilege, so without it these tests can
     /// only fail; skipping keeps `cargo test --all-features` green for an
-    /// unprivileged runner while `sudo … --features root-tests` still exercises them.
+    /// unprivileged runner while `sudo … --features e2e` still exercises them.
     fn skip_if_unprivileged(test: &str) -> bool {
         // SAFETY: geteuid() only reads the calling process's effective uid; it
         // takes no arguments and cannot fail.

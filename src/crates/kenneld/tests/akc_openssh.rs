@@ -22,11 +22,11 @@
 //! production. Built/run like the other root test:
 //!
 //! ```text
-//! cargo test -p kenneld --features root-tests --no-run
+//! cargo test -p kenneld --features e2e --no-run
 //! sudo -E ./target/debug/deps/akc_openssh-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::os::unix::fs::PermissionsExt as _;

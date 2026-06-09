@@ -175,7 +175,7 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 
 - The largest crate by line count. Coordinates everything: policy validation, BPF map population, namespace setup, mount construction, Landlock sealing, seccomp installation, capability drop, environment construction, execve.
 - The namespace and mount phases are built in-crate over `kennel-syscall` (bubblewrap-style, identity-mapped user namespace); there is no subprocess delegation to an external composer.
-- Has integration tests that require root, gated behind `#[cfg(feature = "root-tests")]` (which also pulls the embedded BPF programs via `kennel-bpf/embed-programs`).
+- Has integration tests that require root, gated behind `#[cfg(feature = "e2e")]` (which also pulls the embedded BPF programs via `kennel-bpf/embed-programs`).
 
 ### `kennel-netproxy`
 
@@ -233,9 +233,9 @@ A small set of feature flags allows distribution variation without forking. Each
 | Flag | Crate | Default | Effect |
 |---|---|---|---|
 | `bpf-egress` | `kennel-privhelper` | off | Compile the BPF load/attach path into the privhelper. Pulls `kennel-bpf` with `embed-programs`. Required for live egress; rebuild before root tests (`06-build-and-test.md`). |
-| `embed-programs` | `kennel-bpf` | off | Compile `bpf/*.bpf.c` with clang at build time (`build.rs`) and embed the objects, so a plain `cargo build` needs no clang. Enabled transitively by `bpf-egress` and by `root-tests`. |
+| `embed-programs` | `kennel-bpf` | off | Compile `bpf/*.bpf.c` with clang at build time (`build.rs`) and embed the objects, so a plain `cargo build` needs no clang. Enabled transitively by `bpf-egress` and by `e2e`. |
 | `audit-journald` | `kennel-audit` | off | Link the journald sink (`libsystemd` FFI via `kennel-syscall`); off by default so the common build pulls no FFI surface. |
-| `root-tests` | several (`kennel-spawn`, `kennel-bpf`, `kennel-syscall`, `kennel-privhelper`, `kenneld`) | off | Compile and run tests that require root (cgroup creation, namespace ops, Landlock sealing, the kenneld e2e). Defined per-crate, not workspace-wide; run via `sudo -E … cargo test -p <crate> --features root-tests`. |
+| `e2e` | several (`kennel-spawn`, `kennel-bpf`, `kennel-syscall`, `kennel-privhelper`, `kenneld`) | off | Compile and run tests that require root (cgroup creation, namespace ops, Landlock sealing, the kenneld e2e). Defined per-crate, not workspace-wide; run via `sudo -E … cargo test -p <crate> --features e2e`. |
 
 Feature combinations tested in CI are listed in `06-build-and-test.md`. The default feature set is the minimum that produces a working binary for the most-common installation (single-user developer workstation, no journald requirement).
 

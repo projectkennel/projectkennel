@@ -202,9 +202,9 @@ fn parse_ack(reply: &[u8]) -> io::Result<()> {
     }
 }
 
-#[cfg(all(test, feature = "root-tests"))]
+#[cfg(all(test, feature = "e2e"))]
 mod root_tests {
-    //! `sudo -E env PATH=$PATH cargo test -p kennel-syscall --features root-tests`.
+    //! `sudo -E env PATH=$PATH cargo test -p kennel-syscall --features e2e`.
     use super::*;
     use std::process::Command;
 

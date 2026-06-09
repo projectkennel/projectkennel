@@ -50,9 +50,9 @@ Per `03-crate-decomposition.md`, several crates expose build-time feature flags.
 | `--no-default-features` | Every crate with no features | Catches feature-gated code that was accidentally required. |
 | `embed-programs` (`kennel-bpf`) | Compile `bpf/*.bpf.c` with clang at build time and embed the objects | Needed wherever the loader must actually attach programs. |
 | `bpf-egress` (`kennel-privhelper`) | Privhelper built with the BPF egress path (pulls in `kennel-bpf` with `embed-programs`) | Root e2e and the privileged egress install. |
-| `root-tests` | Tests that need root (transitively enables `embed-programs`/`bpf-egress`) | Run under a privileged CI runner. |
+| `e2e` | Tests that need root (transitively enables `embed-programs`/`bpf-egress`) | Run under a privileged CI runner. |
 
-Every combination must compile, pass clippy, pass non-root tests. The `root-tests` combination additionally runs the privileged tests in a CI runner with elevated capabilities.
+Every combination must compile, pass clippy, pass non-root tests. The `e2e` combination additionally runs the privileged tests in a CI runner with elevated capabilities.
 
 The full feature matrix is in `.github/workflows/ci.yml`; this section is the human-readable summary.
 
@@ -76,7 +76,7 @@ Run by `cargo test --workspace --lib`. Required by every CI job.
 
 `tests/` directories per crate. Test the public API of one crate end-to-end.
 
-Most integration tests run as the user with no special capabilities. A subset (in `kennel-spawn`, `kennel-bpf`, and `kennel-privhelper`) require root for namespace operations, cgroup creation, Landlock sealing on a real kernel, and BPF attach. These are gated behind the `root-tests` feature and run in a dedicated CI job.
+Most integration tests run as the user with no special capabilities. A subset (in `kennel-spawn`, `kennel-bpf`, and `kennel-privhelper`) require root for namespace operations, cgroup creation, Landlock sealing on a real kernel, and BPF attach. These are gated behind the `e2e` feature and run in a dedicated CI job.
 
 ### Property and round-trip tests
 
@@ -117,7 +117,7 @@ Kernel matrix (subject to change in `BUILD-ENV.md`):
 
 ### Binder load/test matrix
 
-The binder transport (`kennel-binder`, `02-4-binder.md`) needs a kernel with `CONFIG_ANDROID_BINDERFS` + `CONFIG_ANDROID_BINDER_IPC` (built in, or a loaded/auto-loadable `binder_linux` module) and `FS_USERNS_MOUNT`, so its mount/open/transaction path is exercised on a real driver, not in isolation. The matrix mounts a per-instance binderfs inside a child user namespace, allocates the `binder` device, checks `BINDER_VERSION` (protocol version 8), and drives a node-0 transaction round trip. This is covered as part of the construction-path e2e and the `root-tests` runner below (it shares their privileged runner and the same kernel matrix as the BPF verifier job); a kernel missing the binder driver skips the binder tests rather than failing (the `kennel check` posture, `02-4-binder.md` §Kernel requirements).
+The binder transport (`kennel-binder`, `02-4-binder.md`) needs a kernel with `CONFIG_ANDROID_BINDERFS` + `CONFIG_ANDROID_BINDER_IPC` (built in, or a loaded/auto-loadable `binder_linux` module) and `FS_USERNS_MOUNT`, so its mount/open/transaction path is exercised on a real driver, not in isolation. The matrix mounts a per-instance binderfs inside a child user namespace, allocates the `binder` device, checks `BINDER_VERSION` (protocol version 8), and drives a node-0 transaction round trip. This is covered as part of the construction-path e2e and the `e2e` runner below (it shares their privileged runner and the same kernel matrix as the BPF verifier job); a kernel missing the binder driver skips the binder tests rather than failing (the `kennel check` posture, `02-4-binder.md` §Kernel requirements).
 
 ---
 
@@ -135,7 +135,7 @@ The binder transport (`kennel-binder`, `02-4-binder.md`) needs a kernel with `CO
 
 The `rust` job folds what would otherwise be separate fmt/clippy/test/build/doc jobs into one runner's step sequence; a step failure fails the job. All five jobs gate a PR.
 
-Owed, and **not** yet in CI (tracked in the workflow header): the Rust checksum verifier twin (needs `sha2`, §5.5.1), the reproducible-build double-build (needs the release image), the BPF verifier-load matrix on custom-kernel runners (the `bpf-compile` job is the hosted-runner compile part), a privileged `root-tests` runner (which is also where the binder load/test matrix and the unprivileged construction-path e2e run), and the construction-path e2e itself. CI must not claim to run a check it does not.
+Owed, and **not** yet in CI (tracked in the workflow header): the Rust checksum verifier twin (needs `sha2`, §5.5.1), the reproducible-build double-build (needs the release image), the BPF verifier-load matrix on custom-kernel runners (the `bpf-compile` job is the hosted-runner compile part), a privileged `e2e` runner (which is also where the binder load/test matrix and the unprivileged construction-path e2e run), and the construction-path e2e itself. CI must not claim to run a check it does not.
 
 **Roadmap CI additions** (designed, not built — the network-namespace redesign of `02-5-binder-net.md` / `07-11-binder-netns.md` is not built; the kennel still shares the host network namespace): root tests for the per-kennel net-ns path (`CLONE_NEWNET`, the four network modes, the loopback mirror, the host-side leg, `AddLoopbackAlias`/`RemoveLoopbackAlias`); and a fuzz target for the `kennel-netshim` SOCKS5 front-end once that crate exists. The `kennel-binder` `BC`/`BR` decoder fuzz target is *already* wired into the `fuzz` job (it is built), not roadmap.
 
@@ -162,11 +162,11 @@ A few specific placement choices:
 
 ### Root-required tests
 
-A subset of integration tests need root for namespace operations, cgroup creation, Landlock sealing on a real kernel, and BPF attach. As built these live in each crate's flat `tests/` directory — `kennel-privhelper/tests/ipc.rs`, `kenneld/tests/e2e.rs`, `kenneld/tests/akc_openssh.rs`, `kennel-syscall/tests/landlock_exec_semantics.rs` — guarded at runtime/`#[cfg(feature = "root-tests")]` rather than collected under a `tests/root/` subdirectory.
+A subset of integration tests need root for namespace operations, cgroup creation, Landlock sealing on a real kernel, and BPF attach. As built these live in each crate's flat `tests/` directory — `kennel-privhelper/tests/ipc.rs`, `kenneld/tests/e2e.rs`, `kenneld/tests/akc_openssh.rs`, `kennel-syscall/tests/landlock_exec_semantics.rs` — guarded at runtime/`#[cfg(feature = "e2e")]` rather than collected under a `tests/root/` subdirectory.
 
-The `root-tests` feature is defined **per crate** (`kennel-spawn`, `kennel-bpf`, `kennel-syscall`, `kennel-privhelper`, `kenneld`), not at the workspace level; it transitively enables `embed-programs`/`bpf-egress`. The real invocation is per crate, e.g. `sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features root-tests`. CI exercises the privileged paths via the all-features build (`cargo test --all-features`); a dedicated privileged `root-tests` runner is owed (see the CI-jobs section).
+The `e2e` feature is defined **per crate** (`kennel-spawn`, `kennel-bpf`, `kennel-syscall`, `kennel-privhelper`, `kenneld`), not at the workspace level; it transitively enables `embed-programs`/`bpf-egress`. The real invocation is per crate, e.g. `sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features e2e`. CI exercises the privileged paths via the all-features build (`cargo test --all-features`); a dedicated privileged `e2e` runner is owed (see the CI-jobs section).
 
-The CI runner for `root-tests` is privileged but ephemeral: a container or VM that exists only for the duration of the test run, with a fresh kernel, and no persistent state.
+The CI runner for `e2e` is privileged but ephemeral: a container or VM that exists only for the duration of the test run, with a fresh kernel, and no persistent state.
 
 ### The unprivileged construction-path e2e
 
@@ -175,11 +175,11 @@ The CI runner for `root-tests` is privileged but ephemeral: a container or VM th
 - `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep` on the privhelper. `cap_setuid` is the factory writing the `0 0 1` host-root line of the kennel's identity uid_map; **`cap_setfcap` is *also* required since Linux 5.12 to map host uid 0 into a new user namespace** (otherwise the `0 0 1` write is `EPERM` even for a privileged process). These join the privhelper's existing `cap_setgid` / `cap_sys_admin` / `cap_net_admin` (`07-paths.md`). This is the deployed `setcap` line, not a test-only artefact.
 - A temporary **AppArmor `userns` profile** over the spawning binary *and* over the privhelper, matching the production `dist/apparmor/kenneld`. On distributions that set `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu), an unprivileged `CLONE_NEWUSER` transitions the new userns to the restricted `unprivileged_userns` profile, which forbids mapping host uid 0 in; the `flags=(unconfined) { userns, }` profile (it only *grants* `userns`; an enforcing profile cannot work because the spawn sets `no_new_privs` before exec'ing the workload, under which AppArmor denies every profile transition) makes the created userns "privileged" so host root can be mapped. The profile is unloaded on exit.
 
-The script builds the participants it needs (`kennel-init`, the facade/proxy binaries, the test binary) and is the as-built proof for the binder construction vertical. Its privileged variant shares the `root-tests` runner; the owed privileged CI runner (below) is where it runs in CI.
+The script builds the participants it needs (`kennel-init`, the facade/proxy binaries, the test binary) and is the as-built proof for the binder construction vertical. Its privileged variant shares the `e2e` runner; the owed privileged CI runner (below) is where it runs in CI.
 
 ### Mock vs real
 
-Where possible, use the real thing. Per CODING-STANDARDS.md (the testing-philosophy callout in §7 is implicit but consistent): integration tests use real files in `tempfile::tempdir`, real Unix sockets, real BPF programs against real cgroups (in the root-tests subset). Mocks are reserved for cases where the real dependency is genuinely unavailable (e.g., a CI machine without a recent enough kernel — in which case the test is skipped, not mocked).
+Where possible, use the real thing. Per CODING-STANDARDS.md (the testing-philosophy callout in §7 is implicit but consistent): integration tests use real files in `tempfile::tempdir`, real Unix sockets, real BPF programs against real cgroups (in the e2e subset). Mocks are reserved for cases where the real dependency is genuinely unavailable (e.g., a CI machine without a recent enough kernel — in which case the test is skipped, not mocked).
 
 ### The audit-writer test
 

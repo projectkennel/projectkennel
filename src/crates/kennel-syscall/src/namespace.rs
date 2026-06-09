@@ -326,8 +326,8 @@ mod tests {
     /// fresh PID namespace in a single syscall — the property the factory relies on to
     /// skip the double fork. The child reports its in-namespace pid via its exit code
     /// (0 ⇒ `getpid()==1`); `getpid` needs no uid mapping, so the still-empty userns
-    /// map does not matter here. Gated behind `root-tests`.
-    #[cfg(feature = "root-tests")]
+    /// map does not matter here. Gated behind `e2e`.
+    #[cfg(feature = "e2e")]
     #[test]
     fn clone_pid1_makes_the_child_pid_namespace_init() {
         if crate::unistd::skip_if_unprivileged("clone_pid1_makes_the_child_pid_namespace_init") {
@@ -349,8 +349,8 @@ mod tests {
 
     /// With privilege, unsharing the mount namespace gives the caller a private
     /// mount namespace — observable as a changed `/proc/self/ns/mnt` link.
-    /// Gated behind `root-tests`; run via `sudo -E cargo test --features root-tests`.
-    #[cfg(feature = "root-tests")]
+    /// Gated behind `e2e`; run via `sudo -E cargo test --features e2e`.
+    #[cfg(feature = "e2e")]
     #[test]
     fn unshare_mount_namespace_changes_the_mount_ns() {
         if crate::unistd::skip_if_unprivileged("unshare_mount_namespace_changes_the_mount_ns") {

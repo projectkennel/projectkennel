@@ -11,11 +11,11 @@
 //! the status rode init→privhelper back to us.
 //!
 //! ```text
-//! cargo test -p kennel-privhelper --features root-tests --test root_construct --no-run
+//! cargo test -p kennel-privhelper --features e2e --test root_construct --no-run
 //! sudo ./target/debug/deps/root_construct-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};

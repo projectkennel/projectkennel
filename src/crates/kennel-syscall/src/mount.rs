@@ -240,9 +240,9 @@ pub fn unmount_detach(target: &Path) -> io::Result<()> {
     nix::mount::umount2(target, MntFlags::MNT_DETACH).map_err(map_err)
 }
 
-#[cfg(all(test, feature = "root-tests"))]
+#[cfg(all(test, feature = "e2e"))]
 mod root_tests {
-    //! Run via `sudo -E cargo test --features root-tests`. Each test runs inside
+    //! Run via `sudo -E cargo test --features e2e`. Each test runs inside
     //! a forked child that unshares a private mount namespace first, so nothing
     //! touches the host mount table.
 

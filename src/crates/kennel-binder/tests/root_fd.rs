@@ -7,11 +7,11 @@
 //! the manager is this test binary re-spawned, sharing the parent's mount namespace.
 //!
 //! ```text
-//! cargo test -p kennel-binder --features root-tests --no-run
+//! cargo test -p kennel-binder --features e2e --no-run
 //! sudo unshare -m ./target/debug/deps/root_fd-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::io::{Read, Write};
 use std::os::fd::AsFd;

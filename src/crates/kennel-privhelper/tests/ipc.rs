@@ -39,14 +39,14 @@ fn an_unallocated_user_is_refused() {
 
 // --- Privileged tests. Run as root (uid 0); they provision uid 0's allocation. ---
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 const ROOT_ALLOCATION: &str = "0:9:0000000001:kennel-root\n";
 
 /// Skip a privilege-requiring test with cause on an unprivileged runner (a skip
-/// is not a proof), matching the other crates' root-tests so `cargo test
-/// --all-features` is green for any runner while `sudo … --features root-tests`
+/// is not a proof), matching the other crates' e2e so `cargo test
+/// --all-features` is green for any runner while `sudo … --features e2e`
 /// still exercises it.
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn skip_if_unprivileged(test: &str) -> bool {
     let euid = kennel_syscall::unistd::effective_uid();
     if euid != 0 {
@@ -56,13 +56,13 @@ fn skip_if_unprivileged(test: &str) -> bool {
     false
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn provision_root_allocation() {
     std::fs::create_dir_all("/etc/kennel").expect("mkdir /etc/kennel");
     std::fs::write("/etc/kennel/subkennel", ROOT_ALLOCATION).expect("write allocation");
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn lo_has(addr: &str) -> bool {
     let out = std::process::Command::new("ip")
         .args(["addr", "show", "dev", "lo"])
@@ -72,13 +72,13 @@ fn lo_has(addr: &str) -> bool {
 }
 
 /// Build a v4 loopback address: 127 | tag(12) | ctx(8) | host(4).
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn v4(tag: u16, ctx: u16, host: u8) -> std::net::Ipv4Addr {
     let suffix = u32::from(tag).wrapping_shl(12) | u32::from(ctx).wrapping_shl(4) | u32::from(host);
     std::net::Ipv4Addr::from(0x7F00_0000 | suffix)
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
 fn adds_and_removes_an_in_scope_loopback_address() {
     if skip_if_unprivileged("adds_and_removes_an_in_scope_loopback_address") {
@@ -124,7 +124,7 @@ fn adds_and_removes_an_in_scope_loopback_address() {
 
 /// Build a `/32` `allow_v4` LPM entry permitting any port to `addr` (network
 /// order). Key/value layouts match `bpf/maps.h`.
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 const fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
     let [a, b, c, d] = addr;
     let [p0, p1, p2, p3] = 32u32.to_ne_bytes(); // prefixlen
@@ -137,7 +137,7 @@ const fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
 }
 
 /// An empty `EgressPayload` (no map entries) — enough to exercise load + attach.
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
     kennel_privhelper::wire::EgressPayload {
         meta: [0u8; kennel_privhelper::wire::META_LEN],
@@ -150,7 +150,7 @@ const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
     }
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
 fn loads_and_attaches_egress_to_an_owned_cgroup() {
     use kennel_privhelper::wire::{EgressPayload, META_LEN};
@@ -190,7 +190,7 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
 /// XDG runtime dir `/run/user/<uid>/kennel/bpf/<id>/` (item 10 + the audit-drain
 /// prerequisite). Proves the pins land owner-only with the right modes; reopening
 /// the ringbuf to drain is the kenneld e2e. (Runs as root, so uid 0.)
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
 fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
     use kennel_privhelper::wire::{EgressPayload, META_LEN};
@@ -260,7 +260,7 @@ fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
     std::fs::remove_dir(&cgroup).expect("remove cgroup");
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
 fn egress_to_a_cgroup_not_owned_by_caller_is_refused() {
     use kennel_privhelper::exec::REFUSAL_CGROUP_NOT_OWNED;

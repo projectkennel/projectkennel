@@ -8,11 +8,11 @@
 //! lookup is denied, and a reserved-namespace registration is refused.
 //!
 //! ```text
-//! cargo test -p kenneld --features root-tests --no-run
+//! cargo test -p kenneld --features e2e --no-run
 //! sudo unshare -m ./target/debug/deps/root_binder-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::path::PathBuf;
 use std::sync::Arc;

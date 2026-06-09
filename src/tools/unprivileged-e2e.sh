@@ -80,7 +80,7 @@ echo "== building binaries =="
 # bpf-egress is built LAST so a later workspace build cannot clobber its embedded
 # BPF objects (privhelper-bpf-egress-build-gotcha).
 cargo build -p kennel-socks-connect -p kennel-netproxy -p kennel-afunix-shim -p kennel-init
-cargo test -p kenneld --features root-tests --no-run
+cargo test -p kenneld --features e2e --no-run
 cargo build -p kennel-privhelper --features bpf-egress
 
 PRIVHELPER="$REPO_ROOT/target/debug/kennel-privhelper"

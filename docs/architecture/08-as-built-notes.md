@@ -211,7 +211,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   `ENOSYS`. Always `cargo build -p kennel-privhelper --features bpf-egress` (and
   `kennel-netproxy`) immediately before running the gated binaries.
 - **Run the gated test *binaries* directly under sudo**, not `sudo cargo` (which
-  leaves root-owned files in `target/`). Compile with `--features root-tests
+  leaves root-owned files in `target/`). Compile with `--features e2e
   --no-run`, then `sudo ./target/debug/deps/<name>-<hash>`. Use `pkill -x kenneld`,
   never `pkill -f` (which matches the harness wrapper and kills the shell).
 - **Stage shim / `/etc` / new-root dirs outside `/tmp`.** The seal mounts a fresh

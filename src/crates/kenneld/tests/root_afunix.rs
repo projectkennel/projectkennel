@@ -8,11 +8,11 @@
 //! sharing the parent's mount namespace.
 //!
 //! ```text
-//! cargo test -p kenneld --features root-tests --no-run
+//! cargo test -p kenneld --features e2e --no-run
 //! sudo unshare -m ./target/debug/deps/root_afunix-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

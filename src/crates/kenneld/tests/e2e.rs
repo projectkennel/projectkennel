@@ -1,6 +1,5 @@
 //! End-to-end hardware test of the **unprivileged** production vertical, gated
-//! behind `root-tests` (the feature name is historical — the test itself runs as
-//! the ordinary operator, *no sudo*).
+//! behind the `e2e` feature; it runs as the ordinary operator, *no sudo*.
 //!
 //! Drives the public orchestration (`kenneld::start`) with a real signed policy
 //! and the **real file-caps privhelper binary**, as the operator, on the
@@ -23,7 +22,7 @@
 //! src/tools/unprivileged-e2e.sh
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
