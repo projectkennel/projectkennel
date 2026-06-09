@@ -1,7 +1,7 @@
 //! The node-0 service protocol: transaction verb codes and reply status bytes.
 //!
 //! Shared by `kenneld`'s context manager and the in-kennel clients (the af-unix
-//! proxy, future facades). Internal-stable (`02-7-binder.md` §Node 0): both ends ship
+//! proxy, future facades). Internal-stable (`02-4-binder.md` §Node 0): both ends ship
 //! from one release, so this module is the single source of the convention.
 
 /// Node-0 transaction verbs (the `code` field). `IServiceManager`-style semantics;

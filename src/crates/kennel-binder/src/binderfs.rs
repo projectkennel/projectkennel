@@ -2,7 +2,7 @@
 //!
 //! A per-kennel binderfs instance is an independent mount (like devpts/tmpfs).
 //! kenneld mounts one inside the kennel's namespaces (`FS_USERNS_MOUNT`, so no
-//! real privilege — `02-7-binder.md` §Mount sequencing), allocates the standard
+//! real privilege — `02-4-binder.md` §Mount sequencing), allocates the standard
 //! `binder` device on its control node, and opens that device to become the
 //! instance's context manager. These are the safe orchestration steps over the
 //! ioctl/mount primitives in [`crate::sys`]; no `unsafe` lives here.
@@ -19,7 +19,7 @@ use std::os::fd::AsFd;
 /// The standard binderfs control device, present in every instance.
 pub const CONTROL_DEVICE: &str = "binder-control";
 
-/// The standard binder device name (the libbinder default; `02-7-binder.md`
+/// The standard binder device name (the libbinder default; `02-4-binder.md`
 /// §Device naming). One `binder` context per kennel instance.
 pub const BINDER_DEVICE: &str = "binder";
 

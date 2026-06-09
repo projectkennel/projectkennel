@@ -1,6 +1,6 @@
 # Process model
 
-This chapter describes the set of processes that exist at runtime, their privilege levels, parent-child relationships, and IPC topology. Detailed lifecycle and recovery rules are in `05-state-and-supervision.md`; wire formats are in `02-4-ipc.md`. This chapter is the *shape* of the system.
+This chapter describes the set of processes that exist at runtime, their privilege levels, parent-child relationships, and IPC topology. Detailed lifecycle and recovery rules are in `05-state-and-supervision.md`; wire formats are in `02-6-ipc.md`. This chapter is the *shape* of the system.
 
 ---
 
@@ -61,13 +61,13 @@ It is started with **empty argv and envp** and **pulls** its configuration over 
 
 SOCKS5 proxy enforcing the per-destination network allowlist. One instance per active kennel; concurrent kennels mean concurrent proxy processes, each listening on a different per-kennel loopback address — the kennel's primary (host offset 1 in its `/28`) at port 1080, exposed to the workload as `$KENNEL_SOCKS_PROXY`, plus the corresponding IPv6 ULA.
 
-Reads its configuration at startup from a config file kenneld writes (the resolved networking policy) and **live-reloads** it: a watcher thread re-reads the file when its mtime changes and swaps the ruleset/host-services in place (`Proxy::reload`), so an egress-policy change needs only a config rewrite, not a respawn (§02-4). Listen-address and audit-sink changes still require a respawn. Writes network audit events to the kennel's audit directory.
+Reads its configuration at startup from a config file kenneld writes (the resolved networking policy) and **live-reloads** it: a watcher thread re-reads the file when its mtime changes and swaps the ruleset/host-services in place (`Proxy::reload`), so an egress-policy change needs only a config rewrite, not a respawn (§02-6). Listen-address and audit-sink changes still require a respawn. Writes network audit events to the kennel's audit directory.
 
 The proxy is the only network egress path for the workload. The cgroup BPF rules deny `connect()` to any address other than the proxy; the workload's `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` environment variables point at the proxy. Together this makes the proxy unbypassable from inside the kennel — kernel enforcement guarantees the workload cannot reach the network without going through the proxy, and the proxy enforces the destination allowlist.
 
 Runs as the user.
 
-> **Roadmap — the per-kennel network namespace ([`02-8-binder-net.md`](02-8-binder-net.md), design §7.11).** The kennel currently *shares the host network namespace*; the network redesign moves each kennel into its own `CLONE_NEWNET` namespace and re-shapes these processes. There, `kennel-netproxy` runs in the **host** net-ns as kenneld's **CONNECT delegate** (no binder access, reached over a per-kennel socketpair, no TCP loopback listener); a new **`kennel-netshim`** runs **inside** the kennel net-ns as the SOCKS5 front-end and the binder consumer of `org.projectkennel.INet/default`; and a **host-side spawn leg** runs in the host net-ns as the **BIND delegate**, holding the host-side mirror of the kennel's native inside listener. These processes are designed but **not built**; the shape above is the as-built (shared-net-ns) model.
+> **Roadmap — the per-kennel network namespace ([`02-5-binder-net.md`](02-5-binder-net.md), design §7.11).** The kennel currently *shares the host network namespace*; the network redesign moves each kennel into its own `CLONE_NEWNET` namespace and re-shapes these processes. There, `kennel-netproxy` runs in the **host** net-ns as kenneld's **CONNECT delegate** (no binder access, reached over a per-kennel socketpair, no TCP loopback listener); a new **`kennel-netshim`** runs **inside** the kennel net-ns as the SOCKS5 front-end and the binder consumer of `org.projectkennel.INet/default`; and a **host-side spawn leg** runs in the host net-ns as the **BIND delegate**, holding the host-side mirror of the kennel's native inside listener. These processes are designed but **not built**; the shape above is the as-built (shared-net-ns) model.
 
 ### `kennel-sshd` (per-kennel SSH egress bastion)
 
@@ -217,12 +217,12 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
 
 Notes on the diagram:
 
-- The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with stdio fds, or the interactive pty-return socket, over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-4-ipc.md`.
+- The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with stdio fds, or the interactive pty-return socket, over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-6-ipc.md`.
 - The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is the kennel's primary loopback (`$KENNEL_SOCKS_PROXY` — host offset 1 in its `/28`, port 1080), never the control socket.
 - SSH egress is re-originated through the per-user `kennel-sshd` bastion (§7.10): the workload's `ssh` reaches it via `kennel-socks-connect` → the egress proxy, authenticating with a disposable synthetic key in its constructed `~/.ssh`. The workload holds no real key and no agent socket; the bastion uses the user's host-side key.
 - BPF programs do not push events to userspace; they write into a ringbuf. A reader in kenneld drains the ringbuf and writes JSONL events to the audit directory.
 - The privhelper is invoked by kenneld during a kennel's bring-up and teardown. The addr/egress ops are one-shot; the **construct-kennel** op runs over a `SOCK_SEQPACKET` socketpair — kenneld sends the construction-half Plan and the stdio/pty fds (`SCM_RIGHTS`), and the op returns the init/workload host pids and, finally, the workload's exit status. The privhelper stays alive as `kennel-init`'s parent for the kennel's lifetime.
-- The kennel's control plane is the **binder bus**, not an ad-hoc pipe: `kennel-init` (PID 1) is a binder consumer transacting to node 0 (kenneld) for both its config pull (`GET_SANDBOX_PLAN`, returning the supervision-half Plan and the pty fd as `BINDER_TYPE_FD`) and its lifecycle events (`NOTIFY_*`). kenneld gates these verbs on the init's host pid (a host context manager sees host pids, not the kennel-internal `1`), supplied by the privhelper at construction, never by the wire. The binder transaction surface is documented in `02-7-binder.md`.
+- The kennel's control plane is the **binder bus**, not an ad-hoc pipe: `kennel-init` (PID 1) is a binder consumer transacting to node 0 (kenneld) for both its config pull (`GET_SANDBOX_PLAN`, returning the supervision-half Plan and the pty fd as `BINDER_TYPE_FD`) and its lifecycle events (`NOTIFY_*`). kenneld gates these verbs on the init's host pid (a host context manager sees host pids, not the kennel-internal `1`), supplied by the privhelper at construction, never by the wire. The binder transaction surface is documented in `02-4-binder.md`.
 
 ---
 
@@ -261,7 +261,7 @@ Full state and the lockfile inventory are in `05-state-and-supervision.md`.
 
 - Sub-kennels (refinements within an existing kennel) and how they interact with the process tree: `05-state-and-supervision.md`.
 - Failure modes (privhelper unavailable, kenneld crash, daemon crash, kernel feature missing): `05-state-and-supervision.md`.
-- Kernel feature requirements per binary and per BPF program: `02-5-bpf-abi.md`.
-- The wire format of the CLI↔kenneld and kenneld↔privhelper sockets: `02-4-ipc.md`.
-- The detailed semantics of the BPF↔userspace ringbuf events: `02-5-bpf-abi.md` and `02-3-audit-schema.md`.
+- Kernel feature requirements per binary and per BPF program: `02-7-bpf-abi.md`.
+- The wire format of the CLI↔kenneld and kenneld↔privhelper sockets: `02-6-ipc.md`.
+- The detailed semantics of the BPF↔userspace ringbuf events: `02-7-bpf-abi.md` and `02-3-audit-schema.md`.
 - The relationship between the workload's PID namespace and the host's: `04-trust-boundaries.md`.

@@ -35,8 +35,8 @@
 //! every right an ABI defines and degrades to the empty set below it, so a newer
 //! kernel (e.g. 6.17 reports ABI 7) is used to its supported extent and an older
 //! one is never asked for a bit it lacks. Scoping (ABI 6) is the kernel-native
-//! enforcement of the `unix.abstract = "deny"` posture (`docs/design/07-4`) and a
-//! complement to the PID-namespace signal isolation (`docs/design/07-7`), superseding
+//! enforcement of the `unix.abstract = "deny"` posture (`docs/design/07-6`) and a
+//! complement to the PID-namespace signal isolation (`docs/design/07-9`), superseding
 //! the seccomp `connect()` filter those sections describe as a fallback.
 
 use std::fs::{File, OpenOptions};
@@ -115,10 +115,10 @@ bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Scope: u64 {
         /// `connect(2)` to an abstract-namespace AF_UNIX socket bound outside the
-        /// sandbox (the `docs/design/07-4` abstract-socket gap; closed natively from
+        /// sandbox (the `docs/design/07-6` abstract-socket gap; closed natively from
         /// Landlock ABI 6).
         const ABSTRACT_UNIX_SOCKET = 0x1;
-        /// Send a signal to a process outside the sandbox (`docs/design/07-7`).
+        /// Send a signal to a process outside the sandbox (`docs/design/07-9`).
         const SIGNAL = 0x2;
     }
 }
@@ -374,7 +374,7 @@ impl Ruleset {
     /// and confines abstract-AF_UNIX/signal reach to the sandbox, until
     /// [`Ruleset::allow_path`] / [`Ruleset::allow_port`] grant exceptions.
     /// Scoping is all-or-nothing (no per-resource exception) and on by default,
-    /// the native form of the `unix.abstract = "deny"` posture (`docs/design/07-4`).
+    /// the native form of the `unix.abstract = "deny"` posture (`docs/design/07-6`).
     ///
     /// # Errors
     ///

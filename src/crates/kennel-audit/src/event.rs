@@ -74,7 +74,7 @@ pub enum Resource {
     Unix,
     /// D-Bus method calls.
     Dbus,
-    /// Binder IPC: service registry and per-call decisions (`07-9`/`02-7`).
+    /// Binder IPC: service registry and per-call decisions (`07-1`/`02-4`).
     Binder,
     /// Privileged-helper invocations and refusals.
     Priv,

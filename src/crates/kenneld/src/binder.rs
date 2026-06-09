@@ -1,4 +1,4 @@
-//! kenneld as the per-kennel binder context manager (`07-1-binder.md` §7.1 / `02-7`).
+//! kenneld as the per-kennel binder context manager (`07-1-binder.md` §7.1 / `02-4`).
 //!
 //! kenneld owns node 0 of each kennel's binderfs instance and serves the service
 //! registry on a per-kennel thread (like [`crate::bpf_audit`]'s drain). It gates
@@ -9,7 +9,7 @@
 //! This module is the *policy* layer; the binder transport (the looper, the wire
 //! codec, the ioctls) is [`kennel_binder`]. The transaction payload convention on
 //! node 0 (the verb codes and the status/byte replies) is internal-stable
-//! (`02-7-binder.md` §Node 0): `kenneld` and the in-kennel client agree because
+//! (`02-4-binder.md` §Node 0): `kenneld` and the in-kennel client agree because
 //! they ship from one release.
 //!
 //! M1a scope: the registry decision point with status replies, proven by a root
@@ -70,7 +70,7 @@ impl Registry {
 
     /// Whether policy lets this kennel *look up* `name`: a service it provides is
     /// locally resolvable, and a declared `consume` is permitted (one kennel is one
-    /// trust domain; `consume` additionally gates cross-instance — `07-9` §7.1.6).
+    /// trust domain; `consume` additionally gates cross-instance — `07-1` §7.1.6).
     fn may_consume(&self, name: &str) -> bool {
         self.may_provide(name) || self.policy.consume.iter().any(|c| c.name == name)
     }
@@ -122,7 +122,7 @@ impl Registry {
     }
 }
 
-/// The lifecycle/config state `kenneld` serves to a kennel's `kennel-init` (`07-11`).
+/// The lifecycle/config state `kenneld` serves to a kennel's `kennel-init` (`07-2`).
 ///
 /// Served over node 0 (§7.2.4). Disabled by default (`init_host_pid == None`): the
 /// lifecycle verbs are refused until the factory reports the init pid and stages the
@@ -255,7 +255,7 @@ fn handle(
 
 /// Serve a node-0 **lifecycle/config verb**, gated on the caller's kernel-stamped
 /// identity: only `kennel-init` (the host pid the privhelper reported, running as
-/// uid 0) may pull the plan or post notifications (`07-11` §7.2.4). A caller that is
+/// uid 0) may pull the plan or post notifications (`07-2` §7.2.4). A caller that is
 /// not the registered init pid — a spoof, or any other in-kennel process — is denied
 /// and audited.
 fn lifecycle_handle(
@@ -333,18 +333,18 @@ fn lifecycle_handle(
 /// `sender_euid == 0` is defense-in-depth alongside the pid match: `kennel-init` is the
 /// only uid-0 process in the kennel (host root via the `0 0 1` map; the workload and facades
 /// run as the operator's non-zero uid), so a lifecycle verb from a non-zero euid is never
-/// `kennel-init` and is denied (`07-11` §7.2.2). The pid match is the primary, exact gate.
+/// `kennel-init` and is denied (`07-2` §7.2.2). The pid match is the primary, exact gate.
 const fn lifecycle_authorized(init: Option<i32>, sender_pid: i32, sender_euid: u32) -> bool {
     matches!(init, Some(pid) if pid == sender_pid) && sender_euid == 0
 }
 
-/// The af-unix facade (`07-9`/`02-7`): resolve the requested socket against the
+/// The af-unix facade (`07-1`/`02-4`): resolve the requested socket against the
 /// `[[unix.allow]]` grants (by its in-view `shim` path or logical `name`), connect to
 /// the real host socket, and return the connected fd. A non-granted request is denied.
 ///
 /// The connect is host-side I/O run inline on the looper for now; moving it to a
 /// worker (so a slow connect cannot head-of-line-block the instance) is the hardening
-/// in `02-7-binder.md` §Threading model.
+/// in `02-4-binder.md` §Threading model.
 fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
     let requested = decode_name(&incoming.data);
     let target = requested

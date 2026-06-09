@@ -724,7 +724,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     };
     print_warnings(&compiled.warnings);
     // Resolve the shared-library closure of the allowlist into the settled artefact
-    // (reads the binaries from disk; deny-by-default execution, 07-1) before signing.
+    // (reads the binaries from disk; deny-by-default execution, 07-3) before signing.
     print_warnings(&kennel_policy::resolve_settled_libraries(
         &mut compiled.policy,
     ));

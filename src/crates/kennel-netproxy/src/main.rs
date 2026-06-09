@@ -61,7 +61,7 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_host_services(cfg.host_services),
     );
-    // Live-reload (§02-4): watch the config file and swap the ruleset/host-services
+    // Live-reload (§02-6): watch the config file and swap the ruleset/host-services
     // in place when `kenneld` rewrites it, without restarting or dropping connections.
     spawn_reloader(Arc::clone(&proxy), path.to_path_buf());
     proxy.serve_all(listeners)?;
@@ -74,7 +74,7 @@ fn config_mtime(path: &Path) -> Option<SystemTime> {
 }
 
 /// Spawn a background thread that re-reads `path` whenever its mtime changes and
-/// live-reloads the proxy's ruleset/host-services/resolved-address opinion (§02-4).
+/// live-reloads the proxy's ruleset/host-services/resolved-address opinion (§02-6).
 ///
 /// A reload that fails to parse is logged and ignored — the running policy is kept,
 /// never silently widened. Listen addresses and audit sinks are *not* hot-reloaded

@@ -16,7 +16,7 @@
 #      kennel-init, and the test binary;
 #   2. `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid=ep` on the
 #      privhelper (the production install posture — 07-paths.md — never sudo at
-#      runtime; cap_setuid is the factory's 0 0 1 uid_map write, 07-11);
+#      runtime; cap_setuid is the factory's 0 0 1 uid_map write, 07-2);
 #   3. provisions an /etc/kennel/subkennel allocation for the operator's uid;
 #   4. loads an AppArmor profile granting `userns` to the test binary (Ubuntu's
 #      kernel.apparmor_restrict_unprivileged_userns=1; dist/apparmor/kenneld is the
@@ -78,7 +78,7 @@ echo "  privhelper: $PRIVHELPER"
 echo "  test bin:   $TESTBIN"
 
 echo "== file capabilities on the privhelper (sudo, one-time) =="
-# The factory additions (07-11): cap_setuid maps the operator's id, and — since Linux
+# The factory additions (07-2): cap_setuid maps the operator's id, and — since Linux
 # 5.12 — cap_setfcap is ALSO required to map host uid 0 into a new user namespace
 # (capabilities(7): "this capability is also needed to map user ID 0 in a new user
 # namespace"). Without cap_setfcap the kennel's `0 0 1` uid_map write is EPERM even for
@@ -112,7 +112,7 @@ echo "== AppArmor userns profile over the test binary (sudo) =="
 # the `profile <name> <path>` form (the build-time deps path has no spaces anyway).
 # Two profiles, both granting userns:
 #  - the test binary (kenneld's role): creates its own userns on the legacy path.
-#  - the PRIVHELPER (factory, 07-11): it calls clone(CLONE_NEWUSER). Without a userns
+#  - the PRIVHELPER (factory, 07-2): it calls clone(CLONE_NEWUSER). Without a userns
 #    grant the kernel transitions the userns it creates to the restricted
 #    `unprivileged_userns` profile, which FORBIDS mapping host uid 0 into it (the
 #    `0 0 1` factory map then fails EPERM). Granting the privhelper userns makes the

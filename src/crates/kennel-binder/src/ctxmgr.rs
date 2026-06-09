@@ -27,7 +27,7 @@ pub enum Reply {
     /// it into the caller. Dropped after the reply (the caller owns its copy).
     Fd(OwnedFd),
     /// Reply with a length-prefixed payload and, when `Some`, a `BINDER_TYPE_FD` object
-    /// (the supervision-half bytes plus the controlling-pty fd — `07-11` §7.2.3). The
+    /// (the supervision-half bytes plus the controlling-pty fd — `07-2` §7.2.3). The
     /// receiver decodes it with [`Connection::transact_with_fd`].
     DataAndFd(Vec<u8>, Option<OwnedFd>),
 }
@@ -62,7 +62,7 @@ impl ContextManager {
     /// inbound transaction by calling `handler` and replying with its bytes.
     ///
     /// `handler` runs on the serve thread and must not block on I/O (registry
-    /// lookups are O(1); the relay facades hand work off — `02-7-binder.md`
+    /// lookups are O(1); the relay facades hand work off — `02-4-binder.md`
     /// §Threading model).
     ///
     /// # Errors

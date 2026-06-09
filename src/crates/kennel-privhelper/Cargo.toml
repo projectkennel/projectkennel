@@ -12,7 +12,7 @@ repository.workspace = true
 [dependencies]
 kennel-syscall = { path = "../kennel-syscall" }
 # The factory parses the ConstructionHalf and reuses the view-construction logic
-# (07-11 §7.11.1). This grows the setuid TCB; held to the same bar as the rest.
+# (07-2 §7.11.1). This grows the setuid TCB; held to the same bar as the rest.
 kennel-spawn = { path = "../kennel-spawn" }
 # Only pulled in (and only then is clang needed at build time) when the
 # bpf-egress feature is on; a plain `cargo build` of the helper stays clang-free.

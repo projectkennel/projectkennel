@@ -108,9 +108,9 @@ numeric context `<ctx>` (not the kennel name):
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-The per-kennel binderfs instance (`02-7-binder.md`) is staged under `ctx-<ctx>/binderfs/`. binderfs carries `FS_USERNS_MOUNT`, so the instance is mounted inside the kennel's child user namespace by the privhelper factory, then ends up at `/dev/binderfs/` in the constructed view (below); kenneld reaches it for node 0 via `/proc/<init-host-pid>/root/dev/binderfs/binder`. The staging directory disappears with the child's mount namespace on kennel exit.
+The per-kennel binderfs instance (`02-4-binder.md`) is staged under `ctx-<ctx>/binderfs/`. binderfs carries `FS_USERNS_MOUNT`, so the instance is mounted inside the kennel's child user namespace by the privhelper factory, then ends up at `/dev/binderfs/` in the constructed view (below); kenneld reaches it for node 0 via `/proc/<init-host-pid>/root/dev/binderfs/binder`. The staging directory disappears with the child's mount namespace on kennel exit.
 
-Inside the constructed view, the device follows the binderfs/Android convention: the instance mounts at `/dev/binderfs/`, the standard device is `/dev/binderfs/binder`, and `/dev/binder` is a symlink to it so a stock libbinder-shaped client finds the driver at its default path (`02-7-binder.md` §Device naming). These are *in-view* paths — the workload's, not the host's — and are listed here only because the device name is a stable contract; the rest of the view is out of scope for this chapter (§What this chapter does not cover). The privhelper factory chowns `/dev/binderfs/binder` to the operator uid (mode `0600`); `binder-control` stays root-only and is never granted to the workload.
+Inside the constructed view, the device follows the binderfs/Android convention: the instance mounts at `/dev/binderfs/`, the standard device is `/dev/binderfs/binder`, and `/dev/binder` is a symlink to it so a stock libbinder-shaped client finds the driver at its default path (`02-4-binder.md` §Device naming). These are *in-view* paths — the workload's, not the host's — and are listed here only because the device name is a stable contract; the rest of the view is out of scope for this chapter (§What this chapter does not cover). The privhelper factory chowns `/dev/binderfs/binder` to the operator uid (mode `0600`); `binder-control` stays root-only and is never granted to the workload.
 
 The per-kennel egress proxy does **not** listen on a Unix socket: it listens on a
 **TCP loopback address** — the kennel's own bit-packed `/28` (IPv4) or `/64`
@@ -124,7 +124,7 @@ is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
 same per-user tree, never a shared one.
 
 **Roadmap — the host loopback alias.** The per-kennel network-namespace redesign
-(`02-8-binder-net.md`, design `07-11-binder-netns.md`) adds a *host-side* alias:
+(`02-5-binder-net.md`, design `07-11-binder-netns.md`) adds a *host-side* alias:
 the kennel's own `/28` (IPv4) and `/64` (IPv6) are added to the host's `lo`
 interface (the privhelper's `AddLoopbackAlias`/`RemoveLoopbackAlias` ops), so an
 allowed in-kennel bind can be mirrored to the same `ip:port` host-side for host

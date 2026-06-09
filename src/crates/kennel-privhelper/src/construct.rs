@@ -121,7 +121,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         }
         // Hand off to the trusted root-owned init **as the kennel's uid 0** (no drop): PID 1
         // must NOT share the operator uid, or the operator-uid workload/facades could signal
-        // or ptrace it (07-11 §7.2.5). `kennel-init` itself drops the workload and facades to
+        // or ptrace it (07-2 §7.2.5). `kennel-init` itself drops the workload and facades to
         // the operator. kenneld still reaches `/proc/<init>/root` because the kennel userns is
         // operator-owned, so the operator kenneld holds CAP_SYS_PTRACE in it. Empty argv/envp
         // (the pull model).
@@ -155,7 +155,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 }
 
 /// The privileged construction the factory child runs as the kennel's uid 0, after its
-/// maps are written and before the `fexecve` (`07-11` §7.2.1): join the cgroup, build
+/// maps are written and before the `fexecve` (`07-2` §7.2.1): join the cgroup, build
 /// and `pivot_root` into the view, and hand the per-kennel binderfs device to the
 /// operator (the fix for the binderfs `EACCES`).
 ///
@@ -169,7 +169,7 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     if half.cgroup_join {
         join_cgroup(&half.cgroup)?;
     }
-    // In-namespace loopback is the per-kennel net-ns path (07-10); not yet built, and the
+    // In-namespace loopback is the per-kennel net-ns path (07-11); not yet built, and the
     // kennel currently shares the host net namespace, so `lo` is always false here.
     if half.lo {
         return Err(io::Error::other("in-namespace loopback not yet implemented"));
@@ -256,7 +256,7 @@ fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io
     Ok(())
 }
 
-/// Write the construction child's `uid_map` and `gid_map` (`07-11` §7.2.1).
+/// Write the construction child's `uid_map` and `gid_map` (`07-2` §7.2.1).
 ///
 /// Always maps host root in (`0 0 1`) so the kennel has a real uid 0, then the operator's
 /// own real uid/gid (so the workload's masked identity is a sane non-root id), then each

@@ -5,7 +5,7 @@
 //! The privhelper *factory* constructs the kennel (user/mount/PID/IPC namespaces, the
 //! `0 0 1`+operator identity maps, the cgroup join, the in-namespace `lo`, the view,
 //! the binderfs mount + device chown, and the `pivot_root`) and then `fexecve`s this
-//! binary as the kennel's uid-0 PID 1 with **empty argv/envp** (`docs/design/07-11`).
+//! binary as the kennel's uid-0 PID 1 with **empty argv/envp** (`docs/design/07-2`).
 //! So by the time `main` runs the host filesystem is already gone, this process holds
 //! uid 0 *only inside the kennel's user namespace* (no ambient host capabilities), and
 //! there is nothing on the command line.
@@ -47,7 +47,7 @@ use kennel_spawn::{AuxProcess, Supervision};
 use kennel_syscall::process::{set_no_new_privs, set_rlimit, wait_any, Reaped};
 use kennel_syscall::spawn::{fork_drop_exec, fork_drop_exec_confined};
 
-/// The in-view binder device the factory mounts (`07-9` §7.1): a fixed path, because the
+/// The in-view binder device the factory mounts (`07-1` §7.1): a fixed path, because the
 /// pull model gives `kennel-init` no argv to carry it.
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 /// The binder buffer mapping size for the pull connection.
@@ -148,7 +148,7 @@ fn spawn_all(
             std::env::set_current_dir(cwd)?;
         }
         // Controlling terminal FIRST, before Landlock/seccomp could gate the ioctls
-        // (`07-7` §7.9.2). The interactive path allocates a pty in the view's devpts and
+        // (`07-9` §7.9.2). The interactive path allocates a pty in the view's devpts and
         // returns the master over the socket the CLI passed; otherwise adopt stdin.
         if let Some(raw) = pty_raw {
             kennel_syscall::pty::setup_view_pty(raw)?;

@@ -84,7 +84,7 @@ pub const FLAT_BINDER_OBJECT_SIZE: usize = 24;
 
 /// `BINDER_TYPE_FD`: a `flat_binder_object` carrying a file descriptor.
 ///
-/// The kernel dups it into the receiver (`07-9`/`02-7` §The af-unix facade). The
+/// The kernel dups it into the receiver (`07-1`/`02-4` §The af-unix facade). The
 /// value is `B_PACK_CHARS('f', 'd', '*', B_TYPE_LARGE=0x85)`; the test cross-checks it.
 pub const BINDER_TYPE_FD: u32 = 0x6664_2a85;
 

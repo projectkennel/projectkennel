@@ -141,11 +141,11 @@ pub struct Identity {
     pub bastion: Option<BastionSetup>,
     /// The host path of `kennel-afunix-shim`, bound into the constructed view and
     /// launched by the seal to broker each granted `AF_UNIX` socket through the binder
-    /// facade (§7.6 / `07-9` §7.1.5). `None` disables the facade path, so `[unix]`
+    /// facade (§7.6 / `07-1` §7.1.5). `None` disables the facade path, so `[unix]`
     /// grants go unserved (no host socket is exposed by other means).
     pub afunix_shim_bin: Option<PathBuf>,
     /// The host path of the trusted root-owned `kennel-init` the privhelper factory
-    /// `fexecve`s as the kennel's uid-0 PID 1 (`07-11`). `Some` selects the factory
+    /// `fexecve`s as the kennel's uid-0 PID 1 (`07-2`). `Some` selects the factory
     /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
     /// the legacy in-process unprivileged spawn.
     pub init_bin: Option<PathBuf>,
@@ -326,7 +326,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         for sock in &unix.sockets {
             // The real host path is not needed here — the facade (kenneld's binder
             // registry) resolves the name and connects; the proxy only listens at the
-            // in-view shim path and brokers by name (`07-9` §7.1.5).
+            // in-view shim path and brokers by name (`07-1` §7.1.5).
             let shim_path = resolve_path(&sock.shim, subst, shim_root);
             if let Some(var) = &sock.env {
                 env.push((var.clone(), shim_path.to_string_lossy().into_owned()));
@@ -784,7 +784,7 @@ fn run_kennel<P, L>(
     let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
 
     // Wire the binder context manager when the kennel declares a [binder] policy *or*
-    // any [unix] grant (the AF_UNIX facade rides binder; `07-9` §7.1.5) and audit is
+    // any [unix] grant (the AF_UNIX facade rides binder; `07-1` §7.1.5) and audit is
     // configured (the registry records every decision; §7.1.4). The plan's view already
     // carries the binder flag in both cases, so the seal mounts binderfs regardless;
     // this provides the daemon-side manager that takes node 0 and answers the facade.
@@ -861,7 +861,7 @@ fn run_kennel<P, L>(
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::kennel_start(pid, ctx));
     }
-    // Drain the per-kennel BPF audit ring buffer (§02-5): reopen the pinned ringbuf
+    // Drain the per-kennel BPF audit ring buffer (§02-7): reopen the pinned ringbuf
     // and route its connect/bind events through the same writer with `source: bpf`.
     // Best-effort — absent pin (older helper / pinning failed) or no audit writer ⇒
     // no drain, egress unaffected.

@@ -65,7 +65,7 @@ const HTTP_200: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 /// The hot-swappable, config-derived half of a [`Proxy`].
 ///
 /// Holds everything `kenneld`'s resolved policy determines, behind an
-/// `RwLock<Arc<…>>` so it can be replaced live ([`Proxy::reload`], §02-4) without
+/// `RwLock<Arc<…>>` so it can be replaced live ([`Proxy::reload`], §02-6) without
 /// restarting the proxy or dropping in-flight connections; each request snapshots
 /// the current `Arc` once.
 #[derive(Clone)]
@@ -159,7 +159,7 @@ impl<R: Resolver> Proxy<R> {
     }
 
     /// Replace the live ruleset, resolved-address opinion, and host-services
-    /// **without restarting** (§02-4 live-reload): `kenneld` rewrites the proxy's
+    /// **without restarting** (§02-6 live-reload): `kenneld` rewrites the proxy's
     /// config file and the reloader thread (`run` in the binary) calls this. In-flight
     /// connections keep the snapshot they started with; new requests see the new
     /// policy. The listen sockets and the audit writer are *not* reloaded — changing

@@ -136,7 +136,7 @@ impl Connection {
     }
 
     /// Send a synchronous transaction expecting a file descriptor in the reply (the
-    /// af-unix facade: `CONNECT` a path, receive the connected socket — `07-9`/`02-7`).
+    /// af-unix facade: `CONNECT` a path, receive the connected socket — `07-1`/`02-4`).
     /// Sets `TF_ACCEPT_FDS` so the kernel permits the reply's fd, and returns the fd
     /// the kernel dup'd into us.
     ///
@@ -181,7 +181,7 @@ impl Connection {
 
     /// Send a synchronous transaction expecting **data and, optionally, a file
     /// descriptor** in one reply (the `kennel-init` `GET_SANDBOX_PLAN` pull: the
-    /// supervision-half bytes plus the controlling-pty fd — `07-11` §7.2.3). Sets
+    /// supervision-half bytes plus the controlling-pty fd — `07-2` §7.2.3). Sets
     /// `TF_ACCEPT_FDS` and returns the data bytes with the fd, or `None` if the reply
     /// carried no fd object.
     ///

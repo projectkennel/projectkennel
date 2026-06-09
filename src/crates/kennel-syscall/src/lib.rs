@@ -3,7 +3,7 @@
 //! # Purpose
 //!
 //! `kennel-syscall` is the workspace's single point for low-level system
-//! operations (`docs/architecture/02-6-internal-api.md`, `03-crate-decomposition.md`):
+//! operations (`docs/architecture/02-8-internal-api.md`, `03-crate-decomposition.md`):
 //! namespaces, mounts, Landlock and seccomp, capability manipulation, path
 //! resolution, and the credential calls. It presents one curated, safe API so
 //! the rest of the workspace does not depend on the underlying syscall crates

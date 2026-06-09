@@ -1,4 +1,4 @@
-//! End-to-end proof of the BPF audit ring-buffer drain (`02-5-bpf-abi.md`,
+//! End-to-end proof of the BPF audit ring-buffer drain (`02-7-bpf-abi.md`,
 //! `08-as-built-notes.md` §8.1, item 11).
 //!
 //! Builds the production drain path in-process under root: create the shared map

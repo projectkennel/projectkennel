@@ -123,7 +123,7 @@ where
 /// place, and before the workload `execve`: the aux inherits the fully-confined
 /// environment, joins the kennel's cgroup, and becomes a child of the workload (PID 1
 /// of the kennel's PID namespace), so it dies with the kennel. Used to launch the
-/// in-kennel proxies (e.g. `kennel-afunix-shim`, `07-9` §7.1.5).
+/// in-kennel proxies (e.g. `kennel-afunix-shim`, `07-1` §7.1.5).
 ///
 /// # Errors
 ///
@@ -159,7 +159,7 @@ pub fn launch_aux(path: &CStr, argv: &[&CStr]) -> io::Result<()> {
 
 /// `fork` a child that **drops to the operator identity** and `execve`s `path`.
 ///
-/// The `kennel-init` spawn-owner primitive (`docs/design/07-11` §7.2.2): init runs
+/// The `kennel-init` spawn-owner primitive (`docs/design/07-2` §7.2.2): init runs
 /// as uid 0 in the kennel's user namespace and forks each facade and the workload,
 /// each of which must run as the **non-root masked operator**, not as init's uid 0.
 /// The child drops in the load-bearing order `set_gid` → `set_supplementary_groups`
@@ -267,7 +267,7 @@ where
 /// descriptor `fd` (`fexecve(2)`), passing `argv` (full vector incl. `argv[0]`) and
 /// `envp`.
 ///
-/// The privhelper-factory's hand-off (`07-11` §7.2.1): it opens the trusted
+/// The privhelper-factory's hand-off (`07-2` §7.2.1): it opens the trusted
 /// root-owned `kennel-init` on the host *before* `clone`, then — inside the construction
 /// child, after `pivot_root` has detached the host filesystem — `fexecve`s it. Executing
 /// by fd is essential because the host path is gone post-pivot, and it keeps the init

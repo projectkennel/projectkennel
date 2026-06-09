@@ -16,9 +16,9 @@ architecture/
 ├── 02-1-cli.md                  CLI subcommands, flags, exit codes, output
 ├── 02-2-config-schema.md        policy TOML schema, templates, signature envelope
 ├── 02-3-audit-schema.md         JSONL event schema and evolution
-├── 02-4-ipc.md                  privhelper and kenneld wire protocols
-├── 02-5-bpf-abi.md              BPF map types, attach points, kernel features
-├── 02-6-internal-api.md         Rust crate-to-crate public surfaces
+├── 02-6-ipc.md                  privhelper and kenneld wire protocols
+├── 02-7-bpf-abi.md              BPF map types, attach points, kernel features
+├── 02-8-internal-api.md         Rust crate-to-crate public surfaces
 ├── 03-crate-decomposition.md    Cargo workspace layout
 ├── 04-trust-boundaries.md       privilege transitions, sanitisation points
 ├── 05-state-and-supervision.md  daemon lifecycles, state ownership, recovery

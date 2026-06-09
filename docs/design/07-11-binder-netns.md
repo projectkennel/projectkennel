@@ -120,16 +120,16 @@ host-side delegate binds the same `ip:port` on the host alias — so the port is
 reachable from the host at the kennel's own IP, with host inbound relayed into the kennel
 through the shim. The mirror is automatic for allowed binds; the decision to allow is
 policy's, never the workload's. Implementation detail is in
-[`02-8-binder-net.md`](../architecture/02-8-binder-net.md).
+[`02-5-binder-net.md`](../architecture/02-5-binder-net.md).
 
 kenneld owns the `INet` node and is never in the data path. It relays each transaction to
 the appropriate delegate, receives the fd in the reply, and forwards it to the shim via
 `BINDER_TYPE_FD`. Once the shim has the fd, data flows directly between the workload and the
 fd. The delegates are not binder participants — the fd-passing mechanics are in
-[`02-8-binder-net.md`](../architecture/02-8-binder-net.md).
+[`02-5-binder-net.md`](../architecture/02-5-binder-net.md).
 
 The full transaction wire protocol and fd-passing conventions are in
-[`02-8-binder-net.md`](../architecture/02-8-binder-net.md).
+[`02-5-binder-net.md`](../architecture/02-5-binder-net.md).
 
 ## 7.11.6 `kennel-netshim`: the SOCKS5 facade inside the kennel
 
@@ -165,7 +165,7 @@ carries a fuzz target under `fuzz/` per CODING-STANDARDS §10.6.
 
 ## 7.11.8 Spawn sequence
 
-The full implementation detail is in `02-8-binder-net.md` §Spawn sequencing; the
+The full implementation detail is in `02-5-binder-net.md` §Spawn sequencing; the
 design-level summary:
 
 `CLONE_NEWNET` is included in the namespace set at spawn — the kennel's network

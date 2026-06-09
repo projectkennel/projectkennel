@@ -15,7 +15,7 @@ cross-instance relay, and the new control-socket operation for kennel spawning.
 > `org.projectkennel.IAfUnix/default` facade brokers an AF_UNIX connect, returning the
 > connected fd. What remains **roadmap** is the cross-instance/inter-kennel relay
 > (§Inter-kennel IPC), the `org.projectkennel.INet` network crossing (→
-> [`02-8-binder-net.md`](02-8-binder-net.md)), and the deferred facades (`IDBus`). Sections
+> [`02-5-binder-net.md`](02-5-binder-net.md)), and the deferred facades (`IDBus`). Sections
 > below mark "built" vs "designed, not yet built" inline; the as-built construction actor and
 > node-0 acquisition are reconciled here, the relay/network sections remain forward contracts.
 
@@ -30,16 +30,16 @@ the policy surface, not the byte layout. kenneld, the service processes, and the
 inside a release. This chapter documents the surface for review and audit; it is not a
 contract to consumers.
 
-The relationship to [`02-4-ipc.md`](02-4-ipc.md) (the CLI/privhelper/daemon wire
+The relationship to [`02-6-ipc.md`](02-6-ipc.md) (the CLI/privhelper/daemon wire
 formats) is deliberately left untouched for now. The one place the two overlap — the
 new `spawn-kennel` control-socket request (§Kennel spawning below) — is documented here
-and will be folded into the `02-4` control-protocol table when the surfaces are remapped.
+and will be folded into the `02-6` control-protocol table when the surfaces are remapped.
 
 ---
 
 ## Why binder, in one paragraph
 
-The AF_UNIX shim (§7.6, [`02-4`](02-4-ipc.md) for its IPC, built) gates at *connect
+The AF_UNIX shim (§7.6, [`02-6`](02-6-ipc.md) for its IPC, built) gates at *connect
 time*: a granted socket is bind-mounted into the constructed view and audited when the
 workload connects. That cannot express authority that lives *inside* the protocol — a
 gpg-agent socket signs anything, a Wayland socket reads the clipboard. The double-blind
@@ -239,7 +239,7 @@ Shared across kennels (kenneld-global, bounded):
 - **A delegate worker pool** for relay work kenneld performs itself — the `IAfUnix`
   host-side `connect()` and the cross-instance payload copy. External delegates
   (`kennel-netproxy` for `INet` `CONNECT`, the kennel's host-side supervisor leg for `INet`
-  `BIND` — see [`02-8-binder-net.md`](02-8-binder-net.md)) are separate processes that do
+  `BIND` — see [`02-5-binder-net.md`](02-5-binder-net.md)) are separate processes that do
   their own blocking I/O with their existing thread-per-connection concurrency.
 - **A reply-reader** that collects completions `{cookie, fd | status}` from the workers and
   the delegate channels, matches the pending entry, and issues `BC_REPLY` — carrying the fd
@@ -459,10 +459,10 @@ pending cross-instance transactions it owned receive `BR_DEAD_REPLY`.
 
 Spawning a kennel on behalf of a running kennel is a **privileged kenneld operation, not a
 binder service transaction** (design §7.1.7): it goes over the existing CLI↔kenneld control
-socket (`$XDG_RUNTIME_DIR/kennel/control.sock`, [`02-4-ipc.md`](02-4-ipc.md)), reached from
+socket (`$XDG_RUNTIME_DIR/kennel/control.sock`, [`02-6-ipc.md`](02-6-ipc.md)), reached from
 inside the kennel only when policy grants it (`[ipc.spawn]`). This adds one request and one
 response to the control protocol. They are documented here and will be merged into the
-`02-4` request/response tables on the remap:
+`02-6` request/response tables on the remap:
 
 **Request — op 5 `SpawnKennel`** (op bytes 1–4 are the existing `Start`/`Stop`/`List`/
 `AuthorizedKeys`):
@@ -486,7 +486,7 @@ its own template declares `[ipc.spawn]` — no ambient transitive spawning.
 
 The frame carries no fds (unlike `Start`'s `SCM_RIGHTS` stdio), and the same
 `SO_PEERCRED` UID check and field bounds as every other control request apply
-([`02-4-ipc.md`](02-4-ipc.md) §Protocol invariants).
+([`02-6-ipc.md`](02-6-ipc.md) §Protocol invariants).
 
 ---
 
@@ -502,7 +502,7 @@ The frame carries no fds (unlike `Start`'s `SCM_RIGHTS` stdio), and the same
 `kennel check` detects an unavailable binder driver — neither built in nor a loaded/loadable
 `binder_linux` module — and reports it as a **fatal** prerequisite failure with a structured,
 named-feature error, the same posture the BPF loader is designed to take for missing BPF
-features (`02-5-bpf-abi.md`). These ship as **modules** (`=m`) on mainstream distributions
+features (`02-7-bpf-abi.md`). These ship as **modules** (`=m`) on mainstream distributions
 — Ubuntu's 6.17 kernel carries `CONFIG_ANDROID_BINDERFS=m` and `CONFIG_ANDROID_BINDER_IPC=m`
 — so the check tests for a usable driver (built in, or a loaded/auto-loadable `binder_linux`),
 not specifically for `=y`. Deployments on stock distribution kernels verify the module is
@@ -552,9 +552,9 @@ validation is a categorical policy-compile error, not a runtime check (design §
   [`02-2-config-schema.md`](02-2-config-schema.md).
 - The JSONL field layouts for the new audit events: [`02-3-audit-schema.md`](02-3-audit-schema.md).
 - The dbus/gpg/wayland protocol-facade service processes (deferred to their own chapter).
-- The CLI/privhelper/daemon non-binder wire formats: [`02-4-ipc.md`](02-4-ipc.md).
+- The CLI/privhelper/daemon non-binder wire formats: [`02-6-ipc.md`](02-6-ipc.md).
 - The spawn pipeline this mounts into: design §8.7 and [`01-process-model.md`](01-process-model.md).
-- Per-crate public APIs (`kennel-binder`, `kenneld::binder`): [`02-6-internal-api.md`](02-6-internal-api.md).
+- Per-crate public APIs (`kennel-binder`, `kenneld::binder`): [`02-8-internal-api.md`](02-8-internal-api.md).
 - On-disk and runtime paths (`…/kennel/ctx-<n>/binderfs/`): [`07-paths.md`](07-paths.md).
 
 ---

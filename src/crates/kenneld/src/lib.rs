@@ -157,7 +157,7 @@ pub trait Privileged {
     /// As [`add_address`](Self::add_address).
     fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response>;
 
-    /// Construct a kennel via the privhelper **factory** (`07-11`): hand it the
+    /// Construct a kennel via the privhelper **factory** (`07-2`): hand it the
     /// `construction_half` bytes, the `kennel-init` binary fd, and (optionally) the pty
     /// socket; receive the long-lived supervisor [`Child`] and `kennel-init`'s host pid.
     ///
@@ -298,7 +298,7 @@ pub struct BinderPrep {
     /// The unified audit writer the registry emits through.
     pub writer: std::sync::Arc<kennel_audit::Writer>,
     /// The `kennel-init` binary the privhelper factory `fexecve`s as the kennel's uid-0
-    /// PID 1 (`07-11`). When `Some`, `bring_up` constructs the kennel via the factory
+    /// PID 1 (`07-2`). When `Some`, `bring_up` constructs the kennel via the factory
     /// (real uid 0, binderfs chowned to the operator); when `None`, it falls back to the
     /// legacy in-process unprivileged spawn (no real uid 0 — the binderfs `EACCES` path).
     pub init_bin: Option<PathBuf>,
@@ -371,7 +371,7 @@ pub struct UnixShim {
 /// launched by the seal; it listens at each shim path so the application finds the
 /// socket where it expects, and on connect brokers to the `org.projectkennel.IAfUnix`
 /// binder facade (kenneld), which resolves the name to the real host socket and returns
-/// a connected fd (`07-9` §7.1.5). The workload never holds a path into the host
+/// a connected fd (`07-1` §7.1.5). The workload never holds a path into the host
 /// `AF_UNIX` namespace. Any named env var is set to the in-kennel shim path. What is not
 /// granted is structurally absent (default-deny); abstract-namespace connections are
 /// denied by the always-on Landlock scope regardless.
@@ -781,7 +781,7 @@ fn bring_up<P: Privileged + Sync>(
         bind_allowed_ports: plan.bind_allowed_ports.clone(),
         // The helper pins this kennel's maps under the owner's
         // `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can drain the audit ringbuf
-        // and the owner can inspect the maps (§02-5).
+        // and the owner can inspect the maps (§02-7).
         pin_id: id.to_owned(),
     };
     expect_ok("setup_egress", privileged.setup_egress(cgroup, &payload))?;
@@ -947,7 +947,7 @@ fn bring_up<P: Privileged + Sync>(
     }
 
     // 4. spawn the workload into this cgroup. Two paths:
-    //    * the **factory** (`07-11`), when a kennel-init binary is configured: the
+    //    * the **factory** (`07-2`), when a kennel-init binary is configured: the
     //      privhelper clones a real-uid-0 kennel, builds the view + binderfs (chowned to
     //      the operator), and `fexecve`s kennel-init, which pulls its supervision-half
     //      over binder and spawns + confines the workload. This is the path that gives a
@@ -987,7 +987,7 @@ fn bring_up<P: Privileged + Sync>(
     Ok(child)
 }
 
-/// The factory construction path (`07-11`): split the plan into its construction- and
+/// The factory construction path (`07-2`): split the plan into its construction- and
 /// supervision-halves, have the privhelper factory build the kennel and `fexecve`
 /// `kennel-init`, then take binder node 0 via the init pid and serve the lifecycle so
 /// `kennel-init` can pull the supervision-half. Returns the long-lived factory process
@@ -1052,7 +1052,7 @@ fn construction_half_from(plan: &Plan) -> kennel_spawn::ConstructionHalf {
         // The granted supplementary gids feed the gid_map after the 0 0 1 + operator
         // lines (the factory adds those); empty ⇒ default drop-all-groups.
         granted_gids: plan.supplementary_groups.clone().unwrap_or_default(),
-        lo: false, // per-kennel net-ns loopback is future work (07-10)
+        lo: false, // per-kennel net-ns loopback is future work (07-11)
     }
 }
 
@@ -1197,7 +1197,7 @@ fn gid_map_set(granted: &[u32]) -> Vec<u32> {
 /// mounts the per-kennel binderfs here; §7.1).
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
-/// Wire the `AF_UNIX` socket facade (§7.6 / `07-9` §7.1.5): launch the in-kennel
+/// Wire the `AF_UNIX` socket facade (§7.6 / `07-1` §7.1.5): launch the in-kennel
 /// `kennel-afunix-shim` proxy so each granted socket is presented at its in-view path
 /// and brokered, on connect, to the `org.projectkennel.IAfUnix` binder facade — which
 /// resolves the name to the real host socket and returns a connected fd. No host

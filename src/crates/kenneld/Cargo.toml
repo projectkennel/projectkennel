@@ -21,11 +21,11 @@ kennel-config = { path = "../kennel-config" }
 # The unified audit writer (02-3): kenneld builds it from the settled
 # AuditRuntime and emits lifecycle events through it.
 kennel-audit = { path = "../kennel-audit" }
-# The BPF loader/ringbuf surface (02-5): kenneld reopens the pinned per-kennel
+# The BPF loader/ringbuf surface (02-7): kenneld reopens the pinned per-kennel
 # audit ringbuf and drains it. No `embed-programs` — kenneld never loads BPF
 # (the privhelper does), so this stays clang-free.
 kennel-bpf = { path = "../kennel-bpf" }
-# The binder IPC context manager (07-9/02-7): kenneld owns node 0 of each kennel's
+# The binder IPC context manager (07-1/02-4): kenneld owns node 0 of each kennel's
 # binderfs instance and gates the registry against the settled [binder] policy.
 kennel-binder = { path = "../kennel-binder" }
 # Writing the per-kennel egress-proxy TOML config (kenneld writes, the netproxy

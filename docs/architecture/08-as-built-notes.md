@@ -36,7 +36,7 @@ narration is kept here; the chapter named is the source of truth.
 - **Daemon-side accept-unsigned dev mode** (`09-policy-lifecycle.md` §9.10, `algorithm =
   "none"`) — not built; `kennel run`'s in-memory compile-and-sign dev loop covers the
   local-dev need without a daemon change.
-- **`kennel_meta` read-only sealing + readback verification** (`02-5-bpf-abi.md`) — the map
+- **`kennel_meta` read-only sealing + readback verification** (`02-7-bpf-abi.md`) — the map
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
 - **Composable fragment catalogue** (`05-templates.md` §5.10) — the `include` mechanism is
@@ -48,7 +48,7 @@ narration is kept here; the chapter named is the source of truth.
   the cgroup BPF + proxy, not net-ns isolation), so the workload can *read* host network state
   (interfaces, routes, listening sockets, the LAN ARP table) via `/proc/net/*` and
   `AF_NETLINK`. Recon-only — egress stays blocked — but a genuine info-disclosure residual.
-  The closure path is now designed (`07-10`): unshare `CLONE_NEWNET` in the construction
+  The closure path is now designed (`07-11`): unshare `CLONE_NEWNET` in the construction
   child, configure an in-namespace `lo`, and reach the host-side proxy across the boundary via
   the `org.projectkennel.INet` binder facade (SOCKS5 → `kennel-netshim` → `INet` `CONNECT` →
   the `kennel-netproxy` delegate) rather than a direct loopback connect — re-architecting the
@@ -57,7 +57,7 @@ narration is kept here; the chapter named is the source of truth.
   `unconstrained` (`mode = host` re-shares the host net-ns and deliberately reinstates the
   recon, recorded as `threats.reinstated`); until then it remains a deferred, accepted residual.
   Would also make the network-inspection tools report the kennel's own stack.
-- **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-7-binder.md`
+- **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
   kennel's services through kenneld (the MCP topology) is designed, not built. So is the
@@ -82,10 +82,10 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   `02-3-audit-schema.md`.
 - **BPF audit ring-buffer drain** — per-kennel `audit_ringbuf`, owner-only pin under
   `/run/user/<uid>/kennel/bpf/<id>/`, drained by the unprivileged kenneld via `BPF_OBJ_GET`:
-  `02-3-audit-schema.md`, `02-5-bpf-abi.md`, `07-paths.md`.
+  `02-3-audit-schema.md`, `02-7-bpf-abi.md`, `07-paths.md`.
 - **`kennel-sshd` SSH egress bastion** + root-owned `kennel-akc` `AuthorizedKeysCommand`
   (bindings live only in the running kenneld; no `authorized_keys` file): `01-process-model.md`,
-  `02-4-ipc.md`, design `07-10-ssh.md` §7.10.
+  `02-6-ipc.md`, design `07-10-ssh.md` §7.10.
 - **`[unix]` AF_UNIX socket shim** — granted sockets bind-mounted into the view, abstract
   denied by the always-on Landlock scope: design `07-6-afunix.md` §7.6.
 - **Binder gateway core — the per-kennel inter-namespace gateway** — every kennel runs a
@@ -105,7 +105,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   AF_UNIX connect (returning the connected fd) in place of the bind-mount grant. New crates
   `kennel-binder` (unsafe ABI, parallel to `kennel-bpf`) and `kennel-init`, plus the
   `kennel-spawn::wire` Plan codec and the privhelper `ConstructKennel` op (`SOCK_SEQPACKET` +
-  `SCM_RIGHTS`): `02-7-binder.md`, design `07-1-binder.md` §7.1, `07-2-kennel-init.md`.
+  `SCM_RIGHTS`): `02-4-binder.md`, design `07-1-binder.md` §7.1, `07-2-kennel-init.md`.
   - **Identity map — subuid rejected, `0 0 1` chosen.** binderfs assigns its nodes to uid 0
     of the mounting userns, so the pure-identity map (`{uid} {uid} 1`) left them on the overflow
     `nobody`/`0600` and nothing in the kennel could open them. The kennel is given a real uid 0
@@ -147,7 +147,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   the CLI over a socketpair for proxying; non-interactive runs pass stdio straight through:
   design `07-9-other.md` §7.9.5a.
 - **Bind-port policy** — `min_port` floor + `allowed_ports`, enforced in `bind4`/`bind6`:
-  `02-5-bpf-abi.md`, design `07-5-network.md` §7.5.7.
+  `02-7-bpf-abi.md`, design `07-5-network.md` §7.5.7.
 - **ssh-agent footgun** — warned (at validate/compile/runtime), not forbidden: design
   `05-templates.md` §5.9 / `07-10-ssh.md`.
 - **`kennel run` auto-compile** — in-memory compile-and-sign of a source policy for the

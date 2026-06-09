@@ -128,7 +128,7 @@ pub fn establish_userns_defer_gid_map(uid: u32) -> io::Result<()> {
 /// `clone(2)` a child that is **PID 1** of a fresh PID namespace, entering all of
 /// `ns` in a single syscall, and run `child` in it.
 ///
-/// This is the privhelper-factory's construction primitive (`docs/design/07-11`):
+/// This is the privhelper-factory's construction primitive (`docs/design/07-2`):
 /// where the old unprivileged path did `unshare(CLONE_NEWUSER)` then a later
 /// [`fork_into_pid1`](crate::spawn::fork_into_pid1) double-fork to reach PID 1, the
 /// factory instead `clone`s once with `NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET]`: the

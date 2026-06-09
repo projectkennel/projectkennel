@@ -23,7 +23,7 @@ use kennel_privhelper::wire::{
 use kennel_privhelper::{alloc, construct, exec};
 
 fn main() -> ExitCode {
-    // The factory mode (`07-11`): kenneld invokes `kennel-privhelper construct` with a
+    // The factory mode (`07-2`): kenneld invokes `kennel-privhelper construct` with a
     // SOCK_SEQPACKET socket as stdin. It is long-lived (stays as the construction child's
     // parent) and passes fds, so it does not use the one-shot stdin/stdout framing below.
     if std::env::args().nth(1).as_deref() == Some("construct") {

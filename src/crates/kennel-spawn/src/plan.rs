@@ -298,7 +298,7 @@ pub struct ShimView {
     /// Mount `/proc` with `hidepid=2`.
     pub proc_hidepid: bool,
     /// Mount a per-kennel binderfs instance in the view and expose the standard
-    /// `binder` device + `/dev/binder` symlink (`07-9`/`02-7`). Set when the settled
+    /// `binder` device + `/dev/binder` symlink (`07-1`/`02-4`). Set when the settled
     /// `[binder]` policy is non-empty; kenneld takes node 0 via `/proc` at spawn.
     pub binder: bool,
 }
@@ -414,7 +414,7 @@ pub struct Plan {
     pub interactive_return_fd: Option<RawFd>,
     /// Auxiliary processes to launch inside the kennel, in the seal after Landlock and
     /// before the workload `execve`, so they inherit the confined environment and die
-    /// with the kennel's PID namespace (`07-9` §7.1.5). Used for the in-kennel proxies
+    /// with the kennel's PID namespace (`07-1` §7.1.5). Used for the in-kennel proxies
     /// (e.g. `kennel-afunix-shim`). Each binary must be bound into the view and granted
     /// Landlock execute. Not policy-derived — kenneld sets it at bring-up.
     pub aux: Vec<AuxProcess>,
@@ -530,7 +530,7 @@ pub struct ConstructionHalf {
     /// lines); each re-checked against the caller's membership before the `gid_map` write.
     pub granted_gids: Vec<u32>,
     /// Whether to bring up the in-namespace loopback (`lo`) — the per-kennel net-ns path
-    /// (`07-10`); `false` while the kennel shares the host net namespace.
+    /// (`07-11`); `false` while the kennel shares the host net namespace.
     pub lo: bool,
 }
 
@@ -711,11 +711,11 @@ impl Plan {
         // contents stay separately gated. Without it, `ls /` is a jarring EACCES.
         landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
 
-        // Binder IPC (07-9/02-7): when the kennel uses binder, the seal mounts a
+        // Binder IPC (07-1/02-4): when the kennel uses binder, the seal mounts a
         // per-kennel binderfs instance in the view; grant the workload its standard
         // `binder` device (read/write/ioctl) and read of the binderfs dir + features.
         // `binder-control` is never granted — only the spawn allocates devices. The
-        // `AF_UNIX` facade rides binder too (`07-9` §7.1.5), so a kennel with `[unix]`
+        // `AF_UNIX` facade rides binder too (`07-1` §7.1.5), so a kennel with `[unix]`
         // grants but no `[binder]` policy still mounts binderfs for the proxy.
         let binder = !policy.binder.is_empty() || !policy.unix.is_empty();
         if binder {

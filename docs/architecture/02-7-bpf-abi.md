@@ -29,7 +29,7 @@ All programs attach to per-kennel cgroups (one cgroup per kennel under `/sys/fs/
 
 > **Roadmap — `[net.bpf]` socket-shaping programs (per-kennel net-ns redesign).** The
 > network-namespace redesign (design [`07-11-binder-netns.md`](../design/07-11-binder-netns.md),
-> architecture [`02-8-binder-net.md`](02-8-binder-net.md) §BPF policy enforcement) extends the
+> architecture [`02-5-binder-net.md`](02-5-binder-net.md) §BPF policy enforcement) extends the
 > cgroup BPF role from the as-built egress gate to full `[net.bpf]` socket shaping for
 > `unconstrained` and `host` mode kennels. The egress programs above are **built**; everything
 > in this callout is **roadmap (designed, not built)**: the kennel still shares the host network
@@ -161,7 +161,7 @@ in `allowed_ports` (a bounded, verifier-clean loop). The two halves of the
 bind-port policy: the floor rides `kennel_meta`, the allowlist rides `bind_subnet`.
 
 > **Roadmap — bind hook drives the loopback mirror.** Under the per-kennel net-ns redesign
-> ([`02-8-binder-net.md`](02-8-binder-net.md) §The host-side mirror and `BIND`), the workload
+> ([`02-5-binder-net.md`](02-5-binder-net.md) §The host-side mirror and `BIND`), the workload
 > binds **natively inside** its own net-ns rather than having `INADDR_ANY` rewritten to a shared
 > stack, and the `bind4`/`bind6` hook gains a second job beyond enforcement: for every bind it
 > *allows* against `[[net.bpf.bind]]` it emits a report (a new ringbuf event kind carrying
@@ -235,7 +235,7 @@ Strings — destination names, paths — are not included in BPF events. The ker
 > `bind4`/`bind6` callout) and policy-denied `socket()`/`bind()`/`connect()` shaping events.
 > kenneld drains these on the same per-kennel `audit_ringbuf` and routes them to the canonical
 > `net.bind` (carrying `mirrored: true` once the host-side mirror is raised) and `net.bpf.deny`
-> audit events ([`02-8-binder-net.md`](02-8-binder-net.md) §Audit events). The as-built kinds
+> audit events ([`02-5-binder-net.md`](02-5-binder-net.md) §Audit events). The as-built kinds
 > above (egress connect/bind/sock/setsockopt/sendmsg) are unchanged. **Roadmap, not built.**
 
 ---
@@ -298,7 +298,7 @@ The workload's view never includes the runtime bpffs — the constructed shim do
 ## What this chapter does not cover
 
 - The C source patterns required of BPF programs (bounds checks, helper whitelist, `#pragma unroll` discipline): CODING-STANDARDS.md §4.1.
-- The Rust loader's `bpf(2)` interface (`object` for ELF, hand-rolled syscalls): `02-6-internal-api.md`.
+- The Rust loader's `bpf(2)` interface (`object` for ELF, hand-rolled syscalls): `02-8-internal-api.md`.
 - How the cgroup is created and the workload moved into it: design doc §8.3 and `01-process-model.md`.
 - The audit JSONL events produced from these ringbuf events: `02-3-audit-schema.md`.
 - The kernel-feature checks at startup: design doc §8.2 and `05-state-and-supervision.md`.

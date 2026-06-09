@@ -25,8 +25,8 @@ The discipline itself — *what* sanitisation looks like — is in CODING-STANDA
 | 13 | Settled policy → runtime | signed settled artefact → enforced policy | `kennel-spawn` (settled verifier) |
 | 14 | Workload/facade → kenneld over binder | binder transaction on node 0 → registry/facade decision | kenneld (`binder` looper, sender-identity gate) |
 | 15 | `kennel-init` → kenneld (lifecycle) | binder lifecycle/config verb → supervised action | kenneld (init-host-pid gate) |
-| 16 *(roadmap)* | Cross-kennel transaction → kenneld relay | provider/consumer transaction → relayed payload | kenneld (`binder` relay; → `02-7-binder.md`) |
-| 17 *(roadmap)* | Kennel net-ns ↔ host net-ns | binder `INet` crossing + host loopback mirror | kenneld + delegates (→ `02-8-binder-net.md`) |
+| 16 *(roadmap)* | Cross-kennel transaction → kenneld relay | provider/consumer transaction → relayed payload | kenneld (`binder` relay; → `02-4-binder.md`) |
+| 17 *(roadmap)* | Kennel net-ns ↔ host net-ns | binder `INet` crossing + host loopback mirror | kenneld + delegates (→ `02-5-binder-net.md`) |
 
 Each boundary is described in its own section below. The descriptions follow a common shape: what crosses, what is trusted on each side, what the validator does, what the failure mode is.
 
@@ -39,11 +39,11 @@ Each boundary is described in its own section below. The descriptions follow a c
 **What crosses.** Two distinct things, both from kenneld (or, in degraded mode, the CLI) to the privhelper:
 
 - the per-operation requests — `add-addr` / `del-addr`, `setup-egress`, `set-gid-map` — described below; and
-- the **construction-half of the kennel `Plan`**, carried by the `ConstructKennel` operation over a `SOCK_SEQPACKET` socketpair (with `SCM_RIGHTS` fds), encoding the uid/gid maps, the loopback config, the binderfs params, the view bind list, and the pivot target (`kennel-spawn::wire`; `07-2-kennel-init.md` §7.2.3, `02-4-ipc.md`).
+- the **construction-half of the kennel `Plan`**, carried by the `ConstructKennel` operation over a `SOCK_SEQPACKET` socketpair (with `SCM_RIGHTS` fds), encoding the uid/gid maps, the loopback config, the binderfs params, the view bind list, and the pivot target (`kennel-spawn::wire`; `07-2-kennel-init.md` §7.2.3, `02-6-ipc.md`).
 
 `ConstructKennel` makes the privhelper the kennel **factory** (`07-2-kennel-init.md` §7.2.1): it `clone`s the namespaces *as the operator* (so the user namespace is operator-owned), its post-`clone` child self-escalates to the kennel's uid 0, writes the maps, builds the root-owned surfaces (view, `/dev`, RO library binds, binderfs), mounts binderfs and chowns the device to the operator, `pivot_root`s, drops to the operator, and `fexecve`s the trusted root-owned `kennel-init` (PID 1). This is the **largest root-parses-operator-input surface in the system** — the construction-half decoder runs in the privileged host context — and is bounded and fuzzed (`07-2-kennel-init.md` §7.2.5, §10.6).
 
-**Privilege held.** The privhelper carries file caps `cap_setuid` + `cap_setgid` + `cap_setfcap` (+ `cap_sys_admin` + `cap_net_admin`). `cap_setuid` and the `cap_setfcap` single-`write(2)` are what let it write the precise two-line identity map — `0 0 1` (host root mapped to the kennel's uid 0) plus `<operator> <operator> 1`, plus one line per granted gid — with **no subuid/subgid** and no `0 0 N` range. This supersedes the older "minimal add-addr / egress / gid-map only" framing of the privhelper (`01-process-model.md`, `02-7-binder.md` §Privilege).
+**Privilege held.** The privhelper carries file caps `cap_setuid` + `cap_setgid` + `cap_setfcap` (+ `cap_sys_admin` + `cap_net_admin`). `cap_setuid` and the `cap_setfcap` single-`write(2)` are what let it write the precise two-line identity map — `0 0 1` (host root mapped to the kennel's uid 0) plus `<operator> <operator> 1`, plus one line per granted gid — with **no subuid/subgid** and no `0 0 N` range. This supersedes the older "minimal add-addr / egress / gid-map only" framing of the privhelper (`01-process-model.md`, `02-4-binder.md` §Privilege).
 
 **Trusted side.** Nothing on either side. The privhelper does not trust the caller's claim that operation parameters are within Project Kennel's reserved range, nor that a `Plan` is well-formed; it validates every field and bounds the construction-half decode. The caller does not trust the privhelper's response semantics beyond what the wire protocol declares.
 
@@ -173,7 +173,7 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 
 **Trusted side.** The wire format is internal. Both sides come from the same release. But kenneld still validates every field because protocol drift is a possibility (a CLI compiled against a different kenneld) and because the same socket handler is the path for any future external integration.
 
-**Validator.** kenneld's `control` decoder. Per CODING-STANDARDS.md §10.2 and `02-4-ipc.md`:
+**Validator.** kenneld's `control` decoder. Per CODING-STANDARDS.md §10.2 and `02-6-ipc.md`:
 
 - Frame length is bounded at `MAX_MESSAGE` (1 MiB); longer frames are a protocol violation, connection dropped.
 - Each field is bounds-checked as it is read: string length is capped at `MAX_STRING` (64 KiB) and array/argv counts at `MAX_COUNT` (4096); a truncated or oversized field is rejected.
@@ -181,7 +181,7 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 
 The kennel name is format-validated at this boundary before it is used anywhere: `kenneld::server::validate_kennel_name` enforces the `[a-z0-9][a-z0-9-]{0,63}` grammar (§02-2) on both `Start` and `Stop` requests, rejecting an empty name, one over 64 characters, or any character outside `[a-z0-9-]`. This runs ahead of `reserve()` (which still rejects a duplicate name and an exhausted context pool), so a name carrying `/`, `..`, NUL, whitespace, or control bytes can never reach the synthetic-`/etc` staging path, the per-kennel audit directory, the synthetic `/etc/hostname`, or the registry key — closing the path-traversal and hostname/log-injection surface at the trust boundary.
 
-**Failure mode.** Structured error response (with code from the catalogue in `02-4-ipc.md`); the connection remains open for the client to issue the next request or close. Protocol-framing violations close the connection.
+**Failure mode.** Structured error response (with code from the catalogue in `02-6-ipc.md`); the connection remains open for the client to issue the next request or close. Protocol-framing violations close the connection.
 
 ---
 
@@ -316,7 +316,7 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 ## 14. Workload/facade → kenneld over binder
 
-**What crosses.** A binder transaction on **node 0** (the well-known servicemanager handle) of the kennel's per-instance binderfs bus: a service-registry verb (`addService`/`getService`/`listServices`/`isDeclared`/`getDeclaredInstances`) or a facade verb (`org.projectkennel.IAfUnix/default` `CONNECT`), encoded as a length-bounded `binder_transaction_data` and its flat payload (`02-7-binder.md`).
+**What crosses.** A binder transaction on **node 0** (the well-known servicemanager handle) of the kennel's per-instance binderfs bus: a service-registry verb (`addService`/`getService`/`listServices`/`isDeclared`/`getDeclaredInstances`) or a facade verb (`org.projectkennel.IAfUnix/default` `CONNECT`), encoded as a length-bounded `binder_transaction_data` and its flat payload (`02-4-binder.md`).
 
 **Trusted side.** Nothing on the workload's side. The workload holds only an unforgeable node reference (no path to enumerate, no abstract name to probe); kenneld is the policy decision point for every call. The decisive trusted fact is **kernel-stamped caller identity**: the binder driver injects `sender_pid`/`sender_euid` into every transaction, and a process cannot forge them.
 
@@ -354,11 +354,11 @@ where `init_host_pid` is a **bootstrap fact from the privhelper** over the const
 
 ## 16. Cross-kennel transaction → kenneld relay *(roadmap)*
 
-*Roadmap: the cross-instance / inter-kennel relay is designed, not built (`02-7-binder.md` §Inter-kennel IPC). The kennel still shares the host network namespace today; this boundary describes the intended contract.*
+*Roadmap: the cross-instance / inter-kennel relay is designed, not built (`02-4-binder.md` §Inter-kennel IPC). The kennel still shares the host network namespace today; this boundary describes the intended contract.*
 
 **What crosses.** A binder transaction routed from a consuming kennel's instance to a providing kennel's instance via kenneld's cross-instance registry — only when **both** sides declare it (`[[binder.consume]]` and `[[binder.provide]]` with matching `accept_from`); a unilateral declaration denies.
 
-**Trusted side / TCB note.** This is the one place kenneld grows from control-plane supervisor to **synchronous data-path relay** — every relayed payload passes through it. The trade is bounded, not unbounded: only **flat scalar / `BINDER_TYPE_ARRAY`** payloads cross (fd and shared-memory objects are rejected cross-instance, kenneld inspecting the object-type field before relaying), and the per-instance pending-cookie table is bounded — overflow returns `BR_FAILED_REPLY`, never silent queueing, so a slow provider degrades to refusals on one instance rather than stalling the looper or growing kenneld without limit. Whether the relay stays in-kenneld or moves to a dedicated broker is an open question (`02-7-binder.md` §Open questions).
+**Trusted side / TCB note.** This is the one place kenneld grows from control-plane supervisor to **synchronous data-path relay** — every relayed payload passes through it. The trade is bounded, not unbounded: only **flat scalar / `BINDER_TYPE_ARRAY`** payloads cross (fd and shared-memory objects are rejected cross-instance, kenneld inspecting the object-type field before relaying), and the per-instance pending-cookie table is bounded — overflow returns `BR_FAILED_REPLY`, never silent queueing, so a slow provider degrades to refusals on one instance rather than stalling the looper or growing kenneld without limit. Whether the relay stays in-kenneld or moves to a dedicated broker is an open question (`02-4-binder.md` §Open questions).
 
 **Failure mode.** A provider crash fires the binder death notification automatically (`BR_DEAD_REPLY` to in-flight callers, not a hang); a consumer's exit destroys its nodes and `BR_DEAD_REPLY`s pending cross-instance transactions it owned. Each cross-instance transaction is audited (`binder.cross`: `from_ctx`, `to_ctx`, service, code, payload byte count, outcome — never content).
 
@@ -366,7 +366,7 @@ where `init_host_pid` is a **bootstrap fact from the privhelper** over the const
 
 ## 17. Kennel net-ns ↔ host net-ns *(roadmap)*
 
-*Roadmap: the per-kennel network namespace, the four network modes, and the loopback mirror are designed, not built — the kennel still shares the host network namespace (`02-8-binder-net.md`; `08-as-built-notes.md` §8.1). This boundary describes the intended contract.*
+*Roadmap: the per-kennel network namespace, the four network modes, and the loopback mirror are designed, not built — the kennel still shares the host network namespace (`02-5-binder-net.md`; `08-as-built-notes.md` §8.1). This boundary describes the intended contract.*
 
 **What crosses.** The only controlled crossing of the kennel net-ns boundary is binder: the `org.projectkennel.INet/default` node carries egress `CONNECT` (shim → kenneld → `kennel-netproxy` delegate) and the kenneld→shim `INBOUND` ingress hand-off. The two loopback stacks (the kennel's `/28` + `/64` inside its net-ns, the same addresses mirrored on the host `lo` alias) are otherwise **independent — no routing, no NAT** — so a `connect()` inside the kennel to its loopback stays inside it.
 
@@ -397,7 +397,7 @@ Both transitions are owned by `kennel-spawn`; both are tested with positive (the
 ## What this chapter does not cover
 
 - The mechanism details of each kernel feature (Landlock semantics, cgroup BPF attach types, seccomp filter format): design doc §7 and §8.
-- The wire formats themselves: `02-4-ipc.md`.
+- The wire formats themselves: `02-6-ipc.md`.
 - The audit event schema: `02-3-audit-schema.md`.
 - The locking matrix that protects shared state inside kenneld: `05-state-and-supervision.md`.
 - The recovery procedure when kenneld restarts: `05-state-and-supervision.md`.

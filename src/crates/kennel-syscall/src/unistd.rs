@@ -136,7 +136,7 @@ pub fn set_uid(uid: u32) -> io::Result<()> {
 /// device to the operator: a binderfs instance assigns its nodes to uid 0 of the
 /// mounting user namespace (now a real uid 0 under the `0 0 1` map), but the workload,
 /// the af-unix proxy, and `kenneld` all act as the **operator**, so the device must be
-/// operator-owned for them to open it (`07-11`; the fix for the binderfs `EACCES`).
+/// operator-owned for them to open it (`07-2`; the fix for the binderfs `EACCES`).
 ///
 /// # Errors
 ///

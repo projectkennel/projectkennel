@@ -732,7 +732,7 @@ fn get_string(r: &mut Reader<'_>) -> Result<String, PlanWireError> {
 
 /// Encode the [`ConstructionHalf`] to its wire bytes — the half the factory parses.
 ///
-/// Reuses [`put_view`] (`07-11` §7.2.1); the operator uid/gid are deliberately not
+/// Reuses [`put_view`] (`07-2` §7.2.1); the operator uid/gid are deliberately not
 /// serialised (the factory uses its own real ids).
 #[must_use]
 pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {

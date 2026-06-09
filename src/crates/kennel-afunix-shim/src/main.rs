@@ -3,7 +3,7 @@
 //!
 //! # Purpose
 //!
-//! The af-unix facade (`07-1-binder.md` §7.1.5 / `02-7`) replaces the bind-mount socket
+//! The af-unix facade (`07-1-binder.md` §7.1.5 / `02-4`) replaces the bind-mount socket
 //! shim: instead of binding a host socket into the kennel's view, kenneld brokers the
 //! connection and returns a connected fd over binder, so the workload never holds a
 //! path into the host `AF_UNIX` namespace and every connect is mediated at call time.

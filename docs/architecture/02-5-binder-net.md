@@ -2,13 +2,13 @@
 
 This chapter is the implementation contract for the binder-based network service
 introduced by the network namespace redesign in [`07-11-binder-netns.md`](../design/07-11-binder-netns.md).
-Where `07-10` says *what and why*, this chapter commits to the concrete shape: which
+Where `07-11` says *what and why*, this chapter commits to the concrete shape: which
 processes participate on the kennel's binderfs instance, the transaction wire conventions
 for `org.projectkennel.INet/default`, the spawn sequencing changes, the thread model, and
 the relationship to the existing `kennel-netproxy` crate.
 
 > **Status: not yet built (roadmap).** This chapter is a forward contract, following
-> the same convention as `02-7-binder.md`. Every "kenneld does X" reads as
+> the same convention as `02-4-binder.md`. Every "kenneld does X" reads as
 > "kenneld is designed to do X". As pieces land, as-built detail graduates into this
 > chapter and the roadmap banner narrows.
 
@@ -26,7 +26,7 @@ directly. The stability surface the workload sees is the SOCKS5 endpoint at
 
 The network service involves four processes, each with a defined role on the kennel's
 binderfs instance. This is an extension of the participant set defined in
-[`02-7-binder.md`](02-7-binder.md):
+[`02-4-binder.md`](02-4-binder.md):
 
 | Process | Net-ns | Binder role | Network responsibility |
 |---|---|---|---|
@@ -36,7 +36,7 @@ binderfs instance. This is an extension of the participant set defined in
 | `kennel-netshim` | kennel | binder **consumer** of `org.projectkennel.INet/default` | SOCKS5 inbound, binder transaction dispatch, accept loop, splice to workload |
 
 Only kenneld registers `org.projectkennel.INet/default` — it is a reserved-namespace node
-and the reserved rule (`02-7-binder.md` §The `org.projectkennel.*` reserved namespace)
+and the reserved rule (`02-4-binder.md` §The `org.projectkennel.*` reserved namespace)
 admits no other registrant. `kennel-netproxy` and the host-side spawn leg are kenneld's
 **delegates, not binder participants**: kenneld receives every `INet` transaction on node 0,
 runs the policy check, and forwards `{cookie, payload, target}` to the right delegate over a
@@ -118,7 +118,7 @@ kennel to its loopback stays inside it — and the only controlled crossing is b
 
 `org.projectkennel.INet/default` is a kenneld-owned node in the reserved
 `org.projectkennel.*` namespace, subject to the same two hard rules as all reserved
-services (`02-7-binder.md` §The `org.projectkennel.*` reserved namespace): only
+services (`02-4-binder.md` §The `org.projectkennel.*` reserved namespace): only
 kenneld may register it; `getService` for it always resolves locally. It is present only
 when `net.mode` is `constrained`, `unconstrained`, or `host`. A `mode = none` kennel has
 no net-ns crossing point and no `INet` node.
@@ -160,7 +160,7 @@ crossing outside the controlled path.
 `BINDER_TYPE_FD` is permitted on this node because the shim and kenneld are within the same
 trust boundary for this transaction class (the delegates hand their fds to kenneld by
 `SCM_RIGHTS`, off the binder path entirely). The general cross-instance fd prohibition
-(`02-7-binder.md` §Intra-instance vs cross-instance object types) is not implicated — shim
+(`02-4-binder.md` §Intra-instance vs cross-instance object types) is not implicated — shim
 to kenneld is intra-instance.
 
 ---
@@ -226,7 +226,7 @@ host-side mirror (observe / expose at the same IP):
 All processes use the existing blocking thread-per-connection discipline — no async
 runtime, consistent with the rest of the codebase.
 
-**`kenneld`:** the canonical binder threading is in [`02-7-binder.md`](02-7-binder.md)
+**`kenneld`:** the canonical binder threading is in [`02-4-binder.md`](02-4-binder.md)
 §Threading model — a non-blocking per-instance looper that hands relay verbs (`INet`
 `CONNECT`/`BIND` among them) to a delegate over the per-kennel `socketpair` and returns to
 `BINDER_WRITE_READ`, plus a global reply-reader that issues `BC_REPLY` with the returned fd

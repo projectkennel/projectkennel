@@ -402,7 +402,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         socks_connect_bin: Some(socks_bin),
     };
 
-    // AF_UNIX socket facade (§7.6 / 07-9 §7.1.5): a real host listener the facade
+    // AF_UNIX socket facade (§7.6 / 07-1 §7.1.5): a real host listener the facade
     // connects on the workload's behalf. The in-kennel `kennel-afunix-shim` proxy
     // presents it at $HOME/kennel-unix.sock and brokers each connect by name through
     // binder node 0 (kenneld). A host echo thread serves "ping" -> "pong". No host
@@ -453,7 +453,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             }],
         },
         writer: binder_writer,
-        // Drive the privhelper factory (07-11): a real uid 0 builds the view + binderfs
+        // Drive the privhelper factory (07-2): a real uid 0 builds the view + binderfs
         // (chowned to the operator), fixing the binderfs EACCES the legacy path hit.
         init_bin: Some(sibling_binary("kennel-init")),
     };

@@ -47,7 +47,7 @@ pub fn fuzz_parsers(data: &[u8]) {
     let _ = kennel_privhelper::wire::Request::decode(data);
 
     // The binder driver-return command stream: the read buffer the kernel fills
-    // carries sender-controlled transaction payloads (07-9/02-7). The decoder must
+    // carries sender-controlled transaction payloads (07-1/02-4). The decoder must
     // bounds-check any junk; a single parse plus the transaction-data decode.
     let _ = kennel_binder::proto::parse(data);
     let _ = kennel_binder::proto::TransactionData::from_bytes(data);

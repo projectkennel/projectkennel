@@ -59,9 +59,9 @@ The full section list:
 | `[exec]` | What binaries the workload may execve() | §7.3 |
 | `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction, scrub patterns | §7.4 |
 | `[net]`, `[net.proxy]`, `[net.bpf]` | Network mode (four-mode taxonomy), proxy destination allowlist + denylist, socket-capability shaping, bind rules, audit. **The four-mode taxonomy + `[net.proxy]`/`[net.bpf]` split is roadmap** (the as-built runtime still shares the host net-ns); see §The `[net]` section. | §7.5 |
-| `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-7`) | §7.6 |
-| `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-7`). **Roadmap** (cross-instance relay is not built). | §7.1 |
-| `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-7` §Kennel spawning). **Roadmap.** | §7.1 |
+| `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
+| `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
+| `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
 | `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.10 |
 | `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.4 |
 | `[container]` | Container-mode policy surface; source-only, design-level (no runtime yet) | §7.1 |
@@ -241,7 +241,7 @@ signature = "BASE64..."
 # signed_fields is optional advisory metadata; the in-tree templates omit it.
 ```
 
-The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-6-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
+The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-8-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
 
 Signature verification rules:
 
@@ -432,7 +432,7 @@ The signature trust differs by artefact (`07-paths.md` §Policy-signing trust sp
 ## The `[net]` section — mode, proxy, BPF
 
 > **Roadmap.** The four-mode taxonomy and the `[net.proxy]` / `[net.bpf]` split below are the
-> network-namespace redesign (design §7.5/§7.11, architecture [`02-8-binder-net.md`](02-8-binder-net.md)).
+> network-namespace redesign (design §7.5/§7.11, architecture [`02-5-binder-net.md`](02-5-binder-net.md)).
 > The as-built runtime still **shares the host network namespace** and reads the three-mode
 > `[net]` form (the `[net.mode]` invariant above). This section is the forward schema; it
 > supersedes the standalone `net-policy.toml` reference (now retired). Field semantics are
@@ -482,7 +482,7 @@ and `protocol`, and a required `reason`. `[[net.proxy.deny]]` carries `cidr` + `
 The socket-capability layer. Optional in `constrained` (defence-in-depth — the net-ns is the
 primitive), meaningful in `unconstrained`, and the **primary** enforcement primitive in `host`
 (no net-ns boundary exists). Enforced at `socket()`/`bind()`/`connect()` by cgroup BPF
-([`02-5-bpf-abi.md`](02-5-bpf-abi.md)).
+([`02-7-bpf-abi.md`](02-7-bpf-abi.md)).
 
 | Table | Fields | Notes |
 |---|---|---|
@@ -509,10 +509,10 @@ either section for `mode = none`.
 
 > **Roadmap.** The cross-instance binder relay these sections drive is not built (the binder
 > *gateway core* — node 0, the `IAfUnix` facade, `kennel-init` lifecycle — is built and proven;
-> the cross-kennel relay is the forward contract in [`02-7-binder.md`](02-7-binder.md)). This is
+> the cross-kennel relay is the forward contract in [`02-4-binder.md`](02-4-binder.md)). This is
 > the forward schema for `BinderRuntime`; field semantics are design §7.1.
 
-These sections configure the binder service registry (`02-7`). The kennel-local registry and the
+These sections configure the binder service registry (`02-4`). The kennel-local registry and the
 reserved `org.projectkennel.*` services need no policy — they are always available when their
 backing section is non-empty. What these sections grant is **cross-kennel** service exchange and
 kennel spawning.
@@ -533,18 +533,18 @@ kennel spawning.
 
 A cross-instance lookup succeeds only when **both** sides declare it: the consumer's
 `[[binder.consume]]` names the service and provider, and the provider's `[[binder.provide]]` names
-the service and lists the consumer in `accept_from`. A unilateral declaration denies (`02-7`
+the service and lists the consumer in `accept_from`. A unilateral declaration denies (`02-4`
 §Cross-instance registry). Peer-kennel names live only in policy, never in the binder protocol the
 workload sees.
 
-`[ipc.spawn]` — grants the `SpawnKennel` control-socket capability (`02-7` §Kennel spawning): when
+`[ipc.spawn]` — grants the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning): when
 present, the kennel may ask kenneld to spawn a child kennel whose policy is the requested template
 intersected with this kennel's own grants and any narrowings (never a superset). A spawned kennel
 has no spawn capability of its own unless its template independently declares `[ipc.spawn]`.
 
 ### Reserved-namespace compile validation
 
-The `org.projectkennel.*` prefix is reserved (`02-7` §The reserved namespace). It is a **categorical
+The `org.projectkennel.*` prefix is reserved (`02-4` §The reserved namespace). It is a **categorical
 policy-compile error** — not a runtime check (design §7.1.4) — for any `[[binder.provide]]` or
 `[[binder.consume]]` `service` to begin with `org.projectkennel.`; only kenneld registers under that
 prefix. The compiler rejects such a policy by name, the same way it rejects an out-of-range
@@ -555,9 +555,9 @@ prefix. The compiler rejects such a policy by name, the same way it rejects an o
 ## What this chapter does not cover
 
 - The field-by-field semantics of each section: see the corresponding design-document chapter (§7.x) or the worked example in [TEMPLATE-ai-coding-strict.md](../design/TEMPLATE-ai-coding-strict.md).
-- The binder IPC contract the `[binder]`/`[ipc.spawn]` sections feed, and the `org.projectkennel.*` service set: [`02-7-binder.md`](02-7-binder.md); the network-over-binder layer the `[net.proxy]`/`[net.bpf]` sections feed: [`02-8-binder-net.md`](02-8-binder-net.md). The standalone `net-policy.toml` schema reference is retired; its content is the §The `[net]` section above.
+- The binder IPC contract the `[binder]`/`[ipc.spawn]` sections feed, and the `org.projectkennel.*` service set: [`02-4-binder.md`](02-4-binder.md); the network-over-binder layer the `[net.proxy]`/`[net.bpf]` sections feed: [`02-5-binder-net.md`](02-5-binder-net.md). The standalone `net-policy.toml` schema reference is retired; its content is the §The `[net]` section above.
 - The design-level treatment of signing, versioned references, and includes: design doc §5.10.
-- The canonical-form serialisation procedure: `02-6-internal-api.md` (`kennel-policy::canonical`).
+- The canonical-form serialisation procedure: `02-8-internal-api.md` (`kennel-policy::canonical`).
 - The signing-key store and lockfile locations on disk: `07-paths.md`.
 - The mechanism by which template and fragment signatures are verified at runtime, and how the lockfile is checked: `04-trust-boundaries.md`.
 - How `kennel diff` and `kennel upgrade` compute and present deltas, and how `upgrade` rewrites the lockfile: `02-1-cli.md`.

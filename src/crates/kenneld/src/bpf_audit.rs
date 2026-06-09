@@ -8,7 +8,7 @@
 //! `ctx_byte`, and emitting a canonical `02-3` event with `source: bpf` through the
 //! same [`Writer`] the lifecycle and proxy events use.
 //!
-//! The drain is the consumer half of `02-5-bpf-abi.md` §The audit ring buffer.
+//! The drain is the consumer half of `02-7-bpf-abi.md` §The audit ring buffer.
 //! Events whose `ctx_byte` does not match this kennel (a corrupt or foreign
 //! sample on a per-kennel buffer) are dropped — defence in depth atop the
 //! one-buffer-per-kennel pinning.

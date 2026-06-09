@@ -512,7 +512,7 @@ fn spawn_inner(
         // In-kennel auxiliary processes (the af-unix proxy and future facades), launched
         // last so they inherit the fully-sealed environment (view, Landlock, seccomp,
         // ulimits) and, being forked from PID 1, die with the kennel's PID namespace
-        // (`07-9` §7.1.5). Each `fork`+`execv` of a view-internal binary; a launch
+        // (`07-1` §7.1.5). Each `fork`+`execv` of a view-internal binary; a launch
         // failure is logged but does not abort the workload (the grant simply goes
         // unserved, as a refused connect — fail-closed, not fail-to-spawn).
         for proc in &aux {
@@ -724,7 +724,7 @@ fn combine_spawn_and_servicer(
 /// after `pivot_root`; the fallback path builds in the parent without it.
 ///
 /// Public so `kennel-init` builds the workload's ruleset post-pivot from its
-/// [`Supervision`] half with the identical logic (`docs/design/07-11` §7.2.2); it is
+/// [`Supervision`] half with the identical logic (`docs/design/07-2` §7.2.2); it is
 /// `unsafe`-free, so sharing it keeps `kennel-init` `#![forbid(unsafe_code)]`.
 ///
 /// # Errors
@@ -766,7 +766,7 @@ pub fn build_ruleset(
 /// [`make_root_private`]: kennel_syscall::mount::make_root_private
 ///
 /// Public so the privhelper factory builds the view in its construction child with the
-/// identical logic (`07-11` §7.2.1); it is `unsafe`-free (mounts go through
+/// identical logic (`07-2` §7.2.1); it is `unsafe`-free (mounts go through
 /// `kennel_syscall::mount`), so sharing it keeps the factory `#![forbid(unsafe_code)]`.
 ///
 /// # Errors
@@ -868,7 +868,7 @@ pub fn build_view_and_pivot(
         }
     }
 
-    // 4b. Binder IPC (07-9/02-7): a per-kennel binderfs instance with the standard
+    // 4b. Binder IPC (07-1/02-4): a per-kennel binderfs instance with the standard
     //     `binder` device and the `/dev/binder` symlink libbinder opens by default.
     //     binderfs is FS_USERNS_MOUNT, so this mounts in the kennel's own userns with
     //     no real privilege. `binder-control` is allocated here but not Landlock-granted

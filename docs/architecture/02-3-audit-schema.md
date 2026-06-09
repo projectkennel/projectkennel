@@ -56,7 +56,7 @@ The Project Kennel audit log is conceptually a *stream* of structured events. Ea
 Sources of events (where they originate before being passed to the sinks):
 
 - **Kernel** via Landlock and AppArmor LSM hooks (filesystem denials, ptrace denials).
-- **cgroup BPF programs.** Network connect/bind/sock-create denials, allow events under summary or full level. Programs write to *our* `audit_ringbuf`; the audit reader in kenneld (`kenneld::bpf_audit`) drains it and translates each event to a canonical `net.*` event through the unified writer with `source: bpf` (`02-5-bpf-abi.md` §The audit ring buffer).
+- **cgroup BPF programs.** Network connect/bind/sock-create denials, allow events under summary or full level. Programs write to *our* `audit_ringbuf`; the audit reader in kenneld (`kenneld::bpf_audit`) drains it and translates each event to a canonical `net.*` event through the unified writer with `source: bpf` (`02-7-bpf-abi.md` §The audit ring buffer).
 - **The netproxy.** SOCKS5-level allow/deny, DNS resolution, byte counters.
 - **xdg-dbus-proxy.** D-Bus method allow/deny.
 - **kennel-privhelper.** Privileged-operation invocations and refusals.
@@ -123,26 +123,26 @@ The connect/bind events below are *BPF-sourced*: the cgroup programs emit them i
 (`kenneld::bpf_audit`) — attributing each event to its kennel by `ctx_byte`, carrying
 `comm` as untrusted (writer-sanitised), and emitting the canonical event with
 `source: bpf`. The mapping from the BPF `audit_kind` to these event names is in
-`02-5-bpf-abi.md`.
+`02-7-bpf-abi.md`.
 
 - **`net.connect-allow`** / **`net.connect-deny`** — connect() attempt, sourced from the BPF connect programs. Allow under audit-level rules; deny always. Adds `addr_family`, `addr`, `port`.
 - **`net.bind-allow`** / **`net.bind-deny`** / **`net.bind-rewrite`** — bind() attempt, sourced from the BPF bind programs. Adds `addr_requested`, `addr_rewritten` (for rewrites), `port`.
 
 **Status: roadmap (per-kennel net-ns).** The events in this block are part of the
 stable schema but are emitted only once the per-kennel network namespace, the four
-network modes, and the loopback mirror land (`02-8-binder-net.md`; the kennel today
+network modes, and the loopback mirror land (`02-5-binder-net.md`; the kennel today
 still **shares the host network namespace**). They are also BPF-sourced — kenneld
 drains them from the `audit_ringbuf` and emits them with `source: bpf`.
 
 - **`net.bind`** — a `bind()` at the cgroup `bind` hook (`[[net.bpf.bind]]` gate). Adds
   `addr`, `port`, and — on an **allowed** bind — `mirrored` (boolean, `true` once the
   host-side mirror has raised the same `ip:port` on the host alias; see
-  `02-8-binder-net.md` §The host-side mirror). The `outcome` carries the allow/deny.
+  `02-5-binder-net.md` §The host-side mirror). The `outcome` carries the allow/deny.
 - **`net.bpf.deny`** — a `[net.bpf]`-denied `bind()` / `connect()` / `socket()` at the
   socket-shaping hooks. Adds `family`, `type`, `protocol`, `addr`, `port`, and `rule`
   (the policy clause that denied it). Always `outcome: deny`.
 
-The `org.projectkennel.INet` network crossing (roadmap, `02-8-binder-net.md`) is
+The `org.projectkennel.INet` network crossing (roadmap, `02-5-binder-net.md`) is
 audited as part of the per-request `net.egress` record below: the `INet` `CONNECT`
 transaction is the binder front of the netproxy CONNECT delegate, so an allowed or
 denied dial surfaces through `net.egress` exactly as a SOCKS5 request does today —
@@ -177,12 +177,12 @@ The per-kennel proxy emits one `net.egress` record per request (`kennel-netproxy
 ### Binder (`resource: "binder"`)
 
 Every binder decision is audited through the unified writer with `source: kenneld` —
-kenneld is node 0 and so witnesses every verb directly (`02-7-binder.md` §Audit
+kenneld is node 0 and so witnesses every verb directly (`02-4-binder.md` §Audit
 events). Payload *content* is never logged: byte counts and outcomes only, per
 CODING-STANDARDS §9.3.
 
 The registry verbs are **built** (kenneld serves node 0 today); the cross-instance
-relay and `SpawnKennel` are **roadmap** (`02-7-binder.md`).
+relay and `SpawnKennel` are **roadmap** (`02-4-binder.md`).
 
 - **`binder.register`** — an `addService` (`IServiceManager` register). Adds `service`
   (the `org.projectkennel.*`-form name), `reason` (for denies). The `outcome` carries
@@ -201,7 +201,7 @@ which file access in which kennel* from the JSONL log alone (design §7.1.9).
 
 ### Kennel spawning (`resource: "lifecycle"`)
 
-- **`kennel.spawn`** *(roadmap)* — a `SpawnKennel` request (`02-7-binder.md` §Kennel
+- **`kennel.spawn`** *(roadmap)* — a `SpawnKennel` request (`02-4-binder.md` §Kennel
   spawning). Adds `template`, `scoped_name`, `policy_hash` (the effective policy hash).
   `source: kenneld`.
 
@@ -219,7 +219,7 @@ The `source` is `privhelper`, but kenneld writes these on the helper's behalf: t
 - **`lifecycle.workload-exit`** — Schema adds `pid`, `exit_code`, `signal`, `uptime_seconds`, `rss_max_bytes`. Today kenneld emits `pid` and `exit_code`.
 
 The binder bus carries the construction/lifecycle control plane between `kennel-init`
-(PID 1) and kenneld as node 0 (`02-7-binder.md` §Lifecycle, `07-2-kennel-init.md`).
+(PID 1) and kenneld as node 0 (`02-4-binder.md` §Lifecycle, `07-2-kennel-init.md`).
 These verbs are witnessed by kenneld directly (`source: kenneld`, `resource:
 lifecycle`) and are audited **as lifecycle events, not as `binder.cross`** — the
 binder transport is the channel, not the subject. kenneld stamps the kernel-supplied
@@ -305,7 +305,7 @@ A representative line:
 
 ## Sink: systemd-journald
 
-The recommended sink on systemd-using systems. Events are emitted via `sd_journal_send` (called from `kennel-audit` through a vetted Rust binding; see `02-6-internal-api.md`).
+The recommended sink on systemd-using systems. Events are emitted via `sd_journal_send` (called from `kennel-audit` through a vetted Rust binding; see `02-8-internal-api.md`).
 
 The destination journal is determined by where kenneld runs:
 
@@ -436,7 +436,7 @@ For journald specifically: filter on `MESSAGE_ID` when targeting a specific even
 ## What this chapter does not cover
 
 - The audit log philosophy (always-deny, sampled-allow, per-kennel correlation): design doc §8.6.
-- Where each daemon emits events from in its codepath: `02-6-internal-api.md` (`kennel-audit` crate).
+- Where each daemon emits events from in its codepath: `02-8-internal-api.md` (`kennel-audit` crate).
 - Rotation and retention as runtime concerns: `05-state-and-supervision.md`.
 - The on-disk path layout for audit files: `07-paths.md`.
 - How `kennel audit` queries the file sink: `02-1-cli.md`.

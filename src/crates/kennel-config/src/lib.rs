@@ -295,14 +295,14 @@ impl Deployment {
     }
 
     /// The in-kennel `AF_UNIX` proxy bound into the view and launched by the seal to
-    /// broker granted sockets through the binder facade (`07-9` §7.1.5).
+    /// broker granted sockets through the binder facade (`07-1` §7.1.5).
     #[must_use]
     pub fn afunix_shim(&self) -> PathBuf {
         self.resolve_bin(self.afunix_shim.as_deref(), "kennel-afunix-shim")
     }
 
     /// The trusted root-owned `kennel-init` the privhelper factory `fexecve`s as the
-    /// kennel's uid-0 PID 1 (`07-11`).
+    /// kennel's uid-0 PID 1 (`07-2`).
     #[must_use]
     pub fn kennel_init(&self) -> PathBuf {
         self.resolve_bin(self.init.as_deref(), "kennel-init")
