@@ -57,6 +57,7 @@
 
 #![allow(unsafe_code)]
 
+pub mod fd;
 pub mod handshake;
 #[cfg(feature = "audit-journald")]
 pub mod journal;

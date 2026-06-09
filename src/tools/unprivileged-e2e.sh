@@ -45,6 +45,12 @@ AA_PROFILE_FILE="$(mktemp /tmp/kennel-e2e-aa.XXXXXX)"
 # Set when the runner temporarily rewrites a pre-existing, mismatched subkennel line
 # for this uid (e.g. a real allocation): the original is saved here and restored on exit.
 SUBKENNEL_SAVED=""
+# The privhelper resolves kennel-init from the root-owned deployment cascade itself and
+# verifies it is root-owned + non-writable before fexecve (sec review / design 07-2). The
+# build tree is operator-owned, so install a root-owned copy at the default libexec path.
+INIT_DEST="/usr/libexec/kennel/kennel-init"
+INIT_DEST_BACKUP=""   # tempfile holding a pre-existing kennel-init to restore on exit
+INIT_DEST_CREATED=""  # set when WE created it (remove on exit)
 
 cleanup() {
     # Unload the temporary AppArmor profile (best-effort).
@@ -56,6 +62,15 @@ cleanup() {
     if [ -n "$SUBKENNEL_SAVED" ]; then
         sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_SAVED}|" /etc/kennel/subkennel 2>/dev/null || true
         echo "  restored original subkennel line for uid $UID_NUM"
+    fi
+    # Restore (or remove) the root-owned kennel-init we installed for the run.
+    if [ -n "$INIT_DEST_CREATED" ]; then
+        sudo rm -f "$INIT_DEST" 2>/dev/null || true
+        echo "  removed test $INIT_DEST"
+    elif [ -n "$INIT_DEST_BACKUP" ]; then
+        sudo cp -f "$INIT_DEST_BACKUP" "$INIT_DEST" 2>/dev/null || true
+        rm -f "$INIT_DEST_BACKUP"
+        echo "  restored original $INIT_DEST"
     fi
 }
 trap cleanup EXIT
@@ -101,6 +116,30 @@ elif [ "$EXISTING" != "$SUBKENNEL_LINE" ]; then
     sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_LINE}|" /etc/kennel/subkennel
 fi
 sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel
+
+echo "== root-owned kennel-init at $INIT_DEST (sudo) =="
+# The privhelper factory resolves kennel-init from the root-owned deployment cascade itself
+# (it no longer trusts a wire-supplied fd — sec review: trusted init source) and verifies it
+# is root-owned + non-writable before fexecve. The build tree is operator-owned, so install a
+# root-owned copy at the default libexec path (Deployment::kennel_init, no system.toml needed).
+# Back up any pre-existing install and restore it on exit.
+INIT_SRC="$REPO_ROOT/target/debug/kennel-init"
+if [ ! -x "$INIT_SRC" ]; then
+    echo "kennel-init not built at $INIT_SRC" >&2
+    exit 1
+fi
+sudo mkdir -p "$(dirname "$INIT_DEST")"
+if [ -e "$INIT_DEST" ]; then
+    INIT_DEST_BACKUP="$(mktemp /tmp/kennel-e2e-init.XXXXXX)"
+    sudo cp -f "$INIT_DEST" "$INIT_DEST_BACKUP"
+    echo "  backed up existing $INIT_DEST"
+else
+    INIT_DEST_CREATED=1
+fi
+sudo cp -f "$INIT_SRC" "$INIT_DEST"
+sudo chown 0:0 "$INIT_DEST"
+sudo chmod 0755 "$INIT_DEST"
+ls -l "$INIT_DEST"
 
 echo "== AppArmor userns profile over the test binary (sudo) =="
 # flags=(unconfined) { userns, } mirrors the production dist/apparmor/kenneld: the

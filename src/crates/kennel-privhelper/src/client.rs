@@ -23,9 +23,10 @@ use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
 /// runs as the operator, so `kenneld` opens the kennel's binderfs device itself via
 /// `/proc/<init>/root` — no fd needs to come back here.
 ///
-/// Spawns `helper construct` with one end of a `SOCK_SEQPACKET` pair as its stdin, sends
-/// the `construction_half` bytes plus the `kennel-init` binary fd and (optionally) the
-/// controlling-pty socket via `SCM_RIGHTS`, and reads back the init host pid.
+/// Spawns `helper construct` with one end of a `SOCK_SEQPACKET` pair as its stdin, sends the
+/// `construction_half` bytes (and, for an interactive run, the controlling-pty socket via
+/// `SCM_RIGHTS`), and reads back the init host pid. The `kennel-init` binary is **not** sent:
+/// the privhelper resolves and opens it from its own root-owned config (07-2; sec review).
 ///
 /// # Errors
 ///
@@ -34,7 +35,6 @@ use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
 pub fn construct_kennel(
     helper: &Path,
     construction_half: &[u8],
-    init_fd: BorrowedFd<'_>,
     pty_fd: Option<BorrowedFd<'_>>,
 ) -> io::Result<(Child, i32)> {
     let (ours, theirs) = seqpacket_pair()?;
@@ -44,10 +44,7 @@ pub fn construct_kennel(
         .spawn()?;
     // `theirs` is consumed by the Command (dup'd to the child's stdin); our end stays.
 
-    let mut fds = vec![init_fd];
-    if let Some(pty) = pty_fd {
-        fds.push(pty);
-    }
+    let fds: Vec<BorrowedFd<'_>> = pty_fd.into_iter().collect();
     send_with_fds(ours.as_fd(), construction_half, &fds)?;
 
     let mut buf = [0u8; 4];

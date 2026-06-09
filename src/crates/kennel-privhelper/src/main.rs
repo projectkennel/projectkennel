@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::{Read as _, Write as _};
+use std::os::fd::AsFd as _;
 use std::process::ExitCode;
 
 use kennel_privhelper::wire::{
@@ -23,11 +24,30 @@ use kennel_privhelper::wire::{
 use kennel_privhelper::{alloc, construct, exec};
 
 fn main() -> ExitCode {
+    // Scrub the inherited environment before anything else. The helper runs privileged and
+    // takes no decision from the environment — identity is the kernel-stamped real uid and
+    // trust comes from root-owned config/allocation files — so a caller-controlled variable
+    // must not steer its runtime (panic verbosity, allocator tuning) nor leak onward (sec
+    // review: ambient environment). The kernel already strips LD_*; this clears the rest.
+    // `vars_os` is a snapshot, so removing during iteration is sound.
+    for (key, _) in std::env::vars_os() {
+        std::env::remove_var(key);
+    }
+
     // The factory mode (`07-2`): kenneld invokes `kennel-privhelper construct` with a
     // SOCK_SEQPACKET socket as stdin. It is long-lived (stays as the construction child's
     // parent) and passes fds, so it does not use the one-shot stdin/stdout framing below.
     if std::env::args().nth(1).as_deref() == Some("construct") {
-        use std::os::fd::AsFd;
+        // Gate the factory on the caller holding a subkennel allocation, exactly as every
+        // one-shot op is gated below: an unallocated user performs no privileged operation
+        // (module docs). The factory replies over the SEQPACKET, not the stdout framing, so a
+        // refusal is a non-zero exit — kenneld sees the helper die without sending a pid.
+        if alloc::load(kennel_syscall::unistd::real_uid()).is_none() {
+            eprintln!(
+                "kennel-privhelper: refusing `construct`: caller has no /etc/kennel/subkennel allocation"
+            );
+            return ExitCode::from(1);
+        }
         construct::run_construct(std::io::stdin().as_fd());
     }
     let mut buf = Vec::new();

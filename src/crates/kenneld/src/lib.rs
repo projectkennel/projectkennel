@@ -150,12 +150,11 @@ pub trait Privileged {
     fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response>;
 
     /// Construct a kennel via the privhelper **factory** (`07-2`): hand it the
-    /// `construction_half` bytes, the `kennel-init` binary fd, and (optionally) the pty
-    /// socket; receive the long-lived supervisor [`Child`] and `kennel-init`'s host pid.
+    /// `construction_half` bytes and (optionally) the pty socket; receive the long-lived
+    /// supervisor [`Child`] and `kennel-init`'s host pid. The privhelper resolves and opens
+    /// `kennel-init` itself from root-owned config (never the wire), so it is not passed here.
     ///
     /// Defaults to an error: only the production [`HelperClient`] drives the real factory.
-    /// The test doubles never reach it (unit tests take the legacy in-process path,
-    /// keyed off an absent `init_bin`).
     ///
     /// # Errors
     /// An OS error if the factory cannot be invoked, or [`io::ErrorKind::Unsupported`]
@@ -163,7 +162,6 @@ pub trait Privileged {
     fn construct_kennel(
         &self,
         _construction_half: &[u8],
-        _init_fd: std::os::fd::BorrowedFd<'_>,
         _pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
     ) -> io::Result<(Child, i32)> {
         Err(io::Error::new(
@@ -218,10 +216,9 @@ impl Privileged for HelperClient {
     fn construct_kennel(
         &self,
         construction_half: &[u8],
-        init_fd: std::os::fd::BorrowedFd<'_>,
         pty_fd: Option<std::os::fd::BorrowedFd<'_>>,
     ) -> io::Result<(Child, i32)> {
-        kennel_privhelper::client::construct_kennel(&self.helper, construction_half, init_fd, pty_fd)
+        kennel_privhelper::client::construct_kennel(&self.helper, construction_half, pty_fd)
     }
 }
 
@@ -937,8 +934,9 @@ fn bring_up<P: Privileged + Sync>(
     // 4. Construct the kennel via the privhelper **factory** (`07-2`) — the one spawn path:
     //    the privhelper clones a real-uid-0 kennel, builds the view + binderfs (chowned to the
     //    operator), and `fexecve`s `kennel-init`, which pulls its supervision-half over binder
-    //    and spawns + confines the workload. Every kennel runs the factory + a binder bus, so
-    //    a `BinderPrep` with a configured `kennel-init` is required.
+    //    and spawns + confines the workload. Every kennel runs the factory + a binder bus, so a
+    //    `BinderPrep` is required. The privhelper resolves `kennel-init` from its own root-owned
+    //    config (never the wire), so kenneld needs no kennel-init path of its own here.
     plan.cgroup = cgroup.to_path_buf();
     let Some(prep) = binder else {
         return Err(Error::Io(io::Error::new(
@@ -946,13 +944,7 @@ fn bring_up<P: Privileged + Sync>(
             "a kennel must be constructed via the factory, which requires a BinderPrep",
         )));
     };
-    let Some(init_bin) = prep.init_bin.as_deref() else {
-        return Err(Error::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "no kennel-init binary configured (Deployment::kennel_init) — the factory cannot run",
-        )));
-    };
-    construct_via_factory(privileged, plan, command, init_bin, ctx, prep, state)
+    construct_via_factory(privileged, plan, command, ctx, prep, state)
 }
 
 /// The factory construction path (`07-2`): split the plan into its construction- and
@@ -965,13 +957,10 @@ fn construct_via_factory<P: Privileged + Sync>(
     privileged: &P,
     plan: &Plan,
     command: &Command,
-    init_bin: &Path,
     ctx: u16,
     prep: &BinderPrep,
     state: &mut Provision,
 ) -> Result<Child, Error> {
-    use std::os::fd::AsFd;
-
     // The masked operator identity every child is dropped to — the caller's real ids,
     // which the construction maps identity-map in (never wire-supplied).
     let drop_uid = kennel_syscall::unistd::real_uid();
@@ -982,11 +971,10 @@ fn construct_via_factory<P: Privileged + Sync>(
     let half_bytes = kennel_spawn::wire::encode_construction(&construction);
     let supervision_bytes = kennel_spawn::wire::encode_supervision(&supervision);
 
-    let init = std::fs::File::open(init_bin)?;
-    // The pty return socket (interactive runs) rides the binder lifecycle reply, not the
-    // factory; the non-interactive vertical passes None. (Interactive-through-factory is
-    // still owed — see docs/design/07-2-kennel-init.md.)
-    let (child, init_pid) = privileged.construct_kennel(&half_bytes, init.as_fd(), None)?;
+    // The privhelper resolves + opens `kennel-init` itself from root-owned config (never the
+    // wire), so kenneld passes no init fd. The pty return socket (interactive runs) is still
+    // owed — None here (see docs/design/07-2-kennel-init.md).
+    let (child, init_pid) = privileged.construct_kennel(&half_bytes, None)?;
     state.factory = true;
 
     // Take binder node 0 of the kennel's binderfs (mounted by the factory) and serve the
