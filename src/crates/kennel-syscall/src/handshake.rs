@@ -8,19 +8,19 @@
 //! `/proc/<pid>/uid_map` + `gid_map` (you cannot become a uid the user namespace has not mapped).
 //! The parent writes the maps, then sends `ACK_PROCEED`; the child blocks on the read until then
 //! — the canonical bubblewrap/runc map-write handshake. This module is that one-byte ack carried
-//! over a close-on-exec pipe (plus a cancellable, `poll`-based wait for the servicer side).
+//! over a close-on-exec pipe.
 //!
 //! It was originally written for the deferred-`gid_map` exchange of the legacy unprivileged
-//! spawn (§7.4.8): the spawn child paused until a privileged helper wrote its `gid_map`. That
-//! path is **gone** — the factory now writes the full identity map (granted groups included) in
-//! one shot — but the primitive is reused, unchanged, for the maps-written handshake above.
+//! spawn (§7.4.8) — which had a richer servicer side (a pid "ready" signal + a cancellable
+//! `poll` wait). That path is **gone** (the factory now writes the full identity map, granted
+//! groups included, in one shot), and the servicer machinery with it; the plain ack primitive is
+//! reused, unchanged, for the maps-written handshake above.
 //!
 //! # Why nix here
 //!
-//! These are four trivial syscalls (`pipe2`/`poll`/`read`/`write`). Rather than own the `unsafe`
-//! for them, this module uses nix's safe wrappers — the §4 "prefer a vetted crate to our own
-//! `unsafe`" rule. The cancellable wait genuinely needs `poll`, so the crate enables nix's
-//! `poll` feature (it pulls no new dependency); the module is itself `unsafe`-free.
+//! These are three trivial syscalls (`pipe2`/`read`/`write`). Rather than own the `unsafe` for
+//! them, this module uses nix's safe wrappers — the §4 "prefer a vetted crate to our own
+//! `unsafe`" rule. The module is itself `unsafe`-free.
 //!
 //! # Threat bearing
 //!
@@ -30,24 +30,17 @@
 
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::errno::Errno;
-use nix::poll::{PollFd, PollFlags, PollTimeout};
 
-/// The ack byte the servicer sends when the privileged step succeeded and A may
-/// proceed.
+/// The ack byte the parent sends once the privileged step (writing the child's userns identity
+/// maps) succeeded and the child may proceed to `set_uid(0)`.
 pub const ACK_PROCEED: u8 = 1;
-
-/// The ack byte the servicer sends when the privileged step failed and A must
-/// abort the spawn fail-closed.
-pub const ACK_ABORT: u8 = 0;
 
 /// Create a close-on-exec anonymous pipe, returned as `(read end, write end)`.
 ///
-/// Close-on-exec so the fds never leak into the execed workload: A (which holds
-/// the ends through the handshake) never execs — it becomes the tiny init — and
-/// the PID-1 grandchild that does exec drops them on `execve`.
+/// Close-on-exec so the fds never leak into the execed workload: the construction child holds
+/// the ends through the handshake and then `fexecve`s `kennel-init`, which drops them.
 ///
 /// # Errors
 ///
@@ -58,16 +51,8 @@ pub fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?)
 }
 
-/// Send a 4-byte native-endian `pid` (the ready signal) on `fd`.
-///
-/// # Errors
-///
-/// The OS error if the write fails (e.g. the peer closed the read end).
-pub fn send_ready(fd: BorrowedFd<'_>, pid: u32) -> io::Result<()> {
-    write_all(fd, &pid.to_ne_bytes())
-}
-
-/// Send a single ack `byte` on `fd` ([`ACK_PROCEED`] or [`ACK_ABORT`]).
+/// Send a single ack `byte` on `fd` (the parent sends [`ACK_PROCEED`]; any other byte, or EOF,
+/// the child reads as abort).
 ///
 /// # Errors
 ///
@@ -80,7 +65,7 @@ pub fn send_ack(fd: BorrowedFd<'_>, byte: u8) -> io::Result<()> {
 ///
 /// Returns `Ok(Some(byte))` with the ack, or `Ok(None)` if the peer closed the
 /// write end without sending one (EOF) — which the caller treats as an aborted
-/// handshake (fail-closed), the same as [`ACK_ABORT`].
+/// handshake (fail-closed).
 ///
 /// # Errors
 ///
@@ -91,52 +76,6 @@ pub fn recv_ack(fd: BorrowedFd<'_>) -> io::Result<Option<u8>> {
         Ok(Some(buf[0]))
     } else {
         Ok(None)
-    }
-}
-
-/// Wait for the 4-byte ready signal (a pid) on `fd`, waking every `tick_ms`
-/// milliseconds to check `cancel`.
-///
-/// Returns `Ok(Some(pid))` once the signal arrives. Returns `Ok(None)` if
-/// `cancel` is observed set first, or if the peer closes the pipe before sending
-/// the full signal (EOF). The cancellable poll exists because the parent keeps a
-/// copy of the *write* end alive (inside `Command`'s stored `pre_exec` closure),
-/// so the servicer cannot rely on EOF to wake it if the spawn child dies before
-/// signalling; the caller sets `cancel` once `Command::spawn` has returned an
-/// error. The tick also bounds the wait against a hung privileged step.
-///
-/// # Errors
-///
-/// The OS error if `poll`/`read` fails for a reason other than `EINTR` or EOF.
-pub fn recv_ready_cancellable(
-    fd: BorrowedFd<'_>,
-    cancel: &AtomicBool,
-    tick_ms: i32,
-) -> io::Result<Option<u32>> {
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(None);
-        }
-        let mut fds = [PollFd::new(fd, PollFlags::POLLIN)];
-        // A negative tick means "block indefinitely" (libc poll convention), which
-        // PollTimeout spells `NONE`; any value >= -1 converts infallibly.
-        let timeout = PollTimeout::try_from(tick_ms.max(-1)).unwrap_or(PollTimeout::NONE);
-        let ready = match nix::poll::poll(&mut fds, timeout) {
-            Ok(ready) => ready,
-            Err(Errno::EINTR) => continue,
-            Err(e) => return Err(e.into()),
-        };
-        if ready == 0 {
-            // Timeout: re-check `cancel` and poll again.
-            continue;
-        }
-        let mut buf = [0u8; 4];
-        return if read_exact(fd, &mut buf)? {
-            Ok(Some(u32::from_ne_bytes(buf)))
-        } else {
-            // Readable but EOF before a full signal: the peer is gone.
-            Ok(None)
-        };
     }
 }
 
@@ -176,48 +115,17 @@ mod tests {
     use std::os::fd::AsFd;
 
     #[test]
-    fn ready_and_ack_round_trip_across_two_pipes() {
-        // The real shape: A signals ready+pid on one pipe and waits for the ack on
-        // the other; the servicer reads the pid and acks. Exercised here with a
-        // thread standing in for A, in one process (no privilege needed).
-        let (ready_r, ready_w) = pipe_cloexec().expect("ready pipe");
+    fn ack_round_trips_across_a_pipe() {
+        // The maps-written handshake's shape: the parent writes the child's identity maps, then
+        // sends ACK_PROCEED; the child blocks in recv_ack until then. One process, no privilege.
         let (proceed_r, proceed_w) = pipe_cloexec().expect("proceed pipe");
-
-        let a = std::thread::spawn(move || {
-            send_ready(ready_w.as_fd(), 4242).expect("send ready");
-            recv_ack(proceed_r.as_fd()).expect("recv ack")
-        });
-
-        let cancel = AtomicBool::new(false);
-        let pid = recv_ready_cancellable(ready_r.as_fd(), &cancel, 50).expect("recv ready");
-        assert_eq!(pid, Some(4242), "the servicer reads A's pid");
+        let child = std::thread::spawn(move || recv_ack(proceed_r.as_fd()).expect("recv ack"));
         send_ack(proceed_w.as_fd(), ACK_PROCEED).expect("send ack");
-
         assert_eq!(
-            a.join().expect("join"),
+            child.join().expect("join"),
             Some(ACK_PROCEED),
-            "A receives the proceed ack"
+            "the child receives the proceed ack"
         );
-    }
-
-    #[test]
-    fn recv_ready_returns_none_when_cancelled() {
-        // With the write end held open (no EOF) and no pid ever sent, a set cancel
-        // flag is what wakes the servicer — proving it does not rely on EOF.
-        let (ready_r, _ready_w) = pipe_cloexec().expect("pipe");
-        let cancel = AtomicBool::new(true);
-        let got = recv_ready_cancellable(ready_r.as_fd(), &cancel, 50).expect("recv");
-        assert_eq!(got, None, "a set cancel flag aborts the wait");
-    }
-
-    #[test]
-    fn recv_ready_returns_none_on_eof() {
-        // Peer closes the write end without signalling: EOF surfaces as None.
-        let (ready_r, ready_w) = pipe_cloexec().expect("pipe");
-        drop(ready_w);
-        let cancel = AtomicBool::new(false);
-        let got = recv_ready_cancellable(ready_r.as_fd(), &cancel, 50).expect("recv");
-        assert_eq!(got, None, "EOF before a full ready signal is None");
     }
 
     #[test]
