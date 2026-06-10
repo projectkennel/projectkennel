@@ -21,7 +21,7 @@
 //! `create_ruleset` that is four `unsafe` blocks, each carrying the §4 `SAFETY:` /
 //! `INVARIANTS UPHELD:` / `FAILURE MODE:` comment (this module is the reason the
 //! crate carries `#![allow(unsafe_code)]`). Opening rule paths goes through `std`
-//! (`O_PATH`), and `no_new_privs` through nix — both safe. Landlock is
+//! (`O_PATH`); `no_new_privs` is a single `prctl`. Landlock is
 //! unprivileged: `restrict_self` needs no capabilities.
 //!
 //! # Kernel support
@@ -38,6 +38,12 @@
 //! enforcement of the `unix.abstract = "deny"` posture (`docs/design/07-6`) and a
 //! complement to the PID-namespace signal isolation (`docs/design/07-9`), superseding
 //! the seccomp `connect()` filter those sections describe as a fallback.
+//!
+//! This is the fourth `unsafe`-bearing crate (after `kennel-syscall`, `kennel-bpf`, and
+//! `kennel-binder`): the hand-rolled Landlock ABI is a kernel boundary, parallel in structure to
+//! `kennel-bpf`. Split out of `kennel-syscall` so that crate carries a smaller unsafe surface
+//! (CODING-STANDARDS §4); re-exported there as `kennel_syscall::landlock` for unchanged callers.
+#![allow(unsafe_code)]
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -452,9 +458,22 @@ impl Ruleset {
     /// `restrict_self` fails.
     pub fn restrict_current_process(self) -> io::Result<()> {
         let ruleset = self.build_fd()?;
-        crate::process::set_no_new_privs()?;
+        set_no_new_privs()?;
         restrict_self(ruleset.as_fd())
     }
+}
+
+/// Set `PR_SET_NO_NEW_PRIVS` — a kernel precondition for `landlock_restrict_self` without
+/// `CAP_SYS_ADMIN`. Inlined here (rather than depending on `kennel-syscall`) so this crate stays
+/// standalone, parallel to `kennel-bpf`/`kennel-binder`.
+fn set_no_new_privs() -> io::Result<()> {
+    // SAFETY: prctl(PR_SET_NO_NEW_PRIVS, 1) takes no pointers and only sets the calling thread's
+    // no-new-privs bit; the unused args are 0 per the man page. -1 ⇒ errno.
+    let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

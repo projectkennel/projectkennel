@@ -89,6 +89,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-landlock"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "libc",
+ "nix",
+]
+
+[[package]]
 name = "kennel-netproxy"
 version = "0.1.0"
 dependencies = [
@@ -148,6 +157,7 @@ name = "kennel-syscall"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "kennel-landlock",
  "kennel-os",
  "libc",
  "nix",

@@ -61,7 +61,6 @@ pub mod boot;
 pub mod fd;
 #[cfg(feature = "audit-journald")]
 pub mod journal;
-pub mod landlock;
 pub mod listenfd;
 pub mod mount;
 pub mod namespace;
@@ -77,3 +76,7 @@ pub mod spawn;
 // unsafe code (CODING-STANDARDS §4). Re-exported so existing `kennel_syscall::{path, unistd,
 // netlink, handshake}` paths keep resolving unchanged.
 pub use kennel_os::{handshake, netlink, path, unistd};
+
+// The hand-rolled Landlock ABI is its own unsafe-bearing crate (parallel to kennel-bpf/binder),
+// re-exported so `kennel_syscall::landlock::…` keeps resolving unchanged.
+pub use kennel_landlock as landlock;

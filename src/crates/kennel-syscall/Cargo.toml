@@ -17,13 +17,16 @@ libc = "=0.2.186"
 # kennel-os: the safe (no-`unsafe`) OS helpers split out of this crate (path, unistd, netlink,
 # handshake), re-exported from lib.rs so this crate's public surface is unchanged.
 kennel-os = { path = "../kennel-os" }
+# kennel-landlock: the hand-rolled Landlock ABI, split out as its own unsafe-bearing crate
+# (parallel to kennel-bpf/binder) and re-exported as `kennel_syscall::landlock`.
+kennel-landlock = { path = "../kennel-landlock" }
 # nix: safe, typed wrappers over the syscalls we would otherwise hand-roll
 # `unsafe` (CODING-STANDARDS.md §4 — prefer a vetted crate to our own unsafe).
 # default-features off; features added pay-as-you-go as each wrapper lands.
 nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "resource", "sched", "mount", "fs", "socket", "net", "term", "signal"] }
-# bitflags: typed access-right sets for the hand-rolled Landlock bindings.
-# Already vendored/approved (it is also a transitive of nix); promoted to a
-# direct dependency here because landlock.rs uses it directly.
+# bitflags: typed flag sets for the namespace/clone bindings (the Landlock access-right sets
+# moved to kennel-landlock with that module). Already vendored/approved (also a transitive of
+# nix); a direct dependency here because namespace.rs uses it directly.
 bitflags = "=2.11.1"
 # seccompiler: compile/install seccomp-BPF filters. Hand-rolling BPF
 # bytecode is the dangerous case (§4), so we use the vetted rust-vmm crate.
