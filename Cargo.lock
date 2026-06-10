@@ -135,6 +135,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-scm"
+version = "0.1.0"
+dependencies = [
+ "nix",
+]
+
+[[package]]
 name = "kennel-socks-connect"
 version = "0.1.0"
 
@@ -159,6 +166,7 @@ dependencies = [
  "bitflags",
  "kennel-landlock",
  "kennel-os",
+ "kennel-scm",
  "libc",
  "nix",
  "seccompiler",

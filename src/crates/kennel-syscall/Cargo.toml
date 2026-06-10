@@ -20,6 +20,9 @@ kennel-os = { path = "../kennel-os" }
 # kennel-landlock: the hand-rolled Landlock ABI, split out as its own unsafe-bearing crate
 # (parallel to kennel-bpf/binder) and re-exported as `kennel_syscall::landlock`.
 kennel-landlock = { path = "../kennel-landlock" }
+# kennel-scm: SCM_RIGHTS fd-passing, split out as its own small unsafe-bearing crate and
+# re-exported as `kennel_syscall::scm` (so dumb delegates can use it without this whole crate).
+kennel-scm = { path = "../kennel-scm" }
 # nix: safe, typed wrappers over the syscalls we would otherwise hand-roll
 # `unsafe` (CODING-STANDARDS.md §4 — prefer a vetted crate to our own unsafe).
 # default-features off; features added pay-as-you-go as each wrapper lands.

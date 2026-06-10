@@ -13,6 +13,12 @@
 //! into an `OwnedFd`, the same one-line ownership transfer the rest of the crate
 //! uses. Received fds arrive with `MSG_CMSG_CLOEXEC` set, so they never leak
 //! across an `execve`.
+//!
+//! A small unsafe-bearing crate (parallel to `kennel-landlock`/`kennel-bpf`/`kennel-binder`), split
+//! out of `kennel-syscall` and re-exported by it, so a dumb delegate like `kennel-netproxy` can
+//! receive a conduit fd without pulling the whole unsafe crate into its dependency tree.
+
+#![allow(unsafe_code)]
 
 use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -227,6 +233,6 @@ mod tests {
         // our own real uid.
         let (a, _b) = UnixStream::pair().expect("socketpair");
         let uid = peer_uid(a.as_fd()).expect("SO_PEERCRED");
-        assert_eq!(uid, crate::unistd::real_uid());
+        assert_eq!(uid, nix::unistd::getuid().as_raw());
     }
 }

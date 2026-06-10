@@ -67,7 +67,6 @@ pub mod namespace;
 pub mod process;
 pub mod pty;
 pub mod random;
-pub mod scm;
 pub mod seccomp;
 pub mod signal;
 pub mod spawn;
@@ -76,6 +75,11 @@ pub mod spawn;
 // unsafe code (CODING-STANDARDS §4). Re-exported so existing `kennel_syscall::{path, unistd,
 // netlink, handshake}` paths keep resolving unchanged.
 pub use kennel_os::{handshake, net, netlink, path, unistd};
+
+// SCM_RIGHTS fd-passing is its own small unsafe-bearing crate (parallel to kennel-landlock), so
+// dumb delegates can use it without the whole unsafe crate; re-exported so `kennel_syscall::scm::…`
+// keeps resolving unchanged.
+pub use kennel_scm as scm;
 
 // The hand-rolled Landlock ABI is its own unsafe-bearing crate (parallel to kennel-bpf/binder),
 // re-exported so `kennel_syscall::landlock::…` keeps resolving unchanged.
