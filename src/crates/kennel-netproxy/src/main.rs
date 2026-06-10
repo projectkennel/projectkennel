@@ -61,19 +61,35 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_host_services(cfg.host_services),
     );
-    // The INet conduit (§7.5.2): bind the per-kennel kenneld↔delegate command socket (owner-only)
-    // and serve the dumb dials on it, alongside the SOCKS5/HTTP listeners. kenneld drives it.
-    if let Some(sock) = cfg.command_socket {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::remove_file(&sock); // clear a stale socket from a prior run
-        let conduit = std::os::unix::net::UnixListener::bind(&sock)?;
-        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
-        std::thread::spawn(move || kennel_netproxy::conduit::serve_conduit(&conduit));
-    }
+    // The INet conduit command socket (§7.5.3): in the net-ns model this is netproxy's ONLY
+    // listener — it has no inbound TCP port. kenneld drives every dial over this owner-only AF_UNIX
+    // socket; the workload-facing SOCKS endpoint is `kennel-netshim` inside the kennel net-ns.
+    let conduit = match cfg.command_socket {
+        Some(sock) => {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::remove_file(&sock); // clear a stale socket from a prior run
+            let listener = std::os::unix::net::UnixListener::bind(&sock)?;
+            std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+            Some(listener)
+        }
+        None => None,
+    };
     // Live-reload (§02-6): watch the config file and swap the ruleset/host-services
     // in place when `kenneld` rewrites it, without restarting or dropping connections.
     spawn_reloader(Arc::clone(&proxy), path.to_path_buf());
-    proxy.serve_all(listeners)?;
+
+    match (listeners.is_empty(), conduit) {
+        // The net-ns model: no TCP listener — block on the conduit in the main thread.
+        (true, Some(conduit)) => kennel_netproxy::conduit::serve_conduit(&conduit),
+        // Legacy / `host` mode: serve the TCP SOCKS listeners; run the conduit alongside if present.
+        (false, conduit) => {
+            if let Some(conduit) = conduit {
+                std::thread::spawn(move || kennel_netproxy::conduit::serve_conduit(&conduit));
+            }
+            proxy.serve_all(listeners)?;
+        }
+        (true, None) => return Err("netproxy: neither a TCP listen nor a command socket".into()),
+    }
     Ok(())
 }
 

@@ -310,9 +310,12 @@ struct RawDeny {
 
 impl RawConfig {
     fn validate(self) -> Result<ProxyConfig, ConfigError> {
-        if self.listen.is_empty() {
+        // In the net-ns model netproxy has no TCP listener — it serves only the conduit command
+        // socket (§7.5.3). A config must give at least one of the two; empty `listen` is valid
+        // when a `command_socket` is set (conduit-only), but a config with neither serves nothing.
+        if self.listen.is_empty() && self.command_socket.is_none() {
             return Err(ConfigError::Invalid(
-                "listen must give at least one socket address".to_owned(),
+                "config must give a listen address or a command_socket".to_owned(),
             ));
         }
         let listen = self
