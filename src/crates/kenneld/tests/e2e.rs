@@ -714,6 +714,31 @@ fn quick_connect(addr: &str) -> bool {
     TcpStream::connect_timeout(&target, Duration::from_millis(100)).is_ok()
 }
 
+/// Classify a bring-up response without `panic!` (the workspace forbids it). `true` means the
+/// environment is not privileged enough for the factory and the caller should clean up and return
+/// (a skip is not a proof); otherwise this asserts the response is `Started`, failing with context
+/// on a real error or any other variant.
+#[cfg(feature = "e2e")]
+#[must_use]
+fn bring_up_skipped(resp: &kenneld::control::Response) -> bool {
+    use kenneld::control::Response;
+    if let Response::Error(msg) = resp {
+        let lower = msg.to_lowercase();
+        if ["userns", "permission", "capabilit", "privhelper", "eperm"]
+            .iter()
+            .any(|n| lower.contains(n))
+        {
+            eprintln!("SKIP: environment not privileged enough for the factory: {msg}");
+            return true;
+        }
+    }
+    assert!(
+        matches!(resp, Response::Started { .. }),
+        "bring-up: expected Started, got {resp:?}"
+    );
+    false
+}
+
 /// Remove the staged scratch dirs, the home test tree, and the unix socket.
 fn cleanup_paths(dirs: &[&PathBuf], home_test: &Path, unix_sock: &Path) {
     for d in dirs {
@@ -832,20 +857,8 @@ fn no_ipc_kennel_runs_through_the_factory() {
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
     run_kennel(&shared, &req, Vec::new(), &mut server);
 
-    match recv_response(&mut client).expect("a first response") {
-        Response::Started { .. } => {}
-        Response::Error(msg) => {
-            let lower = msg.to_lowercase();
-            if ["userns", "permission", "capabilit", "privhelper", "eperm"]
-                .iter()
-                .any(|n| lower.contains(n))
-            {
-                eprintln!("SKIP: environment not privileged enough for the factory: {msg}");
-                return;
-            }
-            panic!("no-IPC bring-up failed: {msg}");
-        }
-        other => panic!("expected Started, got {other:?}"),
+    if bring_up_skipped(&recv_response(&mut client).expect("a first response")) {
+        return;
     }
     assert_eq!(
         recv_response(&mut client).expect("an exit response"),
@@ -951,27 +964,17 @@ fn run_ttl_kennel(
     run_kennel(&shared, &req, Vec::new(), &mut server);
     let elapsed = started_at.elapsed();
 
-    match recv_response(&mut client).expect("a first response") {
-        Response::Started { .. } => {}
-        Response::Error(msg) => {
-            let lower = msg.to_lowercase();
-            if ["userns", "permission", "capabilit", "privhelper", "eperm"]
-                .iter()
-                .any(|n| lower.contains(n))
-            {
-                eprintln!("SKIP: environment not privileged enough for the factory: {msg}");
-                cleanup(&etc_base, &view_root, &audit_base);
-                return None;
-            }
-            panic!("ttl bring-up failed: {msg}");
-        }
-        other => panic!("expected Started, got {other:?}"),
+    if bring_up_skipped(&recv_response(&mut client).expect("a first response")) {
+        cleanup(&etc_base, &view_root, &audit_base);
+        return None;
     }
-    let code = match recv_response(&mut client).expect("an exit response") {
-        Response::Exited { code } => code,
-        other => panic!("expected Exited, got {other:?}"),
-    };
+    let exit = recv_response(&mut client).expect("an exit response");
     cleanup(&etc_base, &view_root, &audit_base);
+    let code = match exit {
+        Response::Exited { code } => Some(code),
+        _ => None,
+    }
+    .expect("the ttl kennel should report Exited");
     Some((elapsed, code))
 }
 
@@ -1145,20 +1148,8 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         reader.join().expect("pty reader thread")
     });
 
-    match recv_response(&mut control).expect("a first response") {
-        Response::Started { .. } => {}
-        Response::Error(msg) => {
-            let lower = msg.to_lowercase();
-            if ["userns", "permission", "capabilit", "privhelper", "eperm"]
-                .iter()
-                .any(|n| lower.contains(n))
-            {
-                eprintln!("SKIP: environment not privileged enough for the factory: {msg}");
-                return;
-            }
-            panic!("interactive bring-up failed: {msg}");
-        }
-        other => panic!("expected Started, got {other:?}"),
+    if bring_up_skipped(&recv_response(&mut control).expect("a first response")) {
+        return;
     }
     assert_eq!(
         recv_response(&mut control).expect("an exit response"),

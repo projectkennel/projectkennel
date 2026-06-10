@@ -75,7 +75,7 @@ pub mod spawn;
 // The safe (no-`unsafe`) primitives live in `kennel-os` so this crate carries only genuinely
 // unsafe code (CODING-STANDARDS §4). Re-exported so existing `kennel_syscall::{path, unistd,
 // netlink, handshake}` paths keep resolving unchanged.
-pub use kennel_os::{handshake, netlink, path, unistd};
+pub use kennel_os::{handshake, net, netlink, path, unistd};
 
 // The hand-rolled Landlock ABI is its own unsafe-bearing crate (parallel to kennel-bpf/binder),
 // re-exported so `kennel_syscall::landlock::…` keeps resolving unchanged.

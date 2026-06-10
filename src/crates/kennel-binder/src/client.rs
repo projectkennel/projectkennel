@@ -37,6 +37,16 @@ pub struct Incoming {
     pub buffer: u64,
 }
 
+/// One cycle's inbound work from [`Connection::recv_batch`].
+#[derive(Debug, Default)]
+pub struct RecvBatch {
+    /// The transactions delivered this cycle, to handle and reply to.
+    pub transactions: Vec<Incoming>,
+    /// The driver asked for another looper thread (`BR_SPAWN_LOOPER`) — all current
+    /// loopers are busy and the registered count is below `set_max_threads`.
+    pub spawn_looper: bool,
+}
+
 /// One open binder endpoint.
 pub struct Connection {
     fd: OwnedFd,
@@ -91,6 +101,42 @@ impl Connection {
         let mut w = Vec::new();
         proto::write_cmd(&mut w, proto::BC_ENTER_LOOPER);
         self.write_only(&w)
+    }
+
+    /// Announce this thread as a binder looper the driver requested via
+    /// `BR_SPAWN_LOOPER` (`BC_REGISTER_LOOPER`) — the counterpart to
+    /// [`Self::enter_looper`] for pool threads the driver asked for, so its
+    /// requested-thread accounting stays correct.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the command cannot be written.
+    pub fn register_looper(&self) -> io::Result<()> {
+        let mut w = Vec::new();
+        proto::write_cmd(&mut w, proto::BC_REGISTER_LOOPER);
+        self.write_only(&w)
+    }
+
+    /// Put the endpoint's fd in non-blocking mode, so a `BINDER_WRITE_READ` read with nothing
+    /// pending returns `EAGAIN` ([`Self::recv_batch`] surfaces it as an empty cycle) rather than
+    /// blocking. Required by the looper pool: a single transaction may `poll`-wake several
+    /// loopers, and all but the one that reads it must not block in the kernel.
+    ///
+    /// # Errors
+    ///
+    /// The OS error if `fcntl(F_GETFL/F_SETFL)` fails.
+    pub fn set_nonblocking(&self) -> io::Result<()> {
+        let raw = self.fd.as_raw_fd();
+        // SAFETY: F_GETFL/F_SETFL on our own open fd; no pointers, no aliasing.
+        let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let rc = unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Send a synchronous transaction to `handle` with `code` and `data`, blocking
@@ -394,27 +440,46 @@ impl Connection {
     ///
     /// Returns the OS error if the `BINDER_WRITE_READ` or a payload copy fails.
     pub fn recv(&self) -> io::Result<Vec<Incoming>> {
+        Ok(self.recv_batch()?.transactions)
+    }
+
+    /// Like [`Self::recv`], but also reports whether the driver asked for another
+    /// looper thread (`BR_SPAWN_LOOPER`) this cycle — the signal a thread pool uses to
+    /// grow toward [`sys::set_max_threads`] when all current loopers are busy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` or a payload copy fails.
+    pub fn recv_batch(&self) -> io::Result<RecvBatch> {
         let brs = self.cycle(&[])?;
         self.ack_refcounts(&brs)?;
-        let mut out = Vec::new();
+        let mut transactions = Vec::new();
+        let mut spawn_looper = false;
         for br in brs {
-            if let Br::Transaction(td) = br {
-                let len = usize::try_from(td.data_size).unwrap_or(0);
-                let data = self
-                    .map
-                    .read_at(td.buffer, len)
-                    .ok_or_else(|| io::Error::other("transaction buffer out of range"))?
-                    .to_vec();
-                out.push(Incoming {
-                    code: td.code,
-                    data,
-                    sender_pid: td.sender_pid,
-                    sender_euid: td.sender_euid,
-                    buffer: td.buffer,
-                });
+            match br {
+                Br::Transaction(td) => {
+                    let len = usize::try_from(td.data_size).unwrap_or(0);
+                    let data = self
+                        .map
+                        .read_at(td.buffer, len)
+                        .ok_or_else(|| io::Error::other("transaction buffer out of range"))?
+                        .to_vec();
+                    transactions.push(Incoming {
+                        code: td.code,
+                        data,
+                        sender_pid: td.sender_pid,
+                        sender_euid: td.sender_euid,
+                        buffer: td.buffer,
+                    });
+                }
+                Br::SpawnLooper => spawn_looper = true,
+                _ => {}
             }
         }
-        Ok(out)
+        Ok(RecvBatch {
+            transactions,
+            spawn_looper,
+        })
     }
 
     /// Reply to the most recently received transaction with `data`, then free its
@@ -504,7 +569,14 @@ impl Connection {
         };
         // SAFETY: `write_buffer`/`read_buffer` point at `write`/`read`, both live for the call,
         // with `write_size`/`read_size` set to their exact lengths; the kernel honours both.
-        unsafe { sys::write_read(self.fd.as_fd(), &mut bwr)? };
+        // On a non-blocking endpoint (the looper pool, see `set_nonblocking`) a read with nothing
+        // pending returns `EAGAIN`; treat that as an empty cycle so the `poll`-woken loser of a
+        // thundering herd does not block.
+        match unsafe { sys::write_read(self.fd.as_fd(), &mut bwr) } {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
         let n = usize::try_from(bwr.read_consumed).unwrap_or(0);
         let mut rest = read.get(..n).unwrap_or(&[]);
         let mut out = Vec::new();

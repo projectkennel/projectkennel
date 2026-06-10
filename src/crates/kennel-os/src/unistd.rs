@@ -43,12 +43,13 @@ pub fn real_gid() -> u32 {
     getgid().as_raw()
 }
 
-/// Test helper: skip a privilege-requiring test with cause on an unprivileged
-/// runner (a skip is not a proof), so `cargo test --all-features` is green for
-/// any runner while `sudo … --features e2e` still exercises it. Shared by
-/// this crate's `root_tests` modules (which only compile under that feature, so
-/// the helper is gated the same way to stay dead-code-free without it).
+/// Test helper: skip a privilege-requiring test with cause on an unprivileged runner.
+///
+/// A skip is not a proof, so `cargo test --all-features` stays green for any runner while
+/// `sudo … --features e2e` still exercises the test. Shared across the crates' e2e tests, so it
+/// is `pub` and feature-gated (not `cfg(test)`) to cross the crate boundary.
 #[cfg(feature = "e2e")]
+#[must_use]
 pub fn skip_if_unprivileged(test: &str) -> bool {
     let euid = effective_uid();
     if euid != 0 {

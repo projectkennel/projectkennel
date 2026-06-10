@@ -20,18 +20,26 @@
 use std::io;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use kennel_audit::{Event, Outcome, Resource, Source, Value, Writer};
 use kennel_binder::client::Incoming;
-use kennel_binder::ctxmgr::{ContextManager, Reply};
+use kennel_binder::ctxmgr::{ContextManager, Handler, Reply};
 use kennel_policy::{BinderRuntime, UnixRuntime};
 
 /// The binder buffer mapping size per instance (ample for service-name transactions).
 const MAP_SIZE: usize = 128 * 1024;
 /// How long the looper waits per poll before re-checking the stop flag.
 const POLL_MS: i32 = 200;
+/// Per-kennel looper-pool ceiling: a blocking facade call (af-unix / `INet` dial) occupies one
+/// looper, so the pool must be deep enough that the registry and lifecycle/TTL verbs always
+/// find a free thread. Fixed for now; `[resources]` will make it policy-tunable.
+const POOL_MAX_THREADS: u32 = 8;
+/// Deadline for a facade dial (`IAfUnix` `CONNECT`) so a wedged or unresponsive host socket
+/// reclaims its looper instead of tying it up indefinitely (bounding pool exhaustion alongside
+/// `POOL_MAX_THREADS`).
+const AFUNIX_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// A service name is bounded (binderfs's own `BINDERFS_MAX_NAME`); reject longer.
 const MAX_NAME: usize = 255;
 
@@ -146,18 +154,25 @@ pub struct Lifecycle {
     pub ttl_action: kennel_policy::TtlAction,
 }
 
-/// A running per-kennel binder context manager: the serve thread plus its stop flag.
+/// A running per-kennel binder context manager: the looper pool plus its stop flag.
 #[derive(Debug)]
 pub struct Manager {
     stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
+    loopers: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl Manager {
-    /// Signal the serve loop to finish and join it. Best-effort.
-    pub fn stop(mut self) {
+    /// Signal the looper pool to finish and join every thread. Best-effort.
+    pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(join) = self.join.take() {
+        let drained: Vec<JoinHandle<()>> = {
+            let mut guard = self
+                .loopers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *guard)
+        };
+        for join in drained {
             let _ = join.join();
         }
     }
@@ -178,29 +193,32 @@ pub fn spawn(
     lifecycle: Lifecycle,
     writer: Arc<Writer>,
 ) -> io::Result<Manager> {
-    let cm = ContextManager::new(device_fd, MAP_SIZE)?;
+    let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
     let stop = Arc::new(AtomicBool::new(false));
-    let worker_stop = Arc::clone(&stop);
-    let join = std::thread::Builder::new()
-        .name(format!("kennel-binder-{ctx}"))
-        .spawn(move || {
-            let mut registry = Registry::new(policy);
-            let lifecycle = lifecycle;
-            let _ = cm.serve(POLL_MS, &worker_stop, |incoming| {
-                handle(&mut registry, &unix, &lifecycle, incoming, ctx, &writer)
-            });
-        })?;
-    Ok(Manager {
-        stop,
-        join: Some(join),
-    })
+
+    // The handler runs concurrently on every looper, so its state is shared: the registry behind
+    // a Mutex (taken only for the O(1) registry verbs, never across the blocking facade dial), and
+    // the rest by Arc.
+    let registry = Arc::new(Mutex::new(Registry::new(policy)));
+    let unix = Arc::new(unix);
+    let lifecycle = Arc::new(lifecycle);
+    let handler: Handler = Arc::new(move |incoming: &Incoming| {
+        handle(&registry, &unix, &lifecycle, incoming, ctx, &writer)
+    });
+
+    let loopers = cm.serve_pool(POOL_MAX_THREADS, POLL_MS, &stop, &handler)?;
+    Ok(Manager { stop, loopers })
 }
 
 /// Decode one node-0 transaction, apply the policy decision, emit an audit event, and
 /// produce the reply (status bytes for the registry verbs, or a connected fd for the
 /// af-unix facade).
+// The registry lock is held for exactly the O(1) registry-verb match and released before the
+// audit emit; that scope is intentional (each arm calls a registry method), so the nursery
+// "tighten the guard further" lint does not apply.
+#[allow(clippy::significant_drop_tightening)]
 fn handle(
-    registry: &mut Registry,
+    registry: &Mutex<Registry>,
     unix: &UnixRuntime,
     lifecycle: &Lifecycle,
     incoming: &Incoming,
@@ -212,40 +230,47 @@ fn handle(
     if incoming.code >= lifecycle::GET_SANDBOX_PLAN {
         return lifecycle_handle(lifecycle, incoming, ctx, writer);
     }
-    // The af-unix facade returns a file descriptor, so it is handled apart from the
-    // byte-reply registry verbs.
+    // The af-unix facade returns a file descriptor and dials host I/O (blocking), so it is
+    // handled apart from the byte-reply registry verbs and **without** the registry lock — the
+    // blocking call must not serialise the whole pool.
     if incoming.code == verb::CONNECT_AFUNIX {
         return af_unix_connect(unix, incoming, ctx, writer);
     }
     let name = decode_name(&incoming.data);
-    let (action, outcome, reply) = match (incoming.code, name) {
-        (verb::ADD_SERVICE, Some(name)) => {
-            let s = registry.add_service(&name);
-            ("binder.register", outcome_for(s), one(s))
+    // The registry verbs are O(1) in-memory; take the lock only for them.
+    let (action, outcome, reply) = {
+        let mut registry = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match (incoming.code, name) {
+            (verb::ADD_SERVICE, Some(name)) => {
+                let s = registry.add_service(&name);
+                ("binder.register", outcome_for(s), one(s))
+            }
+            (verb::GET_SERVICE, Some(name)) => {
+                let s = registry.get_service(&name);
+                ("binder.lookup", outcome_for(s), one(s))
+            }
+            (verb::IS_DECLARED, Some(name)) => {
+                let declared = registry.is_declared(&name);
+                (
+                    "binder.is-declared",
+                    Outcome::Info,
+                    vec![status::OK, u8::from(declared)],
+                )
+            }
+            (verb::LIST_SERVICES, _) => {
+                let body = registry.list_services().join("\n").into_bytes();
+                let mut reply = vec![status::OK];
+                reply.extend_from_slice(&body);
+                ("binder.list", Outcome::Info, reply)
+            }
+            _ => (
+                "binder.bad-request",
+                Outcome::Error,
+                one(status::BAD_REQUEST),
+            ),
         }
-        (verb::GET_SERVICE, Some(name)) => {
-            let s = registry.get_service(&name);
-            ("binder.lookup", outcome_for(s), one(s))
-        }
-        (verb::IS_DECLARED, Some(name)) => {
-            let declared = registry.is_declared(&name);
-            (
-                "binder.is-declared",
-                Outcome::Info,
-                vec![status::OK, u8::from(declared)],
-            )
-        }
-        (verb::LIST_SERVICES, _) => {
-            let body = registry.list_services().join("\n").into_bytes();
-            let mut reply = vec![status::OK];
-            reply.extend_from_slice(&body);
-            ("binder.list", Outcome::Info, reply)
-        }
-        _ => (
-            "binder.bad-request",
-            Outcome::Error,
-            one(status::BAD_REQUEST),
-        ),
     };
 
     let service = decode_name(&incoming.data).unwrap_or_default();
@@ -392,11 +417,16 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
     let (outcome, reply) = target.map_or_else(
         || (Outcome::Deny, Reply::Data(one(status::DENIED))),
         |socket| {
-            std::os::unix::net::UnixStream::connect(&socket.real).map_or_else(
-                // Granted but unreachable (the host socket is absent/refused).
-                |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
-                |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
+            kennel_syscall::net::connect_unix_timeout(
+                std::path::Path::new(&socket.real),
+                AFUNIX_CONNECT_DEADLINE,
             )
+                .map_or_else(
+                    // Granted but unreachable (absent / refused / timed out): never tie up the
+                    // looper on a wedged target.
+                    |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
+                    |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
+                )
         },
     );
     writer.emit(

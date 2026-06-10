@@ -141,11 +141,17 @@ impl Mapping {
     }
 }
 
-// SAFETY: a `Mapping` owns its mmap region exclusively (the only pointer to it),
-// and every access is through `&self`/`&mut self` on the owning thread. Moving it to
-// another thread transfers that sole ownership with no aliasing, so it is sound to
-// send. It is deliberately **not** `Sync`: concurrent access is not provided for.
+// SAFETY: a `Mapping` owns its mmap region exclusively (the only pointer to it), so moving
+// it to another thread transfers that sole ownership with no aliasing.
 unsafe impl Send for Mapping {}
+
+// SAFETY: the mapping is `PROT_READ` — userspace never writes it; the only writer is the binder
+// driver, which copies each inbound transaction into a region it allocated for the receiving
+// looper, non-overlapping with other in-flight transactions. Userspace access is `read_at`
+// (`&self`), which is bounds-checked and returns an immutable slice, and a buffer is freed
+// (`BC_FREE_BUFFER`) only by the thread that received and replied to it. So concurrent `&self`
+// access from the looper pool reads disjoint, live regions with no data race.
+unsafe impl Sync for Mapping {}
 
 impl Drop for Mapping {
     fn drop(&mut self) {

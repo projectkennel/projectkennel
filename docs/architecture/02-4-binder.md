@@ -214,64 +214,47 @@ the pivot) — see [`01-process-model.md`](01-process-model.md) — not a per-bi
 kenneld is blocking, thread-per-connection, no async runtime
 ([`03-crate-decomposition.md`](03-crate-decomposition.md)).
 
-The per-kennel looper is a single serial thread. It handles the registry verbs inline (they are
-O(1)) and runs the facade I/O inline too: `IAfUnix` `CONNECT` calls `UnixStream::connect` on the
-looper, so a slow facade target blocks the kennel's other node-0 traffic until it returns or
-fails.
-
-> **Roadmap — non-blocking looper.** Moving the facade I/O off the looper (the model below) is a
-> prerequisite for `INet`, whose `CONNECT` adds DNS + dial. A bounded delegate worker pool +
-> `BINDER_SET_MAX_THREADS` + a per-instance pending-cookie table + a reply-reader, so the looper
-> does only the O(1) policy decision and returns. The design constraint is
-> [`../design/07-5-network.md`](../design/07-5-network.md) §7.5.
-
-The non-blocking model keeps the thread-per-connection discipline by splitting fast work from
-blocking work so the looper never waits on I/O.
+Each kennel's node 0 is served by a **looper thread pool** (`kenneld::binder` over
+`kennel-binder::ctxmgr`). Binder replies are thread-bound — `BC_REPLY` completes the transaction
+on the receiving thread's transaction stack, so a reply cannot be handed to a different thread —
+which rules out a "looper dispatches to a worker, a reply-reader replies by cookie" split. The
+pool is instead the AOSP looper model: every looper **receives, handles, and replies to its own
+transactions on its own thread**, and there are enough loopers that one blocked on a facade dial
+does not stall the rest.
 
 Per kennel instance:
 
-- **One looper thread** (`kenneld::binder`), on the context-manager fd acquired during
-  spawn setup, consistent with the existing per-kennel BPF-drain thread
-  (`kenneld::bpf_audit`). It calls `BINDER_WRITE_READ` in a loop and classifies each
-  `BR_TRANSACTION`:
+- **The looper pool.** It starts as one thread (`BC_ENTER_LOOPER`) and grows toward a bounded
+  ceiling (`set_max_threads`, `POOL_MAX_THREADS`) as the driver requests more via `BR_SPAWN_LOOPER`
+  (each new thread `BC_REGISTER_LOOPER`s). Each looper polls the context-manager fd (non-blocking,
+  so a thundering-herd wake never blocks a loser of the race and shutdown stays prompt) and
+  classifies each `BR_TRANSACTION`:
   - **Registry verbs** (`addService`/`getService`/`listServices`/`isDeclared`/
-    `getDeclaredInstances`) and the reserved-namespace checks are O(1) in-memory operations
-    against the settled policy and the per-kennel registry. The looper handles them inline
-    and replies on the same thread — there is no I/O to wait on.
-  - **Relay verbs** (the `org.projectkennel.*` facades that perform I/O — `INet` `CONNECT`/
-    `BIND`, `IAfUnix` `CONNECT` — and cross-instance `getService`/transactions) involve
-    blocking work in a delegate (DNS, dial, `connect()`, the peer instance). The looper does
-    **not** perform that I/O. It runs the fast policy check, records a pending entry keyed by
-    the binder transaction cookie in a bounded per-instance table, hands `{cookie, payload,
-    target}` to the relevant delegate, and returns to `BINDER_WRITE_READ`. The looper never
-    blocks on network/connect I/O.
+    `getDeclaredInstances`) and the reserved-namespace checks are O(1) in-memory operations against
+    the settled policy and the per-kennel registry. The registry is behind a `Mutex` the looper
+    takes only for these verbs — never across a blocking call — and replies on the same thread.
+  - **Facade verbs** (`IAfUnix` `CONNECT`, and `INet` `CONNECT`/`BIND` once built) perform host
+    I/O — a `connect()`, and for `INet` a DNS resolve + dial via the `kennel-netproxy` delegate
+    over the per-kennel `socketpair`. The handling looper does that I/O inline and replies (with
+    the connected fd as a `BINDER_TYPE_FD`) on its own thread; while it is blocked, the other
+    loopers keep serving the registry and lifecycle/TTL verbs.
+  - **Lifecycle/config verbs** (`GET_SANDBOX_PLAN`, the `NOTIFY_*`) are served as in §Threading
+    above, gated on the kernel-stamped init pid.
 - **(existing) the BPF-drain thread** (`kenneld::bpf_audit`).
 
-Shared across kennels (kenneld-global, bounded):
+**Bounding.** The pool size is the per-kennel head-of-line bound: a facade dial occupies one
+looper, so `POOL_MAX_THREADS` is sized so the control plane always finds a free thread; when every
+looper is busy, the driver queues further transactions until one frees. A facade dial carries a
+connect deadline, so a wedged or unresponsive target reclaims its looper (degrading to a refusal
+on that one transaction) rather than tying it up. A slow or hostile target therefore degrades to
+delay then refusal on that one kennel, never a stall of other kennels (the relay-TCB concern
+below). External delegates (`kennel-netproxy`; the host-side `BIND` leg — see
+[`02-5-binder-net.md`](02-5-binder-net.md)) run their own blocking I/O in their own processes and
+are not binder participants.
 
-- **A delegate worker pool** for relay work kenneld performs itself — the `IAfUnix`
-  host-side `connect()` and the cross-instance payload copy. External delegates
-  (`kennel-netproxy` for `INet` `CONNECT`, the kennel's host-side supervisor leg for `INet`
-  `BIND` — see [`02-5-binder-net.md`](02-5-binder-net.md)) are separate processes that do
-  their own blocking I/O with their existing thread-per-connection concurrency.
-- **A reply-reader** that collects completions `{cookie, fd | status}` from the workers and
-  the delegate channels, matches the pending entry, and issues `BC_REPLY` — carrying the fd
-  via `BINDER_TYPE_FD`, or `BR_FAILED_REPLY` — on the originating instance's binder fd using
-  the saved cookie. Binder's threadpool model permits this reply path to write `BC_REPLY` on
-  the same fd the looper reads; the reply-reader registers as a binder looper
-  (`BC_ENTER_LOOPER`) and `BINDER_SET_MAX_THREADS` bounds the pool.
-
-The result is that kenneld's per-transaction CPU cost is O(1) and non-blocking, all
-blocking I/O lives in the delegates (processes that already use thread-per-connection), and
-thread count in kenneld stays at one looper plus the BPF-drain thread per kennel, plus the
-two global pools — independent of how many relayed transactions are in flight.
-
-**Backpressure is explicit.** The per-instance pending-cookie table is bounded; when it is
-full, a new relay transaction gets `BR_FAILED_REPLY` immediately. Nothing is silently
-queued. This is the head-of-line-blocking bound and the per-instance memory bound, and it
-is the concrete answer to the relay-TCB concern raised below: the relay cannot grow kenneld
-without limit, and a slow delegate degrades to refusals on that one instance, not a stall
-of the looper or of other kennels.
+> **Roadmap — per-kennel caps.** A `[resources]` policy section bounds how many loopers and
+> connections a single kennel may tie up (`POOL_MAX_THREADS` is a fixed default until then), and
+> the kennel cgroup's `pids.max`/`memory.max` cap the aggregate.
 
 ### Node 0: the service registry protocol
 

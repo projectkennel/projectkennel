@@ -11,7 +11,7 @@ repository.workspace = true
 
 [dependencies]
 libc = "=0.2.186"
-nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "fs", "socket", "net"] }
+nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "fs", "socket", "net", "poll"] }
 
 [features]
 e2e = []

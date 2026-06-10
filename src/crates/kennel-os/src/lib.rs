@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod handshake;
+pub mod net;
 pub mod netlink;
 pub mod path;
 pub mod unistd;

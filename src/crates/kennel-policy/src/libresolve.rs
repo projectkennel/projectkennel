@@ -91,7 +91,7 @@ mod tests {
         let res = resolve_loaders(&[sh.to_string_lossy().into_owned()]);
         assert!(res.warnings.is_empty(), "a readable binary yields no warning");
         assert_eq!(res.loaders.len(), 1, "exactly one loader: {:?}", res.loaders);
-        let loader = &res.loaders[0];
+        let loader = res.loaders.first().expect("exactly one loader");
         assert!(
             loader.contains("ld-") || loader.contains("ld."),
             "the loader looks like ld.so: {loader}"
