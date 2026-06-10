@@ -152,7 +152,7 @@ struct RawDeployment {
     privhelper: Option<PathBuf>,
     netproxy: Option<PathBuf>,
     ssh_reorigin: Option<PathBuf>,
-    socks_connect: Option<PathBuf>,
+    ssh_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix_shim: Option<PathBuf>,
     netshim: Option<PathBuf>,
@@ -169,7 +169,7 @@ impl RawDeployment {
             privhelper: higher.privhelper.or(self.privhelper),
             netproxy: higher.netproxy.or(self.netproxy),
             ssh_reorigin: higher.ssh_reorigin.or(self.ssh_reorigin),
-            socks_connect: higher.socks_connect.or(self.socks_connect),
+            ssh_connect: higher.ssh_connect.or(self.ssh_connect),
             akc: higher.akc.or(self.akc),
             afunix_shim: higher.afunix_shim.or(self.afunix_shim),
             netshim: higher.netshim.or(self.netshim),
@@ -190,7 +190,7 @@ impl RawDeployment {
             privhelper: self.privhelper,
             netproxy: self.netproxy,
             ssh_reorigin: self.ssh_reorigin,
-            socks_connect: self.socks_connect,
+            ssh_connect: self.ssh_connect,
             akc: self.akc,
             afunix_shim: self.afunix_shim,
             netshim: self.netshim,
@@ -209,7 +209,7 @@ pub struct Deployment {
     privhelper: Option<PathBuf>,
     netproxy: Option<PathBuf>,
     ssh_reorigin: Option<PathBuf>,
-    socks_connect: Option<PathBuf>,
+    ssh_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix_shim: Option<PathBuf>,
     netshim: Option<PathBuf>,
@@ -288,8 +288,8 @@ impl Deployment {
 
     /// The in-kennel SOCKS connector the bastion's `ProxyCommand` invokes.
     #[must_use]
-    pub fn socks_connect(&self) -> PathBuf {
-        self.resolve_bin(self.socks_connect.as_deref(), "kennel-socks-connect")
+    pub fn ssh_connect(&self) -> PathBuf {
+        self.resolve_bin(self.ssh_connect.as_deref(), "kennel-ssh-connect")
     }
 
     /// The bastion's root-owned `AuthorizedKeysCommand`.

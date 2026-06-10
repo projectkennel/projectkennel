@@ -12,7 +12,7 @@
 # matching the project's "a skip is not a proof" rule: where a prerequisite cannot
 # be met the test skips with the precise cause rather than passing falsely.
 #
-#   1. builds the privhelper (--features bpf-egress), netproxy, socks-connect,
+#   1. builds the privhelper (--features bpf-egress), netproxy, ssh-connect,
 #      kennel-init, and the test binary;
 #   2. `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid=ep` on the
 #      privhelper (the production install posture — 07-paths.md — never sudo at
@@ -79,7 +79,7 @@ echo "== building binaries =="
 # Build the test binary and the supporting binaries first; the privhelper with
 # bpf-egress is built LAST so a later workspace build cannot clobber its embedded
 # BPF objects (privhelper-bpf-egress-build-gotcha).
-cargo build -p kennel-socks-connect -p kennel-netproxy -p kennel-netshim -p kennel-afunix-shim -p kennel-init
+cargo build -p kennel-ssh-connect -p kennel-netproxy -p kennel-netshim -p kennel-afunix-shim -p kennel-init
 cargo test -p kenneld --features e2e --no-run
 cargo build -p kennel-privhelper --features bpf-egress
 

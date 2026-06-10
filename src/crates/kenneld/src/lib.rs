@@ -342,9 +342,9 @@ pub struct SshPrep {
     /// The bastion's loopback endpoint, allowed as a host-loopback service so the
     /// egress proxy forwards the kennel's SSH to it (§7.5 host services).
     pub host_service: Option<SocketAddr>,
-    /// The host path of `kennel-socks-connect`, bound into the view (read+execute)
+    /// The host path of `kennel-ssh-connect`, bound into the view (read+execute)
     /// so the synthetic `config`'s `ProxyCommand` can run it. `None` when no SSH.
-    pub socks_connect_bin: Option<PathBuf>,
+    pub ssh_connect_bin: Option<PathBuf>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -726,9 +726,9 @@ fn bring_up<P: Privileged + Sync>(
         }
     }
 
-    // 3c-ssh. Lay the synthetic ~/.ssh into the view (config, known_hosts, the
-    //     disposable synthetic keys) and point the kennel's ssh at its proxy: the
-    //     synthetic config's ProxyCommand SOCKS5s through it to the bastion (§7.10.4).
+    // 3c-ssh. Lay the synthetic ~/.ssh into the view (config, known_hosts, the disposable synthetic
+    //     keys). The synthetic config's ProxyCommand reaches the bastion via a CONNECT_INET binder
+    //     transaction to kenneld (§7.10.4) — the same gateway as all egress, no SOCKS hop.
     //     Empty for a kennel with no [ssh] grant, so nothing changes for it.
     if !ssh.file_binds.is_empty() {
         // Grant Landlock read on the synthetic ~/.ssh dir(s): the files are copied
@@ -746,12 +746,6 @@ fn bring_up<P: Privileged + Sync>(
                 .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
         }
         plan.file_binds.extend(ssh.file_binds.iter().cloned());
-        // The connector connects to the kennel's own proxy address.
-        let proxy_addr = state.v4.map_or_else(
-            || SocketAddr::new(addr6.into(), port),
-            |v4| SocketAddr::new(v4.into(), port),
-        );
-        command.env("KENNEL_SOCKS_PROXY", proxy_addr.to_string());
     }
 
     // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind kennel-netshim into the view, launch it
@@ -790,9 +784,9 @@ fn bring_up<P: Privileged + Sync>(
                     writable: false,
                 });
             }
-            // Bind the SOCKS connector in at its own path (read-only) so the synthetic
+            // Bind the ssh binder-dialer in at its own path (read-only) so the synthetic
             // ssh config's ProxyCommand can exec it.
-            if let Some(bin) = &ssh.socks_connect_bin {
+            if let Some(bin) = &ssh.ssh_connect_bin {
                 view.binds.push(kennel_spawn::BindMount {
                     source: bin.clone(),
                     target: bin.clone(),
@@ -801,12 +795,19 @@ fn bring_up<P: Privileged + Sync>(
             }
             command.env("HOME", &view.shim_root);
         }
-        // Grant Landlock execute on the connector (outside the `view` borrow of plan).
-        if let Some(bin) = &ssh.socks_connect_bin {
+        // Grant Landlock execute on the dialer + its loaders (outside the `view` borrow of plan).
+        if let Some(bin) = &ssh.ssh_connect_bin {
             if plan.view.is_some() {
                 use kennel_syscall::landlock::AccessFs;
                 plan.landlock_fs
                     .push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+                let resolution = kennel_policy::libresolve::resolve_loaders(&[bin
+                    .to_string_lossy()
+                    .into_owned()]);
+                for loader in resolution.loaders {
+                    plan.landlock_fs
+                        .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
+                }
             }
         }
     }

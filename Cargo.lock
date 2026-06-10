@@ -147,10 +147,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-socks-connect"
-version = "0.1.0"
-
-[[package]]
 name = "kennel-spawn"
 version = "0.1.0"
 dependencies = [
@@ -158,6 +154,13 @@ dependencies = [
  "kennel-bpf",
  "kennel-policy",
  "kennel-syscall",
+]
+
+[[package]]
+name = "kennel-ssh-connect"
+version = "0.1.0"
+dependencies = [
+ "kennel-binder",
 ]
 
 [[package]]

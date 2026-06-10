@@ -357,22 +357,22 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         synth_pub.starts_with("ssh-ed25519 "),
         "minted a synthetic ed25519 key"
     );
-    let socks_bin = sibling_binary("kennel-socks-connect");
+    let connect_bin = sibling_binary("kennel-ssh-connect");
     assert!(
-        socks_bin.exists(),
-        "build kennel-socks-connect (the runner does)"
+        connect_bin.exists(),
+        "build kennel-ssh-connect (the runner does)"
     );
     let bastion_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey";
     let host_grants = [kenneld::ssh::HostGrant {
         host: "github.com",
         key_file: "id_github.com",
     }];
-    let socks_str = socks_bin.to_string_lossy().into_owned();
+    let connect_str = connect_bin.to_string_lossy().into_owned();
     let ssh_params = kenneld::ssh::SshParams {
         bastion_host: "127.0.0.1",
         bastion_port: 8031,
         bastion_host_key: bastion_key,
-        socks_connect_bin: &socks_str,
+        ssh_connect_bin: &connect_str,
         hosts: &host_grants,
     };
     // The synthetic ~/.ssh lands in the view at the shim $HOME (/home/<account>,
@@ -384,7 +384,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let ssh_prep = kenneld::SshPrep {
         file_binds: ssh_binds,
         host_service: Some("127.0.0.1:8031".parse().expect("addr")),
-        socks_connect_bin: Some(socks_bin),
+        ssh_connect_bin: Some(connect_bin),
     };
 
     // AF_UNIX socket facade (§7.6 / 07-1 §7.1.5): a real host listener the facade
@@ -568,11 +568,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
 /// neutralisation invariant is checked.
 fn build_workload(v4: Ipv4Addr, granted: Option<u32>, primary: u32) -> Command {
     let ssh_clause = "&& test -f \"$HOME/.ssh/config\" \
-         && grep -q 'ProxyCommand .*kennel-socks-connect %h %p' \"$HOME/.ssh/config\" \
+         && grep -q 'ProxyCommand .*kennel-ssh-connect %h %p' \"$HOME/.ssh/config\" \
          && grep -q 'HostKeyAlias kennel-bastion' \"$HOME/.ssh/config\" \
          && grep -q '^kennel-bastion ssh-ed25519 ' \"$HOME/.ssh/known_hosts\" \
-         && test -f \"$HOME/.ssh/id_github.com\" \
-         && test -n \"$KENNEL_SOCKS_PROXY\" ";
+         && test -f \"$HOME/.ssh/id_github.com\" ";
     // The af-unix facade: the in-kennel proxy is launched by the seal (racing this
     // exec) and node 0 comes up shortly after spawn, so the socket appears and the
     // first broker may briefly fail — wait for the listener, then let python retry the

@@ -107,7 +107,7 @@ fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, St
     let bastion = Some(BastionSetup {
         dir: socket::runtime_dir().join("bastion"),
         reorigin_bin: deployment.ssh_reorigin(),
-        socks_connect_bin: deployment.socks_connect(),
+        ssh_connect_bin: deployment.ssh_connect(),
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 8022_u16.saturating_add(scope.tag()),
         agent_sock: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),

@@ -62,11 +62,11 @@ pub struct SshParams<'a> {
     /// [`BASTION_ALIAS`] so `StrictHostKeyChecking` passes for the bastion and
     /// nothing else.
     pub bastion_host_key: &'a str,
-    /// The in-kennel path of the `kennel-socks-connect` binary, used as each
-    /// stanza's `ProxyCommand`: a kennel can `connect()` only to its egress proxy
-    /// (§7.5.2), so `ssh` reaches the bastion by SOCKS5 through that proxy. The
-    /// proxy address is taken from `$KENNEL_SOCKS_PROXY` in the kennel's environment.
-    pub socks_connect_bin: &'a str,
+    /// The in-kennel path of the `kennel-ssh-connect` binary, used as each stanza's
+    /// `ProxyCommand`: a kennel has no network path off its loopback (its own net-ns), so `ssh`
+    /// reaches the bastion by an `INet` `CONNECT_INET` transaction to kenneld over binder (§7.5),
+    /// receiving the connection fd and splicing it to stdin/stdout.
+    pub ssh_connect_bin: &'a str,
     /// The granted host edges — one `config` stanza each. Empty means the kennel has
     /// no SSH grant: `config` is then a header-only file and no host resolves.
     pub hosts: &'a [HostGrant<'a>],
@@ -92,7 +92,7 @@ pub fn config(p: &SshParams<'_>) -> String {
              \tHostName {bastion}\n\
              \tPort {port}\n\
              \tHostKeyAlias {alias}\n\
-             \tProxyCommand {socks} %h %p\n\
+             \tProxyCommand {connect} %h %p\n\
              \tIdentityFile ~/.ssh/{key}\n\
              \tIdentitiesOnly yes\n\
              \tStrictHostKeyChecking yes\n",
@@ -100,7 +100,7 @@ pub fn config(p: &SshParams<'_>) -> String {
             bastion = p.bastion_host,
             port = p.bastion_port,
             alias = BASTION_ALIAS,
-            socks = p.socks_connect_bin,
+            connect = p.ssh_connect_bin,
             key = h.key_file,
         );
     }
@@ -235,7 +235,7 @@ mod tests {
             bastion_host: "127.0.42.1",
             bastion_port: 7022,
             bastion_host_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey",
-            socks_connect_bin: "/opt/kennel/bin/kennel-socks-connect",
+            ssh_connect_bin: "/opt/kennel/bin/kennel-ssh-connect",
             hosts: &[
                 HostGrant {
                     host: "github.com",
@@ -261,9 +261,9 @@ mod tests {
         assert!(c.contains("Port 7022"), "routed to the bastion port");
         // Each stanza pins the alias, its own synthetic key, and locks the client down.
         assert_eq!(c.matches("HostKeyAlias kennel-bastion").count(), 2);
-        // Each stanza routes through the SOCKS connector (the kennel reaches only its proxy).
+        // Each stanza routes through the binder dialer (the kennel's only path off its loopback).
         assert_eq!(
-            c.matches("ProxyCommand /opt/kennel/bin/kennel-socks-connect %h %p")
+            c.matches("ProxyCommand /opt/kennel/bin/kennel-ssh-connect %h %p")
                 .count(),
             2
         );

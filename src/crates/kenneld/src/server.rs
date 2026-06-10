@@ -155,9 +155,9 @@ pub struct BastionSetup {
     pub dir: PathBuf,
     /// The host-side `kennel-ssh-reorigin` the bastion's forced commands invoke.
     pub reorigin_bin: PathBuf,
-    /// The in-kennel path of `kennel-socks-connect` (each synthetic `config`
+    /// The in-kennel path of `kennel-ssh-connect` (each synthetic `config`
     /// stanza's `ProxyCommand`); also the host path bound into the kennel view.
-    pub socks_connect_bin: PathBuf,
+    pub ssh_connect_bin: PathBuf,
     /// The loopback address the bastion listens on.
     pub listen: IpAddr,
     /// The bastion's port.
@@ -282,12 +282,12 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             })
             .collect();
         let listen = setup.listen.to_string();
-        let socks_bin = setup.socks_connect_bin.to_string_lossy().into_owned();
+        let connect_bin = setup.ssh_connect_bin.to_string_lossy().into_owned();
         let params = crate::ssh::SshParams {
             bastion_host: &listen,
             bastion_port: setup.port,
             bastion_host_key: &host_pub,
-            socks_connect_bin: &socks_bin,
+            ssh_connect_bin: &connect_bin,
             hosts: &host_grants,
         };
         let ssh_dir = shim_root.join(".ssh");
@@ -296,7 +296,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         Ok(crate::SshPrep {
             file_binds,
             host_service: Some(SocketAddr::new(setup.listen, setup.port)),
-            socks_connect_bin: Some(setup.socks_connect_bin.clone()),
+            ssh_connect_bin: Some(setup.ssh_connect_bin.clone()),
         })
     }
 
@@ -803,7 +803,7 @@ pub fn run_kennel<P, L>(
     // `USER`/`LOGNAME` (the masked account), `SHELL` (`[exec].shell`), and `HOME`
     // (the kennel's shim home) are synthesised; `[env].set` is layered on top. The
     // parent's environment is never a source — a secret policy did not name cannot
-    // reach the workload. (`bring_up` adds `KENNEL_SOCKS_PROXY` and any unix-shim
+    // reach the workload. (`bring_up` adds the workload's proxy env and any unix-shim
     // vars on top of this cleared base.)
     command.env_clear();
     if !loaded.exec_path.is_empty() {

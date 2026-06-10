@@ -235,41 +235,9 @@ case "$BANNER" in
 esac
 
 echo
-echo "=== 5. full egress chain: ssh -> kennel-socks-connect -> netproxy (SOCKS5) -> bastion ==="
-# The real topology (§7.5/§7.10.4): a kennel can only reach its egress proxy, so its
-# ssh uses kennel-socks-connect (shipped, no nc needed) as a ProxyCommand to SOCKS5
-# through the proxy to the bastion (one allowlisted host-loopback service). Prove the
-# whole chain with the real kennel-netproxy and kennel-socks-connect binaries.
-NETPROXY="$REPO_ROOT/target/debug/kennel-netproxy"
-SOCKS_CONNECT="$REPO_ROOT/target/debug/kennel-socks-connect"
-if [ -x "$NETPROXY" ] && [ -x "$SOCKS_CONNECT" ]; then
-    PROXY_PORT="$(free_port)"
-    # Open mode + accept_private_resolved so the proxy forwards to the loopback
-    # bastion (in production this is a narrow [[net.loopback.host_services]] allow).
-    cat >"$WORK/netproxy.toml" <<EOF
-listen = ["127.0.0.1:$PROXY_PORT"]
-accept_private_resolved = true
-[net]
-mode = "open"
-EOF
-    "$NETPROXY" "$WORK/netproxy.toml" >"$WORK/netproxy.log" 2>&1 &
-    NETPROXY_PID=$!
-    for _ in $(seq 1 50); do 2>/dev/null >/dev/tcp/127.0.0.1/"$PROXY_PORT" && break; sleep 0.1; done
+# The egress *transport* (ssh's ProxyCommand → kenneld over binder → host-side delegate → bastion)
+# is proven by the kenneld e2e (tests/e2e.rs full_vertical: real binder, net-ns, kennel-ssh-connect)
+# + the INet conduit component tests. This script proves the bastion re-origination itself (steps
+# 1-4), which is transport-independent.
 
-    OUT="$(KENNEL_SOCKS_PROXY="127.0.0.1:$PROXY_PORT" timeout 20 ssh -F none \
-        -o IdentitiesOnly=yes -i "$WORK/synthetic" \
-        -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORK/client_known_hosts" \
-        -o BatchMode=yes \
-        -o "ProxyCommand=$SOCKS_CONNECT %h %p" \
-        -p "$BASTION_PORT" 127.0.0.1 "git-upload-pack 'via/proxy.git'" 2>"$WORK/c5.err" || true)"
-    kill "$NETPROXY_PID" 2>/dev/null || true
-    echo "    client saw: $OUT"
-    echo "$OUT" | grep -q "DEST_REACHED" || { cat "$WORK/c5.err" "$WORK/netproxy.log" >&2; fail "did not reach the destination through the proxy chain"; }
-    echo "$OUT" | grep -q "cmd=\[git-upload-pack 'via/proxy.git'\]" || fail "command not forwarded through the chain"
-    pass "ssh reached the bastion through kennel-socks-connect + netproxy and re-originated"
-else
-    echo "  SKIP: netproxy/socks-connect binaries not built"
-fi
-
-echo
 echo "ALL CHECKS PASSED — the re-origination bastion behaves as 07-10-ssh.md §7.10 specifies."
