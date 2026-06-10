@@ -28,7 +28,7 @@ Project Kennel ships the following BPF programs. Each is in `bpf/<name>.bpf.c` a
 All programs attach to per-kennel cgroups (one cgroup per kennel under `/sys/fs/cgroup/kennel/<id>/`). The same compiled `.o` is attached to every kennel's cgroup; per-kennel configuration is in maps, not in the program text.
 
 > **Roadmap — `[net.bpf]` socket-shaping programs (per-kennel net-ns redesign).** The
-> network-namespace redesign (design [`07-11-binder-netns.md`](../design/07-11-binder-netns.md),
+> network-namespace redesign (design [`07-5-network.md`](../design/07-5-network.md),
 > architecture [`02-5-binder-net.md`](02-5-binder-net.md) §BPF policy enforcement) extends the
 > cgroup BPF role from the as-built egress gate to full `[net.bpf]` socket shaping for
 > `unconstrained` and `host` mode kennels. The egress programs above are **built**; everything

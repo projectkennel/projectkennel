@@ -187,7 +187,7 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 
 ### `kennel-netshim` (roadmap — not built)
 
-- A **roadmap** crate (`02-5-binder-net.md`, `07-11-binder-netns.md`): the per-kennel network shim that runs inside the kennel net-ns when the network crossing is built. It holds the **fuzzed SOCKS5** server the workload egresses through, translating to `org.projectkennel.INet` `CONNECT` transactions over the binder bus (kenneld then dispatches to the `kennel-netproxy` host-net-ns delegate). It would become the **third** binder participant after kenneld and `kennel-init`. Not built — there is no `kennel-netshim` crate in the workspace today, and the kennel still shares the host network namespace.
+- A **roadmap** crate (`02-5-binder-net.md`, `07-5-network.md`): the per-kennel network shim that runs inside the kennel net-ns when the network crossing is built. It holds the **fuzzed SOCKS5** server the workload egresses through, translating to `org.projectkennel.INet` `CONNECT` transactions over the binder bus (kenneld then dispatches to the `kennel-netproxy` host-net-ns delegate). It would become the **third** binder participant after kenneld and `kennel-init`. Not built — there is no `kennel-netshim` crate in the workspace today, and the kennel still shares the host network namespace.
 
 ### `kennel-privhelper`
 

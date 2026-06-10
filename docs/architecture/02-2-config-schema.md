@@ -432,11 +432,11 @@ The signature trust differs by artefact (`07-paths.md` §Policy-signing trust sp
 ## The `[net]` section — mode, proxy, BPF
 
 > **Roadmap.** The four-mode taxonomy and the `[net.proxy]` / `[net.bpf]` split below are the
-> network-namespace redesign (design §7.5/§7.11, architecture [`02-5-binder-net.md`](02-5-binder-net.md)).
+> network-namespace redesign (design §7.5, architecture [`02-5-binder-net.md`](02-5-binder-net.md)).
 > The as-built runtime still **shares the host network namespace** and reads the three-mode
 > `[net]` form (the `[net.mode]` invariant above). This section is the forward schema; it
 > supersedes the standalone `net-policy.toml` reference (now retired). Field semantics are
-> design §7.5/§7.11; this is the section's structure.
+> design §7.5; this is the section's structure.
 
 `[net]` is a pure header — `mode`, `reason`, `threats.reinstated`. Everything else belongs to
 `[net.proxy]` (the proxy / destination-allowlist layer) or `[net.bpf]` (the socket-capability
@@ -453,7 +453,7 @@ layer). The four modes, in descending order of isolation:
 
 **`threats.reinstated`.** A list of threat IDs the mode re-opens. For `mode = host` the compiler
 sets it automatically to include `"T1.6:host-recon"` (the host-network-recon threat the per-kennel
-net-ns otherwise closes — design THREATS.md, §7.11.10). It may be **extended** by the author but
+net-ns otherwise closes — design THREATS.md, §7.5). It may be **extended** by the author but
 **not cleared**; declaring it explicitly is for `kennel diff` visibility only. It is the inverse of
 the informational `threats.exposed` tag (§Threat tagging): `reinstated` records a guarantee the
 chosen mode withdraws, set/enforced by the compiler rather than advisory.

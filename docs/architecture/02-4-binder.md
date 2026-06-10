@@ -214,21 +214,21 @@ the pivot) — see [`01-process-model.md`](01-process-model.md) — not a per-bi
 kenneld is blocking, thread-per-connection, no async runtime
 ([`03-crate-decomposition.md`](03-crate-decomposition.md)).
 
-> **As built today (and the hardening owed).** The per-kennel looper is a **single serial
-> thread**: it handles the registry verbs inline (correct — they are O(1)) **but it also runs
-> the facade I/O inline** — `IAfUnix` `CONNECT` calls `UnixStream::connect` on the looper with
-> no timeout — so a slow or wedged facade target **head-of-line-blocks the whole kennel control
-> plane**, including the lifecycle/TTL verbs. `BINDER_SET_MAX_THREADS` is not called; there is
-> no pending-cookie table, delegate worker pool, or reply-reader. The model below is the
-> **target**, not yet built — a *prerequisite* for `INet` (which would add blocking DNS + dial
-> and amplify the stall) and owed hardening for the shipped `IAfUnix` facade regardless. See the
-> foundational plan and the design constraint in
-> [`../design/07-11-binder-netns.md`](../design/07-11-binder-netns.md) §7.11.8.
+The per-kennel looper is a single serial thread. It handles the registry verbs inline (they are
+O(1)) and runs the facade I/O inline too: `IAfUnix` `CONNECT` calls `UnixStream::connect` on the
+looper, so a slow facade target blocks the kennel's other node-0 traffic until it returns or
+fails.
 
-The target model keeps the thread-per-connection discipline by splitting fast work from
+> **Roadmap — non-blocking looper.** Moving the facade I/O off the looper (the model below) is a
+> prerequisite for `INet`, whose `CONNECT` adds DNS + dial. A bounded delegate worker pool +
+> `BINDER_SET_MAX_THREADS` + a per-instance pending-cookie table + a reply-reader, so the looper
+> does only the O(1) policy decision and returns. The design constraint is
+> [`../design/07-5-network.md`](../design/07-5-network.md) §7.5.
+
+The non-blocking model keeps the thread-per-connection discipline by splitting fast work from
 blocking work so the looper never waits on I/O.
 
-Per kennel instance (target):
+Per kennel instance:
 
 - **One looper thread** (`kenneld::binder`), on the context-manager fd acquired during
   spawn setup, consistent with the existing per-kennel BPF-drain thread
@@ -291,12 +291,10 @@ Android — but the verb set and names are deliberately the same so the model is
 Two further verb groups ride node 0. The **`kennel-init` lifecycle** verbs are gated by the
 unforgeable binder caller identity (`sender_pid == init_host_pid`, `sender_euid == 0`) so a
 workload can address node 0 but cannot exercise them. The **`AF_UNIX` facade** verb
-(`CONNECT_AFUNIX`, §7.1.5) is, **as built, gated only by the `[[unix.allow]]` policy name
-match — there is no caller-identity gate**, so any in-kennel caller (not only the trusted
-shim) can pull a facade fd. Restricting it to the shim via a `sender_pid` gate is a resolved
-design decision (`../design/07-11-binder-netns.md` §7.11.14) and owed. The two verb groups:
-the **`AF_UNIX` facade** verb (`CONNECT_AFUNIX`, §7.1.5) and the **`kennel-init` lifecycle**
-verbs
+(`CONNECT_AFUNIX`, §7.1.5) is gated by the `[[unix.allow]]` policy name match; any in-kennel
+caller may pull a granted facade fd. (Roadmap: a `sender_pid` gate restricting facade verbs to
+the shim, the same shape as the lifecycle gate.) The two verb groups: the **`AF_UNIX` facade**
+verb (`CONNECT_AFUNIX`, §7.1.5) and the **`kennel-init` lifecycle** verbs
 (`NOTIFY_BOOT_SYNC`/`NOTIFY_FACADE_CRASH`/`NOTIFY_WORKLOAD_EXEC`/`NOTIFY_FACADE_RESTART`, and
 the blocking `NOTIFY_TTL_EXPIRED` by which the in-kennel TTL custodian asks kenneld to freeze
 + decide — §9.7; [`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)). The lifecycle verbs

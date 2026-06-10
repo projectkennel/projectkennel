@@ -45,12 +45,12 @@ narration is kept here; the chapter named is the source of truth.
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
   tests, not mechanism.
-- **Per-kennel network namespace** (`07-5-network.md` §7.5.6, `07-11-binder-netns.md`,
+- **Per-kennel network namespace** (`07-5-network.md` §7.5.6,
   THREATS T1.6) — a kennel currently shares the host network namespace (egress is gated by
   the cgroup BPF + proxy, not net-ns isolation), so the workload can *read* host network state
   (interfaces, routes, listening sockets, the LAN ARP table) via `/proc/net/*` and
   `AF_NETLINK`. Recon-only — egress stays blocked — but a genuine info-disclosure residual.
-  The closure path is now designed (`07-11`): unshare `CLONE_NEWNET` in the construction
+  The closure path is now designed (`07-5`): unshare `CLONE_NEWNET` in the construction
   child, configure an in-namespace `lo`, and reach the host-side proxy across the boundary via
   the `org.projectkennel.INet` binder facade (SOCKS5 → `kennel-netshim` → `INet` `CONNECT` →
   the `kennel-netproxy` delegate) rather than a direct loopback connect — re-architecting the

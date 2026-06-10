@@ -6,7 +6,7 @@
 > through which anything crosses the kennel boundary. It carries the construction/lifecycle
 > control plane (`kennel-init` ⇄ kenneld, §7.2), the protocol facades that replace raw socket
 > grants (`IAfUnix`, future `IDBus`, §7.1.5), the service registry and inter-kennel calls
-> (§7.1.6–7.1.9), and — on the network path — the `INet` crossing (§7.11). Each crossing is a
+> (§7.1.6–7.1.9), and — on the network path — the `INet` crossing (§7.5). Each crossing is a
 > synchronous, kernel-stamped transaction kenneld can authorize and audit per call, with no
 > ambient authority and no host-side privilege (binderfs is `FS_USERNS_MOUNT`, mounted inside
 > the kennel's own user namespace). New boundary-crossing link types attach here rather than
@@ -14,7 +14,7 @@
 > facade on this bus, inheriting the same unprivileged, per-call-audited model.
 >
 > The rest of this chapter develops the primitive (§7.1.2), the registry and facades it
-> enables, and the inter-kennel topology; §7.2 (`kennel-init`) and §7.11 (network) are its two
+> enables, and the inter-kennel topology; §7.2 (`kennel-init`) and §7.5 (network) are its two
 > principal consumers.
 
 ## 7.1.1 Motivation

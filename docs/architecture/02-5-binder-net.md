@@ -1,8 +1,8 @@
 # API surfaces — network over binder (`org.projectkennel.INet`)
 
 This chapter is the implementation contract for the binder-based network service
-introduced by the network namespace redesign in [`07-11-binder-netns.md`](../design/07-11-binder-netns.md).
-Where `07-11` says *what and why*, this chapter commits to the concrete shape: which
+introduced by the network namespace redesign in [`07-5-network.md`](../design/07-5-network.md).
+Where `07-5` says *what and why*, this chapter commits to the concrete shape: which
 processes participate on the kennel's binderfs instance, the transaction wire conventions
 for `org.projectkennel.INet/default`, the spawn sequencing changes, the thread model, and
 the relationship to the existing `kennel-netproxy` crate.
@@ -12,17 +12,10 @@ the relationship to the existing `kennel-netproxy` crate.
 > "kenneld is designed to do X". As pieces land, as-built detail graduates into this
 > chapter and the roadmap banner narrows.
 
-> **Data-plane + policy revision (settled in `07-11` after the fd-over-binder safety review).**
-> Where sections below describe `kennel-netproxy` dialing and returning the *connected host
-> socket* over `BINDER_TYPE_FD`, and netproxy holding the `Ruleset`/`Resolver`, the settled
-> design is now: **(1)** the conduit fd that crosses into the kennel is a kenneld-minted
-> **socketpair** end, never the host socket — netproxy holds the host socket host-side and
-> `splice`s it to the socketpair (`07-11` §7.11.7); **(2)** the **whitelist, DNS resolve, and
-> IP-pin live in kenneld**, which sees `CONNECT(target)`; `kennel-netproxy` becomes the *dumb
-> outer half* — `connect(pinned-ip)` + `splice`, no config/policy/resolver, `AF_UNIX`-only
-> listener (`07-11` §7.11.10); **(3)** inbound is native-bind + host mirror with no listener fd
-> crossing (`07-11` §7.11.5). These supersede the `(A)`-shaped specifics below; they will be
-> re-authored as as-built when the foundation (`02-4` §Threading model target) lands.
+> The design — the four modes, the socketpair conduit, the `CONNECT`/`BIND` verbs, the
+> kenneld-side policy/resolve/pin, and the dumb `kennel-netproxy` dialer — is
+> [`07-5-network.md`](../design/07-5-network.md) (§7.5). This chapter is the wire-level contract
+> for that design; it carries as-built detail as the subsystem is built.
 
 ## Stability commitment
 

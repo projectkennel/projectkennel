@@ -21,7 +21,7 @@ The default in defensible templates is `constrained`. `unconstrained` is documen
 
 ## 7.5.2 The proxy-as-gateway model
 
-Every outbound connection from a kennel terminates at a kennel-local proxy that Project Kennel controls. The kennel sits in its own network namespace with no route off the loopback alias, so it has no network path to the proxy at all: outbound crosses the **binder gateway** (§7.1). The workload speaks SOCKS5 to an in-kennel shim (`kennel-netshim`) on the kennel's loopback at `:1080`; the shim issues an `org.projectkennel.INet/default` `CONNECT` transaction to kenneld (node 0); kenneld validates mode and policy and relays to its host-side `kennel-netproxy` delegate, which resolves, vets, dials, and returns the connected fd; the shim splices the workload to that fd.
+Every outbound connection from a kennel terminates at a kennel-local proxy that Project Kennel controls. The kennel sits in its own network namespace with no route off the loopback alias, so it has no network path to the proxy at all: outbound crosses the **binder gateway** (§7.1). The workload speaks SOCKS5 to an in-kennel shim (`kennel-netshim`) on the kennel's loopback at `:1080`; the shim issues an `org.projectkennel.INet/default` `CONNECT` transaction to kenneld (node 0); kenneld makes the policy decision, resolves the name, pins the vetted address, and drives its host-side `kennel-netproxy` delegate to dial it. kenneld mints a socketpair for the connection and returns one end to the shim; the delegate splices the other end to the dialled socket. The shim splices the workload to its end.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -30,28 +30,33 @@ Every outbound connection from a kennel terminates at a kennel-local proxy that 
 │  process ──connect()──► 127.42.7.1:1080                                  │
 │                         (kennel-netshim, SOCKS5)                         │
 │                              │                                           │
-│              binder CONNECT(1) → org.projectkennel.INet/default          │
+│              binder CONNECT → org.projectkennel.INet/default            │
 └──────────────────────────────┼───────────────────────────────────────────┘
-                               │  net-ns boundary (the binder crossing)
+                               │  net-ns boundary (binder, control only)
                                ▼
-                    kenneld (host ns, node 0) — mode + policy check
-                               │  relay over the kenneld↔delegate socketpair
-                               ▼
-                    kennel-netproxy (host ns, CONNECT delegate)
-                    resolve · vet · dial · return connected fd
-                               │  fd back to the shim via BINDER_TYPE_FD
-                               ▼
-                    kennel-netshim splices workload ↔ fd  ──► internet
+                    kenneld (host ns, node 0)
+                    mode + [net.proxy] allow · resolve · re-vet IP · PIN
+                    mint socketpair(a,b) · audit                          │
+                ┌──────────────┴──────────────┐                          │
+                ▼                              ▼                          │
+        reply: conduit handle + end b   kennel-netproxy (host ns)        │
+                │                        connect(pinned-ip) → upstream u  │
+                ▼                        splice(a ↔ u)                    │
+        kennel-netshim splices workload ↔ b  ──► internet
 ```
 
-There is no direct loopback `connect()` to the proxy and no cgroup-BPF "allow only the proxy address" rule: the network namespace boundary is what denies every other destination — a `connect()` inside the kennel net-ns to anything but the shim's loopback listener goes nowhere. The single controlled crossing point is binder, not a network path.
+The fd that crosses into the kennel is the socketpair end `b` — a local conduit kenneld minted, not the dialled socket. The upstream socket `u` never leaves the host; kenneld touches no payload byte (it brokers the connection and steps out); half-close and teardown propagate through the socketpair and the conduit's binder death-notification.
+
+There is no direct loopback `connect()` to the proxy and no cgroup-BPF "allow only the proxy address" rule: the network namespace boundary denies every other destination — a `connect()` inside the kennel net-ns to anything but the shim's loopback listener goes nowhere. The single controlled crossing point is binder, not a network path.
 
 Why this is the right primitive:
 
-- **Policy lives in user-space** where it can be expressive: per-host rate limits, structured audit, name-resolution vetting. kenneld is the policy decision point for every `INet` transaction; the kernel just enforces the namespace boundary.
-- **DNS is the proxy's problem.** The kennel cannot resolve names itself; the proxy delegate resolves on its behalf (via the OS resolver) and vets the answers against the allowlist before dialling. DNS rebinding is structurally impossible — the kennel never holds an address, only a name, and the proxy resolves and vets under policy.
-- **Audit is free.** The proxy logs every request with the requesting kennel, destination, byte counts, duration. No need to correlate kernel events with policy decisions; the proxy is the policy decision.
-- **Composes with loopback isolation** (§7.5.6). The kennel's `127.42.x.1` is where the shim listens. The kennel cannot reach the user's `127.0.0.1` services — they are in a different network namespace — except by naming them as host services the proxy delegate dials on its behalf.
+- **Policy lives in user-space, in one place.** kenneld is the policy decision point for every `INet` transaction: it holds the settled policy, makes the allow/deny call on the name, resolves it, re-checks the resolved address against the denies, and pins it — so a poisoned or rebinding answer is caught before the dial. The kernel just enforces the namespace boundary; `kennel-netproxy` is a dumb dialer that connects to the pinned address and splices.
+- **The kennel never holds an address, only a name** — DNS rebinding is structurally impossible because kenneld resolves and pins under policy on every request.
+- **Audit is free.** kenneld logs every request with the requesting kennel, destination, byte counts, duration — it *is* the policy decision, so there is nothing to correlate.
+- **Composes with loopback isolation** (§7.5.6). The kennel's `127.42.x.1` is where the shim listens. The kennel cannot reach the user's `127.0.0.1` services — they are in a different network namespace — except by naming them as host services kenneld dials on its behalf.
+
+`org.projectkennel.INet/default` is a control node: `CONNECT` and `BIND` transact to it, and each approved connection gets a per-connection conduit kenneld mints, whose binder death-notification tears the connection down. The control plane is non-blocking — the node-0 looper makes the O(1) policy decision and hands resolution and the dial to a bounded worker, replying by transaction cookie, so a slow dial never stalls the kennel's lifecycle or registry traffic on the same node; over-capacity requests are refused, never queued. Each kennel's network surface is resource-bounded by the kennel cgroup (`pids.max`/`memory.max`) and a per-kennel concurrent-connection cap, configurable via `[resources]`.
 
 What the kernel still enforces, via cgroup BPF inside the net-ns, is socket-level shaping rather than per-destination routing:
 
@@ -63,23 +68,22 @@ The proxy is where the interesting egress policy lives, and that policy is in us
 
 ## 7.5.3 The proxy implementation
 
-A small, single-purpose daemon launched per kennel, running in the **host** network namespace as kenneld's `CONNECT` delegate:
+A small, single-purpose daemon launched per kennel, running in the **host** network namespace as kenneld's dial delegate:
 
 - Blocking, thread-per-connection Rust (`kennel-netproxy`). No async runtime — the same TCB bar as OpenSSH.
-- Reads the settled policy emitted by the compiler.
-- Does **not** listen for the workload. It has no SOCKS5 server; the SOCKS5 endpoint the workload sees is `kennel-netshim` inside the kennel net-ns. The proxy attaches to the `kenneld`↔delegate socketpair and receives each vetted `CONNECT` request kenneld relays from the `INet` node, dials it, and returns the connected fd by `SCM_RIGHTS`.
-- Resolves names via the OS resolver and vets the answers against the policy's name allowlist and the invariant denies before dialling.
-- Logs JSONL audit events.
-- Refuses gracefully on policy violation; the refusal propagates back through kenneld and the shim to a SOCKS5 reply the requesting process can read.
+- Stateless: no config, no policy, no resolver. kenneld holds the policy and resolves+pins the address (§7.5.5); the delegate is told a pinned IP and connects to it.
+- Listens only on the per-kennel `kenneld`↔delegate `AF_UNIX` socket (0600, owner-only) — no TCP listener, no host-reachable port. The SOCKS5 endpoint the workload sees is `kennel-netshim` inside the kennel net-ns.
+- For each request from kenneld: `connect(pinned-ip)`, then `splice` the upstream socket against the conduit socketpair end kenneld supplied. For an inbound `BIND` (§7.5.7) it binds the host-side port, accepts, and splices each connection the same way.
+- Emits the JSONL egress audit event.
 
-The SOCKS5 wire format is preserved end-to-end so the workload sees no change — it lives in `kennel-netshim` (§7.5.6), with `kennel-netproxy` reduced to the dial-and-vet delegate. SOCKS5 specifically because:
+The SOCKS5 wire format is preserved end-to-end so the workload sees no change — it terminates in `kennel-netshim` (§7.5.6), which carries only the target and the byte stream across the boundary. SOCKS5 specifically because:
 
 - Transport-agnostic (TCP, optionally UDP via SOCKS5 UDP ASSOCIATE).
 - Authenticates if needed (per-kennel proxy credentials enable further sub-kennel discrimination).
 - Universally supported. `curl`, `wget`, `git`, `pip`, `npm`, `cargo`, `ssh` (via `ProxyCommand`), every browser.
-- Crucially: `socks5h://` (with the `h`) means "let the proxy resolve the name". The kennel never resolves DNS itself.
+- `socks5h://` (with the `h`) means "let the proxy resolve the name" — the kennel never resolves DNS itself; the name rides the `CONNECT` transaction and kenneld resolves it.
 
-What SOCKS5 doesn't natively cover, the proxy adds: per-destination policy beyond allow/deny (rate limits, byte caps, time windows), structured audit.
+Per-destination policy beyond allow/deny (rate limits, byte caps, time windows) and structured audit live in kenneld, the decision point.
 
 ## 7.5.4 Policy primitives
 
@@ -195,15 +199,15 @@ DNS is where naive proxy designs leak. The full story:
 
 **The kennel cannot do its own DNS.** The kennel's empty (or loopback-only) network namespace has no route to any resolver: UDP/53 and TCP/53 to external resolvers go nowhere, and `127.0.0.53` (systemd-resolved) is in the host network namespace, unreachable from inside the kennel. There is nothing for the kennel to resolve against.
 
-The kennel does not run DNS at all. Clients use `socks5h://` which defers resolution to the proxy and doesn't require local DNS; the shim carries the name across the binder gateway in the `CONNECT` transaction, and the proxy delegate then resolves via the OS resolver and vets the answers. The kennel's `/etc/resolv.conf` can be set to an invalid IP so that failing-to-go-through-the-proxy is immediately obvious.
+The kennel does not run DNS at all. Clients use `socks5h://` which defers resolution and doesn't require local DNS; the shim carries the name across the binder gateway in the `CONNECT` transaction, and kenneld resolves it via the OS resolver and vets the answer. The kennel's `/etc/resolv.conf` can be set to an invalid IP so that failing-to-go-through-the-proxy is immediately obvious.
 
-**Name resolution happens in the proxy delegate.** On a request to `github.com`, the proxy resolves the name via the OS resolver (in the host network namespace) and dials the resulting address. There is no hand-rolled resolver and no configurable upstream: the proxy delegates resolution to the OS and makes its security decision on the *answer*.
+**Name resolution happens in kenneld.** On a request to `github.com`, kenneld resolves the name via the OS resolver (in the host network namespace), vets and pins the result, and hands `kennel-netproxy` the pinned address to dial. There is no hand-rolled resolver and no configurable upstream: kenneld delegates resolution to the OS and makes its security decision on the *answer*.
 
-**Answer-vetting is the security property.** The name must clear the allowlist (`net.proxy.allow`), and every address the OS resolver returns is then re-checked against the policy's deny rules and the invariant refusals (cloud metadata, link-local) before the proxy dials it. A poisoned or rebinding answer that resolves an allowlisted name to a denied address is refused at dial time — the kennel never holds an address, only a name, and the proxy resolves and vets under policy on every request. (A policy that also denies RFC1918 — its choice, not a mandatory floor — gets the same rebinding protection for those ranges.)
+**Answer-vetting is the security property.** The name must clear the allowlist (`net.proxy.allow`), and every address the OS resolver returns is re-checked against the policy's deny rules and the invariant refusals (cloud metadata, link-local) before kenneld pins it and the delegate dials. A poisoned or rebinding answer that resolves an allowlisted name to a denied address is refused — the kennel never holds an address, only a name, and kenneld resolves and pins under policy on every request, so the address the delegate dials is exactly the one kenneld vetted. (A policy that also denies RFC1918 — its choice, not a mandatory floor — gets the same rebinding protection for those ranges.)
 
-**The allowlist is by name, not IP.** The user writes `github.com`; the proxy enforces against whatever the name resolves to, then vets each resolved address against the denies. This is the right level of abstraction — IPs change, names are stable — and the answer-vetting means a malicious resolver answer cannot smuggle the kennel onto a denied address.
+**The allowlist is by name, not IP.** The user writes `github.com`; kenneld enforces against whatever the name resolves to, then vets each resolved address against the denies. This is the right level of abstraction — IPs change, names are stable — and the answer-vetting means a malicious resolver answer cannot smuggle the kennel onto a denied address.
 
-**No DNS leakage.** The proxy is the only thing in the kennel that does DNS. Verifying this is part of the test plan: tcpdump on the host's external interface during kennel operation should show zero DNS queries originating from the kennel.
+**No DNS leakage.** kenneld is the only thing that resolves on the kennel's behalf, in the host namespace; the kennel has no resolver path of its own. tcpdump on the host's external interface during kennel operation shows zero DNS queries originating from the kennel — part of the test plan.
 
 ## 7.5.6 Loopback isolation
 
@@ -235,7 +239,7 @@ fd<gid>:<ctx high:ctx low>::/64  ← per-kennel
 **The loopback mirror.** The kennel's assigned addresses exist on *both* sides of the network namespace boundary:
 
 - **Inside the kennel net-ns:** `lo` carries the kennel's assigned addresses. The workload binds, connects, and listens against them normally; the shim listens at `…1:1080` for SOCKS5.
-- **Host net-ns:** the same addresses are added as an alias on the host `lo` (`ip addr add <kennel-cidr> dev lo`). The host-side BIND delegate binds inbound listeners here at the kennel's own IP, so a socket the workload binds inside the net-ns appears host-side at that **same** address — an operator's `ss`/`lsof` maps the listener straight back to the kennel. `kennel-netproxy` dials outbound from the host stack; it does not listen for the workload.
+- **Host net-ns:** the same addresses are added as an alias on the host `lo` (`ip addr add <kennel-cidr> dev lo`). The `INet` `BIND` verb (§7.5.7) binds an exposed listener here at the kennel's own IP, so a port the workload exposes appears host-side at that **same** address — an operator's `ss`/`lsof` maps it straight back to the kennel. `kennel-netproxy` dials outbound from the host stack; it does not listen for the workload.
 
 The mirror is deliberate: the same address reality on both sides is what makes a kennel's bound socket observable and attributable from the host without extra tooling. There is no routing, no NAT, no kernel interfaces beyond the loopback aliases. The kernel enforces the namespace boundary — a `connect()` inside the kennel net-ns to its own loopback address goes nowhere outside it — and the one controlled crossing point is binder (§7.1), not a network path.
 
@@ -247,7 +251,7 @@ Inside the net-ns there is no `CAP_NET_ADMIN` requirement for IPv6: bringing up 
 
 - Other kennels on the same host cannot reach it. Each kennel is in a distinct network namespace; one kennel's loopback is structurally invisible to another.
 - The user's normal shell (default context) can reach it via the host `lo` alias — the mirror exposes the kennel's listeners at the kennel's own IP on the host. This is correct: the user is in control.
-- Other users on the system can see the alias addresses on host `lo` but cannot reach the kennel's listeners except through the host-side mirror the BIND delegate raises, which binds only the kennel's own addresses.
+- Other users on the system can see the alias addresses on host `lo` but cannot reach the kennel's listeners except through a host-side mirror the `BIND` verb raises, which binds only the kennel's own addresses.
 - Same-uid processes outside the kennel reach the kennel only through the host-side mirror, not by sharing its stack — the kennel's native listeners live in its own namespace. The honest residual is at the mirror: a host-side listener at the kennel's IP is reachable by anything that can route to host `lo`.
 
 **Network-state visibility — closed by the net-ns (T1.6).** The kennel's own network namespace means `/proc/net/*` and `AF_NETLINK` answer only about the kennel's own stack: in `none` mode an empty stack, in `constrained`/`unconstrained` mode only the kennel's loopback aliases. The host's interfaces, routes, listening-socket table, and neighbour (ARP) table are not visible from inside — the host-network-reconnaissance surface that was T1.6 is structurally closed for these three modes. `mode = host` is the deliberate exception: it shares the host network stack and therefore reinstates T1.6 in full (the compiler records `threats.reinstated = ["T1.6:host-recon"]` and requires the `reason`).
@@ -256,7 +260,9 @@ Inside the net-ns there is no `CAP_NET_ADMIN` requirement for IPv6: bringing up 
 
 A kennel legitimately needs to `bind()`: AI agent runs `npm run dev` spinning up a webpack dev server, build tool starts a local service for testing, language server opens a socket for the editor.
 
-The bind happens **natively inside the kennel net-ns** — which is what makes the listener reachable from within the kennel by ordinary loopback. Policy sits in between: every `bind()` is decided by `[[net.bpf.bind]]` at the cgroup `bind` hook (a non-matching bind fails at the syscall). For every *allowed* bind, the hook reports the `ip:port` to kenneld, which raises the **host-side mirror**: the BIND delegate binds the same address on the host `lo` alias, so the port is observable and reachable from the host at the kennel's own IP, with host inbound relayed into the kennel through the shim. The mirror is automatic for allowed binds; the decision to allow is policy's, never the workload's.
+The bind happens **natively inside the kennel net-ns** — which is what makes the listener reachable from within the kennel by ordinary loopback. Policy sits in between: every `bind()` is decided by `[[net.bpf.bind]]` at the cgroup `bind` hook (a non-matching bind fails at the syscall).
+
+Exposing that listener to the host is the inbound mirror of `CONNECT`: the **`BIND` verb** on `org.projectkennel.INet/default`. Symmetric to `CONNECT` and over the same path — same `kennel-netshim`, same node, same socketpair conduit, only the direction reversed — `BIND` asks kenneld to bind the matching `ip:port` on the host `lo` alias and forward connections that arrive there to the kennel-side `ip:port`. It is SOCKS5 `BIND` with the policy decision kenneld's, not the workload's: kenneld vets the request, binds the host-side port, and for each inbound host connection mints a socketpair conduit — the delegate accepts host-side and splices the accepted connection to one end; the shim connects to the workload's native listener inside the net-ns and splices the other. No listener fd and no accepted-connection host fd crosses the boundary; the operator sees the port at the kennel's own IP on host `lo`, mapping straight back to the kennel. An allowed native bind reported by the cgroup hook (or a SOCKS5 `BIND` request) is what prompts the shim to raise the mirror.
 
 What we don't want:
 
@@ -303,11 +309,11 @@ Against the threats in `THREATS.md`:
 
 ## 7.5.9 Residuals
 
-- **TLS exfiltration via allowed destinations (T1.8).** Kennel can reach `api.openai.com`, so it can exfiltrate by putting data in API requests. The proxy can't see inside TLS. A future TLS-inspection layer would mitigate if the user accepts CA management; otherwise this is a known residual.
+- **TLS exfiltration via allowed destinations (T1.8).** A kennel that may reach `api.openai.com` can exfiltrate by putting data in API requests; the proxy cannot see inside TLS. This is an accepted residual of a destination-allowlist model — the mitigation is a tighter allowlist, not payload inspection.
 - **Covert channels.** Timing, name-resolution patterns for allowed hosts, TLS SNI to allowed hosts can carry exfiltration bandwidth. Out of scope for a non-paranoid threat model.
 - **Pre-existing trust.** If the user pasted `OPENAI_API_KEY` into the kennel's env, the kennel can use it. Limiting which env vars cross the boundary (§7.9) is the mitigation, not the proxy.
 - **`mode = host` reinstates T1.6 in full.** A `host`-mode kennel shares the host network stack and reads its complete state via `/proc/net` and netlink. This is the explicit, `reason`-gated tradeoff for packet-capture and raw-socket tooling; the compiler records the reinstatement and the diff tool surfaces it.
-- **Host-net-ns fd held in the kennel.** The connected (or accepted) fd the shim receives across binder is a socket in the host network namespace held by a process in the kennel net-ns. The shim only `read`/`write`/`shutdown`s it; `connect()`/`bind()` on an already-connected/already-bound socket are no-ops or errors. This is a design invariant enforced by convention.
+- **Brokered conduit outlives the policy decision (T1.10).** A conduit kenneld minted for an approved connection stays open for the connection's life; it survives `warn`/`renew` TTL actions, and only `exit` (the cgroup freeze + kill, §9.7) closes it. There is no selective per-connection revocation while the kennel runs — a kill switch would put kenneld in the data path, which the gateway design excludes.
 - **Loopback alias visibility.** The kennel's assigned addresses appear on the host `lo` for the kennel's lifetime, visible to other host processes via `ip addr`. This is the deliberate mirror — equivalent to the pre-netns situation where the proxy listened on those addresses — and exposes no new information.
 - **`SOCK_RAW` / `AF_PACKET` in unprivileged kennels.** These require `CAP_NET_RAW`, which a kennel running as the user's uid in a user namespace cannot obtain. Declaring `families = [..., "raw"/"packet"]` in such a context is not a policy error — the compiler warns and the rule has no effect — but the same policy is valid for a root-context kennel where the capability exists. Root-context kennels are a distinct deployment model with a materially different threat profile.
 

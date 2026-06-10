@@ -124,7 +124,7 @@ is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
 same per-user tree, never a shared one.
 
 **Roadmap — the host loopback alias.** The per-kennel network-namespace redesign
-(`02-5-binder-net.md`, design `07-11-binder-netns.md`) adds a *host-side* alias:
+(`02-5-binder-net.md`, design `07-5-network.md`) adds a *host-side* alias:
 the kennel's own `/28` (IPv4) and `/64` (IPv6) are added to the host's `lo`
 interface (the privhelper's `AddLoopbackAlias`/`RemoveLoopbackAlias` ops), so an
 allowed in-kennel bind can be mirrored to the same `ip:port` host-side for host

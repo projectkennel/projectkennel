@@ -76,13 +76,13 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    - Add IPv4 address to loopback (or to per-kennel dummy interface)
    - Add IPv6 ULA address
    - Create cgroup if not exists
-   - (Roadmap, §7.11) `AddLoopbackAlias`: for `constrained`/`unconstrained`
+   - (Roadmap, §7.5) `AddLoopbackAlias`: for `constrained`/`unconstrained`
      net-ns modes, bring the kennel's `/28`+`/64` up on the host `lo` so the
      host-side BIND leg can mirror inbound listeners at the kennel's own IP
 
 5. Launch supporting daemons (if not already running for this kennel):
    - the egress proxy — on the kennel's loopback address, or, under the
-     network-namespace model (§7.11), in the host net-ns as a CONNECT delegate
+     network-namespace model (§7.5), in the host net-ns as a CONNECT delegate
      behind a kenneld↔delegate socketpair rather than a TCP loopback listener
    - xdg-dbus-proxy for session bus (if dbus.session.enabled)
    - xdg-dbus-proxy for system bus (if dbus.system.enabled)
@@ -123,7 +123,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         mapped), needed because binderfs (and the view/`/dev`/library binds) assign
         nodes to uid 0 of the mounting userns. No subuid/subgid. setgroups handling
         and supplementary groups are written here too, fully, in this one pass.
-     b. Join the kennel cgroup; for the network-namespace modes (§7.11) bring up
+     b. Join the kennel cgroup; for the network-namespace modes (§7.5) bring up
         `lo` inside the net-ns with the kennel's assigned `/28`+`/64`.
      c. Self-escalate to the kennel's uid 0 and build the root-owned surfaces:
         mount --make-rprivate /; the constructed view (fresh tmpfs root; bind-mount
@@ -149,7 +149,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         serialized buffer (binder copies it — no shared-memory hazard), the pty
         return socket riding as a passed file descriptor. kenneld identifies the
         kennel by the binderfs *instance* the txn arrived on.
-     g. Under the network-namespace model (§7.11), once `INet` is registered, fork
+     g. Under the network-namespace model (§7.5), once `INet` is registered, fork
         the in-kennel SOCKS5 facade as a sibling of the workload inside the net-ns
         and view; it serves SOCKS5 at
         `$KENNEL_SOCKS_PROXY` and relays `CONNECT`/`BIND` over binder. The
