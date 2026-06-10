@@ -1,0 +1,20 @@
+[package]
+name = "kennel-lib-os"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel safe OS primitives: the std-/nix-only helpers (path canonicalisation, uid/gid identity, netlink address management, the pipe handshake) that need no `unsafe`. Split out of `kennel-lib-syscall` so that crate carries only genuinely-unsafe code (CODING-STANDARDS §4: the unsafe crate is reviewable in one sitting)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc = "=0.2.186"
+nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "fs", "socket", "net", "poll"] }
+
+[features]
+e2e = []
+
+[lints]
+workspace = true

@@ -5,7 +5,7 @@ introduced by the network namespace redesign in [`07-5-network.md`](../design/07
 Where `07-5` says *what and why*, this chapter commits to the concrete shape: which
 processes participate on the kennel's binderfs instance, the transaction wire conventions
 for `org.projectkennel.INet/default`, the spawn sequencing changes, the thread model, and
-the relationship to the existing `kennel-netproxy` crate.
+the relationship to the existing `host-netproxy` crate.
 
 > **Status: not yet built (roadmap).** This chapter is a forward contract, following
 > the same convention as `02-4-binder.md`. Every "kenneld does X" reads as
@@ -13,14 +13,14 @@ the relationship to the existing `kennel-netproxy` crate.
 > chapter and the roadmap banner narrows.
 
 > The design — the four modes, the socketpair conduit, the `CONNECT`/`BIND` verbs, the
-> kenneld-side policy/resolve/pin, and the dumb `kennel-netproxy` dialer — is
+> kenneld-side policy/resolve/pin, and the dumb `host-netproxy` dialer — is
 > [`07-5-network.md`](../design/07-5-network.md) (§7.5). This chapter is the wire-level contract
 > for that design; it carries as-built detail as the subsystem is built.
 
 ## Stability commitment
 
 **Internal-stable** per [`02-0-overview.md`](02-0-overview.md). The `org.projectkennel.INet`
-transaction wire format, the `kennel-netshim` SOCKS5 interface, and the inter-process
+transaction wire format, the `facade-netshim` SOCKS5 interface, and the inter-process
 fd-passing conventions documented here are internal: the workload never addresses them
 directly. The stability surface the workload sees is the SOCKS5 endpoint at
 `$KENNEL_SOCKS_PROXY` — that is unchanged from the pre-netns model.
@@ -36,20 +36,20 @@ binderfs instance. This is an extension of the participant set defined in
 | Process | Net-ns | Binder role | Network responsibility |
 |---|---|---|---|
 | `kenneld` | host | context manager (node 0); **sole owner** of `org.projectkennel.INet/default` | policy enforcement, transaction relay; never in the data path |
-| `kennel-netproxy` | host | kenneld's **CONNECT delegate** (no binder access) | outbound dial, proxy allowlist enforcement, DNS vetting, audit |
+| `host-netproxy` | host | kenneld's **CONNECT delegate** (no binder access) | outbound dial, proxy allowlist enforcement, DNS vetting, audit |
 | host-side spawn leg | host | kenneld's **BIND delegate** (no binder access) | holds the host-side mirror (same `ip:port` on the host alias) of the kennel's native inside listener |
-| `kennel-netshim` | kennel | binder **consumer** of `org.projectkennel.INet/default` | SOCKS5 inbound, binder transaction dispatch, accept loop, splice to workload |
+| `facade-netshim` | kennel | binder **consumer** of `org.projectkennel.INet/default` | SOCKS5 inbound, binder transaction dispatch, accept loop, splice to workload |
 
 Only kenneld registers `org.projectkennel.INet/default` — it is a reserved-namespace node
 and the reserved rule (`02-4-binder.md` §The `org.projectkennel.*` reserved namespace)
-admits no other registrant. `kennel-netproxy` and the host-side spawn leg are kenneld's
+admits no other registrant. `host-netproxy` and the host-side spawn leg are kenneld's
 **delegates, not binder participants**: kenneld receives every `INet` transaction on node 0,
 runs the policy check, and forwards `{cookie, payload, target}` to the right delegate over a
 per-kennel `kenneld`↔delegate channel — a `socketpair` established at spawn. The delegate
 does the blocking work (dial / bind) and returns the fd by `SCM_RIGHTS`; kenneld returns it
 to the shim in the binder reply via `BINDER_TYPE_FD` (§Thread model). The only binder
 endpoints are therefore kenneld (node 0) and the shim (consumer); neither delegate links
-`kennel-binder` or opens `/dev/binder`. The workload reaches none of these processes
+`kennel-lib-binder` or opens `/dev/binder`. The workload reaches none of these processes
 directly — it speaks SOCKS5 to the shim.
 
 ### The host-side mirror and `BIND`
@@ -78,9 +78,9 @@ observable host-side at the kennel's IP, and the allow/deny decision is policy's
 There is no workload-initiated `BIND` transaction: the `INet` node carries egress `CONNECT`
 and the kenneld→shim inbound delivery only (§Transaction codes).
 
-### Why `kennel-netproxy` is per-kennel
+### Why `host-netproxy` is per-kennel
 
-`kennel-netproxy` remains one instance per active kennel, not a shared host-side service.
+`host-netproxy` remains one instance per active kennel, not a shared host-side service.
 Per-kennel rulesets, per-kennel audit streams, no cross-kennel policy surface. The only
 thing that changes is how the workload's connection request reaches it — a relayed delegate
 request from kenneld instead of a direct TCP connect to a loopback listener. The
@@ -147,7 +147,7 @@ node when it registers as the `INet` consumer; the delivery is intra-instance, s
 ### Payload constraints
 
 Hostname is validated UTF-8, ≤ 253 bytes, no embedded NUL, no control characters, per
-CODING-STANDARDS §10. The hostname is passed to `kennel-netproxy` as-is; resolution
+CODING-STANDARDS §10. The hostname is passed to `host-netproxy` as-is; resolution
 happens proxy-side, never shim-side (`socks5h://` semantics are preserved — the kennel
 has no DNS path of its own). Port 0 on `CONNECT` is rejected (`BR_FAILED_REPLY`) — the
 shim must supply a concrete port. `INBOUND` carries the target port (the mirrored
@@ -178,13 +178,13 @@ to kenneld is intra-instance.
 workload
   │  SOCKS5 CONNECT (hostname, port)
   ▼
-kennel-netshim  (kennel net-ns, :1080)
+facade-netshim  (kennel net-ns, :1080)
   │  binder CONNECT(1): hostname + port
   ▼
 kenneld  (host, context manager — node 0 looper)
   │  mode / policy check; forward to CONNECT delegate over socketpair
   ▼
-kennel-netproxy  (host net-ns, delegate — no binder)
+host-netproxy  (host net-ns, delegate — no binder)
   │  [net.bpf] CIDR check (unconstrained/host)
   │  DNS resolution
   │  [net.proxy] invariant_deny + deny + allow vetting
@@ -194,7 +194,7 @@ kennel-netproxy  (host net-ns, delegate — no binder)
   ▼
 kenneld  (reply-reader: BC_REPLY with fd via BINDER_TYPE_FD on saved cookie)
   ▼
-kennel-netshim
+facade-netshim
   │  receives connected fd
   │  splice loop: workload ↔ fd
   ▼
@@ -237,16 +237,16 @@ runtime, consistent with the rest of the codebase.
 `BINDER_WRITE_READ`, plus a global reply-reader that issues `BC_REPLY` with the returned fd
 on the saved cookie. The `INet` relay adds **no** kenneld threads beyond that model: the
 looper never blocks on a dial, and the bounded pending-cookie table is the head-of-line and
-memory bound. A slow `kennel-netproxy` dial degrades to a refusal on that one instance, not
+memory bound. A slow `host-netproxy` dial degrades to a refusal on that one instance, not
 a looper stall.
 
-**`kennel-netshim`:** one listener thread on :1080; one thread per accepted SOCKS5
+**`facade-netshim`:** one listener thread on :1080; one thread per accepted SOCKS5
 connection. Each thread issues one binder transaction (blocking on its reply), receives the
 fd, then runs a splice loop. For host inbound to a mirrored port it connects the native
 inside listener and splices each relayed connection. The shim is the only network process
 besides kenneld that touches binder.
 
-**`kennel-netproxy`:** no binder. One delegate-request reader thread on its
+**`host-netproxy`:** no binder. One delegate-request reader thread on its
 `kenneld`↔delegate `socketpair`; each `CONNECT` request dispatches a worker thread (DNS
 resolution, dial) that returns the connected fd by `SCM_RIGHTS`. The existing `Proxy`,
 `Ruleset`, and `Resolver` split is unchanged; only the inbound half (previously the SOCKS5
@@ -262,7 +262,7 @@ callers reach — is the workload's own, not the leg's.
 
 ## Spawn sequencing
 
-The spawn sequence in `kennel-spawn` (`01-process-model.md`, design §8.7) changes
+The spawn sequence in `kennel-lib-spawn` (`01-process-model.md`, design §8.7) changes
 as follows. New steps are marked **†**; existing steps are condensed.
 
 1. Mount namespaces (including **† `CLONE_NEWNET`**), pivot_root, construct view —
@@ -277,16 +277,16 @@ as follows. New steps are marked **†**; existing steps are condensed.
 4. kenneld acquires context-manager fd, calls `BINDER_SET_CONTEXT_MGR` — existing
 5. **† Connect delegate channels**: kenneld opens a `socketpair` to each delegate. The
    host-side spawn leg (already in the host net-ns; BIND delegate) keeps its end; kenneld
-   launches **`kennel-netproxy`** (host net-ns; CONNECT delegate) and passes it its end.
+   launches **`host-netproxy`** (host net-ns; CONNECT delegate) and passes it its end.
    Neither delegate opens `/dev/binder` or registers anything — they speak the delegate
    protocol over the socketpair only.
-6. **† Reaper A forks `kennel-netshim`** into the kennel's namespaces and view (sibling of
+6. **† Reaper A forks `facade-netshim`** into the kennel's namespaces and view (sibling of
    the workload under the in-kennel reaper — `01-process-model.md`): it opens `/dev/binder`,
    `getService`s `org.projectkennel.INet/default`, and starts its SOCKS5 listener on the
    kennel's assigned loopback address at :1080.
 7. Landlock seal, workload exec — existing
 
-**`kennel-netproxy` launch timing** is the surgery. It previously launched early with a
+**`host-netproxy` launch timing** is the surgery. It previously launched early with a
 config file and a SOCKS5 listen address; it now launches after binderfs is up and attaches
 to the delegate socketpair instead of binding a SOCKS5 listener. The config file path
 (`Proxy::reload`) is unchanged; only the startup ordering and the inbound half change.
@@ -301,23 +301,23 @@ privhelper call at step 2 must complete before any host-side `bind()` at step 5/
 
 ---
 
-## Relationship to `kennel-netproxy` crate
+## Relationship to `host-netproxy` crate
 
-The `kennel-netproxy` crate splits into two concerns that were previously unified:
+The `host-netproxy` crate splits into two concerns that were previously unified:
 
 | Concern | Pre-netns | Post-netns |
 |---|---|---|
-| Inbound SOCKS5 accept / handshake | `server.rs` in `kennel-netproxy` | `kennel-netshim` (new crate, inside kennel net-ns) |
-| Outbound dial, proxy allowlist, DNS vetting, audit | `server.rs` in `kennel-netproxy` | `kennel-netproxy` (unchanged logic, new delegate-socketpair inbound) |
+| Inbound SOCKS5 accept / handshake | `server.rs` in `host-netproxy` | `facade-netshim` (new crate, inside kennel net-ns) |
+| Outbound dial, proxy allowlist, DNS vetting, audit | `server.rs` in `host-netproxy` | `host-netproxy` (unchanged logic, new delegate-socketpair inbound) |
 
-`kennel-netshim` is a **new crate** in the workspace. It is a thin process: binder consumer,
+`facade-netshim` is a **new crate** in the workspace. It is a thin process: binder consumer,
 SOCKS5 state machine, splice loop. It carries no policy logic. It parses untrusted input
 (SOCKS5 from the workload) and requires a fuzz target under `fuzz/` per CODING-STANDARDS
-§10.6. It is the only new process that links `kennel-binder`.
+§10.6. It is the only new process that links `kennel-lib-binder`.
 
-`kennel-netproxy` loses its SOCKS5 inbound half and gains a delegate-socketpair reader in
+`host-netproxy` loses its SOCKS5 inbound half and gains a delegate-socketpair reader in
 its place — **not** a binder endpoint. The `Proxy`, `Ruleset`, `Resolver`, and audit logic
-are unchanged, and the crate stays `#![forbid(unsafe_code)]` with no `kennel-binder`
+are unchanged, and the crate stays `#![forbid(unsafe_code)]` with no `kennel-lib-binder`
 dependency (binder stays confined to kenneld and the shim). The config schema changes:
 `[net]` becomes `[net.proxy]` throughout; the crate's config reader is updated accordingly.
 
@@ -348,7 +348,7 @@ surface to gate.
 ## Audit events
 
 Network audit events are unchanged in schema. The `net.egress` event is still
-emitted by `kennel-netproxy` per outbound connection, with the same fields (`kennel
+emitted by `host-netproxy` per outbound connection, with the same fields (`kennel
 ctx`, destination, outcome, byte counts, duration). The transport change — binder
 instead of SOCKS5 inbound — is invisible to the audit layer.
 

@@ -10,23 +10,23 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-kennel-syscall = { path = "../kennel-syscall" }
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The factory parses the ConstructionHalf and reuses the view-construction logic
 # (07-2 §7.11.1). This grows the setuid TCB; held to the same bar as the rest.
-kennel-spawn = { path = "../kennel-spawn" }
-# The factory resolves the kennel-init binary from the root-owned deployment cascade
+kennel-lib-spawn = { path = "../kennel-lib-spawn" }
+# The factory resolves the kennel-bin-init binary from the root-owned deployment cascade
 # itself (never the wire), so a compromised operator cannot choose what runs as the
 # kennel's uid 0 (07-2; sec review: trusted init source).
-kennel-config = { path = "../kennel-config" }
+kennel-lib-config = { path = "../kennel-lib-config" }
 # Only pulled in (and only then is clang needed at build time) when the
 # bpf-egress feature is on; a plain `cargo build` of the helper stays clang-free.
-kennel-bpf = { path = "../kennel-bpf", optional = true }
+kennel-lib-bpf = { path = "../kennel-lib-bpf", optional = true }
 
 [features]
 # Egress BPF setup (Op::SetupEgress). Embeds the cgroup BPF programs, so it
 # requires clang at build time; the installed helper is built with it. Off by
 # default to keep plain builds and the unprivileged test suite clang-free.
-bpf-egress = ["dep:kennel-bpf", "kennel-bpf/embed-programs"]
+bpf-egress = ["dep:kennel-lib-bpf", "kennel-lib-bpf/embed-programs"]
 
 # Tests that need privilege (real cgroup/address/BPF ops). Implies bpf-egress so
 # the egress e2e test can attach real programs. Run via:
@@ -37,7 +37,7 @@ e2e = ["bpf-egress"]
 # The integration tests use the effective-uid primitive to skip the
 # privilege-requiring cases with cause on an unprivileged runner (a skip is not
 # a proof). Already a normal dependency; re-listed so `tests/` can use it directly.
-kennel-syscall = { path = "../kennel-syscall" }
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 
 [lints]
 workspace = true

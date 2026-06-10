@@ -27,7 +27,7 @@ use crate::sshd::{self, AuthSource, SshdParams};
 pub struct Edge {
     /// The kennel that owns this grant (the deregistration key).
     pub kennel: String,
-    /// The policy-fixed destination host (validated by `kennel_policy::ssh`).
+    /// The policy-fixed destination host (validated by `kennel_lib_policy::ssh`).
     pub dest: String,
     /// The real key's `SHA256:` fingerprint the bastion signs the outbound hop with.
     pub real_fp: String,
@@ -60,7 +60,7 @@ pub struct BastionConfig {
     /// host key, config, pid, and `authorized_keys` — sshd's safe-path check
     /// rejects world-writable ancestors (08 §8.1, finding 3).
     pub dir: PathBuf,
-    /// The installed `kennel-ssh-reorigin` the forced commands invoke.
+    /// The installed `kennel-bin-ssh-reorigin` the forced commands invoke.
     pub reorigin_bin: PathBuf,
     /// The loopback address the bastion listens on (the egress proxy forwards here).
     pub listen: IpAddr,
@@ -321,7 +321,7 @@ mod tests {
     fn config() -> BastionConfig {
         BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
-            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-ssh-reorigin"),
+            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
             listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 7022,
             agent_sock: Some(PathBuf::from("/run/user/1000/agent.sock")),

@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kennel_binder::binderfs;
-use kennel_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
-use kennel_policy::{AuditRuntime, BinderProvideRuntime, BinderRuntime, UnixRuntime};
+use kennel_lib_binder::binderfs;
+use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
+use kennel_lib_policy::{AuditRuntime, BinderProvideRuntime, BinderRuntime, UnixRuntime};
 use kenneld::binder::{self, status, verb};
 
 const MAP_SIZE: usize = 128 * 1024;
@@ -83,7 +83,7 @@ fn run_manager() {
 /// Parent: mount the instance, spawn the manager child, transact the verbs, assert
 /// the gate's replies.
 fn run_client() {
-    let dir = std::env::temp_dir().join(format!("kennel-binder-reg-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("kennel-lib-binder-reg-{}", std::process::id()));
     binderfs::mount_instance(&dir, binderfs::DEFAULT_MAX_DEVICES)
         .expect("mount binderfs (run under: sudo unshare -m <test-binary>)");
     binderfs::add_binder_device(&dir).expect("allocate the binder device");

@@ -12,28 +12,28 @@ use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use kennel_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_raw_fds};
+use kennel_lib_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_raw_fds};
 
 use crate::wire::{Op, Request, Response};
 
-/// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
+/// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-bin-init`.
 ///
-/// Returns the (short-lived) helper [`Child`], `kennel-init`'s **host pid** (`07-2` §7.2.1), and
-/// the **boot-sync socket** — `kenneld` then drives [`kennel_syscall::boot`] on that socket to
-/// gate `kennel-init`'s plan pull on node 0 being claimed (deterministic startup, `07-2`
+/// Returns the (short-lived) helper [`Child`], `kennel-bin-init`'s **host pid** (`07-2` §7.2.1), and
+/// the **boot-sync socket** — `kenneld` then drives [`kennel_lib_syscall::boot`] on that socket to
+/// gate `kennel-bin-init`'s plan pull on node 0 being claimed (deterministic startup, `07-2`
 /// §7.2.1a), and reaps this `Child` afterwards (the factory exits once it has reported the pid).
 ///
 /// The factory builds the kennel — including mounting the per-kennel binderfs — `fexecve`s
-/// `kennel-init`, and reports the init pid here with the kenneld end of the boot-sync socket as
-/// the sole `SCM_RIGHTS` fd. `kennel-init` (post-exec) signals "ready" on its inherited end and
+/// `kennel-bin-init`, and reports the init pid here with the kenneld end of the boot-sync socket as
+/// the sole `SCM_RIGHTS` fd. `kennel-bin-init` (post-exec) signals "ready" on its inherited end and
 /// blocks; the caller opens the now-reachable binderfs via `/proc/<init>/root`, claims node 0,
-/// and signals "go" — at which point `kennel-init`'s first `GET_SANDBOX_PLAN` finds the context
+/// and signals "go" — at which point `kennel-bin-init`'s first `GET_SANDBOX_PLAN` finds the context
 /// manager serving (no retry on either side). kenneld (a `set_child_subreaper`) adopts the
-/// orphaned `kennel-init`.
+/// orphaned `kennel-bin-init`.
 ///
 /// Spawns `helper construct` with one end of a `SOCK_SEQPACKET` pair as its stdin, sends the
 /// `construction_half` bytes (and, for an interactive run, the controlling-pty socket via
-/// `SCM_RIGHTS`). The `kennel-init` binary is **not** sent: the privhelper resolves and opens it
+/// `SCM_RIGHTS`). The `kennel-bin-init` binary is **not** sent: the privhelper resolves and opens it
 /// from its own root-owned config (07-2; sec review).
 ///
 /// # Errors

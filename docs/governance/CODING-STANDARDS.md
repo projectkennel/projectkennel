@@ -44,13 +44,13 @@ Bumping MSRV requires:
 
 ### 2.2 C / BPF toolchain
 
-The BPF programs in `bpf/` are compiled by clang against the kernel UAPI (no CO-RE). The Rust loader (`kennel-bpf`, a hand-rolled `bpf(2)` loader using `object` for ELF parsing — **not** libbpf-rs/libbpf-sys or aya) consumes the resulting `.o` files.
+The BPF programs in `bpf/` are compiled by clang against the kernel UAPI (no CO-RE). The Rust loader (`kennel-lib-bpf`, a hand-rolled `bpf(2)` loader using `object` for ELF parsing — **not** libbpf-rs/libbpf-sys or aya) consumes the resulting `.o` files.
 
 - **Compiler:** clang, version pinned by the build environment. CI uses a container image with a specific clang version recorded in `BUILD-ENV.md`. Release builds use the same image; reproducibility requires the same compiler.
 - **No libbpf, no aya.** We do not vendor or link libbpf, and we do not use libbpf-rs/libbpf-sys or aya (their cost — ~1435 vendored C files / a 19-crate tree — outweighed what they save; see `DEPENDENCIES.md`). The loader is a small, reviewed `bpf(2)` FFI over `libc` with `object` for ELF parsing.
 - **Kernel headers:** the programs compile against the kernel UAPI (`<linux/bpf.h>` from `linux-libc-dev`, plus the multiarch `<asm/types.h>` path), pinned in `BUILD-ENV.md`. There is **no** committed `vmlinux.h` and no BTF/CO-RE step — the programs touch only stable hook-context structs and our own maps.
 - **bpftool:** optional, for inspection and the verifier-load matrix only; never on the build/load path. When invoked, its version is pinned in the same container as clang.
-- **Map definitions** are declared in `bpf/maps.h`; the Rust loader mirrors them **by hand** in `kennel-bpf`'s `KENNEL_MAPS` (there is no skeleton-derived type generation), and the loader resolves map references by symbol name. The two sides share a layout via the committed `bpf/maps.h`, which is the single source of truth. Hand-mirroring is deliberate; drift between the C source of truth and the Rust mirror is caught by a test, not prevented by codegen (see §4.1, *Testing*).
+- **Map definitions** are declared in `bpf/maps.h`; the Rust loader mirrors them **by hand** in `kennel-lib-bpf`'s `KENNEL_MAPS` (there is no skeleton-derived type generation), and the loader resolves map references by symbol name. The two sides share a layout via the committed `bpf/maps.h`, which is the single source of truth. Hand-mirroring is deliberate; drift between the C source of truth and the Rust mirror is caught by a test, not prevented by codegen (see §4.1, *Testing*).
 
 ### 2.3 Build properties
 
@@ -89,7 +89,7 @@ The `Apache-2.0` / `GPL-2.0-only` combination is legitimate here precisely becau
 
 **Default:** every crate has `#![forbid(unsafe_code)]` at the top of `lib.rs` or `main.rs`. This is not negotiable for the policy crate, the CLI, the netproxy, or any test code.
 
-**Where allowed:** the `kennel-syscall` crate (or equivalent, name TBD) is the *only* crate permitted to contain `unsafe` blocks. All raw syscalls, Landlock/seccomp/BPF library calls that require `unsafe`, and FFI live there. The crate is sized to be reviewable in one sitting.
+**Where allowed:** the `kennel-lib-syscall` crate (or equivalent, name TBD) is the *only* crate permitted to contain `unsafe` blocks. All raw syscalls, Landlock/seccomp/BPF library calls that require `unsafe`, and FFI live there. The crate is sized to be reviewable in one sitting.
 
 **Required for every `unsafe` block:**
 
@@ -128,7 +128,7 @@ C is `unsafe` by construction. The BPF programs in `bpf/` are the only C in this
 - POSIX C11 with the standard BPF map/helper macro idioms, compiled against the kernel UAPI (`<linux/bpf.h>`) — **no** CO-RE/`vmlinux.h`. No GCC-isms beyond what clang accepts. `-Wall -Wextra -Werror` in the build.
 - `static` everything that isn't a BPF section symbol. No global mutable state beyond BPF maps.
 - **License declaration.** Every program declares a GPL-compatible license at runtime — `char _license[] SEC("license") = "GPL";` — and carries an `SPDX-License-Identifier: GPL-2.0-only` header. This is mandatory, not stylistic: the GPL-only kernel helpers on the `bpf/HELPERS.md` whitelist (including the `bpf_probe_read_kernel*` family required below) cause the verifier to **reject** any program that declares a non-GPL-compatible license, so a wrong or missing declaration is a load failure, not a paperwork slip. The SPDX header and the `SEC("license")` string must agree; CI checks both are present on every program, and the §3 *Licensing* rationale explains why `bpf/` is `GPL-2.0-only` while the userspace is `Apache-2.0`.
-- Map definitions are declared in `bpf/maps.h`; the Rust loader mirrors them by hand in `kennel-bpf`'s `KENNEL_MAPS` (there is no skeleton-derived type generation), and the loader resolves map references by symbol name. The two sides share a layout via the committed `bpf/maps.h`.
+- Map definitions are declared in `bpf/maps.h`; the Rust loader mirrors them by hand in `kennel-lib-bpf`'s `KENNEL_MAPS` (there is no skeleton-derived type generation), and the loader resolves map references by symbol name. The two sides share a layout via the committed `bpf/maps.h`.
 
 **Bounds and safety idioms required:**
 
@@ -155,7 +155,7 @@ C is `unsafe` by construction. The BPF programs in `bpf/` are the only C in this
 
 **Review requirement:** identical to `unsafe` review (two maintainer approvals, one not the author). Adding a new BPF program is reviewed by all current maintainers, the same as introducing a new `unsafe`-bearing crate.
 
-**Verifier failures are not warnings.** A BPF program that loads under one kernel and is rejected by another is a regression, and is treated the same as a compilation failure. CI runs the BPF programs through `bpftool prog load` (and/or `kennel-bpf`'s own loader) on a matrix of supported kernel versions; any rejection blocks merge. The matrix is declared in `BUILD-ENV.md`.
+**Verifier failures are not warnings.** A BPF program that loads under one kernel and is rejected by another is a regression, and is treated the same as a compilation failure. CI runs the BPF programs through `bpftool prog load` (and/or `kennel-lib-bpf`'s own loader) on a matrix of supported kernel versions; any rejection blocks merge. The matrix is declared in `BUILD-ENV.md`.
 
 **Testing:**
 
@@ -214,7 +214,7 @@ The following patterns require explicit per-instance maintainer approval, docume
 
 - **Procedural macros.** Proc-macros execute arbitrary code at compile time. We allow `serde_derive` and its near relatives; everything else needs a reason. We do not allow proc-macros in the privhelper or its dependency chain.
 - **`build.rs` that does anything other than `println!("cargo:rustc-cfg=...")`-style metadata.** Build scripts that invoke external tools, fetch resources, or generate non-trivial code are an attack surface and require review of the script source.
-- **Crates whose public API forces the *caller* to write `unsafe`** — an exported `unsafe fn`, or a documented safety contract the caller must uphold to use even the "safe" API soundly. This is about the *call site*, not the crate's internals. `ring`, `rustls`, and most of our allow-list use `unsafe` internally and expose a safe API; that is fine and is not what this rule covers. Where a dependency's API genuinely forces `unsafe` on us, the wrapping happens in `kennel-syscall` and nowhere else.
+- **Crates whose public API forces the *caller* to write `unsafe`** — an exported `unsafe fn`, or a documented safety contract the caller must uphold to use even the "safe" API soundly. This is about the *call site*, not the crate's internals. `ring`, `rustls`, and most of our allow-list use `unsafe` internally and expose a safe API; that is fine and is not what this rule covers. Where a dependency's API genuinely forces `unsafe` on us, the wrapping happens in `kennel-lib-syscall` and nowhere else.
 - **Crates that themselves depend on more than ten transitive crates.** We will sometimes accept this for foundational deps (the async runtime is the obvious case); we do not accept it for utility crates.
 - **Crates whose latest release is more than two years old AND whose repository shows no maintenance activity.** Stagnation is not automatically disqualifying, but it requires us to commit to maintaining the dep ourselves if needed.
 
@@ -392,8 +392,8 @@ Example skeleton:
 //!
 //! # Non-goals
 //!
-//! This module does not load policies from disk (see `kennel-policy-io`),
-//! does not enforce policies at runtime (see `kennel-spawn`), and does not
+//! This module does not load policies from disk (see `kennel-lib-policy-io`),
+//! does not enforce policies at runtime (see `kennel-lib-spawn`), and does not
 //! own the threat catalogue (see `THREATS.md`).
 ```
 
@@ -663,7 +663,7 @@ Where data crosses into a context that interprets formatting, the data is saniti
 
 Error messages frequently quote the input that caused the error: `invalid policy at line 42: '<bad-value>'`. The quoted portion is sanitised before it appears in the output. Otherwise the error path is a covert channel: an attacker controls a configuration field containing terminal escape sequences, our error message writes those escapes to the user's terminal, and the terminal does whatever the escapes tell it to.
 
-`display_untrusted` (in `kennel-text`) is the single sound primitive for rendering an untrusted string into a *human-facing plain-text or markdown* context (terminal, error message, log line a human reads, or markdown-as-inert-text per §10.3 option 1). It:
+`display_untrusted` (in `kennel-lib-text`) is the single sound primitive for rendering an untrusted string into a *human-facing plain-text or markdown* context (terminal, error message, log line a human reads, or markdown-as-inert-text per §10.3 option 1). It:
 
 - Replaces control characters with explicit escapes (`\x1b`, `\b`, `\r`, …) rather than emitting them raw.
 - Wraps the value in visible delimiters so its boundaries are unambiguous in the rendered output.
@@ -743,7 +743,7 @@ Where the schema requires a bool because users may set true/false at parse time,
 
 ### 11.3 Paths
 
-We do not compare paths as strings. Path validation goes through `kennel-syscall`'s canonicalisation helper, which is the only place that performs `realpath`-equivalent resolution. Comparisons happen on canonicalised values.
+We do not compare paths as strings. Path validation goes through `kennel-lib-syscall`'s canonicalisation helper, which is the only place that performs `realpath`-equivalent resolution. Comparisons happen on canonicalised values.
 
 Path inputs from untrusted sources are *never* used in `Path::join` directly. Joining is preceded by validation that the resulting path stays within an explicit allowed prefix.
 

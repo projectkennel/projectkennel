@@ -30,7 +30,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use kennel_policy::{
+use kennel_lib_policy::{
     AuditRuntime, BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy,
     LifecyclePolicy, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
     SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction, UnixRuntime,
@@ -38,7 +38,7 @@ use kennel_policy::{
 };
 use kennel_privhelper::addr::{loopback_v4, V4_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
-use kennel_spawn::{prepare, RuntimeSubstitutions};
+use kennel_lib_spawn::{prepare, RuntimeSubstitutions};
 use kenneld::{start, Error, EtcSetup, HelperClient, Privileged, ProxySetup, Spec, UnixPrep};
 
 /// The operator's allocation, matching the `/etc/kennel/subkennel` line the runner
@@ -70,9 +70,9 @@ fn privhelper_path() -> PathBuf {
     path
 }
 
-/// The netproxy binary; built by the runner (`cargo build -p kennel-netproxy`).
+/// The netproxy binary; built by the runner (`cargo build -p host-netproxy`).
 fn netproxy_path() -> PathBuf {
-    let path = sibling_binary("kennel-netproxy");
+    let path = sibling_binary("host-netproxy");
     assert!(
         path.exists(),
         "netproxy not found at {} — run src/tools/unprivileged-e2e.sh",
@@ -87,7 +87,7 @@ fn netproxy_path() -> PathBuf {
 /// `AF_UNIX` socket are staged. Production stages under the same path.
 fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
-        || PathBuf::from(format!("/run/user/{}", kennel_syscall::unistd::real_uid())),
+        || PathBuf::from(format!("/run/user/{}", kennel_lib_syscall::unistd::real_uid())),
         PathBuf::from,
     )
 }
@@ -108,8 +108,8 @@ fn own_cgroup_base() -> Option<PathBuf> {
 /// the kennel via the `gid_map` handshake. `None` if the operator has no extra
 /// group (then the test proves default drop-all instead).
 fn pick_granted_group() -> Option<u32> {
-    let primary = kennel_syscall::unistd::real_gid();
-    kennel_syscall::unistd::supplementary_groups()
+    let primary = kennel_lib_syscall::unistd::real_gid();
+    kennel_lib_syscall::unistd::supplementary_groups()
         .into_iter()
         .find(|&g| g != primary)
 }
@@ -127,7 +127,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         effective_policy: EffectivePolicy {
             net: NetPolicy {
                 mode: NetMode::Constrained,
-                proxy: kennel_policy::ProxyListen::default(),
+                proxy: kennel_lib_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: vec![NetRule {
@@ -196,25 +196,25 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             invariant_set_sha256: "00".to_owned(),
             resolved_artifacts: Vec::new(),
         },
-        ssh: kennel_policy::SshRuntime::default(),
+        ssh: kennel_lib_policy::SshRuntime::default(),
         // One [unix] grant so the derived plan mounts binderfs and grants the binder
         // device (the af-unix facade rides binder). The `real` here is a placeholder —
         // the bring-up's `binder_prep` carries the actual host listener path the facade
         // connects; what matters for the plan is that `unix` is non-empty (mirrors a
         // production settled policy that carries [unix]).
-        unix: kennel_policy::UnixRuntime {
-            sockets: vec![kennel_policy::UnixSocket {
+        unix: kennel_lib_policy::UnixRuntime {
+            sockets: vec![kennel_lib_policy::UnixSocket {
                 name: "echo".to_owned(),
                 real: "/placeholder.sock".to_owned(),
                 shim: "/home/kennel/kennel-unix.sock".to_owned(),
                 env: None,
             }],
         },
-        identity: kennel_policy::IdentityRuntime::default(),
-        binder: kennel_policy::BinderRuntime::default(),
-        audit: kennel_policy::AuditRuntime::default(),
-        env: kennel_policy::EnvRuntime::default(),
-        ulimits: kennel_policy::UlimitsRuntime::default(),
+        identity: kennel_lib_policy::IdentityRuntime::default(),
+        binder: kennel_lib_policy::BinderRuntime::default(),
+        audit: kennel_lib_policy::AuditRuntime::default(),
+        env: kennel_lib_policy::EnvRuntime::default(),
+        ulimits: kennel_lib_policy::UlimitsRuntime::default(),
     }
 }
 
@@ -232,11 +232,11 @@ fn dev_allow() -> Vec<String> {
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive end-to-end scenario: view + /etc + ssh + unix + dev + groups
 fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
-    let uid = kennel_syscall::unistd::real_uid();
-    let gid = kennel_syscall::unistd::real_gid();
-    // Play kenneld's role: become a subreaper so the orphaned kennel-init (the factory exits as
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    let gid = kennel_lib_syscall::unistd::real_gid();
+    // Play kenneld's role: become a subreaper so the orphaned kennel-bin-init (the factory exits as
     // soon as it reports the pid) reparents to this process and `wait_pid` can collect its status.
-    let _ = kennel_syscall::process::set_child_subreaper();
+    let _ = kennel_lib_syscall::process::set_child_subreaper();
     assert_ne!(
         uid, 0,
         "this is the UNPRIVILEGED vertical — run it as the operator, not root (see the runner)"
@@ -278,9 +278,9 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
 
     // Sign the policy and trust the key.
     let key = SigningKey::from_seed("e2e-key", &[3u8; 32]).expect("key");
-    let signed = kennel_policy::sign_settled(&minimal_policy(&home), &key).expect("sign");
-    let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
-    let mut keys = kennel_policy::KeySet::new();
+    let signed = kennel_lib_policy::sign_settled(&minimal_policy(&home), &key).expect("sign");
+    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_lib_policy::KeySet::new();
     keys.insert(key.key_id(), &key.public_key_bytes())
         .expect("trust key");
 
@@ -299,7 +299,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     // child, never in this harness, so the harness's own forks are undisturbed.
     assert!(
         plan.namespaces
-            .contains(kennel_syscall::namespace::Namespaces::USER),
+            .contains(kennel_lib_syscall::namespace::Namespaces::USER),
         "the production plan unshares a user namespace (the unprivileged foundation)"
     );
 
@@ -336,7 +336,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     );
     let _ = helper.del_address(ctx, "lo", v4.into(), V4_PREFIX);
     let _ = Command::new("pkill")
-        .args(["-x", "kennel-netproxy"])
+        .args(["-x", "host-netproxy"])
         .output();
 
     // The granted ~ subdir (with a file) and a non-granted sibling, under the real
@@ -357,10 +357,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         synth_pub.starts_with("ssh-ed25519 "),
         "minted a synthetic ed25519 key"
     );
-    let connect_bin = sibling_binary("kennel-ssh-connect");
+    let connect_bin = sibling_binary("facade-ssh-connect");
     assert!(
         connect_bin.exists(),
-        "build kennel-ssh-connect (the runner does)"
+        "build facade-ssh-connect (the runner does)"
     );
     let bastion_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey";
     let host_grants = [kenneld::ssh::HostGrant {
@@ -388,7 +388,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     };
 
     // AF_UNIX socket facade (§7.6 / 07-1 §7.1.5): a real host listener the facade
-    // connects on the workload's behalf. The in-kennel `kennel-afunix-shim` proxy
+    // connects on the workload's behalf. The in-kennel `facade-afunix-shim` proxy
     // presents it at $HOME/kennel-unix.sock and brokers each connect by name through
     // binder node 0 (kenneld). A host echo thread serves "ping" -> "pong". No host
     // socket path is ever bound into the view.
@@ -404,10 +404,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             }
         }
     });
-    let afunix_shim_bin = sibling_binary("kennel-afunix-shim");
+    let afunix_shim_bin = sibling_binary("facade-afunix-shim");
     assert!(
         afunix_shim_bin.exists(),
-        "build kennel-afunix-shim (the runner does)"
+        "build facade-afunix-shim (the runner does)"
     );
     let shim_path = PathBuf::from("/home/kennel/kennel-unix.sock");
     let unix_prep = UnixPrep {
@@ -440,7 +440,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         writer: binder_writer,
         // Drive the privhelper factory (07-2): a real uid 0 builds the view + binderfs
         // (chowned to the operator), fixing the binderfs EACCES the legacy path hit.
-        init_bin: Some(sibling_binary("kennel-init")),
+        init_bin: Some(sibling_binary("kennel-bin-init")),
     };
 
     let spec = Spec {
@@ -453,7 +453,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         proxy: Some(ProxySetup {
             binary: netproxy_path(),
             config_dir: proxy_cfg.clone(),
-            netshim: sibling_binary("kennel-netshim"),
+            netshim: sibling_binary("facade-netshim"),
         }),
         etc: Some(EtcSetup {
             staging_dir: etc_base.join("etc-1"),
@@ -517,7 +517,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         "the kennel's loopback address {v4} should be added"
     );
     // The egress dial delegate binds its owner-only AF_UNIX command socket (no TCP listener — the
-    // workload's SOCKS endpoint is kennel-netshim; kenneld drives the delegate over this socket).
+    // workload's SOCKS endpoint is facade-netshim; kenneld drives the delegate over this socket).
     let command_socket = proxy_cfg.join(format!("netproxy-cmd-{ctx}.sock"));
     assert!(
         command_socket.exists(),
@@ -568,7 +568,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
 /// neutralisation invariant is checked.
 fn build_workload(v4: Ipv4Addr, granted: Option<u32>, primary: u32) -> Command {
     let ssh_clause = "&& test -f \"$HOME/.ssh/config\" \
-         && grep -q 'ProxyCommand .*kennel-ssh-connect %h %p' \"$HOME/.ssh/config\" \
+         && grep -q 'ProxyCommand .*facade-ssh-connect %h %p' \"$HOME/.ssh/config\" \
          && grep -q 'HostKeyAlias kennel-bastion' \"$HOME/.ssh/config\" \
          && grep -q '^kennel-bastion ssh-ed25519 ' \"$HOME/.ssh/known_hosts\" \
          && test -f \"$HOME/.ssh/id_github.com\" ";
@@ -591,7 +591,7 @@ p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket
     };
     // Per-kennel net-ns (§7.5): the kennel's own loopback address is up inside the net-ns (bind
     // succeeds — proves the construction child brought up in-ns `lo` + added the address), and
-    // kennel-netshim is listening at {v4}:1080 (the egress SOCKS endpoint, launched in-ns). The
+    // facade-netshim is listening at {v4}:1080 (the egress SOCKS endpoint, launched in-ns). The
     // host's 127.0.0.1 services are in a different net-ns, so they are unreachable from here.
     let netns_clause = format!(
         "&& python3 -c \"import socket;s=socket.socket();s.bind(('{v4}',0));s.close()\" \
@@ -638,7 +638,7 @@ p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket
 /// (Ubuntu's `AppArmor` restriction with no profile over the test binary), the
 /// precise skip reason; else `None`.
 fn userns_skip_reason(started: &Result<kenneld::Kennel, Error>) -> Option<String> {
-    let Err(Error::Spawn(kennel_spawn::SpawnError::Syscall(e))) = started else {
+    let Err(Error::Spawn(kennel_lib_spawn::SpawnError::Syscall(e))) = started else {
         return None;
     };
     let restricted =
@@ -722,10 +722,10 @@ fn cleanup_paths(dirs: &[&PathBuf], home_test: &Path, unix_sock: &Path) {
 
 /// A no-IPC settled policy: no `[unix]`/`[ssh]`/`[binder]`, net mode `none`. Used to prove
 /// the factory + binder bus are **universal** — even a kennel granting no IPC is built by
-/// the privhelper factory and gets a binderfs instance for the `kennel-init` pull.
+/// the privhelper factory and gets a binderfs instance for the `kennel-bin-init` pull.
 fn no_ipc_policy(home: &Path) -> SettledPolicy {
     let mut p = minimal_policy(home);
-    p.unix = kennel_policy::UnixRuntime::default(); // no af-unix grant (ssh/binder already empty)
+    p.unix = kennel_lib_policy::UnixRuntime::default(); // no af-unix grant (ssh/binder already empty)
     p
 }
 
@@ -745,11 +745,11 @@ fn no_ipc_kennel_runs_through_the_factory() {
     use kenneld::server::{run_kennel, Identity, Shared};
     use std::os::unix::net::UnixStream;
 
-    let uid = kennel_syscall::unistd::real_uid();
-    let gid = kennel_syscall::unistd::real_gid();
-    // Play kenneld's role: become a subreaper so the orphaned kennel-init (the factory exits as
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    let gid = kennel_lib_syscall::unistd::real_gid();
+    // Play kenneld's role: become a subreaper so the orphaned kennel-bin-init (the factory exits as
     // soon as it reports the pid) reparents to this process and `wait_pid` can collect its status.
-    let _ = kennel_syscall::process::set_child_subreaper();
+    let _ = kennel_lib_syscall::process::set_child_subreaper();
     if uid == 0 {
         eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
         return;
@@ -773,9 +773,9 @@ fn no_ipc_kennel_runs_through_the_factory() {
 
     // Sign the no-IPC policy and trust the key (the real verify path runs in the loader).
     let key = SigningKey::from_seed("noipc-key", &[7u8; 32]).expect("key");
-    let signed = kennel_policy::sign_settled(&no_ipc_policy(&home), &key).expect("sign");
-    let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
-    let mut keys = kennel_policy::KeySet::new();
+    let signed = kennel_lib_policy::sign_settled(&no_ipc_policy(&home), &key).expect("sign");
+    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_lib_policy::KeySet::new();
     keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
 
     let run = runtime_dir();
@@ -801,8 +801,8 @@ fn no_ipc_kennel_runs_through_the_factory() {
         view_base: Some(view_root.clone()),
         audit_base: Some(audit_base.clone()),
         bastion: None,
-        afunix_shim_bin: Some(sibling_binary("kennel-afunix-shim")),
-        init_bin: Some(sibling_binary("kennel-init")),
+        afunix_shim_bin: Some(sibling_binary("facade-afunix-shim")),
+        init_bin: Some(sibling_binary("kennel-bin-init")),
     };
     let shared = Shared::new(
         identity,
@@ -845,11 +845,11 @@ fn no_ipc_kennel_runs_through_the_factory() {
 
 /// Bring up a kennel with a **1-second TTL** and `action`, running `argv`, and return
 /// `(elapsed, exit_code)` — or `None` to skip on an under-privileged runner. Proves the §9.7
-/// path end to end: `kennel-init`'s timer → the blocking `NOTIFY_TTL_EXPIRED` call → kenneld
+/// path end to end: `kennel-bin-init`'s timer → the blocking `NOTIFY_TTL_EXPIRED` call → kenneld
 /// freezes the cgroup and, per `action`, kills it (`exit`) or thaws + replies RESUME (`warn`).
 fn run_ttl_kennel(
     name: &str,
-    action: kennel_policy::TtlAction,
+    action: kennel_lib_policy::TtlAction,
     argv: Vec<String>,
 ) -> Option<(std::time::Duration, i32)> {
     use kenneld::control::{recv_response, Response, StartRequest};
@@ -857,9 +857,9 @@ fn run_ttl_kennel(
     use kenneld::server::{run_kennel, Identity, Shared};
     use std::os::unix::net::UnixStream;
 
-    let uid = kennel_syscall::unistd::real_uid();
-    let gid = kennel_syscall::unistd::real_gid();
-    let _ = kennel_syscall::process::set_child_subreaper();
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    let gid = kennel_lib_syscall::unistd::real_gid();
+    let _ = kennel_lib_syscall::process::set_child_subreaper();
     if uid == 0 {
         eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
         return None;
@@ -880,9 +880,9 @@ fn run_ttl_kennel(
     policy.effective_policy.lifecycle.ttl_action = action;
 
     let key = SigningKey::from_seed("ttl-key", &[8u8; 32]).expect("key");
-    let signed = kennel_policy::sign_settled(&policy, &key).expect("sign");
-    let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
-    let mut keys = kennel_policy::KeySet::new();
+    let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
+    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_lib_policy::KeySet::new();
     keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
 
     let run = runtime_dir();
@@ -913,8 +913,8 @@ fn run_ttl_kennel(
         view_base: Some(view_root.clone()),
         audit_base: Some(audit_base.clone()),
         bastion: None,
-        afunix_shim_bin: Some(sibling_binary("kennel-afunix-shim")),
-        init_bin: Some(sibling_binary("kennel-init")),
+        afunix_shim_bin: Some(sibling_binary("facade-afunix-shim")),
+        init_bin: Some(sibling_binary("kennel-bin-init")),
     };
     let shared = Shared::new(
         identity,
@@ -950,14 +950,14 @@ fn run_ttl_kennel(
     Some((elapsed, code))
 }
 
-/// **TTL `exit`, end to end (§9.7).** A `sleep 30` workload under a 1s exit-TTL: `kennel-init`'s
+/// **TTL `exit`, end to end (§9.7).** A `sleep 30` workload under a 1s exit-TTL: `kennel-bin-init`'s
 /// timer fires the blocking `NOTIFY_TTL_EXPIRED`, kenneld freezes + kills the cgroup, and the
 /// kennel dies ~1s in (not 30s) with a killed status.
 #[test]
 fn ttl_exit_terminates_the_kennel_at_the_deadline() {
     let Some((elapsed, code)) = run_ttl_kennel(
         "ttlexit",
-        kennel_policy::TtlAction::Exit,
+        kennel_lib_policy::TtlAction::Exit,
         vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
     ) else {
         return;
@@ -976,7 +976,7 @@ fn ttl_exit_terminates_the_kennel_at_the_deadline() {
 fn ttl_warn_suspends_then_resumes_the_workload() {
     let Some((elapsed, code)) = run_ttl_kennel(
         "ttlwarn",
-        kennel_policy::TtlAction::Warn,
+        kennel_lib_policy::TtlAction::Warn,
         vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 3; exit 0".to_owned()],
     ) else {
         return;
@@ -995,7 +995,7 @@ fn ttl_warn_suspends_then_resumes_the_workload() {
 /// `interactive: true` and a return socket; the workload runs on a controlling tty allocated
 /// in the kennel's own devpts, and its pty master is handed back over the return socket. This
 /// proves the construction-socket pty path: kenneld passes the return socket on the construct
-/// channel → the factory re-homes it at `PTY_RETURN_FD` → `kennel-init` inherits it across
+/// channel → the factory re-homes it at `PTY_RETURN_FD` → `kennel-bin-init` inherits it across
 /// `fexecve` → the seal's `setup_view_pty` allocates the pty and sends the master back. The
 /// workload's `test -t 1` confirms its stdout really is a tty.
 #[test]
@@ -1007,11 +1007,11 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
     use std::os::fd::{AsFd, OwnedFd};
     use std::os::unix::net::UnixStream;
 
-    let uid = kennel_syscall::unistd::real_uid();
-    let gid = kennel_syscall::unistd::real_gid();
-    // Play kenneld's role: become a subreaper so the orphaned kennel-init (the factory exits as
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    let gid = kennel_lib_syscall::unistd::real_gid();
+    // Play kenneld's role: become a subreaper so the orphaned kennel-bin-init (the factory exits as
     // soon as it reports the pid) reparents to this process and `wait_pid` can collect its status.
-    let _ = kennel_syscall::process::set_child_subreaper();
+    let _ = kennel_lib_syscall::process::set_child_subreaper();
     if uid == 0 {
         eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
         return;
@@ -1044,9 +1044,9 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         .extend(["/dev/pts/**".to_owned(), "/dev/tty".to_owned()]);
 
     let key = SigningKey::from_seed("pty-key", &[5u8; 32]).expect("key");
-    let signed = kennel_policy::sign_settled(&policy, &key).expect("sign");
-    let bytes = kennel_policy::to_bytes(&signed).expect("serialise");
-    let mut keys = kennel_policy::KeySet::new();
+    let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
+    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_lib_policy::KeySet::new();
     keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
 
     let run = runtime_dir();
@@ -1072,8 +1072,8 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         view_base: Some(view_root.clone()),
         audit_base: Some(audit_base.clone()),
         bastion: None,
-        afunix_shim_bin: Some(sibling_binary("kennel-afunix-shim")),
-        init_bin: Some(sibling_binary("kennel-init")),
+        afunix_shim_bin: Some(sibling_binary("facade-afunix-shim")),
+        init_bin: Some(sibling_binary("kennel-bin-init")),
     };
     let shared = Shared::new(
         identity,
@@ -1105,7 +1105,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
     let output = std::thread::scope(|s| {
         let reader = s.spawn(|| -> Vec<u8> {
             let mut byte = [0u8; 1];
-            let Ok((_n, fds)) = kennel_syscall::scm::recv_with_fds(ours.as_fd(), &mut byte) else {
+            let Ok((_n, fds)) = kennel_lib_syscall::scm::recv_with_fds(ours.as_fd(), &mut byte) else {
                 return Vec::new();
             };
             let Some(master) = fds.into_iter().next() else {

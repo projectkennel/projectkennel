@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use kennel_policy::NetPolicy;
+use kennel_lib_policy::NetPolicy;
 use kennel_privhelper::validate::ReservedScope;
-use kennel_spawn::{Plan, RuntimeSubstitutions};
+use kennel_lib_spawn::{Plan, RuntimeSubstitutions};
 
 use crate::control::{self, KennelInfo, Request, Response, StartRequest};
 use crate::ctx::CtxAllocator;
@@ -52,25 +52,25 @@ pub struct Loaded {
     pub net: NetPolicy,
     /// The per-kennel SSH runtime (§7.10): the bastion grants `kenneld` realises.
     /// Empty for a kennel with no `[ssh]` policy.
-    pub ssh: kennel_policy::SshRuntime,
+    pub ssh: kennel_lib_policy::SshRuntime,
     /// The per-kennel `AF_UNIX` socket shims (§7.6): the host sockets `kenneld` binds
     /// into the kennel's view. Empty for a kennel with no `[unix]` policy.
-    pub unix: kennel_policy::UnixRuntime,
+    pub unix: kennel_lib_policy::UnixRuntime,
     /// The per-kennel binder IPC runtime (§7.1.4): the user-defined services the
     /// context manager gates against. Empty for a kennel with no `[binder]` policy.
-    pub binder: kennel_policy::BinderRuntime,
+    pub binder: kennel_lib_policy::BinderRuntime,
     /// The granted supplementary groups `(name, gid)` (§7.4): resolved and
     /// membership-checked by the loader, named in the synthetic `/etc/group`. The
     /// loader also sets `plan.supplementary_groups` to these gids (what the seal
     /// `setgroups` to). Empty when no group is granted (the kennel drops all).
     pub groups: Vec<(String, u32)>,
     /// The per-kennel audit runtime (§02-3): the sinks and per-class levels
-    /// kenneld realises by constructing the `kennel-audit` writer. Empty (all
+    /// kenneld realises by constructing the `kennel-lib-audit` writer. Empty (all
     /// defaults) for a kennel with no — or an all-default — `[audit]` section.
-    pub audit: kennel_policy::AuditRuntime,
+    pub audit: kennel_lib_policy::AuditRuntime,
     /// The synthesised environment (§7.9.2): the fixed `[env].set` vars the spawn
     /// applies after clearing the inherited environment. Empty for no `[env].set`.
-    pub env: kennel_policy::EnvRuntime,
+    pub env: kennel_lib_policy::EnvRuntime,
     /// The `PATH` search roots (§7.3.6), synthesised into the workload's `$PATH`.
     /// Empty ⇒ `$PATH` is not set from policy.
     pub exec_path: Vec<String>,
@@ -82,7 +82,7 @@ pub struct Loaded {
     pub home_persist: Vec<String>,
     /// The lifecycle policy (§9.7): the optional TTL and what to do at expiry. Drives
     /// the TTL reaper in `run_kennel`. `ttl_seconds = None` ⇒ no reaper armed.
-    pub lifecycle: kennel_policy::LifecyclePolicy,
+    pub lifecycle: kennel_lib_policy::LifecyclePolicy,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -134,12 +134,12 @@ pub struct Identity {
     /// egress for this daemon. When set, a kennel with `[ssh]` grants gets a
     /// synthetic `~/.ssh` and a route to the shared `kennel-sshd`.
     pub bastion: Option<BastionSetup>,
-    /// The host path of `kennel-afunix-shim`, bound into the constructed view and
+    /// The host path of `facade-afunix-shim`, bound into the constructed view and
     /// launched by the seal to broker each granted `AF_UNIX` socket through the binder
     /// facade (§7.6 / `07-1` §7.1.5). `None` disables the facade path, so `[unix]`
     /// grants go unserved (no host socket is exposed by other means).
     pub afunix_shim_bin: Option<PathBuf>,
-    /// The host path of the trusted root-owned `kennel-init` the privhelper factory
+    /// The host path of the trusted root-owned `kennel-bin-init` the privhelper factory
     /// `fexecve`s as the kennel's uid-0 PID 1 (`07-2`). `Some` selects the factory
     /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
     /// the legacy in-process unprivileged spawn.
@@ -153,9 +153,9 @@ pub struct BastionSetup {
     /// The safe-owned runtime dir for the bastion's host key, config, and
     /// `authorized_keys` (under `$XDG_RUNTIME_DIR`, never world-writable).
     pub dir: PathBuf,
-    /// The host-side `kennel-ssh-reorigin` the bastion's forced commands invoke.
+    /// The host-side `kennel-bin-ssh-reorigin` the bastion's forced commands invoke.
     pub reorigin_bin: PathBuf,
-    /// The in-kennel path of `kennel-ssh-connect` (each synthetic `config`
+    /// The in-kennel path of `facade-ssh-connect` (each synthetic `config`
     /// stanza's `ProxyCommand`); also the host path bound into the kennel view.
     pub ssh_connect_bin: PathBuf,
     /// The loopback address the bastion listens on.
@@ -224,7 +224,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     fn register_ssh(
         &self,
         kennel: &str,
-        ssh: &kennel_policy::SshRuntime,
+        ssh: &kennel_lib_policy::SshRuntime,
         shim_root: &Path,
     ) -> Result<crate::SshPrep, String> {
         let Some(setup) = self.identity.bastion.as_ref() else {
@@ -312,7 +312,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// under it, real paths under the daemon-user's real home.
     fn prepare_unix(
         &self,
-        unix: &kennel_policy::UnixRuntime,
+        unix: &kennel_lib_policy::UnixRuntime,
         subst: &RuntimeSubstitutions,
         shim_root: &Path,
     ) -> crate::UnixPrep {
@@ -482,7 +482,7 @@ where
         // so this cannot be spoofed; it is defence-in-depth behind the socket's
         // 0600 mode. Reject (close without a wire exchange) anything else.
         let served = shared.identity.uid;
-        match kennel_syscall::scm::peer_uid(conn.as_fd()) {
+        match kennel_lib_syscall::scm::peer_uid(conn.as_fd()) {
             Ok(uid) if uid == served => {}
             Ok(uid) => {
                 eprintln!("kenneld: rejected control connection from uid {uid} (serves {served})");
@@ -726,7 +726,7 @@ pub fn run_kennel<P, L>(
         // Home-relative paths exempt from dotfile reconstruction (§7.9.2a).
         home_persist: loaded.home_persist.clone(),
     });
-    // TTL is enforced inside the kennel now (§9.7): `kennel-init` runs the timer and, at
+    // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and, at
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
     // binder Lifecycle), so kenneld no longer polls from out here.
@@ -764,7 +764,7 @@ pub fn run_kennel<P, L>(
     let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
 
     // Every kennel runs the privhelper factory + a per-kennel binder bus: binder is the
-    // universal control plane (`kennel-init` pulls its supervision-half over node 0), not an
+    // universal control plane (`kennel-bin-init` pulls its supervision-half over node 0), not an
     // opt-in for [binder]/[unix] kennels (`07-1`/`07-2`). So always wire the daemon-side
     // context manager — it takes node 0, serves the lifecycle pull, and answers any facade.
     // The registry's policy/facade sets are simply empty for a kennel that grants no IPC.
@@ -772,12 +772,12 @@ pub fn run_kennel<P, L>(
         // The facade connects to the real host socket, so resolve each `real` path's
         // `~`/`$XDG_RUNTIME_DIR`/placeholders against the daemon's own home now (the
         // shim path the proxy listens at was already resolved in `prepare_unix`).
-        let facade_unix = kennel_policy::UnixRuntime {
+        let facade_unix = kennel_lib_policy::UnixRuntime {
             sockets: loaded
                 .unix
                 .sockets
                 .iter()
-                .map(|s| kennel_policy::UnixSocket {
+                .map(|s| kennel_lib_policy::UnixSocket {
                     real: resolve_path(&s.real, &subst, &shared.identity.home)
                         .to_string_lossy()
                         .into_owned(),
@@ -858,7 +858,7 @@ pub fn run_kennel<P, L>(
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
     // Block until the kennel exits, then tear down. TTL is enforced inside the kennel (§9.7):
-    // `kennel-init`'s timer makes the blocking `NOTIFY_TTL_EXPIRED` call, which the node-0
+    // `kennel-bin-init`'s timer makes the blocking `NOTIFY_TTL_EXPIRED` call, which the node-0
     // handler services (freeze + decide; the `ttl-warn`/`ttl-terminate` audit events come from
     // there). So this is a plain wait — on `exit` the handler kills the frozen cgroup, and this
     // wait returns the resulting status. The audited privileged records the teardown too.
@@ -904,7 +904,7 @@ fn fail<P: Privileged + Clone, L: PolicyLoader>(
 }
 
 /// The exit code to report: the kennel's exit code (`128 + signal` if it was killed, as
-/// [`kennel_syscall::process::wait_pid`] already encodes), or `-1` if the wait itself failed.
+/// [`kennel_lib_syscall::process::wait_pid`] already encodes), or `-1` if the wait itself failed.
 fn exit_code(status: &io::Result<i32>) -> i32 {
     *status.as_ref().unwrap_or(&-1)
 }
@@ -912,7 +912,7 @@ fn exit_code(status: &io::Result<i32>) -> i32 {
 /// Read one framed request, plus any stdio fds, from a single `recvmsg`.
 fn recv_request_with_fds(conn: &UnixStream) -> io::Result<(Request, Vec<OwnedFd>)> {
     let mut buf = vec![0u8; 128 * 1024];
-    let (n, fds) = kennel_syscall::scm::recv_with_fds(conn.as_fd(), &mut buf)?;
+    let (n, fds) = kennel_lib_syscall::scm::recv_with_fds(conn.as_fd(), &mut buf)?;
     let frame = buf
         .get(..n)
         .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
@@ -991,9 +991,9 @@ mod tests {
     use std::net::IpAddr;
 
     use kennel_privhelper::wire::Response as HelperResponse;
-    use kennel_syscall::landlock::AccessFs;
-    use kennel_syscall::namespace::Namespaces;
-    use kennel_syscall::seccomp::Action;
+    use kennel_lib_syscall::landlock::AccessFs;
+    use kennel_lib_syscall::namespace::Namespaces;
+    use kennel_lib_syscall::seccomp::Action;
 
     #[test]
     fn valid_kennel_names_are_accepted() {
@@ -1071,11 +1071,11 @@ mod tests {
                 interactive_return_fd: None,
                 aux: Vec::new(),
                 ttl_seconds: None,
-                ttl_action: kennel_policy::TtlAction::Exit,
+                ttl_action: kennel_lib_policy::TtlAction::Exit,
             };
             let net = NetPolicy {
-                mode: kennel_policy::NetMode::Constrained,
-                proxy: kennel_policy::ProxyListen::default(),
+                mode: kennel_lib_policy::NetMode::Constrained,
+                proxy: kennel_lib_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
@@ -1087,18 +1087,18 @@ mod tests {
                 account: "kennel".to_owned(),
                 account_group: "kennel".to_owned(),
                 net,
-                ssh: kennel_policy::SshRuntime::default(),
-                unix: kennel_policy::UnixRuntime::default(),
-                binder: kennel_policy::BinderRuntime::default(),
+                ssh: kennel_lib_policy::SshRuntime::default(),
+                unix: kennel_lib_policy::UnixRuntime::default(),
+                binder: kennel_lib_policy::BinderRuntime::default(),
                 groups: Vec::new(),
-                audit: kennel_policy::AuditRuntime::default(),
-                env: kennel_policy::EnvRuntime::default(),
+                audit: kennel_lib_policy::AuditRuntime::default(),
+                env: kennel_lib_policy::EnvRuntime::default(),
                 exec_path: Vec::new(),
                 shell: "/bin/sh".to_owned(),
                 home_persist: Vec::new(),
-                lifecycle: kennel_policy::LifecyclePolicy {
+                lifecycle: kennel_lib_policy::LifecyclePolicy {
                     ttl_seconds: None,
-                    ttl_action: kennel_policy::TtlAction::Exit,
+                    ttl_action: kennel_lib_policy::TtlAction::Exit,
                 },
             })
         }
@@ -1173,7 +1173,7 @@ mod tests {
         // Stand up a bastion with one live edge (no sshd) and query it as the AKC would.
         let mut bastion = Bastion::new(BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
-            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-ssh-reorigin"),
+            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
             listen: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 7022,
             agent_sock: None,

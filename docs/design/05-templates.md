@@ -121,7 +121,7 @@ Some sections in §7 use single-bracket TOML tables rather than arrays (`[fs.tmp
 
 ## 5.4 Template substitution variables
 
-Template policies may reference variables that are expanded at kennel-spawn time. Project Kennel substitutes these before applying the policy:
+Template policies may reference variables that are expanded at kennel-lib-spawn time. Project Kennel substitutes these before applying the policy:
 
 | Variable | Expands to |
 |---|---|
@@ -278,7 +278,7 @@ Three template-author tools deserve specific mention because they appear in the 
 
 Some host configuration files are needed inside the kennel but the host version contains sensitive content. A common case is `~/.gitconfig`: the agent needs git to know the user's email and signing preferences, but the host's `~/.gitconfig` often contains credential-helper URLs, embedded tokens, or `url.*.insteadOf` rewrites that point at internal hosts.
 
-`fs.home.sanitise` constructs a sanitised copy at kennel-spawn time:
+`fs.home.sanitise` constructs a sanitised copy at kennel-lib-spawn time:
 
 ```toml
 [[fs.home.sanitise]]

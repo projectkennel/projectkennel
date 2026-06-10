@@ -62,7 +62,7 @@ pub struct SshParams<'a> {
     /// [`BASTION_ALIAS`] so `StrictHostKeyChecking` passes for the bastion and
     /// nothing else.
     pub bastion_host_key: &'a str,
-    /// The in-kennel path of the `kennel-ssh-connect` binary, used as each stanza's
+    /// The in-kennel path of the `facade-ssh-connect` binary, used as each stanza's
     /// `ProxyCommand`: a kennel has no network path off its loopback (its own net-ns), so `ssh`
     /// reaches the bastion by an `INet` `CONNECT_INET` transaction to kenneld over binder (§7.5),
     /// receiving the connection fd and splicing it to stdin/stdout.
@@ -235,7 +235,7 @@ mod tests {
             bastion_host: "127.0.42.1",
             bastion_port: 7022,
             bastion_host_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey",
-            ssh_connect_bin: "/opt/kennel/bin/kennel-ssh-connect",
+            ssh_connect_bin: "/opt/kennel/bin/facade-ssh-connect",
             hosts: &[
                 HostGrant {
                     host: "github.com",
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(c.matches("HostKeyAlias kennel-bastion").count(), 2);
         // Each stanza routes through the binder dialer (the kennel's only path off its loopback).
         assert_eq!(
-            c.matches("ProxyCommand /opt/kennel/bin/kennel-ssh-connect %h %p")
+            c.matches("ProxyCommand /opt/kennel/bin/facade-ssh-connect %h %p")
                 .count(),
             2
         );

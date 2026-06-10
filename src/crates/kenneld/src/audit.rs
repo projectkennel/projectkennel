@@ -1,21 +1,21 @@
 //! The per-kennel audit writer kenneld builds, and the events it emits.
 //!
-//! kenneld constructs the `kennel-audit` writer from the settled
+//! kenneld constructs the `kennel-lib-audit` writer from the settled
 //! [`AuditRuntime`] and records lifecycle events through it (`02-3`).
 //! kenneld is one userspace audit *source* (daemon and kennel lifecycle); the
 //! netproxy is the other. Sink/writer assembly is shared via
-//! [`kennel_audit::build`]; kenneld maps the settled runtime onto it.
+//! [`kennel_lib_audit::build`]; kenneld maps the settled runtime onto it.
 
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use kennel_audit::build::{writer, SinkConfig};
-use kennel_audit::{
+use kennel_lib_audit::build::{writer, SinkConfig};
+use kennel_lib_audit::{
     Event, Level, Levels, Outcome, Resource, SinkKind, Source, Value, Writer, WriterContext,
 };
-use kennel_policy::{AuditRuntime, AuditSinkKind};
+use kennel_lib_policy::{AuditRuntime, AuditSinkKind};
 use kennel_privhelper::exec::refusal_message;
 use kennel_privhelper::wire::{Response, Status};
 
@@ -33,8 +33,8 @@ pub fn kennel_uuid() -> String {
         .ok()
         .and_then(|d| u64::try_from(d.as_millis()).ok())
         .unwrap_or(0);
-    let rand = kennel_syscall::random::bytes::<10>().unwrap_or([0_u8; 10]);
-    kennel_audit::format_uuid_v7(ms, rand)
+    let rand = kennel_lib_syscall::random::bytes::<10>().unwrap_or([0_u8; 10]);
+    kennel_lib_audit::format_uuid_v7(ms, rand)
 }
 
 /// Build the writer for a kennel from the settled `runtime`.
@@ -53,7 +53,7 @@ pub fn build_writer(
     let ctx = WriterContext {
         kennel: name.to_owned(),
         kennel_uuid,
-        host: kennel_audit::hostname(),
+        host: kennel_lib_audit::hostname(),
     };
     let cfg = SinkConfig {
         kinds: runtime.sinks.iter().map(|k| sink_kind(*k)).collect(),
@@ -80,7 +80,7 @@ pub fn noop_writer(name: &str, kennel_uuid: String) -> Writer {
     let ctx = WriterContext {
         kennel: name.to_owned(),
         kennel_uuid,
-        host: kennel_audit::hostname(),
+        host: kennel_lib_audit::hostname(),
     };
     Writer::new(ctx, Levels::default(), Vec::new())
 }
@@ -107,23 +107,23 @@ fn overlay_files(paths: &[PathBuf]) -> AuditRuntime {
             Ok(m) => m.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                eprintln!("kennel-audit: cannot stat {}: {e}", path.display());
+                eprintln!("kennel-lib-audit: cannot stat {}: {e}", path.display());
                 continue;
             }
         };
         if len > MAX_AUDIT_TOML {
             eprintln!(
-                "kennel-audit: ignoring {} ({len} bytes exceeds the {MAX_AUDIT_TOML}-byte limit)",
+                "kennel-lib-audit: ignoring {} ({len} bytes exceeds the {MAX_AUDIT_TOML}-byte limit)",
                 path.display()
             );
             continue;
         }
         match std::fs::read_to_string(path) {
-            Ok(toml) => match kennel_policy::parse_audit_defaults(&toml) {
+            Ok(toml) => match kennel_lib_policy::parse_audit_defaults(&toml) {
                 Ok(rt) => defaults = defaults.overlay(&rt),
-                Err(e) => eprintln!("kennel-audit: ignoring {}: {e}", path.display()),
+                Err(e) => eprintln!("kennel-lib-audit: ignoring {}: {e}", path.display()),
             },
-            Err(e) => eprintln!("kennel-audit: cannot read {}: {e}", path.display()),
+            Err(e) => eprintln!("kennel-lib-audit: cannot read {}: {e}", path.display()),
         }
     }
     defaults

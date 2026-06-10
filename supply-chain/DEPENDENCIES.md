@@ -17,7 +17,7 @@ Six direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`,
 
 These are platform C libraries linked via FFI, not crates.io dependencies — there is no `.crate` to vendor or checksum; they are vetted as the host's own packages and gated so the default build links none of them.
 
-- **libsystemd** — linked by `kennel-syscall::journal` (the `sd_journal_sendv` FFI) **only** under the `audit-journald` feature, for the `kennel-audit` journald sink. The default build does not reference it; the feature is off by default. Build-time: `libsystemd-dev`; run-time: `libsystemd` (present on every systemd host). The FFI is one non-variadic function reading caller-owned `iovec`s; see the `SAFETY` note at the call site.
+- **libsystemd** — linked by `kennel-lib-syscall::journal` (the `sd_journal_sendv` FFI) **only** under the `audit-journald` feature, for the `kennel-lib-audit` journald sink. The default build does not reference it; the feature is off by default. Build-time: `libsystemd-dev`; run-time: `libsystemd` (present on every systemd host). The FFI is one non-variadic function reading caller-owned `iovec`s; see the `SAFETY` note at the call site.
 
 ## Entry format
 
@@ -51,7 +51,7 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 ### libc
 
 - **Version:** =0.2.186 (exact pin)
-- **Justification:** The Rust bindings to the system C library — the foundation the syscall layer rests on (nix builds on it). `kennel-syscall` retains it as a direct dependency (the architecture lists `nix, libc`) for the raw constants and types the higher-level crates do not expose, used directly as the namespace/mount/seccomp wrappers land. The safe wrappers themselves go through nix where possible (§4 — prefer a vetted crate to our own `unsafe`).
+- **Justification:** The Rust bindings to the system C library — the foundation the syscall layer rests on (nix builds on it). `kennel-lib-syscall` retains it as a direct dependency (the architecture lists `nix, libc`) for the raw constants and types the higher-level crates do not expose, used directly as the namespace/mount/seccomp wrappers land. The safe wrappers themselves go through nix where possible (§4 — prefer a vetted crate to our own `unsafe`).
 - **Licence:** MIT OR Apache-2.0 (we take Apache-2.0; compatible with the project licence).
 - **Reviewer:** remco (2026-05-30). Provenance verified independent of crates.io via `tools/audit-source.sh`: the `.crate` source is byte-identical to `github.com/rust-lang/libc` at the published commit, which is tag 0.2.186.
 - **Transitive deps added:** none. libc's only dependency (`rustc-std-workspace-core`) is optional and used solely when libc is built as part of the standard library; it is not in our dependency graph.
@@ -60,7 +60,7 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 ### nix
 
 - **Version:** =0.31.3 (exact pin), `default-features = false`, `features = ["user", "process", "sched", "mount", "fs", "poll", "socket", "net"]`.
-- **Justification:** Safe, typed wrappers over the syscalls `kennel-syscall` would otherwise hand-roll `unsafe` — namespaces, mounts, `pivot_root`, credentials, `no_new_privs`, and the rest of the spawn sequence (`docs/design/08`). Per §4 ("don't roll your own `unsafe`"), a vetted, widely-used crate is preferable to our own FFI for these. Features are enabled pay-as-you-go as each wrapper lands, to keep the compiled surface (and transitive set) minimal; `process` / `sched` / `mount` / `fs` pull no new crate. `poll` (for the cancellable `gid_map` handshake) pulls nothing. `socket` (for the SCM_RIGHTS fd-passing in `scm.rs` and the AF_NETLINK sockets in `netlink.rs`, replacing hand-rolled `sendmsg`/`recvmsg`/CMSG `unsafe`) pulls `memoffset`, which in turn build-depends on `autocfg`. `net` (for `if_nametoindex` in `netlink.rs`) only turns on `socket`, so it adds no further crate.
+- **Justification:** Safe, typed wrappers over the syscalls `kennel-lib-syscall` would otherwise hand-roll `unsafe` — namespaces, mounts, `pivot_root`, credentials, `no_new_privs`, and the rest of the spawn sequence (`docs/design/08`). Per §4 ("don't roll your own `unsafe`"), a vetted, widely-used crate is preferable to our own FFI for these. Features are enabled pay-as-you-go as each wrapper lands, to keep the compiled surface (and transitive set) minimal; `process` / `sched` / `mount` / `fs` pull no new crate. `poll` (for the cancellable `gid_map` handshake) pulls nothing. `socket` (for the SCM_RIGHTS fd-passing in `scm.rs` and the AF_NETLINK sockets in `netlink.rs`, replacing hand-rolled `sendmsg`/`recvmsg`/CMSG `unsafe`) pulls `memoffset`, which in turn build-depends on `autocfg`. `net` (for `if_nametoindex` in `netlink.rs`) only turns on `socket`, so it adds no further crate.
 - **Licence:** MIT.
 - **Reviewer:** remco (2026-05-30; `poll`/`socket` features + memoffset/autocfg transitives 2026-06-05). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/nix-rust/nix` at the published commit, tag v0.31.3. Transitives likewise (bitflags, cfg-if, cfg_aliases, memoffset, autocfg).
 - **Transitive deps added:** `bitflags` =2.11.1, `cfg-if` =1.0.4, `memoffset` =0.9.1 (normal, the last via the `socket` feature); `cfg_aliases` =0.2.1 and `autocfg` =1.5.1 (build-dependencies — of nix's and memoffset's `build.rs` respectively). `libc` is shared with the direct dependency above. Each is vendored and recorded in `CHECKSUMS.toml` with its own GitHub-provenance check.
@@ -69,7 +69,7 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 ### bitflags
 
 - **Version:** =2.11.1 (exact pin).
-- **Justification:** Typed access-right sets for the hand-rolled Landlock bindings (`AccessFs` / `AccessNet` in `kennel-syscall::landlock`). Already in the graph as a transitive of nix; promoted to a direct dependency because `landlock.rs` uses it directly. A flag-set macro avoids a hand-written, error-prone set of `u64` bit operations.
+- **Justification:** Typed access-right sets for the hand-rolled Landlock bindings (`AccessFs` / `AccessNet` in `kennel-lib-syscall::landlock`). Already in the graph as a transitive of nix; promoted to a direct dependency because `landlock.rs` uses it directly. A flag-set macro avoids a hand-written, error-prone set of `u64` bit operations.
 - **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
 - **Reviewer:** remco (2026-05-30) — audited as part of the nix adoption. Provenance verified via `tools/audit-source.sh`: byte-identical to `github.com/bitflags/bitflags` at tag 2.11.1.
 - **Transitive deps added:** none new (already present via nix).
@@ -78,7 +78,7 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 ### object
 
 - **Version:** =0.36.7 (exact pin), `default-features = false`, `features = ["read_core", "elf"]`.
-- **Justification:** ELF parsing for the BPF loader (`kennel-bpf`) — sections, symbols, relocations. The generic, error-prone-but-not-security-specific part, delegated to a vetted crate (gimli-rs/object) exactly as `seccompiler` handles BPF bytecode. The security-bearing loader (the `bpf(2)` syscalls, map creation, relocation patching, cgroup attach) is hand-rolled over `libc`. This replaces `libbpf-rs`/`libbpf-sys` (which would vendor zlib+libelf+libbpf C, ~1435 files) and `aya` (19 crates) with a single dependency.
+- **Justification:** ELF parsing for the BPF loader (`kennel-lib-bpf`) — sections, symbols, relocations. The generic, error-prone-but-not-security-specific part, delegated to a vetted crate (gimli-rs/object) exactly as `seccompiler` handles BPF bytecode. The security-bearing loader (the `bpf(2)` syscalls, map creation, relocation patching, cgroup attach) is hand-rolled over `libc`. This replaces `libbpf-rs`/`libbpf-sys` (which would vendor zlib+libelf+libbpf C, ~1435 files) and `aya` (19 crates) with a single dependency.
 - **Licence:** Apache-2.0 OR MIT (we take Apache-2.0).
 - **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: byte-identical to `github.com/gimli-rs/object` at tag 0.36.7.
 - **Transitive deps added:** none new — with `read_core, elf` only, its sole dependency `memchr` is already vendored.
@@ -96,7 +96,7 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 ### ed25519-compact
 
 - **Version:** =2.3.0 (exact pin), `default-features = false`, `features = ["std"]`.
-- **Justification:** Ed25519 signature verification for `kennel-policy` — the runtime spawn path verifies one signature over the settled policy against a pinned key (`docs/architecture/02-2-config-schema.md` §Signatures); the compiler signs settled policies. "Don't roll your own crypto" (§4) — a vetted Ed25519 is mandatory. Chosen over `ed25519-dalek` (≈9× the code, a ~6–9-crate tree) and `ring` (bundles BoringSSL C/asm): a self-contained pure-Rust implementation whose Curve25519 field arithmetic is fiat-crypto formally-verified code, with zero transitive deps under our feature set. Base64 of the signature envelope is decoded in our own code (encoding, not crypto; the bytes are public), so `pem`/`ct-codecs` stays off.
+- **Justification:** Ed25519 signature verification for `kennel-lib-policy` — the runtime spawn path verifies one signature over the settled policy against a pinned key (`docs/architecture/02-2-config-schema.md` §Signatures); the compiler signs settled policies. "Don't roll your own crypto" (§4) — a vetted Ed25519 is mandatory. Chosen over `ed25519-dalek` (≈9× the code, a ~6–9-crate tree) and `ring` (bundles BoringSSL C/asm): a self-contained pure-Rust implementation whose Curve25519 field arithmetic is fiat-crypto formally-verified code, with zero transitive deps under our feature set. Base64 of the signature envelope is decoded in our own code (encoding, not crypto; the bytes are public), so `pem`/`ct-codecs` stays off.
 - **Licence:** MIT.
 - **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: 15 source files byte-identical to `github.com/jedisct1/rust-ed25519-compact` at tag 2.3.0. Source read for backdoors: no FFI/asm/process/net/fs/env; the single `unsafe` is the volatile secret-wipe; verification rejects non-canonical `S` (malleability) and weak/identity keys.
 - **Transitive deps added:** none. `getrandom`, `ct-codecs`, and `ed25519` are optional dependencies, gated behind the `random`/`pem`/`traits` features, none of which we enable. `x25519.rs` and `pem.rs` are not compiled.

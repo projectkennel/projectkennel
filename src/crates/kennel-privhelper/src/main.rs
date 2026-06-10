@@ -37,13 +37,13 @@ fn main() -> ExitCode {
     // The factory mode (`07-2`): kenneld invokes `kennel-privhelper construct` with a
     // SOCK_SEQPACKET socket as stdin. It passes fds (so not the one-shot stdin/stdout framing
     // below) and exits as soon as it has built the kennel and reported the init pid — it is not
-    // a reaper proxy; kenneld (a subreaper) adopts and waits the orphaned `kennel-init`.
+    // a reaper proxy; kenneld (a subreaper) adopts and waits the orphaned `kennel-bin-init`.
     if std::env::args().nth(1).as_deref() == Some("construct") {
         // Gate the factory on the caller holding a subkennel allocation, exactly as every
         // one-shot op is gated below: an unallocated user performs no privileged operation
         // (module docs). The factory replies over the SEQPACKET, not the stdout framing, so a
         // refusal is a non-zero exit — kenneld sees the helper die without sending a pid.
-        if alloc::load(kennel_syscall::unistd::real_uid()).is_none() {
+        if alloc::load(kennel_lib_syscall::unistd::real_uid()).is_none() {
             eprintln!(
                 "kennel-privhelper: refusing `construct`: caller has no /etc/kennel/subkennel allocation"
             );
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
         return respond(Response::protocol());
     };
     // The caller's real UID is the trusted identity; look up its allocation.
-    let scope = alloc::load(kennel_syscall::unistd::real_uid());
+    let scope = alloc::load(kennel_lib_syscall::unistd::real_uid());
     respond(exec::perform(&request, scope.as_ref()))
 }
 

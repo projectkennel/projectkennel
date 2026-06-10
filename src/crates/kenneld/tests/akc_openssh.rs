@@ -133,7 +133,7 @@ fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
 /// reason) when the proof cannot run here. Also prepares the privsep dir and pins the
 /// control-socket path to /run/user/0 (where the env-scrubbed AKC will look).
 fn preflight() -> Option<String> {
-    if kennel_syscall::unistd::real_uid() != 0 {
+    if kennel_lib_syscall::unistd::real_uid() != 0 {
         eprintln!("SKIP: must run as root (sudo) — the AKC binary must be root-owned");
         return None;
     }

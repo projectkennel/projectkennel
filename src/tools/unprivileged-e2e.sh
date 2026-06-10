@@ -13,7 +13,7 @@
 # be met the test skips with the precise cause rather than passing falsely.
 #
 #   1. builds the privhelper (--features bpf-egress), netproxy, ssh-connect,
-#      kennel-init, and the test binary;
+#      kennel-bin-init, and the test binary;
 #   2. `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid=ep` on the
 #      privhelper (the production install posture — 07-paths.md — never sudo at
 #      runtime; cap_setuid is the factory's 0 0 1 uid_map write, 07-2);
@@ -45,11 +45,11 @@ AA_PROFILE_FILE="$(mktemp /tmp/kennel-e2e-aa.XXXXXX)"
 # Set when the runner temporarily rewrites a pre-existing, mismatched subkennel line
 # for this uid (e.g. a real allocation): the original is saved here and restored on exit.
 SUBKENNEL_SAVED=""
-# The privhelper resolves kennel-init from the root-owned deployment cascade itself and
+# The privhelper resolves kennel-bin-init from the root-owned deployment cascade itself and
 # verifies it is root-owned + non-writable before fexecve (sec review / design 07-2). The
 # build tree is operator-owned, so install a root-owned copy at the default libexec path.
-INIT_DEST="/usr/libexec/kennel/kennel-init"
-INIT_DEST_BACKUP=""   # tempfile holding a pre-existing kennel-init to restore on exit
+INIT_DEST="/usr/libexec/kennel/kennel-bin-init"
+INIT_DEST_BACKUP=""   # tempfile holding a pre-existing kennel-bin-init to restore on exit
 INIT_DEST_CREATED=""  # set when WE created it (remove on exit)
 
 cleanup() {
@@ -63,7 +63,7 @@ cleanup() {
         sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_SAVED}|" /etc/kennel/subkennel 2>/dev/null || true
         echo "  restored original subkennel line for uid $UID_NUM"
     fi
-    # Restore (or remove) the root-owned kennel-init we installed for the run.
+    # Restore (or remove) the root-owned kennel-bin-init we installed for the run.
     if [ -n "$INIT_DEST_CREATED" ]; then
         sudo rm -f "$INIT_DEST" 2>/dev/null || true
         echo "  removed test $INIT_DEST"
@@ -79,7 +79,7 @@ echo "== building binaries =="
 # Build the test binary and the supporting binaries first; the privhelper with
 # bpf-egress is built LAST so a later workspace build cannot clobber its embedded
 # BPF objects (privhelper-bpf-egress-build-gotcha).
-cargo build -p kennel-ssh-connect -p kennel-netproxy -p kennel-netshim -p kennel-afunix-shim -p kennel-init
+cargo build -p facade-ssh-connect -p host-netproxy -p facade-netshim -p facade-afunix-shim -p kennel-bin-init
 cargo test -p kenneld --features e2e --no-run
 cargo build -p kennel-privhelper --features bpf-egress
 
@@ -117,15 +117,15 @@ elif [ "$EXISTING" != "$SUBKENNEL_LINE" ]; then
 fi
 sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel
 
-echo "== root-owned kennel-init at $INIT_DEST (sudo) =="
-# The privhelper factory resolves kennel-init from the root-owned deployment cascade itself
+echo "== root-owned kennel-bin-init at $INIT_DEST (sudo) =="
+# The privhelper factory resolves kennel-bin-init from the root-owned deployment cascade itself
 # (it no longer trusts a wire-supplied fd — sec review: trusted init source) and verifies it
 # is root-owned + non-writable before fexecve. The build tree is operator-owned, so install a
-# root-owned copy at the default libexec path (Deployment::kennel_init, no system.toml needed).
+# root-owned copy at the default libexec path (Deployment::kennel_bin_init, no system.toml needed).
 # Back up any pre-existing install and restore it on exit.
-INIT_SRC="$REPO_ROOT/target/debug/kennel-init"
+INIT_SRC="$REPO_ROOT/target/debug/kennel-bin-init"
 if [ ! -x "$INIT_SRC" ]; then
-    echo "kennel-init not built at $INIT_SRC" >&2
+    echo "kennel-bin-init not built at $INIT_SRC" >&2
     exit 1
 fi
 sudo mkdir -p "$(dirname "$INIT_DEST")"

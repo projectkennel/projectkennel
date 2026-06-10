@@ -47,7 +47,7 @@ const ROOT_ALLOCATION: &str = "0:9:0000000001:kennel-root\n";
 /// still exercises it.
 #[cfg(feature = "e2e")]
 fn skip_if_unprivileged(test: &str) -> bool {
-    let euid = kennel_syscall::unistd::effective_uid();
+    let euid = kennel_lib_syscall::unistd::effective_uid();
     if euid != 0 {
         eprintln!("skipping {test}: requires root (euid={euid}) for privileged privhelper ops");
         return true;
@@ -197,7 +197,7 @@ fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
 
     let pin_id = "kennel-pintest";
     // Pins live in the caller's XDG runtime dir (root here, so /run/user/0).
-    let uid = kennel_syscall::unistd::real_uid();
+    let uid = kennel_lib_syscall::unistd::real_uid();
     let pin_dir = std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf")).join(pin_id);
     let _ = std::fs::remove_dir_all(&pin_dir);
 

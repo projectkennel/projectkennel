@@ -7,7 +7,7 @@
 # redirect the trust store would defeat policy signing.
 #
 # Resolution order (lowest priority first): this file, then /etc/kennel/system.toml.
-# See docs/architecture/07-paths.md and the kennel-config crate.
+# See docs/architecture/07-paths.md and the kennel-lib-config crate.
 
 # Directory holding kenneld's helper binaries. Each binary defaults to
 # <libexec_dir>/<name>; override an individual one with the keys below.
@@ -22,7 +22,7 @@ sshd = "/usr/sbin/sshd"
 # Explicit per-binary overrides (absolute paths; no ~ expansion). Uncomment to
 # relocate a single binary away from <libexec_dir>:
 # privhelper    = "/usr/libexec/kennel/kennel-privhelper"
-# netproxy      = "/usr/libexec/kennel/kennel-netproxy"
-# ssh_reorigin  = "/usr/libexec/kennel/kennel-ssh-reorigin"
+# netproxy      = "/usr/libexec/kennel/host-netproxy"
+# ssh_reorigin  = "/usr/libexec/kennel/kennel-bin-ssh-reorigin"
 # socks_connect = "/usr/libexec/kennel/kennel-socks-connect"
 # akc           = "/usr/libexec/kennel/kennel-akc"

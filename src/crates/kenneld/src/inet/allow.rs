@@ -78,7 +78,7 @@ pub enum Destination {
 /// An IP network: a base address and a prefix length.
 ///
 /// Matching is byte-wise and shares no arithmetic with the BPF LPM encoder in
-/// `kennel-spawn`; the two are independent implementations of the same notion,
+/// `kennel-lib-spawn`; the two are independent implementations of the same notion,
 /// which is deliberate (the BPF rules and the proxy rules are enforced by
 /// different mechanisms and must each be correct on their own).
 #[derive(Clone, Debug, PartialEq, Eq)]

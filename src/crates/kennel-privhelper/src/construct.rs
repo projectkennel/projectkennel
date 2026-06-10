@@ -1,9 +1,9 @@
-//! The privhelper **factory**: build a kennel and `fexecve` `kennel-init` into it.
+//! The privhelper **factory**: build a kennel and `fexecve` `kennel-bin-init` into it.
 //!
-//! The construction inversion (`docs/design/07-2-kennel-init.md` §7.2.1): rather than
+//! The construction inversion (`docs/design/07-2-kennel-bin-init.md` §7.2.1): rather than
 //! `kenneld` (the operator) building the sandbox unprivileged, the privhelper — real
 //! root — does *all* privileged construction in its own post-`clone` child, then
-//! `fexecve`s the trusted root-owned `kennel-init` as the kennel's uid-0 PID 1. Doing it
+//! `fexecve`s the trusted root-owned `kennel-bin-init` as the kennel's uid-0 PID 1. Doing it
 //! here is what gives the kennel a **real uid 0** (host root mapped `0 0 1`) so the view
 //! root, `/dev`, the library binds, and the binderfs nodes are owned by and display as
 //! root — and what fixes the binderfs `EACCES` (a binderfs instance assigns its nodes to
@@ -14,7 +14,7 @@
 //! `kenneld` invokes the helper as `kennel-privhelper construct` with one end of a
 //! `SOCK_SEQPACKET` pair as the helper's **stdin**. It sends one datagram: the
 //! `ConstructionHalf` bytes as data (and, later, a controlling-pty socket as `SCM_RIGHTS`).
-//! The `kennel-init` binary is **not** taken from the wire — the helper resolves it from the
+//! The `kennel-bin-init` binary is **not** taken from the wire — the helper resolves it from the
 //! root-owned deployment cascade itself (see below). The helper replies on the same channel
 //! with the construction child's **host pid** (so `kenneld` can take binder node 0 via
 //! `/proc/<pid>/root` and gate the lifecycle verbs), then stays alive as that child's parent
@@ -27,23 +27,23 @@
 //! child therefore blocks on a pipe until the parent (real root, holding `CAP_SETUID`/
 //! `CAP_SETGID`) has written the `0 0 1`+operator maps and acked; only then does it run
 //! the (privileged) construction and `fexecve`. No operator-controlled code ever runs as
-//! userns-0: between `clone` and `fexecve` only this factory code runs, and `kennel-init` is
+//! userns-0: between `clone` and `fexecve` only this factory code runs, and `kennel-bin-init` is
 //! the trusted root-owned binary the helper resolves from its own root-only config — never a
 //! path or fd the operator supplies (sec review: trusted init source).
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
-use kennel_spawn::wire::decode_construction;
-use kennel_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf, LoopbackAddr};
-use kennel_syscall::fd::dup_onto;
-use kennel_syscall::boot::BOOT_SYNC_FD;
-use kennel_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
-use kennel_syscall::namespace::clone_pid1;
-use kennel_syscall::pty::PTY_RETURN_FD;
-use kennel_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
-use kennel_syscall::spawn::fexecve;
-use kennel_syscall::unistd::{real_gid, real_uid};
+use kennel_lib_spawn::wire::decode_construction;
+use kennel_lib_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf, LoopbackAddr};
+use kennel_lib_syscall::fd::dup_onto;
+use kennel_lib_syscall::boot::BOOT_SYNC_FD;
+use kennel_lib_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
+use kennel_lib_syscall::namespace::clone_pid1;
+use kennel_lib_syscall::pty::PTY_RETURN_FD;
+use kennel_lib_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
+use kennel_lib_syscall::spawn::fexecve;
+use kennel_lib_syscall::unistd::{real_gid, real_uid};
 
 use crate::validate::{validate_addr, AddrRequest, ReservedScope};
 use crate::wire::EgressPayload;
@@ -60,7 +60,7 @@ const CONSTRUCT_FAILED: i32 = 125;
 
 /// Run the factory over `chan` (the `SOCK_SEQPACKET` end `kenneld` handed us as stdin).
 ///
-/// Never returns: the construction child `fexecve`s `kennel-init` (or `_exit`s on
+/// Never returns: the construction child `fexecve`s `kennel-bin-init` (or `_exit`s on
 /// failure), and this parent `_exit`s with the child's status once it terminates. A
 /// failure before the child exists exits [`CONSTRUCT_FAILED`].
 pub fn run_construct(chan: BorrowedFd<'_>) -> ! {
@@ -75,18 +75,18 @@ pub fn run_construct(chan: BorrowedFd<'_>) -> ! {
 }
 
 /// Receive the construction request, clone the kennel, write its maps, hand off to
-/// `kennel-init`, and wait for it — returning the child's exit status.
+/// `kennel-bin-init`, and wait for it — returning the child's exit status.
 // `op_uid`/`op_gid` are the domain names; the pedantic similar-names heuristic flags the
 // pair, but renaming would only obscure them.
 #[allow(clippy::similar_names)]
 fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // 0. `chan` (our stdin) is the privileged kenneld↔helper SEQPACKET. The `clone` below
     //    copies our fd table into the construction child, so mark `chan` close-on-exec now:
-    //    `kennel-init` (and the workload it later spawns) must NEVER inherit a handle to the
+    //    `kennel-bin-init` (and the workload it later spawns) must NEVER inherit a handle to the
     //    factory transport across the `fexecve` (sec review: fd hygiene). The received SCM
     //    fds are already `MSG_CMSG_CLOEXEC` and the handshake pipe is `pipe_cloexec`, so this
     //    leaves only stdout/stderr inherited.
-    kennel_syscall::fd::set_cloexec(chan)?;
+    kennel_lib_syscall::fd::set_cloexec(chan)?;
 
     // 1. Receive the construction datagram. Framing: `[u32 ch_len][construction-half][egress]`
     //    — the fixed construction-half (length-prefixed so its decoder gets exactly its bytes)
@@ -94,7 +94,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    carries the controlling-pty **return socket** as the sole `SCM_RIGHTS` fd (the binary
     //    to run as uid 0 is NOT taken from the wire — see step 1b). It arrives
     //    `MSG_CMSG_CLOEXEC`; the construction child re-homes it at `PTY_RETURN_FD` (clearing
-    //    close-on-exec) just before `fexecve` so the argv-less `kennel-init` inherits it there.
+    //    close-on-exec) just before `fexecve` so the argv-less `kennel-bin-init` inherits it there.
     let mut buf = vec![0u8; RECV_CAP];
     let (n, mut wire_fds) = recv_with_fds(chan, &mut buf)?;
     let pty_fd: Option<OwnedFd> = (!wire_fds.is_empty()).then(|| wire_fds.remove(0));
@@ -136,21 +136,21 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         }
     }
 
-    // 1b. Resolve and open the trusted `kennel-init` from the **root-owned** deployment
+    // 1b. Resolve and open the trusted `kennel-bin-init` from the **root-owned** deployment
     //     cascade (`/usr/lib/kennel` → `/etc/kennel`; never a user-writable dir or the
-    //     environment — `kennel_config::Deployment::load`). The operator (`kenneld`) does not
+    //     environment — `kennel_lib_config::Deployment::load`). The operator (`kenneld`) does not
     //     get to choose what runs as the kennel's uid 0 (= host root via the `0 0 1` map): a
     //     wire-supplied fd would let a compromised or hostile operator `fexecve` arbitrary
     //     code as root, defeating the very boundary the helper exists to hold. We open it
     //     ourselves and the child `fexecve`s this fd (sec review: trusted init source) — the
     //     same principle as the never-wire-supplied operator identity below (sec review §6).
-    let init_path = kennel_config::Deployment::load()
-        .map_err(|e| io::Error::other(format!("resolve kennel-init from deployment config: {e}")))?
-        .kennel_init();
+    let init_path = kennel_lib_config::Deployment::load()
+        .map_err(|e| io::Error::other(format!("resolve kennel-bin-init from deployment config: {e}")))?
+        .kennel_bin_init();
     let init_file = std::fs::File::open(&init_path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("open trusted kennel-init {}: {e}", init_path.display()),
+            format!("open trusted kennel-bin-init {}: {e}", init_path.display()),
         )
     })?;
     verify_trusted_init(&init_file, &init_path)?;
@@ -158,11 +158,11 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // 2. The maps-written handshake pipe (child blocks until the parent writes the maps).
     let (ready_r, ready_w) = pipe_cloexec()?;
 
-    // The boot-sync socket (07-2 §7.2.1a) that makes startup deterministic. `kennel-init` cannot
+    // The boot-sync socket (07-2 §7.2.1a) that makes startup deterministic. `kennel-bin-init` cannot
     // take node 0 before it `fexecve`s (kenneld opens the binderfs via `/proc/<init>/root`, which
     // only resolves post-exec), yet must not pull before node 0 is up — so the factory gates the
     // *pull*, not the exec: the child inherits `init_sync` at `BOOT_SYNC_FD` across the `fexecve`,
-    // and kenneld holds `daemon_sync` (we hand it over with the init pid below). `kennel-init`
+    // and kenneld holds `daemon_sync` (we hand it over with the init pid below). `kennel-bin-init`
     // signals "ready" on it after exec and blocks; kenneld claims node 0 and signals "go".
     let (init_sync, daemon_sync) = seqpacket_pair()?;
 
@@ -188,8 +188,8 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         }
         // Become the kennel's uid 0 (inside-0 = host root via the `0 0 1` map line) using the
         // userns capabilities the clone granted, so the view/dev/binderfs are root-owned.
-        if kennel_syscall::unistd::set_gid(0).is_err()
-            || kennel_syscall::unistd::set_uid(0).is_err()
+        if kennel_lib_syscall::unistd::set_gid(0).is_err()
+            || kennel_lib_syscall::unistd::set_uid(0).is_err()
         {
             return;
         }
@@ -199,16 +199,16 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         if build_kennel(&half, op_uid, op_gid).is_err() {
             return;
         }
-        // Place the descriptors `kennel-init` inherits at fixed numbers (`BOOT_SYNC_FD`, and
+        // Place the descriptors `kennel-bin-init` inherits at fixed numbers (`BOOT_SYNC_FD`, and
         // `PTY_RETURN_FD` for an interactive run), returning the init-binary fd to exec.
         let pty_ref = pty_fd.as_ref().map(AsFd::as_fd);
         let Ok(init_file) = place_handoff_fds(init_file.as_fd(), init_sync.as_fd(), pty_ref) else {
             return;
         };
-        // Hand off to the trusted `kennel-init` (resolved from root-owned config, not the
+        // Hand off to the trusted `kennel-bin-init` (resolved from root-owned config, not the
         // wire) **as the kennel's uid 0** (no drop): PID 1 must NOT share the operator uid, or
         // the operator-uid workload/facades could signal or ptrace it (07-2 §7.2.5).
-        // `kennel-init` itself drops the workload and facades to the operator. kenneld still
+        // `kennel-bin-init` itself drops the workload and facades to the operator. kenneld still
         // reaches `/proc/<init>/root` because the kennel userns is operator-owned, so the
         // operator kenneld holds CAP_SYS_PTRACE in it. Empty argv/envp (the pull model).
         let _err = fexecve(init_file.as_fd(), &[], &[]);
@@ -221,9 +221,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    (`verify_root_map`, euid 0) and `CAP_SETFCAP` (since Linux 5.12). This does not
     //    change the userns owner (fixed at clone above). Then release the child and report
     //    the init host pid to kenneld.
-    kennel_syscall::unistd::set_gid(0)
+    kennel_lib_syscall::unistd::set_gid(0)
         .map_err(|e| io::Error::new(e.kind(), format!("factory setgid(0): {e}")))?;
-    kennel_syscall::unistd::set_uid(0)
+    kennel_lib_syscall::unistd::set_uid(0)
         .map_err(|e| io::Error::new(e.kind(), format!("factory setuid(0): {e}")))?;
     write_identity_maps(init_pid, op_uid, op_gid, &granted)?;
 
@@ -233,32 +233,32 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // pid, then exit) the factory parent is the unprivileged operator, never a long-lived
     // host-root process (sec review: minimise the privileged window). A no-op when the operator
     // is root (the root-test case, op_uid == 0).
-    kennel_syscall::unistd::set_gid(op_gid)
+    kennel_lib_syscall::unistd::set_gid(op_gid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setgid({op_gid}): {e}")))?;
-    kennel_syscall::unistd::set_uid(op_uid)
+    kennel_lib_syscall::unistd::set_uid(op_uid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setuid({op_uid}): {e}")))?;
 
     // "build": maps are written, so the child may become uid 0, construct the binderfs, and
-    // `fexecve` `kennel-init` (which then blocks on the boot-sync socket before pulling).
+    // `fexecve` `kennel-bin-init` (which then blocks on the boot-sync socket before pulling).
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
     drop(ready_w);
 
     // Report the init pid AND hand kenneld the boot-sync socket as the sole SCM fd: kenneld waits
-    // on it for `kennel-init`'s post-exec "ready", claims node 0 (now reachable via
+    // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (now reachable via
     // /proc/<pid>/root), and signals "go". With that off our hands, the factory's job is done.
     send_with_raw_fds(chan, &init_pid.to_le_bytes(), &[daemon_sync.as_raw_fd()])?;
 
     // 5. Done. The factory's whole job was to build the kennel, write the maps, and report the init
-    //    pid (plus the boot-sync socket) — `kennel-init` is now PID 1 of the new namespace and an
+    //    pid (plus the boot-sync socket) — `kennel-bin-init` is now PID 1 of the new namespace and an
     //    autonomous daemon, so there is nothing left for this process to do. It exits immediately
-    //    rather than lingering as a reaper proxy: `kennel-init` outlives it (a PID namespace is
+    //    rather than lingering as a reaper proxy: `kennel-bin-init` outlives it (a PID namespace is
     //    tied to its own PID 1, not to the cloner), and kenneld — a `set_child_subreaper` — adopts
     //    the orphaned init and `waitpid`s it directly for the workload's exit status. One
     //    fewer resident host process per kennel.
     Ok(0)
 }
 
-/// Place the descriptors `kennel-init` inherits at the fixed numbers it reads — the boot-sync
+/// Place the descriptors `kennel-bin-init` inherits at the fixed numbers it reads — the boot-sync
 /// socket at [`BOOT_SYNC_FD`] and (interactive) the pty return socket at [`PTY_RETURN_FD`] —
 /// returning the init-binary fd to `fexecve`.
 ///
@@ -273,7 +273,7 @@ fn place_handoff_fds(
     init_sync: BorrowedFd<'_>,
     pty_fd: Option<BorrowedFd<'_>>,
 ) -> io::Result<OwnedFd> {
-    use kennel_syscall::fd::dup_above;
+    use kennel_lib_syscall::fd::dup_above;
     let base = if PTY_RETURN_FD > BOOT_SYNC_FD {
         PTY_RETURN_FD + 1
     } else {
@@ -302,7 +302,7 @@ fn add_loopback_addresses(
         return Ok(());
     }
     let cname = std::ffi::CString::new(LOOPBACK).map_err(|_| io::Error::other("bad ifname"))?;
-    let ifindex = kennel_syscall::netlink::if_index(&cname)?;
+    let ifindex = kennel_lib_syscall::netlink::if_index(&cname)?;
     for lb in addrs {
         let req = AddrRequest {
             ctx,
@@ -316,7 +316,7 @@ fn add_loopback_addresses(
                 lb.addr
             )));
         }
-        kennel_syscall::netlink::add_address(ifindex, lb.addr, lb.prefix)?;
+        kennel_lib_syscall::netlink::add_address(ifindex, lb.addr, lb.prefix)?;
     }
     Ok(())
 }
@@ -327,11 +327,11 @@ fn add_loopback_addresses(
 /// operator (the fix for the binderfs `EACCES`).
 ///
 /// Runs entirely inside the construction child's namespaces; nothing here is visible to,
-/// or reversible by, the workload (it precedes the `fexecve` of `kennel-init`, which
+/// or reversible by, the workload (it precedes the `fexecve` of `kennel-bin-init`, which
 /// precedes the operator-identity drop).
 #[allow(clippy::similar_names)] // op_uid / op_gid are the domain names
 fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result<()> {
-    use kennel_syscall::mount;
+    use kennel_lib_syscall::mount;
 
     if half.cgroup_join {
         join_cgroup(&half.cgroup)?;
@@ -343,10 +343,10 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     // The addresses were re-validated against the caller's reserved scope before the host add above.
     if half.lo {
         let cname = std::ffi::CString::new(LOOPBACK).map_err(|_| io::Error::other("bad ifname"))?;
-        let lo = kennel_syscall::netlink::if_index(&cname)?;
-        kennel_syscall::netlink::set_link_up(lo)?;
+        let lo = kennel_lib_syscall::netlink::if_index(&cname)?;
+        kennel_lib_syscall::netlink::set_link_up(lo)?;
         for lb in &half.loopback {
-            kennel_syscall::netlink::add_address(lo, lb.addr, lb.prefix)?;
+            kennel_lib_syscall::netlink::add_address(lo, lb.addr, lb.prefix)?;
         }
     }
 
@@ -362,11 +362,11 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         // write (bind sockets) there. Hand the operator only the inodes we constructed.
         chown_constructed_home(&view.shim_root, op_uid, op_gid)?;
         // Hand the binderfs device to the operator: it is created mode 0600 owned by uid 0 of
-        // the (now real) userns, but every binder client — kennel-init, the af-unix proxy,
+        // the (now real) userns, but every binder client — kennel-bin-init, the af-unix proxy,
         // kenneld via /proc/<init>/root — acts as the operator. The mount-root dir is 0755
         // (operator-traversable already), so only the device itself needs chowning.
         if view.binder {
-            kennel_syscall::unistd::chown_to(
+            kennel_lib_syscall::unistd::chown_to(
                 std::path::Path::new("/dev/binderfs/binder"),
                 op_uid,
                 op_gid,
@@ -406,7 +406,7 @@ fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io
     if home.file_type().is_symlink() || home.dev() != root_dev {
         return Ok(()); // $HOME is a bind (persisted) or a symlink — not ours to chown
     }
-    kennel_syscall::unistd::chown_to(shim_root, uid, gid)?;
+    kennel_lib_syscall::unistd::chown_to(shim_root, uid, gid)?;
     let mut stack = vec![shim_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -422,7 +422,7 @@ fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io
             if meta.file_type().is_symlink() || meta.dev() != root_dev {
                 continue;
             }
-            kennel_syscall::unistd::chown_to(&path, uid, gid)?;
+            kennel_lib_syscall::unistd::chown_to(&path, uid, gid)?;
             if meta.file_type().is_dir() {
                 stack.push(path);
             }
@@ -431,7 +431,7 @@ fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io
     Ok(())
 }
 
-/// Verify the opened `kennel-init` is a trusted root-owned binary before `fexecve`
+/// Verify the opened `kennel-bin-init` is a trusted root-owned binary before `fexecve`
 /// (`07-2`; `02-adversary-model`): a **regular file**, owned by **uid 0**, and **not writable
 /// by group or other**. The path already comes from root-only config, so this is defence in
 /// depth — it catches a deployment config that points `init` at an operator-writable file,
@@ -442,20 +442,20 @@ fn verify_trusted_init(file: &std::fs::File, path: &std::path::Path) -> io::Resu
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(io::Error::other(format!(
-            "kennel-init {} is not a regular file",
+            "kennel-bin-init {} is not a regular file",
             path.display()
         )));
     }
     if meta.uid() != 0 {
         return Err(io::Error::other(format!(
-            "kennel-init {} is not owned by root (owner uid {})",
+            "kennel-bin-init {} is not owned by root (owner uid {})",
             path.display(),
             meta.uid()
         )));
     }
     if meta.mode() & 0o022 != 0 {
         return Err(io::Error::other(format!(
-            "kennel-init {} is writable by group or other (mode {:o})",
+            "kennel-bin-init {} is writable by group or other (mode {:o})",
             path.display(),
             meta.mode()
         )));
@@ -470,7 +470,7 @@ fn verify_trusted_init(file: &std::fs::File, path: &std::path::Path) -> io::Resu
 /// granted supplementary gid. The operator line is omitted when the operator *is* root
 /// (the maps would otherwise overlap — the case when the factory runs under a root test).
 /// Writing requires the parent's `CAP_SETUID`/`CAP_SETGID`; `setgroups` is left enabled
-/// (not denied) because `kennel-init` needs it for the workload's supplementary-group drop.
+/// (not denied) because `kennel-bin-init` needs it for the workload's supplementary-group drop.
 fn write_identity_maps(pid: i32, uid: u32, gid: u32, granted: &[u32]) -> io::Result<()> {
     let (uid_map, gid_map) = build_identity_maps(uid, gid, granted);
     std::fs::write(format!("/proc/{pid}/uid_map"), &uid_map)

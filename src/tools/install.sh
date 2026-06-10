@@ -16,7 +16,7 @@
 #
 # No install path is baked into a binary: kenneld reads the helper-binary
 # locations and the trust store from the root-owned config cascade
-# (/usr/lib/kennel/system.toml then /etc/kennel/system.toml; kennel-config). The
+# (/usr/lib/kennel/system.toml then /etc/kennel/system.toml; kennel-lib-config). The
 # installer writes the vendor system.toml to match where it actually installs.
 #
 # The installer does NOT fabricate the security-sensitive admin inputs
@@ -70,14 +70,14 @@ run() {
 }
 
 # The unprivileged binaries kenneld locates via the config (all under libexec).
-USER_BINS="kenneld kennel kennel-netproxy kennel-netshim kennel-ssh-reorigin kennel-ssh-connect kennel-akc"
+USER_BINS="kenneld kennel host-netproxy facade-netshim kennel-bin-ssh-reorigin facade-ssh-connect kennel-akc"
 
 build_binaries() {
 	[ "$do_build" -eq 1 ] || { echo "install.sh: --no-build, using target/release"; return 0; }
 	echo "install.sh: building release binaries (offline, frozen, locked)"
 	# -p kenneld builds the kenneld, kennel, and kennel-akc bins.
 	run cargo build --release --offline --frozen --locked \
-		-p kenneld -p kennel-netproxy -p kennel-netshim -p kennel-ssh-reorigin -p kennel-ssh-connect
+		-p kenneld -p host-netproxy -p facade-netshim -p kennel-bin-ssh-reorigin -p facade-ssh-connect
 	# The privhelper needs its BPF feature; build it separately.
 	run cargo build --release --offline --frozen --locked \
 		-p kennel-privhelper --features bpf-egress
@@ -111,7 +111,7 @@ install_config() {
 	# installed, so a --prefix relocation stays coherent without hand-editing.
 	run install -d -m 0755 "$vendor_dir"
 	# Vendor cascade layers for keys/templates/policies so the lowest-priority
-	# search dir always exists (kennel-config 3-layer cascade; 07-paths). No
+	# search dir always exists (kennel-lib-config 3-layer cascade; 07-paths). No
 	# reference policies are shipped — policies are user/org content.
 	run install -d -m 0755 "$vendor_dir/keys" "$vendor_dir/templates" "$vendor_dir/policies"
 	run install -m 0644 "$repo_root/dist/config/system.toml" "$vendor_dir/system.toml"

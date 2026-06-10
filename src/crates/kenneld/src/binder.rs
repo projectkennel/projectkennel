@@ -7,7 +7,7 @@
 //! `binder.*` audit event per call through the unified [`Writer`].
 //!
 //! This module is the *policy* layer; the binder transport (the looper, the wire
-//! codec, the ioctls) is [`kennel_binder`]. The transaction payload convention on
+//! codec, the ioctls) is [`kennel_lib_binder`]. The transaction payload convention on
 //! node 0 (the verb codes and the status/byte replies) is internal-stable
 //! (`02-4-binder.md` §Node 0): `kenneld` and the in-kennel client agree because
 //! they ship from one release.
@@ -23,10 +23,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use kennel_audit::{Event, Outcome, Resource, Source, Value, Writer};
-use kennel_binder::client::Incoming;
-use kennel_binder::ctxmgr::{ContextManager, Handler, Reply};
-use kennel_policy::{BinderRuntime, UnixRuntime};
+use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
+use kennel_lib_binder::client::Incoming;
+use kennel_lib_binder::ctxmgr::{ContextManager, Handler, Reply};
+use kennel_lib_policy::{BinderRuntime, UnixRuntime};
 
 /// The binder buffer mapping size per instance (ample for service-name transactions).
 const MAP_SIZE: usize = 128 * 1024;
@@ -44,8 +44,8 @@ const AFUNIX_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_s
 const MAX_NAME: usize = 255;
 
 // The node-0 verb codes and reply status bytes are the shared wire convention
-// (`kennel_binder::service`), used by both kenneld here and the in-kennel clients.
-pub use kennel_binder::service::{lifecycle, status, ttl, verb};
+// (`kennel_lib_binder::service`), used by both kenneld here and the in-kennel clients.
+pub use kennel_lib_binder::service::{lifecycle, status, ttl, verb};
 
 /// The per-kennel service registry, gated by the settled `[binder]` policy.
 ///
@@ -68,7 +68,7 @@ impl Registry {
 
     /// Whether `name` is in the reserved kenneld-owned namespace.
     fn is_reserved(name: &str) -> bool {
-        name.starts_with(kennel_policy::binder::RESERVED_PREFIX)
+        name.starts_with(kennel_lib_policy::binder::RESERVED_PREFIX)
     }
 
     /// Whether policy lets this kennel *provide* (register) `name`.
@@ -130,20 +130,20 @@ impl Registry {
     }
 }
 
-/// The lifecycle/config state `kenneld` serves to a kennel's `kennel-init` (`07-2`).
+/// The lifecycle/config state `kenneld` serves to a kennel's `kennel-bin-init` (`07-2`).
 ///
 /// Served over node 0 (§7.2.4). Disabled by default (`init_host_pid == None`): the
 /// lifecycle verbs are refused until the factory reports the init pid and stages the
 /// supervision-half.
 #[derive(Debug, Default)]
 pub struct Lifecycle {
-    /// The **host** pid of `kennel-init`, reported by the privhelper factory. The single
+    /// The **host** pid of `kennel-bin-init`, reported by the privhelper factory. The single
     /// authority for the lifecycle gate: a host-side context manager sees the sender's
     /// host pid (`task_tgid_nr_ns`), never the kennel-internal `1`. `None` ⇒ disabled.
     pub init_host_pid: Option<i32>,
-    /// The encoded supervision-half (`kennel-spawn::wire::encode_supervision`) served on
+    /// The encoded supervision-half (`kennel-lib-spawn::wire::encode_supervision`) served on
     /// `GET_SANDBOX_PLAN`. (The interactive pty does NOT ride binder: the privhelper factory
-    /// passes the return socket on the construction channel and `kennel-init` inherits it at
+    /// passes the return socket on the construction channel and `kennel-bin-init` inherits it at
     /// `PTY_RETURN_FD` — `07-2`, decoupled from the bus.)
     pub supervision: Vec<u8>,
     /// The kennel's cgroup (kenneld's delegated subtree). On `NOTIFY_TTL_EXPIRED` kenneld
@@ -151,7 +151,7 @@ pub struct Lifecycle {
     /// daemon, never exposed to the sandbox (§9.7). Empty on a lifecycle with no TTL.
     pub cgroup: std::path::PathBuf,
     /// What to do when the TTL expires (`[lifecycle].on-expiry`), decided kenneld-side.
-    pub ttl_action: kennel_policy::TtlAction,
+    pub ttl_action: kennel_lib_policy::TtlAction,
 }
 
 /// A running per-kennel binder context manager: the looper pool plus its stop flag.
@@ -228,7 +228,7 @@ fn handle(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    // Lifecycle/config verbs (the high range) are spoken only by kennel-init and gated
+    // Lifecycle/config verbs (the high range) are spoken only by kennel-bin-init and gated
     // on its kernel-stamped identity — handled before the registry/af-unix dispatch.
     if incoming.code >= lifecycle::GET_SANDBOX_PLAN {
         return lifecycle_handle(lifecycle, incoming, ctx, writer);
@@ -290,7 +290,7 @@ fn handle(
 }
 
 /// Serve a node-0 **lifecycle/config verb**, gated on the caller's kernel-stamped
-/// identity: only `kennel-init` (the host pid the privhelper reported, running as
+/// identity: only `kennel-bin-init` (the host pid the privhelper reported, running as
 /// uid 0) may pull the plan or post notifications (`07-2` §7.2.4). A caller that is
 /// not the registered init pid — a spoof, or any other in-kennel process — is denied
 /// and audited.
@@ -323,7 +323,7 @@ fn lifecycle_handle(
     let (action, outcome, reply) = match incoming.code {
         lifecycle::GET_SANDBOX_PLAN => {
             // The supervision-half only; the interactive pty rides the construction channel
-            // (kennel-init inherits the return socket at PTY_RETURN_FD), not this reply.
+            // (kennel-bin-init inherits the return socket at PTY_RETURN_FD), not this reply.
             (
                 "binder.get-sandbox-plan",
                 Outcome::Allow,
@@ -351,13 +351,13 @@ fn lifecycle_handle(
             Reply::Data(one(status::OK)),
         ),
         lifecycle::NOTIFY_TTL_EXPIRED => {
-            // The kennel's TTL fired (§9.7). kennel-init is blocked in this very call, so
+            // The kennel's TTL fired (§9.7). kennel-bin-init is blocked in this very call, so
             // freezing the cgroup atomically suspends the whole kennel (no act-past-deadline
             // race) without deadlocking — the BC_TRANSACTION already reached us. Then decide:
             let _ = crate::cgroup::freeze_cgroup(&lifecycle.cgroup);
             match lifecycle.ttl_action {
-                kennel_policy::TtlAction::Exit => {
-                    // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-init is
+                kennel_lib_policy::TtlAction::Exit => {
+                    // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-bin-init is
                     // killed, so it never reads the reply; the reply byte is moot.
                     let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
                     (
@@ -366,12 +366,12 @@ fn lifecycle_handle(
                         Reply::Data(one(ttl::TERMINATE)),
                     )
                 }
-                action @ (kennel_policy::TtlAction::Warn | kennel_policy::TtlAction::Renew) => {
+                action @ (kennel_lib_policy::TtlAction::Warn | kennel_lib_policy::TtlAction::Renew) => {
                     // Thaw, then reply RESUME — the *same* blocking call returns and the kennel
                     // picks up where it left off (a momentary atomic pause + an audit event).
                     // `renew` behaves as a louder warn until the interactive prompt is wired.
                     let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
-                    let name = if matches!(action, kennel_policy::TtlAction::Renew) {
+                    let name = if matches!(action, kennel_lib_policy::TtlAction::Renew) {
                         "binder.ttl-renew"
                     } else {
                         "binder.ttl-warn"
@@ -395,15 +395,15 @@ fn lifecycle_handle(
 }
 
 /// Whether a node-0 lifecycle transaction is authorised: the kernel-stamped sender pid
-/// must be exactly the registered `kennel-init` host pid. That pid is the binding fact —
-/// kernel-stamped (`task_tgid_nr_ns`), unforgeable, and unique to `kennel-init` (the
+/// must be exactly the registered `kennel-bin-init` host pid. That pid is the binding fact —
+/// kernel-stamped (`task_tgid_nr_ns`), unforgeable, and unique to `kennel-bin-init` (the
 /// workload and facades have different pids). `init == None` (lifecycle disabled) denies
 /// everything because `Some(pid) != None`.
 ///
-/// `sender_euid == 0` is defense-in-depth alongside the pid match: `kennel-init` is the
+/// `sender_euid == 0` is defense-in-depth alongside the pid match: `kennel-bin-init` is the
 /// only uid-0 process in the kennel (host root via the `0 0 1` map; the workload and facades
 /// run as the operator's non-zero uid), so a lifecycle verb from a non-zero euid is never
-/// `kennel-init` and is denied (`07-2` §7.2.2). The pid match is the primary, exact gate.
+/// `kennel-bin-init` and is denied (`07-2` §7.2.2). The pid match is the primary, exact gate.
 const fn lifecycle_authorized(init: Option<i32>, sender_pid: i32, sender_euid: u32) -> bool {
     matches!(init, Some(pid) if pid == sender_pid) && sender_euid == 0
 }
@@ -423,7 +423,7 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
     let (outcome, reply) = target.map_or_else(
         || (Outcome::Deny, Reply::Data(one(status::DENIED))),
         |socket| {
-            kennel_syscall::net::connect_unix_timeout(
+            kennel_lib_syscall::net::connect_unix_timeout(
                 std::path::Path::new(&socket.real),
                 AFUNIX_CONNECT_DEADLINE,
             )
@@ -453,7 +453,7 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
 /// [`crate::inet`], and reply with either the connection fd or a status byte.
 ///
 /// On an approved request kenneld pins the vetted address, mints the per-connection socketpair
-/// conduit, drives the `kennel-netproxy` delegate to dial it, and returns the kennel-facing end as
+/// conduit, drives the `host-netproxy` delegate to dial it, and returns the kennel-facing end as
 /// [`Reply::Fd`]. A denied/unreachable request returns a status byte. Audited either way.
 fn inet_connect(
     net: &crate::inet::NetRuntime,
@@ -527,7 +527,7 @@ fn decode_name(data: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kennel_policy::{BinderConsumeRuntime, BinderProvideRuntime};
+    use kennel_lib_policy::{BinderConsumeRuntime, BinderProvideRuntime};
 
     fn registry(provide: &[&str], consume: &[&str]) -> Registry {
         Registry::new(BinderRuntime {
@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn lifecycle_gate_requires_the_exact_init_pid_and_uid0() {
-        // `kennel-init` is the only uid-0 process; the gate is the exact init host pid AND
+        // `kennel-bin-init` is the only uid-0 process; the gate is the exact init host pid AND
         // euid 0.
         assert!(lifecycle_authorized(Some(4242), 4242, 0));
         // Right pid but a non-zero euid (the operator-uid workload/facades) — denied.

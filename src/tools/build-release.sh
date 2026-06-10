@@ -48,7 +48,7 @@ EPOCH="$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)"
 # The seven binaries install.sh consumes. `-p kenneld` builds the kenneld, kennel,
 # and kennel-akc bins (src/bin/); the privhelper is built separately because it
 # needs the bpf-egress feature (and thus clang, on the build host).
-BINS="kenneld kennel kennel-akc kennel-netproxy kennel-ssh-reorigin kennel-ssh-connect kennel-netshim kennel-privhelper"
+BINS="kenneld kennel kennel-akc host-netproxy kennel-bin-ssh-reorigin facade-ssh-connect facade-netshim kennel-privhelper"
 
 # The highest GLIBC_x.y symbol version a binary references — the runtime glibc floor.
 glibc_floor() {
@@ -63,7 +63,7 @@ build_arch() {
 
 	echo "==> [$triple] building release binaries (reproducible, offline, locked)" >&2
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
-		-p kenneld -p kennel-netproxy -p kennel-netshim -p kennel-ssh-reorigin -p kennel-ssh-connect
+		-p kenneld -p host-netproxy -p facade-netshim -p kennel-bin-ssh-reorigin -p facade-ssh-connect
 	# The privhelper LAST and with its feature, so its build is the bpf-egress one
 	# (a plain workspace build would clobber it; see 08-as-built-notes §8.3).
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \

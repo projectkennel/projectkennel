@@ -52,8 +52,8 @@ narration is kept here; the chapter named is the source of truth.
   `AF_NETLINK`. Recon-only — egress stays blocked — but a genuine info-disclosure residual.
   The closure path is now designed (`07-5`): unshare `CLONE_NEWNET` in the construction
   child, configure an in-namespace `lo`, and reach the host-side proxy across the boundary via
-  the `org.projectkennel.INet` binder facade (SOCKS5 → `kennel-netshim` → `INet` `CONNECT` →
-  the `kennel-netproxy` delegate) rather than a direct loopback connect — re-architecting the
+  the `org.projectkennel.INet` binder facade (SOCKS5 → `facade-netshim` → `INet` `CONNECT` →
+  the `host-netproxy` delegate) rather than a direct loopback connect — re-architecting the
   §7.5 loopback/egress model onto the four network modes (`none`/`constrained`/`unconstrained`/
   `host`) + the loopback mirror. When that lands, T1.6 closes for `none`/`constrained`/
   `unconstrained` (`mode = host` re-shares the host net-ns and deliberately reinstates the
@@ -97,17 +97,17 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   the privhelper *factory* clones the namespaces as the operator (so the userns is
   operator-owned), its child self-escalates to the kennel's uid 0 to build the root-owned
   view/`/dev`/library binds and binderfs, mounts binderfs + chowns the device to the operator,
-  `pivot_root`s and `fexecve`s the trusted root-owned `kennel-init` (PID 1) with empty
+  `pivot_root`s and `fexecve`s the trusted root-owned `kennel-bin-init` (PID 1) with empty
   argv/envp; kenneld acquires node 0 by opening `/proc/<init-host-pid>/root/dev/binderfs/binder`
   (SCM_RIGHTS fd-passing is rejected — binder fds are per-opener — and the operator-owned userns
-  is what makes the open succeed); `kennel-init` *pulls* its supervision-half via
+  is what makes the open succeed); `kennel-bin-init` *pulls* its supervision-half via
   `GET_SANDBOX_PLAN` to node 0 (kenneld identifies the kennel by the binderfs instance the txn
   arrived on), the `NOTIFY_*` lifecycle verbs ride node 0 in the `0x100+` range gated by
   `sender_pid == init_host_pid`, and the `org.projectkennel.IAfUnix/default` facade brokers an
   AF_UNIX connect (returning the connected fd) in place of the bind-mount grant. New crates
-  `kennel-binder` (unsafe ABI, parallel to `kennel-bpf`) and `kennel-init`, plus the
-  `kennel-spawn::wire` Plan codec and the privhelper `ConstructKennel` op (`SOCK_SEQPACKET` +
-  `SCM_RIGHTS`): `02-4-binder.md`, design `07-1-binder.md` §7.1, `07-2-kennel-init.md`.
+  `kennel-lib-binder` (unsafe ABI, parallel to `kennel-lib-bpf`) and `kennel-bin-init`, plus the
+  `kennel-lib-spawn::wire` Plan codec and the privhelper `ConstructKennel` op (`SOCK_SEQPACKET` +
+  `SCM_RIGHTS`): `02-4-binder.md`, design `07-1-binder.md` §7.1, `07-2-kennel-bin-init.md`.
   - **Identity map — subuid rejected, `0 0 1` chosen.** binderfs assigns its nodes to uid 0
     of the mounting userns, so the pure-identity map (`{uid} {uid} 1`) left them on the overflow
     `nobody`/`0600` and nothing in the kennel could open them. The kennel is given a real uid 0
@@ -116,15 +116,15 @@ chapter (and the design § for the mechanism). No build notes are kept here.
     single `write(2)` with `CAP_SETFCAP`. There is no "0 0 N" range and no single-extent rule;
     the only constraint was always the single write. The privhelper gains `CAP_SETUID` for this;
     the old deferred-gid map handshake (§7.4.8) is subsumed — the maps are written once, fully,
-    by the constructor before `kennel-init` starts. The escalation hazard of a userns-0 is
+    by the constructor before `kennel-bin-init` starts. The escalation hazard of a userns-0 is
     bounded by the crux invariant: operator code never runs as userns-0 (only privhelper code
-    runs between `clone` and `fexecve`; thereafter only the trusted `kennel-init`; the workload
+    runs between `clone` and `fexecve`; thereafter only the trusted `kennel-bin-init`; the workload
     is dropped to the operator with `no_new_privs` before any operator-named `execve`). Design
-    `07-2-kennel-init.md`; the no-subuid decision is in `../design/04-trust-boundaries.md`.
-  - **`kennel-init` runs as the kennel's uid 0** (as designed): PID 1 holds a different uid
+    `07-2-kennel-bin-init.md`; the no-subuid decision is in `../design/04-trust-boundaries.md`.
+  - **`kennel-bin-init` runs as the kennel's uid 0** (as designed): PID 1 holds a different uid
     from the operator-uid workload and facades, so they cannot signal or `ptrace` it. kenneld
     still acquires node 0 via `/proc/<init>/root` because the kennel userns is operator-owned
-    (kenneld holds `CAP_SYS_PTRACE` there); `kennel-init` drops each child to the operator.
+    (kenneld holds `CAP_SYS_PTRACE` there); `kennel-bin-init` drops each child to the operator.
 - **`[[fs.dev.passthrough]]`** — specific host devices, GID-gated (not capability), merged
   into `DevPolicy.allow`: `02-2-config-schema.md`, design `07-4-filesystem.md` §7.4.8.
 - **`[identity]`** — masked `user`/`group` (default `kennel`) + supplementary `groups`
@@ -141,7 +141,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   (`PT_INTERP`, via the vendored `object` crate), settles it into `exec.loaders`, and the seal
   grants `FS_EXECUTE` on the binaries + their loaders. It does **not** execute-gate libraries:
   Landlock has no `mmap` hook, so they load via `READ` — there is no `[lib]` section and no
-  closure (the earlier filter was unenforceable). Boundary verified by `kennel-spawn`'s
+  closure (the earlier filter was unenforceable). Boundary verified by `kennel-lib-spawn`'s
   `exec_gating` test; design `07-3-exec.md` §7.3.4/§7.3.7.
 - **Narrowed net invariant** — the non-removable deny set is cloud-metadata + link-local only;
   RFC1918/CGNAT/ULA are reachable (by `[[net.allow]]` in `constrained`, freely in `open`). A
@@ -194,7 +194,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   inodes (so system/home/dev rules match a parent-built ruleset), but the constructed
   `/etc` has fresh tmpfs inodes a host-opened fd would never match — libc would be
   denied `/etc`. So the seal builds the ruleset post-pivot with a *skip-missing* pass
-  (a grant for a path the view doesn't contain is vacuous). See `kennel-spawn::spawn`.
+  (a grant for a path the view doesn't contain is vacuous). See `kennel-lib-spawn::spawn`.
 - **The process is ephemeral; the work is not.** The new root is a throwaway tmpfs,
   but every *writable* bind resolves to a persistent host inode (the agent's real
   project tree), so work survives teardown. Any new writable surface must keep this
@@ -214,7 +214,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   `cargo clippy --all-targets` rebuilds `kennel-privhelper` with default features,
   clobbering the `--features bpf-egress` binary; the `kenneld` e2e then fails with
   `ENOSYS`. Always `cargo build -p kennel-privhelper --features bpf-egress` (and
-  `kennel-netproxy`) immediately before running the gated binaries.
+  `host-netproxy`) immediately before running the gated binaries.
 - **Run the gated test *binaries* directly under sudo**, not `sudo cargo` (which
   leaves root-owned files in `target/`). Compile with `--features e2e
   --no-run`, then `sudo ./target/debug/deps/<name>-<hash>`. Use `pkill -x kenneld`,

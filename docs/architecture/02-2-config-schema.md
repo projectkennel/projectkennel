@@ -238,7 +238,7 @@ signature = "BASE64..."
 # signed_fields is optional advisory metadata; the in-tree templates omit it.
 ```
 
-The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-8-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
+The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-8-internal-api.md` under `kennel-lib-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
 
 Signature verification rules:
 
@@ -310,7 +310,7 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 
 ## The settled policy (compilation)
 
-The settled schema is defined in `src/crates/kennel-policy/src/settled.rs`. The
+The settled schema is defined in `src/crates/kennel-lib-policy/src/settled.rs`. The
 settled body (`SettledPolicy`) has two layers. Its `effective_policy`
 (`EffectivePolicy`) is the **kernel-enforcement core** — `net`, `fs`, `exec`,
 `proc`, `cap`, `seccomp`, `lifecycle` — the sections the spawn seal and the BPF
@@ -350,7 +350,7 @@ The settled policy is an **internal-stable** surface per `02-0-overview.md`, wit
 
 The settled policy is a TOML document, like every other Project Kennel config artefact — there is no second config format and no JSON serialiser anywhere in the tree (`basic-toml` is the only serde format dependency). It is machine-produced and machine-consumed (never hand-edited), but TOML serves a machine artefact just as well as a hand-authored one, and keeping one format avoids a second parser/serialiser dependency.
 
-The canonical form for hashing and signing is **deterministic TOML emitted in struct-field order**. This is reproducible because the signer and the verifier are the *same* implementation: a fixed field order yields byte-identical canonical output on both sides. (The schema carries no floating-point values, so "number normalisation" — the hard part of any canonicalisation — does not arise.) The procedure is documented under `kennel-policy::canonical`; the `[signature]` table is excluded from it. If independent third-party verification ever becomes a hard requirement, the signature would cover the literal stored payload bytes (still TOML), which is format-agnostic and needs no canonicaliser at all.
+The canonical form for hashing and signing is **deterministic TOML emitted in struct-field order**. This is reproducible because the signer and the verifier are the *same* implementation: a fixed field order yields byte-identical canonical output on both sides. (The schema carries no floating-point values, so "number normalisation" — the hard part of any canonicalisation — does not arise.) The procedure is documented under `kennel-lib-policy::canonical`; the `[signature]` table is excluded from it. If independent third-party verification ever becomes a hard requirement, the signature would cover the literal stored payload bytes (still TOML), which is format-agnostic and needs no canonicaliser at all.
 
 Top-level structure (the `[signature]` table is a sibling, excluded from the canonical form):
 
@@ -396,7 +396,7 @@ signature = "BASE64..."
 - `deferred_substitutions` lists the per-instance placeholders the runtime must fill. The runtime substitutes exactly these and refuses to spawn if any *other* unsubstituted placeholder is found in `effective_policy`.
 - `framework_invariants_asserted` records which framework invariants the compiler validated. The runtime re-asserts them regardless (defence in depth, §below); the list is for audit, not for the runtime to trust.
 - `provenance` makes the artefact self-describing: every input that produced it, by hash. `resolved_artifacts` embeds the relevant lockfile entries, so the settled policy records exactly which signed source bytes were composed, without those sources needing to be present at runtime.
-- `signature` is over the canonical-form serialisation of every field except `signature` itself, by the compiling authority's key (`kennel-policy::canonical`, the same procedure as source signatures).
+- `signature` is over the canonical-form serialisation of every field except `signature` itself, by the compiling authority's key (`kennel-lib-policy::canonical`, the same procedure as source signatures).
 
 ### Runtime consumption
 
@@ -508,7 +508,7 @@ either section for `mode = none`.
 ## The `[binder]`, `[[binder.provide]]`, `[[binder.consume]]`, and `[ipc.spawn]` sections
 
 > **Roadmap.** The cross-instance binder relay these sections drive is not built (the binder
-> *gateway core* — node 0, the `IAfUnix` facade, `kennel-init` lifecycle — is built and proven;
+> *gateway core* — node 0, the `IAfUnix` facade, `kennel-bin-init` lifecycle — is built and proven;
 > the cross-kennel relay is the forward contract in [`02-4-binder.md`](02-4-binder.md)). This is
 > the forward schema for `BinderRuntime`; field semantics are design §7.1.
 
@@ -557,7 +557,7 @@ prefix. The compiler rejects such a policy by name, the same way it rejects an o
 - The field-by-field semantics of each section: see the corresponding design-document chapter (§7.x) or the worked example in [TEMPLATE-ai-coding-strict.md](../design/TEMPLATE-ai-coding-strict.md).
 - The binder IPC contract the `[binder]`/`[ipc.spawn]` sections feed, and the `org.projectkennel.*` service set: [`02-4-binder.md`](02-4-binder.md); the network-over-binder layer the `[net.proxy]`/`[net.bpf]` sections feed: [`02-5-binder-net.md`](02-5-binder-net.md). The standalone `net-policy.toml` schema reference is retired; its content is the §The `[net]` section above.
 - The design-level treatment of signing, versioned references, and includes: design doc §5.10.
-- The canonical-form serialisation procedure: `02-8-internal-api.md` (`kennel-policy::canonical`).
+- The canonical-form serialisation procedure: `02-8-internal-api.md` (`kennel-lib-policy::canonical`).
 - The signing-key store and lockfile locations on disk: `07-paths.md`.
 - The mechanism by which template and fragment signatures are verified at runtime, and how the lockfile is checked: `04-trust-boundaries.md`.
 - How `kennel diff` and `kennel upgrade` compute and present deltas, and how `upgrade` rewrites the lockfile: `02-1-cli.md`.

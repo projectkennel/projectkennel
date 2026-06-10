@@ -48,14 +48,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
-name = "kennel-audit"
+name = "kennel-lib-audit"
 version = "0.1.0"
 dependencies = [
- "kennel-text",
+ "kennel-lib-text",
 ]
 
 [[package]]
-name = "kennel-bpf"
+name = "kennel-lib-bpf"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -63,7 +63,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-config"
+name = "kennel-lib-config"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
@@ -75,23 +75,23 @@ name = "kennel-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
- "kennel-netproxy",
- "kennel-policy",
+ "host-netproxy",
+ "kennel-lib-policy",
  "kennel-privhelper",
  "kenneld",
 ]
 
 [[package]]
-name = "kennel-netproxy"
+name = "host-netproxy"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
- "kennel-audit",
+ "kennel-lib-audit",
  "serde",
 ]
 
 [[package]]
-name = "kennel-policy"
+name = "kennel-lib-policy"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
@@ -104,20 +104,20 @@ dependencies = [
 name = "kennel-privhelper"
 version = "0.1.0"
 dependencies = [
- "kennel-syscall",
+ "kennel-lib-syscall",
 ]
 
 [[package]]
-name = "kennel-spawn"
+name = "kennel-lib-spawn"
 version = "0.1.0"
 dependencies = [
- "kennel-bpf",
- "kennel-policy",
- "kennel-syscall",
+ "kennel-lib-bpf",
+ "kennel-lib-policy",
+ "kennel-lib-syscall",
 ]
 
 [[package]]
-name = "kennel-syscall"
+name = "kennel-lib-syscall"
 version = "0.1.0"
 dependencies = [
  "bitflags",
@@ -127,7 +127,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-text"
+name = "kennel-lib-text"
 version = "0.1.0"
 
 [[package]]
@@ -135,13 +135,13 @@ name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
- "kennel-audit",
- "kennel-bpf",
- "kennel-config",
- "kennel-policy",
+ "kennel-lib-audit",
+ "kennel-lib-bpf",
+ "kennel-lib-config",
+ "kennel-lib-policy",
  "kennel-privhelper",
- "kennel-spawn",
- "kennel-syscall",
+ "kennel-lib-spawn",
+ "kennel-lib-syscall",
  "serde",
 ]
 

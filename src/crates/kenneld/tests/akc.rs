@@ -10,7 +10,7 @@ use std::process::Command;
 use kenneld::control::{self, Request, Response};
 
 /// One forced-command line, exactly as the bastion would vend it.
-const WANT: &str = "restrict,pty,command=\"/opt/kennel/bin/kennel-ssh-reorigin --dest github.com --key SHA256:AAA\" ssh-ed25519 AAAASYN ka\n";
+const WANT: &str = "restrict,pty,command=\"/opt/kennel/bin/kennel-bin-ssh-reorigin --dest github.com --key SHA256:AAA\" ssh-ed25519 AAAASYN ka\n";
 
 #[test]
 fn kennel_akc_queries_kenneld_and_prints_the_forced_command_line() {

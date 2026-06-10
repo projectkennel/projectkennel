@@ -1,0 +1,25 @@
+[package]
+name = "kennel-lib-spawn"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel spawn orchestration: turns a verified, substituted settled policy into the kernel enforcement objects (namespaces, mounts, Landlock, seccomp, cgroup/BPF) and spawns the confined workload. Holds no unsafe — all syscalls route through kennel-lib-syscall and kennel-lib-bpf."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-lib-bpf = { path = "../kennel-lib-bpf" }
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+kennel-lib-policy = { path = "../kennel-lib-policy" }
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+
+[features]
+# Tests that need privilege (namespace unshare, cgroup BPF attach). Pulls the
+# embedded BPF programs (clang at build time). Run via:
+#   sudo -E env PATH=$PATH cargo test -p kennel-lib-spawn --features e2e
+e2e = ["kennel-lib-bpf/embed-programs"]
+
+[lints]
+workspace = true

@@ -38,8 +38,8 @@ Project Kennel requires the following kernel features, with version requirements
 | Mount namespace | 2.6.x | Universal |
 | PID namespace | 3.8 | Universal |
 | Network namespace | 2.6.x | Universal (used optionally) |
-| User namespace | 3.8 | **The spawn foundation.** Created by the privhelper factory (§7.2) as the operator, so the userns is operator-owned. Its maps are precise identity lines — host root `0 0 1` + the operator `<op> <op> 1` (+ one per granted gid), no subuid — giving the kennel a real uid 0 and `CAP_SYS_ADMIN` *inside the namespace* to `mount`/`pivot_root` (the bubblewrap-equivalent mechanism). The `0 0 1` line needs `CAP_SETUID`, so construction is privileged; the privhelper's post-`clone` child does it, then `fexecve`s the trusted `kennel-init` as PID 1 / uid 0. |
-| PID namespace (via userns) | 3.8 | `CLONE_NEWPID` is in the factory's single `clone`, so the privhelper child is PID 1 of the fresh PID namespace directly — no double-fork (that was only needed when `unshare` left the unsharer in the old pidns). Being PID 1 is what lets it mount a fresh `/proc`. `kennel-init` inherits this as PID 1 and forks the operator-uid workload beneath it. |
+| User namespace | 3.8 | **The spawn foundation.** Created by the privhelper factory (§7.2) as the operator, so the userns is operator-owned. Its maps are precise identity lines — host root `0 0 1` + the operator `<op> <op> 1` (+ one per granted gid), no subuid — giving the kennel a real uid 0 and `CAP_SYS_ADMIN` *inside the namespace* to `mount`/`pivot_root` (the bubblewrap-equivalent mechanism). The `0 0 1` line needs `CAP_SETUID`, so construction is privileged; the privhelper's post-`clone` child does it, then `fexecve`s the trusted `kennel-bin-init` as PID 1 / uid 0. |
+| PID namespace (via userns) | 3.8 | `CLONE_NEWPID` is in the factory's single `clone`, so the privhelper child is PID 1 of the fresh PID namespace directly — no double-fork (that was only needed when `unshare` left the unsharer in the old pidns). Being PID 1 is what lets it mount a fresh `/proc`. `kennel-bin-init` inherits this as PID 1 and forks the operator-uid workload beneath it. |
 | `PR_SET_NO_NEW_PRIVS` | 3.5 | Universal |
 | AppArmor | Distribution-dependent | Below-ABI-6 abstract-AF_UNIX/signal fallback. **Also a deploy prerequisite** where the distro restricts unprivileged user namespaces (next paragraph). |
 | `legacy_tiocsti` sysctl | 6.2 | Defaults safe on newer kernels |
@@ -110,7 +110,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
 
    parent (kenneld / operator): hold the full Plan; wait, manage lifecycle, audit;
      write nothing into the namespace except — escalating only for this — the maps
-   privhelper (host root): opens the trusted root-owned `kennel-init` binary
+   privhelper (host root): opens the trusted root-owned `kennel-bin-init` binary
      (provenance-verified: root-owned, not group/other-writable) and holds the fd;
      `clone(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC [| CLONE_NEWNET])`
      → child C is PID 1 of the new PID namespace directly (no double-fork). Because
@@ -133,14 +133,14 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         `binder` device, and **chown `/dev/binderfs/binder` to the operator** so the
         operator-uid facades and workload can open it.
      d. `pivot_root` into the view and detach the old host root — the structural
-        sever. After this the host path to `kennel-init` is gone from the mount
+        sever. After this the host path to `kennel-bin-init` is gone from the mount
         namespace.
-     e. `fexecve` the trusted `kennel-init` by the fd opened pre-`clone`, with
+     e. `fexecve` the trusted `kennel-bin-init` by the fd opened pre-`clone`, with
         **empty argv/envp** (nothing for `/proc/<pid>/cmdline`/`environ` to leak).
         `fexecve` also keeps the init binary out of the view. This eliminates the
         window where a uid-0 binary runs while the host fs is still visible.
    ─────────────────────────────────────── trust boundary (host root gone) ───
-   kennel-init (PID 1, uid 0, trapped in the pivoted view):
+   kennel-bin-init (PID 1, uid 0, trapped in the pivoted view):
      f. Open `/dev/binderfs/binder`; `GET_SANDBOX_PLAN` to node 0, retrying until
         kenneld has claimed node 0. kenneld acquires node 0 by opening
         `/proc/<init-host-pid>/root/dev/binderfs/binder` (the operator-owned userns
@@ -157,7 +157,7 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
         kenneld↔delegate socketpairs, not binder participants.
      h. Fork the facades, each dropped to the operator (`set_gid` → groups →
         `set_uid`); fork the workload and drop it to the operator the same way.
-        Only `kennel-init` stays uid 0; the workload is never uid 0.
+        Only `kennel-bin-init` stays uid 0; the workload is never uid 0.
    workload child (where the seal completes and the workload runs):
      i. Curate environment per env.* policy
      j. Set PR_SET_NO_NEW_PRIVS
@@ -165,11 +165,11 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
      l. Apply Landlock ruleset, including ABI-6 scoping
         (SCOPE_ABSTRACT_UNIX_SOCKET + SCOPE_SIGNAL) where the kernel
         supports it (final step before exec; ruleset is sealed). Landlock and
-        seccomp apply to the **workload child only** — not `kennel-init` or the
+        seccomp apply to the **workload child only** — not `kennel-bin-init` or the
         facades, which must stay free to fork, `waitpid`, and reach the bus.
      m. execve(command)
 
-   Exit status rides the process chain (`kennel-init` `_exit` → privhelper →
+   Exit status rides the process chain (`kennel-bin-init` `_exit` → privhelper →
    kenneld), not binder, which may already be torn down; binder carries in-life
    telemetry only.
 

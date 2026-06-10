@@ -5,7 +5,7 @@
 # Stands up, with stock OpenSSH and no root, a hermetic two-hop topology:
 #
 #     client (synthetic key)  --ssh-->  BASTION sshd  --forced command-->
-#         kennel-ssh-reorigin  --ssh (real key from agent)-->  DESTINATION sshd
+#         kennel-bin-ssh-reorigin  --ssh (real key from agent)-->  DESTINATION sshd
 #
 # and asserts the design's load-bearing properties (§7.10.9):
 #   1. allow      — a synthetic-key login re-originates to the fixed destination,
@@ -20,17 +20,17 @@
 # line mirrors `kenneld::sshd::authorized_keys_line`; those generators are locked by
 # unit tests, this script proves stock sshd actually behaves as the design assumes.
 #
-# Usage: ssh-bastion-e2e.sh [path-to-kennel-ssh-reorigin]
-#        (defaults to target/debug/kennel-ssh-reorigin relative to the repo root)
+# Usage: ssh-bastion-e2e.sh [path-to-kennel-bin-ssh-reorigin]
+#        (defaults to target/debug/kennel-bin-ssh-reorigin relative to the repo root)
 
 set -euo pipefail
 
 SSHD=/usr/sbin/sshd
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-REORIGIN="${1:-$REPO_ROOT/target/debug/kennel-ssh-reorigin}"
+REORIGIN="${1:-$REPO_ROOT/target/debug/kennel-bin-ssh-reorigin}"
 
 [ -x "$SSHD" ]      || { echo "no sshd at $SSHD" >&2; exit 2; }
-[ -x "$REORIGIN" ]  || { echo "no kennel-ssh-reorigin at $REORIGIN (build it first)" >&2; exit 2; }
+[ -x "$REORIGIN" ]  || { echo "no kennel-bin-ssh-reorigin at $REORIGIN (build it first)" >&2; exit 2; }
 
 # Stage outside world-writable /tmp: sshd's safe-path check rejects an
 # AuthorizedKeysFile whose ancestor is world-writable (08 §8.1, finding 3). The
@@ -236,7 +236,7 @@ esac
 
 echo
 # The egress *transport* (ssh's ProxyCommand → kenneld over binder → host-side delegate → bastion)
-# is proven by the kenneld e2e (tests/e2e.rs full_vertical: real binder, net-ns, kennel-ssh-connect)
+# is proven by the kenneld e2e (tests/e2e.rs full_vertical: real binder, net-ns, facade-ssh-connect)
 # + the INet conduit component tests. This script proves the bastion re-origination itself (steps
 # 1-4), which is transport-independent.
 

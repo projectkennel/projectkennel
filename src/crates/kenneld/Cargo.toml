@@ -10,32 +10,32 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-kennel-spawn = { path = "../kennel-spawn" }
+kennel-lib-spawn = { path = "../kennel-lib-spawn" }
 kennel-privhelper = { path = "../kennel-privhelper" }
-kennel-policy = { path = "../kennel-policy" }
-kennel-syscall = { path = "../kennel-syscall" }
+kennel-lib-policy = { path = "../kennel-lib-policy" }
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The layered deployment config (07-paths.md): resolves the helper-binary
 # locations and the trust store from root-owned TOML, so no install path is
 # baked into this binary.
-kennel-config = { path = "../kennel-config" }
+kennel-lib-config = { path = "../kennel-lib-config" }
 # The unified audit writer (02-3): kenneld builds it from the settled
 # AuditRuntime and emits lifecycle events through it.
-kennel-audit = { path = "../kennel-audit" }
+kennel-lib-audit = { path = "../kennel-lib-audit" }
 # The BPF loader/ringbuf surface (02-7): kenneld reopens the pinned per-kennel
 # audit ringbuf and drains it. No `embed-programs` — kenneld never loads BPF
 # (the privhelper does), so this stays clang-free.
-kennel-bpf = { path = "../kennel-bpf" }
+kennel-lib-bpf = { path = "../kennel-lib-bpf" }
 # The binder IPC context manager (07-1/02-4): kenneld owns node 0 of each kennel's
 # binderfs instance and gates the registry against the settled [binder] policy.
-kennel-binder = { path = "../kennel-binder" }
+kennel-lib-binder = { path = "../kennel-lib-binder" }
 # Writing the per-kennel egress-proxy TOML config (kenneld writes, the netproxy
-# reads). Both already vendored (kennel-policy/kennel-netproxy use them).
+# reads). Both already vendored (kennel-lib-policy/host-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
 # The INet egress decision: kenneld is the decision point (§7.5.2), reusing the netproxy's
 # allow ruleset + resolver seam so the two never drift (crate::inet). Also round-trips the
 # proxy config we write back through the netproxy's own parser (the writer can't drift).
-kennel-netproxy = { path = "../kennel-netproxy" }
+host-netproxy = { path = "../host-netproxy" }
 
 [dev-dependencies]
 # The BPF-drain root test forks a child into a cgroup and attempts a connect to
@@ -46,9 +46,9 @@ libc = "=0.2.186"
 # End-to-end orchestration test that drives the real setuid privhelper and
 # performs real privileged operations (addresses, BPF attach). Requires root and
 # the privhelper built with its bpf-egress feature.
-e2e = ["kennel-spawn/e2e", "kennel-bpf/embed-programs"]
-# Build the journald audit sink (links libsystemd via kennel-syscall's FFI).
-audit-journald = ["kennel-audit/audit-journald"]
+e2e = ["kennel-lib-spawn/e2e", "kennel-lib-bpf/embed-programs"]
+# Build the journald audit sink (links libsystemd via kennel-lib-syscall's FFI).
+audit-journald = ["kennel-lib-audit/audit-journald"]
 
 [lints]
 workspace = true

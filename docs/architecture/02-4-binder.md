@@ -11,7 +11,7 @@ cross-instance relay, and the new control-socket operation for kennel spawning.
 > inter-namespace gateway (§7.1) is built and proven end to end by the unprivileged
 > vertical (`src/tools/unprivileged-e2e.sh`): the privhelper factory mounts the per-kennel
 > binderfs instance and allocates the device; kenneld acquires node 0 via `/proc/<init>/root`
-> and serves the registry; `kennel-init` pulls its `GET_SANDBOX_PLAN` over the bus; and the
+> and serves the registry; `kennel-bin-init` pulls its `GET_SANDBOX_PLAN` over the bus; and the
 > `org.projectkennel.IAfUnix/default` facade brokers an AF_UNIX connect, returning the
 > connected fd. What remains **roadmap** is the cross-instance/inter-kennel relay
 > (§Inter-kennel IPC), the `org.projectkennel.INet` network crossing (→
@@ -23,10 +23,10 @@ cross-instance relay, and the new control-socket operation for kennel spawning.
 
 **Internal-stable** per [`02-0-overview.md`](02-0-overview.md). The binder transaction
 conventions (service-name codes, payload layouts, the `org.projectkennel.*` namespace) and
-the `kennel-binder` ABI are internal: the workload never writes code against them as a
+the `kennel-lib-binder` ABI are internal: the workload never writes code against them as a
 stable contract — it links a libbinder-shaped client, and the *services* it reaches are
 the policy surface, not the byte layout. kenneld, the service processes, and the
-`kennel-binder` crate are built from one source within a release, so skew is impossible
+`kennel-lib-binder` crate are built from one source within a release, so skew is impossible
 inside a release. This chapter documents the surface for review and audit; it is not a
 contract to consumers.
 
@@ -52,32 +52,32 @@ carries inter-kennel IPC for the MCP topology. Rationale in full: design §7.1.1
 
 ---
 
-## The `kennel-binder` crate
+## The `kennel-lib-binder` crate
 
 The binder ioctl ABI is hand-rolled in a **new, thirteenth workspace crate**,
-`kennel-binder`, parallel in every structural respect to `kennel-bpf`
+`kennel-lib-binder`, parallel in every structural respect to `kennel-lib-bpf`
 ([`03-crate-decomposition.md`](03-crate-decomposition.md)):
 
-- **`#![allow(unsafe_code)]`**, the third crate to carry it (after `kennel-syscall` and
-  `kennel-bpf`). `unsafe` is confined to a single `sys.rs` holding the `ioctl(2)` FFI
+- **`#![allow(unsafe_code)]`**, the third crate to carry it (after `kennel-lib-syscall` and
+  `kennel-lib-bpf`). `unsafe` is confined to a single `sys.rs` holding the `ioctl(2)` FFI
   (`BINDER_WRITE_READ`, `BINDER_SET_CONTEXT_MGR`, `BINDER_SET_MAX_THREADS`,
   `BINDER_VERSION`, the binderfs control `BINDER_CTL_ADD`), the same discipline as
-  `kennel-bpf`'s `sys.rs`. Listed in `UNSAFE-CRATES.md`. Adding it is a new
+  `kennel-lib-bpf`'s `sys.rs`. Listed in `UNSAFE-CRATES.md`. Adding it is a new
   unsafe-bearing crate and triggers all-maintainer review per CODING-STANDARDS §4.
 - **No libbinder, no libbinder-ndk.** Both carry Android-specific dependencies. We bind
   the stable UAPI directly (`include/uapi/linux/android/binder.h`,
   `.../binderfs.h`), the same way `bpf/` compiles against `<linux/bpf.h>` with no CO-RE.
   If the build ends up vendoring the binder UAPI headers, they live alongside the crate
   under the same pinning discipline as `bpf/` headers (`BUILD-ENV.md`), which is the
-  second reason this is its own crate rather than a `kennel-syscall` addition:
-  `kennel-syscall` has a 1500-line reviewable-in-one-sitting ceiling
+  second reason this is its own crate rather than a `kennel-lib-syscall` addition:
+  `kennel-lib-syscall` has a 1500-line reviewable-in-one-sitting ceiling
   ([`03-crate-decomposition.md`](03-crate-decomposition.md)) and no kernel-header surface.
-- **Near-leaf in the dependency graph.** Like `kennel-bpf`, it depends on no other
-  Project Kennel crate except (optionally) `kennel-syscall` for shared raw-fd helpers.
+- **Near-leaf in the dependency graph.** Like `kennel-lib-bpf`, it depends on no other
+  Project Kennel crate except (optionally) `kennel-lib-syscall` for shared raw-fd helpers.
   It links `libc`/`nix` for the syscalls; ELF/`object` is not needed (binder is an ioctl
   ABI, not an object format).
 
-**What `kennel-binder` owns** (mechanism, no policy): the `binder_write_read` command
+**What `kennel-lib-binder` owns** (mechanism, no policy): the `binder_write_read` command
 loop, encode/decode of the `BC_*`/`BR_*` command stream and `binder_transaction_data`,
 the context-manager looper primitive (looper registration, transaction receive, reply
 dispatch), binderfs device allocation, and death-notification plumbing. The `BC_*`/`BR_*`
@@ -87,8 +87,8 @@ carries a fuzz target under `fuzz/` per CODING-STANDARDS §10.6.
 **What `kenneld` owns** (policy/state, `#![forbid(unsafe_code)]`): which `addService`
 and `getService` transactions are permitted, the per-kennel and cross-instance service
 registries, the `org.projectkennel.*` services, and the relay. This mirrors the
-`kennel-bpf`↔`kenneld` split — the loader crate provides `create_maps`/`load_program`/the
-ringbuf reader; kenneld decides what to load and drives the drain. Here `kennel-binder`
+`kennel-lib-bpf`↔`kenneld` split — the loader crate provides `create_maps`/`load_program`/the
+ringbuf reader; kenneld decides what to load and drives the drain. Here `kennel-lib-binder`
 provides the context-manager primitive; kenneld decides what to register and resolve and
 drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` module.
 
@@ -98,7 +98,7 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 
 ### Mount sequencing within the spawn pipeline
 
-> **BUILT — as-built via the privhelper factory ([`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)).**
+> **BUILT — as-built via the privhelper factory ([`../design/07-2-kennel-bin-init.md`](../design/07-2-kennel-bin-init.md)).**
 > binderfs assigns its control/device nodes to **uid 0 of the mounting user namespace**.
 > The old pure-identity map (`{uid} {uid} 1`) had no uid 0, so the nodes landed on the
 > overflow uid (`nobody`, mode `0600`) and nothing in the kennel could open them — proven
@@ -107,18 +107,18 @@ drives the looper. The binder logic in kenneld lives in a new `kenneld::binder` 
 > in one `write(2)` with `CAP_SETFCAP`). The **privhelper factory**, in its post-`clone`
 > child, escalates to the kennel's uid 0, mounts binderfs, allocates the device, **chowns
 > `/dev/binderfs/binder` to the operator** (mode 0600, so operator clients can open it),
-> `pivot_root`s, drops to the operator, and `fexecve`s the trusted root-owned **`kennel-init`
+> `pivot_root`s, drops to the operator, and `fexecve`s the trusted root-owned **`kennel-bin-init`
 > (PID 1)** — so the uid-0 mount work never runs while the host fs is visible (`binder-control`
 > stays root-only). Crucially the **user namespace is owned by the operator** (the child clones
 > as the operator, then self-escalates), which is what lets the operator `kenneld` reach the
-> instance via `/proc/<init>/root` (step 3). `kennel-init` then `open`s its own lifecycle
+> instance via `/proc/<init>/root` (step 3). `kennel-bin-init` then `open`s its own lifecycle
 > client on the device and **pulls** its config from node 0 (`GET_SANDBOX_PLAN`).
 >
-> `kennel-init` is `fexecve`'d **as the kennel's uid 0** (the construction child does not drop
+> `kennel-bin-init` is `fexecve`'d **as the kennel's uid 0** (the construction child does not drop
 > before the hand-off): PID 1 stays a different uid from the operator-uid workload/facades, so
 > they cannot signal or `ptrace` it. The operator `kenneld` still opens the device via
 > `/proc/<init>/root` because the kennel userns is operator-owned (it holds `CAP_SYS_PTRACE`
-> there); `kennel-init` itself drops the workload and facades to the operator.
+> there); `kennel-bin-init` itself drops the workload and facades to the operator.
 
 Each kennel gets its own binderfs instance — a fully independent mount, like devpts and
 tmpfs, sharing no nodes with any other kennel's instance. **binderfs carries
@@ -133,7 +133,7 @@ is one-per-instance (a second call returns `EBUSY`); and a process in the initia
 can become context manager of a child-userns instance opened via `/proc/<pid>/root`.
 Binder protocol version is 8.
 
-The step slots into the existing spawn sequence (`kennel-spawn`, design §8.7):
+The step slots into the existing spawn sequence (`kennel-lib-spawn`, design §8.7):
 
 1. During spawn setup, *inside* the kennel's new mount + user namespace, the spawn code
    creates the view's `/dev/binderfs/` and mounts a fresh binderfs there:
@@ -189,19 +189,19 @@ Android convention (cf. `android.os.*`, `vendor.*`), so those are kept as-is.
 
 ### Privilege: no binder-specific op, but construction is now privhelper-driven
 
-> **Updated by the uid-0 construction model ([`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)).**
+> **Updated by the uid-0 construction model ([`../design/07-2-kennel-bin-init.md`](../design/07-2-kennel-bin-init.md)).**
 > The original claim here — that the entire mount → allocate → become-context-manager chain
 > runs *without real privilege* — no longer holds. It rested on the spawn running uid-mapped
 > 1:1 as the operator, but binderfs nodes are owned by the mounting userns's uid 0, which a
 > pure-identity map does not provide. The kennel now maps host root `0 0 1`, which requires
 > `CAP_SETUID` and so is written by the **privhelper**, which also `execve`s the root-owned
-> `kennel-init`. The privhelper is therefore now the kennel *constructor*, not a minimal
+> `kennel-bin-init`. The privhelper is therefore now the kennel *constructor*, not a minimal
 > add-addr/egress/gid-map helper (supersedes that framing in `01-process-model.md`).
 
 There is still **no binder-*specific* privhelper op**: binderfs is `FS_USERNS_MOUNT`, so the
 mount itself is namespace-local, done by the privhelper factory in its post-`clone` child
 (which holds full caps in the new userns), along with the device allocation and the chown to
-the operator — all before `pivot_root` and the `fexecve` of `kennel-init`. What changed is the
+the operator — all before `pivot_root` and the `fexecve` of `kennel-bin-init`. What changed is the
 *construction* privilege (the `0 0 1` map needs `CAP_SETUID`; the factory does the mounts and
 the pivot) — see [`01-process-model.md`](01-process-model.md) — not a per-binder privileged surface.
 
@@ -215,7 +215,7 @@ kenneld is blocking, thread-per-connection, no async runtime
 ([`03-crate-decomposition.md`](03-crate-decomposition.md)).
 
 Each kennel's node 0 is served by a **looper thread pool** (`kenneld::binder` over
-`kennel-binder::ctxmgr`). Binder replies are thread-bound — `BC_REPLY` completes the transaction
+`kennel-lib-binder::ctxmgr`). Binder replies are thread-bound — `BC_REPLY` completes the transaction
 on the receiving thread's transaction stack, so a reply cannot be handed to a different thread —
 which rules out a "looper dispatches to a worker, a reply-reader replies by cookie" split. The
 pool is instead the AOSP looper model: every looper **receives, handles, and replies to its own
@@ -234,7 +234,7 @@ Per kennel instance:
     the settled policy and the per-kennel registry. The registry is behind a `Mutex` the looper
     takes only for these verbs — never across a blocking call — and replies on the same thread.
   - **Facade verbs** (`IAfUnix` `CONNECT`, and `INet` `CONNECT`/`BIND` once built) perform host
-    I/O — a `connect()`, and for `INet` a DNS resolve + dial via the `kennel-netproxy` delegate
+    I/O — a `connect()`, and for `INet` a DNS resolve + dial via the `host-netproxy` delegate
     over the per-kennel `socketpair`. The handling looper does that I/O inline and replies (with
     the connected fd as a `BINDER_TYPE_FD`) on its own thread; while it is blocked, the other
     loopers keep serving the registry and lifecycle/TTL verbs.
@@ -248,7 +248,7 @@ looper is busy, the driver queues further transactions until one frees. A facade
 connect deadline, so a wedged or unresponsive target reclaims its looper (degrading to a refusal
 on that one transaction) rather than tying it up. A slow or hostile target therefore degrades to
 delay then refusal on that one kennel, never a stall of other kennels (the relay-TCB concern
-below). External delegates (`kennel-netproxy`; the host-side `BIND` leg — see
+below). External delegates (`host-netproxy`; the host-side `BIND` leg — see
 [`02-5-binder-net.md`](02-5-binder-net.md)) run their own blocking I/O in their own processes and
 are not binder participants.
 
@@ -271,22 +271,22 @@ Android — but the verb set and names are deliberately the same so the model is
 | 4 | `isDeclared` | workload/service → kenneld | service name | bool: does policy declare this service for this caller |
 | 5 | `getDeclaredInstances` | workload/service → kenneld | interface name | the granted instances of an interface |
 
-Two further verb groups ride node 0. The **`kennel-init` lifecycle** verbs are gated by the
+Two further verb groups ride node 0. The **`kennel-bin-init` lifecycle** verbs are gated by the
 unforgeable binder caller identity (`sender_pid == init_host_pid`, `sender_euid == 0`) so a
 workload can address node 0 but cannot exercise them. The **`AF_UNIX` facade** verb
 (`CONNECT_AFUNIX`, §7.1.5) is gated by the `[[unix.allow]]` policy name match; any in-kennel
 caller may pull a granted facade fd. (Roadmap: a `sender_pid` gate restricting facade verbs to
 the shim, the same shape as the lifecycle gate.) The two verb groups: the **`AF_UNIX` facade**
-verb (`CONNECT_AFUNIX`, §7.1.5) and the **`kennel-init` lifecycle** verbs
+verb (`CONNECT_AFUNIX`, §7.1.5) and the **`kennel-bin-init` lifecycle** verbs
 (`NOTIFY_BOOT_SYNC`/`NOTIFY_FACADE_CRASH`/`NOTIFY_WORKLOAD_EXEC`/`NOTIFY_FACADE_RESTART`, and
 the blocking `NOTIFY_TTL_EXPIRED` by which the in-kennel TTL custodian asks kenneld to freeze
-+ decide — §9.7; [`../design/07-2-kennel-init.md`](../design/07-2-kennel-init.md)). The lifecycle verbs
-make `kennel-init` (PID 1) a binder *consumer* on the same instance kenneld manages as
++ decide — §9.7; [`../design/07-2-kennel-bin-init.md`](../design/07-2-kennel-bin-init.md)). The lifecycle verbs
+make `kennel-bin-init` (PID 1) a binder *consumer* on the same instance kenneld manages as
 node 0, so the kennel's control plane is the binder bus itself. kenneld accepts a lifecycle
 verb only when `sender_pid` equals the init's **host** pid (learned from the privhelper at
 construction — a host-side context manager sees host pids, *not* the kennel-internal `1`)
 and `sender_euid == 0`; any other sender is a logged `Deny`. (This means binder is no
-longer confined to kenneld + `kennel-netshim` — `kennel-init` is a third participant.)
+longer confined to kenneld + `facade-netshim` — `kennel-bin-init` is a third participant.)
 All other transactions on node 0 are rejected with `BR_FAILED_REPLY`. The
 `listServices`/`isDeclared`/`getDeclaredInstances` verbs are the binder-surface
 introspection a workload may run on itself; there is no separate policy-introspection
@@ -497,7 +497,7 @@ The frame carries no fds (unlike `Start`'s `SCM_RIGHTS` stdio), and the same
 |---|---|---|
 | binderfs | 5.0 | per-mount-namespace Binder filesystem; `FS_USERNS_MOUNT` (mounts in a child userns) |
 | `CONFIG_ANDROID_BINDERFS` + `CONFIG_ANDROID_BINDER_IPC` | `=y` **or** `=m` | as a module, `binder_linux` must be loaded (or auto-loadable on first `mount -t binder`) |
-| binder protocol | version 8 | `kennel-binder` checks `BINDER_VERSION` at open |
+| binder protocol | version 8 | `kennel-lib-binder` checks `BINDER_VERSION` at open |
 | Project Kennel overall floor | 6.10 | already required for Landlock ABI 6 (`fs.execute`); binder is comfortably below it |
 
 `kennel check` detects an unavailable binder driver — neither built in nor a loaded/loadable
@@ -513,7 +513,7 @@ present rather than rebuild.
 
 ## Audit events
 
-Every binder decision is audited through the unified writer (`kennel-audit`,
+Every binder decision is audited through the unified writer (`kennel-lib-audit`,
 [`02-3-audit-schema.md`](02-3-audit-schema.md)) with `source: kenneld`. This chapter
 introduces the following event kinds; their JSONL field schemas are added to `02-3` when
 the events land:
@@ -555,7 +555,7 @@ validation is a categorical policy-compile error, not a runtime check (design §
 - The dbus/gpg/wayland protocol-facade service processes (deferred to their own chapter).
 - The CLI/privhelper/daemon non-binder wire formats: [`02-6-ipc.md`](02-6-ipc.md).
 - The spawn pipeline this mounts into: design §8.7 and [`01-process-model.md`](01-process-model.md).
-- Per-crate public APIs (`kennel-binder`, `kenneld::binder`): [`02-8-internal-api.md`](02-8-internal-api.md).
+- Per-crate public APIs (`kennel-lib-binder`, `kenneld::binder`): [`02-8-internal-api.md`](02-8-internal-api.md).
 - On-disk and runtime paths (`…/kennel/ctx-<n>/binderfs/`): [`07-paths.md`](07-paths.md).
 
 ---
@@ -573,7 +573,7 @@ validation is a categorical policy-compile error, not a runtime check (design §
    behind a gate, or the shim becomes the sub-feature fallback (§The af-unix facade).
 4. **Looper-pool sizing.** Single looper per instance vs a pool, driven by head-of-line
    blocking on slow cross-instance round-trips (§Threading model).
-5. **`kennel-binder` UAPI vendoring.** Whether to vendor the binder UAPI headers (as `bpf/`
+5. **`kennel-lib-binder` UAPI vendoring.** Whether to vendor the binder UAPI headers (as `bpf/`
    does) or bind the structs by hand in Rust; affects the crate's build surface and the
    §2.2 header-pinning discipline. The UAPI headers ship in `linux-libc-dev` at
    `/usr/include/linux/android/{binder,binderfs}.h`.

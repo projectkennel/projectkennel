@@ -6,7 +6,7 @@
 //! cgroup as the migration common ancestor, so the workload — born in kenneld's
 //! cgroup — can be moved into its kennel cgroup unprivileged (the constraint that
 //! made top-level delegation impossible; see the cgroup-join note on
-//! `kennel_spawn`). Reading the *own* cgroup keeps this distro-agnostic: no
+//! `kennel_lib_spawn`). Reading the *own* cgroup keeps this distro-agnostic: no
 //! parsing for systemd-specific slice names.
 
 use std::io;
@@ -123,7 +123,7 @@ pub fn kennel_cgroup(base: &Path, ctx: u16) -> PathBuf {
 ///
 /// This is the correct way to stop a kennel's workload: with the unprivileged
 /// spawn the workload is PID 1 of a nested PID namespace reached via a double-fork
-/// (`kennel_spawn::spawn`), so the process kenneld holds a handle to is the
+/// (`kennel_lib_spawn::spawn`), so the process kenneld holds a handle to is the
 /// intermediate init, *not* the workload — signalling that pid by hand would leave
 /// the workload running. `cgroup.kill` reaches every member regardless of PID-
 /// namespace nesting (the intermediate, the workload, and any descendants), and
@@ -159,7 +159,7 @@ pub fn terminate_cgroup(cgroup: &Path) -> io::Result<()> {
     for line in procs.lines() {
         if let Ok(pid) = line.trim().parse::<u32>() {
             // Best-effort: ESRCH (already gone) is fine.
-            let _ = kennel_syscall::signal::terminate(pid);
+            let _ = kennel_lib_syscall::signal::terminate(pid);
         }
     }
     Ok(())

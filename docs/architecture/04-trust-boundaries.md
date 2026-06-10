@@ -11,20 +11,20 @@ The discipline itself — *what* sanitisation looks like — is in CODING-STANDA
 | # | Boundary | Direction | Enforced by |
 |---|---|---|---|
 | 1 | Operator → privhelper (construction) | command + construction-half `Plan` → privileged kennel build | `kennel-privhelper` (factory) |
-| 2 | Disk → policy parser | untrusted bytes → typed `Policy` | `kennel-policy` |
-| 3 | Untrusted template → signature verifier | bytes + claimed signature → verified bytes | `kennel-policy` (signature module) |
+| 2 | Disk → policy parser | untrusted bytes → typed `Policy` | `kennel-lib-policy` |
+| 3 | Untrusted template → signature verifier | bytes + claimed signature → verified bytes | `kennel-lib-policy` (signature module) |
 | 4 | Workload → BPF programs | syscall args → kernel verdict | BPF programs in `bpf/` |
-| 5 | BPF → userspace audit reader | ringbuf bytes → typed `AuditEvent` | `kennel-bpf` (ringbuf parser) |
+| 5 | BPF → userspace audit reader | ringbuf bytes → typed `AuditEvent` | `kennel-lib-bpf` (ringbuf parser) |
 | 6 | CLI → kenneld | wire-format bytes → typed request | kenneld (`control` decoder) |
 | 7 | Untrusted client → kenneld socket | connecting process → authenticated user | kenneld (SO_PEERCRED check) |
 | 8 | Workload → ssh-agent / dbus-proxy | socket data → daemon | external (`xdg-dbus-proxy`, ssh-agent) |
-| 9 | Workload → netproxy | SOCKS5 bytes → resolved destination | `kennel-netproxy` |
-| 10 | Kernel-side string → audit log | bytes from `task->comm`, paths → sanitised text | `kennel-text` (sanitiser) |
-| 11 | Network bytes → DNS resolver | resolver response → allowlist decision | `kennel-netproxy` |
+| 9 | Workload → netproxy | SOCKS5 bytes → resolved destination | `host-netproxy` |
+| 10 | Kernel-side string → audit log | bytes from `task->comm`, paths → sanitised text | `kennel-lib-text` (sanitiser) |
+| 11 | Network bytes → DNS resolver | resolver response → allowlist decision | `host-netproxy` |
 | 12 | Workload → audit log files | file system access to its own audit dir | constructed shim (no access by default) |
-| 13 | Settled policy → runtime | signed settled artefact → enforced policy | `kennel-spawn` (settled verifier) |
+| 13 | Settled policy → runtime | signed settled artefact → enforced policy | `kennel-lib-spawn` (settled verifier) |
 | 14 | Workload/facade → kenneld over binder | binder transaction on node 0 → registry/facade decision | kenneld (`binder` looper, sender-identity gate) |
-| 15 | `kennel-init` → kenneld (lifecycle) | binder lifecycle/config verb → supervised action | kenneld (init-host-pid gate) |
+| 15 | `kennel-bin-init` → kenneld (lifecycle) | binder lifecycle/config verb → supervised action | kenneld (init-host-pid gate) |
 | 16 *(roadmap)* | Cross-kennel transaction → kenneld relay | provider/consumer transaction → relayed payload | kenneld (`binder` relay; → `02-4-binder.md`) |
 | 17 *(roadmap)* | Kennel net-ns ↔ host net-ns | binder `INet` crossing + host loopback mirror | kenneld + delegates (→ `02-5-binder-net.md`) |
 
@@ -39,9 +39,9 @@ Each boundary is described in its own section below. The descriptions follow a c
 **What crosses.** Two distinct things, both from kenneld (or, in degraded mode, the CLI) to the privhelper:
 
 - the per-operation requests — `add-addr` / `del-addr`, `setup-egress`, `set-gid-map` — described below; and
-- the **construction-half of the kennel `Plan`**, carried by the `ConstructKennel` operation over a `SOCK_SEQPACKET` socketpair (with `SCM_RIGHTS` fds), encoding the uid/gid maps, the loopback config, the binderfs params, the view bind list, and the pivot target (`kennel-spawn::wire`; `07-2-kennel-init.md` §7.2.3, `02-6-ipc.md`).
+- the **construction-half of the kennel `Plan`**, carried by the `ConstructKennel` operation over a `SOCK_SEQPACKET` socketpair (with `SCM_RIGHTS` fds), encoding the uid/gid maps, the loopback config, the binderfs params, the view bind list, and the pivot target (`kennel-lib-spawn::wire`; `07-2-kennel-bin-init.md` §7.2.3, `02-6-ipc.md`).
 
-`ConstructKennel` makes the privhelper the kennel **factory** (`07-2-kennel-init.md` §7.2.1): it `clone`s the namespaces *as the operator* (so the user namespace is operator-owned), its post-`clone` child self-escalates to the kennel's uid 0, writes the maps, builds the root-owned surfaces (view, `/dev`, RO library binds, binderfs), mounts binderfs and chowns the device to the operator, `pivot_root`s, drops to the operator, and `fexecve`s the trusted root-owned `kennel-init` (PID 1). This is the **largest root-parses-operator-input surface in the system** — the construction-half decoder runs in the privileged host context — and is bounded and fuzzed (`07-2-kennel-init.md` §7.2.5, §10.6).
+`ConstructKennel` makes the privhelper the kennel **factory** (`07-2-kennel-bin-init.md` §7.2.1): it `clone`s the namespaces *as the operator* (so the user namespace is operator-owned), its post-`clone` child self-escalates to the kennel's uid 0, writes the maps, builds the root-owned surfaces (view, `/dev`, RO library binds, binderfs), mounts binderfs and chowns the device to the operator, `pivot_root`s, drops to the operator, and `fexecve`s the trusted root-owned `kennel-bin-init` (PID 1). This is the **largest root-parses-operator-input surface in the system** — the construction-half decoder runs in the privileged host context — and is bounded and fuzzed (`07-2-kennel-bin-init.md` §7.2.5, §10.6).
 
 **Privilege held.** The privhelper carries file caps `cap_setuid` + `cap_setgid` + `cap_setfcap` (+ `cap_sys_admin` + `cap_net_admin`). `cap_setuid` and the `cap_setfcap` single-`write(2)` are what let it write the precise two-line identity map — `0 0 1` (host root mapped to the kennel's uid 0) plus `<operator> <operator> 1`, plus one line per granted gid — with **no subuid/subgid** and no `0 0 N` range. This supersedes the older "minimal add-addr / egress / gid-map only" framing of the privhelper (`01-process-model.md`, `02-4-binder.md` §Privilege).
 
@@ -53,13 +53,13 @@ Mapping host root into the userns is a privilege-escalation hazard *only if oper
 
 - The userns is **operator-owned** (the child `clone`s as the operator), which is what lets the operator `kenneld` later reach the instance via `/proc/<init>/root`; ownership of the userns is not the same as running uid-0 code in it.
 - The **factory child is the only transient uid-0 actor**. It self-escalates inside the new userns to build root-owned surfaces, and it **never runs while the host filesystem is visible**: it `pivot_root`s and detaches the old host root *before* control leaves privhelper code. There is therefore no window in which a uid-0-mapped process can exercise host DAC against host-root-owned files.
-- The only uid-0 process that outlives construction is `kennel-init`, and it is `execve`'d **after** `pivot_root` — trapped in the sealed view from its first instruction, holding no ambient host caps (only userns-scoped `cap_setuid`/`cap_setgid` for the workload drop). Host DAC on host files is physically impossible despite kuid 0, because the host root is absent from its mount namespace.
-- The **workload is never uid 0**: `kennel-init` forks it and drops gid → groups → uid to the operator, then `no_new_privs` + seccomp + Landlock make the drop irreversible.
-- **`kennel-init` stays uid 0** so PID 1 is a different uid from the operator-uid workload and facades, which therefore cannot signal or `ptrace` it.
+- The only uid-0 process that outlives construction is `kennel-bin-init`, and it is `execve`'d **after** `pivot_root` — trapped in the sealed view from its first instruction, holding no ambient host caps (only userns-scoped `cap_setuid`/`cap_setgid` for the workload drop). Host DAC on host files is physically impossible despite kuid 0, because the host root is absent from its mount namespace.
+- The **workload is never uid 0**: `kennel-bin-init` forks it and drops gid → groups → uid to the operator, then `no_new_privs` + seccomp + Landlock make the drop irreversible.
+- **`kennel-bin-init` stays uid 0** so PID 1 is a different uid from the operator-uid workload and facades, which therefore cannot signal or `ptrace` it.
 
-### `kennel-init`-path provenance
+### `kennel-bin-init`-path provenance
 
-`kennel-init` is the one trusted binary the privhelper hands the kennel to, so its identity is established by **provenance, not by the wire**: its path comes from the root-owned deployment config (`Deployment::kennel_init()` → libexec), never from the operator-supplied `Plan`. The privhelper verifies it is **root-owned and not group/other-writable**, `open`s it **before the `clone`** (the host path is gone after `pivot_root`), and `fexecve`s it by descriptor. The operator cannot substitute a uid-0 init, and `fexecve` keeps the binary out of the view entirely (the workload cannot even see it). The privhelper `execve`s it with **empty argv/envp** — the supervision-half Plan is pulled over binder (boundary 15), not pushed through arguments or the environment, so nothing leaks via `/proc/<pid>/cmdline` or `environ`.
+`kennel-bin-init` is the one trusted binary the privhelper hands the kennel to, so its identity is established by **provenance, not by the wire**: its path comes from the root-owned deployment config (`Deployment::kennel_bin_init()` → libexec), never from the operator-supplied `Plan`. The privhelper verifies it is **root-owned and not group/other-writable**, `open`s it **before the `clone`** (the host path is gone after `pivot_root`), and `fexecve`s it by descriptor. The operator cannot substitute a uid-0 init, and `fexecve` keeps the binary out of the view entirely (the workload cannot even see it). The privhelper `execve`s it with **empty argv/envp** — the supervision-half Plan is pulled over binder (boundary 15), not pushed through arguments or the environment, so nothing leaks via `/proc/<pid>/cmdline` or `environ`.
 
 **Validator.** `kennel-privhelper`'s `validate` module. For each per-operation request:
 
@@ -75,7 +75,7 @@ The validator rejects out-of-scope requests with a stable numeric refusal code c
 
 **Threat IDs addressed.** T1.6 (lateral movement: a hostile caller cannot direct the privhelper to do anything outside the reserved scope), T3.1 (setuid escalation: the privhelper is small and refuses out-of-scope requests; even on subversion of the calling process, the privileged syscall surface is bounded).
 
-**Bounded duration of privilege.** The per-operation privhelper invocations (`add-addr`, `setup-egress`, `set-gid-map`) are short-lived: the privileged process exists only for the milliseconds of one validated syscall sequence. There is no long-running daemon with continuous `CAP_NET_ADMIN`. The `ConstructKennel` factory invocation is longer — it lives across the whole construction (clone → maps → view → binderfs → pivot → `fexecve`) — but it relinquishes privilege at the hand-off: the factory child drops to the operator before the trusted init runs, and the privhelper parent stays only to reap the chain and relay the exit status (`07-2-kennel-init.md` §7.2.1). See `01-process-model.md`.
+**Bounded duration of privilege.** The per-operation privhelper invocations (`add-addr`, `setup-egress`, `set-gid-map`) are short-lived: the privileged process exists only for the milliseconds of one validated syscall sequence. There is no long-running daemon with continuous `CAP_NET_ADMIN`. The `ConstructKennel` factory invocation is longer — it lives across the whole construction (clone → maps → view → binderfs → pivot → `fexecve`) — but it relinquishes privilege at the hand-off: the factory child drops to the operator before the trusted init runs, and the privhelper parent stays only to reap the chain and relay the exit status (`07-2-kennel-bin-init.md` §7.2.1). See `01-process-model.md`.
 
 ---
 
@@ -87,7 +87,7 @@ The validator rejects out-of-scope requests with a stable numeric refusal code c
 
 **Trusted side.** The parser does not trust the file contents. The file may have been written by an attacker-influenced AI agent, may have been tampered with on disk, may have been sync'd from a compromised source.
 
-**Validator.** `kennel-policy::parse` and `kennel-policy::resolve`. Per CODING-STANDARDS.md §10.2:
+**Validator.** `kennel-lib-policy::parse` and `kennel-lib-policy::resolve`. Per CODING-STANDARDS.md §10.2:
 
 - `#[serde(deny_unknown_fields)]` on every config type. Unknown fields are categorical errors.
 - Bounded reads at the call site (`take(N).read_to_string`); the policy file size cap is 256 KiB.
@@ -111,11 +111,11 @@ The validator rejects out-of-scope requests with a stable numeric refusal code c
 
 **Trusted side.** The **system** signing-key set is trusted: keys under `/etc/kennel/keys/` and the vendor `/usr/lib/kennel/keys/` (root-owned, mode 0644). Templates and fragments are the security baseline — the framework invariants and confinement floor — so they verify **only against system keys**; a template signed by the user's own `~/.config/kennel/keys` is **rejected** (the trust split, `07-paths.md` §Policy-signing trust split). This is asymmetric with the settled run policy (boundary 13), which a user *may* sign with their own key. The lockfile (`<name>.lock`, beside the leaf policy in its `policies/<name>/` folder, under the user's control) is trusted as the operator's recorded intent. Nothing else — not the artefact named by the reference, not its claimed version.
 
-**Validator.** `kennel-policy::signature` and `kennel-policy::lock`. The procedure, for each resolved reference:
+**Validator.** `kennel-lib-policy::signature` and `kennel-lib-policy::lock`. The procedure, for each resolved reference:
 
 - Algorithm must be in the supported set (`ed25519`). Cryptographic minimums are enforced at validation; negotiation below the current floor is a categorical error.
 - The `signed_fields` list must cover every top-level field of the artefact except `[signature]` itself — including `template_base` and `include`, so the artefact's own dependency declarations are signed. An artefact that signs only a subset of its fields is rejected; the rule is about the schema, not the instance.
-- The canonical-form serialisation of `signed_fields` is computed deterministically (`kennel-policy::canonical`); the signature is verified against it.
+- The canonical-form serialisation of `signed_fields` is computed deterministically (`kennel-lib-policy::canonical`); the signature is verified against it.
 - The signing key must be in the configured key set, identified by `key_id`.
 - The SHA-256 of the canonical-form content is checked against the lockfile entry for this `(name, version)`. On first resolution the entry is recorded; on subsequent resolution a mismatch is rejected. This is the byte-pin: version pinning alone constrains *which* artefact is named, the lockfile constrains *what bytes* are composed (the same reasoning as CODING-STANDARDS.md §5.5 for Rust crates).
 
@@ -154,7 +154,7 @@ Map data is populated by the loader at kennel start and marked read-only (`BPF_F
 
 **Trusted side.** The events come from our own BPF programs, attached to cgroups we created, populated by code we wrote. The trust is high — but the ringbuf reader still validates because the audit subsystem must never panic on a malformed event (the kennel must keep running even if a BPF event arrives that does not match the declared layout, which could happen across version skew).
 
-**Validator.** `kennel-bpf::ringbuf::parse`:
+**Validator.** `kennel-lib-bpf::ringbuf::parse`:
 
 - Reads the fixed-size `audit_hdr` first, verifies `magic` is `0x4145564E`, verifies `version` is supported.
 - Computes the expected payload size for the event kind from a static table; verifies it equals `header.length - sizeof(audit_hdr)`. A mismatch is reported as a structured error and the event is skipped.
@@ -229,7 +229,7 @@ The PID from `SO_PEERCRED` is recorded in audit events but not used for authoris
 
 **Trusted side.** The proxy does not trust the SOCKS5 client's claims. Hostname resolution happens server-side (the proxy resolves; the workload cannot bypass DNS). Allow/deny is on the resolved destination, not on the client's claim.
 
-**Validator.** `kennel-netproxy::server`. Per the SOCKS5 spec plus our additions:
+**Validator.** `host-netproxy::server`. Per the SOCKS5 spec plus our additions:
 
 - SOCKS5 method negotiation: only `NoAuth` accepted; other methods rejected.
 - CONNECT request: destination must be hostname-with-port (resolved by proxy against allowlist) or IPv4/IPv6 numeric. Numeric addresses are checked directly against the allowlist; the cgroup BPF rules also deny the underlying connect() to addresses outside the allowlist (defence in depth).
@@ -247,7 +247,7 @@ The PID from `SO_PEERCRED` is recorded in audit events but not used for authoris
 
 **Trusted side.** Nothing. `task->comm` can be set by a workload via `prctl(PR_SET_NAME, ...)` to attacker-controlled bytes. Paths may contain control characters or non-UTF-8 bytes.
 
-**Validator.** `kennel-text::sanitise_for_audit`, called by the audit writer for every event-field that may carry kernel-side strings. Per CODING-STANDARDS.md §10.3 and §10.4:
+**Validator.** `kennel-lib-text::sanitise_for_audit`, called by the audit writer for every event-field that may carry kernel-side strings. Per CODING-STANDARDS.md §10.3 and §10.4:
 
 - Control characters escaped (`\x1b`, `\b`, `\r`, ...).
 - Non-UTF-8 replaced with U+FFFD; the event carries `sanitised: true` if any replacement occurred.
@@ -265,7 +265,7 @@ The PID from `SO_PEERCRED` is recorded in audit events but not used for authoris
 
 **Trusted side.** Not the response. DNS responses can be forged on-path (if the upstream resolver is not over DoT/DoH) or returned by a malicious recursor. The netproxy treats DNS responses as untrusted.
 
-**Validator.** `kennel-netproxy::dns`:
+**Validator.** `host-netproxy::dns`:
 
 - Standard DNS-format validation (well-formed RR types, lengths consistent with the message).
 - The resolved name is checked against the allowlist. The set of returned A/AAAA records is what the netproxy uses for the actual `connect()`; if multiple records, the proxy tries them in order.
@@ -299,16 +299,16 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 **Trusted side.** The daemon's trust store. Unlike templates (boundary 3, system-only), a settled run policy may be signed by a **system** key (`/etc/kennel/keys`, `/usr/lib/kennel/keys`) **or** the calling user's own `~/.config/kennel/keys` (the trust split, `07-paths.md` §Policy-signing trust split). The daemon loads system keys first, then the user's, so a user key can never *shadow* a system key of the same id. This is sound: a settled leaf only narrows *within* the template's invariants — re-asserted unconditionally at step 3 below — and a kennel runs with the user's own authority, so trusting the user's own run-policy signature grants no escalation. Nothing else is trusted — not the settled artefact's claim to be valid, not its provenance block, not the `framework_invariants_asserted` list it carries.
 
-**Validator.** `kennel-spawn`'s settled-policy verifier:
+**Validator.** `kennel-lib-spawn`'s settled-policy verifier:
 
 1. Verify the settled policy's `signature` against the trust store (system keys + the user's own; see above). One verification. In attested deployments this is the *only* signature check at runtime; the source-artefact signatures (boundary 3) were verified at compile time and are recorded in the provenance block, not re-verified here.
 2. Check `settled_schema_version` is in the supported range.
-3. **Re-assert framework invariants** against `effective_policy`, regardless of the signature and regardless of `framework_invariants_asserted`. Framework invariants are Project Kennel's structural guarantees, not the signer's; a validly-signed settled policy that violates one is refused. The checks (`kennel-policy::invariant::validate`) are a handful of structural assertions and are cheap: `cap.no_new_privs`, `exec.deny_setuid`/`deny_setgid`/`deny_setcap`/`deny_writable`, the mandatory home shim (`fs.home.shadow`; `$HOME` is `/home/<user>`), the non-empty invariant deny CIDRs (cloud metadata, link-local — RFC1918 is intentionally *not* invariant, design §7.5), and `proc.visibility == self`. `net.mode` is matched exhaustively (the type admits only `constrained`/`open`) rather than asserted to a single value; there is no separate "PID namespace" assertion at this step.
+3. **Re-assert framework invariants** against `effective_policy`, regardless of the signature and regardless of `framework_invariants_asserted`. Framework invariants are Project Kennel's structural guarantees, not the signer's; a validly-signed settled policy that violates one is refused. The checks (`kennel-lib-policy::invariant::validate`) are a handful of structural assertions and are cheap: `cap.no_new_privs`, `exec.deny_setuid`/`deny_setgid`/`deny_setcap`/`deny_writable`, the mandatory home shim (`fs.home.shadow`; `$HOME` is `/home/<user>`), the non-empty invariant deny CIDRs (cloud metadata, link-local — RFC1918 is intentionally *not* invariant, design §7.5), and `proc.visibility == self`. `net.mode` is matched exhaustively (the type admits only `constrained`/`open`) rather than asserted to a single value; there is no separate "PID namespace" assertion at this step.
 4. Substitute the `deferred_substitutions` with per-instance values; refuse if any other unsubstituted placeholder remains in `effective_policy`.
 
 **Trust reduction.** This boundary is deliberately narrow. The spawn path links none of the template machinery — no TOML template parsing, no chain-walking, no include resolution, no delta application, no source-signature verification. Those crossed boundary 3 at compile time. The runtime trusts one signature and re-checks the structural invariants. On a fleet workstation that holds only settled policies, this is the entire policy-trust surface.
 
-**Failure mode.** The signature, schema-version, and invariant checks live in `kennel_policy::verify_settled`; their failures surface as `SpawnError::Policy` wrapping the underlying `PolicyError` — `PolicyError::Signature(..)` for a bad signature, `PolicyError::UnsupportedSchemaVersion { .. }` for an out-of-range `settled_schema_version`, and `PolicyError::InvariantViolations(..)` (carrying the violated invariant names) for a framework-invariant failure. An unresolved placeholder is the distinct `SpawnError::UnsubstitutedPlaceholder { field, value }` (naming the field and value). The spawn is refused; no workload runs.
+**Failure mode.** The signature, schema-version, and invariant checks live in `kennel_lib_policy::verify_settled`; their failures surface as `SpawnError::Policy` wrapping the underlying `PolicyError` — `PolicyError::Signature(..)` for a bad signature, `PolicyError::UnsupportedSchemaVersion { .. }` for an out-of-range `settled_schema_version`, and `PolicyError::InvariantViolations(..)` (carrying the violated invariant names) for a framework-invariant failure. An unresolved placeholder is the distinct `SpawnError::UnsubstitutedPlaceholder { field, value }` (naming the field and value). The spawn is refused; no workload runs.
 
 **Threat IDs addressed.** T2.5 and T2.6 at runtime (a tampered or invariant-weakening settled policy is refused by signature check and invariant re-assertion respectively); supports the attestation capability (the workstation enforces exactly the signed artefact, identified by content hash, with no live resolution that could diverge).
 
@@ -320,7 +320,7 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 **Trusted side.** Nothing on the workload's side. The workload holds only an unforgeable node reference (no path to enumerate, no abstract name to probe); kenneld is the policy decision point for every call. The decisive trusted fact is **kernel-stamped caller identity**: the binder driver injects `sender_pid`/`sender_euid` into every transaction, and a process cannot forge them.
 
-**Validator.** kenneld's `binder` looper (`kenneld::binder`), `#![forbid(unsafe_code)]`; the unsafe ioctl ABI is confined to `kennel-binder` (boundary into the kernel, the third unsafe crate after `kennel-syscall`/`kennel-bpf`), whose `BC_*`/`BR_*` decoder consumes workload-controlled bytes and carries a fuzz target per CODING-STANDARDS §10.6.
+**Validator.** kenneld's `binder` looper (`kenneld::binder`), `#![forbid(unsafe_code)]`; the unsafe ioctl ABI is confined to `kennel-lib-binder` (boundary into the kernel, the third unsafe crate after `kennel-lib-syscall`/`kennel-lib-bpf`), whose `BC_*`/`BR_*` decoder consumes workload-controlled bytes and carries a fuzz target per CODING-STANDARDS §10.6.
 
 - The `BC_*`/`BR_*` command stream and each transaction are length-bounded; service names are ≤ 255 bytes, validated UTF-8, `..`/control-character-free per CODING-STANDARDS §10.
 - Registry verbs are checked against the kennel's settled policy before recording or resolving; `org.projectkennel.*` is a reserved namespace — `addService` under it from any caller but kenneld is rejected, and `getService` for it always resolves locally (the VINTF-declared analogue: a service the policy does not declare cannot register and reports `isDeclared = false`).
@@ -332,11 +332,11 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 ---
 
-## 15. `kennel-init` → kenneld (lifecycle / config)
+## 15. `kennel-bin-init` → kenneld (lifecycle / config)
 
-**What crosses.** Binder transactions on node 0 in a **distinct high code range** (`0x100+`, disjoint from the registry verbs 1–5 and `CONNECT_AFUNIX` = 5): `GET_SANDBOX_PLAN` (the config pull) and the fire-and-forget `NOTIFY_BOOT_SYNC` / `NOTIFY_FACADE_CRASH` / `NOTIFY_WORKLOAD_EXEC` lifecycle verbs (`07-2-kennel-init.md` §7.2.4). This makes `kennel-init` (PID 1) a binder consumer on the same instance kenneld manages — the kennel's control plane *is* the binder bus.
+**What crosses.** Binder transactions on node 0 in a **distinct high code range** (`0x100+`, disjoint from the registry verbs 1–5 and `CONNECT_AFUNIX` = 5): `GET_SANDBOX_PLAN` (the config pull) and the fire-and-forget `NOTIFY_BOOT_SYNC` / `NOTIFY_FACADE_CRASH` / `NOTIFY_WORKLOAD_EXEC` lifecycle verbs (`07-2-kennel-bin-init.md` §7.2.4). This makes `kennel-bin-init` (PID 1) a binder consumer on the same instance kenneld manages — the kennel's control plane *is* the binder bus.
 
-**Trusted side.** Not the verb's claim to come from init. A workload *can address* node 0, so these verbs would be an escalation if any process could exercise them. The trusted fact is again the **kernel-stamped `sender_pid`** — but note the topology subtlety: kenneld is the context manager from the **host** PID namespace (it acquired node 0 via `/proc/<init>/root`), so the driver reports `sender_pid` as `kennel-init`'s **host pid**, *not* the kennel-internal `1`. The naive `sender_pid == 1` gate would be wrong.
+**Trusted side.** Not the verb's claim to come from init. A workload *can address* node 0, so these verbs would be an escalation if any process could exercise them. The trusted fact is again the **kernel-stamped `sender_pid`** — but note the topology subtlety: kenneld is the context manager from the **host** PID namespace (it acquired node 0 via `/proc/<init>/root`), so the driver reports `sender_pid` as `kennel-bin-init`'s **host pid**, *not* the kennel-internal `1`. The naive `sender_pid == 1` gate would be wrong.
 
 **Validator.** kenneld's lifecycle gate. It accepts `GET_SANDBOX_PLAN` and acts on a `NOTIFY_*` only when
 
@@ -344,9 +344,9 @@ If an operator's policy explicitly grants the workload read access to its audit 
 sender_pid == init_host_pid  &&  sender_euid == 0
 ```
 
-where `init_host_pid` is a **bootstrap fact from the privhelper** over the construction socketpair (`07-2-kennel-init.md` §7.2.2), never wire-supplied. `sender_euid == 0` is defence-in-depth: `kennel-init` is the only uid-0 process (facades and the workload run as the operator), so it cannot be impersonated; the host-pid match is the primary, exact gate. kenneld identifies *which* kennel a `GET_SANDBOX_PLAN` belongs to by the **binderfs instance** the transaction arrived on (per-instance fd + looper — no token), and replies with the supervision-half Plan as flat `kennel-spawn::wire` bytes (binder *copies* the buffer — `BINDER_TYPE_PTR` rejected — so there is no host↔sandbox shared-memory hazard); the supervision-half decoder runs post-pivot inside `kennel-init`, contained, and is bounded + fuzzed.
+where `init_host_pid` is a **bootstrap fact from the privhelper** over the construction socketpair (`07-2-kennel-bin-init.md` §7.2.2), never wire-supplied. `sender_euid == 0` is defence-in-depth: `kennel-bin-init` is the only uid-0 process (facades and the workload run as the operator), so it cannot be impersonated; the host-pid match is the primary, exact gate. kenneld identifies *which* kennel a `GET_SANDBOX_PLAN` belongs to by the **binderfs instance** the transaction arrived on (per-instance fd + looper — no token), and replies with the supervision-half Plan as flat `kennel-lib-spawn::wire` bytes (binder *copies* the buffer — `BINDER_TYPE_PTR` rejected — so there is no host↔sandbox shared-memory hazard); the supervision-half decoder runs post-pivot inside `kennel-bin-init`, contained, and is bounded + fuzzed.
 
-**Failure mode.** Any verb whose `sender_pid`/`sender_euid` does not match is a logged `Deny` (`binder.lifecycle-forged`) returning `BR_FAILED_REPLY`. The reliable kennel exit status rides the process chain (`kennel-init` → privhelper → kenneld), not binder, which may already be torn down — binder carries in-life telemetry only.
+**Failure mode.** Any verb whose `sender_pid`/`sender_euid` does not match is a logged `Deny` (`binder.lifecycle-forged`) returning `BR_FAILED_REPLY`. The reliable kennel exit status rides the process chain (`kennel-bin-init` → privhelper → kenneld), not binder, which may already be torn down — binder carries in-life telemetry only.
 
 **Threat IDs addressed.** T3.1 (privilege escalation: a workload addressing node 0 cannot drive construction/lifecycle verbs — the host-pid gate makes them inert for anyone but the trusted init).
 
@@ -368,9 +368,9 @@ where `init_host_pid` is a **bootstrap fact from the privhelper** over the const
 
 *Roadmap: the per-kennel network namespace, the four network modes, and the loopback mirror are designed, not built — the kennel still shares the host network namespace (`02-5-binder-net.md`; `08-as-built-notes.md` §8.1). This boundary describes the intended contract.*
 
-**What crosses.** The only controlled crossing of the kennel net-ns boundary is binder: the `org.projectkennel.INet/default` node carries egress `CONNECT` (shim → kenneld → `kennel-netproxy` delegate) and the kenneld→shim `INBOUND` ingress hand-off. The two loopback stacks (the kennel's `/28` + `/64` inside its net-ns, the same addresses mirrored on the host `lo` alias) are otherwise **independent — no routing, no NAT** — so a `connect()` inside the kennel to its loopback stays inside it.
+**What crosses.** The only controlled crossing of the kennel net-ns boundary is binder: the `org.projectkennel.INet/default` node carries egress `CONNECT` (shim → kenneld → `host-netproxy` delegate) and the kenneld→shim `INBOUND` ingress hand-off. The two loopback stacks (the kennel's `/28` + `/64` inside its net-ns, the same addresses mirrored on the host `lo` alias) are otherwise **independent — no routing, no NAT** — so a `connect()` inside the kennel to its loopback stays inside it.
 
-**Trusted side.** Not the shim's request. kenneld is the policy decision point; the delegates (`kennel-netproxy` for `CONNECT`, the host-side spawn leg for the `BIND` mirror) hold **no binder access** and do their blocking I/O off the binder path, returning fds to kenneld by `SCM_RIGHTS`. `BINDER_TYPE_FD` is permitted on the `INet` node because shim↔kenneld is intra-instance; the general cross-instance fd prohibition (boundary 16) is not implicated. The shim never `connect()`s or `bind()`s a received fd — it is already in the desired state.
+**Trusted side.** Not the shim's request. kenneld is the policy decision point; the delegates (`host-netproxy` for `CONNECT`, the host-side spawn leg for the `BIND` mirror) hold **no binder access** and do their blocking I/O off the binder path, returning fds to kenneld by `SCM_RIGHTS`. `BINDER_TYPE_FD` is permitted on the `INet` node because shim↔kenneld is intra-instance; the general cross-instance fd prohibition (boundary 16) is not implicated. The shim never `connect()`s or `bind()`s a received fd — it is already in the desired state.
 
 **Host-side mirror.** A native `bind()` inside the kennel is gated by `[[net.bpf.bind]]` at the cgroup `bind` hook; an allowed bind is reported to kenneld, which raises the host-side leg's mirror of the same `ip:port` on the host alias — so every listener that exists is both intra-kennel-reachable and observable host-side at the kennel's own IP, and the allow/deny decision is policy's alone (no workload-initiated `BIND` transaction). `mode = host` kennels share the host stack directly, use no mirror, and reinstate the host-network recon threat (T1.6) by design.
 
@@ -384,13 +384,13 @@ Beyond the boundary inventory, two specific privilege transitions deserve naming
 
 ### `PR_SET_NO_NEW_PRIVS`
 
-Set unconditionally before `execve()` by `kennel-spawn`. This is a framework invariant per CODING-STANDARDS.md §11.2 — the policy cannot disable it. It blocks setuid binaries from gaining privilege via execve, blocks file capabilities from being granted via execve, blocks AT_SECURE-clearing.
+Set unconditionally before `execve()` by `kennel-lib-spawn`. This is a framework invariant per CODING-STANDARDS.md §11.2 — the policy cannot disable it. It blocks setuid binaries from gaining privilege via execve, blocks file capabilities from being granted via execve, blocks AT_SECURE-clearing.
 
 ### Landlock sealing
 
-The Landlock ruleset is constructed by `kennel-spawn` from the resolved policy, then sealed via `landlock_restrict_self`. After sealing, the ruleset cannot be widened — by the kernel's design — for the lifetime of the process and its descendants. The seal happens after all setup operations (mount construction, BPF attach, capability drop) so the setup itself has the access it needs, and before execve so the workload starts under the restriction.
+The Landlock ruleset is constructed by `kennel-lib-spawn` from the resolved policy, then sealed via `landlock_restrict_self`. After sealing, the ruleset cannot be widened — by the kernel's design — for the lifetime of the process and its descendants. The seal happens after all setup operations (mount construction, BPF attach, capability drop) so the setup itself has the access it needs, and before execve so the workload starts under the restriction.
 
-Both transitions are owned by `kennel-spawn`; both are tested with positive (the setup works) and negative (a workload cannot bypass them) integration tests under `tests/`.
+Both transitions are owned by `kennel-lib-spawn`; both are tested with positive (the setup works) and negative (a workload cannot bypass them) integration tests under `tests/`.
 
 ---
 

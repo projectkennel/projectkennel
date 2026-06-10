@@ -39,7 +39,7 @@ All programs attach to per-kennel cgroups (one cgroup per kennel under `/sys/fs/
 > |---|---|---|
 > | `sock_create` (extended) | `cgroup/sock_create` | Shape `socket(family, type, protocol)` against `[net.bpf.families]` / `[net.bpf.types]` / `[net.bpf.protocols]` — beyond the as-built family allowlist. |
 > | `bind4`/`bind6` (extended) | `cgroup/bind4`, `cgroup/bind6` | Gate the *native inside-net-ns* `bind()` against `[[net.bpf.bind]]` / `[[net.bpf.deny]]` and **report** each allowed bind to kenneld to drive the host-side loopback mirror (below). |
-> | `connect4`/`connect6` (extended) | `cgroup/connect4`, `cgroup/connect6` | Enforce `[[net.bpf.allow]]` / `[[net.bpf.deny]]` for `unconstrained`/`host`. **Egress still flows the proxy path:** the workload's actual outbound `connect()` goes SOCKS5 → `kennel-netshim` → kenneld → `kennel-netproxy` delegate, which applies the `[net.proxy]` allowlist and DNS vetting; the cgroup `connect` hook is a CIDR-level shaper layered over that, not a replacement for it. A direct `connect()` to a non-loopback address inside the net-ns has nowhere to route. |
+> | `connect4`/`connect6` (extended) | `cgroup/connect4`, `cgroup/connect6` | Enforce `[[net.bpf.allow]]` / `[[net.bpf.deny]]` for `unconstrained`/`host`. **Egress still flows the proxy path:** the workload's actual outbound `connect()` goes SOCKS5 → `facade-netshim` → kenneld → `host-netproxy` delegate, which applies the `[net.proxy]` allowlist and DNS vetting; the cgroup `connect` hook is a CIDR-level shaper layered over that, not a replacement for it. A direct `connect()` to a non-loopback address inside the net-ns has nowhere to route. |
 > | `sendmsg4`/`sendmsg6` (extended) | `cgroup/sendmsg4`, `cgroup/sendmsg6` | Same per-destination check for connectionless UDP, scoped to the per-kennel net-ns. |
 > | connection/rate limits | (existing hooks) | Enforce `[net.bpf.limits]` (connection count, rate) as DoS bounds. |
 >
@@ -70,7 +70,7 @@ Project Kennel's overall kernel floor is 6.10 (per design doc §8.2; required fo
 Required BPF features beyond the attach points:
 
 - **BPF ringbuf** (kernel 5.8+). Used for audit-event delivery; replaces perfbuf.
-- **No CO-RE.** The programs touch only stable hook-context structs and our own maps, so they compile against the kernel UAPI (`<linux/bpf.h>`) rather than a `vmlinux.h` BTF dump. `kennel-bpf`'s `bpf(2)` loader resolves map relocations by symbol name; there is no BTF/CO-RE relocation step.
+- **No CO-RE.** The programs touch only stable hook-context structs and our own maps, so they compile against the kernel UAPI (`<linux/bpf.h>`) rather than a `vmlinux.h` BTF dump. `kennel-lib-bpf`'s `bpf(2)` loader resolves map relocations by symbol name; there is no BTF/CO-RE relocation step.
 - **LPM trie maps** (kernel 4.11+). Used for CIDR-based allowlists.
 - **`bpf_loop`** (kernel 5.17+, optional). Replaces some `#pragma unroll` loops; programs fall back to unrolling when unavailable.
 
@@ -177,7 +177,7 @@ bind-port policy: the floor rides `kennel_meta`, the allowlist rides `bind_subne
 
 The audit reader in kenneld drains it; events carry the originating kennel's `kennel_uuid` (resolved from `ctx_byte` via kenneld's in-memory registry), and route through the unified audit writer (`02-3-audit-schema.md` §Scope) with `source: bpf`.
 
-There is exactly *one* `audit_ringbuf` per kennel: the privhelper creates the kennel's map set once (`kennel_bpf::create_maps`) and loads every program against it (`load_program_against`), so all of a kennel's programs share the one buffer. kenneld is unprivileged and cannot create BPF maps, so the privhelper creates and pins the buffer to `/run/user/<uid>/kennel/bpf/<id>/audit_ringbuf` (`07-paths.md`); the unprivileged kenneld reopens it with `BPF_OBJ_GET` and drains it on a per-kennel thread (`kenneld::bpf_audit`).
+There is exactly *one* `audit_ringbuf` per kennel: the privhelper creates the kennel's map set once (`kennel_lib_bpf::create_maps`) and loads every program against it (`load_program_against`), so all of a kennel's programs share the one buffer. kenneld is unprivileged and cannot create BPF maps, so the privhelper creates and pins the buffer to `/run/user/<uid>/kennel/bpf/<id>/audit_ringbuf` (`07-paths.md`); the unprivileged kenneld reopens it with `BPF_OBJ_GET` and drains it on a per-kennel thread (`kenneld::bpf_audit`).
 
 Capacity is configurable per kennel via `[audit].ringbuf_bytes`, capped at 16 MiB to prevent operator misconfiguration causing memory pressure.
 

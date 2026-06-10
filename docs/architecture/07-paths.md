@@ -8,7 +8,7 @@ This chapter is the path-layout reference. Every directory and file Project Kenn
 
 The paths in this chapter are **stable** per `02-0-overview.md`. They do not change within a major version. Operators may configure shell aliases, log-shipping rules, monitoring queries, and backup procedures against these paths and expect them to work across patch and minor updates.
 
-Paths *not* in this chapter — temporary directories created by tests, internal cache files used by `kennel-policy`, paths under `OUT_DIR` at build time — are implementation detail. They are not listed because they may be removed or restructured at any time.
+Paths *not* in this chapter — temporary directories created by tests, internal cache files used by `kennel-lib-policy`, paths under `OUT_DIR` at build time — are implementation detail. They are not listed because they may be removed or restructured at any time.
 
 ---
 
@@ -167,7 +167,7 @@ Owner: root. Mode: directory `0755`, files `0644`. The `keys/` directory holds p
 
 The installer creates `keys/`, `templates/`, and `policies/` (and the matching vendor dirs under `/usr/lib/kennel/`). It ships no reference policies — policies are user/org content; the shipped baseline is `templates/`. A `policies/<name>/` here is a system-staged run policy, structurally identical to the user's (§`~/.config/kennel/`); `kennel run <name>` finds it when no higher-priority user policy of that name exists (§Run-policy resolution).
 
-**No install path is baked into a binary.** Deployment paths — the helper-binary directory (`libexec_dir`, default `/usr/libexec/kennel`), the daemon's signing-key `trust_dir` (default `/etc/kennel/keys`), and the host `sshd` — are expressed in `system.toml`, resolved through a cascade by the `kennel-config` crate. The cascade reads lowest-priority first, a higher layer overriding a lower one **per key**, with compiled-in fallback defaults so a host with no config files still runs:
+**No install path is baked into a binary.** Deployment paths — the helper-binary directory (`libexec_dir`, default `/usr/libexec/kennel`), the daemon's signing-key `trust_dir` (default `/etc/kennel/keys`), and the host `sshd` — are expressed in `system.toml`, resolved through a cascade by the `kennel-lib-config` crate. The cascade reads lowest-priority first, a higher layer overriding a lower one **per key**, with compiled-in fallback defaults so a host with no config files still runs:
 
 * **`system.toml`** (deployment, integrity-sensitive) resolves from **root-owned dirs only** — `/usr/lib/kennel` (vendor) then `/etc/kennel` (admin). It is deliberately **not** read from the user's `~/.config`, and honours no environment override: `kenneld` runs as the user, so letting the user redirect `trust_dir` would defeat policy signing. Each helper binary defaults to `<libexec_dir>/<name>`; an explicit per-binary key overrides one.
 * **`config.toml`** (CLI conveniences — template, key, and policy *search* dirs) resolves from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`. Safe to be user-writable: it only steers where the CLI looks while authoring; the daemon re-verifies against the locked `system.toml` `trust_dir` (plus the user's own `keys/` for run policies, §Policy-signing trust split) at run.
@@ -213,7 +213,7 @@ runtime state) and pins each kennel's shared map set under it:
         └── bind_subnet_map
 ```
 
-A kennel's programs share one map set (`kennel_bpf::create_maps` +
+A kennel's programs share one map set (`kennel_lib_bpf::create_maps` +
 `load_program_against`), so there is exactly one `audit_ringbuf` per kennel and one
 coherent set to pin. Because the whole `/run/user/<uid>/` tree is already private to
 the user, this design needs no shared `/run/kennel/bpf` directory, no `kennel-readers`
@@ -253,9 +253,9 @@ into the kennel's view.
 |---|---|---|
 | `kennel` | `/usr/bin/kennel` | The CLI; user binary, no special permissions. |
 | `kenneld` | `/usr/libexec/kennel/kenneld` | Started by systemd-user or by the CLI in degraded mode; not on `PATH`. |
-| `kennel-init` | `/usr/libexec/kennel/kennel-init` | The kennel's PID 1 / supervisor (§7.2, `../design/07-2-kennel-init.md`); root-owned and non-writable (`0755`, owner root, no setuid/setcap). The privhelper verifies its root ownership + non-writability, opens it on the host pre-`clone`, and `fexecve`s it after `pivot_root`. Its path comes from the deployment config (`Deployment::kennel_init()` → libexec), never the wire. Not on `PATH`; located by absolute path. |
-| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin,cap_net_admin=ep` are a documented per-distribution alternative the installer does not itself apply. The privhelper is the kennel *constructor* (`../design/07-2-kennel-init.md`): it clones the namespaces as the operator (so the userns is operator-owned), writes the identity map (host root `0 0 1` + the operator line + one line per granted gid) in a single `write(2)`, builds the root-owned surfaces, mounts binderfs, `pivot_root`s, and `fexecve`s `kennel-init`. `cap_setuid` writes the `0 0 1` uid map (the kennel's real uid 0); `cap_setgid` writes the `gid_map` so a workload keeps a granted supplementary group (§7.4.8); `cap_setfcap` lets the single map `write(2)` land; `cap_sys_admin` mounts (view, `/dev`, binderfs) and `pivot_root`s; `cap_net_admin` is for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
-| `kennel-netproxy` | `/usr/libexec/kennel/kennel-netproxy` | Spawned by kenneld; not on `PATH`. |
+| `kennel-bin-init` | `/usr/libexec/kennel/kennel-bin-init` | The kennel's PID 1 / supervisor (§7.2, `../design/07-2-kennel-bin-init.md`); root-owned and non-writable (`0755`, owner root, no setuid/setcap). The privhelper verifies its root ownership + non-writability, opens it on the host pre-`clone`, and `fexecve`s it after `pivot_root`. Its path comes from the deployment config (`Deployment::kennel_bin_init()` → libexec), never the wire. Not on `PATH`; located by absolute path. |
+| `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin,cap_net_admin=ep` are a documented per-distribution alternative the installer does not itself apply. The privhelper is the kennel *constructor* (`../design/07-2-kennel-bin-init.md`): it clones the namespaces as the operator (so the userns is operator-owned), writes the identity map (host root `0 0 1` + the operator line + one line per granted gid) in a single `write(2)`, builds the root-owned surfaces, mounts binderfs, `pivot_root`s, and `fexecve`s `kennel-bin-init`. `cap_setuid` writes the `0 0 1` uid map (the kennel's real uid 0); `cap_setgid` writes the `gid_map` so a workload keeps a granted supplementary group (§7.4.8); `cap_setfcap` lets the single map `write(2)` land; `cap_sys_admin` mounts (view, `/dev`, binderfs) and `pivot_root`s; `cap_net_admin` is for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
+| `host-netproxy` | `/usr/libexec/kennel/host-netproxy` | Spawned by kenneld; not on `PATH`. |
 | `kennel-akc` | `/usr/libexec/kennel/kennel-akc` | The SSH bastion's root-owned `AuthorizedKeysCommand` (§7.10); installed root-owned (safe-path), queries kenneld; not on `PATH`. |
 | `kennel-socks-connect` | `/usr/libexec/kennel/kennel-socks-connect` | The `ProxyCommand` bridging a kennel's `ssh` to its egress proxy (§7.10); bound into the view with a Landlock execute grant. |
 
@@ -292,7 +292,7 @@ The kennel instance `<name>` (second positional) is **optional** and defaults to
 
 Two distinct trust scopes, by layer:
 
-- **Templates** — the security baseline (framework invariants + confinement floor) — verify **only against system keys** (`/etc/kennel/keys`, `/usr/lib/kennel/keys`), never the user's `~/.config/kennel/keys`. A template signed by a user key is rejected at compile time. (`kennel-config::User::system_key_dirs`.)
+- **Templates** — the security baseline (framework invariants + confinement floor) — verify **only against system keys** (`/etc/kennel/keys`, `/usr/lib/kennel/keys`), never the user's `~/.config/kennel/keys`. A template signed by a user key is rejected at compile time. (`kennel-lib-config::User::system_key_dirs`.)
 - **Run policies** — the settled leaf the daemon enforces — verify against **system keys *or* the user's own `~/.config/kennel/keys`**. A user may run a policy signed with their own key: a leaf can only narrow *within* the template's re-asserted invariants and a kennel runs with the user's own authority, so trusting the user's own run-policy signature grants no escalation. The daemon loads system keys then the user's, system winning a key-id clash (a user key cannot shadow a system key id). (`kenneld` `TrustStoreLoader::from_dirs`.)
 
 This is detailed in `04-trust-boundaries.md`.
@@ -345,7 +345,7 @@ Each path's mode and ownership are part of its security contract. The most-load-
 ## What this chapter does not cover
 
 - The set of paths the workload sees (the constructed shim view): TEMPLATE-ai-coding-strict.md and design doc §7.4.
-- How paths flow through the policy parser (tilde expansion, canonicalisation, traversal-rejection): CODING-STANDARDS.md §10 and `kennel-policy::path`.
+- How paths flow through the policy parser (tilde expansion, canonicalisation, traversal-rejection): CODING-STANDARDS.md §10 and `kennel-lib-policy::path`.
 - File-rotation algorithm for audit logs: `05-state-and-supervision.md`.
 - The install-time relocation of paths: `06-build-and-test.md` and `install.sh --prefix`, which rewrites `libexec_dir` in the deployment `system.toml`.
 - Whether the workload has access to any of these paths: it does not, except via explicit policy grant; the shim is the mechanism (`04-trust-boundaries.md` boundary 12).

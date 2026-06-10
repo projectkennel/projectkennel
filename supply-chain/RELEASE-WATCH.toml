@@ -38,7 +38,7 @@ repo          = "https://github.com/rust-lang/libc"
 release-feed  = "https://github.com/rust-lang/libc/releases.atom"
 last-reviewed = "0.2.186"
 reviewed-by   = "remco"
-note          = "First dependency. Pinned =0.2.186; underlies kennel-syscall FFI."
+note          = "First dependency. Pinned =0.2.186; underlies kennel-lib-syscall FFI."
 
 [[watch]]
 name          = "nix"
@@ -46,7 +46,7 @@ repo          = "https://github.com/nix-rust/nix"
 release-feed  = "https://github.com/nix-rust/nix/releases.atom"
 last-reviewed = "0.31.3"
 reviewed-by   = "remco"
-note          = "Direct dep of kennel-syscall (safe syscall wrappers). Pinned =0.31.3, default-features off. Transitives bitflags/cfg-if/cfg_aliases are not direct deps and are not separately watched (§5.7)."
+note          = "Direct dep of kennel-lib-syscall (safe syscall wrappers). Pinned =0.31.3, default-features off. Transitives bitflags/cfg-if/cfg_aliases are not direct deps and are not separately watched (§5.7)."
 
 [[watch]]
 name          = "seccompiler"
@@ -54,7 +54,7 @@ repo          = "https://github.com/rust-vmm/seccompiler"
 release-feed  = "https://github.com/rust-vmm/seccompiler/releases.atom"
 last-reviewed = "0.5.0"
 reviewed-by   = "remco"
-note          = "Direct dep of kennel-syscall (seccomp-BPF filter compiler). Pinned =0.5.0, default features (no json/serde). bitflags is now also a direct dep but already watched implicitly via nix; not separately listed."
+note          = "Direct dep of kennel-lib-syscall (seccomp-BPF filter compiler). Pinned =0.5.0, default features (no json/serde). bitflags is now also a direct dep but already watched implicitly via nix; not separately listed."
 
 [[watch]]
 name          = "object"
@@ -62,4 +62,4 @@ repo          = "https://github.com/gimli-rs/object"
 release-feed  = "https://github.com/gimli-rs/object/releases.atom"
 last-reviewed = "0.36.7"
 reviewed-by   = "remco"
-note          = "Direct dep of kennel-bpf (ELF parsing). Pinned =0.36.7, features = [read_core, elf]."
+note          = "Direct dep of kennel-lib-bpf (ELF parsing). Pinned =0.36.7, features = [read_core, elf]."

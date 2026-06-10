@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kennel_policy::{AuditRuntime, AuditSinkKind};
+use kennel_lib_policy::{AuditRuntime, AuditSinkKind};
 
 /// Skip with cause on an unprivileged runner (a skip is not a proof). BPF load,
 /// the bpffs mount, and cgroup attach all need privilege.
@@ -42,21 +42,21 @@ fn drains_a_denied_connect_event_through_the_writer() {
     }
 
     // 1. Shared map set; load connect4 against it (the production load path).
-    let maps = kennel_bpf::create_maps(kennel_bpf::KENNEL_MAPS).expect("create shared maps");
-    let spec = kennel_bpf::KENNEL_PROGRAMS
+    let maps = kennel_lib_bpf::create_maps(kennel_lib_bpf::KENNEL_MAPS).expect("create shared maps");
+    let spec = kennel_lib_bpf::KENNEL_PROGRAMS
         .iter()
         .find(|p| p.name == "connect4")
         .expect("connect4 spec");
-    let elf = kennel_bpf::programs::object("connect4").expect("embedded connect4 object");
-    let prog = kennel_bpf::load_program_against(elf, spec, &maps).expect("load connect4");
+    let elf = kennel_lib_bpf::programs::object("connect4").expect("embedded connect4 object");
+    let prog = kennel_lib_bpf::load_program_against(elf, spec, &maps).expect("load connect4");
 
     // 2. Pin the shared audit_ringbuf on a bpffs, exactly as the privhelper does —
     //    in the caller's XDG runtime dir (root here, so /run/user/0/kennel/bpf).
-    let uid = kennel_syscall::unistd::real_uid();
+    let uid = kennel_lib_syscall::unistd::real_uid();
     let bpffs = std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf"));
     std::fs::create_dir_all(&bpffs).expect("mkdir runtime bpf dir");
-    if !kennel_syscall::mount::is_bpffs(&bpffs).unwrap_or(false) {
-        kennel_syscall::mount::mount_bpffs(&bpffs).expect("mount bpffs");
+    if !kennel_lib_syscall::mount::is_bpffs(&bpffs).unwrap_or(false) {
+        kennel_lib_syscall::mount::mount_bpffs(&bpffs).expect("mount bpffs");
     }
     let pin_dir = bpffs.join("kennel-draintest");
     let _ = std::fs::remove_dir_all(&pin_dir);
@@ -64,13 +64,13 @@ fn drains_a_denied_connect_event_through_the_writer() {
     let rb_pin = pin_dir.join("audit_ringbuf");
     let cpin = CString::new(rb_pin.as_os_str().as_encoded_bytes()).expect("pin path");
     let rb_fd = maps.get("audit_ringbuf").expect("shared ringbuf");
-    kennel_bpf::sys::obj_pin(rb_fd.as_fd(), &cpin).expect("pin ringbuf to bpffs");
+    kennel_lib_bpf::sys::obj_pin(rb_fd.as_fd(), &cpin).expect("pin ringbuf to bpffs");
 
     // 3. Attach connect4 to a fresh cgroup (empty maps ⇒ fail closed ⇒ deny).
     let cg = Path::new("/sys/fs/cgroup/kennel-draintest");
     let _ = std::fs::create_dir(cg);
     let cgfd = std::fs::File::open(cg).expect("open cgroup");
-    kennel_bpf::sys::prog_attach_cgroup(cgfd.as_fd(), prog.as_fd(), spec.attach_type)
+    kennel_lib_bpf::sys::prog_attach_cgroup(cgfd.as_fd(), prog.as_fd(), spec.attach_type)
         .expect("attach connect4");
 
     // 4. A file-sink writer to a temp state dir (net events → network.jsonl).

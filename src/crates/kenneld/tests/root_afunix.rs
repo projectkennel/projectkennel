@@ -18,9 +18,9 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kennel_binder::binderfs;
-use kennel_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
-use kennel_policy::{AuditRuntime, BinderRuntime, UnixRuntime, UnixSocket};
+use kennel_lib_binder::binderfs;
+use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
+use kennel_lib_policy::{AuditRuntime, BinderRuntime, UnixRuntime, UnixSocket};
 use kenneld::binder::{self, verb};
 
 const MAP_SIZE: usize = 128 * 1024;

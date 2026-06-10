@@ -1,14 +1,14 @@
 //! The `INet` egress decision: kenneld as the policy decision point for outbound
 //! connections (`docs/design/07-5-network.md` §7.5.2).
 //!
-//! `kennel-netshim` (inside the kennel) transacts a [`verb::CONNECT_INET`] request to node 0;
+//! `facade-netshim` (inside the kennel) transacts a [`verb::CONNECT_INET`] request to node 0;
 //! kenneld decides it here against the signed policy's [`Ruleset`] ([`allow`]), resolves the name
 //! under policy ([`dns`]), re-checks every resolved address, and **pins** the vetted set. The pinned
 //! address never crosses back into the kennel (the kennel holds only a name), so DNS rebinding is
 //! structurally impossible. Approved, kenneld mints a socketpair, hands the dial delegate one end
 //! plus the pinned address, and returns the other end into the kennel over binder.
 //!
-//! [`verb::CONNECT_INET`]: kennel_binder::service::verb::CONNECT_INET
+//! [`verb::CONNECT_INET`]: kennel_lib_binder::service::verb::CONNECT_INET
 
 pub mod allow;
 pub mod dns;
@@ -20,8 +20,8 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use kennel_binder::service::transport;
-use kennel_policy::{NameRule, NetPolicy, NetRule, Protocol};
+use kennel_lib_binder::service::transport;
+use kennel_lib_policy::{NameRule, NetPolicy, NetRule, Protocol};
 
 use allow::{
     is_special_use, Cidr, Decision, DenyMatcher, DenyRule, Destination, Matcher, NetMode,
@@ -105,10 +105,10 @@ impl NetRuntime {
 
 /// The settled schema has no `none` mode (a no-network kennel runs no egress delegate), so only the
 /// two egress modes map.
-const fn net_mode(mode: kennel_policy::NetMode) -> NetMode {
+const fn net_mode(mode: kennel_lib_policy::NetMode) -> NetMode {
     match mode {
-        kennel_policy::NetMode::Constrained => NetMode::Constrained,
-        kennel_policy::NetMode::Open => NetMode::Open,
+        kennel_lib_policy::NetMode::Constrained => NetMode::Constrained,
+        kennel_lib_policy::NetMode::Open => NetMode::Open,
     }
 }
 
@@ -176,11 +176,11 @@ pub enum InetDecision {
 /// Decode a [`verb::CONNECT_INET`] payload: `[transport: u8 | port: u16 big-endian | host: UTF-8]`.
 /// `None` for a short, unknown-transport, empty/oversized, or non-UTF-8 payload (all untrusted).
 ///
-/// [`verb::CONNECT_INET`]: kennel_binder::service::verb::CONNECT_INET
+/// [`verb::CONNECT_INET`]: kennel_lib_binder::service::verb::CONNECT_INET
 #[must_use]
 pub fn decode_request(data: &[u8], max_host: usize) -> Option<(Transport, u16, Destination)> {
     // The byte layout is the shared node-0 convention; map its raw output to the policy types.
-    let (transport_byte, port, host) = kennel_binder::service::inet::decode_request(data, max_host)?;
+    let (transport_byte, port, host) = kennel_lib_binder::service::inet::decode_request(data, max_host)?;
     let transport = match transport_byte {
         transport::TCP => Transport::Tcp,
         transport::UDP => Transport::Udp,
@@ -261,8 +261,8 @@ pub fn dial_via_delegate(
 ) -> io::Result<UnixStream> {
     let (delegate_end, kennel_end) = UnixStream::pair()?;
     let command = UnixStream::connect(command_socket)?;
-    let payload = kennel_netproxy::conduit::encode_command(port, pinned);
-    kennel_syscall::scm::send_with_fds(command.as_fd(), &payload, &[delegate_end.as_fd()])?;
+    let payload = host_netproxy::conduit::encode_command(port, pinned);
+    kennel_lib_syscall::scm::send_with_fds(command.as_fd(), &payload, &[delegate_end.as_fd()])?;
     // `delegate_end` drops here; the delegate holds its received copy via SCM_RIGHTS.
     Ok(kennel_end)
 }
@@ -428,7 +428,7 @@ mod tests {
         let sock = std::env::temp_dir().join(format!("kennel-inet-dial-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).expect("bind cmd socket");
-        std::thread::spawn(move || kennel_netproxy::conduit::serve_conduit(&listener));
+        std::thread::spawn(move || host_netproxy::conduit::serve_conduit(&listener));
 
         // kenneld's side: dial via the delegate, get the kennel-facing conduit end back.
         let mut end =

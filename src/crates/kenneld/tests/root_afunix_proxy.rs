@@ -1,10 +1,10 @@
-//! Root-gated e2e for the real `kennel-afunix-shim` proxy binary brokering an
+//! Root-gated e2e for the real `facade-afunix-shim` proxy binary brokering an
 //! `AF_UNIX` socket through the binder facade.
 //!
 //! Where `root_afunix` exercises the facade at the binder-client level, this drives
 //! the actual proxy binary the seal launches: a child holds binder node 0 (kenneld's
 //! role) gating `CONNECT_AFUNIX` for one granted name, the parent runs the proxy
-//! (`kennel-afunix-shim <device> <shim-path>=<name>`), and an application connects to
+//! (`facade-afunix-shim <device> <shim-path>=<name>`), and an application connects to
 //! the proxy's listener and round-trips a byte to the real host socket. This proves the
 //! listener-present-at-the-shim-path + broker-by-name + fd-splice path of the proxy.
 //!
@@ -19,8 +19,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kennel_binder::binderfs;
-use kennel_policy::{AuditRuntime, BinderRuntime, UnixRuntime, UnixSocket};
+use kennel_lib_binder::binderfs;
+use kennel_lib_policy::{AuditRuntime, BinderRuntime, UnixRuntime, UnixSocket};
 use kenneld::binder;
 
 const ROLE_ENV: &str = "KENNEL_BINDER_ROLE";
@@ -137,7 +137,7 @@ fn run_client() {
         .arg(&device)
         .arg(format!("{}={SERVICE}", shim.display()))
         .spawn()
-        .expect("spawn kennel-afunix-shim proxy");
+        .expect("spawn facade-afunix-shim proxy");
 
     // Wait for the proxy to bind its listener at the shim path.
     for _ in 0..50 {
@@ -180,18 +180,18 @@ fn run_client() {
     let _ = std::fs::remove_file(dir.with_extension("stop"));
 }
 
-/// Locate the `kennel-afunix-shim` binary beside the test binary.
+/// Locate the `facade-afunix-shim` binary beside the test binary.
 fn proxy_binary() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
-    // .../target/debug/deps/root_afunix_proxy-<hash> -> .../target/debug/kennel-afunix-shim
+    // .../target/debug/deps/root_afunix_proxy-<hash> -> .../target/debug/facade-afunix-shim
     let dir = exe
         .parent()
         .and_then(std::path::Path::parent)
         .expect("deps dir parent");
-    let bin = dir.join("kennel-afunix-shim");
+    let bin = dir.join("facade-afunix-shim");
     assert!(
         bin.exists(),
-        "build kennel-afunix-shim first (cargo build -p kennel-afunix-shim): {}",
+        "build facade-afunix-shim first (cargo build -p facade-afunix-shim): {}",
         bin.display()
     );
     bin

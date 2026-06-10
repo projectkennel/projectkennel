@@ -1,8 +1,13 @@
 # Project Kennel — Cargo workspace root.
 #
-# One crate per architectural module (docs/architecture/03-crate-decomposition.md),
-# each prefixed `kennel-`. Crates are added as they are implemented; this is
-# not yet the full set described in the architecture.
+# One crate per architectural module (docs/architecture/03-crate-decomposition.md).
+# The prefix encodes where the crate runs — the security-relevant fact:
+#   kennel-lib-*  — libraries linked into the binaries (no runtime location of their own)
+#   kennel-bin-*  — binaries that are neither end of a binder connector (init, ssh-reorigin)
+#   host-*        — the host end of a binder connector: a delegate kenneld drives (netproxy)
+#   facade-*      — the in-kennel end of a binder connector: pushes workload traffic into binder
+#                   (netshim, afunix-shim, ssh-connect)
+#   kenneld, kennel-privhelper — kept bare: the two privileged host-TCB anchors.
 #
 # Dependency policy is strict (CODING-STANDARDS.md §5): exact version pins,
 # vendored artefacts, the CHECKSUMS.toml manifest. The crates implemented so
@@ -12,25 +17,30 @@
 [workspace]
 resolver = "2"
 members = [
-    "src/crates/kennel-privhelper",
-    "src/crates/kennel-bpf",
-    "src/crates/kennel-binder",
-    "src/crates/kennel-afunix-shim",
-    "src/crates/kennel-init",
-    "src/crates/kennel-policy",
-    "src/crates/kennel-audit",
-    "src/crates/kennel-config",
-    "src/crates/kennel-spawn",
-    "src/crates/kennel-syscall",
-    "src/crates/kennel-os",
-    "src/crates/kennel-landlock",
-    "src/crates/kennel-scm",
-    "src/crates/kennel-netshim",
-    "src/crates/kennel-text",
-    "src/crates/kennel-netproxy",
-    "src/crates/kennel-ssh-reorigin",
-    "src/crates/kennel-ssh-connect",
+    # The privileged host-TCB anchors (bare names).
     "src/crates/kenneld",
+    "src/crates/kennel-privhelper",
+    # Libraries (linked into the binaries).
+    "src/crates/kennel-lib-audit",
+    "src/crates/kennel-lib-binder",
+    "src/crates/kennel-lib-bpf",
+    "src/crates/kennel-lib-config",
+    "src/crates/kennel-lib-landlock",
+    "src/crates/kennel-lib-os",
+    "src/crates/kennel-lib-policy",
+    "src/crates/kennel-lib-scm",
+    "src/crates/kennel-lib-spawn",
+    "src/crates/kennel-lib-syscall",
+    "src/crates/kennel-lib-text",
+    # Binaries that are not a binder-connector end.
+    "src/crates/kennel-bin-init",
+    "src/crates/kennel-bin-ssh-reorigin",
+    # The host end of a binder connector (kenneld's dial delegate).
+    "src/crates/host-netproxy",
+    # The in-kennel ends of binder connectors (push workload traffic into binder).
+    "src/crates/facade-afunix-shim",
+    "src/crates/facade-netshim",
+    "src/crates/facade-ssh-connect",
 ]
 
 [workspace.package]
@@ -54,8 +64,8 @@ publish = false
 
 # Shared lint configuration, applied to every member via `[lints] workspace =
 # true`. Encodes CODING-STANDARDS.md §12.2. `#![forbid(unsafe_code)]` is a
-# per-crate attribute (§3, §4), not set here, so the kennel-syscall and
-# kennel-bpf exception crates can omit it without fighting a workspace forbid.
+# per-crate attribute (§3, §4), not set here, so the kennel-lib-syscall and
+# kennel-lib-bpf exception crates can omit it without fighting a workspace forbid.
 [workspace.lints.rust]
 rust_2018_idioms = { level = "deny", priority = -1 }
 missing_docs = "warn"

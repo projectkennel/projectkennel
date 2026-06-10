@@ -14,7 +14,7 @@
 //! tunnels, `PermitOpen none`, and SFTP wired to `/bin/false`. Combined with the
 //! per-key `restrict,pty` option set, SFTP/scp/port-forwarding are out of scope by
 //! construction for the first cut. `ExposeAuthInfo yes` writes `$SSH_USER_AUTH` so
-//! the forced command (`kennel-ssh-reorigin`) can confirm which synthetic key
+//! the forced command (`kennel-bin-ssh-reorigin`) can confirm which synthetic key
 //! authenticated.
 //!
 //! # `AuthorizedKeys` source (§7.10.7)
@@ -70,7 +70,7 @@ pub struct SshdParams<'a> {
     pub pid_file: &'a Path,
     /// The agent socket the forced command signs the *outbound* connection with —
     /// the user's host-side agent holding the granted real keys (§7.10.7). Emitted as
-    /// a server-side `SetEnv SSH_AUTH_SOCK=…` so `kennel-ssh-reorigin` inherits it
+    /// a server-side `SetEnv SSH_AUTH_SOCK=…` so `kennel-bin-ssh-reorigin` inherits it
     /// (sshd otherwise hands a session no agent unless forwarding, which is denied).
     /// `None` leaves it unset (the helper then finds no key and fails closed).
     pub agent_sock: Option<&'a Path>,
@@ -155,8 +155,8 @@ pub fn sshd_config(p: &SshdParams<'_>) -> String {
 /// `(host, key)` edge and cannot redirect the command.
 ///
 /// `synthetic_pubkey` is one whitespace-normalised public-key line (`ssh-ed25519
-/// AAAA… [comment]`); `reorigin_bin` is the absolute path to `kennel-ssh-reorigin`.
-/// `dest` and `real_fp` MUST already be policy-validated (`kennel_policy::ssh`); they
+/// AAAA… [comment]`); `reorigin_bin` is the absolute path to `kennel-bin-ssh-reorigin`.
+/// `dest` and `real_fp` MUST already be policy-validated (`kennel_lib_policy::ssh`); they
 /// are emitted verbatim inside the quoted command.
 #[must_use]
 pub fn authorized_keys_line(
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn authorized_keys_line_bakes_in_dest_and_key_with_restrict_pty() {
         let line = authorized_keys_line(
-            Path::new("/opt/kennel/bin/kennel-ssh-reorigin"),
+            Path::new("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
             "github.com",
             "SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt",
             "ssh-ed25519 AAAASYNTHETIC synthetic-github\n",

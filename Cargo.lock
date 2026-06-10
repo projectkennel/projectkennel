@@ -42,29 +42,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
-name = "kennel-afunix-shim"
+name = "facade-afunix-shim"
 version = "0.1.0"
 dependencies = [
- "kennel-binder",
+ "kennel-lib-binder",
 ]
 
 [[package]]
-name = "kennel-audit"
+name = "facade-netshim"
 version = "0.1.0"
 dependencies = [
- "kennel-syscall",
- "kennel-text",
+ "kennel-lib-binder",
 ]
 
 [[package]]
-name = "kennel-binder"
+name = "facade-ssh-connect"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-binder",
+]
+
+[[package]]
+name = "host-netproxy"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-scm",
+]
+
+[[package]]
+name = "kennel-bin-init"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-binder",
+ "kennel-lib-spawn",
+ "kennel-lib-syscall",
+]
+
+[[package]]
+name = "kennel-bin-ssh-reorigin"
+version = "0.1.0"
+
+[[package]]
+name = "kennel-lib-audit"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-syscall",
+ "kennel-lib-text",
+]
+
+[[package]]
+name = "kennel-lib-binder"
 version = "0.1.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
-name = "kennel-bpf"
+name = "kennel-lib-bpf"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -72,7 +106,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-config"
+name = "kennel-lib-config"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
@@ -80,16 +114,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-init"
-version = "0.1.0"
-dependencies = [
- "kennel-binder",
- "kennel-spawn",
- "kennel-syscall",
-]
-
-[[package]]
-name = "kennel-landlock"
+name = "kennel-lib-landlock"
 version = "0.1.0"
 dependencies = [
  "bitflags",
@@ -98,21 +123,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-netproxy"
-version = "0.1.0"
-dependencies = [
- "kennel-scm",
-]
-
-[[package]]
-name = "kennel-netshim"
-version = "0.1.0"
-dependencies = [
- "kennel-binder",
-]
-
-[[package]]
-name = "kennel-os"
+name = "kennel-lib-os"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -120,7 +131,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-policy"
+name = "kennel-lib-policy"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
@@ -130,74 +141,63 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-privhelper"
-version = "0.1.0"
-dependencies = [
- "kennel-bpf",
- "kennel-config",
- "kennel-spawn",
- "kennel-syscall",
-]
-
-[[package]]
-name = "kennel-scm"
+name = "kennel-lib-scm"
 version = "0.1.0"
 dependencies = [
  "nix",
 ]
 
 [[package]]
-name = "kennel-spawn"
+name = "kennel-lib-spawn"
 version = "0.1.0"
 dependencies = [
- "kennel-binder",
- "kennel-bpf",
- "kennel-policy",
- "kennel-syscall",
+ "kennel-lib-binder",
+ "kennel-lib-bpf",
+ "kennel-lib-policy",
+ "kennel-lib-syscall",
 ]
 
 [[package]]
-name = "kennel-ssh-connect"
-version = "0.1.0"
-dependencies = [
- "kennel-binder",
-]
-
-[[package]]
-name = "kennel-ssh-reorigin"
-version = "0.1.0"
-
-[[package]]
-name = "kennel-syscall"
+name = "kennel-lib-syscall"
 version = "0.1.0"
 dependencies = [
  "bitflags",
- "kennel-landlock",
- "kennel-os",
- "kennel-scm",
+ "kennel-lib-landlock",
+ "kennel-lib-os",
+ "kennel-lib-scm",
  "libc",
  "nix",
  "seccompiler",
 ]
 
 [[package]]
-name = "kennel-text"
+name = "kennel-lib-text"
 version = "0.1.0"
+
+[[package]]
+name = "kennel-privhelper"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-bpf",
+ "kennel-lib-config",
+ "kennel-lib-spawn",
+ "kennel-lib-syscall",
+]
 
 [[package]]
 name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
- "kennel-audit",
- "kennel-binder",
- "kennel-bpf",
- "kennel-config",
- "kennel-netproxy",
- "kennel-policy",
+ "host-netproxy",
+ "kennel-lib-audit",
+ "kennel-lib-binder",
+ "kennel-lib-bpf",
+ "kennel-lib-config",
+ "kennel-lib-policy",
+ "kennel-lib-spawn",
+ "kennel-lib-syscall",
  "kennel-privhelper",
- "kennel-spawn",
- "kennel-syscall",
  "libc",
  "serde",
 ]

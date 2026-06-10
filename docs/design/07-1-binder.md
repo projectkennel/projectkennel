@@ -4,7 +4,7 @@
 > binderfs bus with kenneld as its context manager (node 0), and that bus is the kennel's
 > **auditable, unprivileged inter-namespace gateway**: the single kernel-mediated chokepoint
 > through which anything crosses the kennel boundary. It carries the construction/lifecycle
-> control plane (`kennel-init` ⇄ kenneld, §7.2), the protocol facades that replace raw socket
+> control plane (`kennel-bin-init` ⇄ kenneld, §7.2), the protocol facades that replace raw socket
 > grants (`IAfUnix`, future `IDBus`, §7.1.5), the service registry and inter-kennel calls
 > (§7.1.6–7.1.9), and — on the network path — the `INet` crossing (§7.5). Each crossing is a
 > synchronous, kernel-stamped transaction kenneld can authorize and audit per call, with no
@@ -14,7 +14,7 @@
 > facade on this bus, inheriting the same unprivileged, per-call-audited model.
 >
 > The rest of this chapter develops the primitive (§7.1.2), the registry and facades it
-> enables, and the inter-kennel topology; §7.2 (`kennel-init`) and §7.5 (network) are its two
+> enables, and the inter-kennel topology; §7.2 (`kennel-bin-init`) and §7.5 (network) are its two
 > principal consumers.
 
 ## 7.1.1 Motivation
@@ -101,14 +101,14 @@ kernel configuration includes them explicitly.
 
 ## 7.1.3 binderfs instance lifecycle
 
-> **The construction model is [§7.2](07-2-kennel-init.md).** binderfs assigns its nodes to
+> **The construction model is [§7.2](07-2-kennel-bin-init.md).** binderfs assigns its nodes to
 > **uid 0 of the mounting user namespace**, so the kennel needs a real uid 0 (host root mapped
 > `0 0 1`) for the nodes to be owned by a proper root rather than the overflow uid. The
 > privhelper factory therefore mounts binderfs, allocates the device, and **chowns
 > `/dev/binderfs/binder` to the operator** in its post-`clone` child — before `pivot_root` and
-> before it `fexecve`s the trusted root-owned **`kennel-init` (PID 1)**, so no uid-0 binary
+> before it `fexecve`s the trusted root-owned **`kennel-bin-init` (PID 1)**, so no uid-0 binary
 > runs while the host filesystem is still visible. The map needs `CAP_SETUID`, so this work is
-> the privhelper's; `kennel-init` is a binder *consumer* that **pulls** its config over the bus
+> the privhelper's; `kennel-bin-init` is a binder *consumer* that **pulls** its config over the bus
 > (§7.2). The lifecycle mechanics below describe the steady-state bus.
 
 ### Mount sequencing

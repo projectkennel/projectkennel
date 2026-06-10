@@ -3,7 +3,7 @@
 //! This is the privileged side of the trust boundary
 //! (`docs/architecture/04-trust-boundaries.md`, boundary 1): every request is
 //! validated against the reserved scope *before* any privileged syscall. The
-//! privileged work routes through `kennel-syscall` (netlink for addresses) and
+//! privileged work routes through `kennel-lib-syscall` (netlink for addresses) and
 //! `std::fs` (cgroup directories); this crate stays `#![forbid(unsafe_code)]`.
 
 use std::ffi::CString;
@@ -101,14 +101,14 @@ pub fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -
         Ok(m) => m.uid(),
         Err(e) => return Response::internal(errno_of(&e)),
     };
-    if owner != kennel_syscall::unistd::real_uid() {
+    if owner != kennel_lib_syscall::unistd::real_uid() {
         return Response::refused(REFUSAL_CGROUP_NOT_OWNED);
     }
     let cgroup_fd = dir.as_fd();
 
     // One shared map set for the whole kennel: every program references the same
     // maps (so there is one `audit_ringbuf` to drain and one coherent set to pin).
-    let maps = match kennel_bpf::create_maps(kennel_bpf::KENNEL_MAPS) {
+    let maps = match kennel_lib_bpf::create_maps(kennel_lib_bpf::KENNEL_MAPS) {
         Ok(m) => m,
         Err(e) => return Response::internal(errno_of(&e)),
     };
@@ -116,17 +116,17 @@ pub fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -
         return Response::internal(errno_of(&e));
     }
 
-    for spec in kennel_bpf::KENNEL_PROGRAMS {
-        let Some(elf) = kennel_bpf::programs::object(spec.name) else {
+    for spec in kennel_lib_bpf::KENNEL_PROGRAMS {
+        let Some(elf) = kennel_lib_bpf::programs::object(spec.name) else {
             // The binary was built without this program embedded — treat as unsupported.
             return Response::internal(ENOSYS);
         };
-        let prog = match kennel_bpf::load_program_against(elf, spec, &maps) {
+        let prog = match kennel_lib_bpf::load_program_against(elf, spec, &maps) {
             Ok(p) => p,
             Err(e) => return Response::internal(errno_of(&e)),
         };
         if let Err(e) =
-            kennel_bpf::sys::prog_attach_cgroup(cgroup_fd, prog.as_fd(), spec.attach_type)
+            kennel_lib_bpf::sys::prog_attach_cgroup(cgroup_fd, prog.as_fd(), spec.attach_type)
         {
             return Response::internal(errno_of(&e));
         }
@@ -169,7 +169,7 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
     if pin_id.is_empty() || !valid_pin_id(pin_id) {
         return;
     }
-    let caller_uid = kennel_syscall::unistd::real_uid();
+    let caller_uid = kennel_lib_syscall::unistd::real_uid();
     let base = pin_root(caller_uid);
     if ensure_bpffs(&base, caller_uid).is_err() {
         return;
@@ -188,7 +188,7 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
         let Ok(cpin) = std::ffi::CString::new(pin.as_os_str().as_encoded_bytes()) else {
             continue;
         };
-        if kennel_bpf::sys::obj_pin(fd.as_fd(), &cpin).is_err() {
+        if kennel_lib_bpf::sys::obj_pin(fd.as_fd(), &cpin).is_err() {
             continue;
         }
         let _ = std::os::unix::fs::chown(&pin, Some(caller_uid), None);
@@ -231,8 +231,8 @@ fn valid_pin_id(id: &str) -> bool {
 #[cfg(feature = "bpf-egress")]
 fn ensure_bpffs(base: &std::path::Path, caller_uid: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(base)?;
-    if !kennel_syscall::mount::is_bpffs(base).unwrap_or(false) {
-        kennel_syscall::mount::mount_bpffs(base)?;
+    if !kennel_lib_syscall::mount::is_bpffs(base).unwrap_or(false) {
+        kennel_lib_syscall::mount::mount_bpffs(base)?;
     }
     // Hand the bpffs root to the owning user, owner-only. Enforced every time
     // (cheap, root-only) so it self-heals a stale owner/mode.
@@ -293,19 +293,19 @@ fn bind_subnet_value(meta: &[u8], allowed_ports: &[u16]) -> Option<[u8; 44]> {
     Some(value)
 }
 
-/// Write `payload` into the shared egress map set (from `kennel_bpf::create_maps`).
+/// Write `payload` into the shared egress map set (from `kennel_lib_bpf::create_maps`).
 #[cfg(feature = "bpf-egress")]
 fn populate_maps(
     maps: &std::collections::BTreeMap<String, std::os::fd::OwnedFd>,
     payload: &EgressPayload,
 ) -> std::io::Result<()> {
-    use kennel_bpf::sys::BPF_ANY;
+    use kennel_lib_bpf::sys::BPF_ANY;
 
     // The safe `update_kennel_map` validates each (key, value) against the named map's
     // KENNEL_MAPS geometry and does the unsafe `map_update` internally — so this
     // `#![forbid(unsafe_code)]` crate needs no unsafe block of its own.
     let update = |name: &str, key: &[u8], value: &[u8]| -> std::io::Result<()> {
-        kennel_bpf::update_kennel_map(maps, name, key, value, BPF_ANY)
+        kennel_lib_bpf::update_kennel_map(maps, name, key, value, BPF_ANY)
     };
 
     update("kennel_meta_map", &0u32.to_ne_bytes(), &payload.meta)?;
@@ -352,12 +352,12 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     let Ok(cname) = CString::new(req.interface.clone()) else {
         return Response::protocol();
     };
-    let ifindex = match kennel_syscall::netlink::if_index(&cname) {
+    let ifindex = match kennel_lib_syscall::netlink::if_index(&cname) {
         Ok(i) => i,
         Err(e) => return Response::internal(errno_of(&e)),
     };
     // The only standalone address op is the teardown delete; the add is folded into construct.
-    match kennel_syscall::netlink::del_address(ifindex, req.addr, req.prefix) {
+    match kennel_lib_syscall::netlink::del_address(ifindex, req.addr, req.prefix) {
         Ok(()) => Response::ok(),
         Err(e) => Response::internal(errno_of(&e)),
     }

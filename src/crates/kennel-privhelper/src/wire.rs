@@ -44,10 +44,10 @@ pub const META_LEN: usize = 64;
 const MAX_ENTRIES: usize = 8192;
 
 /// An IPv4 egress LPM map entry: `(lpm_v4_key[8], allow_value[8])`. Matches
-/// `kennel_spawn::plan::LpmV4Entry`.
+/// `kennel_lib_spawn::plan::LpmV4Entry`.
 pub type V4Entry = ([u8; 8], [u8; 8]);
 /// An IPv6 egress LPM map entry: `(lpm_v6_key[20], allow_value[8])`. Matches
-/// `kennel_spawn::plan::LpmV6Entry`.
+/// `kennel_lib_spawn::plan::LpmV6Entry`.
 pub type V6Entry = ([u8; 20], [u8; 8]);
 
 /// The privileged operation a request asks for.
@@ -276,7 +276,7 @@ pub struct EgressPayload {
 }
 
 /// The maximum number of `bind_allowed_ports` the wire carries (the `bind_subnet`
-/// BPF array size; mirrors `kennel_policy::settled::MAX_BIND_PORTS`).
+/// BPF array size; mirrors `kennel_lib_policy::settled::MAX_BIND_PORTS`).
 pub const MAX_BIND_PORTS: usize = 8;
 
 /// The maximum byte length of the [`EgressPayload::pin_id`] field on the wire.

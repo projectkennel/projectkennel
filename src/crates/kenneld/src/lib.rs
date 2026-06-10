@@ -6,7 +6,7 @@
 //!
 //! 1. create the kennel's cgroup (kenneld owns its delegated `user@<uid>`
 //!    subtree, so this is unprivileged — see §8.5 and the cgroup-join note on
-//!    [`kennel_spawn`]);
+//!    [`kennel_lib_spawn`]);
 //! 2. add the per-kennel loopback addresses (privileged — via the helper);
 //! 3. load + attach the egress BPF programs to the cgroup (privileged);
 //! 4. spawn the workload, which joins the cgroup in its seal.
@@ -18,7 +18,7 @@
 //!
 //! This crate holds no `unsafe` (`#![forbid(unsafe_code)]`): privilege is
 //! borrowed transiently through the helper, and the workload syscalls route
-//! through `kennel-spawn`/`kennel-syscall`.
+//! through `kennel-lib-spawn`/`kennel-lib-syscall`.
 
 #![forbid(unsafe_code)]
 
@@ -43,23 +43,23 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use kennel_policy::NetPolicy;
+use kennel_lib_policy::NetPolicy;
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response};
-use kennel_spawn::{Plan, ProxyEndpoint, SpawnError};
-use kennel_syscall::namespace::Namespaces;
+use kennel_lib_spawn::{Plan, ProxyEndpoint, SpawnError};
+use kennel_lib_syscall::namespace::Namespaces;
 
 /// The default proxy host offset within the kennel's subnet (`…|0001` / `::1`).
 ///
-/// Mirrors what [`kennel_policy::ProxyListen::default`] resolves to; the live
+/// Mirrors what [`kennel_lib_policy::ProxyListen::default`] resolves to; the live
 /// offset comes from the signed policy (`net.proxy.offset`). The reference the
 /// tests compute against.
 pub const PROXY_HOST: u8 = 1;
 
 /// The default TCP port the per-kennel egress proxy listens on.
 ///
-/// Mirrors what [`kennel_policy::ProxyListen::default`] resolves to; the live
+/// Mirrors what [`kennel_lib_policy::ProxyListen::default`] resolves to; the live
 /// port comes from the signed policy (`net.proxy.port`).
 pub const PROXY_PORT: u16 = 1080;
 
@@ -122,8 +122,8 @@ pub trait Privileged {
 
     /// Construct a kennel via the privhelper **factory** (`07-2`): hand it the
     /// `construction_half` bytes and (optionally) the pty socket; receive the long-lived
-    /// supervisor [`Child`] and `kennel-init`'s host pid. The privhelper resolves and opens
-    /// `kennel-init` itself from root-owned config (never the wire), so it is not passed here.
+    /// supervisor [`Child`] and `kennel-bin-init`'s host pid. The privhelper resolves and opens
+    /// `kennel-bin-init` itself from root-owned config (never the wire), so it is not passed here.
     ///
     /// Defaults to an error: only the production [`HelperClient`] drives the real factory.
     ///
@@ -152,7 +152,7 @@ pub struct HelperClient {
 
 impl HelperClient {
     /// Use the privhelper at `helper` (resolved from the deployment config by
-    /// the daemon; see [`kennel_config::Deployment::privhelper`]).
+    /// the daemon; see [`kennel_lib_config::Deployment::privhelper`]).
     pub fn new(helper: impl Into<PathBuf>) -> Self {
         Self {
             helper: helper.into(),
@@ -183,16 +183,16 @@ impl Privileged for HelperClient {
 
 /// How to launch a kennel's egress proxy.
 ///
-/// The `kennel-netproxy` binary plus the directory its per-kennel config is
+/// The `host-netproxy` binary plus the directory its per-kennel config is
 /// written to. `None` in [`Spec::proxy`] skips the proxy entirely (unit tests, or
 /// a setup that does not run one).
 #[derive(Debug, Clone)]
 pub struct ProxySetup {
-    /// The `kennel-netproxy` dial-delegate binary (host side) to launch.
+    /// The `host-netproxy` dial-delegate binary (host side) to launch.
     pub binary: PathBuf,
     /// Directory the per-kennel conduit command socket is bound in.
     pub config_dir: PathBuf,
-    /// The `kennel-netshim` binary bound into the view and launched by the seal: the workload's
+    /// The `facade-netshim` binary bound into the view and launched by the seal: the workload's
     /// in-kennel SOCKS5 endpoint, which brokers each connect to node 0 as `CONNECT_INET`.
     pub netshim: PathBuf,
 }
@@ -238,13 +238,13 @@ pub struct EtcSetup {
 /// `binder.*` decisions through.
 pub struct BinderPrep {
     /// The user-defined services this kennel may register / look up.
-    pub policy: kennel_policy::BinderRuntime,
+    pub policy: kennel_lib_policy::BinderRuntime,
     /// The `[[unix.allow]]` grants the af-unix facade resolves and connects (§7.6 via
     /// the binder facade). Empty when the kennel grants no `AF_UNIX` socket.
-    pub unix: kennel_policy::UnixRuntime,
+    pub unix: kennel_lib_policy::UnixRuntime,
     /// The unified audit writer the registry emits through.
-    pub writer: std::sync::Arc<kennel_audit::Writer>,
-    /// The `kennel-init` binary the privhelper factory `fexecve`s as the kennel's uid-0
+    pub writer: std::sync::Arc<kennel_lib_audit::Writer>,
+    /// The `kennel-bin-init` binary the privhelper factory `fexecve`s as the kennel's uid-0
     /// PID 1 (`07-2`). When `Some`, `bring_up` constructs the kennel via the factory
     /// (real uid 0, binderfs chowned to the operator); when `None`, it falls back to the
     /// legacy in-process unprivileged spawn (no real uid 0 — the binderfs `EACCES` path).
@@ -307,7 +307,7 @@ pub struct UnixShim {
 /// The `AF_UNIX` socket shims prepared for one kennel (§7.6 via the binder facade).
 ///
 /// Built by `crate::server::Shared::prepare_unix` (path placeholders resolved) and
-/// consumed by the bring-up: the `kennel-afunix-shim` proxy is bound into the view and
+/// consumed by the bring-up: the `facade-afunix-shim` proxy is bound into the view and
 /// launched by the seal; it listens at each shim path so the application finds the
 /// socket where it expects, and on connect brokers to the `org.projectkennel.IAfUnix`
 /// binder facade (kenneld), which resolves the name to the real host socket and returns
@@ -322,7 +322,7 @@ pub struct UnixPrep {
     /// `(env var, value)` pairs set on the workload — the in-kennel shim path the
     /// application reads (e.g. `WAYLAND_DISPLAY`).
     pub env: Vec<(String, String)>,
-    /// The host path of `kennel-afunix-shim` to bind into the view and launch as the
+    /// The host path of `facade-afunix-shim` to bind into the view and launch as the
     /// in-kennel broker (§7.6 via the binder facade). `None` (no deployment binary)
     /// leaves the grants unserved rather than falling back to a host-socket bind mount.
     pub afunix_shim_bin: Option<PathBuf>,
@@ -342,7 +342,7 @@ pub struct SshPrep {
     /// The bastion's loopback endpoint, allowed as a host-loopback service so the
     /// egress proxy forwards the kennel's SSH to it (§7.5 host services).
     pub host_service: Option<SocketAddr>,
-    /// The host path of `kennel-ssh-connect`, bound into the view (read+execute)
+    /// The host path of `facade-ssh-connect`, bound into the view (read+execute)
     /// so the synthetic `config`'s `ProxyCommand` can run it. `None` when no SSH.
     pub ssh_connect_bin: Option<PathBuf>,
 }
@@ -350,7 +350,7 @@ pub struct SshPrep {
 /// A running kennel: the workload plus what must be torn down when it stops.
 #[derive(Debug)]
 pub struct Kennel {
-    /// `kennel-init`'s host pid. The privhelper factory exits as soon as it has reported
+    /// `kennel-bin-init`'s host pid. The privhelper factory exits as soon as it has reported
     /// this (it is not a reaper proxy); the orphaned init reparented to kenneld (a
     /// `set_child_subreaper`), so kenneld `waitpid`s this pid directly for the workload's
     /// exit status (`07-2`).
@@ -372,7 +372,7 @@ pub struct Kennel {
 }
 
 impl Kennel {
-    /// `kennel-init`'s host process id.
+    /// `kennel-bin-init`'s host process id.
     #[must_use]
     pub fn id(&self) -> u32 {
         u32::try_from(self.init_pid).unwrap_or(0)
@@ -401,7 +401,7 @@ impl Kennel {
         // Best-effort: a pre-5.14 kernel or an already-removed cgroup falls through
         // to signalling the handle (which also covers the no-cgroup unit-test path).
         let via_cgroup = cgroup::kill_cgroup(&self.cgroup).is_ok();
-        match kennel_syscall::process::kill_pid(self.init_pid) {
+        match kennel_lib_syscall::process::kill_pid(self.init_pid) {
             Ok(()) => Ok(()),
             // The cgroup kill succeeded; a failure to also signal the (already dying) init
             // is not fatal.
@@ -419,7 +419,7 @@ impl Kennel {
     /// # Errors
     /// An OS error if the status check fails.
     pub fn try_finished(&mut self) -> io::Result<Option<i32>> {
-        kennel_syscall::process::try_wait_pid(self.init_pid)
+        kennel_lib_syscall::process::try_wait_pid(self.init_pid)
     }
 
     /// Wait for the workload to exit, then tear the kennel down: remove the
@@ -431,7 +431,7 @@ impl Kennel {
     /// # Errors
     /// An OS error if waiting on the workload fails.
     pub fn stop<P: Privileged>(mut self, privileged: &P) -> io::Result<i32> {
-        let status = kennel_syscall::process::wait_pid(self.init_pid)?;
+        let status = kennel_lib_syscall::process::wait_pid(self.init_pid)?;
         if let Some(manager) = self.binder.take() {
             manager.stop();
         }
@@ -447,7 +447,7 @@ impl Kennel {
         Ok(status)
     }
 
-    // TTL is enforced inside the kennel now (§9.7): `kennel-init` runs the timer and makes the
+    // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and makes the
     // blocking `NOTIFY_TTL_EXPIRED` call that kenneld's node-0 handler services (freeze + decide
     // per `ttl_action`). So there is no external poll/reaper here — `stop` is a plain wait, and
     // on the `exit` action the handler kills the frozen cgroup, which that wait observes.
@@ -592,17 +592,17 @@ fn bring_up<P: Privileged + Sync>(
     // into the one construct op — it re-validates each against the caller's reserved subnet),
     // so here we only collect them for the construction-half and record them in `state` for
     // teardown's `del_address`.
-    let mut loopback: Vec<kennel_spawn::LoopbackAddr> = Vec::new();
+    let mut loopback: Vec<kennel_lib_spawn::LoopbackAddr> = Vec::new();
     if let Ok(c) = u8::try_from(ctx) {
         let addr = loopback_v4(scope.tag(), c, offset);
-        loopback.push(kennel_spawn::LoopbackAddr {
+        loopback.push(kennel_lib_spawn::LoopbackAddr {
             addr: addr.into(),
             prefix: V4_PREFIX,
         });
         state.v4 = Some(addr);
     }
     let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
-    loopback.push(kennel_spawn::LoopbackAddr {
+    loopback.push(kennel_lib_spawn::LoopbackAddr {
         addr: addr6.into(),
         prefix: V6_PREFIX,
     });
@@ -690,7 +690,7 @@ fn bring_up<P: Privileged + Sync>(
         // exactly as the dotfiles and synthetic ~/.ssh below do. The constructed /etc
         // holds only framework content (the host /etc is never bound in), so this is safe.
         {
-            use kennel_syscall::landlock::AccessFs;
+            use kennel_lib_syscall::landlock::AccessFs;
             let mut etc_dirs = std::collections::BTreeSet::new();
             for (_src, target) in &plan.file_binds {
                 if let Some(parent) = target.parent() {
@@ -711,7 +711,7 @@ fn bring_up<P: Privileged + Sync>(
         let dot_binds =
             crate::etc::materialize_home_dotfiles(&dot_dir, &etc.home, &etc.home_persist)?;
         if !dot_binds.is_empty() {
-            use kennel_syscall::landlock::AccessFs;
+            use kennel_lib_syscall::landlock::AccessFs;
             let mut dot_dirs = std::collections::BTreeSet::new();
             for (_src, target) in &dot_binds {
                 if let Some(parent) = target.parent() {
@@ -734,7 +734,7 @@ fn bring_up<P: Privileged + Sync>(
         // Grant Landlock read on the synthetic ~/.ssh dir(s): the files are copied
         // into the view like the synthetic /etc, but unlike /etc the home subtree is
         // not in `fs.read`, so without this `ssh` is denied reading its own config.
-        use kennel_syscall::landlock::AccessFs;
+        use kennel_lib_syscall::landlock::AccessFs;
         let mut ssh_dirs = std::collections::BTreeSet::new();
         for (_src, target) in &ssh.file_binds {
             if let Some(parent) = target.parent() {
@@ -748,7 +748,7 @@ fn bring_up<P: Privileged + Sync>(
         plan.file_binds.extend(ssh.file_binds.iter().cloned());
     }
 
-    // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind kennel-netshim into the view, launch it
+    // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind facade-netshim into the view, launch it
     //     on the kennel's loopback at `port`, and point the workload's proxy env at it. It brokers
     //     each connect to node 0 as CONNECT_INET; kenneld decides + drives the dial delegate. Needs
     //     the constructed view, so it engages only when pivoting and the kennel has egress.
@@ -778,7 +778,7 @@ fn bring_up<P: Privileged + Sync>(
     if view_root.is_some() {
         if let Some(view) = plan.view.as_mut() {
             for sub in crate::etc::essential_etc_subtrees() {
-                view.binds.push(kennel_spawn::BindMount {
+                view.binds.push(kennel_lib_spawn::BindMount {
                     source: sub.clone(),
                     target: sub,
                     writable: false,
@@ -787,7 +787,7 @@ fn bring_up<P: Privileged + Sync>(
             // Bind the ssh binder-dialer in at its own path (read-only) so the synthetic
             // ssh config's ProxyCommand can exec it.
             if let Some(bin) = &ssh.ssh_connect_bin {
-                view.binds.push(kennel_spawn::BindMount {
+                view.binds.push(kennel_lib_spawn::BindMount {
                     source: bin.clone(),
                     target: bin.clone(),
                     writable: false,
@@ -798,10 +798,10 @@ fn bring_up<P: Privileged + Sync>(
         // Grant Landlock execute on the dialer + its loaders (outside the `view` borrow of plan).
         if let Some(bin) = &ssh.ssh_connect_bin {
             if plan.view.is_some() {
-                use kennel_syscall::landlock::AccessFs;
+                use kennel_lib_syscall::landlock::AccessFs;
                 plan.landlock_fs
                     .push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
-                let resolution = kennel_policy::libresolve::resolve_loaders(&[bin
+                let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[bin
                     .to_string_lossy()
                     .into_owned()]);
                 for loader in resolution.loaders {
@@ -822,9 +822,9 @@ fn bring_up<P: Privileged + Sync>(
     // 4. Construct the kennel via the privhelper **factory** (`07-2`) — the one privileged op,
     //    which now provisions everything in a single invocation: it adds the loopback addresses
     //    (re-validating each), attaches the egress BPF, clones the namespaces, builds the view +
-    //    binderfs (chowned to the operator), and `fexecve`s `kennel-init`. Every kennel runs the
+    //    binderfs (chowned to the operator), and `fexecve`s `kennel-bin-init`. Every kennel runs the
     //    factory + a binder bus, so a `BinderPrep` is required. The privhelper resolves
-    //    `kennel-init` from its own root-owned config (never the wire), so kenneld needs none here.
+    //    `kennel-bin-init` from its own root-owned config (never the wire), so kenneld needs none here.
     plan.cgroup = cgroup.to_path_buf();
     let Some(prep) = binder else {
         return Err(Error::Io(io::Error::new(
@@ -836,27 +836,27 @@ fn bring_up<P: Privileged + Sync>(
         construct_via_factory(privileged, plan, command, ctx, &loopback, &egress_bytes, state)?;
     let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
 
-    // Boot-sync (07-2 §7.2.1a): wait for kennel-init to announce it has execed — only then is its
+    // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed — only then is its
     // binderfs reachable via /proc/<init>/root. This is what lets node 0 be claimed deterministically
     // (and what the old retry loop was really waiting on). A failure here leaves the kennel up but
     // binder-less; the workload (which it gates) will not start, so surface it.
-    kennel_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
+    kennel_lib_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
 
     // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
-    // kennel-init start the workload), so its command socket is bound before the first INet request.
+    // kennel-bin-init start the workload), so its command socket is bound before the first INet request.
     if let (Some(setup), Some(sock)) = (proxy, command_socket.as_ref()) {
         state.proxy = Some(crate::proxy::spawn(&setup.binary, sock).map_err(Error::Proxy)?);
     }
 
     // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
-    // so kennel-init can pull its supervision-half. kennel-init has execed (boot-sync above), so
+    // so kennel-bin-init can pull its supervision-half. kennel-bin-init has execed (boot-sync above), so
     // the device is reachable via /proc/<init>/root — a single open, no retry.
     if plan.view.as_ref().is_some_and(|v| v.binder) {
         let init_pid_u32 = u32::try_from(init_pid).unwrap_or(0);
         let lifecycle = crate::binder::Lifecycle {
             init_host_pid: Some(init_pid),
             supervision: supervision_bytes,
-            // The TTL custodian's inputs: kennel-init's timer fires NOTIFY_TTL_EXPIRED and the
+            // The TTL custodian's inputs: kennel-bin-init's timer fires NOTIFY_TTL_EXPIRED and the
             // node-0 handler freezes/thaws/kills this cgroup per the action (§9.7).
             cgroup: plan.cgroup.clone(),
             ttl_action: plan.ttl_action,
@@ -867,19 +867,19 @@ fn bring_up<P: Privileged + Sync>(
         }
     }
 
-    // Tell kennel-init the bus is live so it pulls its plan and starts the workload (unconditional:
+    // Tell kennel-bin-init the bus is live so it pulls its plan and starts the workload (unconditional:
     // it always blocks for this). Then reap the factory parent, which exits the moment it has
-    // reported the pid; `kennel-init` has reparented to kenneld (the subreaper), so the `Kennel`
+    // reported the pid; `kennel-bin-init` has reparented to kenneld (the subreaper), so the `Kennel`
     // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
-    kennel_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
+    kennel_lib_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
     let _ = child.wait();
     Ok(init_pid)
 }
 
 /// The factory construction step (`07-2`): build the construction- and supervision-halves and
 /// have the privhelper factory provision the kennel — loopback adds, egress attach, the
-/// namespace clone, the view, and binderfs — then `fexecve` `kennel-init`. Returns
-/// `kennel-init`'s host pid and the encoded supervision-half (the caller serves it over binder
+/// namespace clone, the view, and binderfs — then `fexecve` `kennel-bin-init`. Returns
+/// `kennel-bin-init`'s host pid and the encoded supervision-half (the caller serves it over binder
 /// node 0). The factory exits as soon as it has reported the pid, so it is reaped here, and the
 /// orphaned init has reparented to kenneld (the `set_child_subreaper`) before we return.
 #[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
@@ -888,25 +888,25 @@ fn construct_via_factory<P: Privileged + Sync>(
     plan: &Plan,
     command: &Command,
     ctx: u16,
-    loopback: &[kennel_spawn::LoopbackAddr],
+    loopback: &[kennel_lib_spawn::LoopbackAddr],
     egress_bytes: &[u8],
     state: &mut Provision,
 ) -> Result<(Child, i32, std::os::fd::OwnedFd, Vec<u8>), Error> {
-    let drop_uid = kennel_syscall::unistd::real_uid();
-    let drop_gid = kennel_syscall::unistd::real_gid();
+    let drop_uid = kennel_lib_syscall::unistd::real_uid();
+    let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
     let construction = construction_half_from(plan, ctx, loopback);
     let supervision = supervision_from(plan, command, drop_uid, drop_gid);
-    let half_bytes = kennel_spawn::wire::encode_construction(&construction);
-    let supervision_bytes = kennel_spawn::wire::encode_supervision(&supervision);
+    let half_bytes = kennel_lib_spawn::wire::encode_construction(&construction);
+    let supervision_bytes = kennel_lib_spawn::wire::encode_supervision(&supervision);
 
-    // The privhelper resolves + opens `kennel-init` from root-owned config (never the wire), so
+    // The privhelper resolves + opens `kennel-bin-init` from root-owned config (never the wire), so
     // kenneld passes no init fd. For an interactive run it passes the pty return socket (the
     // workload's pty master is sent back over it), re-homed at `PTY_RETURN_FD`; the egress payload
     // rides the same datagram. The pty fd lives in the plan and is kept open by the caller
     // (`run_kennel`'s `return_sock`) for the construction.
-    // Returns once `kennel-init` has been `fexecve`'d and the init pid reported, handing back the
-    // boot-sync socket: the caller waits on it for kennel-init's "ready", claims binder node 0,
+    // Returns once `kennel-bin-init` has been `fexecve`'d and the init pid reported, handing back the
+    // boot-sync socket: the caller waits on it for kennel-bin-init's "ready", claims binder node 0,
     // then signals "go" (deterministic startup, `07-2` §7.2.1a). The factory exits the moment it
     // reports the pid, so the caller reaps the `Child` after the sync.
     let (child, init_pid, sync) =
@@ -921,9 +921,9 @@ fn construct_via_factory<P: Privileged + Sync>(
 fn construction_half_from(
     plan: &Plan,
     ctx: u16,
-    loopback: &[kennel_spawn::LoopbackAddr],
-) -> kennel_spawn::ConstructionHalf {
-    kennel_spawn::ConstructionHalf {
+    loopback: &[kennel_lib_spawn::LoopbackAddr],
+) -> kennel_lib_spawn::ConstructionHalf {
+    kennel_lib_spawn::ConstructionHalf {
         namespaces: plan.namespaces,
         cgroup: plan.cgroup.clone(),
         cgroup_join: plan.cgroup_join,
@@ -941,7 +941,7 @@ fn construction_half_from(
     }
 }
 
-/// Build the supervision-half (what kennel-init pulls) from the plan and the workload
+/// Build the supervision-half (what kennel-bin-init pulls) from the plan and the workload
 /// `Command`. Reads the program/argv/env/cwd back via the stable `Command` getters, so
 /// the command-building in `server.rs` is unchanged by the cutover.
 #[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
@@ -950,7 +950,7 @@ fn supervision_from(
     command: &Command,
     drop_uid: u32,
     drop_gid: u32,
-) -> kennel_spawn::Supervision {
+) -> kennel_lib_spawn::Supervision {
     let program = PathBuf::from(command.get_program());
     let mut argv = vec![command.get_program().to_string_lossy().into_owned()];
     argv.extend(command.get_args().map(|a| a.to_string_lossy().into_owned()));
@@ -958,14 +958,14 @@ fn supervision_from(
         .get_envs()
         .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
         .collect();
-    kennel_spawn::Supervision {
+    kennel_lib_spawn::Supervision {
         program,
         argv,
         env,
         cwd: command.get_current_dir().map(Path::to_path_buf),
         drop_uid,
         drop_gid,
-        // kennel-init runs as the kennel's uid 0 (it holds CAP_SETGID in the userns), so it
+        // kennel-bin-init runs as the kennel's uid 0 (it holds CAP_SETGID in the userns), so it
         // sets the granted supplementary groups on each child as it drops it to the operator.
         groups: plan.supplementary_groups.clone(),
         landlock_fs: plan.landlock_fs.clone(),
@@ -975,7 +975,7 @@ fn supervision_from(
         ulimits: plan.ulimits.clone(),
         aux: plan.aux.clone(),
         interactive: plan.interactive_return_fd.is_some(),
-        // kennel-init runs this timer and, at expiry, makes the blocking NOTIFY_TTL_EXPIRED
+        // kennel-bin-init runs this timer and, at expiry, makes the blocking NOTIFY_TTL_EXPIRED
         // call to kenneld (which freezes + decides). The action is decided kenneld-side.
         ttl_seconds: plan.ttl_seconds,
     }
@@ -989,7 +989,7 @@ fn supervision_from(
 /// `resolve_pid` yields the pid whose `/proc/<pid>/root` holds the device, retried until
 /// the device appears (construction runs concurrently with our return). On the legacy
 /// path that is the workload (a `/children` walk from the spawn intermediate); on the
-/// factory path it is `kennel-init` directly. `lifecycle` carries the init-pid gate +
+/// factory path it is `kennel-bin-init` directly. `lifecycle` carries the init-pid gate +
 /// supervision-half kenneld serves over node 0 (disabled on the legacy path).
 fn acquire_binder_node0(
     init_pid: u32,
@@ -1002,7 +1002,7 @@ fn acquire_binder_node0(
 
     // Deterministic: the factory has mounted the binderfs and is blocking its child before
     // `fexecve` (it reported the pid only after the device existed), so this is a single open with
-    // no retry. The pid is stable across the upcoming `fexecve` (same process becomes kennel-init).
+    // no retry. The pid is stable across the upcoming `fexecve` (same process becomes kennel-bin-init).
     let dev = format!("/proc/{init_pid}/root/dev/binderfs/binder");
     // std opens files O_CLOEXEC by default on Unix.
     let file = std::fs::OpenOptions::new()
@@ -1028,7 +1028,7 @@ fn acquire_binder_node0(
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
 /// Wire the `AF_UNIX` socket facade (§7.6 / `07-1` §7.1.5): launch the in-kennel
-/// `kennel-afunix-shim` proxy so each granted socket is presented at its in-view path
+/// `facade-afunix-shim` proxy so each granted socket is presented at its in-view path
 /// and brokered, on connect, to the `org.projectkennel.IAfUnix` binder facade — which
 /// resolves the name to the real host socket and returns a connected fd. No host
 /// socket path is ever bound into the view (the bind-mount shim it replaces is gone).
@@ -1042,13 +1042,13 @@ const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 /// the deployment provides the proxy binary. When grants exist but the binary is absent,
 /// it warns and serves nothing — fail-closed, never a silent host-socket bind.
 fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivoting: bool) {
-    use kennel_syscall::landlock::AccessFs;
+    use kennel_lib_syscall::landlock::AccessFs;
     if unix.shims.is_empty() || !pivoting {
         return;
     }
     let Some(shim_bin) = unix.afunix_shim_bin.clone() else {
         eprintln!(
-            "kenneld: warning: kennel grants [unix] sockets but no kennel-afunix-shim binary is \
+            "kenneld: warning: kennel grants [unix] sockets but no facade-afunix-shim binary is \
              configured (deployment `afunix_shim`); the sockets will be unserved."
         );
         return;
@@ -1074,7 +1074,7 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
     }
     // Bind the proxy binary into the view at its own path (read-only) and grant execute.
     if let Some(view) = plan.view.as_mut() {
-        view.binds.push(kennel_spawn::BindMount {
+        view.binds.push(kennel_lib_spawn::BindMount {
             source: shim_bin.clone(),
             target: shim_bin.clone(),
             writable: false,
@@ -1087,35 +1087,35 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
     // above. Its shared libraries load via READ from the view's lib dirs and are not
     // execute-gated (07-3-exec). `skip_missing` drops a loader the view omits.
     let resolution =
-        kennel_policy::libresolve::resolve_loaders(&[shim_bin.to_string_lossy().into_owned()]);
+        kennel_lib_policy::libresolve::resolve_loaders(&[shim_bin.to_string_lossy().into_owned()]);
     for loader in resolution.loaders {
         plan.landlock_fs
             .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
     }
-    // Register the proxy as a seal-launched aux: `kennel-afunix-shim <device>
+    // Register the proxy as a seal-launched aux: `facade-afunix-shim <device>
     // <shim-path>=<name> ...`. It runs inside the sealed view, brokers by logical name
     // (which the facade resolves), and dies with the kennel's PID namespace.
     let mut args = vec![IN_VIEW_BINDER_DEVICE.to_owned()];
     for shim in &unix.shims {
         args.push(format!("{}={}", shim.shim_path.display(), shim.name));
     }
-    plan.aux.push(kennel_spawn::AuxProcess {
+    plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: shim_bin,
         args,
     });
 }
 
-/// Bind `kennel-netshim` into the view, launch it as a seal aux on the kennel loopback `listen`,
+/// Bind `facade-netshim` into the view, launch it as a seal aux on the kennel loopback `listen`,
 /// and point the workload's proxy env at it.
 ///
 /// netshim is the workload's SOCKS5 endpoint: it forwards each connect to binder node 0 as a
 /// `CONNECT_INET` transaction, which kenneld decides and dials via the host-side delegate. The
 /// `socks5h` scheme keeps name resolution on the proxy side (the kennel holds names, not addresses).
 fn apply_netshim(plan: &mut Plan, netshim_bin: &Path, listen: SocketAddr, command: &mut Command) {
-    use kennel_syscall::landlock::AccessFs;
+    use kennel_lib_syscall::landlock::AccessFs;
     // Bind the binary into the view at its own path (read-only) and grant execute + its loaders.
     if let Some(view) = plan.view.as_mut() {
-        view.binds.push(kennel_spawn::BindMount {
+        view.binds.push(kennel_lib_spawn::BindMount {
             source: netshim_bin.to_path_buf(),
             target: netshim_bin.to_path_buf(),
             writable: false,
@@ -1124,13 +1124,13 @@ fn apply_netshim(plan: &mut Plan, netshim_bin: &Path, listen: SocketAddr, comman
     plan.landlock_fs
         .push((netshim_bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
     let resolution =
-        kennel_policy::libresolve::resolve_loaders(&[netshim_bin.to_string_lossy().into_owned()]);
+        kennel_lib_policy::libresolve::resolve_loaders(&[netshim_bin.to_string_lossy().into_owned()]);
     for loader in resolution.loaders {
         plan.landlock_fs
             .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
     }
-    // `kennel-netshim <binder-device> <listen-addr>`, run inside the sealed view.
-    plan.aux.push(kennel_spawn::AuxProcess {
+    // `facade-netshim <binder-device> <listen-addr>`, run inside the sealed view.
+    plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: netshim_bin.to_path_buf(),
         args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), listen.to_string()],
     });

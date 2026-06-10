@@ -1,4 +1,4 @@
-//! Root-gated e2e for the `kennel-init` lifecycle pull over binder node 0.
+//! Root-gated e2e for the `kennel-bin-init` lifecycle pull over binder node 0.
 //!
 //! A child holds node 0 with a populated [`binder::Lifecycle`] (init pid = the client's
 //! pid + a supervision blob); the client transacts `GET_SANDBOX_PLAN` and gets back the
@@ -18,10 +18,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kennel_binder::binderfs;
-use kennel_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
-use kennel_binder::service::lifecycle;
-use kennel_policy::{AuditRuntime, BinderRuntime, UnixRuntime};
+use kennel_lib_binder::binderfs;
+use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
+use kennel_lib_binder::service::lifecycle;
+use kennel_lib_policy::{AuditRuntime, BinderRuntime, UnixRuntime};
 use kenneld::binder;
 
 const ROLE_ENV: &str = "KENNEL_BINDER_ROLE";
@@ -61,7 +61,7 @@ fn run_manager() {
         init_host_pid: Some(init_pid),
         supervision: SUPERVISION.to_vec(),
         cgroup: std::path::PathBuf::new(),
-        ttl_action: kennel_policy::TtlAction::Exit,
+        ttl_action: kennel_lib_policy::TtlAction::Exit,
     };
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");
@@ -117,7 +117,7 @@ fn run_client() {
     assert!(ready.exists(), "manager child did not become ready");
 
     // Pull: GET_SANDBOX_PLAN returns the supervision bytes as a plain data reply. (The
-    // interactive pty rides the construction channel now — kennel-init inherits the return
+    // interactive pty rides the construction channel now — kennel-bin-init inherits the return
     // socket at PTY_RETURN_FD — not this reply; see interactive_pty in tests/e2e.rs.)
     let device = dir.join("binder");
     let file = std::fs::OpenOptions::new()

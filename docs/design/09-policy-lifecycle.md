@@ -121,7 +121,7 @@ ttl = "2h"           # kennel auto-exits after this duration
 ttl_action = "exit"  # "exit" | "warn" | "renew"
 ```
 
-The deadline is held **inside** the kennel — `kennel-init` (PID 1) runs the timer — and enforced with the **cgroup v2 freezer**, not an external polling reaper. At expiry `kennel-init` makes a single blocking call out to the daemon, which owns the kennel's cgroup; the daemon **atomically freezes** the whole kennel (so nothing runs past the deadline — there is no "acts during the grace window" race) and then, per `ttl_action`:
+The deadline is held **inside** the kennel — `kennel-bin-init` (PID 1) runs the timer — and enforced with the **cgroup v2 freezer**, not an external polling reaper. At expiry `kennel-bin-init` makes a single blocking call out to the daemon, which owns the kennel's cgroup; the daemon **atomically freezes** the whole kennel (so nothing runs past the deadline — there is no "acts during the grace window" race) and then, per `ttl_action`:
 
 - `exit`: terminate the frozen kennel. The freeze is atomic and the kill reaches frozen tasks, so termination is immediate and race-free — and it is the *daemon's* kill, which a compromised in-kennel PID 1 cannot refuse.
 - `warn`: a momentary atomic pause, an audit event, then **resume** — the workload keeps running. The same blocking call returns and the kennel picks up exactly where it was suspended.

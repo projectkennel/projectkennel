@@ -48,7 +48,7 @@ This document has three audiences. Read the chapters that match yours.
 | 5 | Template system |
 | 6 | Worked examples |
 | 7.1 | Binder: the inter-namespace gateway |
-| 7.2 | `kennel-init` — the kennel's PID 1 |
+| 7.2 | `kennel-bin-init` — the kennel's PID 1 |
 | 7.3 | Policy surface: binary execution |
 | 7.4 | Policy surface: filesystem |
 | 7.5 | Policy surface: network |
