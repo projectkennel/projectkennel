@@ -1,0 +1,76 @@
+# ============================================================================
+# Leaf policy: openclaw on a single project   (~/.config/kennel/kennels/openclaw-myproj.toml)
+# Derives from: ai-coding-strict@v1
+# Threat catalogue: THREATS.md v0.3
+#
+# WHAT THIS IS
+#   openclaw is an open-source, autonomous coding agent — it reads your code,
+#   writes code, runs tests, fetches dependencies, and calls a remote model API,
+#   all on its own initiative. It is exactly the workload Project Kennel exists
+#   for, and it is treated as ADVERSARIAL: assume the agent (or a dependency it
+#   pulls, or a prompt-injected instruction it follows) will try to read your
+#   credentials, exfiltrate the project, probe the host, and reach the network
+#   off-leash. Nothing here trusts the agent's good behaviour; every capability
+#   is denied unless this policy or its template chain grants it for a stated
+#   reason.
+#
+#   The template (ai-coding-strict) already encodes the hard part: a constructed
+#   $HOME with the credential locations absent (not merely unreadable), a
+#   per-kennel network namespace whose ONLY egress path is the binder gateway to
+#   the proxy, an exec allowlist, a seccomp filter, and a per-kennel gpg-agent
+#   instead of the user's. This leaf adds the only two things the template can't
+#   know: WHICH project tree, and WHICH model endpoint.
+#
+# HOW TO READ A DELTA
+#   `[[fs.read.add]]` etc. are array-of-tables deltas (`+=`): each entry is
+#   APPENDED to the effective list the template chain produced. Every delta
+#   entry must carry a `reason` — the policy refuses to compile without one, so a
+#   grant is never silent. Scalars (not shown here) override; lists add/remove.
+# ============================================================================
+
+# A leaf names its parent by a single versioned reference and names itself. There
+# is no separate `template_version` field — the version rides the reference, and
+# the lockfile pins the exact fragment hash at compile time.
+template_base = "ai-coding-strict@v1"
+name = "openclaw-myproj"
+
+
+# --- The project tree -------------------------------------------------------
+# The agent gets read+write on EXACTLY this subtree and nothing else under $HOME.
+# Everything outside it is absent from the constructed view, so the agent cannot
+# even enumerate ~/.ssh, ~/.aws, ~/.config/gh, or sibling projects — they are not
+# "denied", they do not exist in its filesystem namespace (T1.1).
+#
+# CAVEAT, stated plainly: a secret that lives INSIDE this tree (a committed .env,
+# a stray id_rsa, a .git/config with a token) is readable by the agent, because
+# you granted the tree. Keep secrets out of project trees — the sandbox cannot
+# distinguish your code from your secrets once both are under a granted path.
+[[fs.read.add]]
+path = "~/projects/myproj/**"
+reason = "the project openclaw is working on"
+
+[[fs.write.add]]
+path = "~/projects/myproj/**"
+reason = "openclaw edits the project in place"
+
+
+# --- The model endpoint -----------------------------------------------------
+# The ONE destination this agent may reach beyond the template's registries+git
+# hosts. The kennel cannot resolve names itself (no resolver in its net-ns);
+# kenneld resolves `api.anthropic.com`, re-checks the result against the deny
+# invariants, pins it, and dials it through the host-side delegate. A poisoned or
+# rebinding DNS answer is caught before the dial.
+#
+# RESIDUAL — T1.8 (exfiltration via an allowed destination): the agent can put
+# anything it can read into a request to this endpoint. The allowlist bounds
+# WHERE bytes can go, not WHAT goes there. This is irreducible for any agent that
+# legitimately talks to a model API; the mitigations are external (don't grant a
+# tree with high-value secrets; the audit log records every connection; an
+# optional TLS-inspection layer if your threat model demands payload inspection).
+[[net.allow.add]]
+name = "api.anthropic.com"
+ports = [443]
+protocol = "tcp"
+tls.required = true
+reason = "the model API openclaw calls"
+threats.exposed = ["T1.8"]

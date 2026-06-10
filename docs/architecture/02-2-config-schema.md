@@ -58,7 +58,7 @@ The full section list:
 |---|---|---|
 | `[exec]` | What binaries the workload may execve() | §7.3 |
 | `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction | §7.4 |
-| `[net]`, `[net.proxy]`, `[net.bpf]` | Network mode (four-mode taxonomy), proxy destination allowlist + denylist, socket-capability shaping, bind rules, audit. **The four-mode taxonomy + `[net.proxy]`/`[net.bpf]` split is roadmap** (the as-built runtime still shares the host net-ns); see §The `[net]` section. | §7.5 |
+| `[net]` and `[net.*]` | Egress mode (`constrained`/`open`/`none`), the `[[net.allow]]` destination allowlist, `[net.deny]` invariants, `[net.bind]` gate, `[net.ipv6]`, and `[net.audit]`. The per-kennel net-ns is the egress boundary (§7.5); the `host`/`unconstrained` modes + `[net.proxy]`/`[net.bpf]` nesting are roadmap — see §The `[net]` section. | §7.5 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
 | `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
 | `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
@@ -74,7 +74,7 @@ The full section list:
 | `[lifecycle]` | TTL and TTL-action | §9 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
-Each section's specific fields are documented in the corresponding design-document chapter. This chapter describes *how the sections compose and inherit*, not what each field means.
+This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for `[net]` and `[net.*]` (the §The `[net]` section below, kept exact against the parser). Each other section's specific fields are documented in the corresponding design-document chapter; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
 
 ---
 
@@ -89,7 +89,7 @@ Fields that name filesystem paths use the following syntax:
 
 Tilde expansion does not happen until signature verification of the file containing the tilde-path completes. An attacker-controlled template cannot use `~/.ssh/...` to refer to the operator's keys at parse time.
 
-Paths in `fs.read`, `fs.write`, `fs.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax. Paths in `exec.allow` (there is no `exec.deny` — execution is deny-by-default, §7.3.4) are absolute only — no `~` expansion — but do accept globs including `**` (e.g. `/usr/lib/git-core/**`); a bare `**`/`/**` is the explicit `permissive-exec` opt-out and is the one case the compiler warns about.
+Paths in `fs.read`, `fs.write`, `fs.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax. Paths in `exec.allow` and `exec.deny` are absolute only — no `~` expansion — but do accept globs including `**` (e.g. `/usr/lib/git-core/**`); a bare `**`/`/**` in `exec.allow` is the explicit `permissive-exec` opt-out and is the one case the compiler warns about. Execution is deny-by-default (§7.3.4): `exec.allow` is the allowlist and `exec.deny` carves exceptions out of it (a path or glob that is refused even if an `allow` glob would otherwise admit it).
 
 ---
 
@@ -429,79 +429,82 @@ The signature trust differs by artefact (`07-paths.md` §Policy-signing trust sp
 
 ---
 
-## The `[net]` section — mode, proxy, BPF
+## The `[net]` section — egress mode, allowlist, bind, audit
 
-> **Roadmap.** The four-mode taxonomy and the `[net.proxy]` / `[net.bpf]` split below are the
-> network-namespace redesign (design §7.5, architecture [`02-5-binder-net.md`](02-5-binder-net.md)).
-> The as-built runtime still **shares the host network namespace** and reads the three-mode
-> `[net]` form (the `[net.mode]` invariant above). This section is the forward schema; it
-> supersedes the standalone `net-policy.toml` reference (now retired). Field semantics are
-> design §7.5; this is the section's structure.
+This documents the **as-built** `[net]` schema — the form `kennel_lib_policy::source::NetSection`
+parses today (`deny_unknown_fields`, so an undocumented key is a hard error). The fields are flat
+under `[net]`; there is no `[net.proxy]` / `[net.bpf]` nesting in the parsed schema (see the roadmap
+note at the end for where that split is headed). Field *semantics* are design §7.5; this is the
+structure a policy author writes.
 
-`[net]` is a pure header — `mode`, `reason`, `threats.reinstated`. Everything else belongs to
-`[net.proxy]` (the proxy / destination-allowlist layer) or `[net.bpf]` (the socket-capability
-layer). The four modes, in descending order of isolation:
+### `[net]` scalars
 
-| `mode` | Net-ns | Proxy | BPF | Notes |
-|---|---|---|---|---|
-| `none` | `CLONE_NEWNET`, empty stack | absent | absent | no network surface, no `INet` node; rejects `[net.proxy]`/`[net.bpf]` |
-| `constrained` | `CLONE_NEWNET` + loopback alias | enforces the named-destination allowlist | optional (defence-in-depth) | net-ns is the enforcement primitive |
-| `unconstrained` | `CLONE_NEWNET` + loopback alias | present for audit + invariant denylist; no name allowlist | shapes traffic at the socket level | open egress, bounds retained |
-| `host` | host net-ns (no `CLONE_NEWNET`) | mandatory (audit floor) | **primary** enforcement primitive | requires `reason`; auto-instates `threats.reinstated` |
-
-`reason` is required for `mode = host`; the compiler rejects `host` without it (`02-1-cli.md`).
-
-**`threats.reinstated`.** A list of threat IDs the mode re-opens. For `mode = host` the compiler
-sets it automatically to include `"T1.6:host-recon"` (the host-network-recon threat the per-kennel
-net-ns otherwise closes — design THREATS.md, §7.5). It may be **extended** by the author but
-**not cleared**; declaring it explicitly is for `kennel diff` visibility only. It is the inverse of
-the informational `threats.exposed` tag (§Threat tagging): `reinstated` records a guarantee the
-chosen mode withdraws, set/enforced by the compiler rather than advisory.
-
-### `[net.proxy]`
-
-The proxy / destination-allowlist layer. Present for every mode except `none`.
-
-| Field / table | Type | Notes |
+| Field | Type | Notes |
 |---|---|---|
-| `listen_v4` / `listen_v6` | bool | enable the per-family SOCKS5 listener |
-| `listen_v4_address` / `listen_v6_address` | `offset:port` | within the kennel's `/28` (v4) / `/64` (v6); absent → `1:1080` |
-| `accept_private_resolved` | bool | accept names that resolve to RFC1918/ULA (default `false`; rare) |
-| `[[net.proxy.allow]]` | table array | named/CIDR destination allowlist (`constrained`; optional in `host`) |
-| `[[net.proxy.deny]]` | table array | optional policy denylist, evaluated **before** allow |
-| `[[net.proxy.invariant_deny]]` | table array | non-removable (cloud-metadata IMDS, link-local); the framework invariant |
-| `[[net.proxy.host_services]]` | table array | exact `addr:port` literals reachable despite the host-loopback invariant deny (e.g. the SSH bastion, §7.10.4) |
+| `mode` | string | `"constrained"` (allowlist enforced), `"open"` (only the invariant denies), or `"none"` (no egress). The settled schema has two enforced egress modes (constrained/open); `none` is the no-network posture. |
+| `proxy_listen_v4` / `proxy_listen_v6` | bool | whether the per-kennel egress endpoint listens on that family (default: per kennel addressing). |
+| `proxy_listen_v4_address` / `proxy_listen_v6_address` | string `"offset:port"` | the listen offset+port within the kennel's `/28` (v4) / `/64` (v6); absent → `1:1080`. |
 
-An `[[net.proxy.allow]]` entry carries either `name` (resolved proxy-side — `socks5h://` semantics;
-the kennel never resolves DNS itself) **or** `cidr` (raw address), plus `ports` (a list; empty = all)
-and `protocol`, and a required `reason`. `[[net.proxy.deny]]` carries `cidr` + `ports`.
-`[[net.proxy.invariant_deny]]` and `[[net.proxy.host_services]]` carry a `reason`.
+In the network-namespace model the workload-facing endpoint is `facade-socks5` on the kennel
+loopback; `proxy_listen_*` set where it binds. The kennel has no other route off its loopback
+(§7.5), so egress crosses the binder gateway to kenneld, which dials through the host-side
+`host-netproxy` delegate.
 
-### `[net.bpf]`
+### `[[net.allow]]` — the destination allowlist (array of tables)
 
-The socket-capability layer. Optional in `constrained` (defence-in-depth — the net-ns is the
-primitive), meaningful in `unconstrained`, and the **primary** enforcement primitive in `host`
-(no net-ns boundary exists). Enforced at `socket()`/`bind()`/`connect()` by cgroup BPF
-([`02-7-bpf-abi.md`](02-7-bpf-abi.md)).
+Each entry permits one destination. By **name** (resolved kenneld-side — the kennel never resolves
+DNS itself, so rebinding is structurally impossible) **or** by **CIDR** (a raw address, e.g. a
+loopback host service). Enforced in `constrained` mode; in `open` mode only the invariant denies apply.
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | the destination host (or dot-prefixed suffix). Mutually exclusive with `cidr`. |
+| `cidr` | string | a CIDR destination, when the rule is by-address. |
+| `ports` | array of int | permitted ports; empty = any port. |
+| `protocol` | string | `"tcp"`, `"udp"`, or `"any"`. |
+| `reason` | string | why this destination is permitted (**required** on a leaf delta). |
+| `tls.required` | bool | whether TLS is required to the destination (`[[net.allow]]` carries a `tls` sub-table). |
+| `threats` | table | `threats.exposed` / `threats.mitigated` — threat IDs this grant bears. |
+
+### `[net.deny]` — the invariant denylist
 
 | Table | Fields | Notes |
 |---|---|---|
-| `[net.bpf.families]` | `allow` | `inet` / `inet6` (default both). `AF_UNIX` is governed by `[unix]`, not here; `AF_NETLINK` is not a controllable axis; `AF_PACKET` requires `CAP_NET_RAW` (root-context kennel — compiler warns if unavailable). |
-| `[net.bpf.types]` | `allow` | `stream` / `dgram` / `seqpacket` (default all three); `raw` requires `CAP_NET_RAW`. |
-| `[net.bpf.protocols]` | `allow` | default `["tcp","udp"]`; `sctp` / `dccp` / `udplite` require explicit opt-in; absence is a deny. |
-| `[net.bpf.limits]` | `max_connections`, `max_connects_per_minute` | DoS bounds (cgroup caps), not security primitives. |
-| `[[net.bpf.bind]]` | `address`, `ports`, `protocol`, `reason` | bind allow-gate; in `host` the compiler annotates each rule `host_visible = true` (cannot be set `false`) and warns the listener is on the host stack. |
-| `[[net.bpf.allow]]` / `[[net.bpf.deny]]` | `cidr`, `ports`, `protocol`/`reason` | CIDR-level allow/deny at `connect()`/`bind()`, before the proxy sees the request (no name resolution — CIDR only). |
+| `[[net.deny.invariant]]` | `cidr`, `reason`, `threats` | non-removable categorical denies (cloud-metadata IMDS, link-local, host loopback), re-checked against every *resolved* address — an allowed name that resolves into a denied range is still refused. A **leaf may not declare** `[[net.deny.invariant]]`; invariants are template/fragment-author tools (`LeafPolicy::validate` rejects it). |
 
-### Evaluation order (constrained / unconstrained / host)
+### `[net.bind]` — the bind gate (§7.5.7)
 
-1. `[net.bpf]` — families / types / protocols / `bind` / `allow` / `deny`, at `socket()` and `bind()`.
-2. `[[net.proxy.invariant_deny]]` — cloud metadata, link-local (non-removable).
-3. `[[net.proxy.deny]]` — optional policy denylist.
-4. `[[net.proxy.allow]]` — `constrained` only; absent = open in `unconstrained` / `host`.
+Governs what the workload may `bind(2)`. All fields optional.
 
-`mode = none` has no `[net.proxy]`/`[net.bpf]` and no `INet` binder node; the compiler rejects
-either section for `mode = none`.
+| Field | Type | Notes |
+|---|---|---|
+| `inaddr_any_policy` | string | wildcard IPv4 bind handling: `"rewrite"` (to the kennel loopback) or `"deny"`. |
+| `in6addr_any_policy` | string | wildcard IPv6 bind handling. |
+| `allow_host_loopback_v4` / `allow_host_loopback_v6` | bool | whether binding the host loopback is permitted. |
+| `min_port` | int | lowest bindable port (the privileged-port floor, T6). |
+| `allowed_ports` | array of int | explicit bindable-port allowlist; empty/absent = any port at or above `min_port`. Capped at `MAX_BIND_PORTS` at translation. |
+
+### `[net.ipv6]`
+
+| Field | Type | Notes |
+|---|---|---|
+| `force_v6only` | bool | set `IPV6_V6ONLY=1` so a dual-stack socket cannot escape the v4 bind rewrite. |
+
+### `[net.audit]` — per-kennel egress audit (distinct from the global `[audit]`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `log_path` | string | where the per-kennel egress JSONL log is written. |
+| `level` | string | egress audit verbosity: `"summary"` or `"full"`. |
+
+> **Roadmap.** The four-mode taxonomy (`none`/`constrained`/`unconstrained`/`host`) and a
+> `[net.proxy]` / `[net.bpf]` restructuring are the forward contract in design §7.5 /
+> [`02-5-binder-net.md`](02-5-binder-net.md): a `host` mode that shares the host net-ns with BPF as the
+> primary gate, and an `unconstrained` mode between `open` and `host`. The per-kennel **net-ns is
+> built** (§7.5, the egress boundary) and cgroup BPF is present as defence-in-depth; what the parsed
+> schema does not yet carry is the `host`/`unconstrained` modes or the `[net.proxy]`/`[net.bpf]`
+> field nesting. When those land, this section gains the nested tables; until then the flat `[net]`
+> form above is authoritative.
 
 ---
 
@@ -521,15 +524,19 @@ kennel spawning.
 
 | Field | Type | Notes |
 |---|---|---|
-| `service` | string | the service name (may **not** begin with `org.projectkennel.` — reserved) |
+| `name` | string | the service name (may **not** begin with `org.projectkennel.` — reserved) |
 | `accept_from` | array of strings | peer-kennel names permitted to consume it |
+| `reason` | string | why this service is offered (the audited justification) |
+| `threats` | table | `threats.exposed` / `threats.mitigated` — threat IDs this grant bears |
 
 `[[binder.consume]]` — services this kennel may look up from named providers:
 
 | Field | Type | Notes |
 |---|---|---|
-| `service` | string | the service name (may **not** begin with `org.projectkennel.`) |
+| `name` | string | the service name (may **not** begin with `org.projectkennel.`) |
 | `from` | string | the providing kennel's name |
+| `reason` | string | why this lookup is needed |
+| `threats` | table | `threats.exposed` / `threats.mitigated` |
 
 A cross-instance lookup succeeds only when **both** sides declare it: the consumer's
 `[[binder.consume]]` names the service and provider, and the provider's `[[binder.provide]]` names
@@ -546,7 +553,7 @@ has no spawn capability of its own unless its template independently declares `[
 
 The `org.projectkennel.*` prefix is reserved (`02-4` §The reserved namespace). It is a **categorical
 policy-compile error** — not a runtime check (design §7.1.4) — for any `[[binder.provide]]` or
-`[[binder.consume]]` `service` to begin with `org.projectkennel.`; only kenneld registers under that
+`[[binder.consume]]` `name` to begin with `org.projectkennel.`; only kenneld registers under that
 prefix. The compiler rejects such a policy by name, the same way it rejects an out-of-range
 `[net.mode]`.
 
