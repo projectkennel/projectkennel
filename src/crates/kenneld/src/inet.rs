@@ -11,8 +11,12 @@
 //!
 //! [`verb::CONNECT_INET`]: kennel_binder::service::verb::CONNECT_INET
 
+use std::io;
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 
 use kennel_binder::service::transport;
 use kennel_netproxy::allow::{
@@ -34,6 +38,9 @@ pub struct NetRuntime {
     /// Sanctioned host-loopback services: exact `addr:port` literals reachable despite the
     /// host-loopback invariant deny (the SSH bastion, §7.10.4).
     host_services: Vec<SocketAddr>,
+    /// The per-kennel `kenneld`↔delegate command socket the conduit dial is driven over (the path
+    /// `kennel-netproxy` binds). `None` when the kennel runs no egress proxy.
+    command_socket: Option<PathBuf>,
 }
 
 impl NetRuntime {
@@ -45,13 +52,20 @@ impl NetRuntime {
     ///
     /// The parser's error string if the TOML does not parse (it is kenneld's own output, so this is
     /// a build bug, surfaced rather than silently denying).
-    pub fn from_toml(toml: &str) -> Result<Self, String> {
+    pub fn from_toml(toml: &str, command_socket: Option<PathBuf>) -> Result<Self, String> {
         let cfg = kennel_netproxy::config::from_toml_str(toml).map_err(|e| e.to_string())?;
         Ok(Self {
             ruleset: cfg.ruleset,
             accept_private_resolved: cfg.accept_private_resolved,
             host_services: cfg.host_services,
+            command_socket,
         })
+    }
+
+    /// The conduit command socket, if the kennel has an egress delegate.
+    #[must_use]
+    pub fn command_socket(&self) -> Option<&Path> {
+        self.command_socket.as_deref()
     }
 
     /// A deny-all runtime (network mode `none`): every `INet` request is refused. Used when the
@@ -66,6 +80,7 @@ impl NetRuntime {
             },
             accept_private_resolved: false,
             host_services: Vec::new(),
+            command_socket: None,
         }
     }
 
@@ -170,6 +185,28 @@ pub fn decide(
     }
 }
 
+/// Drive the conduit dial, returning the kennel-facing socketpair end for the binder reply.
+///
+/// Mint the socketpair, hand the delegate one end plus the pinned addresses over its command
+/// socket, and return the other end. The delegate dials a pinned address and splices its end to the
+/// upstream; kenneld touches no payload byte and never re-enters the data path.
+///
+/// # Errors
+///
+/// The OS error if the socketpair, the connect to the delegate, or the command send fails.
+pub fn dial_via_delegate(
+    command_socket: &Path,
+    port: u16,
+    pinned: &[IpAddr],
+) -> io::Result<UnixStream> {
+    let (delegate_end, kennel_end) = UnixStream::pair()?;
+    let command = UnixStream::connect(command_socket)?;
+    let payload = kennel_netproxy::conduit::encode_command(port, pinned);
+    kennel_syscall::scm::send_with_fds(command.as_fd(), &payload, &[delegate_end.as_fd()])?;
+    // `delegate_end` drops here; the delegate holds its received copy via SCM_RIGHTS.
+    Ok(kennel_end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +240,7 @@ mod tests {
             },
             accept_private_resolved: false,
             host_services: Vec::new(),
+            command_socket: None,
         }
     }
 
@@ -307,5 +345,40 @@ mod tests {
             decide(&rt, &resolver, &dest, 2222, Transport::Tcp),
             InetDecision::Pinned(vec![v4("127.0.0.1")])
         );
+    }
+
+    #[test]
+    fn dial_via_delegate_round_trips_bytes_through_the_conduit() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpListener};
+        use std::os::unix::net::UnixListener;
+
+        // An echo upstream the delegate dials.
+        let echo = TcpListener::bind("127.0.0.1:0").expect("bind echo");
+        let echo_addr = echo.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = echo.accept() {
+                let mut b = [0u8; 64];
+                if let Ok(n) = s.read(&mut b) {
+                    let _ = s.write_all(b.get(..n).unwrap_or_default());
+                }
+            }
+        });
+
+        // The real delegate conduit server on a per-kennel command socket.
+        let sock = std::env::temp_dir().join(format!("kennel-inet-dial-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind cmd socket");
+        std::thread::spawn(move || kennel_netproxy::conduit::serve_conduit(&listener));
+
+        // kenneld's side: dial via the delegate, get the kennel-facing conduit end back.
+        let mut end =
+            dial_via_delegate(&sock, echo_addr.port(), &[echo_addr.ip()]).expect("dial");
+        end.write_all(b"ping").expect("write");
+        end.shutdown(Shutdown::Write).expect("half-close");
+        let mut got = Vec::new();
+        end.read_to_end(&mut got).expect("read echo");
+        assert_eq!(got, b"ping");
+        let _ = std::fs::remove_file(&sock);
     }
 }

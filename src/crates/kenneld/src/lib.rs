@@ -655,14 +655,23 @@ fn bring_up<P: Privileged + Sync>(
             if let Some(audit) = proxy_audit {
                 std::fs::create_dir_all(&audit.dir)?;
             }
-            let config =
-                crate::proxy::config_toml(net, &listen, proxy_audit, ssh.host_service.as_slice())
-                    .map_err(Error::ProxyConfig)?;
+            std::fs::create_dir_all(&setup.config_dir)?;
+            // The per-kennel kenneld↔delegate conduit command socket (§7.5.2): the delegate binds
+            // it; kenneld connects per INet CONNECT to drive the dial. Owner-only (the config_dir).
+            let command_socket = setup.config_dir.join(format!("netproxy-cmd-{ctx}.sock"));
+            let config = crate::proxy::config_toml(
+                net,
+                &listen,
+                proxy_audit,
+                ssh.host_service.as_slice(),
+                Some(&command_socket),
+            )
+            .map_err(Error::ProxyConfig)?;
             // The INet decision runtime is built from the same config the netproxy reads, parsed
             // through the netproxy's own reader, so kenneld's decision point cannot drift from the
             // delegate's enforcement.
-            let net_runtime = crate::inet::NetRuntime::from_toml(&config).map_err(Error::ProxyConfig)?;
-            std::fs::create_dir_all(&setup.config_dir)?;
+            let net_runtime = crate::inet::NetRuntime::from_toml(&config, Some(command_socket))
+                .map_err(Error::ProxyConfig)?;
             let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
             std::fs::write(&config_path, config)?;
             (Some(config_path), net_runtime)

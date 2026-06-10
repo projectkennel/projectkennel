@@ -59,6 +59,9 @@ struct ProxyToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     audit_log: Option<String>,
     accept_private_resolved: bool,
+    // The per-kennel kenneld↔delegate conduit command socket (§7.5.2); the delegate binds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_socket: Option<String>,
     net: NetToml,
     // A table, so declared after the scalars and `net`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,6 +199,7 @@ pub fn config_toml(
     listen: &[SocketAddr],
     audit: Option<&ProxyAudit>,
     host_services: &[SocketAddr],
+    command_socket: Option<&std::path::Path>,
 ) -> Result<String, String> {
     let mut allow: Vec<AllowToml> = net.allow.iter().map(allow_from_cidr).collect();
     allow.extend(net.allow_names.iter().map(allow_from_name));
@@ -220,6 +224,7 @@ pub fn config_toml(
         // kenneld supplies the `[audit]` block, not the legacy single-file path.
         audit_log: None,
         accept_private_resolved: false,
+        command_socket: command_socket.map(|p| p.display().to_string()),
         net: NetToml {
             mode: mode_str(net.mode),
             allow,
@@ -299,7 +304,7 @@ mod tests {
             "127.0.144.81:1080".parse().expect("v4"),
             "[fd00:0:1:1::1]:1080".parse().expect("v6"),
         ];
-        let toml = config_toml(&net(), &listen, None, &[]).expect("toml");
+        let toml = config_toml(&net(), &listen, None, &[], None).expect("toml");
 
         // The netproxy's own reader must accept what we wrote, and reconstruct
         // the same ruleset — the anti-drift guarantee.
@@ -333,7 +338,7 @@ mod tests {
             compress_after_seconds: Some(3600),
             retain_count: Some(8),
         };
-        let toml = config_toml(&net(), &listen, Some(&audit), &[]).expect("toml");
+        let toml = config_toml(&net(), &listen, Some(&audit), &[], None).expect("toml");
         let cfg = kennel_netproxy::config::from_toml_str(&toml).expect("parse");
         let parsed = cfg.audit.expect("audit block present");
         assert_eq!(parsed.kennel, "ai-coding");
@@ -344,7 +349,7 @@ mod tests {
         assert_eq!(parsed.compress_after_seconds, Some(3600));
         assert_eq!(parsed.retain_count, Some(8));
         // No [audit] ⇒ the writer falls back (legacy/standalone).
-        let none = config_toml(&net(), &listen, None, &[]).expect("toml");
+        let none = config_toml(&net(), &listen, None, &[], None).expect("toml");
         assert!(kennel_netproxy::config::from_toml_str(&none)
             .expect("parse")
             .audit

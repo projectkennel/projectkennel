@@ -61,6 +61,15 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_host_services(cfg.host_services),
     );
+    // The INet conduit (§7.5.2): bind the per-kennel kenneld↔delegate command socket (owner-only)
+    // and serve the dumb dials on it, alongside the SOCKS5/HTTP listeners. kenneld drives it.
+    if let Some(sock) = cfg.command_socket {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::remove_file(&sock); // clear a stale socket from a prior run
+        let conduit = std::os::unix::net::UnixListener::bind(&sock)?;
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+        std::thread::spawn(move || kennel_netproxy::conduit::serve_conduit(&conduit));
+    }
     // Live-reload (§02-6): watch the config file and swap the ruleset/host-services
     // in place when `kenneld` rewrites it, without restarting or dropping connections.
     spawn_reloader(Arc::clone(&proxy), path.to_path_buf());

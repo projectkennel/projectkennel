@@ -68,6 +68,9 @@ pub struct ProxyConfig {
     pub ruleset: Ruleset,
     /// Whether a name may connect to a resolved special-use address.
     pub accept_private_resolved: bool,
+    /// The per-kennel `kenneld`↔delegate conduit command socket to bind and serve (§7.5.2), or
+    /// `None` for a standalone proxy with no `INet` conduit.
+    pub command_socket: Option<PathBuf>,
     /// Sanctioned host-loopback services (`[[net.host_services]]`, §7.5): exact
     /// `addr:port` literals reachable despite the host-loopback invariant deny.
     pub host_services: Vec<SocketAddr>,
@@ -179,6 +182,8 @@ struct RawConfig {
     audit_log: Option<PathBuf>,
     #[serde(default)]
     accept_private_resolved: bool,
+    #[serde(default)]
+    command_socket: Option<PathBuf>,
     net: RawNet,
     #[serde(default)]
     audit: Option<RawAudit>,
@@ -357,6 +362,7 @@ impl RawConfig {
             listen,
             ruleset: Ruleset { mode, allow, deny },
             accept_private_resolved: self.accept_private_resolved,
+            command_socket: self.command_socket,
             host_services,
             audit_log: self.audit_log,
             audit,

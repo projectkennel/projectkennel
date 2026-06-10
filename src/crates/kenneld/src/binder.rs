@@ -463,36 +463,42 @@ fn inet_connect(
 ) -> Reply {
     use kennel_netproxy::allow::Destination;
     use kennel_netproxy::dns::SystemResolver;
-    let (status, dest_label, port) =
-        match crate::inet::decode_request(&incoming.data, MAX_NAME) {
-            None => (status::BAD_REQUEST, String::new(), 0),
-            Some((transport, port, dest)) => {
-                let label = match &dest {
-                    Destination::Name(name) => name.clone(),
-                    Destination::Addr(addr) => addr.to_string(),
-                };
-                let status = match crate::inet::decide(net, &SystemResolver, &dest, port, transport)
-                {
-                    crate::inet::InetDecision::Pinned(_) => status::OK,
-                    crate::inet::InetDecision::Denied => status::DENIED,
-                    crate::inet::InetDecision::Unreachable => status::NOT_FOUND,
-                };
-                (status, label, port)
-            }
-        };
-    writer.emit(
-        &Event::new(
-            "binder.inet-connect",
-            Resource::Binder,
-            outcome_for(status),
-            Source::Kenneld,
-        )
+    let Some((transport, port, dest)) = crate::inet::decode_request(&incoming.data, MAX_NAME) else {
+        writer.emit(&inet_event(incoming, ctx, "", 0, Outcome::Error));
+        return Reply::Data(one(status::BAD_REQUEST));
+    };
+    let label = match &dest {
+        Destination::Name(name) => name.clone(),
+        Destination::Addr(addr) => addr.to_string(),
+    };
+    let (outcome, reply) = match crate::inet::decide(net, &SystemResolver, &dest, port, transport) {
+        crate::inet::InetDecision::Denied => (Outcome::Deny, Reply::Data(one(status::DENIED))),
+        crate::inet::InetDecision::Unreachable => {
+            (Outcome::Error, Reply::Data(one(status::NOT_FOUND)))
+        }
+        // Approved + pinned: mint the conduit via the delegate and hand the kennel-facing end back
+        // over binder. No command socket (no egress delegate) ⇒ unreachable.
+        crate::inet::InetDecision::Pinned(addrs) => net.command_socket().map_or_else(
+            || (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
+            |sock| {
+                crate::inet::dial_via_delegate(sock, port, &addrs).map_or_else(
+                    |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
+                    |end| (Outcome::Allow, Reply::Fd(OwnedFd::from(end))),
+                )
+            },
+        ),
+    };
+    writer.emit(&inet_event(incoming, ctx, &label, port, outcome));
+    reply
+}
+
+/// The audit event for an `INet` CONNECT decision.
+fn inet_event(incoming: &Incoming, ctx: u16, dest: &str, port: u16, outcome: Outcome) -> Event {
+    Event::new("binder.inet-connect", Resource::Binder, outcome, Source::Kenneld)
         .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
-        .field("dest", Value::untrusted(dest_label))
+        .field("dest", Value::untrusted(dest.to_owned()))
         .field("port", Value::Uint(u64::from(port)))
-        .field("ctx", Value::Uint(u64::from(ctx))),
-    );
-    Reply::Data(one(status))
+        .field("ctx", Value::Uint(u64::from(ctx)))
 }
 
 /// A one-byte status reply.
