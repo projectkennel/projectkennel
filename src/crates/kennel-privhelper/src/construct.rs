@@ -32,15 +32,16 @@
 //! path or fd the operator supplies (sec review: trusted init source).
 
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use kennel_spawn::wire::decode_construction;
 use kennel_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf, LoopbackAddr};
 use kennel_syscall::fd::dup_onto;
+use kennel_syscall::boot::BOOT_SYNC_FD;
 use kennel_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
 use kennel_syscall::namespace::clone_pid1;
 use kennel_syscall::pty::PTY_RETURN_FD;
-use kennel_syscall::scm::{recv_with_fds, send_with_fds};
+use kennel_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
 use kennel_syscall::spawn::fexecve;
 use kennel_syscall::unistd::{real_gid, real_uid};
 
@@ -157,6 +158,14 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // 2. The maps-written handshake pipe (child blocks until the parent writes the maps).
     let (ready_r, ready_w) = pipe_cloexec()?;
 
+    // The boot-sync socket (07-2 §7.2.1a) that makes startup deterministic. `kennel-init` cannot
+    // take node 0 before it `fexecve`s (kenneld opens the binderfs via `/proc/<init>/root`, which
+    // only resolves post-exec), yet must not pull before node 0 is up — so the factory gates the
+    // *pull*, not the exec: the child inherits `init_sync` at `BOOT_SYNC_FD` across the `fexecve`,
+    // and kenneld holds `daemon_sync` (we hand it over with the init pid below). `kennel-init`
+    // signals "ready" on it after exec and blocks; kenneld claims node 0 and signals "go".
+    let (init_sync, daemon_sync) = seqpacket_pair()?;
+
     // The operator identity (the caller's real ids; setcap/setuid leave the real uid as
     // the invoking user) — never wire-supplied (sec review §6).
     let op_uid = real_uid();
@@ -190,15 +199,12 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         if build_kennel(&half, op_uid, op_gid).is_err() {
             return;
         }
-        // Interactive run: re-home the pty return socket at the fixed `PTY_RETURN_FD` so it
-        // survives the `fexecve` (dup2 clears close-on-exec) and the argv-less `kennel-init`
-        // inherits it there. Done last, after the handshake pipe is finished with, so the
-        // dup target cannot clobber a still-needed descriptor.
-        if let Some(pty) = &pty_fd {
-            if dup_onto(pty.as_fd(), PTY_RETURN_FD).is_err() {
-                return;
-            }
-        }
+        // Place the descriptors `kennel-init` inherits at fixed numbers (`BOOT_SYNC_FD`, and
+        // `PTY_RETURN_FD` for an interactive run), returning the init-binary fd to exec.
+        let pty_ref = pty_fd.as_ref().map(AsFd::as_fd);
+        let Ok(init_file) = place_handoff_fds(init_file.as_fd(), init_sync.as_fd(), pty_ref) else {
+            return;
+        };
         // Hand off to the trusted `kennel-init` (resolved from root-owned config, not the
         // wire) **as the kennel's uid 0** (no drop): PID 1 must NOT share the operator uid, or
         // the operator-uid workload/facades could signal or ptrace it (07-2 §7.2.5).
@@ -232,18 +238,55 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     kennel_syscall::unistd::set_uid(op_uid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setuid({op_uid}): {e}")))?;
 
+    // "build": maps are written, so the child may become uid 0, construct the binderfs, and
+    // `fexecve` `kennel-init` (which then blocks on the boot-sync socket before pulling).
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
-    drop(ready_w); // close our write end
-    send_with_fds(chan, &init_pid.to_le_bytes(), &[])?;
+    drop(ready_w);
 
-    // 5. Done. The factory's whole job was to build the kennel, write the maps, and report
-    //    the init pid — `kennel-init` is now PID 1 of the new namespace and an autonomous
-    //    daemon, so there is nothing left for this process to do. It exits immediately rather
-    //    than lingering as a reaper proxy: `kennel-init` outlives it (a PID namespace is tied
-    //    to its own PID 1, not to the cloner), and kenneld — a `set_child_subreaper` — adopts
+    // Report the init pid AND hand kenneld the boot-sync socket as the sole SCM fd: kenneld waits
+    // on it for `kennel-init`'s post-exec "ready", claims node 0 (now reachable via
+    // /proc/<pid>/root), and signals "go". With that off our hands, the factory's job is done.
+    send_with_raw_fds(chan, &init_pid.to_le_bytes(), &[daemon_sync.as_raw_fd()])?;
+
+    // 5. Done. The factory's whole job was to build the kennel, write the maps, and report the init
+    //    pid (plus the boot-sync socket) — `kennel-init` is now PID 1 of the new namespace and an
+    //    autonomous daemon, so there is nothing left for this process to do. It exits immediately
+    //    rather than lingering as a reaper proxy: `kennel-init` outlives it (a PID namespace is
+    //    tied to its own PID 1, not to the cloner), and kenneld — a `set_child_subreaper` — adopts
     //    the orphaned init and `waitpid`s it directly for the workload's exit status. One
     //    fewer resident host process per kennel.
     Ok(0)
+}
+
+/// Place the descriptors `kennel-init` inherits at the fixed numbers it reads — the boot-sync
+/// socket at [`BOOT_SYNC_FD`] and (interactive) the pty return socket at [`PTY_RETURN_FD`] —
+/// returning the init-binary fd to `fexecve`.
+///
+/// Every descriptor we still need (the init binary, the boot-sync socket, the pty socket) is
+/// first lifted ABOVE the target range with [`dup_above`], so `dup2`-ing onto the low fixed
+/// numbers cannot clobber one of them — their natural fd numbers depend on what else is open and
+/// could otherwise land on a target (the bug an interactive run, with its extra pty fd, exposed).
+/// `dup_above` keeps close-on-exec; [`dup_onto`] clears it on the fixed targets so they survive
+/// the `fexecve`; the relocated copies (still cloexec) close across it.
+fn place_handoff_fds(
+    init_file: BorrowedFd<'_>,
+    init_sync: BorrowedFd<'_>,
+    pty_fd: Option<BorrowedFd<'_>>,
+) -> io::Result<OwnedFd> {
+    use kennel_syscall::fd::dup_above;
+    let base = if PTY_RETURN_FD > BOOT_SYNC_FD {
+        PTY_RETURN_FD + 1
+    } else {
+        BOOT_SYNC_FD + 1
+    };
+    let init_file = dup_above(init_file, base)?;
+    let init_sync = dup_above(init_sync, base)?;
+    let pty_hi = pty_fd.map(|p| dup_above(p, base)).transpose()?;
+    dup_onto(init_sync.as_fd(), BOOT_SYNC_FD)?;
+    if let Some(pty) = &pty_hi {
+        dup_onto(pty.as_fd(), PTY_RETURN_FD)?;
+    }
+    Ok(init_file)
 }
 
 /// Validate each loopback address against the caller's reserved `scope`, then add it on `lo`

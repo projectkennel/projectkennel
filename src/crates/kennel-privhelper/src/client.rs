@@ -8,7 +8,7 @@
 
 use std::io;
 use std::net::IpAddr;
-use std::os::fd::{AsFd, RawFd};
+use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
@@ -18,28 +18,34 @@ use crate::wire::{Op, Request, Response};
 
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-init`.
 ///
-/// Returns the (short-lived) helper [`Child`] and `kennel-init`'s **host pid** (`07-2`
-/// §7.2.1). The helper exits as soon as it has reported the pid — it is not a reaper proxy;
-/// kenneld (a `set_child_subreaper`) adopts the orphaned `kennel-init` and waits it for the
-/// workload's exit status. The caller reaps this `Child` (it has already exited). kennel-init
-/// runs as the operator, so `kenneld` opens the kennel's binderfs device itself via
-/// `/proc/<init>/root` — no fd needs to come back here.
+/// Returns the (short-lived) helper [`Child`], `kennel-init`'s **host pid** (`07-2` §7.2.1), and
+/// the **boot-sync socket** — `kenneld` then drives [`kennel_syscall::boot`] on that socket to
+/// gate `kennel-init`'s plan pull on node 0 being claimed (deterministic startup, `07-2`
+/// §7.2.1a), and reaps this `Child` afterwards (the factory exits once it has reported the pid).
+///
+/// The factory builds the kennel — including mounting the per-kennel binderfs — `fexecve`s
+/// `kennel-init`, and reports the init pid here with the kenneld end of the boot-sync socket as
+/// the sole `SCM_RIGHTS` fd. `kennel-init` (post-exec) signals "ready" on its inherited end and
+/// blocks; the caller opens the now-reachable binderfs via `/proc/<init>/root`, claims node 0,
+/// and signals "go" — at which point `kennel-init`'s first `GET_SANDBOX_PLAN` finds the context
+/// manager serving (no retry on either side). kenneld (a `set_child_subreaper`) adopts the
+/// orphaned `kennel-init`.
 ///
 /// Spawns `helper construct` with one end of a `SOCK_SEQPACKET` pair as its stdin, sends the
 /// `construction_half` bytes (and, for an interactive run, the controlling-pty socket via
-/// `SCM_RIGHTS`), and reads back the init host pid. The `kennel-init` binary is **not** sent:
-/// the privhelper resolves and opens it from its own root-owned config (07-2; sec review).
+/// `SCM_RIGHTS`). The `kennel-init` binary is **not** sent: the privhelper resolves and opens it
+/// from its own root-owned config (07-2; sec review).
 ///
 /// # Errors
 ///
-/// Returns the OS error if the socketpair, spawn, send, or pid receive fails, or
-/// [`io::ErrorKind::InvalidData`] if the reply is not the 4-byte pid.
+/// Returns the OS error if the socketpair, spawn, send, or receive fails, or
+/// [`io::ErrorKind::InvalidData`] if the reply is not the 4-byte pid plus the boot-sync fd.
 pub fn construct_kennel(
     helper: &Path,
     construction_half: &[u8],
     egress: Option<&[u8]>,
     pty_fd: Option<RawFd>,
-) -> io::Result<(Child, i32)> {
+) -> io::Result<(Child, i32, OwnedFd)> {
     let (ours, theirs) = seqpacket_pair()?;
     let child = Command::new(helper)
         .arg("construct")
@@ -60,15 +66,24 @@ pub fn construct_kennel(
     let fds: Vec<RawFd> = pty_fd.into_iter().collect();
     send_with_raw_fds(ours.as_fd(), &data, &fds)?;
 
+    // The reply is the 4-byte init pid plus the kenneld end of the boot-sync socket as the sole
+    // SCM fd.
     let mut buf = [0u8; 4];
-    let (n, _none) = recv_with_fds(ours.as_fd(), &mut buf)?;
+    let (n, mut reply_fds) = recv_with_fds(ours.as_fd(), &mut buf)?;
     if n != 4 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "factory did not return the 4-byte init pid",
         ));
     }
-    Ok((child, i32::from_le_bytes(buf)))
+    if reply_fds.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "factory did not return the boot-sync socket",
+        ));
+    }
+    let sync = reply_fds.remove(0);
+    Ok((child, i32::from_le_bytes(buf), sync))
 }
 
 /// Invoke `helper`, send `request`, and return the decoded response.

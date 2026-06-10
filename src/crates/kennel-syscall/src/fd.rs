@@ -1,7 +1,7 @@
 //! File-descriptor flag helpers.
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 
@@ -50,6 +50,24 @@ pub fn dup_onto(src: BorrowedFd<'_>, dst: RawFd) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Duplicate `src` to the lowest free descriptor `>= base`, close-on-exec (`F_DUPFD_CLOEXEC`),
+/// returned as an [`OwnedFd`].
+///
+/// Used to move the descriptors a process will place at fixed low numbers (via [`dup_onto`]) up
+/// out of that range first, so the placements cannot clobber one another or another descriptor
+/// the process still needs (e.g. the factory relocates the init-binary fd, the pty socket, and
+/// the boot-sync socket above `PTY_RETURN_FD`/`BOOT_SYNC_FD` before `dup2`-ing them down).
+///
+/// # Errors
+/// The OS error if `fcntl(F_DUPFD_CLOEXEC)` fails (e.g. the fd table is full).
+pub fn dup_above(src: BorrowedFd<'_>, base: RawFd) -> io::Result<OwnedFd> {
+    let raw = fcntl(src, FcntlArg::F_DUPFD_CLOEXEC(base))
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    // SAFETY: `F_DUPFD_CLOEXEC` returned a fresh, owned descriptor we are the sole holder of;
+    // wrapping it transfers that ownership for RAII close.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
 #[cfg(test)]

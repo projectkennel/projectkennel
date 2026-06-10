@@ -137,7 +137,7 @@ pub trait Privileged {
         _construction_half: &[u8],
         _egress: Option<&[u8]>,
         _pty_fd: Option<std::os::fd::RawFd>,
-    ) -> io::Result<(Child, i32)> {
+    ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "factory construction not supported by this Privileged impl",
@@ -178,7 +178,7 @@ impl Privileged for HelperClient {
         construction_half: &[u8],
         egress: Option<&[u8]>,
         pty_fd: Option<std::os::fd::RawFd>,
-    ) -> io::Result<(Child, i32)> {
+    ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
         kennel_privhelper::client::construct_kennel(&self.helper, construction_half, egress, pty_fd)
     }
 }
@@ -810,20 +810,26 @@ fn bring_up<P: Privileged + Sync>(
             "a kennel must be constructed via the factory, which requires a BinderPrep",
         )));
     };
-    let (init_pid, supervision_bytes) =
+    let (mut child, init_pid, sync, supervision_bytes) =
         construct_via_factory(privileged, plan, command, ctx, &loopback, &egress_bytes, state)?;
+    let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
+
+    // Boot-sync (07-2 §7.2.1a): wait for kennel-init to announce it has execed — only then is its
+    // binderfs reachable via /proc/<init>/root. This is what lets node 0 be claimed deterministically
+    // (and what the old retry loop was really waiting on). A failure here leaves the kennel up but
+    // binder-less; the workload (which it gates) will not start, so surface it.
+    kennel_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
 
     // The factory has added the loopback addresses, so the egress proxy can now bind them.
-    // Launch it *before* serving the binder pull (which is what lets kennel-init start the
+    // Launch it *before* releasing the binder pull (which is what lets kennel-init start the
     // workload), so the proxy is listening before the workload's first connect().
     if let (Some(setup), Some(config_path)) = (proxy, proxy_config.as_ref()) {
         state.proxy = Some(crate::proxy::spawn(&setup.binary, config_path).map_err(Error::Proxy)?);
     }
 
-    // Take binder node 0 of the kennel's binderfs (mounted by the factory) and serve the
-    // lifecycle (gated on the init pid) so kennel-init can pull its supervision-half. kennel-init
-    // runs as the operator, so kenneld opens the device via /proc/<init>/root. Best-effort: a
-    // failure leaves binder inert but the workload still runs.
+    // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
+    // so kennel-init can pull its supervision-half. kennel-init has execed (boot-sync above), so
+    // the device is reachable via /proc/<init>/root — a single open, no retry.
     if plan.view.as_ref().is_some_and(|v| v.binder) {
         let init_pid_u32 = u32::try_from(init_pid).unwrap_or(0);
         let lifecycle = crate::binder::Lifecycle {
@@ -834,11 +840,18 @@ fn bring_up<P: Privileged + Sync>(
             cgroup: plan.cgroup.clone(),
             ttl_action: plan.ttl_action,
         };
-        match acquire_binder_node0(|| Some(init_pid_u32), ctx, prep, lifecycle) {
+        match acquire_binder_node0(init_pid_u32, ctx, prep, lifecycle) {
             Ok(manager) => state.binder = Some(manager),
             Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
         }
     }
+
+    // Tell kennel-init the bus is live so it pulls its plan and starts the workload (unconditional:
+    // it always blocks for this). Then reap the factory parent, which exits the moment it has
+    // reported the pid; `kennel-init` has reparented to kenneld (the subreaper), so the `Kennel`
+    // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
+    kennel_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
+    let _ = child.wait();
     Ok(init_pid)
 }
 
@@ -857,7 +870,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     loopback: &[kennel_spawn::LoopbackAddr],
     egress_bytes: &[u8],
     state: &mut Provision,
-) -> Result<(i32, Vec<u8>), Error> {
+) -> Result<(Child, i32, std::os::fd::OwnedFd, Vec<u8>), Error> {
     let drop_uid = kennel_syscall::unistd::real_uid();
     let drop_gid = kennel_syscall::unistd::real_gid();
 
@@ -871,15 +884,15 @@ fn construct_via_factory<P: Privileged + Sync>(
     // workload's pty master is sent back over it), re-homed at `PTY_RETURN_FD`; the egress payload
     // rides the same datagram. The pty fd lives in the plan and is kept open by the caller
     // (`run_kennel`'s `return_sock`) for the construction.
-    let (mut child, init_pid) =
+    // Returns once `kennel-init` has been `fexecve`'d and the init pid reported, handing back the
+    // boot-sync socket: the caller waits on it for kennel-init's "ready", claims binder node 0,
+    // then signals "go" (deterministic startup, `07-2` §7.2.1a). The factory exits the moment it
+    // reports the pid, so the caller reaps the `Child` after the sync.
+    let (child, init_pid, sync) =
         privileged.construct_kennel(&half_bytes, Some(egress_bytes), plan.interactive_return_fd)?;
     state.factory = true;
 
-    // The factory exits the moment it reports the pid (not a reaper proxy — `07-2`): reap it
-    // now. By the time we return, `kennel-init` has reparented to kenneld, so the `Kennel`
-    // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
-    let _ = child.wait();
-    Ok((init_pid, supervision_bytes))
+    Ok((child, init_pid, sync, supervision_bytes))
 }
 
 /// Build the construction-half (the privhelper factory's input) from the plan, the kennel's
@@ -956,34 +969,31 @@ fn supervision_from(
 /// factory path it is `kennel-init` directly. `lifecycle` carries the init-pid gate +
 /// supervision-half kenneld serves over node 0 (disabled on the legacy path).
 fn acquire_binder_node0(
-    resolve_pid: impl Fn() -> Option<u32>,
+    init_pid: u32,
     ctx: u16,
     prep: &BinderPrep,
     lifecycle: crate::binder::Lifecycle,
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
-    for _ in 0..150 {
-        if let Some(pid) = resolve_pid() {
-            let dev = format!("/proc/{pid}/root/dev/binderfs/binder");
-            // std opens files O_CLOEXEC by default on Unix.
-            if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&dev) {
-                return crate::binder::spawn(
-                    OwnedFd::from(file),
-                    ctx,
-                    prep.policy.clone(),
-                    prep.unix.clone(),
-                    lifecycle,
-                    std::sync::Arc::clone(&prep.writer),
-                );
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "kennel binderfs device did not appear",
-    ))
+    // Deterministic: the factory has mounted the binderfs and is blocking its child before
+    // `fexecve` (it reported the pid only after the device existed), so this is a single open with
+    // no retry. The pid is stable across the upcoming `fexecve` (same process becomes kennel-init).
+    let dev = format!("/proc/{init_pid}/root/dev/binderfs/binder");
+    // std opens files O_CLOEXEC by default on Unix.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&dev)
+        .map_err(|e| io::Error::new(e.kind(), format!("open kennel binderfs {dev}: {e}")))?;
+    crate::binder::spawn(
+        OwnedFd::from(file),
+        ctx,
+        prep.policy.clone(),
+        prep.unix.clone(),
+        lifecycle,
+        std::sync::Arc::clone(&prep.writer),
+    )
 }
 
 /// The workload pid: the first child of the `Command`-spawned intermediate (which

@@ -35,10 +35,12 @@ privhelper (real host root)
        5. join the kennel cgroup; bring up loopback; mount the view; mount binderfs,
           allocate the `binder` device, chown /dev/binderfs/binder to the operator uid
        6. pivot_root into the view and detach the old host root   ← the structural sever
-       7. fexecve(initfd)  ← the host path is gone; exec by the fd opened in step 2
+       7. place inherited fds (boot-sync, pty); fexecve(initfd)  ← exec by the fd from step 2
+       (privhelper then reports the init host pid + the boot-sync socket to kenneld and exits)
 ─────────────────────────────────────────────────────────────── trust boundary
 kennel-init (PID 1, uid 0, trapped in the pivoted view, zero argv/envp)
-  8. open /dev/binderfs/binder; GET_SANDBOX_PLAN from node 0 (retry until kenneld answers)
+  8. boot-sync: send READY, block until kenneld signals GO (§7.2.1a) — kenneld claims node 0
+  8b. open /dev/binderfs/binder; GET_SANDBOX_PLAN from node 0 (single transaction, no retry)
   9. fork facades (PIDs 2,3,…), each dropped to the operator; NOTIFY_BOOT_SYNC
  10. NOTIFY_WORKLOAD_EXEC; fork the workload, drop to operator, no_new_privs + seccomp +
      Landlock + ulimits + pty, execve
@@ -57,6 +59,29 @@ may already be torn down.
 `<libexec>/kennel-init` is absent from the mount namespace, so the privhelper opens the
 trusted init on the host *before* the clone and execs it by descriptor afterward. As a bonus
 the init binary never appears in the view; the workload cannot even see it.
+
+## 7.2.1a Boot-sync: deterministic node-0 startup, no retry loop
+
+`kennel-init` pulls its Plan from node 0, which kenneld claims by opening the kennel's binderfs
+via `/proc/<init>/root/dev/binderfs/binder`. Two facts make the ordering subtle: that open only
+resolves **after** `kennel-init` has `fexecve`'d (a blocked, pre-exec construction child is not
+reachable that way), so the claim cannot precede the exec — yet the pull must not precede the
+claim. The factory therefore cannot gate the *exec*; it gates the *pull*, from inside
+`kennel-init`, over a `SOCK_SEQPACKET` the factory hands it at a fixed inherited descriptor
+(`kennel_syscall::boot::BOOT_SYNC_FD`, the sibling of the interactive `PTY_RETURN_FD`):
+
+1. The factory builds the kennel, `fexecve`s `kennel-init`, and reports the init host pid to
+   kenneld **with the kenneld end of the boot-sync socket** as an `SCM_RIGHTS` fd; then it exits.
+2. `kennel-init` (post-exec) sends `READY` on its end and **blocks**.
+3. kenneld sees `READY`, opens the now-reachable binderfs, claims node 0, and sends `GO`.
+4. `kennel-init` wakes and pulls — node 0 is already serving, so it is a single first-try
+   transaction.
+
+This replaces the previous double retry (kenneld polling for the device to appear, `kennel-init`
+re-sending `GET_SANDBOX_PLAN` until it stopped getting `BR_DEAD_REPLY`) with one deterministic
+handshake. The fixed descriptors `kennel-init` inherits are placed collision-safe: the factory
+lifts the init-binary, boot-sync, and pty fds above the target range before `dup2`-ing them down,
+so an interactive run's extra pty fd cannot make a placement clobber one still needed.
 
 ## 7.2.2 The binder bus is the control plane
 
@@ -94,17 +119,15 @@ network facade.
 
 ## 7.2.3 The pull model: zero-argument `execve`, config over the bus
 
-Because the privhelper mounts binderfs and kenneld claims node 0 **before** `kennel-init`
-runs, the channel is open from PID 1's first instruction. So the privhelper `execve`s
-`kennel-init` with **empty `argv` and `envp`** — no serialized Plan shoved through arguments
-or the environment, and nothing for host-side `ps`/`/proc/<pid>/cmdline`/`environ` to leak.
+The privhelper mounts binderfs and `execve`s `kennel-init` with **empty `argv` and `envp`** —
+no serialized Plan shoved through arguments or the environment, and nothing for host-side
+`ps`/`/proc/<pid>/cmdline`/`environ` to leak.
 
 `kennel-init` **pulls** its configuration:
 
 1. Open the standard `/dev/binderfs/binder` (a compile-time constant path).
-2. `GET_SANDBOX_PLAN` to node 0, **retrying** until kenneld has claimed node 0 (kenneld opens
-   `/proc/<init>/root/dev/binderfs/binder` after the pivot; the retry closes the race with no
-   extra handshake).
+2. `GET_SANDBOX_PLAN` to node 0 — a single transaction, **no retry**. The boot-sync handshake
+   (§7.2.1a) guarantees kenneld has already claimed node 0 by the time this runs.
 3. kenneld looks up the **supervision half** of the pre-compiled Plan **by the binderfs
    instance the transaction arrived on** — each kennel has its own node-0 fd and looper, so a
    transaction on that queue is unambiguously that kennel; no token, cookie, or handshake is

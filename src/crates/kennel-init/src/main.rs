@@ -55,10 +55,6 @@ use kennel_syscall::spawn::{fork_drop_exec, fork_drop_exec_confined};
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 /// The binder buffer mapping size for the pull connection.
 const MAP_SIZE: usize = 128 * 1024;
-/// How many times to retry the plan pull while `kenneld` is still claiming node 0.
-const PULL_RETRIES: u32 = 1000;
-/// Backoff between pull retries (≈10s total worst case before giving up).
-const PULL_BACKOFF: Duration = Duration::from_millis(10);
 
 // --- Facade restart policy (hardcoded, after systemd's defaults — deliberately not a
 // per-kennel knob; §7.2 supervision). A crashed facade is re-forked after a short delay,
@@ -92,6 +88,10 @@ fn main() -> ExitCode {
 /// Open the bus, pull the supervision-half, own the spawn, and supervise to exit.
 fn run() -> io::Result<u8> {
     require_kennel_userns()?;
+    // Boot-sync (07-2 §7.2.1a): announce we have execed and block until kenneld has claimed binder
+    // node 0, so the pull below is a single first-try transaction (no retry). The factory placed
+    // our end of the sync socket at `BOOT_SYNC_FD` before our `fexecve`.
+    kennel_syscall::boot::init_await_bus(kennel_syscall::boot::BOOT_SYNC_FD)?;
     let conn = open_bus()?;
     let bytes = pull_plan(&conn)?;
     let sup = decode_supervision(&bytes)
@@ -137,28 +137,14 @@ fn open_bus() -> io::Result<Connection> {
     Connection::open(fd.into(), MAP_SIZE)
 }
 
-/// Pull the supervision-half from node 0, retrying while `kenneld` is still claiming the
-/// context-manager node (`BR_DEAD_REPLY`). (No fd rides this reply — the interactive pty is
-/// inherited at `PTY_RETURN_FD` from the construction channel, not the bus.)
+/// Pull the supervision-half from node 0 — a single transaction, no retry.
+///
+/// The factory does not `fexecve` `kennel-init` until kenneld has claimed the context-manager
+/// node (07-2 §7.2.1a: the construction child blocks on a "node 0 live" handshake before exec),
+/// so by the time this runs the bus is already serving. (No fd rides this reply — the interactive
+/// pty is inherited at `PTY_RETURN_FD` from the construction channel, not the bus.)
 fn pull_plan(conn: &Connection) -> io::Result<Vec<u8>> {
-    let mut last = None;
-    for _ in 0..PULL_RETRIES {
-        match conn.transact(CONTEXT_MANAGER_HANDLE, lifecycle::GET_SANDBOX_PLAN, &[]) {
-            Ok(reply) => return Ok(reply),
-            Err(e) if is_node0_not_ready(&e) => {
-                last = Some(e);
-                std::thread::sleep(PULL_BACKOFF);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| io::Error::other("plan pull exhausted retries")))
-}
-
-/// Whether an error means "node 0 not claimed yet" — worth retrying the pull. The
-/// driver reports a transaction to an unowned context manager as `BR_DEAD_REPLY`.
-fn is_node0_not_ready(e: &io::Error) -> bool {
-    e.to_string().contains("BR_DEAD_REPLY")
+    conn.transact(CONTEXT_MANAGER_HANDLE, lifecycle::GET_SANDBOX_PLAN, &[])
 }
 
 /// Fork the facades and the workload, dropping each to the operator and confining the
