@@ -59,15 +59,12 @@
 
 pub mod boot;
 pub mod fd;
-pub mod handshake;
 #[cfg(feature = "audit-journald")]
 pub mod journal;
 pub mod landlock;
 pub mod listenfd;
 pub mod mount;
 pub mod namespace;
-pub mod netlink;
-pub mod path;
 pub mod process;
 pub mod pty;
 pub mod random;
@@ -75,4 +72,8 @@ pub mod scm;
 pub mod seccomp;
 pub mod signal;
 pub mod spawn;
-pub mod unistd;
+
+// The safe (no-`unsafe`) primitives live in `kennel-os` so this crate carries only genuinely
+// unsafe code (CODING-STANDARDS §4). Re-exported so existing `kennel_syscall::{path, unistd,
+// netlink, handshake}` paths keep resolving unchanged.
+pub use kennel_os::{handshake, netlink, path, unistd};

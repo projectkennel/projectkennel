@@ -48,8 +48,8 @@ pub fn real_gid() -> u32 {
 /// any runner while `sudo … --features e2e` still exercises it. Shared by
 /// this crate's `root_tests` modules (which only compile under that feature, so
 /// the helper is gated the same way to stay dead-code-free without it).
-#[cfg(all(test, feature = "e2e"))]
-pub(crate) fn skip_if_unprivileged(test: &str) -> bool {
+#[cfg(feature = "e2e")]
+pub fn skip_if_unprivileged(test: &str) -> bool {
     let euid = effective_uid();
     if euid != 0 {
         eprintln!("skipping {test}: requires root (euid={euid}) for the privileged operation");

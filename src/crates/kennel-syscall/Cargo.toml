@@ -2,7 +2,7 @@
 name = "kennel-syscall"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel low-level system-call and path primitives. The single crate permitted to contain `unsafe` (Linux syscalls, namespaces, Landlock/seccomp, FFI); the portable, std-only path-canonicalisation helper lands first while the crate is still unsafe-free."
+description = "Project Kennel low-level system-call primitives. The single crate permitted to contain `unsafe` (Linux syscalls, namespaces, Landlock/seccomp, FFI). The safe, no-`unsafe` helpers (path, uid/gid, netlink, handshake) live in `kennel-os` and are re-exported here, so this crate carries only genuinely-unsafe code (CODING-STANDARDS §4)."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,6 +14,9 @@ repository.workspace = true
 # vendored in src/vendor/ and recorded in CHECKSUMS.toml / DEPENDENCIES.md
 # per §5.5. libc itself has no (non-optional) dependencies.
 libc = "=0.2.186"
+# kennel-os: the safe (no-`unsafe`) OS helpers split out of this crate (path, unistd, netlink,
+# handshake), re-exported from lib.rs so this crate's public surface is unchanged.
+kennel-os = { path = "../kennel-os" }
 # nix: safe, typed wrappers over the syscalls we would otherwise hand-roll
 # `unsafe` (CODING-STANDARDS.md §4 — prefer a vetted crate to our own unsafe).
 # default-features off; features added pay-as-you-go as each wrapper lands.
@@ -30,8 +33,9 @@ seccompiler = "=0.5.0"
 [features]
 # Tests that need privilege (namespace/mount ops). Off by default so the normal
 # `cargo test` runs unprivileged; CI/maintainers run `sudo -E cargo test
-# --features e2e` (CODING-STANDARDS.md / 03-crate-decomposition.md).
-e2e = []
+# --features e2e` (CODING-STANDARDS.md / 03-crate-decomposition.md). Propagates to kennel-os so
+# its re-exported `unistd::skip_if_unprivileged` test helper is available to this crate's tests.
+e2e = ["kennel-os/e2e"]
 # Compiles the `journal` module and links libsystemd for the journald audit
 # sink (sd_journal_sendv FFI). Off by default; enabled transitively by
 # kennel-audit's `audit-journald` feature. Needs libsystemd-dev to build.

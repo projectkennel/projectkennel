@@ -98,6 +98,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-os"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
+]
+
+[[package]]
 name = "kennel-policy"
 version = "0.1.0"
 dependencies = [
@@ -140,6 +148,7 @@ name = "kennel-syscall"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "kennel-os",
  "libc",
  "nix",
  "seccompiler",

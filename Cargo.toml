@@ -22,6 +22,7 @@ members = [
     "src/crates/kennel-config",
     "src/crates/kennel-spawn",
     "src/crates/kennel-syscall",
+    "src/crates/kennel-os",
     "src/crates/kennel-text",
     "src/crates/kennel-netproxy",
     "src/crates/kennel-ssh-reorigin",
