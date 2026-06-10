@@ -20,7 +20,7 @@ the relationship to the existing `host-netproxy` crate.
 ## Stability commitment
 
 **Internal-stable** per [`02-0-overview.md`](02-0-overview.md). The `org.projectkennel.INet`
-transaction wire format, the `facade-netshim` SOCKS5 interface, and the inter-process
+transaction wire format, the `facade-socks5` SOCKS5 interface, and the inter-process
 fd-passing conventions documented here are internal: the workload never addresses them
 directly. The stability surface the workload sees is the SOCKS5 endpoint at
 `$KENNEL_SOCKS_PROXY` — that is unchanged from the pre-netns model.
@@ -38,7 +38,7 @@ binderfs instance. This is an extension of the participant set defined in
 | `kenneld` | host | context manager (node 0); **sole owner** of `org.projectkennel.INet/default` | policy enforcement, transaction relay; never in the data path |
 | `host-netproxy` | host | kenneld's **CONNECT delegate** (no binder access) | outbound dial, proxy allowlist enforcement, DNS vetting, audit |
 | host-side spawn leg | host | kenneld's **BIND delegate** (no binder access) | holds the host-side mirror (same `ip:port` on the host alias) of the kennel's native inside listener |
-| `facade-netshim` | kennel | binder **consumer** of `org.projectkennel.INet/default` | SOCKS5 inbound, binder transaction dispatch, accept loop, splice to workload |
+| `facade-socks5` | kennel | binder **consumer** of `org.projectkennel.INet/default` | SOCKS5 inbound, binder transaction dispatch, accept loop, splice to workload |
 
 Only kenneld registers `org.projectkennel.INet/default` — it is a reserved-namespace node
 and the reserved rule (`02-4-binder.md` §The `org.projectkennel.*` reserved namespace)
@@ -178,7 +178,7 @@ to kenneld is intra-instance.
 workload
   │  SOCKS5 CONNECT (hostname, port)
   ▼
-facade-netshim  (kennel net-ns, :1080)
+facade-socks5  (kennel net-ns, :1080)
   │  binder CONNECT(1): hostname + port
   ▼
 kenneld  (host, context manager — node 0 looper)
@@ -194,7 +194,7 @@ host-netproxy  (host net-ns, delegate — no binder)
   ▼
 kenneld  (reply-reader: BC_REPLY with fd via BINDER_TYPE_FD on saved cookie)
   ▼
-facade-netshim
+facade-socks5
   │  receives connected fd
   │  splice loop: workload ↔ fd
   ▼
@@ -240,7 +240,7 @@ looper never blocks on a dial, and the bounded pending-cookie table is the head-
 memory bound. A slow `host-netproxy` dial degrades to a refusal on that one instance, not
 a looper stall.
 
-**`facade-netshim`:** one listener thread on :1080; one thread per accepted SOCKS5
+**`facade-socks5`:** one listener thread on :1080; one thread per accepted SOCKS5
 connection. Each thread issues one binder transaction (blocking on its reply), receives the
 fd, then runs a splice loop. For host inbound to a mirrored port it connects the native
 inside listener and splices each relayed connection. The shim is the only network process
@@ -280,7 +280,7 @@ as follows. New steps are marked **†**; existing steps are condensed.
    launches **`host-netproxy`** (host net-ns; CONNECT delegate) and passes it its end.
    Neither delegate opens `/dev/binder` or registers anything — they speak the delegate
    protocol over the socketpair only.
-6. **† Reaper A forks `facade-netshim`** into the kennel's namespaces and view (sibling of
+6. **† Reaper A forks `facade-socks5`** into the kennel's namespaces and view (sibling of
    the workload under the in-kennel reaper — `01-process-model.md`): it opens `/dev/binder`,
    `getService`s `org.projectkennel.INet/default`, and starts its SOCKS5 listener on the
    kennel's assigned loopback address at :1080.
@@ -307,10 +307,10 @@ The `host-netproxy` crate splits into two concerns that were previously unified:
 
 | Concern | Pre-netns | Post-netns |
 |---|---|---|
-| Inbound SOCKS5 accept / handshake | `server.rs` in `host-netproxy` | `facade-netshim` (new crate, inside kennel net-ns) |
+| Inbound SOCKS5 accept / handshake | `server.rs` in `host-netproxy` | `facade-socks5` (new crate, inside kennel net-ns) |
 | Outbound dial, proxy allowlist, DNS vetting, audit | `server.rs` in `host-netproxy` | `host-netproxy` (unchanged logic, new delegate-socketpair inbound) |
 
-`facade-netshim` is a **new crate** in the workspace. It is a thin process: binder consumer,
+`facade-socks5` is a **new crate** in the workspace. It is a thin process: binder consumer,
 SOCKS5 state machine, splice loop. It carries no policy logic. It parses untrusted input
 (SOCKS5 from the workload) and requires a fuzz target under `fuzz/` per CODING-STANDARDS
 §10.6. It is the only new process that links `kennel-lib-binder`.

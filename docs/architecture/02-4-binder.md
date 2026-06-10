@@ -286,7 +286,7 @@ node 0, so the kennel's control plane is the binder bus itself. kenneld accepts 
 verb only when `sender_pid` equals the init's **host** pid (learned from the privhelper at
 construction — a host-side context manager sees host pids, *not* the kennel-internal `1`)
 and `sender_euid == 0`; any other sender is a logged `Deny`. (This means binder is no
-longer confined to kenneld + `facade-netshim` — `kennel-bin-init` is a third participant.)
+longer confined to kenneld + `facade-socks5` — `kennel-bin-init` is a third participant.)
 All other transactions on node 0 are rejected with `BR_FAILED_REPLY`. The
 `listServices`/`isDeclared`/`getDeclaredInstances` verbs are the binder-surface
 introspection a workload may run on itself; there is no separate policy-introspection

@@ -86,7 +86,7 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
     let proxy = Some(ProxySetup {
         binary: deployment.netproxy(),
         config_dir: socket::runtime_dir().join("proxy"),
-        netshim: deployment.netshim(),
+        socks5: deployment.socks5(),
     });
     let etc_base = Some(socket::runtime_dir().join("etc"));
     let view_base = Some(socket::runtime_dir().join("root"));
@@ -107,7 +107,7 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
     let bastion = Some(BastionSetup {
         dir: socket::runtime_dir().join("bastion"),
         reorigin_bin: deployment.ssh_reorigin(),
-        ssh_connect_bin: deployment.ssh_connect(),
+        ssh_bin: deployment.ssh(),
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 8022_u16.saturating_add(scope.tag()),
         agent_sock: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
@@ -128,7 +128,7 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
         view_base,
         audit_base,
         bastion,
-        afunix_shim_bin: Some(deployment.afunix_shim()),
+        afunix_bin: Some(deployment.afunix()),
         init_bin: Some(deployment.kennel_bin_init()),
     })
 }

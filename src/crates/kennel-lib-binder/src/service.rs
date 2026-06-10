@@ -20,7 +20,7 @@ pub mod verb {
     pub const CONNECT_AFUNIX: u32 = 5;
     /// Request an outbound network connection (the `INet` egress facade, §7.5.2).
     ///
-    /// `facade-netshim` transacts the request payload `[transport: u8 | port: u16
+    /// `facade-socks5` transacts the request payload `[transport: u8 | port: u16
     /// big-endian | host: UTF-8]` (see [`transport`]) to kenneld, which decides under
     /// `[net.proxy]`, resolves the name, pins the vetted address, and (with the conduit
     /// built) returns the connection fd.
@@ -38,7 +38,7 @@ pub mod transport {
 
 /// The [`verb::CONNECT_INET`] request wire: `[transport: u8 | port: u16 big-endian | host: UTF-8]`.
 ///
-/// The single source of the layout: `facade-netshim` [`encode_request`]s, kenneld
+/// The single source of the layout: `facade-socks5` [`encode_request`]s, kenneld
 /// [`decode_request`]s (then maps the transport byte and the host to its policy types). The
 /// transport byte's validity is the decoder's caller's concern — this layer only frames bytes.
 pub mod inet {

@@ -192,9 +192,9 @@ pub struct ProxySetup {
     pub binary: PathBuf,
     /// Directory the per-kennel conduit command socket is bound in.
     pub config_dir: PathBuf,
-    /// The `facade-netshim` binary bound into the view and launched by the seal: the workload's
+    /// The `facade-socks5` binary bound into the view and launched by the seal: the workload's
     /// in-kennel SOCKS5 endpoint, which brokers each connect to node 0 as `CONNECT_INET`.
-    pub netshim: PathBuf,
+    pub socks5: PathBuf,
 }
 
 /// What the synthetic `/etc` is built from: where to stage it and the workload's
@@ -307,7 +307,7 @@ pub struct UnixShim {
 /// The `AF_UNIX` socket shims prepared for one kennel (§7.6 via the binder facade).
 ///
 /// Built by `crate::server::Shared::prepare_unix` (path placeholders resolved) and
-/// consumed by the bring-up: the `facade-afunix-shim` proxy is bound into the view and
+/// consumed by the bring-up: the `facade-afunix` proxy is bound into the view and
 /// launched by the seal; it listens at each shim path so the application finds the
 /// socket where it expects, and on connect brokers to the `org.projectkennel.IAfUnix`
 /// binder facade (kenneld), which resolves the name to the real host socket and returns
@@ -322,10 +322,10 @@ pub struct UnixPrep {
     /// `(env var, value)` pairs set on the workload — the in-kennel shim path the
     /// application reads (e.g. `WAYLAND_DISPLAY`).
     pub env: Vec<(String, String)>,
-    /// The host path of `facade-afunix-shim` to bind into the view and launch as the
+    /// The host path of `facade-afunix` to bind into the view and launch as the
     /// in-kennel broker (§7.6 via the binder facade). `None` (no deployment binary)
     /// leaves the grants unserved rather than falling back to a host-socket bind mount.
-    pub afunix_shim_bin: Option<PathBuf>,
+    pub afunix_bin: Option<PathBuf>,
 }
 
 /// The SSH egress prepared for one kennel (§7.10).
@@ -342,9 +342,9 @@ pub struct SshPrep {
     /// The bastion's loopback endpoint, allowed as a host-loopback service so the
     /// egress proxy forwards the kennel's SSH to it (§7.5 host services).
     pub host_service: Option<SocketAddr>,
-    /// The host path of `facade-ssh-connect`, bound into the view (read+execute)
+    /// The host path of `facade-ssh`, bound into the view (read+execute)
     /// so the synthetic `config`'s `ProxyCommand` can run it. `None` when no SSH.
-    pub ssh_connect_bin: Option<PathBuf>,
+    pub ssh_bin: Option<PathBuf>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -748,7 +748,7 @@ fn bring_up<P: Privileged + Sync>(
         plan.file_binds.extend(ssh.file_binds.iter().cloned());
     }
 
-    // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind facade-netshim into the view, launch it
+    // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind facade-socks5 into the view, launch it
     //     on the kennel's loopback at `port`, and point the workload's proxy env at it. It brokers
     //     each connect to node 0 as CONNECT_INET; kenneld decides + drives the dial delegate. Needs
     //     the constructed view, so it engages only when pivoting and the kennel has egress.
@@ -759,7 +759,7 @@ fn bring_up<P: Privileged + Sync>(
                 state.v4.map_or_else(|| addr6.into(), IpAddr::from),
                 port,
             );
-            apply_netshim(plan, &setup.netshim, listen, command);
+            apply_socks5(plan, &setup.socks5, listen, command);
         }
     }
 
@@ -767,7 +767,7 @@ fn bring_up<P: Privileged + Sync>(
     //     its shim path, set env vars, and grant Landlock. The shim model needs the
     //     constructed view (a mount namespace), so it engages only when pivoting.
     let unix_pivoting = view_root.is_some() && plan.view.is_some();
-    apply_unix_shims(plan, unix, command, unix_pivoting);
+    apply_afunix(plan, unix, command, unix_pivoting);
 
     // 3d. constructed-view wiring (§7.4.5). When the plan carries a shim view and
     //     the daemon gave us a staging mountpoint: point HOME at the shim root,
@@ -786,7 +786,7 @@ fn bring_up<P: Privileged + Sync>(
             }
             // Bind the ssh binder-dialer in at its own path (read-only) so the synthetic
             // ssh config's ProxyCommand can exec it.
-            if let Some(bin) = &ssh.ssh_connect_bin {
+            if let Some(bin) = &ssh.ssh_bin {
                 view.binds.push(kennel_lib_spawn::BindMount {
                     source: bin.clone(),
                     target: bin.clone(),
@@ -796,7 +796,7 @@ fn bring_up<P: Privileged + Sync>(
             command.env("HOME", &view.shim_root);
         }
         // Grant Landlock execute on the dialer + its loaders (outside the `view` borrow of plan).
-        if let Some(bin) = &ssh.ssh_connect_bin {
+        if let Some(bin) = &ssh.ssh_bin {
             if plan.view.is_some() {
                 use kennel_lib_syscall::landlock::AccessFs;
                 plan.landlock_fs
@@ -1028,7 +1028,7 @@ fn acquire_binder_node0(
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
 /// Wire the `AF_UNIX` socket facade (§7.6 / `07-1` §7.1.5): launch the in-kennel
-/// `facade-afunix-shim` proxy so each granted socket is presented at its in-view path
+/// `facade-afunix` proxy so each granted socket is presented at its in-view path
 /// and brokered, on connect, to the `org.projectkennel.IAfUnix` binder facade — which
 /// resolves the name to the real host socket and returns a connected fd. No host
 /// socket path is ever bound into the view (the bind-mount shim it replaces is gone).
@@ -1041,15 +1041,15 @@ const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 /// A no-op unless `pivoting` (the facade needs the constructed view + its binderfs) and
 /// the deployment provides the proxy binary. When grants exist but the binary is absent,
 /// it warns and serves nothing — fail-closed, never a silent host-socket bind.
-fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivoting: bool) {
+fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivoting: bool) {
     use kennel_lib_syscall::landlock::AccessFs;
     if unix.shims.is_empty() || !pivoting {
         return;
     }
-    let Some(shim_bin) = unix.afunix_shim_bin.clone() else {
+    let Some(shim_bin) = unix.afunix_bin.clone() else {
         eprintln!(
-            "kenneld: warning: kennel grants [unix] sockets but no facade-afunix-shim binary is \
-             configured (deployment `afunix_shim`); the sockets will be unserved."
+            "kenneld: warning: kennel grants [unix] sockets but no facade-afunix binary is \
+             configured (deployment `afunix`); the sockets will be unserved."
         );
         return;
     };
@@ -1092,7 +1092,7 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
         plan.landlock_fs
             .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
     }
-    // Register the proxy as a seal-launched aux: `facade-afunix-shim <device>
+    // Register the proxy as a seal-launched aux: `facade-afunix <device>
     // <shim-path>=<name> ...`. It runs inside the sealed view, brokers by logical name
     // (which the facade resolves), and dies with the kennel's PID namespace.
     let mut args = vec![IN_VIEW_BINDER_DEVICE.to_owned()];
@@ -1105,36 +1105,36 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
     });
 }
 
-/// Bind `facade-netshim` into the view, launch it as a seal aux on the kennel loopback `listen`,
+/// Bind `facade-socks5` into the view, launch it as a seal aux on the kennel loopback `listen`,
 /// and point the workload's proxy env at it.
 ///
-/// netshim is the workload's SOCKS5 endpoint: it forwards each connect to binder node 0 as a
+/// `facade-socks5` is the workload's SOCKS5 endpoint: it forwards each connect to binder node 0 as a
 /// `CONNECT_INET` transaction, which kenneld decides and dials via the host-side delegate. The
 /// `socks5h` scheme keeps name resolution on the proxy side (the kennel holds names, not addresses).
-fn apply_netshim(plan: &mut Plan, netshim_bin: &Path, listen: SocketAddr, command: &mut Command) {
+fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command: &mut Command) {
     use kennel_lib_syscall::landlock::AccessFs;
     // Bind the binary into the view at its own path (read-only) and grant execute + its loaders.
     if let Some(view) = plan.view.as_mut() {
         view.binds.push(kennel_lib_spawn::BindMount {
-            source: netshim_bin.to_path_buf(),
-            target: netshim_bin.to_path_buf(),
+            source: socks5_bin.to_path_buf(),
+            target: socks5_bin.to_path_buf(),
             writable: false,
         });
     }
     plan.landlock_fs
-        .push((netshim_bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+        .push((socks5_bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
     let resolution =
-        kennel_lib_policy::libresolve::resolve_loaders(&[netshim_bin.to_string_lossy().into_owned()]);
+        kennel_lib_policy::libresolve::resolve_loaders(&[socks5_bin.to_string_lossy().into_owned()]);
     for loader in resolution.loaders {
         plan.landlock_fs
             .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
     }
-    // `facade-netshim <binder-device> <listen-addr>`, run inside the sealed view.
+    // `facade-socks5 <binder-device> <listen-addr>`, run inside the sealed view.
     plan.aux.push(kennel_lib_spawn::AuxProcess {
-        path: netshim_bin.to_path_buf(),
+        path: socks5_bin.to_path_buf(),
         args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), listen.to_string()],
     });
-    // The workload's egress goes through netshim. socks5h ⇒ the proxy resolves names.
+    // The workload's egress goes through facade-socks5. socks5h ⇒ the proxy resolves names.
     let url = format!("socks5h://{listen}");
     for var in ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"] {
         command.env(var, &url);

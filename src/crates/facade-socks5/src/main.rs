@@ -9,11 +9,11 @@
 //! [`verb::CONNECT_INET`] to node 0; kenneld decides under `[net.proxy]`, resolves the name, pins
 //! the vetted address, drives its host-side `host-netproxy` delegate to dial it, and returns one
 //! end of a socketpair conduit. The shim completes the SOCKS5 handshake and splices the workload to
-//! that conduit. It is the TCP analogue of `facade-afunix-shim`.
+//! that conduit. It is the TCP analogue of `facade-afunix`.
 //!
 //! # Invocation
 //!
-//! `facade-netshim <binder-device> <listen-addr>`, spawned by kenneld into the kennel's view.
+//! `facade-socks5 <binder-device> <listen-addr>`, spawned by kenneld into the kennel's view.
 //! `<binder-device>` is `/dev/binder`; `<listen-addr>` is the kennel loopback SOCKS endpoint.
 //!
 //! # Non-goals
@@ -49,13 +49,13 @@ const REP_ATYP_NOT_SUPPORTED: u8 = 0x08;
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (Some(device), Some(listen)) = (args.next(), args.next()) else {
-        eprintln!("facade-netshim: usage: <binder-device> <listen-addr>");
+        eprintln!("facade-socks5: usage: <binder-device> <listen-addr>");
         return ExitCode::FAILURE;
     };
     match serve(&device, &listen) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("facade-netshim: {e}");
+            eprintln!("facade-socks5: {e}");
             ExitCode::FAILURE
         }
     }
@@ -70,7 +70,7 @@ fn serve(device: &str, listen: &str) -> io::Result<()> {
         let device = device.to_owned();
         thread::spawn(move || {
             if let Err(e) = handle(&device, client) {
-                eprintln!("facade-netshim: {e}");
+                eprintln!("facade-socks5: {e}");
             }
         });
     }

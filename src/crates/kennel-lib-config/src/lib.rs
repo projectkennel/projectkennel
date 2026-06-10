@@ -152,10 +152,10 @@ struct RawDeployment {
     privhelper: Option<PathBuf>,
     netproxy: Option<PathBuf>,
     ssh_reorigin: Option<PathBuf>,
-    ssh_connect: Option<PathBuf>,
+    ssh: Option<PathBuf>,
     akc: Option<PathBuf>,
-    afunix_shim: Option<PathBuf>,
-    netshim: Option<PathBuf>,
+    afunix: Option<PathBuf>,
+    socks5: Option<PathBuf>,
     init: Option<PathBuf>,
 }
 
@@ -169,10 +169,10 @@ impl RawDeployment {
             privhelper: higher.privhelper.or(self.privhelper),
             netproxy: higher.netproxy.or(self.netproxy),
             ssh_reorigin: higher.ssh_reorigin.or(self.ssh_reorigin),
-            ssh_connect: higher.ssh_connect.or(self.ssh_connect),
+            ssh: higher.ssh.or(self.ssh),
             akc: higher.akc.or(self.akc),
-            afunix_shim: higher.afunix_shim.or(self.afunix_shim),
-            netshim: higher.netshim.or(self.netshim),
+            afunix: higher.afunix.or(self.afunix),
+            socks5: higher.socks5.or(self.socks5),
             init: higher.init.or(self.init),
         }
     }
@@ -190,10 +190,10 @@ impl RawDeployment {
             privhelper: self.privhelper,
             netproxy: self.netproxy,
             ssh_reorigin: self.ssh_reorigin,
-            ssh_connect: self.ssh_connect,
+            ssh: self.ssh,
             akc: self.akc,
-            afunix_shim: self.afunix_shim,
-            netshim: self.netshim,
+            afunix: self.afunix,
+            socks5: self.socks5,
             init: self.init,
         }
     }
@@ -209,10 +209,10 @@ pub struct Deployment {
     privhelper: Option<PathBuf>,
     netproxy: Option<PathBuf>,
     ssh_reorigin: Option<PathBuf>,
-    ssh_connect: Option<PathBuf>,
+    ssh: Option<PathBuf>,
     akc: Option<PathBuf>,
-    afunix_shim: Option<PathBuf>,
-    netshim: Option<PathBuf>,
+    afunix: Option<PathBuf>,
+    socks5: Option<PathBuf>,
     init: Option<PathBuf>,
 }
 
@@ -288,8 +288,8 @@ impl Deployment {
 
     /// The in-kennel SOCKS connector the bastion's `ProxyCommand` invokes.
     #[must_use]
-    pub fn ssh_connect(&self) -> PathBuf {
-        self.resolve_bin(self.ssh_connect.as_deref(), "facade-ssh-connect")
+    pub fn ssh(&self) -> PathBuf {
+        self.resolve_bin(self.ssh.as_deref(), "facade-ssh")
     }
 
     /// The bastion's root-owned `AuthorizedKeysCommand`.
@@ -301,15 +301,15 @@ impl Deployment {
     /// The in-kennel `AF_UNIX` proxy bound into the view and launched by the seal to
     /// broker granted sockets through the binder facade (`07-1` §7.1.5).
     #[must_use]
-    pub fn afunix_shim(&self) -> PathBuf {
-        self.resolve_bin(self.afunix_shim.as_deref(), "facade-afunix-shim")
+    pub fn afunix(&self) -> PathBuf {
+        self.resolve_bin(self.afunix.as_deref(), "facade-afunix")
     }
 
     /// The in-kennel SOCKS5 egress shim bound into the view and launched by the seal: it
     /// brokers each outbound connect to node 0 as a `CONNECT_INET` transaction (`07-5` §7.5).
     #[must_use]
-    pub fn netshim(&self) -> PathBuf {
-        self.resolve_bin(self.netshim.as_deref(), "facade-netshim")
+    pub fn socks5(&self) -> PathBuf {
+        self.resolve_bin(self.socks5.as_deref(), "facade-socks5")
     }
 
     /// The trusted root-owned `kennel-bin-init` the privhelper factory `fexecve`s as the

@@ -52,7 +52,7 @@ narration is kept here; the chapter named is the source of truth.
   `AF_NETLINK`. Recon-only — egress stays blocked — but a genuine info-disclosure residual.
   The closure path is now designed (`07-5`): unshare `CLONE_NEWNET` in the construction
   child, configure an in-namespace `lo`, and reach the host-side proxy across the boundary via
-  the `org.projectkennel.INet` binder facade (SOCKS5 → `facade-netshim` → `INet` `CONNECT` →
+  the `org.projectkennel.INet` binder facade (SOCKS5 → `facade-socks5` → `INet` `CONNECT` →
   the `host-netproxy` delegate) rather than a direct loopback connect — re-architecting the
   §7.5 loopback/egress model onto the four network modes (`none`/`constrained`/`unconstrained`/
   `host`) + the loopback mirror. When that lands, T1.6 closes for `none`/`constrained`/

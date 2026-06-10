@@ -5,7 +5,7 @@
 //! `kenneld` owns the entire egress decision (`docs/design/07-5-network.md` §7.5): it reads the
 //! signed kennel policy, runs the allow/deny ruleset, resolves names under policy, re-checks the
 //! resolved address, and **pins** the vetted IPs — all in-process (`kenneld::inet`). The workload
-//! speaks SOCKS to `facade-netshim` inside its own net-ns, which forwards each request as a
+//! speaks SOCKS to `facade-socks5` inside its own net-ns, which forwards each request as a
 //! `CONNECT_INET` binder transaction to `kenneld`. None of that lives here any more.
 //!
 //! What's left is the one thing `kenneld` cannot do without crossing the net-ns boundary: put a

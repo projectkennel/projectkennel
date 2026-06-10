@@ -134,11 +134,11 @@ pub struct Identity {
     /// egress for this daemon. When set, a kennel with `[ssh]` grants gets a
     /// synthetic `~/.ssh` and a route to the shared `kennel-sshd`.
     pub bastion: Option<BastionSetup>,
-    /// The host path of `facade-afunix-shim`, bound into the constructed view and
+    /// The host path of `facade-afunix`, bound into the constructed view and
     /// launched by the seal to broker each granted `AF_UNIX` socket through the binder
     /// facade (§7.6 / `07-1` §7.1.5). `None` disables the facade path, so `[unix]`
     /// grants go unserved (no host socket is exposed by other means).
-    pub afunix_shim_bin: Option<PathBuf>,
+    pub afunix_bin: Option<PathBuf>,
     /// The host path of the trusted root-owned `kennel-bin-init` the privhelper factory
     /// `fexecve`s as the kennel's uid-0 PID 1 (`07-2`). `Some` selects the factory
     /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
@@ -155,9 +155,9 @@ pub struct BastionSetup {
     pub dir: PathBuf,
     /// The host-side `kennel-bin-ssh-reorigin` the bastion's forced commands invoke.
     pub reorigin_bin: PathBuf,
-    /// The in-kennel path of `facade-ssh-connect` (each synthetic `config`
+    /// The in-kennel path of `facade-ssh` (each synthetic `config`
     /// stanza's `ProxyCommand`); also the host path bound into the kennel view.
-    pub ssh_connect_bin: PathBuf,
+    pub ssh_bin: PathBuf,
     /// The loopback address the bastion listens on.
     pub listen: IpAddr,
     /// The bastion's port.
@@ -282,12 +282,12 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             })
             .collect();
         let listen = setup.listen.to_string();
-        let connect_bin = setup.ssh_connect_bin.to_string_lossy().into_owned();
+        let connect_bin = setup.ssh_bin.to_string_lossy().into_owned();
         let params = crate::ssh::SshParams {
             bastion_host: &listen,
             bastion_port: setup.port,
             bastion_host_key: &host_pub,
-            ssh_connect_bin: &connect_bin,
+            ssh_bin: &connect_bin,
             hosts: &host_grants,
         };
         let ssh_dir = shim_root.join(".ssh");
@@ -296,7 +296,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         Ok(crate::SshPrep {
             file_binds,
             host_service: Some(SocketAddr::new(setup.listen, setup.port)),
-            ssh_connect_bin: Some(setup.ssh_connect_bin.clone()),
+            ssh_bin: Some(setup.ssh_bin.clone()),
         })
     }
 
@@ -334,7 +334,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         crate::UnixPrep {
             shims,
             env,
-            afunix_shim_bin: self.identity.afunix_shim_bin.clone(),
+            afunix_bin: self.identity.afunix_bin.clone(),
         }
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
                 view_base: None,
                 audit_base: None,
                 bastion: None,
-                afunix_shim_bin: None,
+                afunix_bin: None,
                 init_bin: None,
             },
             OkPriv,

@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-//! `facade-ssh-connect`: the in-kennel ssh `ProxyCommand`, dialing through binder.
+//! `facade-ssh`: the in-kennel ssh `ProxyCommand`, dialing through binder.
 //!
 //! A confined kennel has no network path off its loopback (its own net-ns); every outbound
 //! connection crosses the binder gateway. `ssh` reaches the bastion the same way: this command,
-//! invoked as `ProxyCommand facade-ssh-connect %h %p`, issues an `INet` `CONNECT_INET` transaction
+//! invoked as `ProxyCommand facade-ssh %h %p`, issues an `INet` `CONNECT_INET` transaction
 //! to kenneld (binder node 0), receives the connection fd, and splices it to stdin/stdout. The
 //! bastion is a sanctioned host-loopback service kenneld dials on the kennel's behalf.
 //!
@@ -23,19 +23,19 @@ use kennel_lib_binder::service::{inet, transport, verb};
 /// The kennel-side binder device the `ProxyCommand` transacts on (the constructed view's binderfs).
 const DEFAULT_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
-/// The binder receive-buffer size (matches `facade-netshim`).
+/// The binder receive-buffer size (matches `facade-socks5`).
 const MAP_SIZE: usize = 128 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [host, port] = args.as_slice() else {
-        eprintln!("usage: facade-ssh-connect <host> <port>");
+        eprintln!("usage: facade-ssh <host> <port>");
         return ExitCode::from(2);
     };
     match run(host, port) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("facade-ssh-connect: {e}");
+            eprintln!("facade-ssh: {e}");
             ExitCode::from(1)
         }
     }

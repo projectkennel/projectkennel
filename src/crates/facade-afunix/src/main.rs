@@ -10,11 +10,11 @@
 //! Applications still expect a socket at the standard path, so this proxy listens
 //! there: on each accept it asks the facade to `CONNECT` the named socket
 //! (`transact_fd`), receives the connected host fd, and splices the two. It is the
-//! `AF_UNIX` analogue of the `facade-netshim` SOCKS facade (§7.11).
+//! `AF_UNIX` analogue of the `facade-socks5` SOCKS facade (§7.11).
 //!
 //! # Invocation
 //!
-//! `facade-afunix-shim <binder-device> <shim-path>=<service-name> [...]`, spawned by
+//! `facade-afunix <binder-device> <shim-path>=<service-name> [...]`, spawned by
 //! `kenneld` into the kennel's constructed view. `<binder-device>` is `/dev/binder`;
 //! each pair binds a listener at `<shim-path>` brokering the facade service
 //! `<service-name>` (the `[[unix.allow]]` `name`).
@@ -43,12 +43,12 @@ const MAP_SIZE: usize = 128 * 1024;
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(device) = args.next() else {
-        eprintln!("facade-afunix-shim: usage: <binder-device> <shim-path>=<service> ...");
+        eprintln!("facade-afunix: usage: <binder-device> <shim-path>=<service> ...");
         return ExitCode::FAILURE;
     };
     let sockets: Vec<(String, String)> = args.filter_map(|a| split_pair(&a)).collect();
     if sockets.is_empty() {
-        eprintln!("facade-afunix-shim: no <shim-path>=<service> pairs given");
+        eprintln!("facade-afunix: no <shim-path>=<service> pairs given");
         return ExitCode::FAILURE;
     }
 
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
         let device = device.clone();
         handles.push(thread::spawn(move || {
             if let Err(e) = serve_socket(&device, &shim, &service) {
-                eprintln!("facade-afunix-shim: {shim} ({service}): {e}");
+                eprintln!("facade-afunix: {shim} ({service}): {e}");
             }
         }));
     }
@@ -98,7 +98,7 @@ fn serve_socket(device: &str, shim: &str, service: &str) -> io::Result<()> {
                 thread::spawn(move || splice(client, host));
             }
             Err(e) => {
-                eprintln!("facade-afunix-shim: facade refused {service}: {e}");
+                eprintln!("facade-afunix: facade refused {service}: {e}");
                 // Dropping `client` closes it; the application sees a failed connect.
             }
         }

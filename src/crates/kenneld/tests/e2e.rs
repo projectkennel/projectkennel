@@ -357,10 +357,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         synth_pub.starts_with("ssh-ed25519 "),
         "minted a synthetic ed25519 key"
     );
-    let connect_bin = sibling_binary("facade-ssh-connect");
+    let connect_bin = sibling_binary("facade-ssh");
     assert!(
         connect_bin.exists(),
-        "build facade-ssh-connect (the runner does)"
+        "build facade-ssh (the runner does)"
     );
     let bastion_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey";
     let host_grants = [kenneld::ssh::HostGrant {
@@ -372,7 +372,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         bastion_host: "127.0.0.1",
         bastion_port: 8031,
         bastion_host_key: bastion_key,
-        ssh_connect_bin: &connect_str,
+        ssh_bin: &connect_str,
         hosts: &host_grants,
     };
     // The synthetic ~/.ssh lands in the view at the shim $HOME (/home/<account>,
@@ -384,11 +384,11 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let ssh_prep = kenneld::SshPrep {
         file_binds: ssh_binds,
         host_service: Some("127.0.0.1:8031".parse().expect("addr")),
-        ssh_connect_bin: Some(connect_bin),
+        ssh_bin: Some(connect_bin),
     };
 
     // AF_UNIX socket facade (§7.6 / 07-1 §7.1.5): a real host listener the facade
-    // connects on the workload's behalf. The in-kennel `facade-afunix-shim` proxy
+    // connects on the workload's behalf. The in-kennel `facade-afunix` proxy
     // presents it at $HOME/kennel-unix.sock and brokers each connect by name through
     // binder node 0 (kenneld). A host echo thread serves "ping" -> "pong". No host
     // socket path is ever bound into the view.
@@ -404,10 +404,10 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             }
         }
     });
-    let afunix_shim_bin = sibling_binary("facade-afunix-shim");
+    let afunix_bin = sibling_binary("facade-afunix");
     assert!(
-        afunix_shim_bin.exists(),
-        "build facade-afunix-shim (the runner does)"
+        afunix_bin.exists(),
+        "build facade-afunix (the runner does)"
     );
     let shim_path = PathBuf::from("/home/kennel/kennel-unix.sock");
     let unix_prep = UnixPrep {
@@ -416,7 +416,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             shim_path: shim_path.clone(),
         }],
         env: Vec::new(),
-        afunix_shim_bin: Some(afunix_shim_bin),
+        afunix_bin: Some(afunix_bin),
     };
     // The binder facade kenneld serves (node 0): resolves the brokered name "echo" to
     // the real host listener. Mirrors what `Shared::run_kennel` wires for a [unix]
@@ -453,7 +453,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         proxy: Some(ProxySetup {
             binary: netproxy_path(),
             config_dir: proxy_cfg.clone(),
-            netshim: sibling_binary("facade-netshim"),
+            socks5: sibling_binary("facade-socks5"),
         }),
         etc: Some(EtcSetup {
             staging_dir: etc_base.join("etc-1"),
@@ -517,7 +517,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         "the kennel's loopback address {v4} should be added"
     );
     // The egress dial delegate binds its owner-only AF_UNIX command socket (no TCP listener — the
-    // workload's SOCKS endpoint is facade-netshim; kenneld drives the delegate over this socket).
+    // workload's SOCKS endpoint is facade-socks5; kenneld drives the delegate over this socket).
     let command_socket = proxy_cfg.join(format!("netproxy-cmd-{ctx}.sock"));
     assert!(
         command_socket.exists(),
@@ -568,7 +568,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
 /// neutralisation invariant is checked.
 fn build_workload(v4: Ipv4Addr, granted: Option<u32>, primary: u32) -> Command {
     let ssh_clause = "&& test -f \"$HOME/.ssh/config\" \
-         && grep -q 'ProxyCommand .*facade-ssh-connect %h %p' \"$HOME/.ssh/config\" \
+         && grep -q 'ProxyCommand .*facade-ssh %h %p' \"$HOME/.ssh/config\" \
          && grep -q 'HostKeyAlias kennel-bastion' \"$HOME/.ssh/config\" \
          && grep -q '^kennel-bastion ssh-ed25519 ' \"$HOME/.ssh/known_hosts\" \
          && test -f \"$HOME/.ssh/id_github.com\" ";
@@ -591,7 +591,7 @@ p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket
     };
     // Per-kennel net-ns (§7.5): the kennel's own loopback address is up inside the net-ns (bind
     // succeeds — proves the construction child brought up in-ns `lo` + added the address), and
-    // facade-netshim is listening at {v4}:1080 (the egress SOCKS endpoint, launched in-ns). The
+    // facade-socks5 is listening at {v4}:1080 (the egress SOCKS endpoint, launched in-ns). The
     // host's 127.0.0.1 services are in a different net-ns, so they are unreachable from here.
     let netns_clause = format!(
         "&& python3 -c \"import socket;s=socket.socket();s.bind(('{v4}',0));s.close()\" \
@@ -801,7 +801,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         view_base: Some(view_root.clone()),
         audit_base: Some(audit_base.clone()),
         bastion: None,
-        afunix_shim_bin: Some(sibling_binary("facade-afunix-shim")),
+        afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
     };
     let shared = Shared::new(
@@ -913,7 +913,7 @@ fn run_ttl_kennel(
         view_base: Some(view_root.clone()),
         audit_base: Some(audit_base.clone()),
         bastion: None,
-        afunix_shim_bin: Some(sibling_binary("facade-afunix-shim")),
+        afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
     };
     let shared = Shared::new(
@@ -1072,7 +1072,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         view_base: Some(view_root.clone()),
         audit_base: Some(audit_base.clone()),
         bastion: None,
-        afunix_shim_bin: Some(sibling_binary("facade-afunix-shim")),
+        afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
     };
     let shared = Shared::new(

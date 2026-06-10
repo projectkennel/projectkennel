@@ -65,7 +65,7 @@ The proxy is the only network egress path for the workload. The cgroup BPF rules
 
 Runs as the user.
 
-> **Roadmap — the per-kennel network namespace ([`02-5-binder-net.md`](02-5-binder-net.md), design §7.5).** The kennel currently *shares the host network namespace*; the network redesign moves each kennel into its own `CLONE_NEWNET` namespace and re-shapes these processes. There, `host-netproxy` runs in the **host** net-ns as kenneld's **CONNECT delegate** (no binder access, reached over a per-kennel socketpair, no TCP loopback listener); a new **`facade-netshim`** runs **inside** the kennel net-ns as the SOCKS5 front-end and the binder consumer of `org.projectkennel.INet/default`; and a **host-side spawn leg** runs in the host net-ns as the **BIND delegate**, holding the host-side mirror of the kennel's native inside listener. These processes are designed but **not built**; the shape above is the as-built (shared-net-ns) model.
+> **Roadmap — the per-kennel network namespace ([`02-5-binder-net.md`](02-5-binder-net.md), design §7.5).** The kennel currently *shares the host network namespace*; the network redesign moves each kennel into its own `CLONE_NEWNET` namespace and re-shapes these processes. There, `host-netproxy` runs in the **host** net-ns as kenneld's **CONNECT delegate** (no binder access, reached over a per-kennel socketpair, no TCP loopback listener); a new **`facade-socks5`** runs **inside** the kennel net-ns as the SOCKS5 front-end and the binder consumer of `org.projectkennel.INet/default`; and a **host-side spawn leg** runs in the host net-ns as the **BIND delegate**, holding the host-side mirror of the kennel's native inside listener. These processes are designed but **not built**; the shape above is the as-built (shared-net-ns) model.
 
 ### `kennel-sshd` (per-kennel SSH egress bastion)
 
@@ -133,7 +133,7 @@ systemd --user                                              (user, subreaper of 
 ├── kenneld                                                 (user; child subreaper — adopts each kennel-bin-init)
 │   ├── host-netproxy [ai-coding]                         (user)
 │   ├── kennel-bin-init [ai-coding]                             (PID 1; reparented to kenneld once the factory exited)
-│   │   ├── facade-afunix-shim (facade)                     (operator)
+│   │   ├── facade-afunix (facade)                     (operator)
 │   │   └── bash [inside ai-coding kennel]                  (operator, in cgroup, Landlock applied)
 │   │       └── ... workload subprocesses ...
 │   ├── host-netproxy [web-dev]                           (user)

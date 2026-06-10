@@ -7,7 +7,7 @@
 //! libbinder-ndk: the context-manager state machine ([`ctxmgr`]) that `kenneld`
 //! runs as node 0 of each kennel's binderfs instance, and the consumer client
 //! ([`client`]) that a workload-side process (a service, or — with §7.11 — the
-//! `facade-netshim`) uses to register and look up services. The wire codec for
+//! `facade-socks5`) uses to register and look up services. The wire codec for
 //! the `BC_*`/`BR_*` command stream lives in [`proto`]; the raw ioctl/`mmap` FFI
 //! is quarantined to [`sys`]; binderfs mount + device allocation is [`binderfs`].
 //!

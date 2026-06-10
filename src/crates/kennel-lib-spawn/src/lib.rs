@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn stamp_proxy_grants_landlock_connect_on_the_proxy_port() {
         // Landlock always handles net (TCP connect is denied except to listed ports). The workload
-        // reaches facade-netshim at the proxy port, so stamping the proxy must add a CONNECT_TCP
+        // reaches facade-socks5 at the proxy port, so stamping the proxy must add a CONNECT_TCP
         // grant for it — else the in-net-ns connect to the egress endpoint is Landlock-denied.
         use kennel_lib_syscall::landlock::AccessNet;
         let mut plan = fixture_plan();

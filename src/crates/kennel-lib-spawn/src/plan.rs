@@ -415,7 +415,7 @@ pub struct Plan {
     /// Auxiliary processes to launch inside the kennel, in the seal after Landlock and
     /// before the workload `execve`, so they inherit the confined environment and die
     /// with the kennel's PID namespace (`07-1` §7.1.5). Used for the in-kennel proxies
-    /// (e.g. `facade-afunix-shim`). Each binary must be bound into the view and granted
+    /// (e.g. `facade-afunix`). Each binary must be bound into the view and granted
     /// Landlock execute. Not policy-derived — kenneld sets it at bring-up.
     pub aux: Vec<AuxProcess>,
     /// The kennel's time-to-live in seconds (`[lifecycle].ttl`); `None` ⇒ no TTL. `kennel-bin-init`
@@ -486,7 +486,7 @@ pub struct Supervision {
     pub seccomp_deny_action: Action,
     /// The workload's resource limits (`setrlimit`), applied last before `execve`.
     pub ulimits: Vec<(Resource, u64, u64)>,
-    /// The facades to launch (af-unix proxy, future netshim/dbus/gpg), each forked and
+    /// The facades to launch (af-unix proxy, future socks5/dbus/gpg), each forked and
     /// dropped to the operator but **not** confined.
     pub aux: Vec<AuxProcess>,
     /// Whether a controlling-pty fd accompanies the reply (a `BINDER_TYPE_FD` object);
@@ -873,7 +873,7 @@ impl Plan {
             .push((lpm_v6_key(endpoint.v6.octets(), HOST_PREFIX_V6), value));
 
         // Landlock always handles net (the ruleset restricts TCP connect to the listed ports). The
-        // workload reaches its egress endpoint (facade-netshim's SOCKS5 listener) at the proxy port,
+        // workload reaches its egress endpoint (facade-socks5's SOCKS5 listener) at the proxy port,
         // so it must carry a CONNECT_TCP grant — else Landlock denies the connect BPF allowed.
         if !self.landlock_net.iter().any(|(p, _)| *p == endpoint.port) {
             self.landlock_net

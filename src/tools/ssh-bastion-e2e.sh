@@ -236,7 +236,7 @@ esac
 
 echo
 # The egress *transport* (ssh's ProxyCommand → kenneld over binder → host-side delegate → bastion)
-# is proven by the kenneld e2e (tests/e2e.rs full_vertical: real binder, net-ns, facade-ssh-connect)
+# is proven by the kenneld e2e (tests/e2e.rs full_vertical: real binder, net-ns, facade-ssh)
 # + the INet conduit component tests. This script proves the bastion re-origination itself (steps
 # 1-4), which is transport-independent.
 

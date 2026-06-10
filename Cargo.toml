@@ -5,8 +5,8 @@
 #   kennel-lib-*  — libraries linked into the binaries (no runtime location of their own)
 #   kennel-bin-*  — binaries that are neither end of a binder connector (init, ssh-reorigin)
 #   host-*        — the host end of a binder connector: a delegate kenneld drives (netproxy)
-#   facade-*      — the in-kennel end of a binder connector: pushes workload traffic into binder
-#                   (netshim, afunix-shim, ssh-connect)
+#   facade-*      — the in-kennel end of a binder connector: pushes workload traffic into binder,
+#                   named for the protocol it fronts (facade-socks5, facade-afunix, facade-ssh)
 #   kenneld, kennel-privhelper — kept bare: the two privileged host-TCB anchors.
 #
 # Dependency policy is strict (CODING-STANDARDS.md §5): exact version pins,
@@ -38,9 +38,9 @@ members = [
     # The host end of a binder connector (kenneld's dial delegate).
     "src/crates/host-netproxy",
     # The in-kennel ends of binder connectors (push workload traffic into binder).
-    "src/crates/facade-afunix-shim",
-    "src/crates/facade-netshim",
-    "src/crates/facade-ssh-connect",
+    "src/crates/facade-afunix",
+    "src/crates/facade-socks5",
+    "src/crates/facade-ssh",
 ]
 
 [workspace.package]

@@ -92,7 +92,7 @@ pub fn del_address(ifindex: u32, addr: IpAddr, prefix_len: u8) -> io::Result<()>
 /// Bring the interface `ifindex` administratively up (`RTM_NEWLINK`, `IFF_UP`).
 ///
 /// A fresh network namespace starts with `lo` DOWN; the per-kennel net-ns must bring it up before
-/// the workload (and `facade-netshim`) can bind/connect on the loopback addresses. Unprivileged
+/// the workload (and `facade-socks5`) can bind/connect on the loopback addresses. Unprivileged
 /// within the kennel's own user+network namespace (the construction child holds `CAP_NET_ADMIN`
 /// there). Idempotent: re-upping an already-up interface is a no-op ack.
 ///

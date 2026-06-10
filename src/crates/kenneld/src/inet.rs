@@ -1,7 +1,7 @@
 //! The `INet` egress decision: kenneld as the policy decision point for outbound
 //! connections (`docs/design/07-5-network.md` §7.5.2).
 //!
-//! `facade-netshim` (inside the kennel) transacts a [`verb::CONNECT_INET`] request to node 0;
+//! `facade-socks5` (inside the kennel) transacts a [`verb::CONNECT_INET`] request to node 0;
 //! kenneld decides it here against the signed policy's [`Ruleset`] ([`allow`]), resolves the name
 //! under policy ([`dns`]), re-checks every resolved address, and **pins** the vetted set. The pinned
 //! address never crosses back into the kennel (the kennel holds only a name), so DNS rebinding is

@@ -21,14 +21,14 @@ The default in defensible templates is `constrained`. `unconstrained` is documen
 
 ## 7.5.2 The proxy-as-gateway model
 
-Every outbound connection from a kennel terminates at a kennel-local proxy that Project Kennel controls. The kennel sits in its own network namespace with no route off the loopback alias, so it has no network path to the proxy at all: outbound crosses the **binder gateway** (§7.1). The workload speaks SOCKS5 to an in-kennel shim (`facade-netshim`) on the kennel's loopback at `:1080`; the shim issues an `org.projectkennel.INet/default` `CONNECT` transaction to kenneld (node 0); kenneld makes the policy decision, resolves the name, pins the vetted address, and drives its host-side `host-netproxy` delegate to dial it. kenneld mints a socketpair for the connection and returns one end to the shim; the delegate splices the other end to the dialled socket. The shim splices the workload to its end.
+Every outbound connection from a kennel terminates at a kennel-local proxy that Project Kennel controls. The kennel sits in its own network namespace with no route off the loopback alias, so it has no network path to the proxy at all: outbound crosses the **binder gateway** (§7.1). The workload speaks SOCKS5 to an in-kennel shim (`facade-socks5`) on the kennel's loopback at `:1080`; the shim issues an `org.projectkennel.INet/default` `CONNECT` transaction to kenneld (node 0); kenneld makes the policy decision, resolves the name, pins the vetted address, and drives its host-side `host-netproxy` delegate to dial it. kenneld mints a socketpair for the connection and returns one end to the shim; the delegate splices the other end to the dialled socket. The shim splices the workload to its end.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                       KENNEL NET-NS (constrained / unconstrained)         │
 │                                                                          │
 │  process ──connect()──► 127.42.7.1:1080                                  │
-│                         (facade-netshim, SOCKS5)                         │
+│                         (facade-socks5, SOCKS5)                         │
 │                              │                                           │
 │              binder CONNECT → org.projectkennel.INet/default            │
 └──────────────────────────────┼───────────────────────────────────────────┘
@@ -42,7 +42,7 @@ Every outbound connection from a kennel terminates at a kennel-local proxy that 
         reply: conduit handle + end b   host-netproxy (host ns)        │
                 │                        connect(pinned-ip) → upstream u  │
                 ▼                        splice(a ↔ u)                    │
-        facade-netshim splices workload ↔ b  ──► internet
+        facade-socks5 splices workload ↔ b  ──► internet
 ```
 
 The fd that crosses into the kennel is the socketpair end `b` — a local conduit kenneld minted, not the dialled socket. The upstream socket `u` never leaves the host; kenneld touches no payload byte (it brokers the connection and steps out); half-close and teardown propagate through the socketpair and the conduit's binder death-notification.
@@ -72,11 +72,11 @@ A small, single-purpose daemon launched per kennel, running in the **host** netw
 
 - Blocking, thread-per-connection Rust (`host-netproxy`). No async runtime — the same TCB bar as OpenSSH.
 - Stateless: no config, no policy, no resolver. kenneld holds the policy and resolves+pins the address (§7.5.5); the delegate is told a pinned IP and connects to it.
-- Listens only on the per-kennel `kenneld`↔delegate `AF_UNIX` socket (0600, owner-only) — no TCP listener, no host-reachable port. The SOCKS5 endpoint the workload sees is `facade-netshim` inside the kennel net-ns.
+- Listens only on the per-kennel `kenneld`↔delegate `AF_UNIX` socket (0600, owner-only) — no TCP listener, no host-reachable port. The SOCKS5 endpoint the workload sees is `facade-socks5` inside the kennel net-ns.
 - For each request from kenneld: `connect(pinned-ip)`, then `splice` the upstream socket against the conduit socketpair end kenneld supplied. For an inbound `BIND` (§7.5.7) it binds the host-side port, accepts, and splices each connection the same way.
 - Emits the JSONL egress audit event.
 
-The SOCKS5 wire format is preserved end-to-end so the workload sees no change — it terminates in `facade-netshim` (§7.5.6), which carries only the target and the byte stream across the boundary. SOCKS5 specifically because:
+The SOCKS5 wire format is preserved end-to-end so the workload sees no change — it terminates in `facade-socks5` (§7.5.6), which carries only the target and the byte stream across the boundary. SOCKS5 specifically because:
 
 - Transport-agnostic (TCP, optionally UDP via SOCKS5 UDP ASSOCIATE).
 - Authenticates if needed (per-kennel proxy credentials enable further sub-kennel discrimination).
@@ -265,10 +265,10 @@ The bind happens **natively inside the kennel net-ns** — which is what makes t
 Exposing that listener to the host is the **`BIND` verb** on `org.projectkennel.INet/default`. Where `CONNECT` is pulled by the kennel — the shim transacts to node 0 and gets the conduit fd in the reply — `BIND` is pushed by the daemon, so the direction reverses on every leg:
 
 - **The host-side listener is a delegate.** A per-kennel host-side leg (kenneld's `BIND` delegate, a control-socket delegate alongside the `CONNECT` dialer) binds the policy-allowed `ip:port` on the host `lo` alias at the kennel's own IP, listens, and accepts. The bind decision is kenneld's, gated by `[[net.bpf.bind]]`; the workload never decides what is exposed.
-- **The kennel-side facade exposes a callback.** `facade-netshim`'s `BIND` transaction registers a callback node (with the kennel-side `ip:port` to forward to) that kenneld holds a reference to. This is the reverse of `CONNECT`: kenneld pushes inbound connections *to* the netshim rather than the netshim pulling outbound *from* kenneld.
-- **Per inbound connection, kenneld brokers a socketpair.** On an accepted connection the host-side delegate signals kenneld over the control socket; kenneld mints a socketpair, hands one end back to the delegate (control socket, `SCM_RIGHTS`) to splice against the accepted connection, and pushes the other end through binder to the netshim's callback node. The netshim connects to the kennel-side service (the workload's native listener at the same `ip:port`) and splices.
+- **The kennel-side facade exposes a callback.** `facade-socks5`'s `BIND` transaction registers a callback node (with the kennel-side `ip:port` to forward to) that kenneld holds a reference to. This is the reverse of `CONNECT`: kenneld pushes inbound connections *to* the socks5 rather than the socks5 pulling outbound *from* kenneld.
+- **Per inbound connection, kenneld brokers a socketpair.** On an accepted connection the host-side delegate signals kenneld over the control socket; kenneld mints a socketpair, hands one end back to the delegate (control socket, `SCM_RIGHTS`) to splice against the accepted connection, and pushes the other end through binder to the socks5's callback node. The socks5 connects to the kennel-side service (the workload's native listener at the same `ip:port`) and splices.
 
-Bytes flow `external → accepted connection → socketpair → netshim → kennel-side service`; kenneld mints both ends, so it relays no delegate-supplied fd and stays out of the data path, and the only fd crossing into the kennel is a benign socketpair end — the same conduit shape as `CONNECT`, only minted on the daemon's initiative. No host listener fd and no accepted-connection fd ever crosses the boundary. The operator sees the port at the kennel's own IP on host `lo`, mapping straight back to the kennel. An allowed native bind reported by the cgroup hook (or a SOCKS5 `BIND` request) is what prompts the shim to register the callback.
+Bytes flow `external → accepted connection → socketpair → socks5 → kennel-side service`; kenneld mints both ends, so it relays no delegate-supplied fd and stays out of the data path, and the only fd crossing into the kennel is a benign socketpair end — the same conduit shape as `CONNECT`, only minted on the daemon's initiative. No host listener fd and no accepted-connection fd ever crosses the boundary. The operator sees the port at the kennel's own IP on host `lo`, mapping straight back to the kennel. An allowed native bind reported by the cgroup hook (or a SOCKS5 `BIND` request) is what prompts the shim to register the callback.
 
 What we don't want:
 
@@ -301,7 +301,7 @@ The userspace process believes it bound to `0.0.0.0`; the kernel actually bound 
 
 **Port allocation.** Two kennels can both bind `:3000` without conflict — each binds inside its own network namespace, and the host-side mirrors land on distinct addresses (`127.42.7.1:3000` and `127.42.11.1:3000`) on the host `lo` alias. Tools that hardcode `localhost:3000` for status checks within the kennel work, because the kennel's `/etc/hosts` shadows `localhost` → `127.42.<ctx>.1`.
 
-**The in-kennel facade.** The workload never sees any of the binder mechanics. `facade-netshim` runs as a sibling of the workload inside the kennel net-ns and view, listens on the kennel's loopback at `:1080` (the address `$KENNEL_SOCKS_PROXY` points at), and speaks SOCKS5. A `CONNECT` request becomes an `org.projectkennel.INet/default` `CONNECT` transaction; the conduit fd comes back in the reply and the shim splices it against the SOCKS5 session. For inbound, the shim registers a `BIND` callback once; kenneld pushes each arriving connection's conduit fd to it, and the shim splices that against a connection it opens to the kennel-side service. The shim does no policy, no DNS, no audit — those are kenneld's; it is purely the SOCKS5↔binder translation layer, and as a parser of untrusted workload input it carries a fuzz target.
+**The in-kennel facade.** The workload never sees any of the binder mechanics. `facade-socks5` runs as a sibling of the workload inside the kennel net-ns and view, listens on the kennel's loopback at `:1080` (the address `$KENNEL_SOCKS_PROXY` points at), and speaks SOCKS5. A `CONNECT` request becomes an `org.projectkennel.INet/default` `CONNECT` transaction; the conduit fd comes back in the reply and the shim splices it against the SOCKS5 session. For inbound, the shim registers a `BIND` callback once; kenneld pushes each arriving connection's conduit fd to it, and the shim splices that against a connection it opens to the kennel-side service. The shim does no policy, no DNS, no audit — those are kenneld's; it is purely the SOCKS5↔binder translation layer, and as a parser of untrusted workload input it carries a fuzz target.
 
 ## 7.5.8 Threats addressed
 
