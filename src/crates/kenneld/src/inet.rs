@@ -2,14 +2,16 @@
 //! connections (`docs/design/07-5-network.md` §7.5.2).
 //!
 //! `kennel-netshim` (inside the kennel) transacts a [`verb::CONNECT_INET`] request to node 0;
-//! kenneld decides it here — exactly as the `kennel-netproxy` server would, reusing that crate's
-//! [`Ruleset`] and resolver seam so the two never drift — and **pins** the vetted address. The
-//! pinned address never crosses back into the kennel (the kennel holds only a name), so DNS
-//! rebinding is structurally impossible: kenneld resolves and re-checks under policy on every
-//! request. Driving the dial and minting the socketpair conduit is the next increment (N1.2); this
-//! module is the decision, unit-tested in isolation against a fake resolver.
+//! kenneld decides it here against the signed policy's [`Ruleset`] ([`allow`]), resolves the name
+//! under policy ([`dns`]), re-checks every resolved address, and **pins** the vetted set. The pinned
+//! address never crosses back into the kennel (the kennel holds only a name), so DNS rebinding is
+//! structurally impossible. Approved, kenneld mints a socketpair, hands the dial delegate one end
+//! plus the pinned address, and returns the other end into the kennel over binder.
 //!
 //! [`verb::CONNECT_INET`]: kennel_binder::service::verb::CONNECT_INET
+
+pub mod allow;
+pub mod dns;
 
 use std::io;
 use std::net::IpAddr;
@@ -19,16 +21,15 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use kennel_binder::service::transport;
-use kennel_netproxy::allow::{
-    is_special_use, Decision, Destination, NetMode, RequestDecision, Ruleset, Transport,
+use kennel_policy::{NameRule, NetPolicy, NetRule, Protocol};
+
+use allow::{
+    is_special_use, Cidr, Decision, DenyMatcher, DenyRule, Destination, Matcher, NetMode,
+    RequestDecision, Rule, RuleProtocol, Ruleset, Transport,
 };
-use kennel_netproxy::dns::Resolver;
+use dns::Resolver;
 
 /// The egress policy inputs for the `INet` decision.
-///
-/// The same trio the `kennel-netproxy` server snapshots per request, built here from the very
-/// config the netproxy reads so the decision point and the proxy's reader stay in lockstep
-/// (`from_toml`).
 #[derive(Clone, Debug)]
 pub struct NetRuntime {
     /// The resolved egress allow/deny ruleset.
@@ -39,27 +40,37 @@ pub struct NetRuntime {
     /// host-loopback invariant deny (the SSH bastion, §7.10.4).
     host_services: Vec<SocketAddr>,
     /// The per-kennel `kenneld`↔delegate command socket the conduit dial is driven over (the path
-    /// `kennel-netproxy` binds). `None` when the kennel runs no egress proxy.
+    /// the dial delegate binds). `None` when the kennel runs no egress delegate.
     command_socket: Option<PathBuf>,
 }
 
 impl NetRuntime {
-    /// Build the decision runtime from the per-kennel proxy config TOML kenneld already generates
-    /// for `kennel-netproxy`, parsed through that crate's own reader (the round-trip the proxy
-    /// writer is validated against — one source of truth for the allow/deny mapping).
+    /// Build the decision runtime directly from the signed policy's [`NetPolicy`].
     ///
-    /// # Errors
-    ///
-    /// The parser's error string if the TOML does not parse (it is kenneld's own output, so this is
-    /// a build bug, surfaced rather than silently denying).
-    pub fn from_toml(toml: &str, command_socket: Option<PathBuf>) -> Result<Self, String> {
-        let cfg = kennel_netproxy::config::from_toml_str(toml).map_err(|e| e.to_string())?;
-        Ok(Self {
-            ruleset: cfg.ruleset,
-            accept_private_resolved: cfg.accept_private_resolved,
-            host_services: cfg.host_services,
+    /// The allowlist is the union of the by-address (`net.allow`) and by-name (`net.allow_names`)
+    /// rules; the denylist is the invariant deny CIDRs, re-checked against every resolved address.
+    /// `host_services` are the sanctioned host-loopback literals; `command_socket` is the delegate's
+    /// dial socket. `accept_private_resolved` is `false` — a name may not resolve into special-use
+    /// space.
+    #[must_use]
+    pub fn from_policy(
+        net: &NetPolicy,
+        host_services: Vec<SocketAddr>,
+        command_socket: Option<PathBuf>,
+    ) -> Self {
+        let mut allow: Vec<Rule> = net.allow.iter().filter_map(rule_from_cidr).collect();
+        allow.extend(net.allow_names.iter().map(rule_from_name));
+        let deny: Vec<DenyRule> = net.deny_invariant.iter().filter_map(deny_from_cidr).collect();
+        Self {
+            ruleset: Ruleset {
+                mode: net_mode(net.mode),
+                allow,
+                deny,
+            },
+            accept_private_resolved: false,
+            host_services,
             command_socket,
-        })
+        }
     }
 
     /// The conduit command socket, if the kennel has an egress delegate.
@@ -90,6 +101,62 @@ impl NetRuntime {
             .iter()
             .any(|s| s.ip() == addr && s.port() == port)
     }
+}
+
+/// The settled schema has no `none` mode (a no-network kennel runs no egress delegate), so only the
+/// two egress modes map.
+const fn net_mode(mode: kennel_policy::NetMode) -> NetMode {
+    match mode {
+        kennel_policy::NetMode::Constrained => NetMode::Constrained,
+        kennel_policy::NetMode::Open => NetMode::Open,
+    }
+}
+
+const fn rule_protocol(protocol: Protocol) -> RuleProtocol {
+    match protocol {
+        Protocol::Any => RuleProtocol::Any,
+        Protocol::Tcp => RuleProtocol::Tcp,
+        Protocol::Udp => RuleProtocol::Udp,
+    }
+}
+
+/// A port *range* as the ruleset's discrete port set: the full range is "any port" (empty); a
+/// single port is `[p]`; a sub-range is enumerated.
+fn ports_for(port_min: u16, port_max: u16) -> Vec<u16> {
+    if port_min == 0 && port_max == u16::MAX {
+        Vec::new()
+    } else {
+        (port_min..=port_max).collect()
+    }
+}
+
+fn rule_from_cidr(rule: &NetRule) -> Option<Rule> {
+    Some(Rule {
+        matcher: Matcher::Cidr(cidr_of(rule)?),
+        ports: ports_for(rule.port_min, rule.port_max),
+        protocol: rule_protocol(rule.protocol),
+    })
+}
+
+fn rule_from_name(rule: &NameRule) -> Rule {
+    Rule {
+        matcher: Matcher::Name(rule.name.clone()),
+        ports: rule.ports.clone(),
+        protocol: rule_protocol(rule.protocol),
+    }
+}
+
+fn deny_from_cidr(rule: &NetRule) -> Option<DenyRule> {
+    Some(DenyRule {
+        matcher: DenyMatcher::Cidr(cidr_of(rule)?),
+        ports: ports_for(rule.port_min, rule.port_max),
+    })
+}
+
+/// A policy CIDR (`cidr` literal + `prefix_len`) as a ruleset [`Cidr`], or `None` if the literal
+/// does not parse (a malformed signed policy — dropped rather than admitting a wrong match).
+fn cidr_of(rule: &NetRule) -> Option<Cidr> {
+    Cidr::new(rule.cidr.parse::<IpAddr>().ok()?, rule.prefix_len).ok()
 }
 
 /// The outcome of an `INet` decision. `Pinned` carries the vetted address set (in resolver order)
@@ -128,9 +195,9 @@ pub fn decode_request(data: &[u8], max_host: usize) -> Option<(Transport, u16, D
 
 /// Decide an `INet` request, **pinning** the vetted addresses instead of dialling.
 ///
-/// Mirrors `kennel_netproxy::server`'s `resolve_and_connect` exactly — host-service exception, then
-/// `decide_request`, then (for a name) resolve + per-address `decide_resolved` + the special-use
-/// gate. The dial is kenneld's delegate's job (N1.2).
+/// The host-service exception first (an exact loopback literal), then `decide_request`, then (for a
+/// name) resolve + per-address `decide_resolved` + the special-use gate. The dial itself is the
+/// delegate's job ([`dial_via_delegate`]).
 #[must_use]
 pub fn decide(
     rt: &NetRuntime,
@@ -203,8 +270,7 @@ pub fn dial_via_delegate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kennel_netproxy::allow::{Cidr, DenyMatcher, DenyRule, Matcher, Rule, RuleProtocol};
-    use kennel_netproxy::dns::ResolveError;
+    use dns::ResolveError;
     use std::net::Ipv4Addr;
 
     /// A resolver that returns a fixed answer (or an error), so the decision is exercised without

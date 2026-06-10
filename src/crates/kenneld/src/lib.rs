@@ -72,9 +72,7 @@ pub enum Error {
     Io(io::Error),
     /// The workload could not be spawned.
     Spawn(SpawnError),
-    /// The egress proxy's config could not be derived from the policy.
-    ProxyConfig(String),
-    /// The egress proxy process could not be launched.
+    /// The egress dial delegate process could not be launched.
     Proxy(io::Error),
 }
 
@@ -83,8 +81,7 @@ impl core::fmt::Display for Error {
         match self {
             Self::Io(e) => write!(f, "cgroup filesystem operation failed: {e}"),
             Self::Spawn(e) => write!(f, "workload spawn failed: {e}"),
-            Self::ProxyConfig(m) => write!(f, "egress proxy config could not be derived: {m}"),
-            Self::Proxy(e) => write!(f, "egress proxy could not be launched: {e}"),
+            Self::Proxy(e) => write!(f, "egress dial delegate could not be launched: {e}"),
         }
     }
 }
@@ -94,7 +91,6 @@ impl std::error::Error for Error {
         match self {
             Self::Io(e) | Self::Proxy(e) => Some(e),
             Self::Spawn(e) => Some(e),
-            Self::ProxyConfig(_) => None,
         }
     }
 }
@@ -279,13 +275,6 @@ pub struct Spec {
     /// (or a view-less plan) keeps the in-place fallback seal. kenneld creates it
     /// at bring-up and removes it at teardown.
     pub view_root: Option<PathBuf>,
-    /// The unified-audit context for the egress proxy (the `[audit]` block, §02-3):
-    /// the kennel name, the shared `kennel_uuid`, the per-kennel state dir
-    /// (`~/.local/state/kennel/<kennel>/`, where `network.jsonl` lands), and the
-    /// sinks/levels. kenneld creates the dir at bring-up; the logs persist across
-    /// runs (not removed at teardown — they are audit data). `None` (or no proxy)
-    /// leaves the proxy logging egress to stdout.
-    pub proxy_audit: Option<crate::proxy::ProxyAudit>,
     /// The prepared SSH egress (§7.10): the synthetic `~/.ssh` binds, the bastion
     /// host-service to allow, and the in-kennel connector to bind in. Empty
     /// ([`SshPrep::default`]) for a kennel with no `[ssh]` grant.
@@ -507,7 +496,6 @@ pub fn start<P: Privileged + Sync>(
         proxy,
         etc,
         view_root,
-        proxy_audit,
         ssh,
         unix,
         binder,
@@ -525,7 +513,6 @@ pub fn start<P: Privileged + Sync>(
         proxy.as_ref(),
         etc.as_ref(),
         view_root.as_deref(),
-        proxy_audit.as_ref(),
         &ssh,
         &unix,
         binder.as_ref(),
@@ -576,7 +563,6 @@ fn bring_up<P: Privileged + Sync>(
     proxy: Option<&ProxySetup>,
     etc: Option<&EtcSetup>,
     view_root: Option<&Path>,
-    proxy_audit: Option<&crate::proxy::ProxyAudit>,
     ssh: &SshPrep,
     unix: &UnixPrep,
     binder: Option<&BinderPrep>,
@@ -644,39 +630,25 @@ fn bring_up<P: Privileged + Sync>(
     };
     let egress_bytes = payload.encode();
 
-    // 3b. Build + write the per-kennel egress proxy config (no spawn yet): the proxy binds the
-    //     kennel's loopback addresses, which only exist once the factory has added them, so the
-    //     actual launch is deferred to *after* construct (below). Skipped with no proxy.
-    let (proxy_config, net_runtime): (Option<PathBuf>, crate::inet::NetRuntime) =
+    // 3b. The per-kennel egress: the dial delegate's command socket + kenneld's decision runtime.
+    //     The delegate launch is deferred to *after* construct (below); here we only fix the socket
+    //     path and build the in-process decision runtime from the signed policy. Skipped with no
+    //     egress delegate ⇒ no egress: every INet request is refused.
+    let (command_socket, net_runtime): (Option<PathBuf>, crate::inet::NetRuntime) =
         if let Some(setup) = proxy {
-            let listen = proxy_listen(state.v4, addr6, port);
-            // The per-kennel audit dir persists across runs; create it but never
-            // remove it at teardown (it is audit data, not scratch).
-            if let Some(audit) = proxy_audit {
-                std::fs::create_dir_all(&audit.dir)?;
-            }
             std::fs::create_dir_all(&setup.config_dir)?;
-            // The per-kennel kenneld↔delegate conduit command socket (§7.5.2): the delegate binds
-            // it; kenneld connects per INet CONNECT to drive the dial. Owner-only (the config_dir).
+            // The owner-only kenneld↔delegate conduit command socket (§7.5.2): the delegate binds
+            // it; kenneld connects per INet CONNECT to drive the dial.
             let command_socket = setup.config_dir.join(format!("netproxy-cmd-{ctx}.sock"));
-            let config = crate::proxy::config_toml(
-                net,
-                &listen,
-                proxy_audit,
-                ssh.host_service.as_slice(),
-                Some(&command_socket),
-            )
-            .map_err(Error::ProxyConfig)?;
-            // The INet decision runtime is built from the same config the netproxy reads, parsed
-            // through the netproxy's own reader, so kenneld's decision point cannot drift from the
-            // delegate's enforcement.
-            let net_runtime = crate::inet::NetRuntime::from_toml(&config, Some(command_socket))
-                .map_err(Error::ProxyConfig)?;
-            let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
-            std::fs::write(&config_path, config)?;
-            (Some(config_path), net_runtime)
+            let host_services = ssh
+                .host_service
+                .iter()
+                .copied()
+                .collect::<Vec<std::net::SocketAddr>>();
+            let net_runtime =
+                crate::inet::NetRuntime::from_policy(net, host_services, Some(command_socket.clone()));
+            (Some(command_socket), net_runtime)
         } else {
-            // No egress proxy ⇒ no egress: every INet request is refused.
             (None, crate::inet::NetRuntime::denied())
         };
 
@@ -842,11 +814,10 @@ fn bring_up<P: Privileged + Sync>(
     // binder-less; the workload (which it gates) will not start, so surface it.
     kennel_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
 
-    // The factory has added the loopback addresses, so the egress proxy can now bind them.
-    // Launch it *before* releasing the binder pull (which is what lets kennel-init start the
-    // workload), so the proxy is listening before the workload's first connect().
-    if let (Some(setup), Some(config_path)) = (proxy, proxy_config.as_ref()) {
-        state.proxy = Some(crate::proxy::spawn(&setup.binary, config_path).map_err(Error::Proxy)?);
+    // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
+    // kennel-init start the workload), so its command socket is bound before the first INet request.
+    if let (Some(setup), Some(sock)) = (proxy, command_socket.as_ref()) {
+        state.proxy = Some(crate::proxy::spawn(&setup.binary, sock).map_err(Error::Proxy)?);
     }
 
     // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
@@ -1104,22 +1075,6 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
     });
 }
 
-/// The socket address the egress proxy listens on: the kennel's primary v4
-/// loopback address when it has one, else its v6, at `port`. (The current
-/// netproxy binds a single listener; a dual-stack kennel funnels through the v4
-/// one. Both proxy addresses are BPF-allowed regardless.)
-fn proxy_listen(v4: Option<Ipv4Addr>, v6: Ipv6Addr, port: u16) -> Vec<SocketAddr> {
-    // Both loopback addresses the kennel owns: the proxy listens on each, so a
-    // dual-stack workload reaches it over v4 or v6. v4 is absent for a v6-only
-    // kennel (ctx > 255). One TcpListener binds a single family; the netproxy's
-    // serve_all accepts on all of them.
-    let mut addrs = Vec::with_capacity(2);
-    if let Some(addr) = v4 {
-        addrs.push(SocketAddr::new(addr.into(), port));
-    }
-    addrs.push(SocketAddr::new(v6.into(), port));
-    addrs
-}
 
 /// Best-effort reverse of bring-up: kill the proxy, remove the addresses, then the
 /// cgroup (which detaches the egress BPF). Each step is independent so a failure

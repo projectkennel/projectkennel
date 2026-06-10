@@ -25,11 +25,10 @@
 #![cfg(feature = "e2e")]
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::Ipv4Addr;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use kennel_policy::{
     AuditRuntime, BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy,
@@ -37,7 +36,7 @@ use kennel_policy::{
     SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction, UnixRuntime,
     UnixSocket,
 };
-use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX};
+use kennel_privhelper::addr::{loopback_v4, V4_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_spawn::{prepare, RuntimeSubstitutions};
 use kenneld::{start, Error, EtcSetup, HelperClient, Privileged, ProxySetup, Spec, UnixPrep};
@@ -113,19 +112,6 @@ fn pick_granted_group() -> Option<u32> {
     kennel_syscall::unistd::supplementary_groups()
         .into_iter()
         .find(|&g| g != primary)
-}
-
-/// Whether something accepts TCP connections at `addr`, retried briefly to let the
-/// just-spawned proxy finish binding.
-fn listening(addr: &str) -> bool {
-    let target: std::net::SocketAddr = addr.parse().expect("addr");
-    for _ in 0..40 {
-        if TcpStream::connect_timeout(&target, Duration::from_millis(100)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
 }
 
 /// A settled policy exercising the constructed view: the system dirs a shell needs
@@ -348,7 +334,6 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         u8::try_from(ctx).expect("ctx fits u8 for a v4 kennel"),
         kenneld::PROXY_HOST,
     );
-    let v6 = loopback_v6(scope.ula_gid(), ctx, u64::from(kenneld::PROXY_HOST));
     let _ = helper.del_address(ctx, "lo", v4.into(), V4_PREFIX);
     let _ = Command::new("pkill")
         .args(["-x", "kennel-netproxy"])
@@ -489,17 +474,6 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             home_persist: Vec::new(),
         }),
         view_root: Some(view_root.clone()),
-        proxy_audit: Some(kenneld::proxy::ProxyAudit {
-            kennel: "e2e".to_owned(),
-            kennel_uuid: "e2e-uuid".to_owned(),
-            dir: audit_base.join("e2e"),
-            sinks: Vec::new(),
-            network_level: None,
-            syslog_facility: None,
-            rotate_at_bytes: None,
-            compress_after_seconds: None,
-            retain_count: None,
-        }),
         ssh: ssh_prep,
         unix: unix_prep,
         binder: Some(binder_prep),
@@ -541,18 +515,14 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         lo_has(&v4.to_string()),
         "the kennel's loopback address {v4} should be added"
     );
-    let proxy_addr = format!("{v4}:1080");
+    // The egress dial delegate binds its owner-only AF_UNIX command socket (no TCP listener — the
+    // workload's SOCKS endpoint is kennel-netshim; kenneld drives the delegate over this socket).
+    let command_socket = proxy_cfg.join(format!("netproxy-cmd-{ctx}.sock"));
     assert!(
-        listening(&proxy_addr),
-        "the egress proxy should be listening on {proxy_addr}"
+        command_socket.exists(),
+        "the egress delegate should bind its command socket at {}",
+        command_socket.display()
     );
-    let proxy_addr6 = format!("[{v6}]:1080");
-    assert!(
-        listening(&proxy_addr6),
-        "the egress proxy should be listening on {proxy_addr6}"
-    );
-    let proxy_config = proxy_cfg.join(format!("proxy-{ctx}.toml"));
-    assert!(proxy_config.exists(), "the proxy config should be written");
     assert!(
         audit_path.parent().is_some_and(Path::exists),
         "the audit log directory should be created"
@@ -569,10 +539,6 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     assert!(
         !lo_has(&v4.to_string()),
         "the loopback address should be removed on teardown"
-    );
-    assert!(
-        !quick_connect(&proxy_addr),
-        "the proxy should be killed on teardown"
     );
     assert!(
         !view_root.exists(),
@@ -706,12 +672,6 @@ fn lo_has(addr: &str) -> bool {
         .output()
         .expect("run ip");
     String::from_utf8_lossy(&out.stdout).contains(addr)
-}
-
-/// A single connection attempt — for asserting the proxy is *gone*.
-fn quick_connect(addr: &str) -> bool {
-    let target: std::net::SocketAddr = addr.parse().expect("addr");
-    TcpStream::connect_timeout(&target, Duration::from_millis(100)).is_ok()
 }
 
 /// Classify a bring-up response without `panic!` (the workspace forbids it). `true` means the

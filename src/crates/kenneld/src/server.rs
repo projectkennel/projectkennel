@@ -702,22 +702,6 @@ pub fn run_kennel<P, L>(
         .audit_base
         .as_ref()
         .map(|base| base.join(&req.kennel));
-    let proxy_audit = state_dir.as_ref().map(|dir| crate::proxy::ProxyAudit {
-        kennel: req.kennel.clone(),
-        kennel_uuid: kennel_uuid.clone(),
-        dir: dir.clone(),
-        sinks: audit_runtime
-            .sinks
-            .iter()
-            .map(|k| k.token().to_owned())
-            .collect(),
-        network_level: audit_runtime.network_level.clone(),
-        syslog_facility: audit_runtime.syslog_facility.clone(),
-        rotate_at_bytes: audit_runtime.file.rotate_at_bytes,
-        compress_after_seconds: audit_runtime.file.compress_after_seconds,
-        retain_count: audit_runtime.file.retain_count,
-    });
-
     // Hand the seal the interactive return socket's raw fd (it sends the pty master
     // back over it during pre-exec). `return_sock` keeps the fd open until after the
     // spawn returns, so the forked child still has it.
@@ -759,7 +743,6 @@ pub fn run_kennel<P, L>(
             .view_base
             .as_ref()
             .map(|base| base.join(format!("root-{ctx}"))),
-        proxy_audit,
         ssh,
         unix,
         binder: None,

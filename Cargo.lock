@@ -101,10 +101,7 @@ dependencies = [
 name = "kennel-netproxy"
 version = "0.1.0"
 dependencies = [
- "basic-toml",
- "kennel-audit",
  "kennel-scm",
- "serde",
 ]
 
 [[package]]

@@ -461,8 +461,8 @@ fn inet_connect(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    use kennel_netproxy::allow::Destination;
-    use kennel_netproxy::dns::SystemResolver;
+    use crate::inet::allow::Destination;
+    use crate::inet::dns::SystemResolver;
     let Some((transport, port, dest)) = crate::inet::decode_request(&incoming.data, MAX_NAME) else {
         writer.emit(&inet_event(incoming, ctx, "", 0, Outcome::Error));
         return Reply::Data(one(status::BAD_REQUEST));
