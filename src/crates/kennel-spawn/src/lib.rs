@@ -779,7 +779,9 @@ mod tests {
         p.effective_policy.exec.loaders = vec!["/lib64/ld-linux-x86-64.so.2".to_owned()];
         let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
-        // Namespaces: user (the unprivileged foundation) + mount/pid/ipc, never net.
+        // Namespaces at the plan level: user (the unprivileged foundation) + mount/pid/ipc. The
+        // per-kennel net-ns (Namespaces::NET) is added by kenneld's bring-up for egress kennels
+        // (it needs the runtime loopback scope), not by this policy→plan translation.
         assert_eq!(
             plan.namespaces,
             Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC

@@ -28,11 +28,14 @@ use nix::sys::socket::{
 // netlink message types and flags (`<linux/netlink.h>`, `<linux/rtnetlink.h>`).
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
+const RTM_NEWLINK: u16 = 16;
 const NLMSG_ERROR: u16 = 2;
 const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_ACK: u16 = 0x04;
 const NLM_F_EXCL: u16 = 0x200;
 const NLM_F_CREATE: u16 = 0x400;
+/// `IFF_UP` (`<net/if.h>`): the admin-up flag we set on `lo` inside the kennel net-ns.
+const IFF_UP: u32 = 0x1;
 // `ifaddrmsg` route attributes (`<linux/if_addr.h>`).
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
@@ -84,6 +87,49 @@ pub fn add_address(ifindex: u32, addr: IpAddr, prefix_len: u8) -> io::Result<()>
 pub fn del_address(ifindex: u32, addr: IpAddr, prefix_len: u8) -> io::Result<()> {
     let flags = NLM_F_REQUEST | NLM_F_ACK;
     request(RTM_DELADDR, flags, ifindex, addr, prefix_len)
+}
+
+/// Bring the interface `ifindex` administratively up (`RTM_NEWLINK`, `IFF_UP`).
+///
+/// A fresh network namespace starts with `lo` DOWN; the per-kennel net-ns must bring it up before
+/// the workload (and `kennel-netshim`) can bind/connect on the loopback addresses. Unprivileged
+/// within the kennel's own user+network namespace (the construction child holds `CAP_NET_ADMIN`
+/// there). Idempotent: re-upping an already-up interface is a no-op ack.
+///
+/// # Errors
+///
+/// Returns the OS error if the kernel rejects the request.
+pub fn set_link_up(ifindex: u32) -> io::Result<()> {
+    let msg = build_link_up_msg(ifindex)?;
+    netlink_round_trip(&msg)
+}
+
+/// Serialise an `nlmsghdr` + `ifinfomsg` setting `IFF_UP` (no rtattrs).
+///
+/// `ifinfomsg` is `{ u8 family; u8 pad; u16 type; i32 index; u32 flags; u32 change }` — 16 bytes,
+/// already 4-byte aligned. `change = IFF_UP` masks the update to just the up bit.
+fn build_link_up_msg(ifindex: u32) -> io::Result<Vec<u8>> {
+    let index = i32::try_from(ifindex).map_err(|_| invalid("ifindex too large"))?;
+    let mut body: Vec<u8> = Vec::with_capacity(16);
+    body.push(0u8); // ifi_family = AF_UNSPEC
+    body.push(0u8); // pad
+    body.extend_from_slice(&0u16.to_ne_bytes()); // ifi_type (ignored on set)
+    body.extend_from_slice(&index.to_ne_bytes()); // ifi_index
+    body.extend_from_slice(&IFF_UP.to_ne_bytes()); // ifi_flags
+    body.extend_from_slice(&IFF_UP.to_ne_bytes()); // ifi_change (only the up bit)
+
+    let total = u32::try_from(body.len())
+        .ok()
+        .and_then(|b| b.checked_add(NLMSGHDR_LEN))
+        .ok_or_else(|| invalid("message too long"))?;
+    let mut msg = Vec::with_capacity(body.len().wrapping_add(NLMSGHDR_LEN as usize));
+    msg.extend_from_slice(&total.to_ne_bytes()); // nlmsg_len
+    msg.extend_from_slice(&RTM_NEWLINK.to_ne_bytes()); // nlmsg_type
+    msg.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
+    msg.extend_from_slice(&1u32.to_ne_bytes()); // nlmsg_seq
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid (to the kernel)
+    msg.extend_from_slice(&body);
+    Ok(msg)
 }
 
 /// Build and send one `RTM_*ADDR` request, returning the kernel's ack result.

@@ -336,10 +336,18 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     if half.cgroup_join {
         join_cgroup(&half.cgroup)?;
     }
-    // In-namespace loopback is the per-kennel net-ns path (07-11); not yet built, and the
-    // kennel currently shares the host net namespace, so `lo` is always false here.
+    // In-namespace loopback (§7.3): a fresh net-ns starts with `lo` DOWN and no addresses. Bring it
+    // up and add the kennel's own loopback addresses inside the net-ns — the mirror of the host-lo
+    // alias the factory already added (the same addresses on both sides of the boundary). The
+    // construction child holds CAP_NET_ADMIN over its own new userns+netns, so this is unprivileged.
+    // The addresses were re-validated against the caller's reserved scope before the host add above.
     if half.lo {
-        return Err(io::Error::other("in-namespace loopback not yet implemented"));
+        let cname = std::ffi::CString::new(LOOPBACK).map_err(|_| io::Error::other("bad ifname"))?;
+        let lo = kennel_syscall::netlink::if_index(&cname)?;
+        kennel_syscall::netlink::set_link_up(lo)?;
+        for lb in &half.loopback {
+            kennel_syscall::netlink::add_address(lo, lb.addr, lb.prefix)?;
+        }
     }
 
     // Detach mount propagation from the host before any mount in either path.

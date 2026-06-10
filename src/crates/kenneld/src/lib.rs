@@ -48,6 +48,7 @@ use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response};
 use kennel_spawn::{Plan, ProxyEndpoint, SpawnError};
+use kennel_syscall::namespace::Namespaces;
 
 /// The default proxy host offset within the kennel's subnet (`…|0001` / `::1`).
 ///
@@ -607,6 +608,14 @@ fn bring_up<P: Privileged + Sync>(
     });
     state.v6 = Some(addr6);
 
+    // Per-kennel network namespace (§7.5.1): an egress kennel gets its own net-ns, so the only path
+    // off its loopback is the binder gateway (no route to the host stack, no sibling reachability).
+    // The net-ns boundary is the egress gate; the construction child brings up the in-ns `lo` + the
+    // kennel's addresses (the mirror of the host-lo alias). cgroup-BPF stays as defence-in-depth.
+    if proxy.is_some() {
+        plan.namespaces |= Namespaces::NET;
+    }
+
     // Stamp the egress proxy into the plan before deriving the BPF payload: this
     // adds the flagged allow-entry that lets the workload reach its proxy (and
     // records the proxy in kennel_meta). Without it the BPF would deny every
@@ -923,7 +932,9 @@ fn construction_half_from(
         // The granted supplementary gids feed the gid_map after the 0 0 1 + operator
         // lines (the factory adds those); empty ⇒ default drop-all-groups.
         granted_gids: plan.supplementary_groups.clone().unwrap_or_default(),
-        lo: false, // per-kennel net-ns loopback is future work (07-11)
+        // Bring up the in-namespace `lo` (+ the kennel's own addresses) iff the kennel has its own
+        // net-ns and loopback addresses — the §7.3 mirror of the host-lo alias the factory adds.
+        lo: plan.namespaces.contains(Namespaces::NET) && !loopback.is_empty(),
         ctx,
         loopback: loopback.to_vec(),
     }
