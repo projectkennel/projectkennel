@@ -18,6 +18,71 @@ const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 /// The prefix for a per-kennel cgroup directory name (`kennel-<ctx>`).
 const KENNEL_PREFIX: &str = "kennel-";
 
+/// kenneld's own leaf cgroup, a child of its delegated base. The daemon moves itself here so the
+/// base can carry controllers for its kennel children (see [`prepare_delegation`]).
+const SUPERVISOR_LEAF: &str = "supervisor";
+
+/// Default per-kennel process/thread ceiling (`pids.max`) applied at bring-up.
+///
+/// Generous enough for legitimate parallel builds inside a kennel, while bounding a fork-bomb or a
+/// facade-driven thread explosion to a self-scoped failure of that one kennel. Overridable per
+/// template by `[resources]`.
+pub const DEFAULT_PIDS_MAX: u64 = 4096;
+
+/// Vacate the base cgroup so it can delegate the `pids`/`memory` controllers to its kennel children.
+///
+/// This lets each per-kennel cgroup carry its own [`write_pids_max`] / [`write_memory_max`].
+/// cgroup v2's *no-internal-process* rule forbids a cgroup from both holding member processes and
+/// enabling controllers in `cgroup.subtree_control`. kenneld's service cgroup (the `base`, delegated
+/// via `Delegate=yes`) holds the daemon, so it cannot pass controllers to the kennel cgroups until
+/// the daemon vacates it. This moves the daemon (whole thread group) into `base/supervisor`, leaving
+/// `base` process-free, then enables each controller independently — a host that delegates `pids`
+/// but not `memory` still gets the `pids` bound.
+///
+/// Call once at daemon startup, *before* any kennel cgroup is created. Best-effort at the call site:
+/// where delegation does not grant the controllers the per-kennel writes simply no-op, leaving the
+/// aggregate `kenneld.service` `TasksMax` as the host backstop.
+///
+/// # Errors
+///
+/// An OS error if the leaf cannot be created or the daemon cannot migrate into it (the subsequent
+/// `subtree_control` writes are themselves best-effort and never surfaced).
+pub fn prepare_delegation(base: &Path) -> io::Result<()> {
+    let leaf = base.join(SUPERVISOR_LEAF);
+    std::fs::create_dir_all(&leaf)?;
+    std::fs::write(leaf.join("cgroup.procs"), std::process::id().to_string())?;
+    for controller in ["+pids", "+memory"] {
+        let _ = std::fs::write(base.join("cgroup.subtree_control"), controller);
+    }
+    Ok(())
+}
+
+/// Cap the number of processes/threads in `cgroup` (cgroup v2 `pids.max`).
+///
+/// The kernel refuses `fork`/`clone` past the cap, bounding a fork-bomb or a facade-driven thread
+/// explosion to a self-scoped failure of that one kennel, independent of uid. Requires the `pids`
+/// controller to be enabled for `cgroup`'s parent (see [`prepare_delegation`]); the caller treats
+/// the write as best-effort.
+///
+/// # Errors
+///
+/// An OS error if `pids.max` does not exist (the controller is not delegated) or the write fails.
+pub fn write_pids_max(cgroup: &Path, max: u64) -> io::Result<()> {
+    std::fs::write(cgroup.join("pids.max"), max.to_string())
+}
+
+/// Cap the memory of `cgroup` in bytes (cgroup v2 `memory.max`).
+///
+/// Over the cap the kernel reclaims, then OOM-kills within the cgroup only. Requires the `memory`
+/// controller (see [`prepare_delegation`]); best-effort at the call site.
+///
+/// # Errors
+///
+/// An OS error if `memory.max` does not exist (the controller is not delegated) or the write fails.
+pub fn write_memory_max(cgroup: &Path, bytes: u64) -> io::Result<()> {
+    std::fs::write(cgroup.join("memory.max"), bytes.to_string())
+}
+
 /// kenneld's own cgroup, as an absolute path under `CGROUP_MOUNT`.
 ///
 /// # Errors
@@ -223,6 +288,27 @@ mod tests {
         assert!(
             !status.success(),
             "the SIGTERMed sleep must not exit cleanly"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_pids_max_and_memory_max_write_the_value() {
+        // Against a stand-in directory (a real controller write needs a delegated cgroup with the
+        // controller enabled, a daemon-level concern): the helpers must target `<cgroup>/pids.max`
+        // / `<cgroup>/memory.max` and write exactly the decimal value the kernel expects.
+        let dir = std::env::temp_dir().join(format!("kennel-cgcaps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        write_pids_max(&dir, 4096).expect("write pids.max");
+        write_memory_max(&dir, 1_073_741_824).expect("write memory.max");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pids.max")).expect("read pids.max"),
+            "4096"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("memory.max")).expect("read memory.max"),
+            "1073741824"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -585,6 +585,12 @@ fn bring_up<P: Privileged + Sync>(
     // 1. cgroup (unprivileged: within kenneld's delegated subtree).
     std::fs::create_dir_all(cgroup)?;
     state.made_cgroup = true;
+    // Per-kennel process ceiling: bounds a fork-bomb or facade-driven thread explosion to this one
+    // kennel. Best-effort — no-ops where the daemon could not delegate the `pids` controller (see
+    // cgroup::prepare_delegation); the kenneld.service TasksMax remains the host backstop.
+    if let Err(e) = cgroup::write_pids_max(cgroup, cgroup::DEFAULT_PIDS_MAX) {
+        eprintln!("kenneld: warning: pids.max not applied to {}: {e}", cgroup.display());
+    }
 
     // 2. loopback addresses. The proxy's listen offset + port come from the signed
     //    policy (`net.proxy`); offset 1 / port 1080 by default. v4 only when ctx

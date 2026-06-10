@@ -73,6 +73,12 @@ fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, St
         .ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
     let cgroup_base =
         kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
+    // Vacate the base cgroup and enable the pids/memory controllers for the kennel children, so
+    // each kennel can carry its own pids.max/memory.max. Best-effort: where the controllers are not
+    // delegated the per-kennel caps no-op and the aggregate kenneld.service TasksMax is the backstop.
+    if let Err(e) = kenneld::cgroup::prepare_delegation(&cgroup_base) {
+        eprintln!("kenneld: warning: per-kennel resource controllers unavailable: {e}");
+    }
     let gid = kennel_syscall::unistd::real_gid();
     // Host-side only: the SSH bastion's AuthorizedKeysCommandUser. The kennel's own
     // synthetic /etc/passwd masks the account name to `kennel` (kenneld::etc).
