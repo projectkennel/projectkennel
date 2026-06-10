@@ -12,6 +12,18 @@ the relationship to the existing `kennel-netproxy` crate.
 > "kenneld is designed to do X". As pieces land, as-built detail graduates into this
 > chapter and the roadmap banner narrows.
 
+> **Data-plane + policy revision (settled in `07-11` after the fd-over-binder safety review).**
+> Where sections below describe `kennel-netproxy` dialing and returning the *connected host
+> socket* over `BINDER_TYPE_FD`, and netproxy holding the `Ruleset`/`Resolver`, the settled
+> design is now: **(1)** the conduit fd that crosses into the kennel is a kenneld-minted
+> **socketpair** end, never the host socket — netproxy holds the host socket host-side and
+> `splice`s it to the socketpair (`07-11` §7.11.7); **(2)** the **whitelist, DNS resolve, and
+> IP-pin live in kenneld**, which sees `CONNECT(target)`; `kennel-netproxy` becomes the *dumb
+> outer half* — `connect(pinned-ip)` + `splice`, no config/policy/resolver, `AF_UNIX`-only
+> listener (`07-11` §7.11.10); **(3)** inbound is native-bind + host mirror with no listener fd
+> crossing (`07-11` §7.11.5). These supersede the `(A)`-shaped specifics below; they will be
+> re-authored as as-built when the foundation (`02-4` §Threading model target) lands.
+
 ## Stability commitment
 
 **Internal-stable** per [`02-0-overview.md`](02-0-overview.md). The `org.projectkennel.INet`

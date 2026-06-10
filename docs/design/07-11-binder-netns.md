@@ -18,30 +18,48 @@ own interfaces. This is a re-architecture of the §7.5 egress/loopback model, se
 
 ## 7.11.2 Design constraints
 
-Three constraints are non-negotiable coming out of §7.5:
+Non-negotiable, coming out of §7.5 and the fd-over-binder safety review (§7.11.7):
 
 **The SOCKS5 contract is preserved.** The workload finds a SOCKS5 listener at
-`$KENNEL_SOCKS_PROXY` and connects to it. This is the interface every tool — `curl`,
-`git`, `pip`, `npm`, `cargo`, `ssh` via `ProxyCommand` — already speaks. The network
-namespace boundary must not require any workload-visible change.
+`$KENNEL_SOCKS_PROXY` and connects to it. Every tool — `curl`, `git`, `pip`, `npm`,
+`cargo`, `ssh` via `ProxyCommand` — already speaks this. The net-ns boundary must not
+require any workload-visible change.
 
-**`kennel-netproxy` is per-kennel and its policy model is unchanged.** Per-kennel
-rulesets, per-kennel audit streams, `Proxy::reload` for live updates — none of this
-changes. The transport layer between the workload and the proxy changes; the proxy
-itself does not.
+**No host socket ever crosses the boundary into the kennel.** The thing the kernel hands
+a process inside the kennel is only ever a **local socketpair end** that kenneld minted —
+never a host-network socket. A host socket carries its origin net-ns and answers
+`getpeername`/`getsockname`/`SIOCGIF*` against the *host* stack; a socketpair end is
+anonymous (no peer name, network ioctls return `ENOTTY`, it cannot `connect()` anywhere).
+This is what keeps the net-ns isolation the chapter exists to add from leaking back through
+the very fd that crosses it (§7.11.7).
 
-**No veth.** Creating a veth pair to give the kennel network connectivity requires
-`CAP_NET_ADMIN` in the host network namespace, host-side routing or NAT configuration,
-and a kernel network stack per kennel. This is the architecture every container runtime
-uses and it is correct — but it belongs below the userspace confinement layer Kennel
-operates at. The design avoids it.
+**kenneld is never in the data path.** kenneld is the highest-authority host userspace
+process and `#![forbid(unsafe_code)]`; it must not run a per-connection byte-copy loop over
+untrusted payload (T5.3). It brokers the *control* (decide, resolve, mint the conduit) and
+steps out; bytes move by `splice` at the two ends, never through kenneld.
+
+**The control plane never blocks on I/O.** The per-kennel binder looper carries the
+lifecycle/TTL verbs and the service registry as well as `INet`; a `CONNECT` that blocks the
+looper on DNS or a `dial()` head-of-line-stalls the *whole* kennel control plane. The looper
+does only O(1) policy and returns; resolve/dial/accept run on a bounded worker, replied
+asynchronously by transaction cookie (§7.11.8).
+
+**Every kennel's network surface is resource-bounded.** The shim's per-connection splice
+threads and the conduit fds are bounded structurally by the kennel cgroup
+(`pids.max`/`memory.max`) and a per-kennel concurrent-connection cap, not by the operator's
+shared session budget (§7.11.9).
+
+**No veth.** A veth pair needs `CAP_NET_ADMIN` in the host net-ns, host routing/NAT, and a
+kernel stack per kennel — the container-runtime architecture, correct but below the
+userspace confinement layer Kennel operates at. The design avoids it; the only host-side
+network object is a loopback alias.
 
 ## 7.11.3 Network modes
 
-§7.5 defined three modes (`none`, `constrained`, `open`). This chapter introduces
-a four-mode taxonomy that cleanly separates the isolation axis (net-ns or not) from
-the enforcement axis (proxy allowlist, BPF, or both). The old `open` mode is retired
-and replaced by `unconstrained` and `host`.
+§7.5 defined three modes (`none`, `constrained`, `open`). This chapter introduces a
+four-mode taxonomy that separates the isolation axis (net-ns or not) from the enforcement
+axis (proxy allowlist, BPF, or both). The old `open` mode is retired and replaced by
+`unconstrained` and `host`.
 
 | Mode | Net-ns | Proxy | BPF role | Use case |
 |---|---|---|---|---|
@@ -51,200 +69,292 @@ and replaced by `unconstrained` and `host`.
 | `host` | host net-ns | present, mandatory | **primary enforcement primitive** | Packet capture, raw socket tooling, root-context kennels |
 
 `mode = none` is the zero-cost case. `CLONE_NEWNET` inside the user namespace is
-unprivileged — no privhelper involvement, no loopback alias, no shim, no proxy. The
-kennel gets a fully empty network stack. `/proc/net` is empty. netlink answers only
-about that empty stack. The T1.6 host-network-reconnaissance residual is closed
-structurally.
+unprivileged — no privhelper involvement, no loopback alias, no shim, no proxy. The kennel
+gets a fully empty network stack; `/proc/net` is empty; netlink answers only about that
+empty stack. The T1.6 host-network-reconnaissance residual is closed structurally.
 
-`mode = host` reinstates the T1.6 residual in full — the workload shares the host
-network stack and can read its full state. The compiler auto-sets
-`threats.reinstated = ["T1.6:host-recon"]` and requires an explicit `reason` field.
-BPF is the primary enforcement primitive; the net-ns boundary does not exist. The proxy
-remains mandatory for audit continuity.
+`mode = host` reinstates the T1.6 residual in full — the workload shares the host network
+stack and can read its full state. The compiler auto-sets
+`threats.reinstated = ["T1.6:host-recon"]` and requires an explicit `reason`. BPF is the
+primary enforcement primitive; the net-ns boundary does not exist. The proxy remains
+mandatory for audit continuity.
 
 ## 7.11.4 The loopback alias model
 
-The kennel's assigned address space (a `/28` from `127.0.0.0/8` for IPv4 and a `/64`
-from the project's ULA `/48` for IPv6, allocated at spawn by §7.5) already exists on
-both sides: kenneld knows it, `kennel-netproxy` listens on it, the workload's
-`$KENNEL_SOCKS_PROXY` points into it.
+The kennel's assigned address space (a `/28` from `127.0.0.0/8` for IPv4 and a `/64` from
+the project's ULA `/48` for IPv6, allocated at spawn by §7.5) already exists on both sides:
+kenneld knows it, the workload's `$KENNEL_SOCKS_PROXY` points into it.
 
-For `constrained` and `unconstrained` modes, this same address space is brought up on
-both sides of the network namespace boundary using the host's `lo` interface:
+For `constrained` and `unconstrained` modes, the same address space is brought up on both
+sides of the boundary using `lo`:
 
 - **Inside the kennel net-ns:** `lo` is configured with the kennel's assigned addresses.
-  The workload binds, connects, and listens against these addresses normally.
+  The workload (and `kennel-netshim`) bind, connect, and listen against these normally.
 - **Host net-ns:** the privhelper adds the same addresses as an alias on the host `lo`
-  (`ip addr add <kennel-cidr> dev lo`). The host-side BIND delegate binds inbound listeners
-  here at the kennel's own IP, so a socket the workload binds inside the net-ns appears
-  host-side at that **same** address — an operator's `ss`/`lsof` maps the listener straight
-  back to the kennel. `kennel-netproxy` dials outbound from the host stack; it does not
-  listen for the workload (the shim does, inside the net-ns).
+  (`AddLoopbackAlias`). The host-side **mirror** for an allowed inbound bind appears here at
+  the kennel's own IP, so an operator's `ss`/`lsof` maps it straight back to the kennel.
+  `kennel-netproxy` *dials outbound* from the host stack; it does not listen for the
+  workload (the shim does, inside the net-ns).
 
-The mirror is deliberate: the same address reality on both sides is what makes a kennel's
-bound socket observable and attributable from the host without extra tooling. No routing.
-No NAT. No kernel interfaces beyond loopback aliases. The kernel enforces the network
-namespace boundary — a `connect()` inside the kennel net-ns to its own loopback address
-goes nowhere outside it. The controlled crossing point is binder, not a network path.
+The mirror is deliberate: the same address reality on both sides makes a kennel's bound
+socket observable and attributable from the host without extra tooling. No routing, no NAT,
+no kernel interfaces beyond loopback aliases. The kernel enforces the boundary — a
+`connect()` inside the kennel net-ns to its own loopback goes nowhere outside it. The one
+controlled crossing point is binder, not a network path.
 
-The privhelper gains two new operations: `AddLoopbackAlias` at spawn and
-`RemoveLoopbackAlias` at kennel exit, both scoped to address addition and removal on
-the existing `lo` interface. This is the only new privileged step these modes add.
+The privhelper gains two operations: `AddLoopbackAlias` at spawn and `RemoveLoopbackAlias`
+at exit, both scoped to address add/remove on the existing `lo`. `mode = host` kennels use
+no alias.
 
-`mode = host` kennels use no loopback alias — they share the host network stack
-directly and require no address-space mirroring.
-
-## 7.11.5 The crossing point: `org.projectkennel.INet/default`
+## 7.11.5 The crossing point: `org.projectkennel.INet`
 
 With the kennel in its own net-ns and no veth, the workload has no network path to
-`kennel-netproxy`. The crossing point is the kennel's binderfs instance (§7.1), via
-the reserved service `org.projectkennel.INet/default`.
+`kennel-netproxy`. The crossing point is the kennel's binderfs instance (§7.1), via the
+reserved service `org.projectkennel.INet/default` — a kenneld-owned node under the standard
+reserved-namespace rules (only kenneld registers it; `getService` resolves locally).
 
-`org.projectkennel.INet/default` is a kenneld-owned node subject to the standard
-reserved-namespace rules: only kenneld may register it; `getService` always resolves
-locally.
+The facade is split into a **control node** and per-connection **data conduits**:
 
-**Outbound** crosses via the node's `CONNECT` (1) transaction: the workload (via the shim —
-§7.11.6) requests a connection to a named host and port; kenneld validates mode and policy
-and relays to its host-side `kennel-netproxy` delegate, which applies the `[net.bpf]` CIDR
-rules, resolves the name, vets against the `[net.proxy]` allowlist and denylist, dials, and
-returns the connected fd. The shim splices between the workload and the fd.
+- **`INet/default` (control).** `CONNECT(target)` (and the inbound `BIND`, §7.11.6) are
+  transacted here. This is the singleton entry point the shim always knows.
+- **`INet/<n>` (data conduit), kenneld-minted.** On an *approved* `CONNECT`, kenneld
+  allocates a per-connection conduit, returns its handle `<n>` in the reply, and passes the
+  kennel end of a **socketpair** as the reply fd. `<n>`'s lifetime *is* the connection's:
+  binder death-notification on it tears the connection down with no reaper logic, and `<n>`
+  is the connection's identity for any later control. The workload/shim can only ever hold a
+  conduit kenneld minted *after* the policy decision — it cannot fabricate an `<n>` for an
+  unapproved target, so the data plane can never outrun the policy plane.
 
-**Inbound** does *not* go through the node to create a listener. A workload listener is
-bound **natively inside the kennel net-ns**, which is what makes it reachable from inside the
-kennel by ordinary loopback. Policy sits in between: the bind is decided by `[[net.bpf.bind]]`
-at the cgroup `bind` hook — a denied bind fails at the syscall, an allowed bind succeeds and
-the hook reports it to kenneld. For every *allowed* bind, kenneld raises the **mirror** — its
-host-side delegate binds the same `ip:port` on the host alias — so the port is observable and
-reachable from the host at the kennel's own IP, with host inbound relayed into the kennel
-through the shim. The mirror is automatic for allowed binds; the decision to allow is
-policy's, never the workload's.
+**Outbound (`CONNECT`).** The shim sends `CONNECT(target)` to `INet/default`. kenneld, on its
+looper, does only the O(1) checks — mode, the `[net.proxy]` allow-by-name match — and hands
+the rest to a bounded worker (§7.11.8). The worker **resolves** the name (OS resolver),
+**re-checks the resolved IP** against the invariant denylist (`[net.bpf]` CIDRs, e.g.
+cloud-metadata `169.254.169.254`) — closing the DNS-rebinding window by **pinning** the IP it
+vetted — then drives the host-side `kennel-netproxy` delegate to `connect()` that exact
+pinned address. kenneld mints the socketpair, hands the host end and the pinned target to the
+delegate, replies on the saved cookie with `<n>` + the kennel end. The delegate `splice`s the
+upstream socket ↔ the host socketpair end; the shim `splice`s the workload ↔ the kennel
+socketpair end. **The upstream host socket never leaves the host** — it is held only by the
+delegate; the workload holds a socketpair end. kenneld touches no payload byte.
 
-kenneld owns the `INet` node and is never in the data path. It relays each transaction to
-the appropriate delegate, receives the connected file descriptor in the reply, and forwards
-it to the shim. Once the shim has the fd, data flows directly between the workload and the
-fd. The delegates are not binder participants — they reach kenneld over a per-kennel
-socketpair, not the bus.
+**The whitelist lives in kenneld.** Because kenneld sees `CONNECT(target)` and holds the
+settled `[net.allow]`/`[net.deny]`, it makes the egress decision itself and resolves+pins the
+address. `kennel-netproxy` therefore needs **no per-kennel config and no policy** — it
+becomes the *dumb outer half*: `connect(pinned-ip)` + `splice`, nothing else (§7.11.10). It
+listens **only** on the per-kennel `kenneld`↔delegate `AF_UNIX` socket, never a host TCP
+port (one less host-side surface).
+
+**Inbound (`BIND`).** A workload listener is bound **natively inside the kennel net-ns** —
+real, reachable from inside by ordinary loopback — and gated at the cgroup `bind` hook by
+`[[net.bpf.bind]]`: a denied bind fails at the syscall, an allowed bind succeeds and the hook
+reports it. For every *allowed* bind, kenneld raises the host **mirror** (its delegate binds
+the same `ip:port` on the host alias) so the port is observable and reachable from the host
+at the kennel's own IP. A host connection to the mirror is accepted host-side by the delegate,
+which relays it inward over a fresh `INet/<n>` socketpair — exactly as outbound, in reverse.
+**No listener fd and no accepted-connection host fd ever crosses the boundary.** (The SOCKS5
+`BIND` command maps to the shim performing a native bind plus this mirror.) The decision to
+allow is policy's, never the workload's.
 
 ## 7.11.6 `kennel-netshim`: the SOCKS5 facade inside the kennel
 
-The workload must not know the network architecture changed. `kennel-netshim` is a
-small process the in-kennel reaper forks into the kennel's namespaces and view, a sibling
-of the workload (so it inherits the net-ns and the constructed view directly). It listens
-on the kennel's assigned loopback address at :1080 — the same address `$KENNEL_SOCKS_PROXY`
-has always pointed at — and speaks SOCKS5 inbound.
+The workload must not know the network architecture changed. `kennel-netshim` is a small
+process the in-kennel init forks into the kennel's namespaces and view, a sibling of the
+workload (so it inherits the net-ns and the constructed view directly). It listens on the
+kennel's assigned loopback at `:1080` — where `$KENNEL_SOCKS_PROXY` has always pointed — and
+speaks SOCKS5 inbound. It **terminates** the SOCKS5 handshake in-kennel; only the target and
+the post-handshake byte stream cross the boundary, never the SOCKS5 framing.
 
-For each incoming SOCKS5 session:
+For each SOCKS5 session:
 
-- `CONNECT` request → issue `CONNECT` (1) binder transaction to
-  `org.projectkennel.INet/default`, receive connected fd, splice bidirectionally
-  between the SOCKS5 client and the fd.
-- `BIND` request → issue `BIND` (2) binder transaction, receive listener fd, run
-  accept loop with one thread per accepted connection, splice each back to the SOCKS5
-  session.
+- `CONNECT` → parse the target, send `CONNECT(target)` to `INet/default`. The reply is the
+  approval result (mapped straight back to the SOCKS5 reply byte) plus, on success, `<n>` and
+  the conduit socketpair end. `splice` the SOCKS5 client ↔ the socketpair end. **TCP
+  half-close and teardown are kernel-implicit:** the workload's `shutdown(WR)` propagates as
+  EOF across the socketpair to the delegate, which shuts down the upstream, and vice versa —
+  so no `SHUTDOWN` control verb is needed.
+- `BIND` → native-bind a listener inside the net-ns and request the host mirror; inbound
+  connections arrive over per-connection `INet/<n>` socketpairs and are spliced back to the
+  SOCKS5 session.
 
-The shim does no policy enforcement, no DNS resolution, no audit; those stay in the proxy
-delegate and kenneld. It is purely a protocol translation layer: SOCKS5 wire format in,
-binder transactions out, fds back, splice. Because it parses untrusted workload input
-(SOCKS5 from the workload), it is a security-sensitive parser and is kept correspondingly
-small.
+The shim does no policy, no DNS, no audit — those stay in kenneld and the delegate. It is a
+protocol-translation layer: SOCKS5 in, `CONNECT` out, a socketpair back, `splice`. Because it
+parses untrusted workload SOCKS5, it is a security-sensitive parser kept correspondingly
+small, with a fuzz target (CODING-STANDARDS §10.6).
 
-## 7.11.7 Per-mode behaviour
+## 7.11.7 The data plane is a socketpair, not the host socket — and why
 
-| Mode | Net-ns | `INet` node | Shim | Proxy | BPF |
+The fd-over-binder safety review (recorded with the binder design state) confirmed the
+**mechanism** of passing fds through binder is sound: fds flow *out* from the trusted TCB to
+the less-trusted in-kennel party and never in (request-direction fd injection into node 0 is
+structurally `-EPERM` — node 0 is created with no fd-accept right), reply fds are forced
+`O_CLOEXEC`, the reply is gated on the requester's `TF_ACCEPT_FDS` (fails closed), and the
+24-byte object decoder is bounds-checked, `fd>=0`-filtered, and fuzzed. The kernel's
+`security_binder_transfer_file` LSM hook is a **no-op** on this host (no binder LSM in the
+active set) — so the structural gate, not the LSM, is what protects the inbound direction;
+the design must not rely on the hook.
+
+Given that, the open choice was *which* fd crosses. Two candidates:
+
+- **(A) the host-dialed socket.** Fastest (the shim `splice`s straight to the upstream
+  socket), but the shim then holds a host-net-ns socket that answers
+  `getpeername`/`getsockname`/`SIOCGIF*` against the *host* stack — re-opening the very
+  interface/route/peer-path recon the net-ns exists to close — and kenneld must validate a
+  delegate-supplied fd's type/state before relaying it (the LSM won't).
+- **(C) a kenneld-minted socketpair end** (this design). One extra in-kernel `splice` hop
+  (workload ↔ socketpair ↔ upstream), negligible for our traffic, in exchange for: the shim
+  holds an anonymous socketpair — **no host introspection, nothing to seccomp-deny**; the
+  host socket never crosses, so there is **no delegate-fd to validate**; and it is *still
+  fd-passing*, so it keeps every property that makes the mechanism safe (kenneld out of the
+  data path, the minimal fuzzed fd wire, the `TF_ACCEPT_FDS` fail-closed opt-in). It is
+  strictly safer on every axis except raw throughput.
+
+(C) is the design. The socketpair is the *data* plane only; it does not address control-plane
+blocking, which §7.11.8 handles separately.
+
+## 7.11.8 The control plane is non-blocking by construction
+
+`INet` shares the per-kennel binder looper with the registry and the lifecycle/TTL verbs, so
+a `CONNECT` that blocks the looper on DNS or `connect()` stalls everything — including the
+trusted lifecycle plane. The model:
+
+- The **looper** runs only the O(1) decision (mode + `[net.proxy]` name match), records a
+  pending entry keyed by the binder transaction **cookie** in a **bounded** per-kennel table,
+  dispatches `{cookie, target}` to a bounded **delegate worker pool**, and returns
+  immediately to `BINDER_WRITE_READ`.
+- A **reply-reader** issues the reply (`<n>` + socketpair, or a failure) on the saved cookie
+  when the worker finishes. Reply-reader threads register as binder loopers
+  (`BINDER_SET_MAX_THREADS` with a bounded ceiling).
+- When the pending table is full or the worker pool is saturated, the looper replies
+  `BR_FAILED_REPLY` on that one transaction — **backpressure as refusal**, never a stall.
+
+This is a design *constraint*; the as-built threading lives in `02-5-binder-net.md` (and the
+foundational build that realises it is owed — the current single-serial-looper-with-inline-
+`connect` does **not** meet this constraint and `INet` must not be built on it).
+
+## 7.11.9 Resource bounds
+
+The shim runs as the operator uid and forks a splice thread per connection; without bounds a
+runaway (malicious or merely wedged) workload exhausts threads/fds against the operator's
+shared session budget. Bounds are structural and uid-independent:
+
+- **Per-kennel cgroup caps.** The kennel cgroup carries `pids.max` (bounds the splice-thread
+  explosion) and `memory.max` (bounds per-connection buffers), written at bring-up with
+  conservative defaults, overridable via a new `[resources]` policy section (alongside
+  `[ulimits]`, which is per-process and does not bound the aggregate).
+- **Per-kennel concurrent-connection cap** in kenneld (the bounded pending-cookie table of
+  §7.11.8 is the same bound) and a connect-rate limit; over-cap `CONNECT`s get
+  `BR_FAILED_REPLY`.
+- **Daemon backstop.** `kenneld.service` carries `TasksMax`/`LimitNOFILE`; facade forks apply
+  `RLIMIT_NOFILE`/`NPROC`.
+
+## 7.11.10 `kennel-netproxy` after this change
+
+`kennel-netproxy` becomes the *dumb outer half* of the proxy and loses most of its surface:
+
+- **No config, no policy, no DNS.** kenneld decides, resolves, and pins; the delegate is told
+  a pinned IP and connects to it. The per-kennel `proxy-<ctx>.toml` generation, the
+  allow/deny logic, and the resolver move out.
+- **No TCP listener.** It listens only on the per-kennel `kenneld`↔delegate `AF_UNIX` socket
+  (0600, owner-only) — removing the host loopback TCP port that anything host-side could
+  reach.
+- **What remains:** `connect(pinned-ip)`, `splice(upstream ↔ socketpair)`, audit emission for
+  the egress event, and the inbound mirror's `accept`+`splice`. It is kept a separate process
+  from kenneld (blast-radius isolation: the code that touches a possibly-hostile upstream is
+  not the policy daemon), but it is now stateless and trivial.
+
+## 7.11.11 Per-mode behaviour
+
+| Mode | Net-ns | `INet` node | Shim | Proxy delegate | BPF |
 |---|---|---|---|---|---|
 | `none` | `CLONE_NEWNET`, empty | absent | not launched | not launched | not loaded |
-| `constrained` | `CLONE_NEWNET` + alias | present | launched | launched, `[net.proxy]` allowlist | optional |
-| `unconstrained` | `CLONE_NEWNET` + alias | present | launched | launched, invariant denylist | socket shaping + limits |
-| `host` | host net-ns | present | launched | launched, mandatory | **primary enforcement** |
+| `constrained` | `CLONE_NEWNET` + alias | present | launched | launched (dumb dialer) | optional |
+| `unconstrained` | `CLONE_NEWNET` + alias | present | launched | launched (dumb dialer) | socket shaping + limits |
+| `host` | host net-ns | present | launched | launched (dumb dialer) | **primary enforcement** |
 
-## 7.11.8 Spawn sequence
+## 7.11.12 Spawn sequence
 
-The design-level summary of how the network namespace and its facades come up:
+`CLONE_NEWNET` is in the namespace set at spawn — the kennel's network namespace is empty
+from creation; no host network state is ever visible inside it. For `constrained`/
+`unconstrained`, the privhelper's `AddLoopbackAlias` runs immediately after namespace
+creation, before any host-side `bind()` on the kennel's addresses. `kennel-netproxy` launches
+after binderfs is up and attaches to its `kenneld`↔delegate socketpair (it is a delegate, not
+a binder participant). The in-kennel init forks `kennel-netshim` inside the view last, once
+`INet/default` is registered.
 
-`CLONE_NEWNET` is included in the namespace set at spawn — the kennel's network
-namespace is empty from the moment of creation; no host network state is ever visible
-inside it. For `constrained` and `unconstrained` modes, the privhelper's
-`AddLoopbackAlias` call runs immediately after namespace creation, before any host-side
-`bind()` on the kennel's addresses. `kennel-netproxy` launches after binderfs is up and
-attaches to its `kenneld`↔delegate socketpair (it is a delegate, not a binder participant).
-The in-kennel reaper forks `kennel-netshim` inside the view last, once `INet` is registered.
-
-## 7.11.9 Network flow
+## 7.11.13 Network flow (outbound, `constrained`/`unconstrained`)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      KENNEL NET-NS                           │
-│  (constrained / unconstrained)                               │
-│                                                              │
-│  process ──connect()──► 127.42.7.1:1080                      │
-│                         (kennel-netshim, SOCKS5)             │
-│                              │                               │
-│              binder CONNECT(1) transaction                   │
+┌──────────────────────── KENNEL NET-NS ───────────────────────┐
+│  process ──connect()──► 127.42.7.1:1080  (kennel-netshim, SOCKS5)
+│                              │  terminates SOCKS5, parses target
+│              binder CONNECT(target) → INet/default
 └──────────────────────────────┼───────────────────────────────┘
-                               │  net-ns boundary
+                               │  net-ns boundary (binder, control only)
                                ▼
-                    kenneld (host, context manager)
-                    mode + policy check
+                kenneld looper:  mode + [net.proxy] name allow  (O(1), non-blocking)
+                               │  → bounded worker, by cookie
+                               ▼
+                worker:  resolve (OS) → re-check resolved IP vs invariant denylist
+                         → PIN the IP  (closes DNS-rebind)
+                         → mint socketpair(a,b); audit net.egress
                                │
-                               ▼
-                  kennel-netproxy (host net-ns)
-                  [net.bpf] CIDR check
-                  DNS resolution
-                  [net.proxy] denylist + allowlist vetting
-                  audit: net.egress
-                  dial TCP to destination
-                  return connected fd via BINDER_TYPE_FD
-                               │
-                               ▼
-                  kennel-netshim receives fd
-                  splice: workload ↔ fd
-                  (kenneld not in data path)
-
-──────────────────────────────────────────────────────────────
-
-  mode = host (no net-ns boundary):
-
-  process ──connect()──► 127.42.7.1:1080
-                         (kennel-netshim, SOCKS5)
-                              │
-              binder CONNECT(1) transaction
-                              │
-                    kenneld + kennel-netproxy
-                    [net.bpf] enforcement (primary)
-                    [net.proxy] invariant denylist + optional allowlist
-                    audit: net.egress
+                 ┌─────────────┴───────────────┐
+                 ▼                              ▼
+        reply on cookie:                kennel-netproxy delegate (host net-ns):
+        <n> + socketpair end b           connect(pinned-ip) → upstream u
+                 │                        splice(a ↔ u)        ← dumb dialer, no policy
+                 ▼
+        kennel-netshim: splice(workload ↔ b)
+        (host socket u never crosses; kenneld not in data path;
+         half-close/teardown implicit via the socketpair)
 ```
 
-## 7.11.10 Residuals
+`mode = host` is identical except there is no net-ns boundary and BPF is the primary
+enforcement; the SOCKS5→`CONNECT`→delegate path is unchanged for audit continuity.
 
-**Host-net-ns fd in the shim.** The fd the shim receives from a `CONNECT` or accepted
-`BIND` connection is a socket in the host net-ns, held by a process in the kennel
-net-ns. The shim only `read`/`write`/`shutdown`s on it — `connect()` and `bind()` on
-an already-connected or already-bound socket are no-ops or errors. This is a design
-invariant enforced by convention; documented here for reviewer verification.
+## 7.11.14 Resolved decisions
 
-**Loopback alias visibility.** The kennel's assigned addresses appear on the host `lo`
-for the duration of the kennel's life, visible to other host processes via `ip addr`.
-This is equivalent to the pre-netns situation where the proxy listened on those
-addresses — no new information is exposed.
+- **`INet`/`CONNECT_AFUNIX` are caller-identity-gated to the shim.** Only the in-kennel
+  facade shim (not the workload directly) may pull a facade conduit — kenneld checks the
+  kernel-stamped `sender_pid` against the known shim pid before serving the verb, in addition
+  to the policy-name match. This shrinks the (already small, with (C)) blast radius to the
+  shim and is the same gate the lifecycle verbs already use. (This also corrects an as-built
+  over-claim: `CONNECT_AFUNIX` is *not* currently caller-gated — see the architecture
+  reconciliation note.)
+- **A `[resources]` policy section carries the per-kennel floor** (`pids.max`, `memory.max`,
+  max concurrent connections, connect rate) with conservative non-opt-in defaults, overridable
+  per template.
+- **Brokered conduits are not revocable mid-life (accepted T1.10 residual).** A delivered
+  conduit outlives the policy decision and survives `warn`/`renew` TTL actions; only `exit`
+  (cgroup freeze + kill) closes it. A mid-life kill switch would force kenneld back into the
+  data path, which §7.11.2 rejects. The freezer (§9.7) still suspends the whole kennel
+  atomically, so a TTL `exit` does close every conduit; what is not offered is selective
+  per-connection revocation while the kennel runs.
 
-**`AI_ADDRCONFIG` inside `mode = none` kennels.** An empty net-ns means only
-`127.0.0.1`/`::1` on `lo`. `getaddrinfo` with `AI_ADDRCONFIG` will suppress IPv6
-results if no global IPv6 address exists. For `mode = none` this is correct — the
-kennel has no network. For `constrained`/`unconstrained` kennels the ULA address on
-`lo` is sufficient to satisfy `AI_ADDRCONFIG` for IPv6.
+## 7.11.15 Residuals
 
-**`mode = host` reinstates T1.6 in full.** The workload shares the host network stack
-and can read its complete state via `/proc/net` and netlink. This is an explicit,
-acknowledged tradeoff — the operator accepts it by declaring `mode = host` with a
-`reason`. The compiler enforces the acknowledgement; the diff tool surfaces it.
+**Loopback alias visibility.** The kennel's assigned addresses appear on the host `lo` for
+the kennel's life, visible via `ip addr` — equivalent to the pre-netns situation where the
+proxy listened on them. No new information.
 
-**`SOCK_RAW` / `AF_PACKET` in unprivileged kennels.** These require `CAP_NET_RAW`.
-A kennel running as the user's uid in a user namespace cannot obtain this capability.
-Declaring `allow = [..., "raw"]` or `allow = [..., "packet"]` in an unprivileged
-context is not a policy error — the policy compiler warns and the rule has no effect.
-The same policy file is then valid for a root-context kennel where the capability is
-available. Root-context kennels are a distinct deployment model whose threat profile
-differs materially from the standard user-level model; a dedicated threat catalogue
-section is owed.
+**`AI_ADDRCONFIG` inside `mode = none`.** An empty net-ns means only `127.0.0.1`/`::1`;
+`getaddrinfo` with `AI_ADDRCONFIG` suppresses IPv6 if no global IPv6 exists — correct for a
+kennel with no network. `constrained`/`unconstrained` carry a ULA address on `lo`, sufficient
+to satisfy `AI_ADDRCONFIG`.
+
+**`mode = host` reinstates T1.6 in full.** Explicit, acknowledged: the operator declares
+`mode = host` with a `reason`; the compiler enforces the acknowledgement and the diff tool
+surfaces it.
+
+**`SOCK_RAW`/`AF_PACKET` in unprivileged kennels.** These need `CAP_NET_RAW`, unavailable to a
+user-namespace kennel; `allow = [..., "raw"|"packet"]` warns and has no effect (valid for a
+root-context kennel where the capability exists). Root-context kennels are a distinct
+deployment model; a dedicated threat-catalogue section is owed.
+
+**Conduit outlives the policy decision (T1.10).** See §7.11.14 — accepted; closed only by a
+TTL `exit` / kennel teardown, not selectively mid-life.
+
+**No host-net-ns fd in the shim.** Recorded as a *closed* residual relative to the (A)
+alternative: with the socketpair data plane (§7.11.7) the shim never holds a host socket, so
+the `getpeername`/`getsockname`/`SIOCGIF*` host-introspection leak that (A) would carry does
+not arise and needs no per-shim seccomp ioctl-deny.
