@@ -453,6 +453,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         proxy: Some(ProxySetup {
             binary: netproxy_path(),
             config_dir: proxy_cfg.clone(),
+            netshim: sibling_binary("kennel-netshim"),
         }),
         etc: Some(EtcSetup {
             staging_dir: etc_base.join("etc-1"),

@@ -86,6 +86,7 @@ fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, St
     let proxy = Some(ProxySetup {
         binary: deployment.netproxy(),
         config_dir: socket::runtime_dir().join("proxy"),
+        netshim: deployment.netshim(),
     });
     let etc_base = Some(socket::runtime_dir().join("etc"));
     let view_base = Some(socket::runtime_dir().join("root"));

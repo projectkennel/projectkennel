@@ -449,12 +449,12 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
     reply
 }
 
-/// The `INet` egress facade (§7.5.2): decode the request, decide it under `[net.proxy]` (reusing the
-/// netproxy ruleset + resolver via [`crate::inet`]), audit, and reply with the decision status.
+/// The `INet` egress facade (§7.5.2): decode the request, decide it under `[net.proxy]` via
+/// [`crate::inet`], and reply with either the connection fd or a status byte.
 ///
-/// This returns the *decision* only; minting the per-connection socketpair conduit and driving the
-/// `kennel-netproxy` delegate to dial the pinned address (turning an `OK` into a returned connection
-/// fd) is the next increment (`07-5` §7.5.2). The verb is dormant until `kennel-netshim` is wired.
+/// On an approved request kenneld pins the vetted address, mints the per-connection socketpair
+/// conduit, drives the `kennel-netproxy` delegate to dial it, and returns the kennel-facing end as
+/// [`Reply::Fd`]. A denied/unreachable request returns a status byte. Audited either way.
 fn inet_connect(
     net: &crate::inet::NetRuntime,
     incoming: &Incoming,

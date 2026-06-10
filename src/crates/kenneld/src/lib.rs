@@ -187,10 +187,13 @@ impl Privileged for HelperClient {
 /// a setup that does not run one).
 #[derive(Debug, Clone)]
 pub struct ProxySetup {
-    /// The `kennel-netproxy` binary to launch.
+    /// The `kennel-netproxy` dial-delegate binary (host side) to launch.
     pub binary: PathBuf,
-    /// Directory the per-kennel `proxy-<ctx>.toml` config is written to.
+    /// Directory the per-kennel conduit command socket is bound in.
     pub config_dir: PathBuf,
+    /// The `kennel-netshim` binary bound into the view and launched by the seal: the workload's
+    /// in-kennel SOCKS5 endpoint, which brokers each connect to node 0 as `CONNECT_INET`.
+    pub netshim: PathBuf,
 }
 
 /// What the synthetic `/etc` is built from: where to stage it and the workload's
@@ -742,6 +745,21 @@ fn bring_up<P: Privileged + Sync>(
         command.env("KENNEL_SOCKS_PROXY", proxy_addr.to_string());
     }
 
+    // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind kennel-netshim into the view, launch it
+    //     on the kennel's loopback at `port`, and point the workload's proxy env at it. It brokers
+    //     each connect to node 0 as CONNECT_INET; kenneld decides + drives the dial delegate. Needs
+    //     the constructed view, so it engages only when pivoting and the kennel has egress.
+    let net_pivoting = view_root.is_some() && plan.view.is_some();
+    if net_pivoting && command_socket.is_some() {
+        if let Some(setup) = proxy {
+            let listen = SocketAddr::new(
+                state.v4.map_or_else(|| addr6.into(), IpAddr::from),
+                port,
+            );
+            apply_netshim(plan, &setup.netshim, listen, command);
+        }
+    }
+
     // 3c-unix. AF_UNIX socket shims (§7.6): bind each granted socket into the view at
     //     its shim path, set env vars, and grant Landlock. The shim model needs the
     //     constructed view (a mount namespace), so it engages only when pivoting.
@@ -1075,6 +1093,41 @@ fn apply_unix_shims(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, piv
     });
 }
 
+/// Bind `kennel-netshim` into the view, launch it as a seal aux on the kennel loopback `listen`,
+/// and point the workload's proxy env at it.
+///
+/// netshim is the workload's SOCKS5 endpoint: it forwards each connect to binder node 0 as a
+/// `CONNECT_INET` transaction, which kenneld decides and dials via the host-side delegate. The
+/// `socks5h` scheme keeps name resolution on the proxy side (the kennel holds names, not addresses).
+fn apply_netshim(plan: &mut Plan, netshim_bin: &Path, listen: SocketAddr, command: &mut Command) {
+    use kennel_syscall::landlock::AccessFs;
+    // Bind the binary into the view at its own path (read-only) and grant execute + its loaders.
+    if let Some(view) = plan.view.as_mut() {
+        view.binds.push(kennel_spawn::BindMount {
+            source: netshim_bin.to_path_buf(),
+            target: netshim_bin.to_path_buf(),
+            writable: false,
+        });
+    }
+    plan.landlock_fs
+        .push((netshim_bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    let resolution =
+        kennel_policy::libresolve::resolve_loaders(&[netshim_bin.to_string_lossy().into_owned()]);
+    for loader in resolution.loaders {
+        plan.landlock_fs
+            .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    }
+    // `kennel-netshim <binder-device> <listen-addr>`, run inside the sealed view.
+    plan.aux.push(kennel_spawn::AuxProcess {
+        path: netshim_bin.to_path_buf(),
+        args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), listen.to_string()],
+    });
+    // The workload's egress goes through netshim. socks5h ⇒ the proxy resolves names.
+    let url = format!("socks5h://{listen}");
+    for var in ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"] {
+        command.env(var, &url);
+    }
+}
 
 /// Best-effort reverse of bring-up: kill the proxy, remove the addresses, then the
 /// cgroup (which detaches the egress BPF). Each step is independent so a failure

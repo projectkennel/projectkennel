@@ -155,6 +155,7 @@ struct RawDeployment {
     socks_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix_shim: Option<PathBuf>,
+    netshim: Option<PathBuf>,
     init: Option<PathBuf>,
 }
 
@@ -171,6 +172,7 @@ impl RawDeployment {
             socks_connect: higher.socks_connect.or(self.socks_connect),
             akc: higher.akc.or(self.akc),
             afunix_shim: higher.afunix_shim.or(self.afunix_shim),
+            netshim: higher.netshim.or(self.netshim),
             init: higher.init.or(self.init),
         }
     }
@@ -191,6 +193,7 @@ impl RawDeployment {
             socks_connect: self.socks_connect,
             akc: self.akc,
             afunix_shim: self.afunix_shim,
+            netshim: self.netshim,
             init: self.init,
         }
     }
@@ -209,6 +212,7 @@ pub struct Deployment {
     socks_connect: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix_shim: Option<PathBuf>,
+    netshim: Option<PathBuf>,
     init: Option<PathBuf>,
 }
 
@@ -299,6 +303,13 @@ impl Deployment {
     #[must_use]
     pub fn afunix_shim(&self) -> PathBuf {
         self.resolve_bin(self.afunix_shim.as_deref(), "kennel-afunix-shim")
+    }
+
+    /// The in-kennel SOCKS5 egress shim bound into the view and launched by the seal: it
+    /// brokers each outbound connect to node 0 as a `CONNECT_INET` transaction (`07-5` §7.5).
+    #[must_use]
+    pub fn netshim(&self) -> PathBuf {
+        self.resolve_bin(self.netshim.as_deref(), "kennel-netshim")
     }
 
     /// The trusted root-owned `kennel-init` the privhelper factory `fexecve`s as the
