@@ -1229,6 +1229,39 @@ mod tests {
     }
 
     #[test]
+    fn stamp_proxy_grants_landlock_connect_on_the_proxy_port() {
+        // Landlock always handles net (TCP connect is denied except to listed ports). The workload
+        // reaches kennel-netshim at the proxy port, so stamping the proxy must add a CONNECT_TCP
+        // grant for it — else the in-net-ns connect to the egress endpoint is Landlock-denied.
+        use kennel_syscall::landlock::AccessNet;
+        let mut plan = fixture_plan();
+        assert!(
+            !plan.landlock_net.iter().any(|(p, _)| *p == 1080),
+            "fixture has no 1080 grant before stamping"
+        );
+        plan.stamp_proxy(&ProxyEndpoint {
+            v4: Some("127.0.144.1".parse().expect("v4")),
+            v6: "fd00:0:0:42::1".parse().expect("v6"),
+            port: 1080,
+        });
+        assert!(
+            plan.landlock_net.contains(&(1080, AccessNet::CONNECT_TCP)),
+            "the proxy port carries a Landlock CONNECT_TCP grant"
+        );
+        // Idempotent: stamping again does not duplicate the grant.
+        plan.stamp_proxy(&ProxyEndpoint {
+            v4: Some("127.0.144.1".parse().expect("v4")),
+            v6: "fd00:0:0:42::1".parse().expect("v6"),
+            port: 1080,
+        });
+        assert_eq!(
+            plan.landlock_net.iter().filter(|(p, _)| *p == 1080).count(),
+            1,
+            "no duplicate grant on re-stamp"
+        );
+    }
+
+    #[test]
     fn stamp_proxy_v6_only_kennel_skips_v4() {
         let mut plan = fixture_plan();
         let before_v4 = plan.bpf_allow_v4.len();

@@ -590,6 +590,17 @@ p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket
     } else {
         "&& ! test -e /dev/mem "
     };
+    // Per-kennel net-ns (§7.5): the kennel's own loopback address is up inside the net-ns (bind
+    // succeeds — proves the construction child brought up in-ns `lo` + added the address), and
+    // kennel-netshim is listening at {v4}:1080 (the egress SOCKS endpoint, launched in-ns). The
+    // host's 127.0.0.1 services are in a different net-ns, so they are unreachable from here.
+    let netns_clause = format!(
+        "&& python3 -c \"import socket;s=socket.socket();s.bind(('{v4}',0));s.close()\" \
+         && for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+              python3 -c \"import socket;s=socket.socket();s.settimeout(1);s.connect(('{v4}',1080));s.close()\" \
+                2>/dev/null && break; sleep 0.5; done \
+         && python3 -c \"import socket;s=socket.socket();s.settimeout(1);s.connect(('{v4}',1080));s.close()\" "
+    );
     // Identity is masked: the synthetic passwd/group name the account `kennel` with
     // the masked home `/home/kennel` (§7.4 `$HOME = /home/<user>`); no operator
     // identity leaks. (The legacy `! grep /home/` predates the /home/<user> model.)
@@ -616,6 +627,7 @@ p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket
          {ssh_clause} \
          {unix_clause} \
          {dev_clause} \
+         {netns_clause} \
          {id_clause} \
          {groups_clause} \
          && sleep 2",

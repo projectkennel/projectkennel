@@ -871,6 +871,14 @@ impl Plan {
         }
         self.bpf_allow_v6
             .push((lpm_v6_key(endpoint.v6.octets(), HOST_PREFIX_V6), value));
+
+        // Landlock always handles net (the ruleset restricts TCP connect to the listed ports). The
+        // workload reaches its egress endpoint (kennel-netshim's SOCKS5 listener) at the proxy port,
+        // so it must carry a CONNECT_TCP grant — else Landlock denies the connect BPF allowed.
+        if !self.landlock_net.iter().any(|(p, _)| *p == endpoint.port) {
+            self.landlock_net
+                .push((endpoint.port, AccessNet::CONNECT_TCP));
+        }
     }
 
     /// Build the seccomp filter this plan describes. Pure — the filter is not
