@@ -112,24 +112,17 @@ pub enum InetDecision {
 /// [`verb::CONNECT_INET`]: kennel_binder::service::verb::CONNECT_INET
 #[must_use]
 pub fn decode_request(data: &[u8], max_host: usize) -> Option<(Transport, u16, Destination)> {
-    let [t, hi, lo, host @ ..] = data else {
-        return None;
-    };
-    let transport = match *t {
+    // The byte layout is the shared node-0 convention; map its raw output to the policy types.
+    let (transport_byte, port, host) = kennel_binder::service::inet::decode_request(data, max_host)?;
+    let transport = match transport_byte {
         transport::TCP => Transport::Tcp,
         transport::UDP => Transport::Udp,
         _ => return None,
     };
-    if host.is_empty() || host.len() > max_host {
-        return None;
-    }
-    let host = std::str::from_utf8(host).ok()?;
-    let port = u16::from_be_bytes([*hi, *lo]);
     // A literal address is decided as-is; anything else is a name to resolve under policy.
-    let dest = host.parse::<IpAddr>().map_or_else(
-        |_| Destination::Name(host.to_owned()),
-        Destination::Addr,
-    );
+    let dest = host
+        .parse::<IpAddr>()
+        .map_or_else(|_| Destination::Name(host.to_owned()), Destination::Addr);
     Some((transport, port, dest))
 }
 

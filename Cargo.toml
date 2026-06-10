@@ -25,6 +25,7 @@ members = [
     "src/crates/kennel-os",
     "src/crates/kennel-landlock",
     "src/crates/kennel-scm",
+    "src/crates/kennel-netshim",
     "src/crates/kennel-text",
     "src/crates/kennel-netproxy",
     "src/crates/kennel-ssh-reorigin",

@@ -36,6 +36,56 @@ pub mod transport {
     pub const UDP: u8 = 1;
 }
 
+/// The [`verb::CONNECT_INET`] request wire: `[transport: u8 | port: u16 big-endian | host: UTF-8]`.
+///
+/// The single source of the layout: `kennel-netshim` [`encode_request`]s, kenneld
+/// [`decode_request`]s (then maps the transport byte and the host to its policy types). The
+/// transport byte's validity is the decoder's caller's concern — this layer only frames bytes.
+pub mod inet {
+    /// Encode a `CONNECT_INET` request.
+    #[must_use]
+    pub fn encode_request(transport: u8, port: u16, host: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(host.len().saturating_add(3));
+        out.push(transport);
+        out.extend_from_slice(&port.to_be_bytes());
+        out.extend_from_slice(host.as_bytes());
+        out
+    }
+
+    /// Decode a `CONNECT_INET` request into `(transport byte, port, host)`. `None` for a short,
+    /// empty/oversized-host, or non-UTF-8 payload (all untrusted).
+    #[must_use]
+    pub fn decode_request(data: &[u8], max_host: usize) -> Option<(u8, u16, &str)> {
+        let [transport, hi, lo, host @ ..] = data else {
+            return None;
+        };
+        if host.is_empty() || host.len() > max_host {
+            return None;
+        }
+        let host = core::str::from_utf8(host).ok()?;
+        Some((*transport, u16::from_be_bytes([*hi, *lo]), host))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{decode_request, encode_request};
+
+        #[test]
+        fn round_trips() {
+            let bytes = encode_request(0, 443, "api.openai.com");
+            assert_eq!(decode_request(&bytes, 255), Some((0, 443, "api.openai.com")));
+        }
+
+        #[test]
+        fn rejects_short_empty_oversized_and_non_utf8() {
+            assert!(decode_request(&[0, 0x01], 255).is_none()); // short
+            assert!(decode_request(&[0, 0x01, 0xBB], 255).is_none()); // empty host
+            assert!(decode_request(&[0, 0x01, 0xBB, b'a', b'b'], 1).is_none()); // oversized
+            assert!(decode_request(&[0, 0x01, 0xBB, 0xFF, 0xFE], 255).is_none()); // !utf8
+        }
+    }
+}
+
 /// Node-0 **lifecycle/config verbs** spoken only by `kennel-init`, the kennel's uid-0
 /// PID 1 (`docs/design/07-2-kennel-init.md` §7.2.4).
 ///
