@@ -57,16 +57,13 @@ The full section list:
 | Section | Purpose | Detailed in (design doc) |
 |---|---|---|
 | `[exec]` | What binaries the workload may execve() | §7.3 |
-| `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction, scrub patterns | §7.4 |
+| `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction | §7.4 |
 | `[net]`, `[net.proxy]`, `[net.bpf]` | Network mode (four-mode taxonomy), proxy destination allowlist + denylist, socket-capability shaping, bind rules, audit. **The four-mode taxonomy + `[net.proxy]`/`[net.bpf]` split is roadmap** (the as-built runtime still shares the host net-ns); see §The `[net]` section. | §7.5 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
 | `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
 | `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
 | `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.10 |
 | `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.4 |
-| `[container]` | Container-mode policy surface; source-only, design-level (no runtime yet) | §7.1 |
-| `[dbus]` | D-Bus session/system bus enablement and method filtering | §7.7 |
-| `[x11]` | X11/Wayland display server isolation | §7.8 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.9 |
 | `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.4 |
 | `[cap]` | Capabilities and `no_new_privs` | §7.9 |
@@ -323,10 +320,12 @@ from the canonical form when empty (so a policy that does not use one signs
 unchanged): `ssh` (`SshRuntime`), `unix` (`UnixRuntime`), `identity`
 (`IdentityRuntime` — the masked `user`/`group` and supplementary `groups`),
 `audit` (`AuditRuntime`), `env` (`EnvRuntime` — the synthesised environment), and
-`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The sections with no runtime
-representation yet — `dbus`, `x11`, `ptrace`, `signal`, and the source-only
-`fs.scrub`/`fs.home.sanitise` — are dropped at translate and absent from the
-settled form. The settled net section carries `net.allow_names` (the by-name proxy
+`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The informational sections
+`ptrace`/`signal` (their scoping comes from the PID namespace + seccomp, not the
+section) are dropped at translate and absent from the settled form; they compile
+with a warning. (Unbuilt feature surfaces — `[container]`, `[dbus]`, `[x11]`,
+`[fs.scrub]`, `[[fs.home.sanitise]]` — are no longer part of the schema at all:
+they are rejected at parse, not carried as design-level no-ops.) The settled net section carries `net.allow_names` (the by-name proxy
 allowlist), `net.proxy` (`offset`, `port`), and the bind-port policy
 (`bind_port_min` + `bind_allowed_ports`, §7.5.7); the settled fs section adds
 `fs.tmp` (`private`, `size_mib`, `mode`) and `fs.dev.allow`, and the proc section

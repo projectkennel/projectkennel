@@ -45,10 +45,9 @@
 
 use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
-    CapSection, ContainerSection, DbusBus, DbusSection, EnvSection, ExecSection, FsDev, FsHome,
-    FsProc, FsScrub, FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit,
-    NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection, SeccompSection,
-    SignalSection, SourcePolicy, SshSection, UnixSection, X11Section,
+    CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
+    LifecycleSection, NetAudit, NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection,
+    SeccompSection, SignalSection, SourcePolicy, SshSection, UnixSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -223,15 +222,12 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
         identity: merge(&parent.identity, &child.identity, fold_identity),
         binder: merge(&parent.binder, &child.binder, fold_binder),
-        dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
-        x11: merge(&parent.x11, &child.x11, fold_x11),
         proc: merge(&parent.proc, &child.proc, fold_proc),
         ptrace: merge(&parent.ptrace, &child.ptrace, fold_ptrace),
         signal: merge(&parent.signal, &child.signal, fold_signal),
         env: merge(&parent.env, &child.env, fold_env),
         seccomp: merge(&parent.seccomp, &child.seccomp, fold_seccomp),
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
-        container: merge(&parent.container, &child.container, fold_container),
         audit: merge(&parent.audit, &child.audit, fold_audit),
         ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
     }
@@ -312,18 +308,12 @@ fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
         tmp: merge(&p.tmp, &c.tmp, fold_fs_tmp),
         proc: merge(&p.proc, &c.proc, fold_fs_proc),
         dev: merge(&p.dev, &c.dev, fold_fs_dev),
-        scrub: merge(&p.scrub, &c.scrub, fold_fs_scrub),
     }
 }
 
 fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
     FsHome {
         shadow: or(&c.shadow, &p.shadow),
-        sanitise: if c.sanitise.is_empty() {
-            p.sanitise.clone()
-        } else {
-            c.sanitise.clone()
-        },
         persist: union_strings(&p.persist, &c.persist),
         readonly: or(&c.readonly, &p.readonly),
     }
@@ -354,13 +344,6 @@ fn fold_fs_dev(p: &FsDev, c: &FsDev) -> FsDev {
         } else {
             c.passthrough.clone()
         },
-    }
-}
-
-fn fold_fs_scrub(p: &FsScrub, c: &FsScrub) -> FsScrub {
-    FsScrub {
-        patterns: or(&c.patterns, &p.patterns),
-        mode: or(&c.mode, &p.mode),
     }
 }
 
@@ -521,26 +504,6 @@ fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
     }
 }
 
-fn fold_dbus(p: &DbusSection, c: &DbusSection) -> DbusSection {
-    DbusSection {
-        session: merge(&p.session, &c.session, fold_dbus_bus),
-        system: merge(&p.system, &c.system, fold_dbus_bus),
-    }
-}
-
-fn fold_dbus_bus(p: &DbusBus, c: &DbusBus) -> DbusBus {
-    DbusBus {
-        enabled: or(&c.enabled, &p.enabled),
-    }
-}
-
-fn fold_x11(p: &X11Section, c: &X11Section) -> X11Section {
-    X11Section {
-        xwayland_isolated: or(&c.xwayland_isolated, &p.xwayland_isolated),
-        xephyr_isolated: or(&c.xephyr_isolated, &p.xephyr_isolated),
-    }
-}
-
 fn fold_proc(p: &ProcSection, c: &ProcSection) -> ProcSection {
     ProcSection {
         visibility: or(&c.visibility, &p.visibility),
@@ -593,27 +556,6 @@ fn fold_lifecycle(p: &LifecycleSection, c: &LifecycleSection) -> LifecycleSectio
     LifecycleSection {
         ttl: or(&c.ttl, &p.ttl),
         ttl_action: or(&c.ttl_action, &p.ttl_action),
-    }
-}
-
-fn fold_container(p: &ContainerSection, c: &ContainerSection) -> ContainerSection {
-    ContainerSection {
-        image: or(&c.image, &p.image),
-        image_digest: or(&c.image_digest, &p.image_digest),
-        allow_privileged: or(&c.allow_privileged, &p.allow_privileged),
-        allow_pid_host: or(&c.allow_pid_host, &p.allow_pid_host),
-        allow_network_host: or(&c.allow_network_host, &p.allow_network_host),
-        run_as_nonroot: or(&c.run_as_nonroot, &p.run_as_nonroot),
-        published_ports: if c.published_ports.is_empty() {
-            p.published_ports.clone()
-        } else {
-            c.published_ports.clone()
-        },
-        volumes: if c.volumes.is_empty() {
-            p.volumes.clone()
-        } else {
-            c.volumes.clone()
-        },
     }
 }
 

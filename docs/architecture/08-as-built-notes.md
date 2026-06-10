@@ -14,14 +14,16 @@ narration is kept here; the chapter named is the source of truth.
 
 ### Not built yet
 
-- **D-Bus proxy** (`07-7-dbus.md`) — designed, not built. The schema exposes only a
-  per-bus `enabled` toggle (`[dbus.session]`/`[dbus.system]`); no `xdg-dbus-proxy` is
-  launched and no per-method allowlist is enforced.
-- **X11 isolation** (`07-8-x11.md`) — designed, not built. The schema exposes only the
-  `xwayland_isolated`/`xephyr_isolated` toggles; no isolated display is constructed.
-- **`fs.scrub` / `fs.home.sanitise`** (`07-4-filesystem.md` §7.4.5) — designed, not built.
-  Both parse and fold up the template chain but are dropped at translate (source-only): no
-  shim step overlays scrubbed files or writes the sanitised copy.
+- **D-Bus proxy** (`07-7-dbus.md`) — designed, not built. The `[dbus]` config surface has been
+  **removed from the schema** (a policy declaring it is now rejected at parse, not carried as a
+  no-op toggle); the design stands as roadmap, and the binder successor is
+  `org.projectkennel.IDBus/default` (below), not the old `xdg-dbus-proxy`.
+- **X11 isolation** (`07-8-x11.md`) — designed, not built. The `[x11]` config surface
+  (`xwayland_isolated`/`xephyr_isolated`) has been **removed from the schema** (rejected at
+  parse); the design stands as roadmap.
+- **`fs.scrub` / `fs.home.sanitise`** (`07-4-filesystem.md` §7.4.5) — designed, not built. Both
+  config surfaces have been **removed from the schema** (rejected at parse) rather than parsed +
+  dropped at translate; the design stands as roadmap.
 - **Run-environment `template` file-loading** (`07-9-other.md` §7.9.2a) — the one unbuilt
   piece of the otherwise-built run environment. `[env].template` / `[fs.home].template`
   would seed values/dotfiles from a policy-referenced file pinned at compile; it needs the
@@ -64,10 +66,10 @@ narration is kept here; the chapter named is the source of truth.
   `org.projectkennel.IDBus/default` D-Bus facade (the binder successor to `xdg-dbus-proxy`,
   superseding the unbuilt `07-7-dbus.md` proxy) and `SpawnKennel`-over-binder. kenneld owns
   the reserved nodes; the relay grows kenneld's TCB and is tracked as a new threat surface.
-- **`[container]` runtime** (`05-templates.md` §5.7) — `[container]` is design-level *language*
-  only (parse + compile-warn, same family as `[dbus]`/`[x11]`); there is no container-runtime
-  integration. No shipped template uses it: `containerised-service` runs the service directly
-  under the kennel (the kennel *is* the container).
+- **`[container]` runtime** (`05-templates.md` §5.7) — there is no container-runtime integration,
+  and the `[container]` config surface has been **removed from the schema** (rejected at parse)
+  rather than kept as design-level language. No shipped template uses it: `containerised-service`
+  runs the service directly under the kennel (the kennel *is* the container).
 
 ### Built — now described in the chapters
 

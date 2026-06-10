@@ -180,30 +180,15 @@ pub fn compile_leaf(
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
-/// Warn about policy sections the runtime does **not** enforce. They parse (so a
-/// policy still compiles) but translate drops them and nothing acts on them — which
-/// is exactly how decorative "controls" crept into the shipped templates: a
-/// `[fs.scrub]` that scrubs nothing, a `[container]` that containerises nothing,
-/// `[dbus]`/`[x11]` with no proxy behind them. Surfacing them keeps an author from
-/// believing a no-op protects them, without forbidding forward-declared sections
-/// (warn, don't refuse — `footgun-warn-dont-forbid`). One message per present section.
+/// Warn about policy sections that parse but whose effect comes from elsewhere, so an author
+/// does not believe the section itself imposes a control. Unbuilt *features* (`[container]`,
+/// `[dbus]`, `[x11]`, `[fs.scrub]`, `[[fs.home.sanitise]]`) are no longer accepted at all — they
+/// are rejected at parse by `deny_unknown_fields`, not warned — to keep assumptions off unbuilt
+/// code. What remains here are the *informational* sections whose scoping is real but enforced by
+/// another mechanism (the PID namespace + seccomp), not by the section. One message per present
+/// section (warn, don't refuse — `footgun-warn-dont-forbid`).
 fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
-    let scrub = effective
-        .fs
-        .as_ref()
-        .and_then(|f| f.scrub.as_ref())
-        .is_some();
     [
-        (
-            effective.dbus.is_some(),
-            "[dbus]",
-            "no D-Bus proxy exists yet",
-        ),
-        (
-            effective.x11.is_some(),
-            "[x11]",
-            "no X11 mediation exists yet",
-        ),
         (
             effective.ptrace.is_some(),
             "[ptrace]",
@@ -213,16 +198,6 @@ fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
             effective.signal.is_some(),
             "[signal]",
             "signal scoping comes from the PID namespace, not this section",
-        ),
-        (
-            effective.container.is_some(),
-            "[container]",
-            "container orchestration is not implemented",
-        ),
-        (
-            scrub,
-            "[fs.scrub]",
-            "credential scrubbing is not implemented",
         ),
     ]
     .into_iter()
@@ -431,25 +406,23 @@ mod tests {
     }
 
     #[test]
-    fn decorative_sections_warn_as_unenforced() {
-        use crate::source::{FsScrub, FsSection, SourcePolicy};
+    fn informational_sections_warn_as_unenforced() {
+        use crate::source::{PtraceSection, SignalSection, SourcePolicy};
+        // The unbuilt *features* ([dbus]/[x11]/[container]/[fs.scrub]/[[fs.home.sanitise]]) are
+        // gone from the schema (rejected at parse), so what warns here are the informational
+        // sections whose scoping is enforced elsewhere (PID namespace + seccomp).
         let sp = SourcePolicy {
-            dbus: Some(crate::source::DbusSection::default()),
-            container: Some(crate::source::ContainerSection::default()),
-            fs: Some(FsSection {
-                scrub: Some(FsScrub::default()),
-                ..FsSection::default()
-            }),
+            ptrace: Some(PtraceSection::default()),
+            signal: Some(SignalSection::default()),
             ..SourcePolicy::default()
         };
         let w = unenforced_section_warnings(&sp);
-        assert_eq!(w.len(), 3, "one warning per decorative section: {w:?}");
+        assert_eq!(w.len(), 2, "one warning per informational section: {w:?}");
         assert!(w
             .iter()
-            .any(|s| s.contains("[dbus]") && s.contains("NOT enforced")));
-        assert!(w.iter().any(|s| s.contains("[container]")));
-        assert!(w.iter().any(|s| s.contains("[fs.scrub]")));
-        // A clean policy (no decorative sections) warns about none of this.
+            .any(|s| s.contains("[ptrace]") && s.contains("NOT enforced")));
+        assert!(w.iter().any(|s| s.contains("[signal]")));
+        // A clean policy warns about none of this.
         assert!(unenforced_section_warnings(&SourcePolicy::default()).is_empty());
     }
 

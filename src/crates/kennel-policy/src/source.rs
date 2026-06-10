@@ -5,8 +5,8 @@
 //! This is the **input** to `kennel compile`: a template or leaf policy as authored
 //! in TOML (`docs/architecture/02-2-config-schema.md`, `docs/design/05-templates.md`). It is the
 //! rich, human-facing surface — every resource section (`exec`, `fs`, `net`, `unix`,
-//! `ssh`, `dbus`, `x11`, `env`, `cap`, `seccomp`, `proc`, `ptrace`, `signal`,
-//! `lifecycle`, `container`), identity and inheritance (`template_base`, `template_name`, `name`,
+//! `ssh`, `binder`, `env`, `cap`, `seccomp`, `proc`, `ptrace`, `signal`,
+//! `lifecycle`), identity and inheritance (`template_base`, `template_name`, `name`,
 //! `include`), and signing metadata. The compiler resolves a chain of these into the
 //! flat [`crate::settled::SettledPolicy`] the runtime enforces.
 //!
@@ -99,12 +99,6 @@ pub struct SourcePolicy {
     /// never declared here (`07-1-binder.md` §7.1.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binder: Option<BinderSection>,
-    /// D-Bus section (`[dbus]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dbus: Option<DbusSection>,
-    /// X11/Wayland section (`[x11]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub x11: Option<X11Section>,
     /// Procfs section (`[proc]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proc: Option<ProcSection>,
@@ -123,9 +117,6 @@ pub struct SourcePolicy {
     /// Lifecycle section (`[lifecycle]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleSection>,
-    /// Container section (`[container]`) — design-level; no runtime yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container: Option<ContainerSection>,
     /// Audit section (`[audit]` and `[audit.*]`) — sinks and per-class levels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditSection>,
@@ -298,9 +289,6 @@ pub struct FsSection {
     /// `[fs.dev]` — the minimal `/dev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev: Option<FsDev>,
-    /// `[fs.scrub]` — credential-shaped paths overlaid empty/absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scrub: Option<FsScrub>,
 }
 
 /// `[fs.home]` — the mandatory constructed-`$HOME` shim.
@@ -310,9 +298,6 @@ pub struct FsHome {
     /// Whether `$HOME` is shadowed by a constructed view (must be true once resolved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<bool>,
-    /// `[[fs.home.sanitise]]` — host config files copied in with secrets stripped.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sanitise: Vec<FsHomeSanitise>,
     /// Home-relative paths that **persist** across runs (§7.9.2a). By default the
     /// synthesised dotfiles are reconstructed read-only each spawn (no
     /// self-poisoning); a path named here is *not* reconstructed, so a writable
@@ -327,22 +312,6 @@ pub struct FsHome {
     /// home read-only. The escape hatch for a workload that must not write its home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readonly: Option<bool>,
-}
-
-/// One `[[fs.home.sanitise]]` entry (`docs/design/05-templates.md` §5.9).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct FsHomeSanitise {
-    /// The real host file to read.
-    pub real: String,
-    /// The shim path the sanitised copy is bound at.
-    pub shim: String,
-    /// Key globs to strip from the copy.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub strip: Vec<String>,
-    /// Why this file is needed inside the kennel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }
 
 /// `[fs.tmp]` — private `/tmp`. `size` is the human form (`"512M"`); the resolver
@@ -412,18 +381,6 @@ pub struct DevPassthrough {
     /// kernel attack surface and carries a group right into the kennel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
-}
-
-/// `[fs.scrub]` — credential-shaped files masked inside a granted tree.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct FsScrub {
-    /// Glob patterns to mask.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patterns: Option<Vec<String>>,
-    /// `"empty"` (zero-byte file) or `"enoent"` (appears absent).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
 }
 
 /// `[net]` and its sub-tables.
@@ -613,7 +570,7 @@ pub struct UnixAllow {
 /// `[binder]` — binder IPC policy (`docs/design/07-1-binder.md` §7.1.4).
 ///
 /// Covers **user-defined** services only: the reserved `org.projectkennel.*` facades
-/// (af-unix, dbus, gpg, wayland) are enabled by their own sections and are never named
+/// (the af-unix shim) are enabled by their own sections and are never named
 /// here. Source-only and realised by `kenneld`'s context manager, which gates
 /// `addService`/`getService` against the resolved set.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -752,39 +709,6 @@ pub struct SshKnownHost {
     pub key: Option<String>,
 }
 
-/// `[dbus]` — session/system bus enablement.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DbusSection {
-    /// Session bus.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<DbusBus>,
-    /// System bus.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<DbusBus>,
-}
-
-/// A D-Bus bus's enablement (`session.enabled = false`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DbusBus {
-    /// Whether the bus is reachable from the kennel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-}
-
-/// `[x11]` — display-server isolation.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct X11Section {
-    /// Isolate via Xwayland on Wayland hosts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub xwayland_isolated: Option<bool>,
-    /// Isolate via Xephyr on X11 hosts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub xephyr_isolated: Option<bool>,
-}
-
 /// `[proc]` — procfs visibility (mirrors `[fs.proc]`; both appear in the corpus).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -866,69 +790,6 @@ pub struct LifecycleSection {
     pub ttl_action: Option<String>,
 }
 
-/// `[container]` — design-level container orchestration (no runtime yet).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContainerSection {
-    /// The container image reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    /// The pinned image digest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_digest: Option<String>,
-    /// Invariant: never `--privileged`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_privileged: Option<bool>,
-    /// Invariant: never `--pid=host`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_pid_host: Option<bool>,
-    /// Invariant: never `--network=host`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_network_host: Option<bool>,
-    /// Run as the image's non-root user where supported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_nonroot: Option<bool>,
-    /// `[[container.published_ports]]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub published_ports: Vec<ContainerPort>,
-    /// `[[container.volumes]]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub volumes: Vec<ContainerVolume>,
-}
-
-/// One `[[container.published_ports]]` entry.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContainerPort {
-    /// The in-container port.
-    pub container_port: u16,
-    /// Host offset within the kennel's subnet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_offset: Option<u8>,
-    /// The host port on the kennel's loopback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_port: Option<u16>,
-    /// Why this port is published (required).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Threat tags.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threats: Option<Threats>,
-}
-
-/// One `[[container.volumes]]` entry.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContainerVolume {
-    /// The host path.
-    pub host: String,
-    /// The in-container mount path.
-    pub container: String,
-    /// Why this volume is mounted (required).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
 /// Parse source-policy TOML bytes into a [`SourcePolicy`].
 ///
 /// This is parse-only: it enforces the schema shape (`deny_unknown_fields`, types,
@@ -948,7 +809,7 @@ impl SourcePolicy {
     /// Checks: identity coherence (template vs leaf), `template_base`/`include`
     /// reference grammar, no duplicate includes, and a non-empty `reason` on every
     /// capability-granting entry (`[[net.allow]]`, `[[net.deny.invariant]]`,
-    /// `[[unix.allow]]`, `[[container.published_ports]]`, `[[container.volumes]]`).
+    /// `[[unix.allow]]`).
     ///
     /// Chain resolution, signature verification, lockfile byte-pinning, and
     /// framework-invariant assertion are *cross-artefact* or *post-resolution*
@@ -1072,24 +933,6 @@ impl SourcePolicy {
                 let who = k.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
                 if is_blank(k.reason.as_deref()) {
                     errs.push(format!("[[ssh.keys]] \"{who}\" is missing a `reason`"));
-                }
-            }
-        }
-        if let Some(c) = &self.container {
-            for p in &c.published_ports {
-                if is_blank(p.reason.as_deref()) {
-                    errs.push(format!(
-                        "[[container.published_ports]] {} is missing a `reason`",
-                        p.container_port
-                    ));
-                }
-            }
-            for v in &c.volumes {
-                if is_blank(v.reason.as_deref()) {
-                    errs.push(format!(
-                        "[[container.volumes]] \"{}\" is missing a `reason`",
-                        v.container
-                    ));
                 }
             }
         }
@@ -1271,30 +1114,19 @@ mod tests {
     }
 
     #[test]
-    fn design_level_container_block_still_parses() {
-        // [container] is design-level language (parse + compile-warn, no runtime),
-        // in the same family as [dbus]/[x11]/[ptrace]. No shipped template uses it
-        // any more — the containerised-service template runs the service directly
-        // under the kennel — so this exercises the parse path with an inline fixture.
+    fn container_block_is_now_rejected_at_parse() {
+        // [container] was design-level language (parse + compile-warn, no runtime). It is now
+        // removed from the schema entirely — assumptions on unbuilt code are off — so a policy
+        // declaring it fails `deny_unknown_fields` at parse, rather than compiling with a warning.
         let src = "\
 template_name = \"x\"
 [container]
 image = \"docker.io/library/postgres:17\"
-allow_privileged = false
-allow_pid_host = false
-[[container.published_ports]]
-container_port = 5432
-reason = \"Postgres reachable from the workstation\"
 ";
-        let pol = parse(src.as_bytes()).expect("parse");
-        let c = pol.container.expect("container");
-        assert_eq!(c.allow_privileged, Some(false));
-        assert_eq!(c.allow_pid_host, Some(false));
-        assert!(c.published_ports.iter().any(|p| p.container_port == 5432));
-        assert!(c
-            .published_ports
-            .iter()
-            .all(|p| !is_blank(p.reason.as_deref())));
+        assert!(
+            parse(src.as_bytes()).is_err(),
+            "[container] is no longer a known section"
+        );
     }
 
     #[test]
@@ -1303,7 +1135,6 @@ reason = \"Postgres reachable from the workstation\"
         // container. It derives base-confined, persists one data dir, and stays
         // deny-by-default on exec (the leaf adds the server binary).
         let pol = parse(CONTAINERISED_SERVICE.as_bytes()).expect("parse");
-        assert!(pol.container.is_none(), "no container fiction");
         let fs = pol.fs.expect("fs");
         assert!(
             fs.write

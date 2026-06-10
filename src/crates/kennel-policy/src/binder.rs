@@ -81,7 +81,7 @@ fn check_entry(errs: &mut Vec<String>, label: &str, name: Option<&str>, reason: 
         Some(n) if n.starts_with(RESERVED_PREFIX) => {
             errs.push(format!(
                 "[[{label}]] `{n}` is in the reserved `{RESERVED_PREFIX}*` namespace: reserved \
-                 services are enabled by their own sections (e.g. [unix]/[dbus]/[gpg]), never \
+                 services are enabled by their own sections (e.g. [unix]/[ssh]), never \
                  declared here (§7.1.4)"
             ));
         }
