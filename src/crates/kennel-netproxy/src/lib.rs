@@ -67,6 +67,7 @@
 
 pub mod allow;
 pub mod audit;
+pub mod conduit;
 pub mod config;
 pub mod dns;
 pub mod http;

@@ -15,6 +15,10 @@ basic-toml = "=0.1.10"
 # The unified audit writer (02-3): egress records emit through it, so they reach
 # the same sinks (file/stdout/syslog/journald) the policy selected.
 kennel-audit = { path = "../kennel-audit" }
+# SCM_RIGHTS fd-passing: the INet conduit (§7.5.2) — kenneld mints a socketpair, dials are driven
+# here, and the conduit end arrives over the kenneld↔delegate AF_UNIX socket. A small focused crate,
+# so the delegate's TCB stays minimal (not the whole kennel-syscall unsafe surface).
+kennel-scm = { path = "../kennel-scm" }
 
 [features]
 # Build the journald audit sink (links libsystemd via kennel-audit).
