@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! `kennel-ssh-reorigin`: the SSH re-origination forced command (`docs/design/07-10-ssh.md` §7.10.4).
 //!
 //! # Role

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! `kennel-ssh-reorigin` binary: the thin IO shell around the re-origination core.
 //!
 //! All decision logic lives in the library (`kennel_ssh_reorigin`), which is pure and

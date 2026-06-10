@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! `kennel-socks-connect` binary: the TCP + splice around the pure SOCKS5 core.
 //!
 //! Usage (as an `ssh` `ProxyCommand`): `kennel-socks-connect <host> <port>`, with the

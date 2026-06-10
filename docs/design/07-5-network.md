@@ -87,7 +87,7 @@ Per-destination policy beyond allow/deny (rate limits, byte caps, time windows) 
 
 ## 7.5.4 Policy primitives
 
-`[net]` carries the mode and splits into two enforcement sections: `[net.proxy]` (the user-space egress policy the proxy delegate enforces) and `[net.bpf]` (the kernel-level socket shaping and the bind gate).
+`[net]` carries the mode and splits into two enforcement sections: `[net.proxy]` (the user-space egress policy kenneld enforces) and `[net.bpf]` (the kernel-level socket shaping and the bind gate).
 
 ```toml
 [net]
@@ -239,7 +239,7 @@ fd<gid>:<ctx high:ctx low>::/64  ← per-kennel
 **The loopback mirror.** The kennel's assigned addresses exist on *both* sides of the network namespace boundary:
 
 - **Inside the kennel net-ns:** `lo` carries the kennel's assigned addresses. The workload binds, connects, and listens against them normally; the shim listens at `…1:1080` for SOCKS5.
-- **Host net-ns:** the same addresses are added as an alias on the host `lo` (`ip addr add <kennel-cidr> dev lo`). The `INet` `BIND` verb (§7.5.7) binds an exposed listener here at the kennel's own IP, so a port the workload exposes appears host-side at that **same** address — an operator's `ss`/`lsof` maps it straight back to the kennel. `kennel-netproxy` dials outbound from the host stack; it does not listen for the workload.
+- **Host net-ns:** the same addresses are added as an alias on the host `lo` (`ip addr add <kennel-cidr> dev lo`). The `INet` `BIND` verb (§7.5.7) binds an exposed listener here at the kennel's own IP, so a port the workload exposes appears host-side at that **same** address — an operator's `ss`/`lsof` maps it straight back to the kennel. The workload-facing SOCKS5 listener is the shim's, inside the net-ns; the host-side delegate dials outbound (`CONNECT`) and listens for host inbound (`BIND`).
 
 The mirror is deliberate: the same address reality on both sides is what makes a kennel's bound socket observable and attributable from the host without extra tooling. There is no routing, no NAT, no kernel interfaces beyond the loopback aliases. The kernel enforces the namespace boundary — a `connect()` inside the kennel net-ns to its own loopback address goes nowhere outside it — and the one controlled crossing point is binder (§7.1), not a network path.
 
@@ -262,7 +262,13 @@ A kennel legitimately needs to `bind()`: AI agent runs `npm run dev` spinning up
 
 The bind happens **natively inside the kennel net-ns** — which is what makes the listener reachable from within the kennel by ordinary loopback. Policy sits in between: every `bind()` is decided by `[[net.bpf.bind]]` at the cgroup `bind` hook (a non-matching bind fails at the syscall).
 
-Exposing that listener to the host is the inbound mirror of `CONNECT`: the **`BIND` verb** on `org.projectkennel.INet/default`. Symmetric to `CONNECT` and over the same path — same `kennel-netshim`, same node, same socketpair conduit, only the direction reversed — `BIND` asks kenneld to bind the matching `ip:port` on the host `lo` alias and forward connections that arrive there to the kennel-side `ip:port`. It is SOCKS5 `BIND` with the policy decision kenneld's, not the workload's: kenneld vets the request, binds the host-side port, and for each inbound host connection mints a socketpair conduit — the delegate accepts host-side and splices the accepted connection to one end; the shim connects to the workload's native listener inside the net-ns and splices the other. No listener fd and no accepted-connection host fd crosses the boundary; the operator sees the port at the kennel's own IP on host `lo`, mapping straight back to the kennel. An allowed native bind reported by the cgroup hook (or a SOCKS5 `BIND` request) is what prompts the shim to raise the mirror.
+Exposing that listener to the host is the **`BIND` verb** on `org.projectkennel.INet/default`. Where `CONNECT` is pulled by the kennel — the shim transacts to node 0 and gets the conduit fd in the reply — `BIND` is pushed by the daemon, so the direction reverses on every leg:
+
+- **The host-side listener is a delegate.** A per-kennel host-side leg (kenneld's `BIND` delegate, a control-socket delegate alongside the `CONNECT` dialer) binds the policy-allowed `ip:port` on the host `lo` alias at the kennel's own IP, listens, and accepts. The bind decision is kenneld's, gated by `[[net.bpf.bind]]`; the workload never decides what is exposed.
+- **The kennel-side facade exposes a callback.** `kennel-netshim`'s `BIND` transaction registers a callback node (with the kennel-side `ip:port` to forward to) that kenneld holds a reference to. This is the reverse of `CONNECT`: kenneld pushes inbound connections *to* the netshim rather than the netshim pulling outbound *from* kenneld.
+- **Per inbound connection, kenneld brokers a socketpair.** On an accepted connection the host-side delegate signals kenneld over the control socket; kenneld mints a socketpair, hands one end back to the delegate (control socket, `SCM_RIGHTS`) to splice against the accepted connection, and pushes the other end through binder to the netshim's callback node. The netshim connects to the kennel-side service (the workload's native listener at the same `ip:port`) and splices.
+
+Bytes flow `external → accepted connection → socketpair → netshim → kennel-side service`; kenneld mints both ends, so it relays no delegate-supplied fd and stays out of the data path, and the only fd crossing into the kennel is a benign socketpair end — the same conduit shape as `CONNECT`, only minted on the daemon's initiative. No host listener fd and no accepted-connection fd ever crosses the boundary. The operator sees the port at the kennel's own IP on host `lo`, mapping straight back to the kennel. An allowed native bind reported by the cgroup hook (or a SOCKS5 `BIND` request) is what prompts the shim to register the callback.
 
 What we don't want:
 
@@ -295,7 +301,7 @@ The userspace process believes it bound to `0.0.0.0`; the kernel actually bound 
 
 **Port allocation.** Two kennels can both bind `:3000` without conflict — each binds inside its own network namespace, and the host-side mirrors land on distinct addresses (`127.42.7.1:3000` and `127.42.11.1:3000`) on the host `lo` alias. Tools that hardcode `localhost:3000` for status checks within the kennel work, because the kennel's `/etc/hosts` shadows `localhost` → `127.42.<ctx>.1`.
 
-**The in-kennel facade.** The workload never sees any of the binder mechanics. `kennel-netshim` runs as a sibling of the workload inside the kennel net-ns and view, listens on the kennel's loopback at `:1080` (the address `$KENNEL_SOCKS_PROXY` points at), and speaks SOCKS5: `CONNECT` requests become `org.projectkennel.INet/default` `CONNECT` transactions and `BIND` requests become `BIND` transactions, with the returned fd spliced to the SOCKS5 session. The shim does no policy, no DNS, no audit — those stay in `kennel-netproxy` and kenneld; it is purely the SOCKS5↔binder translation layer, and as a parser of untrusted workload input it carries a fuzz target.
+**The in-kennel facade.** The workload never sees any of the binder mechanics. `kennel-netshim` runs as a sibling of the workload inside the kennel net-ns and view, listens on the kennel's loopback at `:1080` (the address `$KENNEL_SOCKS_PROXY` points at), and speaks SOCKS5. A `CONNECT` request becomes an `org.projectkennel.INet/default` `CONNECT` transaction; the conduit fd comes back in the reply and the shim splices it against the SOCKS5 session. For inbound, the shim registers a `BIND` callback once; kenneld pushes each arriving connection's conduit fd to it, and the shim splices that against a connection it opens to the kennel-side service. The shim does no policy, no DNS, no audit — those are kenneld's; it is purely the SOCKS5↔binder translation layer, and as a parser of untrusted workload input it carries a fuzz target.
 
 ## 7.5.8 Threats addressed
 

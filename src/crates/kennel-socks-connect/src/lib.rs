@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! `kennel-socks-connect`: a minimal SOCKS5 CONNECT stdio proxy.
 //!
 //! # Why this exists
