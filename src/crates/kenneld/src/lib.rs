@@ -30,6 +30,7 @@ pub mod cgroup;
 pub mod control;
 pub mod ctx;
 pub mod etc;
+pub mod inet;
 pub mod policy;
 pub mod proxy;
 pub mod server;
@@ -646,23 +647,29 @@ fn bring_up<P: Privileged + Sync>(
     // 3b. Build + write the per-kennel egress proxy config (no spawn yet): the proxy binds the
     //     kennel's loopback addresses, which only exist once the factory has added them, so the
     //     actual launch is deferred to *after* construct (below). Skipped with no proxy.
-    let proxy_config: Option<PathBuf> = if let Some(setup) = proxy {
-        let listen = proxy_listen(state.v4, addr6, port);
-        // The per-kennel audit dir persists across runs; create it but never
-        // remove it at teardown (it is audit data, not scratch).
-        if let Some(audit) = proxy_audit {
-            std::fs::create_dir_all(&audit.dir)?;
-        }
-        let config =
-            crate::proxy::config_toml(net, &listen, proxy_audit, ssh.host_service.as_slice())
-                .map_err(Error::ProxyConfig)?;
-        std::fs::create_dir_all(&setup.config_dir)?;
-        let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
-        std::fs::write(&config_path, config)?;
-        Some(config_path)
-    } else {
-        None
-    };
+    let (proxy_config, net_runtime): (Option<PathBuf>, crate::inet::NetRuntime) =
+        if let Some(setup) = proxy {
+            let listen = proxy_listen(state.v4, addr6, port);
+            // The per-kennel audit dir persists across runs; create it but never
+            // remove it at teardown (it is audit data, not scratch).
+            if let Some(audit) = proxy_audit {
+                std::fs::create_dir_all(&audit.dir)?;
+            }
+            let config =
+                crate::proxy::config_toml(net, &listen, proxy_audit, ssh.host_service.as_slice())
+                    .map_err(Error::ProxyConfig)?;
+            // The INet decision runtime is built from the same config the netproxy reads, parsed
+            // through the netproxy's own reader, so kenneld's decision point cannot drift from the
+            // delegate's enforcement.
+            let net_runtime = crate::inet::NetRuntime::from_toml(&config).map_err(Error::ProxyConfig)?;
+            std::fs::create_dir_all(&setup.config_dir)?;
+            let config_path = setup.config_dir.join(format!("proxy-{ctx}.toml"));
+            std::fs::write(&config_path, config)?;
+            (Some(config_path), net_runtime)
+        } else {
+            // No egress proxy ⇒ no egress: every INet request is refused.
+            (None, crate::inet::NetRuntime::denied())
+        };
 
     // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
     //     binds that shadow them over the kennel's view. Built here because it
@@ -846,7 +853,7 @@ fn bring_up<P: Privileged + Sync>(
             cgroup: plan.cgroup.clone(),
             ttl_action: plan.ttl_action,
         };
-        match acquire_binder_node0(init_pid_u32, ctx, prep, lifecycle) {
+        match acquire_binder_node0(init_pid_u32, ctx, prep, lifecycle, net_runtime) {
             Ok(manager) => state.binder = Some(manager),
             Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
         }
@@ -979,6 +986,7 @@ fn acquire_binder_node0(
     ctx: u16,
     prep: &BinderPrep,
     lifecycle: crate::binder::Lifecycle,
+    net: crate::inet::NetRuntime,
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
@@ -998,6 +1006,7 @@ fn acquire_binder_node0(
         prep.policy.clone(),
         prep.unix.clone(),
         lifecycle,
+        net,
         std::sync::Arc::clone(&prep.writer),
     )
 }

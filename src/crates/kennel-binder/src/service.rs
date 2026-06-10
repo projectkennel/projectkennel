@@ -18,6 +18,22 @@ pub mod verb {
     /// Connect a granted `AF_UNIX` socket and return the connected fd (the af-unix
     /// facade; sent with `transact_fd`, the reply carries the socket fd).
     pub const CONNECT_AFUNIX: u32 = 5;
+    /// Request an outbound network connection (the `INet` egress facade, §7.5.2).
+    ///
+    /// `kennel-netshim` transacts the request payload `[transport: u8 | port: u16
+    /// big-endian | host: UTF-8]` (see [`transport`]) to kenneld, which decides under
+    /// `[net.proxy]`, resolves the name, pins the vetted address, and (with the conduit
+    /// built) returns the connection fd.
+    pub const CONNECT_INET: u32 = 6;
+}
+
+/// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
+/// both ends ship from one release). Mirrors `kennel_netproxy::allow::Transport`.
+pub mod transport {
+    /// TCP (SOCKS5 `CONNECT`).
+    pub const TCP: u8 = 0;
+    /// UDP (SOCKS5 `UDP ASSOCIATE`; reserved — not yet served).
+    pub const UDP: u8 = 1;
 }
 
 /// Node-0 **lifecycle/config verbs** spoken only by `kennel-init`, the kennel's uid-0

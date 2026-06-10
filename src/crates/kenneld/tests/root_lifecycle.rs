@@ -71,6 +71,7 @@ fn run_manager() {
         BinderRuntime::default(),
         UnixRuntime::default(),
         lifecycle,
+        kenneld::inet::NetRuntime::denied(),
         writer,
     )
     .expect("manager: become context manager");

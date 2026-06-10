@@ -32,11 +32,12 @@ kennel-binder = { path = "../kennel-binder" }
 # reads). Both already vendored (kennel-policy/kennel-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
+# The INet egress decision: kenneld is the decision point (§7.5.2), reusing the netproxy's
+# allow ruleset + resolver seam so the two never drift (crate::inet). Also round-trips the
+# proxy config we write back through the netproxy's own parser (the writer can't drift).
+kennel-netproxy = { path = "../kennel-netproxy" }
 
 [dev-dependencies]
-# Round-trip the config we write back through the netproxy's own parser, so the
-# writer cannot drift from the reader.
-kennel-netproxy = { path = "../kennel-netproxy" }
 # The BPF-drain root test forks a child into a cgroup and attempts a connect to
 # produce a real denied-connect audit event; libc gives it fork/connect/_exit.
 libc = "=0.2.186"

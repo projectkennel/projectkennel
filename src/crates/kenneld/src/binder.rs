@@ -191,6 +191,7 @@ pub fn spawn(
     policy: BinderRuntime,
     unix: UnixRuntime,
     lifecycle: Lifecycle,
+    net: crate::inet::NetRuntime,
     writer: Arc<Writer>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
@@ -201,9 +202,10 @@ pub fn spawn(
     // the rest by Arc.
     let registry = Arc::new(Mutex::new(Registry::new(policy)));
     let unix = Arc::new(unix);
+    let net = Arc::new(net);
     let lifecycle = Arc::new(lifecycle);
     let handler: Handler = Arc::new(move |incoming: &Incoming| {
-        handle(&registry, &unix, &lifecycle, incoming, ctx, &writer)
+        handle(&registry, &unix, &net, &lifecycle, incoming, ctx, &writer)
     });
 
     let loopers = cm.serve_pool(POOL_MAX_THREADS, POLL_MS, &stop, &handler)?;
@@ -220,6 +222,7 @@ pub fn spawn(
 fn handle(
     registry: &Mutex<Registry>,
     unix: &UnixRuntime,
+    net: &crate::inet::NetRuntime,
     lifecycle: &Lifecycle,
     incoming: &Incoming,
     ctx: u16,
@@ -230,11 +233,14 @@ fn handle(
     if incoming.code >= lifecycle::GET_SANDBOX_PLAN {
         return lifecycle_handle(lifecycle, incoming, ctx, writer);
     }
-    // The af-unix facade returns a file descriptor and dials host I/O (blocking), so it is
+    // The af-unix and INet facades dial host I/O (blocking) and return a descriptor, so they are
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the
     // blocking call must not serialise the whole pool.
     if incoming.code == verb::CONNECT_AFUNIX {
         return af_unix_connect(unix, incoming, ctx, writer);
+    }
+    if incoming.code == verb::CONNECT_INET {
+        return inet_connect(net, incoming, ctx, writer);
     }
     let name = decode_name(&incoming.data);
     // The registry verbs are O(1) in-memory; take the lock only for them.
@@ -441,6 +447,52 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
         .field("ctx", Value::Uint(u64::from(ctx))),
     );
     reply
+}
+
+/// The `INet` egress facade (§7.5.2): decode the request, decide it under `[net.proxy]` (reusing the
+/// netproxy ruleset + resolver via [`crate::inet`]), audit, and reply with the decision status.
+///
+/// This returns the *decision* only; minting the per-connection socketpair conduit and driving the
+/// `kennel-netproxy` delegate to dial the pinned address (turning an `OK` into a returned connection
+/// fd) is the next increment (`07-5` §7.5.2). The verb is dormant until `kennel-netshim` is wired.
+fn inet_connect(
+    net: &crate::inet::NetRuntime,
+    incoming: &Incoming,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
+    use kennel_netproxy::allow::Destination;
+    use kennel_netproxy::dns::SystemResolver;
+    let (status, dest_label, port) =
+        match crate::inet::decode_request(&incoming.data, MAX_NAME) {
+            None => (status::BAD_REQUEST, String::new(), 0),
+            Some((transport, port, dest)) => {
+                let label = match &dest {
+                    Destination::Name(name) => name.clone(),
+                    Destination::Addr(addr) => addr.to_string(),
+                };
+                let status = match crate::inet::decide(net, &SystemResolver, &dest, port, transport)
+                {
+                    crate::inet::InetDecision::Pinned(_) => status::OK,
+                    crate::inet::InetDecision::Denied => status::DENIED,
+                    crate::inet::InetDecision::Unreachable => status::NOT_FOUND,
+                };
+                (status, label, port)
+            }
+        };
+    writer.emit(
+        &Event::new(
+            "binder.inet-connect",
+            Resource::Binder,
+            outcome_for(status),
+            Source::Kenneld,
+        )
+        .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+        .field("dest", Value::untrusted(dest_label))
+        .field("port", Value::Uint(u64::from(port)))
+        .field("ctx", Value::Uint(u64::from(ctx))),
+    );
+    Reply::Data(one(status))
 }
 
 /// A one-byte status reply.
