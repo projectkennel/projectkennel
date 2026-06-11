@@ -797,13 +797,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bare_name_template_base_needs_versioned_form_to_resolve() {
-        // A bare-name `template_base` passes per-artefact validation (legacy form is
-        // accepted by the grammar) but this increment requires the `@v` form to walk
-        // the chain, so resolution reports the missing version.
+    fn bare_name_template_base_is_rejected() {
+        // A `template_base` must carry an inline `@v<ver>`; the bare-name form is no longer
+        // accepted — per-artefact validation rejects it outright.
         let entry = "name = \"n\"\ntemplate_base = \"base-confined\"\n";
-        let err = resolve(&parse(entry.as_bytes()).expect("parse"), &base_source())
-            .expect_err("bare-name base cannot be resolved here");
-        assert!(matches!(err, PolicyError::Resolution(_)), "got {err}");
+        let err = parse(entry.as_bytes())
+            .expect("parse")
+            .validate()
+            .expect_err("bare-name base must fail validation");
+        assert!(matches!(err, PolicyError::SourceValidation(_)), "got {err}");
     }
 }

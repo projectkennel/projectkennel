@@ -46,13 +46,11 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourcePolicy {
-    /// Versioned reference to the parent template (`<name>@v<ver>`), or a bare name
-    /// in the legacy two-field form. Absent only for the root template
-    /// (`base-confined`).
+    /// Versioned reference to the parent template (`<name>@v<ver>`). Absent only for the
+    /// root template (`base-confined`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_base: Option<String>,
-    /// This artefact's own version (templates), or — in the legacy two-field leaf
-    /// form — the referenced parent's version. A quoted string by convention.
+    /// This artefact's own version. A quoted string by convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_version: Option<String>,
     /// The template's own name. Present on templates, absent on leaf policies.
@@ -859,13 +857,9 @@ impl SourcePolicy {
 
     fn check_references(&self, errs: &mut Vec<String>) {
         if let Some(base) = &self.template_base {
-            // The legacy two-field form carries a bare name plus a separate
-            // `template_version`; the canonical form carries `@v<ver>` inline.
-            if base.contains('@') {
-                if let Err(msg) = validate_reference(base) {
-                    errs.push(format!("`template_base` = \"{base}\": {msg}"));
-                }
-            } else if let Err(msg) = validate_ref_name(base) {
+            // A `template_base` is a versioned reference: `<name>@v<ver>`. The bare-name form is
+            // rejected — the version must be inline so the lockfile pins an exact parent.
+            if let Err(msg) = validate_reference(base) {
                 errs.push(format!("`template_base` = \"{base}\": {msg}"));
             }
         }

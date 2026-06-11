@@ -258,15 +258,12 @@ path = "~/data/dev-postgres/**"
 reason = "Postgres data directory"
 ```
 
-> **There is no `[container]` block.** An earlier draft of this example carried an
-> `[container]` section (image, published ports, volumes, env) — design-only language the
-> runtime never implemented; it is now rejected at parse (`deny_unknown_fields`). The
-> honest model is that **the kennel *is* the container**: `containerised-service` runs the
-> service directly under the same confinement as every other kennel (its own net-ns,
-> constructed view, exec allowlist), with no second container runtime underneath. The
-> service binary, its bind ports, and its invariants live in the *template*; the leaf adds
-> only the data directory. The image-pull / volume / published-port intent is expressed
-> through the template's exec allowlist, `[fs]` grants, and `[net.bind]` — not a container spec.
+> **There is no `[container]` block** — an unknown-section error at parse. **The kennel *is* the
+> container**: `containerised-service` runs the service directly under the same confinement as every
+> other kennel (its own net-ns, constructed view, exec allowlist), with no second container runtime
+> underneath. The service binary, its bind ports, and its invariants live in the *template*; the
+> leaf adds only the data directory. The image / volume / published-port intent is expressed through
+> the template's exec allowlist, `[fs]` grants, and `[net.bind]` — not a container spec.
 
 **What's enforced.** The Postgres kennel:
 - Listens only on its own per-kennel loopback address (`127.<tag>.<ctx>.1:5432`), which appears on the host `lo` at that same address — the user's default context can connect; the LAN cannot.

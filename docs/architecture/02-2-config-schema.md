@@ -37,7 +37,7 @@ Every policy file has the following top-level fields:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `template_base` | versioned reference | Yes for templates and leaf policies; No for the root template (`base-confined`) | Names the parent template as `<name>@<version>`. Resolution walks the chain to the root. See §Versioned references. |
-| `template_version` | string | Legacy; optional | The two-field form. Accepted for backward compatibility when `template_base` carries no `@version`; the combined form is canonical. |
+| `template_version` | string | Templates only | The template's own version. A leaf has none — the parent's version is inline in `template_base`. |
 | `template_name` | string | Yes for templates; No for leaf policies | The template's own name. Leaf policies use the kennel name from `name`. |
 | `name` | string | Yes for leaf policies; No for templates | The kennel name. Matches the leaf policy's filename without `.toml`. |
 | `include` | array of versioned references | No | Additional signed fragments composed additively. See §Includes. |
@@ -107,11 +107,9 @@ Examples: `ai-coding-strict@v4`, `corp-egress-allowlist@v2.33.2`.
 
 The parser rejects a `template_base` or `include` element that:
 
-- omits the `@version` (production mode); development mode resolves to the highest installed version and warns.
+- omits the `@version` — every reference is `<name>@v<ver>`, so the lockfile pins an exact parent.
 - carries a malformed name or version.
 - appears more than once in `include` (duplicate references are an error).
-
-The legacy two-field form (`template_base = "ai-coding-strict"` with a separate `template_version = "4"`) is accepted when `template_base` carries no `@`. The two forms are mutually exclusive on a single reference; a `template_base` that carries `@v4` *and* a `template_version` field is a conflict error.
 
 ### Resolution and verification of a reference
 
@@ -323,9 +321,9 @@ unchanged): `ssh` (`SshRuntime`), `unix` (`UnixRuntime`), `identity`
 `ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The informational sections
 `ptrace`/`signal` (their scoping comes from the PID namespace + seccomp, not the
 section) are dropped at translate and absent from the settled form; they compile
-with a warning. (Unbuilt feature surfaces — `[container]`, `[dbus]`, `[x11]`,
-`[fs.scrub]`, `[[fs.home.sanitise]]` — are no longer part of the schema at all:
-they are rejected at parse, not carried as design-level no-ops.) The settled net section carries `net.allow_names` (the by-name proxy
+with a warning. (`[container]`, `[dbus]`, `[x11]`, `[fs.scrub]`, and
+`[[fs.home.sanitise]]` are not in the schema — an unknown-section error at parse.)
+The settled net section carries `net.allow_names` (the by-name proxy
 allowlist), `net.proxy` (`offset`, `port`), and the bind-port policy
 (`bind_port_min` + `bind_allowed_ports`, §7.5.7); the settled fs section adds
 `fs.tmp` (`private`, `size_mib`, `mode`) and `fs.dev.allow`, and the proc section

@@ -33,12 +33,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeafPolicy {
-    /// The parent template reference (`<name>@v<ver>`). Required for a leaf.
+    /// The parent template reference (`<name>@v<ver>`). Required for a leaf; the parent's
+    /// version is inline in the reference, so a leaf has no own version field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_base: Option<String>,
-    /// Legacy parent-version field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_version: Option<String>,
     /// The kennel name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
