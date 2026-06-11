@@ -31,23 +31,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use kennel_lib_policy::{
-    AuditRuntime, BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy,
-    LifecyclePolicy, NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance,
-    SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction, UnixRuntime,
-    UnixSocket,
+    CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
+    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
+    SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
 };
-use kennel_lib_spawn::{prepare, RuntimeSubstitutions};
 use kennel_privhelper::addr::{loopback_v4, V4_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
-use kenneld::{start, Error, EtcSetup, HelperClient, Privileged, ProxySetup, Spec, UnixPrep};
+use kenneld::{HelperClient, Privileged};
 
 /// The operator's allocation, matching the `/etc/kennel/subkennel` line the runner
 /// provisions for the test uid: `<uid>:42:0000000002:kennel-dev`.
 const TEST_TAG: u16 = 42;
 const TEST_ULA_GID: [u8; 5] = [0, 0, 0, 0, 2];
 const TEST_NAMESPACE: &str = "kennel-dev";
-/// The synthetic name the granted supplementary group resolves to inside the kennel.
-const GRANTED_GROUP_NAME: &str = "kennelgrp";
 
 /// Locate a binary built alongside this test (`target/<profile>/<name>`).
 fn sibling_binary(name: &str) -> PathBuf {
@@ -117,6 +113,24 @@ fn pick_granted_group() -> Option<u32> {
     kennel_lib_syscall::unistd::supplementary_groups()
         .into_iter()
         .find(|&g| g != primary)
+}
+
+/// The same granted group as [`pick_granted_group`], but as `(name, gid)` — the form
+/// the self-hosting path needs, since a policy's `[identity].groups` names groups and
+/// the loader's `resolve_groups` re-resolves the name and membership-checks it. We map
+/// a held gid back to a name by scanning `/etc/group` (the loader resolves the name
+/// forward again, so the round-trip must agree). `None` when the operator has no extra
+/// group whose gid resolves to a name in `/etc/group`.
+fn pick_granted_group_named() -> Option<(String, u32)> {
+    let gid = pick_granted_group()?;
+    let group_db = std::fs::read_to_string("/etc/group").ok()?;
+    group_db.lines().find_map(|line| {
+        let mut f = line.split(':');
+        let name = f.next()?;
+        let _passwd = f.next()?;
+        let line_gid: u32 = f.next()?.parse().ok()?;
+        (line_gid == gid).then(|| (name.to_owned(), gid))
+    })
 }
 
 /// A settled policy exercising the constructed view: the system dirs a shell needs
@@ -223,6 +237,31 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
     }
 }
 
+/// The full constructed-view scenario as a **signed policy**, for the self-hosting
+/// `full_vertical` test: [`minimal_policy`] with the `[unix]` echo socket pointed at
+/// the real host listener `real_sock` (the af-unix facade connects to it by name), and
+/// — when the operator holds a grantable supplementary group — that group named in
+/// `[identity].groups`. The loader resolves both from this policy alone; nothing is
+/// hand-wired into the bring-up, so this is the production `run_kennel` path exactly.
+fn rich_policy(home: &Path, real_sock: &Path, granted: Option<&(String, u32)>) -> SettledPolicy {
+    let mut p = minimal_policy(home);
+    p.unix = kennel_lib_policy::UnixRuntime {
+        sockets: vec![kennel_lib_policy::UnixSocket {
+            name: "echo".to_owned(),
+            real: real_sock.to_string_lossy().into_owned(),
+            shim: "/home/kennel/kennel-unix.sock".to_owned(),
+            env: None,
+        }],
+    };
+    if let Some((name, _gid)) = granted {
+        p.identity = kennel_lib_policy::IdentityRuntime {
+            groups: vec![name.clone()],
+            ..kennel_lib_policy::IdentityRuntime::default()
+        };
+    }
+    p
+}
+
 /// The constructed `/dev` allowlist: the pseudo-device baseline plus the real
 /// host-device passthrough `/dev/net/tun` (§7.4.8) when present (`0666`, so `open()`
 /// needs no capability or group).
@@ -234,9 +273,25 @@ fn dev_allow() -> Vec<String> {
     v
 }
 
+/// The full constructed-view vertical, driven **self-hosting** through the real
+/// `run_kennel` (the production per-kennel path the daemon runs) — not the hand-built
+/// `Spec`/`BinderPrep` replica the earlier version used, which could drift from
+/// `run_kennel`'s real wiring. We sign the rich policy ([`rich_policy`]), hand
+/// `run_kennel` the operator's `Identity`, and let it derive everything (the view, the
+/// constructed `/etc`, the af-unix facade, the supplementary-group grant) from the
+/// signed policy alone. The workload script ([`view_proof_script`]) proves the
+/// constructed view from *inside* the kennel; the host side stands up only the one
+/// fixture a policy cannot carry — the real `AF_UNIX` echo listener the facade connects
+/// to. (SSH egress is proven separately by `src/tools/ssh-bastion-e2e.sh`; this test
+/// no longer re-wires a bastion.)
 #[test]
-#[allow(clippy::too_many_lines)] // one cohesive end-to-end scenario: view + /etc + ssh + unix + dev + groups
+#[allow(clippy::too_many_lines)] // one cohesive end-to-end scenario: view + /etc + unix + dev + groups
 fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
+    use kenneld::control::{recv_response, Response, StartRequest};
+    use kenneld::policy::TrustStoreLoader;
+    use kenneld::server::{run_kennel, Identity, Shared};
+    use std::os::unix::net::UnixStream;
+
     let uid = kennel_lib_syscall::unistd::real_uid();
     let gid = kennel_lib_syscall::unistd::real_gid();
     // Play kenneld's role: become a subreaper so the orphaned kennel-bin-init (the factory exits as
@@ -279,119 +334,25 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     }
 
     let scope = ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE);
+    // `run_kennel` does a single `reserve` on a fresh `Shared`, which allocates ctx 1
+    // (proven by `reserve_allocates_and_refuses_duplicates`); the loopback mirror brings
+    // up `127 | tag | ctx | host 1` for that ctx, so the workload's net-ns proof can
+    // compute the same address test-side.
     let ctx = 1u16;
-
-    // Sign the policy and trust the key.
-    let key = SigningKey::from_seed("e2e-key", &[3u8; 32]).expect("key");
-    let signed = kennel_lib_policy::sign_settled(&minimal_policy(&home), &key).expect("sign");
-    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
-    let mut keys = kennel_lib_policy::KeySet::new();
-    keys.insert(key.key_id(), &key.public_key_bytes())
-        .expect("trust key");
-
-    let subst = RuntimeSubstitutions {
-        ctx,
-        uid,
-        kennel: "e2e".to_owned(),
-        home: home.clone(),
-        namespace: TEST_NAMESPACE.to_owned(),
-        tag: TEST_TAG,
-        ula_gid: TEST_ULA_GID,
-    };
-    let mut plan = prepare(&bytes, &keys, &subst).expect("verify + plan");
-    // The production userns path stands as prepared: USER | MOUNT | IPC | PID. No
-    // override (unlike the legacy root scenario) — PID is unshared inside the seal's
-    // child, never in this harness, so the harness's own forks are undisturbed.
-    assert!(
-        plan.namespaces
-            .contains(kennel_lib_syscall::namespace::Namespaces::USER),
-        "the production plan unshares a user namespace (the unprivileged foundation)"
-    );
-
-    // Re-grant one real supplementary group the operator holds via the gid_map
-    // handshake (§7.4.8); the privhelper (cap_setgid) writes the multi-gid map. With
-    // no extra group the kennel proves default drop-all instead.
-    let granted = pick_granted_group();
-    plan.supplementary_groups = granted.map(|g| vec![g]);
-
-    let cgroup = base.join(format!("kennel-{ctx}"));
-    let helper = HelperClient::new(privhelper_path());
-
-    // Stage everything the bring-up binds under the user runtime dir (outside /tmp).
-    let run = runtime_dir();
-    let tag = std::process::id();
-    let proxy_cfg = run.join(format!("kenneld-e2e-proxy-{tag}"));
-    let etc_base = run.join(format!("kenneld-e2e-etc-{tag}"));
-    let view_root = run.join(format!("kenneld-e2e-root-{tag}"));
-    let audit_base = run.join(format!("kenneld-e2e-audit-{tag}"));
-    let audit_path = audit_base.join("e2e").join("network.jsonl");
-    let ssh_stage = run.join(format!("kenneld-e2e-ssh-{tag}"));
-    let unix_sock = run.join(format!("kenneld-e2e-unix-{tag}.sock"));
-    for p in [&proxy_cfg, &etc_base, &view_root, &audit_base, &ssh_stage] {
-        let _ = std::fs::remove_dir_all(p);
-    }
-    let _ = std::fs::remove_file(&unix_sock);
-
-    // Best-effort: clear any leftover loopback addresses a prior interrupted run left
-    // (via the privhelper — unprivileged `ip addr del` cannot).
     let v4 = loopback_v4(
         scope.tag(),
         u8::try_from(ctx).expect("ctx fits u8 for a v4 kennel"),
         kenneld::PROXY_HOST,
     );
-    let _ = helper.del_address(ctx, "lo", v4.into(), V4_PREFIX);
-    let _ = Command::new("pkill").args(["-x", "host-netproxy"]).output();
 
-    // The granted ~ subdir (with a file) and a non-granted sibling, under the real
-    // home. In the view the granted path remaps beneath the shim root; the sibling
-    // must be absent (its name gone, not merely denied).
-    let home_test = home.join("kennel-e2e");
-    let _ = std::fs::remove_dir_all(&home_test);
-    std::fs::create_dir_all(home_test.join("granted")).expect("mkdir granted");
-    std::fs::create_dir_all(home_test.join("secret")).expect("mkdir secret");
-    std::fs::write(home_test.join("granted/file"), "OK\n").expect("write granted file");
-    std::fs::write(home_test.join("secret/file"), "SECRET\n").expect("write secret file");
-
-    // SSH egress (§7.10): mint a synthetic key + ~/.ssh, exactly as
-    // `Shared::register_ssh` does, and hand it to the bring-up via `Spec.ssh`.
-    let synth_pub = kenneld::ssh::mint_synthetic_key(&ssh_stage, "id_github.com", "e2e synthetic")
-        .expect("mint synthetic");
-    assert!(
-        synth_pub.starts_with("ssh-ed25519 "),
-        "minted a synthetic ed25519 key"
-    );
-    let connect_bin = sibling_binary("facade-ssh");
-    assert!(connect_bin.exists(), "build facade-ssh (the runner does)");
-    let bastion_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey";
-    let host_grants = [kenneld::ssh::HostGrant {
-        host: "github.com",
-        key_file: "id_github.com",
-    }];
-    let connect_str = connect_bin.to_string_lossy().into_owned();
-    let ssh_params = kenneld::ssh::SshParams {
-        bastion_host: "127.0.0.1",
-        bastion_port: 8031,
-        bastion_host_key: bastion_key,
-        ssh_bin: &connect_str,
-        hosts: &host_grants,
-    };
-    // The synthetic ~/.ssh lands in the view at the shim $HOME (/home/<account>,
-    // default `kennel`), exactly where production roots it (Shared::register_ssh) and
-    // where the workload's $HOME points — not the old /run/kennel home.
-    let ssh_dir = PathBuf::from("/home/kennel/.ssh");
-    let ssh_binds =
-        kenneld::ssh::materialize(&ssh_stage, &ssh_dir, &ssh_params).expect("materialise ~/.ssh");
-    let ssh_prep = kenneld::SshPrep {
-        file_binds: ssh_binds,
-        host_service: Some("127.0.0.1:8031".parse().expect("addr")),
-        ssh_bin: Some(connect_bin),
-    };
-
-    // AF_UNIX socket facade (§7.6 / 07-1 §7.1.5): a real host listener the facade
-    // connects on the workload's behalf. The in-kennel `facade-afunix` proxy
-    // presents it at $HOME/kennel-unix.sock and brokers each connect by name through
-    // binder node 0 (kenneld). A host echo thread serves "ping" -> "pong". No host
-    // socket path is ever bound into the view.
+    // A real AF_UNIX echo listener on the host — the one fixture a policy cannot carry.
+    // The af-unix facade (binder node 0) connects to it by name on the workload's behalf
+    // and the in-kennel `facade-afunix` proxy presents it at the shim path. A host echo
+    // thread serves "ping" -> "pong". No host socket path is ever bound into the view.
+    let run = runtime_dir();
+    let tag = std::process::id();
+    let unix_sock = run.join(format!("kenneld-e2e-unix-{tag}.sock"));
+    let _ = std::fs::remove_file(&unix_sock);
     let unix_listener = UnixListener::bind(&unix_sock).expect("bind unix listener");
     std::thread::spawn(move || {
         for conn in unix_listener.incoming() {
@@ -404,136 +365,134 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
             }
         }
     });
-    let afunix_bin = sibling_binary("facade-afunix");
-    assert!(afunix_bin.exists(), "build facade-afunix (the runner does)");
-    let shim_path = PathBuf::from("/home/kennel/kennel-unix.sock");
-    let unix_prep = UnixPrep {
-        shims: vec![kenneld::UnixShim {
-            name: "echo".to_owned(),
-            shim_path: shim_path.clone(),
-        }],
-        env: Vec::new(),
-        afunix_bin: Some(afunix_bin),
-    };
-    // The binder facade kenneld serves (node 0): resolves the brokered name "echo" to
-    // the real host listener. Mirrors what `Shared::run_kennel` wires for a [unix]
-    // kennel. Its writer records the af-unix decisions.
-    let binder_writer = std::sync::Arc::new(kenneld::audit::build_writer(
-        "e2e",
-        &audit_base.join("e2e"),
-        &AuditRuntime::default(),
-        "e2e-uuid".to_owned(),
-    ));
-    let binder_prep = kenneld::BinderPrep {
-        policy: BinderRuntime::default(),
-        unix: UnixRuntime {
-            sockets: vec![UnixSocket {
-                name: "echo".to_owned(),
-                real: unix_sock.to_string_lossy().into_owned(),
-                shim: shim_path.to_string_lossy().into_owned(),
-                env: None,
-            }],
-        },
-        writer: binder_writer,
-        // Drive the privhelper factory (07-2): a real uid 0 builds the view + binderfs
-        // (chowned to the operator), fixing the binderfs EACCES the legacy path hit.
-        init_bin: Some(sibling_binary("kennel-bin-init")),
-    };
 
-    let spec = Spec {
-        id: "kennel-e2e".to_owned(),
-        cgroup: cgroup.clone(),
-        ctx,
+    // The granted ~ subdir (with a file) and a non-granted sibling, under the real home.
+    // In the view the granted path remaps beneath the shim root; the sibling must be
+    // absent (its name gone, not merely denied). `minimal_policy` grants the `granted`
+    // subdir read; `secret` is never named.
+    let home_test = home.join("kennel-e2e");
+    let _ = std::fs::remove_dir_all(&home_test);
+    std::fs::create_dir_all(home_test.join("granted")).expect("mkdir granted");
+    std::fs::create_dir_all(home_test.join("secret")).expect("mkdir secret");
+    std::fs::write(home_test.join("granted/file"), "OK\n").expect("write granted file");
+    std::fs::write(home_test.join("secret/file"), "SECRET\n").expect("write secret file");
+
+    // Re-grant one real supplementary group the operator holds (§7.4.8) by naming it in
+    // the policy's `[identity].groups`; the loader resolves + membership-checks it and
+    // sets `plan.supplementary_groups`. With no extra group the kennel proves default
+    // drop-all instead.
+    let granted = pick_granted_group_named();
+
+    // Sign the rich policy and trust the key — the real verify path runs in the loader.
+    let key = SigningKey::from_seed("e2e-key", &[3u8; 32]).expect("key");
+    let policy = rich_policy(&home, &unix_sock, granted.as_ref());
+    let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
+    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_lib_policy::KeySet::new();
+    keys.insert(key.key_id(), &key.public_key_bytes())
+        .expect("trust key");
+
+    // Stage the per-kennel scratch dirs under the user runtime dir (outside /tmp).
+    let policy_file = run.join(format!("kenneld-e2e-policy-{tag}.bin"));
+    std::fs::write(&policy_file, &bytes).expect("write policy");
+    let proxy_cfg = run.join(format!("kenneld-e2e-proxy-{tag}"));
+    let etc_base = run.join(format!("kenneld-e2e-etc-{tag}"));
+    let view_root = run.join(format!("kenneld-e2e-root-{tag}"));
+    let audit_base = run.join(format!("kenneld-e2e-audit-{tag}"));
+    for p in [&proxy_cfg, &etc_base, &view_root, &audit_base] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    // Best-effort: clear any loopback address a prior interrupted run left (the
+    // privhelper does it — unprivileged `ip addr del` cannot), and any stale delegate.
+    let helper = HelperClient::new(privhelper_path());
+    let _ = helper.del_address(ctx, "lo", v4.into(), V4_PREFIX);
+    let _ = Command::new("pkill").args(["-x", "host-netproxy"]).output();
+
+    // The operator's `Identity` — exactly what kenneld holds for its user. `run_kennel`
+    // derives the view, /etc, af-unix facade, proxy, and the group grant from the signed
+    // policy + this identity. A constrained-net policy needs the proxy fixtures.
+    let identity = Identity {
+        uid,
+        gid,
+        username: "dev".to_owned(),
+        home,
         scope,
-        plan,
-        net: minimal_policy(&home).effective_policy.net,
-        proxy: Some(ProxySetup {
+        cgroup_base: base.clone(),
+        proxy: Some(kenneld::ProxySetup {
             binary: netproxy_path(),
             config_dir: proxy_cfg.clone(),
             socks5: sibling_binary("facade-socks5"),
         }),
-        etc: Some(EtcSetup {
-            staging_dir: etc_base.join("etc-1"),
-            account: "kennel".to_owned(),
-            account_group: "kennel".to_owned(),
-            hostname: "e2e".to_owned(),
-            // The kernel uid/gid inside the userns are the operator's (identity map),
-            // so the synthetic passwd/group must name those very ids as `kennel` for
-            // `id`/`getpwuid` to resolve without leaking the host login.
-            uid,
-            gid,
-            // The passwd home is the constructed shim $HOME (/home/<account>), not the
-            // operator's real home — matches production and the workload's $HOME.
-            home: PathBuf::from("/home/kennel"),
-            groups: granted
-                .map(|g| vec![(GRANTED_GROUP_NAME.to_owned(), g)])
-                .unwrap_or_default(),
-            shell: "/bin/sh".to_owned(),
-            home_persist: Vec::new(),
-        }),
-        view_root: Some(view_root.clone()),
-        ssh: ssh_prep,
-        unix: unix_prep,
-        binder: Some(binder_prep),
+        etc_base: Some(etc_base.clone()),
+        view_base: Some(view_root.clone()),
+        audit_base: Some(audit_base.clone()),
+        bastion: None,
+        afunix_bin: Some(sibling_binary("facade-afunix")),
+        init_bin: Some(sibling_binary("kennel-bin-init")),
+    };
+    let shared = Shared::new(identity, helper.clone(), TrustStoreLoader::from_keys(keys));
+
+    let req = StartRequest {
+        policy: policy_file.clone(),
+        kennel: "e2e".to_owned(),
+        argv: view_proof_script(v4, granted.as_ref(), gid),
+        cwd: PathBuf::from("/"),
+        term: String::new(),
+        interactive: false,
     };
 
-    // The workload proves the constructed view; the group clauses below are written
-    // for userns semantics (see build_workload).
-    let mut workload = build_workload(v4, granted, gid);
-    let started = start(&helper, spec, &mut workload);
-    // Prerequisite skips, never a false pass:
-    if let Some(reason) = userns_skip_reason(&started) {
-        cleanup_paths(
-            &[&proxy_cfg, &etc_base, &view_root, &ssh_stage],
-            &home_test,
-            &unix_sock,
-        );
-        let _ = std::fs::remove_dir(&base);
-        eprintln!("SKIP: {reason}");
-        return;
-    }
-    if let Some(reason) = privhelper_skip_reason(&started) {
-        cleanup_paths(
-            &[&proxy_cfg, &etc_base, &view_root, &ssh_stage],
-            &home_test,
-            &unix_sock,
-        );
-        let _ = std::fs::remove_dir(&base);
-        eprintln!("SKIP: {reason}");
-        return;
-    }
-    let kennel = started.expect("start kennel");
-    assert!(
-        cgroup.is_dir(),
-        "the kennel cgroup should exist while running"
-    );
+    let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+    run_kennel(&shared, &req, Vec::new(), &mut server);
 
-    // The loopback v4 address (127 | tag | ctx | host 1) should be present.
+    let first = recv_response(&mut client).expect("a first response");
+    if bring_up_skipped(&first) {
+        let _ = helper.del_address(ctx, "lo", v4.into(), V4_PREFIX);
+        cleanup_paths(
+            &[&proxy_cfg, &etc_base, &view_root, &audit_base],
+            &home_test,
+            &unix_sock,
+        );
+        let _ = std::fs::remove_file(&policy_file);
+        let _ = std::fs::remove_dir(&base);
+        return;
+    }
+
+    // While the kennel runs (the view proof script sleeps briefly at the end), the
+    // host-observable bring-up state must hold: the loopback address is up and the egress
+    // delegate's command socket is bound. These are the checks the old hand-built test
+    // made against `Spec`; here they observe what `run_kennel` actually built.
     assert!(
         lo_has(&v4.to_string()),
-        "the kennel's loopback address {v4} should be added"
+        "the kennel's loopback address {v4} should be added during bring-up"
     );
-    // The egress dial delegate binds its owner-only AF_UNIX command socket (no TCP listener — the
-    // workload's SOCKS endpoint is facade-socks5; kenneld drives the delegate over this socket).
     let command_socket = proxy_cfg.join(format!("netproxy-cmd-{ctx}.sock"));
+    // The delegate binds its socket shortly after bring-up; allow a brief settle.
+    let mut delegate_up = false;
+    for _ in 0..40 {
+        if command_socket.exists() {
+            delegate_up = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(
-        command_socket.exists(),
+        delegate_up,
         "the egress delegate should bind its command socket at {}",
         command_socket.display()
     );
-    assert!(
-        audit_path.parent().is_some_and(Path::exists),
-        "the audit log directory should be created"
-    );
 
-    let status = kennel.stop(&helper).expect("stop");
+    // The workload's exit code is the verdict: the whole `view_proof_script` ran inside
+    // the kennel (granted readable, secret ENOENT, masked /etc, af-unix ping->pong, net-ns
+    // loopback + SOCKS endpoint, the supplementary group re-granted) iff it exited 0.
     assert_eq!(
-        status, 0,
-        "the constructed view held (synthetic /etc + ~/.ssh, granted readable, sibling ENOENT, the \
-         AF_UNIX shim connectable, the granted group re-granted via the gid_map handshake) (got {status})"
+        recv_response(&mut client).expect("an exit response"),
+        Response::Exited { code: 0 },
+        "the constructed view held: synthetic /etc + granted readable + sibling ENOENT + the \
+         AF_UNIX shim connectable + net-ns loopback + the granted group re-granted"
     );
 
-    assert!(!cgroup.exists(), "the cgroup should be removed on teardown");
+    // Teardown removed it all.
     assert!(
         !lo_has(&v4.to_string()),
         "the loopback address should be removed on teardown"
@@ -548,27 +507,28 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     );
 
     cleanup_paths(
-        &[&proxy_cfg, &etc_base, &audit_base, &ssh_stage],
+        &[&proxy_cfg, &etc_base, &audit_base],
         &home_test,
         &unix_sock,
     );
+    let _ = std::fs::remove_file(&policy_file);
     let _ = std::fs::remove_dir(&base);
 }
 
-/// Build the workload shell: the original view/etc/ssh/unix/dev clauses, plus a
-/// **userns-correct** group clause (§7.4.8). The legacy `id -G | wc -w == 2` does
-/// not hold on the userns path — `getgroups` returns every inherited group with the
-/// unmapped ones folded to the overflow gid (`nogroup`, 65534), not an emptied list.
-/// So we assert: the granted gid is present and resolves to its synthetic name, and
-/// **every** supplementary gid is the primary, the overflow gid, or the granted one
-/// (no host group kept its real identity). With no granted group, only the
-/// neutralisation invariant is checked.
-fn build_workload(v4: Ipv4Addr, granted: Option<u32>, primary: u32) -> Command {
-    let ssh_clause = "&& test -f \"$HOME/.ssh/config\" \
-         && grep -q 'ProxyCommand .*facade-ssh %h %p' \"$HOME/.ssh/config\" \
-         && grep -q 'HostKeyAlias kennel-bastion' \"$HOME/.ssh/config\" \
-         && grep -q '^kennel-bastion ssh-ed25519 ' \"$HOME/.ssh/known_hosts\" \
-         && test -f \"$HOME/.ssh/id_github.com\" ";
+/// Build the in-kennel proof script (the workload's argv): a `/bin/sh -c` chain that
+/// verifies the constructed view from *inside* the kennel and exits 0 iff every clause
+/// holds — the self-hosting test's whole verdict. Covers the constructed `/etc`, the
+/// granted `~` subdir + the absent (ENOENT) non-granted sibling, the dev passthrough,
+/// the per-kennel net-ns, the `AF_UNIX` facade round-trip, and the supplementary-group
+/// grant. (SSH egress is proven by `ssh-bastion-e2e.sh`, not here.)
+///
+/// The **group clause** is userns-correct (§7.4.8): the legacy `id -G | wc -w == 2`
+/// does not hold — `getgroups` returns every inherited group with the unmapped ones
+/// folded to the overflow gid (`nogroup`, 65534), not an emptied list. So we assert the
+/// granted gid is present and resolves to its name, and **every** supplementary gid is
+/// the primary, the overflow gid, or the granted one (no host group kept its identity).
+/// With no granted group, only the neutralisation invariant is checked.
+fn view_proof_script(v4: Ipv4Addr, granted: Option<&(String, u32)>, primary: u32) -> Vec<String> {
     // The af-unix facade: the in-kennel proxy is launched by the seal (racing this
     // exec) and node 0 comes up shortly after spawn, so the socket appears and the
     // first broker may briefly fail — wait for the listener, then let python retry the
@@ -599,72 +559,35 @@ p=os.environ['HOME']+'/kennel-unix.sock'\nfor _ in range(40):\n try:\n  s=socket
     );
     // Identity is masked: the synthetic passwd/group name the account `kennel` with
     // the masked home `/home/kennel` (§7.4 `$HOME = /home/<user>`); no operator
-    // identity leaks. (The legacy `! grep /home/` predates the /home/<user> model.)
+    // identity leaks.
     let id_clause = "&& grep -q '^kennel:' /etc/passwd \
          && grep -q '^kennel:' /etc/group \
          && grep -q ':/home/kennel:' /etc/passwd ";
     // Userns group isolation: every supplementary gid is primary / overflow(65534) /
-    // granted; the granted gid is present and resolves to its synthetic name.
+    // granted; the granted gid is present and resolves to its name (the policy named it
+    // in [identity].groups; the synthetic /etc/group carries it under that same name).
     let groups_clause = granted.map_or_else(
         || format!("&& for x in $(id -G); do [ \"$x\" = {primary} ] || [ \"$x\" = 65534 ] || exit 9; done "),
-        |g| {
+        |(name, g)| {
             format!(
                 "&& id -G | grep -qw {g} \
-                 && id -Gn | grep -qw {GRANTED_GROUP_NAME} \
+                 && id -Gn | grep -qw {name} \
                  && for x in $(id -G); do [ \"$x\" = {primary} ] || [ \"$x\" = 65534 ] || [ \"$x\" = {g} ] || exit 9; done "
             )
         },
     );
-    let mut workload = Command::new("/bin/sh");
-    workload.arg("-c").arg(format!(
+    let script = format!(
         "grep -q '{v4}[[:space:]]*localhost e2e' /etc/hosts \
          && test -r \"$HOME/kennel-e2e/granted/file\" \
          && ! test -e \"$HOME/kennel-e2e/secret\" \
-         {ssh_clause} \
          {unix_clause} \
          {dev_clause} \
          {netns_clause} \
          {id_clause} \
          {groups_clause} \
          && sleep 2",
-    ));
-    workload
-}
-
-/// If `started` failed because the userns was created but capability-stripped
-/// (Ubuntu's `AppArmor` restriction with no profile over the test binary), the
-/// precise skip reason; else `None`.
-fn userns_skip_reason(started: &Result<kenneld::Kennel, Error>) -> Option<String> {
-    let Err(Error::Spawn(kennel_lib_spawn::SpawnError::Syscall(e))) = started else {
-        return None;
-    };
-    let restricted =
-        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-            .is_ok_and(|s| s.trim() == "1");
-    if e.kind() == std::io::ErrorKind::PermissionDenied && restricted {
-        Some(format!(
-            "userns created but capability-stripped — kernel.apparmor_restrict_unprivileged_userns=1 and \
-             this test binary has no AppArmor profile granting `userns` (the runner loads one): {e}"
-        ))
-    } else {
-        None
-    }
-}
-
-/// If `started` failed because the privhelper factory could not provision the kennel (most
-/// likely it lacks the file capabilities), the precise skip reason; else `None`. The factory
-/// now does the netlink add + BPF attach itself, so a capability-less helper fails *inside*
-/// `construct` (its `EPERM` netlink/BPF op) before reporting the init pid — surfacing here as
-/// an `Error::Io`. (On the real runner the caps are applied, so `start` succeeds and this never
-/// triggers; it only gives a graceful off-runner skip.)
-fn privhelper_skip_reason(started: &Result<kenneld::Kennel, Error>) -> Option<String> {
-    let Err(Error::Io(e)) = started else {
-        return None;
-    };
-    Some(format!(
-        "factory construction failed ({e}) — most likely the helper lacks file capabilities; \
-         run src/tools/unprivileged-e2e.sh (it applies `setcap cap_net_admin,cap_sys_admin,cap_setgid=ep`)"
-    ))
+    );
+    vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
 }
 
 /// Whether `/etc/kennel/subkennel` has a line for `uid` (the privhelper's reserved
