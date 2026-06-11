@@ -82,14 +82,22 @@ This chapter describes *how the sections compose and inherit*, and gives the ful
 
 Fields that name filesystem paths use the following syntax:
 
-- `~/foo/bar` — relative to the workload's `$HOME` after the shim is constructed. Tilde expansion is performed by Project Kennel, not by the workload's shell.
-- `/abs/path` — absolute, against the host filesystem as seen *before* shim construction. Most absolute paths are reserved for system files (`/etc/*`, `/usr/*`); user data lives under `~/`.
+- `~/foo/bar` — the home. **`~` is the only way to name the home, and it always means the kennel's persona home (`/home/<user>`, default `/home/kennel`)** — never a host path. See §The home and the persona below.
+- `/abs/path` — absolute, against the host filesystem. Most absolute paths are reserved for system files (`/etc/*`, `/usr/*`).
 - `<kennel>/foo` — Project Kennel placeholder, expanded to the kennel's runtime ID at load time.
 - `**` and `*` — glob suffixes. `**` matches across path separators; `*` does not.
 
 Tilde expansion does not happen until signature verification of the file containing the tilde-path completes. An attacker-controlled template cannot use `~/.ssh/...` to refer to the operator's keys at parse time.
 
-Paths in `fs.read`, `fs.write`, `fs.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax. Paths in `exec.allow` and `exec.deny` are absolute only — no `~` expansion — but do accept globs including `**` (e.g. `/usr/lib/git-core/**`); a bare `**`/`/**` in `exec.allow` is the explicit `permissive-exec` opt-out and is the one case the compiler warns about. Execution is deny-by-default (§7.3.4): `exec.allow` is the allowlist and `exec.deny` carves exceptions out of it (a path or glob that is refused even if an `allow` glob would otherwise admit it).
+Paths in `fs.read`, `fs.write`, `fs.deny`, `exec.allow`, `exec.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax — all accept `~` and globs (e.g. `/usr/lib/git-core/**`). A bare `**`/`/**` in `exec.allow` is the explicit `permissive-exec` opt-out and is the one case the compiler warns about. Execution is deny-by-default (§7.3.4): `exec.allow` is the allowlist and `exec.deny` carves exceptions out of it (a path or glob that is refused even if an `allow` glob would otherwise admit it).
+
+### The home and the persona
+
+Inside the kennel the workload runs as a masked persona — user `kennel`, `$HOME = /home/kennel` (`[identity].user`, §7.4). A policy author never names the operator's host home. The home model:
+
+- **`~` (and `$HOME`) are canonicalised to `~` at compile**, so the settled, signed policy carries exactly one home form and **zero host-context home/user references**. `$HOME/foo` in a source policy becomes `~/foo` in the settled artefact.
+- **At spawn, a `~` path resolves to the persona home for everything the kennel sees** — the Landlock rule, the bind *target*, and the `exec.allow` match are all `/home/kennel/...`. So `exec.allow = ~/foo/bin/tool` grants execute on `/home/kennel/foo/bin/tool` (the path the workload actually execs), and `fs.read = ~/foo` is readable at `/home/kennel/foo`.
+- **The bind *source*** — the only place a host path is needed — is the operator's real home (that is where the data lives), reverse-mapped at mount time. It never appears in the policy, the settled artefact, or the kennel's view; the workload cannot observe the operator's username or home.
 
 ---
 

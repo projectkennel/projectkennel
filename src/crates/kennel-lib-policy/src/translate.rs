@@ -933,7 +933,23 @@ fn subst(s: &str, deferred: &mut BTreeSet<String>) -> String {
     // they are deferred to spawn like `<ctx>`/`<uid>` — the compiler only records
     // them. This keeps one source of truth (the daemon) and means the CLI never has
     // to know or find out the installation's tag/gid.
-    collect_placeholders(s, deferred);
+    let s = canonicalize_home(s);
+    collect_placeholders(&s, deferred);
+    s
+}
+
+/// Canonicalise the home prefix to `~`, so the settled policy carries exactly ONE way to name the
+/// kennel's home and **zero host-context home references**. `$HOME`/`$HOME/` rewrite to `~`/`~/`.
+/// A literal absolute host-home path cannot be recognised here (the compiler is host- and
+/// user-independent — it does not know the operator's home), so that form is normalised at spawn,
+/// where the home is known; here we canonicalise the symbolic forms an author writes.
+fn canonicalize_home(s: &str) -> String {
+    if s == "$HOME" {
+        return "~".to_owned();
+    }
+    if let Some(rest) = s.strip_prefix("$HOME/") {
+        return format!("~/{rest}");
+    }
     s.to_owned()
 }
 
@@ -1669,6 +1685,29 @@ mod tests {
         );
         let over = parse(src.as_bytes()).expect("parse");
         assert!(translate_net(&over, &mut BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn home_prefix_canonicalises_to_tilde_in_settled() {
+        // $HOME/foo → ~/foo in the settled policy: one canonical home form, zero host-context refs.
+        let src = parse(
+            b"name = \"k\"\n[fs]\nread = [\"$HOME/foo\", \"~/bar\", \"/usr\"]\n[fs.home]\n[exec]\nallow = [\"$HOME/bin/tool\", \"/bin/sh\"]\n",
+        )
+        .expect("parse");
+        let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate fs");
+        assert!(fs.read.contains(&"~/foo".to_owned()), "$HOME/ → ~/ ; got {:?}", fs.read);
+        assert!(fs.read.contains(&"~/bar".to_owned()), "~/ stays ~/");
+        assert!(fs.read.contains(&"/usr".to_owned()), "non-home paths untouched");
+        assert!(
+            !fs.read.iter().any(|p| p.contains("$HOME")),
+            "no $HOME survives into settled"
+        );
+        let exec = translate_exec(&src, &mut BTreeSet::new()).expect("translate exec");
+        assert!(
+            exec.allow.contains(&"~/bin/tool".to_owned()),
+            "exec.allow $HOME/ → ~/ ; got {:?}",
+            exec.allow
+        );
     }
 
     #[test]

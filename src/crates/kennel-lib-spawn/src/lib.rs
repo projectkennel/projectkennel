@@ -130,6 +130,27 @@ fn substitute_str(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str
         .replace("<group>", group)
 }
 
+/// Substitute a **bind-backed path** field (`fs.read`/`fs.write`/`exec.allow`): `substitute_str`
+/// plus a leading `~`/`$HOME` → the operator's home.
+///
+/// A home-relative grant (`~/foo`) names a host path whose *data* lives there, but the kennel must
+/// never see that location: `remap_target` relocates it beneath the persona `$HOME` (`/home/kennel/…`)
+/// for the bind target, the Landlock rule, and the exec-allowlist match. So `~/foo/bin/tool` becomes
+/// a grant on `/home/kennel/foo/bin/tool` inside the kennel, bound from the operator's real
+/// `~/foo/bin/tool`. Expanding to the real home here is what lets the existing remap do the
+/// relocation; `~` is the *only* way to name the home — the real path is never written in policy.
+fn substitute_path(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
+    let s = substitute_str(s, subst, user, group);
+    let home = subst.home.to_string_lossy();
+    if s == "~" || s == "$HOME" {
+        return home.into_owned();
+    }
+    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("$HOME/")) {
+        return format!("{home}/{rest}");
+    }
+    s
+}
+
 /// Error if `value` still contains an unresolved `<…>` placeholder.
 fn reject_leftover(field: &str, value: &str) -> Result<(), SpawnError> {
     if value.contains('<') {
@@ -159,15 +180,15 @@ pub fn substitute(
     let fs = &mut p.effective_policy.fs;
 
     for path in &mut fs.read {
-        *path = substitute_str(path, subst, &user, &group);
+        *path = substitute_path(path, subst, &user, &group);
         reject_leftover("fs.read", path)?;
     }
     for path in &mut fs.write {
-        *path = substitute_str(path, subst, &user, &group);
+        *path = substitute_path(path, subst, &user, &group);
         reject_leftover("fs.write", path)?;
     }
     for bin in &mut p.effective_policy.exec.allow {
-        *bin = substitute_str(bin, subst, &user, &group);
+        *bin = substitute_path(bin, subst, &user, &group);
         reject_leftover("exec.allow", bin)?;
     }
     for dir in &mut p.effective_policy.exec.path {
@@ -786,6 +807,48 @@ mod tests {
         let mut sorted = order.clone();
         sorted.sort_unstable();
         assert_eq!(order, sorted, "fs binds under /srv are shortest-first: {order:?}");
+    }
+
+    #[test]
+    fn home_relative_grants_map_to_the_persona_home_not_the_operator_home() {
+        // A `~/foo` fs grant + a `~/foo/bin/tool` exec grant both resolve to the in-kennel persona
+        // home (/home/kennel/...), never the operator's real home — which must not appear in the
+        // plan's targets/Landlock at all. The bind SOURCE is the real host path (that's where the
+        // data is); the TARGET the kennel sees is the persona path.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.read = vec!["~/foo".to_owned()];
+        p.effective_policy.fs.write = vec![];
+        p.effective_policy.exec.allow = vec!["~/foo/bin/tool".to_owned()];
+        p.effective_policy.exec.loaders = vec![];
+        // subst() has home = /home/dev (the operator's real home).
+        let p = substitute(&p, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+
+        // The fs grant binds the real source to the persona target.
+        let view = plan.view.as_ref().expect("view");
+        let foo = view
+            .binds
+            .iter()
+            .find(|b| b.target == Path::new("/home/kennel/foo"))
+            .expect("~/foo binds at the persona home");
+        assert_eq!(foo.source, Path::new("/home/dev/foo"), "bound from the real host path");
+
+        // The exec Landlock grant is on the persona path, so it matches what the workload execs.
+        assert!(
+            plan.landlock_fs.iter().any(|(path, a)| path == Path::new("/home/kennel/foo/bin/tool")
+                && a.contains(AccessFs::EXECUTE)),
+            "exec.allow ~/foo/bin/tool grants execute on the persona path"
+        );
+
+        // The operator's real home appears in NO target or Landlock path (only as a bind source).
+        assert!(
+            !plan.landlock_fs.iter().any(|(path, _)| path.starts_with("/home/dev")),
+            "the operator home never appears in a Landlock target"
+        );
+        assert!(
+            !view.binds.iter().any(|b| b.target.starts_with("/home/dev")),
+            "the operator home never appears as a bind target"
+        );
     }
 
     #[test]
