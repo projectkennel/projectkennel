@@ -98,6 +98,7 @@ Inside the kennel the workload runs as a masked persona — user `kennel`, `$HOM
 - **`~` (and `$HOME`) are canonicalised to `~` at compile**, so the settled, signed policy carries exactly one home form and **zero host-context home/user references**. `$HOME/foo` in a source policy becomes `~/foo` in the settled artefact.
 - **At spawn, a `~` path resolves to the persona home for everything the kennel sees** — the Landlock rule, the bind *target*, and the `exec.allow` match are all `/home/kennel/...`. So `exec.allow = ~/foo/bin/tool` grants execute on `/home/kennel/foo/bin/tool` (the path the workload actually execs), and `fs.read = ~/foo` is readable at `/home/kennel/foo`.
 - **The bind *source*** — the only place a host path is needed — is the operator's real home (that is where the data lives), reverse-mapped at mount time. It never appears in the policy, the settled artefact, or the kennel's view; the workload cannot observe the operator's username or home.
+- **`exec.path` (the `$PATH` search roots) and `exec.shell`** are persona *strings* the workload reads, not bind-backed paths: their `~`/`$HOME`/`<home>` resolves straight to the persona home. `exec.path = ["~/.local/bin"]` puts `/home/kennel/.local/bin` in `$PATH`, matching where a `~/.local/bin/...` `exec.allow` grant landed. (`<home>` here is the persona home too — it never expands to the operator's home in a string the workload can read.)
 
 ---
 

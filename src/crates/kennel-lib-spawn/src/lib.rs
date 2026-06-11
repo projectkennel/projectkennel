@@ -130,6 +130,20 @@ fn substitute_str(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str
         .replace("<group>", group)
 }
 
+/// Expand a leading home token (`~`, `$HOME`, or the `<home>` placeholder) in `s` to `home`.
+/// No change if `s` has no home prefix.
+fn expand_home_prefix(s: String, home: &str) -> String {
+    for tok in ["~", "$HOME", "<home>"] {
+        if s == tok {
+            return home.to_owned();
+        }
+        if let Some(rest) = s.strip_prefix(tok).and_then(|r| r.strip_prefix('/')) {
+            return format!("{home}/{rest}");
+        }
+    }
+    s
+}
+
 /// Substitute a **bind-backed path** field (`fs.read`/`fs.write`/`exec.allow`): `substitute_str`
 /// plus a leading `~`/`$HOME` → the operator's home.
 ///
@@ -141,14 +155,23 @@ fn substitute_str(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str
 /// relocation; `~` is the *only* way to name the home — the real path is never written in policy.
 fn substitute_path(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
     let s = substitute_str(s, subst, user, group);
-    let home = subst.home.to_string_lossy();
-    if s == "~" || s == "$HOME" {
-        return home.into_owned();
-    }
-    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("$HOME/")) {
-        return format!("{home}/{rest}");
-    }
-    s
+    expand_home_prefix(s, &subst.home.to_string_lossy())
+}
+
+/// Substitute a **persona-string** path field (`exec.path` search roots, `exec.shell`): a `~`/`$HOME`
+/// prefix → the **persona** home (`/home/<user>`) directly.
+///
+/// Unlike the bind-backed fields, these are not bound — they are strings the workload reads (its
+/// `$PATH`, its `$SHELL`/`pw_shell`). So `~` resolves straight to the in-kennel persona home, the
+/// path that actually exists in the view: `exec.path = ["~/.local/bin"]` becomes
+/// `/home/kennel/.local/bin` in `$PATH`, matching where a `~/.local/bin/...` `exec.allow` grant
+/// landed (its remap target is the same persona path).
+fn substitute_persona_path(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
+    // Resolve the home prefix to the persona home FIRST — before `substitute_str` would expand a
+    // `<home>` token to the *operator's* home (a leak in a string the workload reads). The remaining
+    // `<…>` tokens (ctx/uid/…) are then substituted normally.
+    let s = expand_home_prefix(s.to_owned(), &format!("/home/{user}"));
+    substitute_str(&s, subst, user, group)
 }
 
 /// Error if `value` still contains an unresolved `<…>` placeholder.
@@ -192,12 +215,12 @@ pub fn substitute(
         reject_leftover("exec.allow", bin)?;
     }
     for dir in &mut p.effective_policy.exec.path {
-        *dir = substitute_str(dir, subst, &user, &group);
+        *dir = substitute_persona_path(dir, subst, &user, &group);
         reject_leftover("exec.path", dir)?;
     }
     {
         let shell = &mut p.effective_policy.exec.shell;
-        *shell = substitute_str(shell, subst, &user, &group);
+        *shell = substitute_persona_path(shell, subst, &user, &group);
         reject_leftover("exec.shell", shell)?;
     }
     // The synthesised environment (§7.9.2): substitute placeholders in the values
@@ -848,6 +871,49 @@ mod tests {
         assert!(
             !view.binds.iter().any(|b| b.target.starts_with("/home/dev")),
             "the operator home never appears as a bind target"
+        );
+    }
+
+    #[test]
+    fn exec_path_and_shell_resolve_tilde_to_the_persona_home() {
+        // exec.path/exec.shell are persona STRINGS (the workload's $PATH / $SHELL), not binds:
+        // ~ resolves straight to /home/<user>, the path that exists in the view — matching where a
+        // ~/.local/bin/* exec.allow grant landed. This is the case that bites real workloads.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.exec.path = vec!["~/.local/bin".to_owned(), "/usr/bin".to_owned()];
+        p.effective_policy.exec.shell = "~/.local/bin/myshell".to_owned();
+        // shell must be in allow (translate enforces this on the canonical ~ form).
+        p.effective_policy.exec.allow = vec!["~/.local/bin/myshell".to_owned()];
+        p.effective_policy.exec.loaders = vec![];
+        let p = substitute(&p, &subst()).expect("substitute");
+
+        assert_eq!(
+            p.effective_policy.exec.path,
+            vec!["/home/kennel/.local/bin".to_owned(), "/usr/bin".to_owned()],
+            "exec.path ~ → persona home in $PATH"
+        );
+        assert_eq!(
+            p.effective_policy.exec.shell, "/home/kennel/.local/bin/myshell",
+            "exec.shell ~ → persona home"
+        );
+        // The <home> placeholder in a persona string resolves to the PERSONA home, never the
+        // operator's — it must not leak the real home into the workload's $PATH.
+        let mut q = policy_with_placeholders();
+        q.effective_policy.exec.path = vec!["<home>/bin".to_owned()];
+        let q = substitute(&q, &subst()).expect("substitute");
+        assert_eq!(
+            q.effective_policy.exec.path,
+            vec!["/home/kennel/bin".to_owned()],
+            "<home> in exec.path → persona home, not the operator home"
+        );
+        // And the matching exec.allow grant lands on the same persona path (Landlock execute),
+        // so the shell the workload runs is the one it's allowed to run.
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        assert!(
+            plan.landlock_fs.iter().any(|(path, a)| path
+                == Path::new("/home/kennel/.local/bin/myshell")
+                && a.contains(AccessFs::EXECUTE)),
+            "the persona shell path carries an execute grant"
         );
     }
 
