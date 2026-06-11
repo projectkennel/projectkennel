@@ -730,6 +730,65 @@ mod tests {
     }
 
     #[test]
+    fn a_path_in_both_read_and_write_dedups_to_one_writable_bind() {
+        // A path is one bind mount with one mode. The implied rule folds every write path into read,
+        // so a writable tree appears in both lists; the plan must collapse it to ONE bind, writable.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.read = vec![
+            "/srv/data/project".to_owned(), // in both → must dedup to one, writable
+            "/usr".to_owned(),              // read-only
+        ];
+        p.effective_policy.fs.write = vec!["/srv/data/project".to_owned()];
+        let p = substitute(&p, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let view = plan.view.as_ref().expect("view");
+
+        let project: Vec<&BindMount> = view
+            .binds
+            .iter()
+            .filter(|b| b.source == Path::new("/srv/data/project"))
+            .collect();
+        assert_eq!(project.len(), 1, "the shared path binds exactly once, not twice");
+        assert!(
+            project.first().expect("one bind").writable,
+            "the deduped bind is writable (write wins over read)"
+        );
+
+        // /usr (read-only, never in write) stays a single read-only bind.
+        let usr: Vec<&BindMount> = view
+            .binds
+            .iter()
+            .filter(|b| b.source == Path::new("/usr"))
+            .collect();
+        assert_eq!(usr.len(), 1);
+        assert!(
+            !usr.first().expect("one bind").writable,
+            "a read-only path is bound read-only"
+        );
+    }
+
+    #[test]
+    fn fs_binds_are_ordered_shortest_path_first() {
+        // Mount order is by path length so a parent grant lands before a more-specific child.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.read = vec!["/srv/a/b/c".to_owned(), "/srv".to_owned()];
+        p.effective_policy.fs.write = vec!["/srv/a".to_owned()];
+        let p = substitute(&p, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let view = plan.view.as_ref().expect("view");
+        // The three fs grants, in the order they appear among the binds, are length-ascending.
+        let order: Vec<usize> = view
+            .binds
+            .iter()
+            .filter(|b| b.source.starts_with("/srv"))
+            .map(|b| b.source.as_os_str().len())
+            .collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "fs binds under /srv are shortest-first: {order:?}");
+    }
+
+    #[test]
     fn every_ulimit_resource_name_maps_to_a_kernel_resource() {
         // Lock-step with the policy crate's accepted names: a name translate admits
         // must resolve to a Resource here, or a valid policy would fail at spawn.

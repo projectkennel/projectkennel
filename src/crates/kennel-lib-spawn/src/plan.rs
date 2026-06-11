@@ -623,18 +623,35 @@ impl Plan {
         // escape hatch is an explicit `**` entry — the `permissive-exec` opt-in — which
         // restores the open posture (reads carry EXECUTE, nothing is gated).
         let permissive_exec = ep.exec.allow.iter().any(|e| is_exec_wildcard(e));
-        let grants = ep
+        // A path is, at the end of the day, ONE bind mount with one mode. `fs.read`/`fs.write` only
+        // express which mode; the implied rule (translate) already folds every write path into read,
+        // so a writable path appears in both lists. Collapse to one entry per glob-stripped source,
+        // writable iff it is in `fs.write` (write wins — read is subsumed). Then mount **shortest
+        // path first**, so a broad parent grant lands before a more-specific child and the child
+        // (e.g. a writable subtree inside a read-only tree) nests on top deterministically.
+        //
+        // A read/write grant may use a `/**` or `/*` glob (e.g. `/usr/**`); the bind source and
+        // Landlock target must be the real directory root — the literal glob has no inode, so
+        // binding it is `ENOENT` and the Landlock rule would be dropped by skip-missing. Strip it.
+        let mut fs_grants: Vec<(PathBuf, bool)> = Vec::new();
+        for (path_str, writable) in ep
             .fs
             .read
             .iter()
             .map(|p| (p, false))
-            .chain(ep.fs.write.iter().map(|p| (p, true)));
-        for (path_str, writable) in grants {
-            // A read/write grant may use a `/**` or `/*` glob (e.g. `/usr/**`); the
-            // bind source and Landlock target must be the real directory root — the
-            // literal glob has no inode, so binding it is `ENOENT` and the Landlock
-            // rule would be dropped by skip-missing. Strip it, exactly as exec does.
+            .chain(ep.fs.write.iter().map(|p| (p, true)))
+        {
             let source = glob_root(path_str);
+            if let Some(existing) = fs_grants.iter_mut().find(|(s, _)| *s == source) {
+                existing.1 |= writable; // a path in both read and write is writable
+            } else {
+                fs_grants.push((source, writable));
+            }
+        }
+        // Shortest source path first (parent before child). Stable: equal-length paths keep their
+        // first-seen order, so the result is deterministic.
+        fs_grants.sort_by_key(|(s, _)| s.as_os_str().len());
+        for (source, writable) in fs_grants {
             let target = remap_target(&source, home, &shim_root);
             landlock_fs.push((
                 target.clone(),
