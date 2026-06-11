@@ -37,7 +37,7 @@ Every policy file has the following top-level fields:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `template_base` | versioned reference | Yes for templates and leaf policies; No for the root template (`base-confined`) | Names the parent template as `<name>@<version>`. Resolution walks the chain to the root. See §Versioned references. |
-| `template_version` | string | Legacy; optional | The two-field form. Accepted for backward compatibility when `template_base` carries no `@version`; the combined form is canonical. |
+| `template_version` | string | Templates only | The template's own version. A leaf has none — the parent's version is inline in `template_base`. |
 | `template_name` | string | Yes for templates; No for leaf policies | The template's own name. Leaf policies use the kennel name from `name`. |
 | `name` | string | Yes for leaf policies; No for templates | The kennel name. Matches the leaf policy's filename without `.toml`. |
 | `include` | array of versioned references | No | Additional signed fragments composed additively. See §Includes. |
@@ -56,26 +56,25 @@ The full section list:
 
 | Section | Purpose | Detailed in (design doc) |
 |---|---|---|
-| `[exec]` | What binaries the workload may execve() | §7.1 |
-| `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction, scrub patterns | §7.2 |
-| `[net]` and `[net.*]` | Network egress allowlist, proxy listen, loopback rules, bind rules, audit | §7.3 |
-| `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling | §7.4 |
-| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.8 |
-| `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.2 |
-| `[container]` | Container-mode policy surface; source-only, design-level (no runtime yet) | §7.9 |
-| `[dbus]` | D-Bus session/system bus enablement and method filtering | §7.5 |
-| `[x11]` | X11/Wayland display server isolation | §7.6 |
-| `[env]` | Environment variable pass-through, deny patterns, forced values | §7.7 |
-| `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.2 |
-| `[cap]` | Capabilities and `no_new_privs` | §7.7 |
-| `[seccomp]` | Seccomp filter | §7.7 |
-| `[proc]` | Procfs visibility and hidepid | §7.7 |
-| `[ptrace]` | Ptrace allow/deny across kennel boundary | §7.7 |
-| `[signal]` | Signal allow/deny across kennel boundary | §7.7 |
+| `[exec]` | What binaries the workload may execve() | §7.3 |
+| `[fs]` and `[fs.*]` | Filesystem read/write access, shim construction | §7.4 |
+| `[net]` and `[net.*]` | Egress mode (`constrained`/`open`/`none`), the `[[net.allow]]` destination allowlist, `[net.deny]` invariants, `[net.bind]` gate, `[net.ipv6]`, and `[net.audit]`. The per-kennel net-ns is the egress boundary (§7.5); the `host`/`unconstrained` modes + `[net.proxy]`/`[net.bpf]` nesting are roadmap — see §The `[net]` section. | §7.5 |
+| `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
+| `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
+| `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
+| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.10 |
+| `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.4 |
+| `[env]` | Environment variable pass-through, deny patterns, forced values | §7.9 |
+| `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.4 |
+| `[cap]` | Capabilities and `no_new_privs` | §7.9 |
+| `[seccomp]` | Seccomp filter | §7.9 |
+| `[proc]` | Procfs visibility and hidepid | §7.9 |
+| `[ptrace]` | Ptrace allow/deny across kennel boundary | §7.9 |
+| `[signal]` | Signal allow/deny across kennel boundary | §7.9 |
 | `[lifecycle]` | TTL and TTL-action | §9 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
-Each section's specific fields are documented in the corresponding design-document chapter. This chapter describes *how the sections compose and inherit*, not what each field means.
+This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for `[net]` and `[net.*]` (the §The `[net]` section below, kept exact against the parser). Each other section's specific fields are documented in the corresponding design-document chapter; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
 
 ---
 
@@ -83,14 +82,23 @@ Each section's specific fields are documented in the corresponding design-docume
 
 Fields that name filesystem paths use the following syntax:
 
-- `~/foo/bar` — relative to the workload's `$HOME` after the shim is constructed. Tilde expansion is performed by Project Kennel, not by the workload's shell.
-- `/abs/path` — absolute, against the host filesystem as seen *before* shim construction. Most absolute paths are reserved for system files (`/etc/*`, `/usr/*`); user data lives under `~/`.
+- `~/foo/bar` — the home. **`~` is the only way to name the home, and it always means the kennel's persona home (`/home/<user>`, default `/home/kennel`)** — never a host path. See §The home and the persona below.
+- `/abs/path` — absolute, against the host filesystem. Most absolute paths are reserved for system files (`/etc/*`, `/usr/*`).
 - `<kennel>/foo` — Project Kennel placeholder, expanded to the kennel's runtime ID at load time.
 - `**` and `*` — glob suffixes. `**` matches across path separators; `*` does not.
 
 Tilde expansion does not happen until signature verification of the file containing the tilde-path completes. An attacker-controlled template cannot use `~/.ssh/...` to refer to the operator's keys at parse time.
 
-Paths in `fs.read`, `fs.write`, `fs.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax. Paths in `exec.allow` (there is no `exec.deny` — execution is deny-by-default, §7.1.4) are absolute only — no `~` expansion — but do accept globs including `**` (e.g. `/usr/lib/git-core/**`); a bare `**`/`/**` is the explicit `permissive-exec` opt-out and is the one case the compiler warns about.
+Paths in `fs.read`, `fs.write`, `fs.deny`, `exec.allow`, `exec.deny`, `unix.allow[].real`, and `unix.allow[].shim` follow this syntax — all accept `~` and globs (e.g. `/usr/lib/git-core/**`). A bare `**`/`/**` in `exec.allow` is the explicit `permissive-exec` opt-out and is the one case the compiler warns about. Execution is deny-by-default (§7.3.4): `exec.allow` is the allowlist and `exec.deny` carves exceptions out of it (a path or glob that is refused even if an `allow` glob would otherwise admit it).
+
+### The home and the persona
+
+Inside the kennel the workload runs as a masked persona — user `kennel`, `$HOME = /home/kennel` (`[identity].user`, §7.4). A policy author never names the operator's host home. The home model:
+
+- **`~` (and `$HOME`) are canonicalised to `~` at compile**, so the settled, signed policy carries exactly one home form and **zero host-context home/user references**. `$HOME/foo` in a source policy becomes `~/foo` in the settled artefact.
+- **At spawn, a `~` path resolves to the persona home for everything the kennel sees** — the Landlock rule, the bind *target*, and the `exec.allow` match are all `/home/kennel/...`. So `exec.allow = ~/foo/bin/tool` grants execute on `/home/kennel/foo/bin/tool` (the path the workload actually execs), and `fs.read = ~/foo` is readable at `/home/kennel/foo`.
+- **The bind *source*** — the only place a host path is needed — is the operator's real home (that is where the data lives), reverse-mapped at mount time. It never appears in the policy, the settled artefact, or the kennel's view; the workload cannot observe the operator's username or home.
+- **`exec.path` (the `$PATH` search roots) and `exec.shell`** are persona *strings* the workload reads, not bind-backed paths: their `~`/`$HOME`/`<home>` resolves straight to the persona home. `exec.path = ["~/.local/bin"]` puts `/home/kennel/.local/bin` in `$PATH`, matching where a `~/.local/bin/...` `exec.allow` grant landed. (`<home>` here is the persona home too — it never expands to the operator's home in a string the workload can read.)
 
 ---
 
@@ -108,11 +116,9 @@ Examples: `ai-coding-strict@v4`, `corp-egress-allowlist@v2.33.2`.
 
 The parser rejects a `template_base` or `include` element that:
 
-- omits the `@version` (production mode); development mode resolves to the highest installed version and warns.
+- omits the `@version` — every reference is `<name>@v<ver>`, so the lockfile pins an exact parent.
 - carries a malformed name or version.
 - appears more than once in `include` (duplicate references are an error).
-
-The legacy two-field form (`template_base = "ai-coding-strict"` with a separate `template_version = "4"`) is accepted when `template_base` carries no `@`. The two forms are mutually exclusive on a single reference; a `template_base` that carries `@v4` *and* a `template_version` field is a conflict error.
 
 ### Resolution and verification of a reference
 
@@ -209,6 +215,17 @@ The threat IDs must be present in the version of `THREATS.md` named by `threat_c
 
 ---
 
+## Implied rules
+
+Translation (source → settled policy) derives a few grants the author would otherwise have to restate. The author writes the intent once; the **settled policy carries the derived grants explicitly**, so `kennel diff` and the audit show exactly what was added — nothing widens invisibly. An implied grant never overrides an explicit one: if the author already wrote the target grant, theirs (with whatever extra ports/scope) wins and the rule is a no-op.
+
+- **`fs.write` implies `fs.read`.** Every path in the effective `fs.write` set is folded into `fs.read` if not already present. A writable tree is meant to be usable, which requires read; restating it as `fs.read` is noise.
+- **An `[[ssh.keys]]` host implies egress to it on port 22.** SSH leaves the kennel only over the egress gateway, so each granted host is added to the by-name allowlist (`net.allow_names`) on TCP/22. The author writes the `[ssh]` grant once, not also a parallel `[[net.allow]]`. (The bastion re-origination endpoint itself is a host service `kenneld` dials — see §7.10.)
+
+The egress endpoint's own reachability — the workload connecting to `facade-socks5` on the kennel loopback — is granted at bring-up (the proxy's address+port get the cgroup-BPF allow and the Landlock `CONNECT_TCP`), not written in policy: a kennel with egress can always reach its own egress endpoint by construction.
+
+---
+
 ## Framework invariants
 
 Certain properties cannot be weakened by any user delta, regardless of `reason`. These are framework invariants. The schema validator rejects policies that violate them.
@@ -218,10 +235,10 @@ The current invariants (mechanism details in design doc §12):
 - `cap.no_new_privs = true`. Cannot be set false.
 - `exec.deny_setuid = true`, `exec.deny_setgid = true`, `exec.deny_setcap = true`, `exec.deny_writable = true`. Cannot be set false.
 - `fs.home.shadow = true`. The shim is mandatory. `$HOME` is `/home/<user>` — the masked `[identity].user`, default `kennel`.
-- `[net.mode]` may be `"none"`, `"constrained"`, or `"open"`; it may not be any other value. `"none"` and `"constrained"` both translate to the settled `NetMode::Constrained` (proxy-only egress; `"none"` is "constrained with an empty allowlist"); an absent `[net.mode]` is accepted and also translates to `Constrained`. `"open"` is the permissive mode for `ai-coding-permissive`-style templates. The runtime re-assert only checks the settled mode is `Constrained` or `Open`; the "open only for permissive templates" guidance is a convention, not a validator-enforced rule.
-- `[net.deny.invariant]` entries (cloud metadata, link-local) are present and cannot be removed by any delta. (RFC1918 is *not* invariant — design §7.3 — so it is not asserted here.)
+- `[net.mode]` is the enforcement-mode enum. **As built** it may be `"none"`, `"constrained"`, or `"open"`; it may not be any other value. `"none"` and `"constrained"` both translate to the settled `NetMode::Constrained` (proxy-only egress; `"none"` is "constrained with an empty allowlist"); an absent `[net.mode]` is accepted and also translates to `Constrained`. `"open"` is the permissive mode for `ai-coding-permissive`-style templates. The runtime re-assert only checks the settled mode is `Constrained` or `Open`; the "open only for permissive templates" guidance is a convention, not a validator-enforced rule. **Roadmap (the net-ns redesign, §The `[net]` section):** the enum becomes the four-mode taxonomy `"none"` / `"constrained"` / `"unconstrained"` / `"host"` (replacing `"open"`); `"host"` requires `reason` and auto-instates `threats.reinstated`. The invariant statement — `[net.mode]` is enum-bounded and the proxy/invariant-deny floor cannot be removed — is unchanged across that migration.
+- The proxy invariant denylist (cloud metadata, link-local — `[net.deny.invariant]` today, `[[net.proxy.invariant_deny]]` under the roadmap split) is present and cannot be removed by any delta. (RFC1918 is *not* invariant — design §7.5 — so it is not asserted here.)
 - `[proc.visibility] = "self"`.
-- `[fs.dev.allow]` is the default-deny list documented in design §7.7; user deltas may not add device files outside the framework-known safe set without an explicit `framework_override` flag (which is itself an invariant override and requires a separate signed envelope; see `04-trust-boundaries.md`).
+- `[fs.dev.allow]` is the default-deny list documented in design §7.9; user deltas may not add device files outside the framework-known safe set without an explicit `framework_override` flag (which is itself an invariant override and requires a separate signed envelope; see `04-trust-boundaries.md`).
 
 Framework invariants are declared in `schema/invariants.toml` and surfaced in `kennel templates inspect`. Adding an invariant is a major-version event; removing one is also a major-version event.
 
@@ -239,7 +256,7 @@ signature = "BASE64..."
 # signed_fields is optional advisory metadata; the in-tree templates omit it.
 ```
 
-The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-6-internal-api.md` under `kennel-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
+The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-8-internal-api.md` under `kennel-lib-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
 
 Signature verification rules:
 
@@ -311,7 +328,7 @@ The CHANGELOG entry for a schema change goes under `### Policy schema changes` a
 
 ## The settled policy (compilation)
 
-The settled schema is defined in `src/crates/kennel-policy/src/settled.rs`. The
+The settled schema is defined in `src/crates/kennel-lib-policy/src/settled.rs`. The
 settled body (`SettledPolicy`) has two layers. Its `effective_policy`
 (`EffectivePolicy`) is the **kernel-enforcement core** — `net`, `fs`, `exec`,
 `proc`, `cap`, `seccomp`, `lifecycle` — the sections the spawn seal and the BPF
@@ -321,20 +338,23 @@ from the canonical form when empty (so a policy that does not use one signs
 unchanged): `ssh` (`SshRuntime`), `unix` (`UnixRuntime`), `identity`
 (`IdentityRuntime` — the masked `user`/`group` and supplementary `groups`),
 `audit` (`AuditRuntime`), `env` (`EnvRuntime` — the synthesised environment), and
-`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The sections with no runtime
-representation yet — `dbus`, `x11`, `ptrace`, `signal`, and the source-only
-`fs.scrub`/`fs.home.sanitise` — are dropped at translate and absent from the
-settled form. The settled net section carries `net.allow_names` (the by-name proxy
+`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The informational sections
+`ptrace`/`signal` (their scoping comes from the PID namespace + seccomp, not the
+section) are dropped at translate and absent from the settled form; they compile
+with a warning. (`[container]`, `[dbus]`, `[x11]`, `[fs.scrub]`, and
+`[[fs.home.sanitise]]` are not in the schema — an unknown-section error at parse.)
+The settled net section carries `net.allow_names` (the by-name proxy
 allowlist), `net.proxy` (`offset`, `port`), and the bind-port policy
-(`bind_port_min` + `bind_allowed_ports`, §7.3.7); the settled fs section adds
+(`bind_port_min` + `bind_allowed_ports`, §7.5.7); the settled fs section adds
 `fs.tmp` (`private`, `size_mib`, `mode`) and `fs.dev.allow`, and the proc section
 adds `proc.hidepid`. Settled `FsPolicy` uses flat field names (`home_shadow`,
 `home_persist`, `home_readonly`), not nested `fs.home.*`. The settled exec section
-carries `exec.libraries` — the exact shared-library closure of the `exec.allow`
-binaries, resolved at compile time (ELF `PT_INTERP` + transitive `DT_NEEDED`) and
-filtered through the source-only `[lib]` allow/deny globs (§7.1.7). The spawn grants
-`FS_EXECUTE` on exactly that settled list; the `[lib]` source section itself folds
-into it and is absent from the settled form.
+carries `exec.loaders` — each `exec.allow` dynamic binary's ELF `PT_INTERP` (its
+`ld.so`), resolved at compile time. The spawn grants `FS_EXECUTE` on the allowlisted
+binaries **and** these loaders, because the kernel opens both `FMODE_EXEC` during
+`execve`. It grants nothing for the binaries' shared libraries: Landlock does not gate
+`mmap`, so libraries load via the ordinary `fs.read` grants and cannot be execute-gated
+(§7.3.7). There is no `[lib]` source section.
 
 The TOML schema above describes *source* policies — what an operator authors. The runtime does not enforce source policies directly. `kennel compile` resolves a source policy once and emits a **settled policy**: a flat, fully-resolved, signed artefact that the runtime consumes. The design rationale is in design doc §9.10; this section is the artefact's format and stability.
 
@@ -348,7 +368,7 @@ The settled policy is an **internal-stable** surface per `02-0-overview.md`, wit
 
 The settled policy is a TOML document, like every other Project Kennel config artefact — there is no second config format and no JSON serialiser anywhere in the tree (`basic-toml` is the only serde format dependency). It is machine-produced and machine-consumed (never hand-edited), but TOML serves a machine artefact just as well as a hand-authored one, and keeping one format avoids a second parser/serialiser dependency.
 
-The canonical form for hashing and signing is **deterministic TOML emitted in struct-field order**. This is reproducible because the signer and the verifier are the *same* implementation: a fixed field order yields byte-identical canonical output on both sides. (The schema carries no floating-point values, so "number normalisation" — the hard part of any canonicalisation — does not arise.) The procedure is documented under `kennel-policy::canonical`; the `[signature]` table is excluded from it. If independent third-party verification ever becomes a hard requirement, the signature would cover the literal stored payload bytes (still TOML), which is format-agnostic and needs no canonicaliser at all.
+The canonical form for hashing and signing is **deterministic TOML emitted in struct-field order**. This is reproducible because the signer and the verifier are the *same* implementation: a fixed field order yields byte-identical canonical output on both sides. (The schema carries no floating-point values, so "number normalisation" — the hard part of any canonicalisation — does not arise.) The procedure is documented under `kennel-lib-policy::canonical`; the `[signature]` table is excluded from it. If independent third-party verification ever becomes a hard requirement, the signature would cover the literal stored payload bytes (still TOML), which is format-agnostic and needs no canonicaliser at all.
 
 Top-level structure (the `[signature]` table is a sibling, excluded from the canonical form):
 
@@ -394,7 +414,7 @@ signature = "BASE64..."
 - `deferred_substitutions` lists the per-instance placeholders the runtime must fill. The runtime substitutes exactly these and refuses to spawn if any *other* unsubstituted placeholder is found in `effective_policy`.
 - `framework_invariants_asserted` records which framework invariants the compiler validated. The runtime re-asserts them regardless (defence in depth, §below); the list is for audit, not for the runtime to trust.
 - `provenance` makes the artefact self-describing: every input that produced it, by hash. `resolved_artifacts` embeds the relevant lockfile entries, so the settled policy records exactly which signed source bytes were composed, without those sources needing to be present at runtime.
-- `signature` is over the canonical-form serialisation of every field except `signature` itself, by the compiling authority's key (`kennel-policy::canonical`, the same procedure as source signatures).
+- `signature` is over the canonical-form serialisation of every field except `signature` itself, by the compiling authority's key (`kennel-lib-policy::canonical`, the same procedure as source signatures).
 
 ### Runtime consumption
 
@@ -427,11 +447,142 @@ The signature trust differs by artefact (`07-paths.md` §Policy-signing trust sp
 
 ---
 
+## The `[net]` section — egress mode, allowlist, bind, audit
+
+This documents the **as-built** `[net]` schema — the form `kennel_lib_policy::source::NetSection`
+parses today (`deny_unknown_fields`, so an undocumented key is a hard error). The fields are flat
+under `[net]`; there is no `[net.proxy]` / `[net.bpf]` nesting in the parsed schema (see the roadmap
+note at the end for where that split is headed). Field *semantics* are design §7.5; this is the
+structure a policy author writes.
+
+### `[net]` scalars
+
+| Field | Type | Notes |
+|---|---|---|
+| `mode` | string | `"constrained"` (allowlist enforced), `"open"` (only the invariant denies), or `"none"` (no egress). The settled schema has two enforced egress modes (constrained/open); `none` is the no-network posture. |
+| `proxy_listen_v4` / `proxy_listen_v6` | bool | whether the per-kennel egress endpoint listens on that family (default: per kennel addressing). |
+| `proxy_listen_v4_address` / `proxy_listen_v6_address` | string `"offset:port"` | the listen offset+port within the kennel's `/28` (v4) / `/64` (v6); absent → `1:1080`. |
+
+In the network-namespace model the workload-facing endpoint is `facade-socks5` on the kennel
+loopback; `proxy_listen_*` set where it binds. The kennel has no other route off its loopback
+(§7.5), so egress crosses the binder gateway to kenneld, which dials through the host-side
+`host-netproxy` delegate.
+
+### `[[net.allow]]` — the destination allowlist (array of tables)
+
+Each entry permits one destination. By **name** (resolved kenneld-side — the kennel never resolves
+DNS itself, so rebinding is structurally impossible) **or** by **CIDR** (a raw address, e.g. a
+loopback host service). Enforced in `constrained` mode; in `open` mode only the invariant denies apply.
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | the destination host (or dot-prefixed suffix). Mutually exclusive with `cidr`. |
+| `cidr` | string | a CIDR destination, when the rule is by-address. |
+| `ports` | array of int | permitted ports; empty = any port. |
+| `protocol` | string | `"tcp"`, `"udp"`, or `"any"`. |
+| `reason` | string | why this destination is permitted (**required** on a leaf delta). |
+| `tls.required` | bool | whether TLS is required to the destination (`[[net.allow]]` carries a `tls` sub-table). |
+| `threats` | table | `threats.exposed` / `threats.mitigated` — threat IDs this grant bears. |
+
+### `[net.deny]` — the invariant denylist
+
+| Table | Fields | Notes |
+|---|---|---|
+| `[[net.deny.invariant]]` | `cidr`, `reason`, `threats` | non-removable categorical denies (cloud-metadata IMDS, link-local, host loopback), re-checked against every *resolved* address — an allowed name that resolves into a denied range is still refused. A **leaf may not declare** `[[net.deny.invariant]]`; invariants are template/fragment-author tools (`LeafPolicy::validate` rejects it). |
+
+### `[net.bind]` — the bind gate (§7.5.7)
+
+Governs what the workload may `bind(2)`. All fields optional.
+
+| Field | Type | Notes |
+|---|---|---|
+| `inaddr_any_policy` | string | wildcard IPv4 bind handling: `"rewrite"` (to the kennel loopback) or `"deny"`. |
+| `in6addr_any_policy` | string | wildcard IPv6 bind handling. |
+| `allow_host_loopback_v4` / `allow_host_loopback_v6` | bool | whether binding the host loopback is permitted. |
+| `min_port` | int | lowest bindable port (the privileged-port floor, T6). |
+| `allowed_ports` | array of int | explicit bindable-port allowlist; empty/absent = any port at or above `min_port`. Capped at `MAX_BIND_PORTS` at translation. |
+
+### `[net.ipv6]`
+
+| Field | Type | Notes |
+|---|---|---|
+| `force_v6only` | bool | set `IPV6_V6ONLY=1` so a dual-stack socket cannot escape the v4 bind rewrite. |
+
+### `[net.audit]` — per-kennel egress audit (distinct from the global `[audit]`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `log_path` | string | where the per-kennel egress JSONL log is written. |
+| `level` | string | egress audit verbosity: `"summary"` or `"full"`. |
+
+> **Roadmap.** The four-mode taxonomy (`none`/`constrained`/`unconstrained`/`host`) and a
+> `[net.proxy]` / `[net.bpf]` restructuring are the forward contract in design §7.5 /
+> [`02-5-binder-net.md`](02-5-binder-net.md): a `host` mode that shares the host net-ns with BPF as the
+> primary gate, and an `unconstrained` mode between `open` and `host`. The per-kennel **net-ns is
+> built** (§7.5, the egress boundary) and cgroup BPF is present as defence-in-depth; what the parsed
+> schema does not yet carry is the `host`/`unconstrained` modes or the `[net.proxy]`/`[net.bpf]`
+> field nesting. When those land, this section gains the nested tables; until then the flat `[net]`
+> form above is authoritative.
+
+---
+
+## The `[binder]`, `[[binder.provide]]`, `[[binder.consume]]`, and `[ipc.spawn]` sections
+
+> **Roadmap.** The cross-instance binder relay these sections drive is not built (the binder
+> *gateway core* — node 0, the `IAfUnix` facade, `kennel-bin-init` lifecycle — is built and proven;
+> the cross-kennel relay is the forward contract in [`02-4-binder.md`](02-4-binder.md)). This is
+> the forward schema for `BinderRuntime`; field semantics are design §7.1.
+
+These sections configure the binder service registry (`02-4`). The kennel-local registry and the
+reserved `org.projectkennel.*` services need no policy — they are always available when their
+backing section is non-empty. What these sections grant is **cross-kennel** service exchange and
+kennel spawning.
+
+`[[binder.provide]]` — services this kennel offers to named peer kennels:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | the service name (may **not** begin with `org.projectkennel.` — reserved) |
+| `accept_from` | array of strings | peer-kennel names permitted to consume it |
+| `reason` | string | why this service is offered (the audited justification) |
+| `threats` | table | `threats.exposed` / `threats.mitigated` — threat IDs this grant bears |
+
+`[[binder.consume]]` — services this kennel may look up from named providers:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | the service name (may **not** begin with `org.projectkennel.`) |
+| `from` | string | the providing kennel's name |
+| `reason` | string | why this lookup is needed |
+| `threats` | table | `threats.exposed` / `threats.mitigated` |
+
+A cross-instance lookup succeeds only when **both** sides declare it: the consumer's
+`[[binder.consume]]` names the service and provider, and the provider's `[[binder.provide]]` names
+the service and lists the consumer in `accept_from`. A unilateral declaration denies (`02-4`
+§Cross-instance registry). Peer-kennel names live only in policy, never in the binder protocol the
+workload sees.
+
+`[ipc.spawn]` — grants the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning): when
+present, the kennel may ask kenneld to spawn a child kennel whose policy is the requested template
+intersected with this kennel's own grants and any narrowings (never a superset). A spawned kennel
+has no spawn capability of its own unless its template independently declares `[ipc.spawn]`.
+
+### Reserved-namespace compile validation
+
+The `org.projectkennel.*` prefix is reserved (`02-4` §The reserved namespace). It is a **categorical
+policy-compile error** — not a runtime check (design §7.1.4) — for any `[[binder.provide]]` or
+`[[binder.consume]]` `name` to begin with `org.projectkennel.`; only kenneld registers under that
+prefix. The compiler rejects such a policy by name, the same way it rejects an out-of-range
+`[net.mode]`.
+
+---
+
 ## What this chapter does not cover
 
 - The field-by-field semantics of each section: see the corresponding design-document chapter (§7.x) or the worked example in [TEMPLATE-ai-coding-strict.md](../design/TEMPLATE-ai-coding-strict.md).
+- The binder IPC contract the `[binder]`/`[ipc.spawn]` sections feed, and the `org.projectkennel.*` service set: [`02-4-binder.md`](02-4-binder.md); the network-over-binder layer the `[net.proxy]`/`[net.bpf]` sections feed: [`02-5-binder-net.md`](02-5-binder-net.md). The standalone `net-policy.toml` schema reference is retired; its content is the §The `[net]` section above.
 - The design-level treatment of signing, versioned references, and includes: design doc §5.10.
-- The canonical-form serialisation procedure: `02-6-internal-api.md` (`kennel-policy::canonical`).
+- The canonical-form serialisation procedure: `02-8-internal-api.md` (`kennel-lib-policy::canonical`).
 - The signing-key store and lockfile locations on disk: `07-paths.md`.
 - The mechanism by which template and fragment signatures are verified at runtime, and how the lockfile is checked: `04-trust-boundaries.md`.
 - How `kennel diff` and `kennel upgrade` compute and present deltas, and how `upgrade` rewrites the lockfile: `02-1-cli.md`.

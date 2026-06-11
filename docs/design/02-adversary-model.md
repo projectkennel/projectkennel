@@ -80,6 +80,7 @@ Within Project Kennel's claimed strength:
 - Cannot read its own policy file — the policy is not present in the kennel's constructed view of the filesystem.
 - Cannot enumerate denied resources by directory listing — denied resources are absent from the constructed view, not merely denied on access.
 - Cannot influence Project Kennel's own daemon processes beyond making them deny things they would have denied anyway. (See §2.5.)
+- Is never uid 0, even within its own user namespace. The kennel does map a real uid 0 (host root, mapped `0 0 1`), but that identity belongs solely to the trusted `kennel-bin-init` supervisor (§7.2), not to the workload. The workload is forked by `kennel-bin-init` and dropped to the operator's non-zero uid — gid, supplementary groups, then uid — before its `execve`, after which `no_new_privs` and seccomp make the drop irreversible. (See §2.8.)
 
 Each property is demonstrated via the test corpus (§8 and §11). A claim without a regression test is provisional and marked as such.
 
@@ -118,3 +119,20 @@ The full catalogue is `THREATS.md`. This section identifies which threat IDs are
 **Family 3 — Workload-class-specific (T3.1–T3.7).** T3.1 (setuid) is universal. T3.2–T3.5 are container-specific: container escape, port exposure, volume over-mounting, root-with-host-UID. T3.6 is MCP-specific: capability creep when an agent invokes an MCP server outside the agent's kennel. T3.7 is AI-agent-specific: prompt injection from project content.
 
 The threat IDs are stable references that the rest of this document, the templates, and the audit log all use. A reader reviewing a specific incident can map it to the threat IDs via the incident appendix in `THREATS.md`.
+
+## 2.8 Mapped uid 0 and the escalation window
+
+Constructing a kennel requires a real uid 0 inside the kennel's user namespace. binderfs assigns its control and device nodes to uid 0 of the mounting namespace, and the view's root, `/dev`, and read-only library binds must be owned by a proper root rather than the namespace's overflow uid. The kennel therefore maps host root into the namespace with a precise two-line identity map — `0 0 1` plus the operator's identity line (and one line per granted gid) — written in a single `write(2)`. There is no `subuid`/`subgid` delegation and no `0 0 N` range; the mapping is exactly host root and the operator, nothing more.
+
+A uid 0 inside the namespace is a privilege-escalation hazard *if and only if* code the adversary controls can run as that uid while host-owned resources are still reachable. Project Kennel's construction model is built to deny that condition structurally, and the resulting invariant is the security crux of the whole design:
+
+**No operator-supplied or workload code ever runs as userns-0.** The only process that holds the mapped uid 0 is `kennel-bin-init` (§7.2), a small, root-owned, trusted-by-provenance supervisor. It is `execve`'d by the privhelper *after* `pivot_root` has detached the host root from the mount namespace, so from its very first instruction the host filesystem is physically absent — host DAC on host-owned files is impossible despite the kernel-level uid 0. The dangerous window of "a uid-0-mapped binary while the host filesystem is still visible" never exists.
+
+The escalation-window analysis, stated as the adversary would probe it:
+
+- **Before `kennel-bin-init` runs**, the only code executing as the mapped uid 0 is the privhelper's own post-`clone` child — trusted host-side code, not the workload, with no adversary input executing.
+- **At hand-off**, the privhelper `execve`s `kennel-bin-init` with empty `argv`/`envp` (no serialised configuration to leak via `/proc/<pid>/cmdline` or `environ`) by file descriptor (`fexecve`) opened before the namespace existed, so the trusted init binary is not even resolvable by path inside the view. The operator cannot substitute a uid-0 init: its path comes from the root-owned deployment config, and the privhelper verifies root ownership and non-writability before opening it.
+- **After hand-off**, `kennel-bin-init` holds no ambient host capabilities — being uid 0 *in the userns* grants only namespace-scoped `CAP_SETUID`/`CAP_SETGID`, enough to drop the workload and powerless against host-owned resources. It runs no mount, netlink, device, filesystem-lookup, or environment-handling code, and it performs no policy decisions.
+- **The workload**, forked by `kennel-bin-init`, is dropped to the operator's non-zero uid before its `execve` and can never regain uid 0 (`no_new_privs` + seccomp). It therefore cannot reach the mapped uid 0 at all; the boundary it would need to cross is a separate process it cannot influence.
+
+The mapped uid 0 is thus safe not because uid 0 is harmless but because the one process that holds it is trusted, trapped inside the sealed view, stripped of host authority, and unreachable by the workload. Remove any one of those properties and the mapping becomes an escalation path; the design treats all four as invariants, each with a corresponding regression test (§8, §11).

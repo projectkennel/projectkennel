@@ -23,7 +23,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kennel_policy::TemplateSource;
+use kennel_lib_policy::TemplateSource;
 use kenneld::control::{self, Request, Response, StartRequest};
 use kenneld::socket;
 
@@ -125,17 +125,17 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             dirs: template_dirs,
         };
         let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_policy::Trust::allow_unsigned(Some(&keys));
+        let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
-        print_warnings(&kennel_policy::resolve_settled_libraries(
+        print_warnings(&kennel_lib_policy::resolve_settled_loaders(
             &mut compiled.policy,
         ));
         let key = load_signing_key(&key_path)?;
-        let doc = kennel_policy::sign_settled(&compiled.policy, &key)
+        let doc = kennel_lib_policy::sign_settled(&compiled.policy, &key)
             .map_err(|e| format!("signing: {e}"))?;
-        let out = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
+        let out = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
         let temp = TempSettled::write(&name, &out)?;
         let path = temp.path().to_path_buf();
         eprintln!(
@@ -192,11 +192,11 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
 /// Restores the terminal to its saved (pre-raw) settings when dropped — on every
 /// return path of an interactive run, including errors and `?` early-returns.
 struct RawGuard {
-    prev: kennel_syscall::pty::Termios,
+    prev: kennel_lib_syscall::pty::Termios,
 }
 impl Drop for RawGuard {
     fn drop(&mut self) {
-        let _ = kennel_syscall::pty::restore(io::stdin().as_fd(), &self.prev);
+        let _ = kennel_lib_syscall::pty::restore(io::stdin().as_fd(), &self.prev);
     }
 }
 
@@ -206,7 +206,7 @@ impl Drop for RawGuard {
 /// mode and proxy bytes both ways until the workload exits. The workload's shell then
 /// has real job control (`^Z`/`fg`/`bg`); the terminal is restored on exit.
 fn run_interactive(mut conn: UnixStream, request: &Request) -> Result<ExitCode, String> {
-    use kennel_syscall::pty;
+    use kennel_lib_syscall::pty;
     let real_in = io::stdin();
     // Raw mode now; the guard restores the terminal on every return below.
     let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
@@ -246,7 +246,7 @@ fn run_interactive(mut conn: UnixStream, request: &Request) -> Result<ExitCode, 
 /// as a single `SCM_RIGHTS` fd (with a one-byte payload).
 fn recv_pty_master(sock: &UnixStream) -> Result<OwnedFd, String> {
     let mut buf = [0u8; 1];
-    let (_, mut fds) = kennel_syscall::scm::recv_with_fds(sock.as_fd(), &mut buf)
+    let (_, mut fds) = kennel_lib_syscall::scm::recv_with_fds(sock.as_fd(), &mut buf)
         .map_err(|e| format!("receiving the workload pty: {e}"))?;
     fds.pop()
         .ok_or_else(|| "the workload did not return a controlling terminal".to_owned())
@@ -276,7 +276,7 @@ fn proxy_terminal(master: &OwnedFd, real_in: BorrowedFd<'_>) -> Result<(), Strin
         let _ = std::io::copy(&mut r, &mut w);
     });
     // SIGWINCH → propagate the new window size to the workload
-    std::thread::spawn(move || kennel_syscall::pty::relay_winch(winch_in, winch_master));
+    std::thread::spawn(move || kennel_lib_syscall::pty::relay_winch(winch_in, winch_master));
     Ok(())
 }
 
@@ -393,7 +393,7 @@ fn audit(args: &[String]) -> Result<ExitCode, String> {
                 .map_err(|e| format!("system clock: {e}"))?
                 .as_secs();
             let cut = i64::try_from(now.saturating_sub(secs)).unwrap_or(i64::MAX);
-            Some(kennel_audit::format_rfc3339_micros(cut, 0))
+            Some(kennel_lib_audit::format_rfc3339_micros(cut, 0))
         }
     };
 
@@ -592,7 +592,7 @@ fn send(conn: &UnixStream, request: &Request, fds: &[BorrowedFd<'_>]) -> Result<
     let mut framed = Vec::new();
     control::write_frame(&mut framed, &request.encode())
         .map_err(|e| format!("encoding request: {e}"))?;
-    kennel_syscall::scm::send_with_fds(conn.as_fd(), &framed, fds)
+    kennel_lib_syscall::scm::send_with_fds(conn.as_fd(), &framed, fds)
         .map_err(|e| format!("sending request: {e}"))?;
     Ok(())
 }
@@ -710,9 +710,9 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     add_system_trust_dirs(&mut trust_dirs);
     let keys = load_trust_store(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_policy::Trust::require(&keys)
+        kennel_lib_policy::Trust::require(&keys)
     } else {
-        kennel_policy::Trust::allow_unsigned(Some(&keys))
+        kennel_lib_policy::Trust::allow_unsigned(Some(&keys))
     };
 
     let mut compiled = match build_settled(&bytes, &source, &trust, version) {
@@ -724,8 +724,8 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     };
     print_warnings(&compiled.warnings);
     // Resolve the shared-library closure of the allowlist into the settled artefact
-    // (reads the binaries from disk; deny-by-default execution, 07-1) before signing.
-    print_warnings(&kennel_policy::resolve_settled_libraries(
+    // (reads the binaries from disk; deny-by-default execution, 07-3) before signing.
+    print_warnings(&kennel_lib_policy::resolve_settled_loaders(
         &mut compiled.policy,
     ));
     let policy = &compiled.policy;
@@ -738,7 +738,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     if !no_lock {
         let lock_path = lock_path_for(&out, &policy.name);
         if let Ok(prev_bytes) = std::fs::read(&lock_path) {
-            let previous = kennel_policy::Lockfile::parse(&prev_bytes)
+            let previous = kennel_lib_policy::Lockfile::parse(&prev_bytes)
                 .map_err(|e| format!("reading {}: {e}", lock_path.display()))?;
             if let Err(e) = compiled.lock.verify_against(&previous) {
                 eprintln!("kennel: {e}");
@@ -755,11 +755,11 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
 
     let doc = if let Some(key_path) = &signing_key {
         let key = load_signing_key(key_path)?;
-        kennel_policy::sign_settled(policy, &key).map_err(|e| format!("signing: {e}"))?
+        kennel_lib_policy::sign_settled(policy, &key).map_err(|e| format!("signing: {e}"))?
     } else {
-        kennel_policy::seal_unsigned(policy)
+        kennel_lib_policy::seal_unsigned(policy)
     };
-    let out_bytes = kennel_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
+    let out_bytes = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
 
     let note = if unsigned {
@@ -777,7 +777,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
 /// `[signature]`, …) those `deny_unknown_fields` schemas reject, so the two parses
 /// are mutually exclusive. Used by `kennel run` to decide whether to compile.
 fn is_source_policy(bytes: &[u8]) -> bool {
-    kennel_policy::parse_source(bytes).is_ok() || kennel_policy::parse_leaf(bytes).is_ok()
+    kennel_lib_policy::parse_source(bytes).is_ok() || kennel_lib_policy::parse_leaf(bytes).is_ok()
 }
 
 /// A short-lived on-disk settled policy produced by `kennel run`'s in-memory
@@ -836,13 +836,13 @@ fn lock_path_for(output: &Path, name: &str) -> PathBuf {
 fn build_settled(
     bytes: &[u8],
     source: &FsTemplateSource,
-    trust: &kennel_policy::Trust<'_>,
+    trust: &kennel_lib_policy::Trust<'_>,
     version: &str,
-) -> Result<kennel_policy::Compiled, kennel_policy::PolicyError> {
-    match kennel_policy::parse_source(bytes) {
-        Ok(entry) => kennel_policy::compile(&entry, source, trust, version),
-        Err(source_err) => kennel_policy::parse_leaf(bytes).map_or(Err(source_err), |leaf| {
-            kennel_policy::compile_leaf(&leaf, source, trust, version)
+) -> Result<kennel_lib_policy::Compiled, kennel_lib_policy::PolicyError> {
+    match kennel_lib_policy::parse_source(bytes) {
+        Ok(entry) => kennel_lib_policy::compile(&entry, source, trust, version),
+        Err(source_err) => kennel_lib_policy::parse_leaf(bytes).map_or(Err(source_err), |leaf| {
+            kennel_lib_policy::compile_leaf(&leaf, source, trust, version)
         }),
     }
 }
@@ -882,9 +882,9 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
     };
     let keys = load_trust_store(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_policy::Trust::require(&keys)
+        kennel_lib_policy::Trust::require(&keys)
     } else {
-        kennel_policy::Trust::allow_unsigned(Some(&keys))
+        kennel_lib_policy::Trust::allow_unsigned(Some(&keys))
     };
 
     match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
@@ -929,7 +929,7 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
     let key_path = key_path.ok_or("sign needs --key <path>")?;
 
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let policy = kennel_policy::parse_source(&bytes).map_err(|e| {
+    let policy = kennel_lib_policy::parse_source(&bytes).map_err(|e| {
         format!("{path} is not a signable source template/fragment ({e}); leaf policies may stay unsigned")
     })?;
     if policy.signature.is_some() {
@@ -939,7 +939,8 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let key = load_signing_key(Path::new(key_path))?;
-    let signed = kennel_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
+    let signed =
+        kennel_lib_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
     let env = signed.signature.ok_or("internal: signature not produced")?;
     // Append the signature as a new top-level table, preserving the original text.
     let block = format!(
@@ -955,7 +956,7 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
     eprintln!(
         "install this public key in the trust store as `{}.pub`:\n{}",
         key.key_id(),
-        kennel_policy::b64::encode(&key.public_key_bytes())
+        kennel_lib_policy::b64::encode(&key.public_key_bytes())
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -1003,8 +1004,9 @@ fn keygen(args: &[String]) -> Result<ExitCode, String> {
 
     // 32 bytes from the OS CSPRNG (`getrandom`) → the Ed25519 seed.
     let mut seed = [0u8; 32];
-    kennel_syscall::random::fill(&mut seed).map_err(|e| format!("reading OS randomness: {e}"))?;
-    let key = kennel_policy::SigningKey::from_seed(key_id, &seed)
+    kennel_lib_syscall::random::fill(&mut seed)
+        .map_err(|e| format!("reading OS randomness: {e}"))?;
+    let key = kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
         .map_err(|e| format!("deriving key: {e}"))?;
 
     // The key dir holds secret seeds: 0700.
@@ -1013,11 +1015,11 @@ fn keygen(args: &[String]) -> Result<ExitCode, String> {
         .mode(0o700)
         .create(&dir)
         .map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    write_secret(&key_path, &kennel_policy::b64::encode(&seed), 0o600)
+    write_secret(&key_path, &kennel_lib_policy::b64::encode(&seed), 0o600)
         .map_err(|e| format!("writing {}: {e}", key_path.display()))?;
     write_secret(
         &pub_path,
-        &kennel_policy::b64::encode(&key.public_key_bytes()),
+        &kennel_lib_policy::b64::encode(&key.public_key_bytes()),
         0o644,
     )
     .map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
@@ -1217,7 +1219,7 @@ fn subkennel_add(args: &[String]) -> Result<ExitCode, String> {
             _ => return Err("kennel subkennel add takes no positional arguments".to_owned()),
         }
     }
-    let uid = uid.unwrap_or_else(kennel_syscall::unistd::real_uid);
+    let uid = uid.unwrap_or_else(kennel_lib_syscall::unistd::real_uid);
 
     // Existing allocations (an absent file just means none yet).
     let existing = std::fs::read_to_string(&file).unwrap_or_default();
@@ -1255,7 +1257,8 @@ fn subkennel_add(args: &[String]) -> Result<ExitCode, String> {
         allocs.iter().map(|a| a.gid_hex.as_str()).collect();
     let gid_hex = loop {
         let mut g = [0u8; 5];
-        kennel_syscall::random::fill(&mut g).map_err(|e| format!("reading OS randomness: {e}"))?;
+        kennel_lib_syscall::random::fill(&mut g)
+            .map_err(|e| format!("reading OS randomness: {e}"))?;
         if g == [0u8; 5] {
             continue; // avoid the degenerate all-zero ULA id
         }
@@ -1315,7 +1318,7 @@ fn subkennel_check(args: &[String]) -> Result<ExitCode, String> {
             _ => return Err("kennel subkennel check takes no positional arguments".to_owned()),
         }
     }
-    let uid = uid.unwrap_or_else(kennel_syscall::unistd::real_uid);
+    let uid = uid.unwrap_or_else(kennel_lib_syscall::unistd::real_uid);
     let text = std::fs::read_to_string(&file).map_err(|e| {
         format!(
             "reading {}: {e} (run `kennel subkennel add`)",
@@ -1369,9 +1372,9 @@ fn report_dups(field: &str, values: impl Iterator<Item = String>) {
     }
 }
 
-/// Map a compile-time [`kennel_policy::PolicyError`] to a CLI exit code (`02-1`).
-const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
-    use kennel_policy::PolicyError as E;
+/// Map a compile-time [`kennel_lib_policy::PolicyError`] to a CLI exit code (`02-1`).
+const fn policy_error_code(err: &kennel_lib_policy::PolicyError) -> u8 {
+    use kennel_lib_policy::PolicyError as E;
     match err {
         E::Signature(_) | E::LockMismatch(_) => 6,
         E::Parse(_)
@@ -1390,7 +1393,7 @@ const fn policy_error_code(err: &kennel_policy::PolicyError) -> u8 {
 /// system). A malformed user config falls back to the built-in default.
 fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
     dirs.extend(
-        kennel_config::User::load()
+        kennel_lib_config::User::load()
             .unwrap_or_default()
             .template_dirs(),
     );
@@ -1416,7 +1419,7 @@ fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), 
             "`{arg}` is not an existing file, and not a valid policy name (no `/`, `..`, or whitespace)"
         ));
     }
-    for dir in kennel_config::User::load()
+    for dir in kennel_lib_config::User::load()
         .unwrap_or_default()
         .policy_dirs()
     {
@@ -1486,7 +1489,7 @@ fn default_settled_path(policy_path: &Path, name: &str) -> PathBuf {
 /// `--trust-dir` flags still append, so an operator can add an org key dir.
 fn add_system_trust_dirs(dirs: &mut Vec<PathBuf>) {
     dirs.extend(
-        kennel_config::User::load()
+        kennel_lib_config::User::load()
             .unwrap_or_default()
             .system_key_dirs(),
     );
@@ -1494,8 +1497,8 @@ fn add_system_trust_dirs(dirs: &mut Vec<PathBuf>) {
 
 /// Load a trust store: every `<key_id>.pub` (base64 32-byte public key) under each
 /// directory. Missing directories are skipped; a malformed key file is an error.
-fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_policy::KeySet, String> {
-    let mut keys = kennel_policy::KeySet::new();
+fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, String> {
+    let mut keys = kennel_lib_policy::KeySet::new();
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
@@ -1519,16 +1522,16 @@ fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_policy::KeySet, String> {
 
 /// Load a signing key from a file holding the base64 of a 32-byte Ed25519 seed.
 /// The key id is the file stem, mirroring the `.pub` trust-store convention.
-fn load_signing_key(path: &Path) -> Result<kennel_policy::SigningKey, String> {
+fn load_signing_key(path: &Path) -> Result<kennel_lib_policy::SigningKey, String> {
     let shown = path.display();
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {shown}: {e}"))?;
-    let seed = kennel_policy::b64::decode(text.trim().as_bytes())
+    let seed = kennel_lib_policy::b64::decode(text.trim().as_bytes())
         .ok_or_else(|| format!("key {shown} is not valid base64"))?;
     let key_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| format!("cannot derive a key id from {shown}"))?;
-    kennel_policy::SigningKey::from_seed(key_id, &seed)
+    kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
         .map_err(|e| format!("loading key {shown}: {e}"))
 }
 

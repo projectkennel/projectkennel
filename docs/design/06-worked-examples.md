@@ -2,6 +2,8 @@
 
 Each example gives the policy, explains what the user is signing up for, and surfaces the residuals.
 
+Every leaf policy below derives from a vetted template by a small set of **deltas** — `[[fs.write.add]]`, `[[net.allow.add]]`, … — each of which carries a required `reason`. The template names a parent via a single versioned reference (`template_base = "<name>@v<ver>"`); the field-by-field schema is the reference in [`docs/architecture/02-2-config-schema.md`](../architecture/02-2-config-schema.md). A few grants are **implied** so you write the intent once (see §Implied rules in the schema reference): a writable path is readable, so a project tree is one `fs.write.add` (not a read+write pair); an `[[ssh.keys]]` host implies egress to it on :22. **Every TOML block in this chapter parses and validates against the real policy parser** (`kennel_lib_policy::parse_leaf` + `validate`), checked with the oracle at `src/crates/kennel-lib-policy/examples/validate-policy.rs`; what a leaf cannot express (egress `mode`, bind ports, the invariant denylist — all template-level) is called out where it arises. For an end-to-end annotated leaf on an adversarial workload, see [`TEMPLATE-openclaw.md`](TEMPLATE-openclaw.md).
+
 ## 6.1 AI coding agent on a project
 
 The motivating use case. The user runs an AI agent (Claude Code, Cursor, Aider, similar) against a single project. The agent reads code, writes code, runs tests, calls a remote LLM API.
@@ -9,23 +11,18 @@ The motivating use case. The user runs an AI agent (Claude Code, Cursor, Aider, 
 **Policy** (`~/.config/kennel/kennels/myproj-ai.toml`):
 
 ```toml
-template = "ai-coding-strict"
-template_version = "3"
+template_base = "ai-coding-strict@v1"
 name = "myproj-ai"
 
-[fs.read.add]
-- path = "~/projects/myproj/**"
-  reason = "the project"
+[[fs.write.add]]
+path = "~/projects/myproj/**"
+reason = "the project (read implied)"
 
-[fs.write.add]
-- path = "~/projects/myproj/**"
-  reason = "the project"
-
-[net.allow.add]
-- name = "api.anthropic.com"
-  ports = [443]
-  reason = "Claude API"
-  threats.exposed = ["T1.8"]
+[[net.allow.add]]
+name = "api.anthropic.com"
+ports = [443]
+reason = "Claude API"
+threats.exposed = ["T1.8"]
 ```
 
 Total user content: ~10 lines. Everything else is inherited from the template.
@@ -58,20 +55,21 @@ The user wants to try a new npm package. Post-install scripts (T1.2) are the thr
 **Policy** (`~/.config/kennel/kennels/npm-try.toml`):
 
 ```toml
-template = "package-install"
-template_version = "2"
+template_base = "package-install@v1"
 name = "npm-try"
 
 # The template defaults to net.mode = "constrained" with the registry
 # allowed. User adds the project where to install.
 
-[fs.write.add]
-- path = "~/scratch/npm-try/**"
-  reason = "scratch dir for trial install"
+[[fs.write.add]]
+path = "~/scratch/npm-try/**"
+reason = "scratch dir for trial install"
 
-[lifecycle]
+# Override the template's TTL action: a trial install should be ephemeral, so
+# stop (not warn) at the TTL. A leaf overrides scalars via `[lifecycle.override]`.
+[lifecycle.override]
 ttl = "1h"
-reason = "trial install; should be ephemeral"
+ttl_action = "stop"
 ```
 
 **What's enforced.** The post-install script can:
@@ -99,39 +97,38 @@ The user has cloned a repository and wants to read it (`grep`, `cat`, `tree`) wi
 **Policy** (`~/.config/kennel/kennels/inspect.toml`):
 
 ```toml
-template = "inspect-only"
-template_version = "1"
+template_base = "inspect-only@v1"
 name = "inspect-repo"
 
-[fs.read.add]
-- path = "~/clones/<repo>/**"
-  reason = "the repo to inspect"
+[[fs.read.add]]
+path = "~/clones/<repo>/**"
+reason = "the repo to inspect"
 ```
 
 The `inspect-only` template provides:
 
 ```toml
-# Template baseline:
+# Template baseline (the relevant sections; the full template carries identity
+# + signature). exec.allow is a TOML array of strings under [exec], not a list.
 [net]
 mode = "none"
 
-[fs.write]
-# Only Project Kennel's audit log path
-
-[exec.allow]
-- /usr/bin/cat
-- /usr/bin/grep
-- /usr/bin/find
-- /usr/bin/tree
-- /usr/bin/less
-- /usr/bin/head
-- /usr/bin/tail
-- /usr/bin/file
-- /usr/bin/strings
-- /usr/bin/wc
-- /usr/bin/sort
-- /usr/bin/uniq
-# Notably absent: any compiler, interpreter, build tool
+[exec]
+allow = [
+    "/usr/bin/cat",
+    "/usr/bin/grep",
+    "/usr/bin/find",
+    "/usr/bin/tree",
+    "/usr/bin/less",
+    "/usr/bin/head",
+    "/usr/bin/tail",
+    "/usr/bin/file",
+    "/usr/bin/strings",
+    "/usr/bin/wc",
+    "/usr/bin/sort",
+    "/usr/bin/uniq",
+    # Notably absent: any compiler, interpreter, build tool
+]
 ```
 
 **What's enforced.** The user can read the repo. Nothing in the kennel can execute build scripts, fetch dependencies, run tests, or do anything beyond text inspection.
@@ -148,51 +145,47 @@ The user is developing a web application that needs the local Postgres instance.
 **Policy** (`~/.config/kennel/kennels/webapp-dev.toml`):
 
 ```toml
-template = "dev-server"
-template_version = "2"
+template_base = "ai-coding-strict@v1"
 name = "webapp-dev"
 
-[fs.read.add]
-- path = "~/projects/webapp/**"
-  reason = "the project"
+[[fs.write.add]]
+path = "~/projects/webapp/**"
+reason = "the project (read implied)"
 
-[fs.write.add]
-- path = "~/projects/webapp/**"
-  reason = "the project"
+[[net.allow.add]]
+name = "registry.npmjs.org"
+ports = [443]
+reason = "deps"
 
-[net.allow.add]
-- name = "registry.npmjs.org"
-  ports = [443]
-  reason = "deps"
-- name = "github.com"
-  ports = [443]
-  reason = "git fetches"
+[[net.allow.add]]
+name = "github.com"
+ports = [443]
+reason = "git fetches"
 
-[[net.loopback.host_services]]
-name = "postgres"
-addr_v4 = "127.0.0.1:5432"
-proxy.required = false
+# Reach the host's local Postgres over loopback. There is no [net.loopback]
+# section in a leaf; loopback reachability is an ordinary by-CIDR egress grant —
+# kenneld dials 127.0.0.1:5432 on the kennel's behalf (a sanctioned host service).
+[[net.allow.add]]
+cidr = "127.0.0.1/32"
+ports = [5432]
 reason = "local development Postgres instance"
-threats.exposed = ["T1.6:local-service-via-explicit-grant"]
-
-[net.bind.allowed_ports]
-add = [3000, 3001]
-reason = "Vite dev server and HMR socket"
+threats.exposed = ["T1.6"]
 ```
 
 **What's enforced.** The dev server can:
-- Bind `127.42.<ctx>.1:3000` and `:3001` (rewritten from `0.0.0.0`).
-- Reach `127.0.0.1:5432` directly (the host's Postgres).
-- Reach npmjs.org and github.com via proxy.
-- Be reached at its dev address from the user's browser (default context can connect to confined kennels' loopback).
+- Reach `127.0.0.1:5432` (the host's Postgres), dialled by kenneld as a sanctioned host service — there is no direct loopback path out of the kennel's net-ns.
+- Reach npmjs.org and github.com via the egress gateway.
+- Be reached at its own loopback address from the user's default context (its bound port appears on the host `lo` at the kennel's `127.<tag>.<ctx>.1`).
 
 It cannot:
-- Reach other host loopback services (e.g. the user's other dev Postgres on `:5433`, or an ssh-agent on `~/.ssh/agent`).
-- Reach other kennels' dev servers (sibling kennels have different loopback addresses).
+- Reach other host loopback services (e.g. another Postgres on `:5433`, or an ssh-agent socket) — only the `127.0.0.1:5432` literal it was granted.
+- Reach other kennels' dev servers (sibling kennels sit in distinct net namespaces with distinct loopback addresses).
 - Exfiltrate beyond the npmjs+github allowlist.
 
+> **Bind ports.** Rewriting a `0.0.0.0` listener to the kennel's own loopback and allowing specific bind ports (`net.bind.allowed_ports`, the Vite/HMR case) is a **template-level** setting, not a leaf delta — a leaf has no `[net.bind]` field. A dev-server template carries it; the leaf above only adds the project, the registries, and the Postgres reach.
+
 **Residuals.**
-- **The Postgres grant is broad.** Granting `127.0.0.1:5432` is granting access to whatever Postgres has — including other databases the user has on that instance. The mitigation is at the Postgres role level (the kennel's connection string uses a role with access only to the relevant database).
+- **The Postgres grant is broad.** Granting `127.0.0.1:5432` grants access to whatever that Postgres instance holds — including other databases on it. The mitigation is at the Postgres role level (the kennel's connection string uses a role scoped to the relevant database).
 
 **Startup.** Cold: ~1.5s.
 
@@ -203,30 +196,26 @@ A Rust build that downloads dozens of crates from crates.io and a few from git r
 **Policy** (`~/.config/kennel/kennels/rust-build.toml`):
 
 ```toml
-template = "ai-coding-permissive"
-template_version = "1"
+# The open-net posture is carried by the template (net.mode is a template-level
+# scalar, not a leaf delta). ai-coding-permissive would set mode = "open"; here
+# the leaf adds the project + cargo cache and turns egress audit up to full.
+template_base = "ai-coding-strict@v1"
 name = "rust-build"
 
-[fs.read.add]
-- path = "~/projects/myrustapp/**"
-  reason = "the project"
+[[fs.write.add]]
+path = "~/projects/myrustapp/**"
+reason = "the project (read implied)"
 
-[fs.write.add]
-- path = "~/projects/myrustapp/**"
-  reason = "the project"
-- path = "~/.cargo/registry/**"
-  reason = "cargo's downloaded crate cache"
+[[fs.write.add]]
+path = "~/.cargo/registry/**"
+reason = "cargo's downloaded crate cache"
 
-[net]
-mode = "open"
-reason = "Rust builds fetch from crates.io and arbitrary git repos"
-
+# A leaf tunes per-kennel egress audit via [net.audit.override] (level / log_path).
 [net.audit.override]
 level = "full"
-reason = "open internet; log every destination for review"
 ```
 
-**What's enforced.** The build can reach the open internet, but every connection is logged. Filesystem is still scoped to the project and cargo cache.
+**What's enforced.** With an open-net template the build can reach the open internet, but every connection is logged (`net.audit.override` raises it to `full`). The filesystem stays scoped to the project and the cargo cache regardless of net mode.
 
 **Residuals.**
 - **Open net mode is weak.** A compromised crate can exfiltrate freely. The audit log catches the destinations after the fact; the proxy adds nothing per-destination beyond logging.
@@ -249,44 +238,26 @@ The developer needs a Postgres instance for local development. They want it expo
 **Policy** (`~/.config/kennel/kennels/dev-postgres.toml`):
 
 ```toml
-template = "containerised-service"
-template_version = "1"
+template_base = "containerised-service@v1"
 name = "dev-postgres"
 
-[fs.write.add]
-- path = "~/data/dev-postgres/**"
-  reason = "Postgres data directory"
-
-[container]
-image = "docker.io/library/postgres:17"
-image_digest = "sha256:..."  # pinned
-
-[[container.published_ports]]
-container_port = 5432
-host_bind = "127.<tag>.<ctx>.1:5432"
-reason = "Postgres reachable from default context only, not LAN"
-threats.mitigated = ["T3.3"]
-
-[[container.volumes]]
-host = "~/data/dev-postgres"
-container = "/var/lib/postgresql/data"
-reason = "Postgres data persistence"
-
-[container.env]
-POSTGRES_PASSWORD = "..." # from the user's secret store; never in this file
+[[fs.write.add]]
+path = "~/data/dev-postgres/**"
+reason = "Postgres data directory"
 ```
 
-**What's enforced.** The Postgres container:
-- Listens only on the per-kennel loopback address (`127.42.<ctx>.1:5432`). The user's default context can connect; the LAN cannot.
-- Has access only to `~/data/dev-postgres/` as volume; no other host paths.
-- Cannot use `--privileged`, `--pid=host`, `--network=host` (template invariants).
-- Runs with a non-root container user where the image supports it.
+The `containerised-service` template runs the service as the kennel itself: the service binary and its invariants live in the template, its published port is a `[net.bind]` entry, and its data and config are `[fs]` grants. The leaf adds only the data directory.
+
+**What's enforced.** The Postgres kennel:
+- Listens only on its own per-kennel loopback address (`127.<tag>.<ctx>.1:5432`), which appears on the host `lo` at that same address — the user's default context can connect; the LAN cannot.
+- Has access only to `~/data/dev-postgres/` plus the template's baseline read paths; no other host paths.
+- Runs under the same unprivileged user namespace + seccomp + Landlock as any kennel.
 
 **Residuals.**
-- **T3.2 (container escape) — in scope but not fully mitigated.** A kernel CVE in runc or the container runtime would allow escape. Out of any user-space framework's reach.
-- **T3.5 (root-with-host-UID) — depends on workstation configuration.** If Docker is configured with `userns-remap`, mitigated. Otherwise the container's root has uid 0 on the host with permissions on the volume mount. Documented in template README.
+- **The Postgres binary and its libraries are trusted.** The template grants exec on the system Postgres; a compromise of that package is a supply-chain residual (T1.9), mitigated only by the same confinement applied to everything else.
+- **Secrets in the data directory.** The granted `~/data/dev-postgres/**` tree holds whatever the service writes there, readable by the kennel — keep unrelated secrets out of it.
 
-**Startup.** Cold: ~3s (container pull + start).
+**Startup.** Cold: ~1.5s (no container runtime to pull or start).
 
 ## 6.7 Corp-toolchain delta
 
@@ -295,37 +266,45 @@ The user works at a company that requires specific tools from a non-standard pat
 **Policy** (`~/.config/kennel/kennels/corp-ai.toml`):
 
 ```toml
-template = "ai-coding-strict"
-template_version = "3"
+template_base = "ai-coding-strict@v1"
 name = "corp-ai"
 
-[fs.read.add]
-- path = "~/projects/work/**"
-  reason = "work project"
-- path = "/opt/corp-toolchain/**"
-  reason = "company-installed dev tools"
-  threats.exposed = ["T1.4:corp-toolchain-integrity"]
+[[fs.write.add]]
+path = "~/projects/work/**"
+reason = "work project (read implied)"
 
-[fs.write.add]
-- path = "~/projects/work/**"
-  reason = "work project"
+# Read-only: the corp toolchain is consumed, never modified — so this stays fs.read.
+[[fs.read.add]]
+path = "/opt/corp-toolchain/**"
+reason = "company-installed dev tools"
+threats.exposed = ["T1.4"]
 
-[net.allow.add]
-- name = "api.anthropic.com"
-  ports = [443]
-- name = "git.corp.example"
-  ports = [443, 22]
-- name = "registry.corp.example"
-  ports = [443]
-- name = "artifacts.corp.example"
-  ports = [443]
+[[net.allow.add]]
+name = "api.anthropic.com"
+ports = [443]
+reason = "Claude API"
 
-[unix.allow.add]
-- name = "corp-vpn-agent"
-  real = "/run/corp/vpn-agent.sock"
-  shim = "/run/corp/vpn-agent.sock"
-  reason = "corp VPN agent for cert-based auth to internal services"
-  threats.exposed = ["T1.6:privileged-service-surface"]
+[[net.allow.add]]
+name = "git.corp.example"
+ports = [443, 22]
+reason = "corp git host (HTTPS + SSH)"
+
+[[net.allow.add]]
+name = "registry.corp.example"
+ports = [443]
+reason = "corp package registry"
+
+[[net.allow.add]]
+name = "artifacts.corp.example"
+ports = [443]
+reason = "corp artifact store"
+
+[[unix.allow.add]]
+name = "corp-vpn-agent"
+real = "/run/corp/vpn-agent.sock"
+shim = "/run/corp/vpn-agent.sock"
+reason = "corp VPN agent for cert-based auth to internal services"
+threats.exposed = ["T1.6"]
 ```
 
 **Diff output** (when running `kennel diff corp-ai`):
@@ -358,32 +337,30 @@ The user has to run a legacy GUI tool (some Java Swing app from 2008). It only w
 **Policy** (`~/.config/kennel/kennels/legacy-gui.toml`):
 
 ```toml
-template = "x11-isolated-dev"
-template_version = "1"
+# The X11 isolation (Xwayland/Xephyr) and the no-network posture are template
+# work — an x11-isolated template carries net.mode = "none" and the X server
+# wiring. A leaf has no [net].mode field. The leaf adds the data + the tool.
+template_base = "ai-coding-strict@v1"
 name = "legacy-gui"
 
-[fs.read.add]
-- path = "~/legacy-data/**"
-  reason = "input data for the legacy tool"
+[[fs.read.add]]
+path = "~/legacy-data/**"
+reason = "input data for the legacy tool"
 
-[fs.write.add]
-- path = "~/legacy-data/output/**"
-  reason = "tool's output"
+[[fs.write.add]]
+path = "~/legacy-data/output/**"
+reason = "tool's output"
 
-[exec.allow.add]
-- path = "/usr/bin/java"
-- path = "/opt/legacy-tool/bin/legacy-tool"
-  reason = "the legacy tool"
+[[exec.allow.add]]
+path = "/usr/bin/java"
+reason = "the legacy tool's JVM runtime"
 
-# Template handles xwayland_isolated/xephyr_isolated based on host.
-# Clipboard bridging deliberately off.
-
-[net]
-mode = "none"
-reason = "the legacy tool has no business on the internet"
+[[exec.allow.add]]
+path = "/opt/legacy-tool/bin/legacy-tool"
+reason = "the legacy tool"
 ```
 
-**What's enforced.** The tool runs in a dedicated Xwayland (Wayland host) or Xephyr (X11 host) instance. The tool can read input data, write output data, no network, no other capabilities. The user sees the tool's window in their normal session; the tool sees only itself in its X server.
+**What's enforced.** With an X11-isolated template the tool runs in a dedicated Xwayland (Wayland host) or Xephyr (X11 host) instance and gets no network. The leaf adds read on the input data, write on the output dir, and exec on the JVM + the tool binary. The user sees the tool's window in their normal session; the tool sees only itself in its X server.
 
 **Residuals.**
 - **No copy-paste between host and tool.** The user accepts this in exchange for the isolation. Copy-paste within the tool works normally.

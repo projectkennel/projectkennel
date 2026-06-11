@@ -1,0 +1,17 @@
+[package]
+name = "kennel-bin-ssh-reorigin"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel SSH re-origination forced command: the unprivileged router the per-kennel bastion (kennel-sshd) runs once a synthetic key authenticates. It confirms the publickey auth via $SSH_USER_AUTH, selects the real key by its baked-in fingerprint, and re-execs a fresh ssh to the destination fixed by the forced command — so the workload never holds a key and cannot redirect the connection."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kennel-bin-ssh-reorigin"
+path = "src/main.rs"

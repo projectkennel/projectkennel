@@ -3,7 +3,7 @@
  *
  * The Rust loader (kennel-bpf) mirrors these layouts by hand in its KENNEL_MAPS
  * table (it does not read BTF); these definitions are authoritative for both
- * sides and the two must be kept in lockstep (architecture/02-5-bpf-abi.md).
+ * sides and the two must be kept in lockstep (architecture/02-7-bpf-abi.md).
  *
  * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30); the map layouts were
  * validated by bpftool's BTF-driven decode of live map contents (the LPM key,
@@ -20,7 +20,7 @@
 #ifndef KENNEL_MAPS_H
 #define KENNEL_MAPS_H
 
-/* Sentinels (architecture/02-5). */
+/* Sentinels (architecture/02-7). */
 #define KENNEL_META_MAGIC 0x4B4E454Cu /* "KNEL" */
 #define KENNEL_ABI_VERSION 1
 

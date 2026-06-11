@@ -1,0 +1,22 @@
+[package]
+name = "kennel-bin-init"
+version.workspace = true
+publish.workspace = true
+description = "The kennel's uid-0 PID 1: pulls its supervision-half over binder from kenneld, forks and identity-drops the facades and the workload, confines the workload, and supervises to exit (07-2 §7.11)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kennel-bin-init"
+path = "src/main.rs"
+
+[dependencies]
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+kennel-lib-spawn = { path = "../kennel-lib-spawn" }
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+
+[lints]
+workspace = true

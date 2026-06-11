@@ -14,14 +14,13 @@ fn run(req: &Request) -> Response {
         .expect("invoke privhelper")
 }
 
-fn cgroup_request(op: Op, path: &str) -> Request {
+fn bare_request(op: Op) -> Request {
     Request {
         op,
         ctx: 0,
         addr: "0.0.0.0".parse().expect("placeholder addr"),
         prefix: 0,
         interface: String::new(),
-        cgroup_path: path.into(),
     }
 }
 
@@ -29,7 +28,7 @@ fn cgroup_request(op: Op, path: &str) -> Request {
 fn an_unallocated_user_is_refused() {
     // The test user has no /etc/kennel/subkennel allocation, so every operation
     // is refused before any privileged syscall — no privilege needed to verify.
-    let resp = run(&cgroup_request(Op::AddAddr, ""));
+    let resp = run(&bare_request(Op::DelAddr));
     assert_eq!(
         resp.status,
         Status::Refused,
@@ -39,16 +38,16 @@ fn an_unallocated_user_is_refused() {
 
 // --- Privileged tests. Run as root (uid 0); they provision uid 0's allocation. ---
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 const ROOT_ALLOCATION: &str = "0:9:0000000001:kennel-root\n";
 
 /// Skip a privilege-requiring test with cause on an unprivileged runner (a skip
-/// is not a proof), matching the other crates' root-tests so `cargo test
-/// --all-features` is green for any runner while `sudo … --features root-tests`
+/// is not a proof), matching the other crates' e2e so `cargo test
+/// --all-features` is green for any runner while `sudo … --features e2e`
 /// still exercises it.
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn skip_if_unprivileged(test: &str) -> bool {
-    let euid = kennel_syscall::unistd::effective_uid();
+    let euid = kennel_lib_syscall::unistd::effective_uid();
     if euid != 0 {
         eprintln!("skipping {test}: requires root (euid={euid}) for privileged privhelper ops");
         return true;
@@ -56,13 +55,13 @@ fn skip_if_unprivileged(test: &str) -> bool {
     false
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn provision_root_allocation() {
     std::fs::create_dir_all("/etc/kennel").expect("mkdir /etc/kennel");
     std::fs::write("/etc/kennel/subkennel", ROOT_ALLOCATION).expect("write allocation");
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn lo_has(addr: &str) -> bool {
     let out = std::process::Command::new("ip")
         .args(["addr", "show", "dev", "lo"])
@@ -72,23 +71,29 @@ fn lo_has(addr: &str) -> bool {
 }
 
 /// Build a v4 loopback address: 127 | tag(12) | ctx(8) | host(4).
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 fn v4(tag: u16, ctx: u16, host: u8) -> std::net::Ipv4Addr {
     let suffix = u32::from(tag).wrapping_shl(12) | u32::from(ctx).wrapping_shl(4) | u32::from(host);
     std::net::Ipv4Addr::from(0x7F00_0000 | suffix)
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
-fn adds_and_removes_an_in_scope_loopback_address() {
-    if skip_if_unprivileged("adds_and_removes_an_in_scope_loopback_address") {
+fn removes_an_in_scope_address_and_refuses_out_of_scope() {
+    if skip_if_unprivileged("removes_an_in_scope_address_and_refuses_out_of_scope") {
         return;
     }
     provision_root_allocation();
-    // In scope for tag=9, ctx=5, /28.
+    // In scope for tag=9, ctx=5, /28. The factory adds loopback addresses now (folded into
+    // `construct`); the standalone `DelAddr` op is the teardown delete, tested here. Place the
+    // alias with `ip` to model an address the factory added, then delete it via the op.
     let addr = v4(9, 5, 1);
     let addr_str = addr.to_string();
-    let mut req = cgroup_request(Op::AddAddr, "");
+    let _ = std::process::Command::new("ip")
+        .args(["addr", "add", &format!("{addr_str}/28"), "dev", "lo"])
+        .status();
+
+    let mut req = bare_request(Op::DelAddr);
     req.ctx = 5;
     req.addr = addr.into();
     req.prefix = 28;
@@ -97,23 +102,11 @@ fn adds_and_removes_an_in_scope_loopback_address() {
     assert_eq!(
         run(&req).status,
         Status::Ok,
-        "in-scope address add should succeed"
-    );
-    assert!(
-        lo_has(&addr_str),
-        "the loopback alias {addr_str} should be present"
-    );
-
-    req.op = Op::DelAddr;
-    assert_eq!(
-        run(&req).status,
-        Status::Ok,
-        "address removal should succeed"
+        "in-scope address removal should succeed"
     );
     assert!(!lo_has(&addr_str), "the loopback alias should be gone");
 
-    // An out-of-scope address (wrong tag) must be refused, no syscall.
-    req.op = Op::AddAddr;
+    // An out-of-scope address (wrong tag) must be refused, before any syscall.
     req.addr = v4(1, 5, 1).into(); // tag 1 != 9
     assert_eq!(
         run(&req).status,
@@ -124,7 +117,7 @@ fn adds_and_removes_an_in_scope_loopback_address() {
 
 /// Build a `/32` `allow_v4` LPM entry permitting any port to `addr` (network
 /// order). Key/value layouts match `bpf/maps.h`.
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 const fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
     let [a, b, c, d] = addr;
     let [p0, p1, p2, p3] = 32u32.to_ne_bytes(); // prefixlen
@@ -137,7 +130,7 @@ const fn allow_v4_any(addr: [u8; 4]) -> kennel_privhelper::wire::V4Entry {
 }
 
 /// An empty `EgressPayload` (no map entries) — enough to exercise load + attach.
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
     kennel_privhelper::wire::EgressPayload {
         meta: [0u8; kennel_privhelper::wire::META_LEN],
@@ -150,7 +143,7 @@ const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
     }
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
 fn loads_and_attaches_egress_to_an_owned_cgroup() {
     use kennel_privhelper::wire::{EgressPayload, META_LEN};
@@ -158,7 +151,6 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
     if skip_if_unprivileged("loads_and_attaches_egress_to_an_owned_cgroup") {
         return;
     }
-    let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
     // Model the delegated-subtree flow: kenneld (here, the test running as the
     // caller) creates the cgroup itself; it is owned by the caller's uid.
     let cgroup = std::path::PathBuf::from("/sys/fs/cgroup/kennel-egress-test");
@@ -174,7 +166,7 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
         bind_allowed_ports: Vec::new(),
         pin_id: String::new(),
     };
-    let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
+    let resp = kennel_privhelper::exec::attach_egress_programs(&cgroup, &payload);
     assert_eq!(
         resp.status,
         Status::Ok,
@@ -190,7 +182,7 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
 /// XDG runtime dir `/run/user/<uid>/kennel/bpf/<id>/` (item 10 + the audit-drain
 /// prerequisite). Proves the pins land owner-only with the right modes; reopening
 /// the ringbuf to drain is the kenneld e2e. (Runs as root, so uid 0.)
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
 fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
     use kennel_privhelper::wire::{EgressPayload, META_LEN};
@@ -199,14 +191,13 @@ fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
     if skip_if_unprivileged("pins_the_shared_maps_in_the_xdg_runtime_dir") {
         return;
     }
-    let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
     let cgroup = std::path::PathBuf::from("/sys/fs/cgroup/kennel-egress-pin-test");
     let _ = std::fs::remove_dir(&cgroup);
     std::fs::create_dir(&cgroup).expect("create cgroup");
 
     let pin_id = "kennel-pintest";
     // Pins live in the caller's XDG runtime dir (root here, so /run/user/0).
-    let uid = kennel_syscall::unistd::real_uid();
+    let uid = kennel_lib_syscall::unistd::real_uid();
     let pin_dir = std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf")).join(pin_id);
     let _ = std::fs::remove_dir_all(&pin_dir);
 
@@ -219,7 +210,7 @@ fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
         bind_allowed_ports: Vec::new(),
         pin_id: pin_id.to_owned(),
     };
-    let resp = client::setup_egress(helper, cgroup.clone(), &payload).expect("invoke setup_egress");
+    let resp = kennel_privhelper::exec::attach_egress_programs(&cgroup, &payload);
     assert_eq!(
         resp.status,
         Status::Ok,
@@ -260,7 +251,7 @@ fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
     std::fs::remove_dir(&cgroup).expect("remove cgroup");
 }
 
-#[cfg(feature = "root-tests")]
+#[cfg(feature = "e2e")]
 #[test]
 fn egress_to_a_cgroup_not_owned_by_caller_is_refused() {
     use kennel_privhelper::exec::REFUSAL_CGROUP_NOT_OWNED;
@@ -268,7 +259,6 @@ fn egress_to_a_cgroup_not_owned_by_caller_is_refused() {
     if skip_if_unprivileged("egress_to_a_cgroup_not_owned_by_caller_is_refused") {
         return;
     }
-    let helper = Path::new(env!("CARGO_BIN_EXE_kennel-privhelper"));
     // A cgroup owned by a *different* uid must be refused before any BPF syscall —
     // the delegation boundary. (Run as root, so chowning to a foreign uid is possible.)
     let cgroup = std::path::PathBuf::from("/sys/fs/cgroup/kennel-foreign-test");
@@ -276,8 +266,7 @@ fn egress_to_a_cgroup_not_owned_by_caller_is_refused() {
     std::fs::create_dir(&cgroup).expect("create cgroup");
     std::os::unix::fs::chown(&cgroup, Some(12345), None).expect("chown to foreign uid");
 
-    let resp = client::setup_egress(helper, cgroup.clone(), &empty_payload())
-        .expect("invoke setup_egress");
+    let resp = kennel_privhelper::exec::attach_egress_programs(&cgroup, &empty_payload());
     assert_eq!(
         resp.status,
         Status::Refused,

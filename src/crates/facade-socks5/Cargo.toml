@@ -1,0 +1,20 @@
+[package]
+name = "facade-socks5"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel in-kennel SOCKS5 egress shim: presents a SOCKS5 endpoint on the kennel's loopback and brokers each CONNECT to the org.projectkennel.INet/default binder facade (docs/design/07-5-network.md §7.5.2/§7.5.6), receiving a conduit fd and splicing the workload to it. The TCP analogue of facade-afunix. No policy, no resolver, no host socket — kenneld decides, resolves, and pins."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "facade-socks5"
+path = "src/main.rs"

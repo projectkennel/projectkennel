@@ -12,15 +12,15 @@
 //! helper and its caller are the same machine.
 //!
 //! ```text
-//! Request (294 bytes):
-//!   0      op           u8     (1 add-addr, 2 del-addr, 5 setup-egress, 6 set-gid-map)
-//!   1      family       u8     (4 or 6; 0 for the egress op)
+//! Request (38 bytes) — the only standalone op is `del-addr` (the address add + egress
+//! attach are folded into the factory's construct datagram):
+//!   0      op           u8     (2 del-addr)
+//!   1      family       u8     (4 or 6)
 //!   2      prefix       u8
 //!   3      _reserved    u8     (0)
 //!   4..6   ctx          u16    (16-bit kennel context; v4 uses ctx <= 255)
 //!   6..22  addr         [u8;16] (v4 in the first 4 bytes)
 //!   22..38 interface    [u8;16] (NUL-padded; kernel IFNAMSIZ)
-//!   38..294 cgroup_path [u8;256] (NUL-padded; the egress op's target cgroup)
 //!
 //! Response (6 bytes):
 //!   0      status       u8     (0 ok, 1 refused, 2 protocol, 3 internal)
@@ -29,15 +29,13 @@
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
 
 /// The on-wire length of a [`Request`].
-pub const REQUEST_LEN: usize = 294;
+pub const REQUEST_LEN: usize = 38;
 /// The on-wire length of a [`Response`].
 pub const RESPONSE_LEN: usize = 6;
 
 const INTERFACE_FIELD: usize = 16;
-const PATH_FIELD: usize = 256;
 
 /// Length of the `kennel_meta` map value (`bpf/maps.h`).
 pub const META_LEN: usize = 64;
@@ -46,52 +44,35 @@ pub const META_LEN: usize = 64;
 const MAX_ENTRIES: usize = 8192;
 
 /// An IPv4 egress LPM map entry: `(lpm_v4_key[8], allow_value[8])`. Matches
-/// `kennel_spawn::plan::LpmV4Entry`.
+/// `kennel_lib_spawn::plan::LpmV4Entry`.
 pub type V4Entry = ([u8; 8], [u8; 8]);
 /// An IPv6 egress LPM map entry: `(lpm_v6_key[20], allow_value[8])`. Matches
-/// `kennel_spawn::plan::LpmV6Entry`.
+/// `kennel_lib_spawn::plan::LpmV6Entry`.
 pub type V6Entry = ([u8; 20], [u8; 8]);
 
 /// The privileged operation a request asks for.
+///
+/// Only the teardown address-delete remains as a standalone op: the address *add* and the
+/// egress-BPF *attach* (former byte-1 `AddAddr` and byte-5 `SetupEgress`) are folded into the
+/// factory's `construct` op, and bytes 3/4 were the retired cgroup create/delete ops (kenneld
+/// now manages cgroups unprivileged in its delegated subtree). The byte values are left as-is
+/// so the wire encoding is stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    /// Add a per-kennel loopback address.
-    AddAddr,
-    /// Remove a per-kennel loopback address.
+    /// Remove a per-kennel loopback address (teardown).
     DelAddr,
-    /// Load, populate, and attach the egress BPF programs to a kennel's cgroup.
-    /// The fixed [`Request`] carries the cgroup path (the helper validates the
-    /// caller owns it); a variable-length [`EgressPayload`] tail carries the map
-    /// contents. (Op byte 5; bytes 3 and 4 were the retired cgroup create/delete
-    /// ops — kenneld now manages cgroups unprivileged in its delegated subtree.)
-    SetupEgress,
-    /// Write a workload's user-namespace `gid_map` so it retains specific
-    /// supplementary groups (§7.2.8 device passthrough). An unprivileged process
-    /// can map only its own primary gid, so a process that needs another granted
-    /// group (e.g. `dialout`) cannot self-map it; the helper, holding `CAP_SETGID`
-    /// in the parent (init) user namespace, writes the map for it. A variable-length
-    /// [`GidMapPayload`] tail carries the target pid and the gids. **Gated** by the
-    /// helper re-checking the caller is a member of every gid and owns the target
-    /// pid — mapping a gid the user is not in would be an escalation.
-    SetGidMap,
 }
 
 impl Op {
     const fn to_byte(self) -> u8 {
         match self {
-            Self::AddAddr => 1,
             Self::DelAddr => 2,
-            Self::SetupEgress => 5,
-            Self::SetGidMap => 6,
         }
     }
 
     const fn from_byte(b: u8) -> Option<Self> {
         match b {
-            1 => Some(Self::AddAddr),
             2 => Some(Self::DelAddr),
-            5 => Some(Self::SetupEgress),
-            6 => Some(Self::SetGidMap),
             _ => None,
         }
     }
@@ -138,14 +119,12 @@ pub struct Request {
     pub op: Op,
     /// The per-kennel context (16-bit; a v4-enabled kennel uses `ctx <= 255`).
     pub ctx: u16,
-    /// The address (for address ops; `0.0.0.0` is the placeholder for cgroup ops).
+    /// The address to remove.
     pub addr: IpAddr,
-    /// The subnet prefix length (for address ops).
+    /// The subnet prefix length.
     pub prefix: u8,
-    /// The interface name (for address ops).
+    /// The interface name (`lo`).
     pub interface: String,
-    /// The cgroup path (for cgroup ops).
-    pub cgroup_path: PathBuf,
 }
 
 /// A failure to decode a message.
@@ -199,9 +178,6 @@ impl Request {
         b.extend_from_slice(&self.ctx.to_ne_bytes());
         b.extend_from_slice(&addr16);
         b.extend_from_slice(&pad_field::<INTERFACE_FIELD>(self.interface.as_bytes()));
-        b.extend_from_slice(&pad_field::<PATH_FIELD>(
-            self.cgroup_path.as_os_str().as_encoded_bytes(),
-        ));
         b
     }
 
@@ -244,23 +220,22 @@ impl Request {
             _ => return Err(WireError::BadFamily),
         };
         let interface = read_string(buf.get(22..38).ok_or(WireError::BadLength)?)?;
-        let cgroup_path =
-            PathBuf::from(read_string(buf.get(38..294).ok_or(WireError::BadLength)?)?);
         Ok(Self {
             op,
             ctx,
             addr,
             prefix,
             interface,
-            cgroup_path,
         })
     }
 }
 
-/// The variable-length tail of a [`Op::SetupEgress`] request: the BPF map
-/// contents the helper writes into the egress programs' maps before attaching.
+/// The BPF map contents the factory writes into the egress programs' maps before attaching.
 ///
-/// Layout (appended directly after the fixed [`Request`] bytes):
+/// The egress tail of the `construct` datagram (`construct.rs`; it was the retired
+/// `SetupEgress` op's payload).
+///
+/// Layout (a self-describing byte blob):
 ///
 /// ```text
 ///   0..64    meta            [u8; 64]   kennel_meta_map[0]
@@ -287,7 +262,7 @@ pub struct EgressPayload {
     pub allow_v6: Vec<V6Entry>,
     /// `deny_v6` LPM entries.
     pub deny_v6: Vec<V6Entry>,
-    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.3.7) for the
+    /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.5.7) for the
     /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. Capped
     /// at [`MAX_BIND_PORTS`] on decode (the BPF array is fixed-size).
     pub bind_allowed_ports: Vec<u16>,
@@ -301,7 +276,7 @@ pub struct EgressPayload {
 }
 
 /// The maximum number of `bind_allowed_ports` the wire carries (the `bind_subnet`
-/// BPF array size; mirrors `kennel_policy::settled::MAX_BIND_PORTS`).
+/// BPF array size; mirrors `kennel_lib_policy::settled::MAX_BIND_PORTS`).
 pub const MAX_BIND_PORTS: usize = 8;
 
 /// The maximum byte length of the [`EgressPayload::pin_id`] field on the wire.
@@ -500,72 +475,6 @@ impl EgressPayload {
     }
 }
 
-/// The variable-length tail of a [`Op::SetGidMap`] request: the target process and
-/// the gids to identity-map into its user namespace.
-///
-/// Layout (appended directly after the fixed [`Request`] bytes):
-///
-/// ```text
-///   0..4    pid       u32   native-endian; the process whose userns gid_map to write
-///   4..8    n_gids    u32   native-endian
-///   8..     gids      u32 each (native-endian)
-/// ```
-///
-/// Each gid becomes one identity line (`<gid> <gid> 1`) in the written `gid_map`,
-/// so inside the kennel the workload keeps exactly these groups and the kernel sees
-/// the same real gids outside. The helper does **not** trust this list: it refuses
-/// any gid the caller is not a member of, and refuses a pid it does not own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GidMapPayload {
-    /// The target process (the workload's user-namespace owner).
-    pub pid: u32,
-    /// The gids to identity-map (primary + each granted supplementary group).
-    pub gids: Vec<u32>,
-}
-
-impl GidMapPayload {
-    /// Encode the payload tail (appended after the request bytes by the client).
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(8usize.saturating_add(self.gids.len().saturating_mul(4)));
-        b.extend_from_slice(&self.pid.to_ne_bytes());
-        b.extend_from_slice(
-            &u32::try_from(self.gids.len())
-                .unwrap_or(u32::MAX)
-                .to_ne_bytes(),
-        );
-        for gid in &self.gids {
-            b.extend_from_slice(&gid.to_ne_bytes());
-        }
-        b
-    }
-
-    /// Decode a payload tail.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`WireError::BadLength`] if the buffer is short, the count exceeds
-    /// the defensive cap, or the gid bytes do not match the declared count.
-    pub fn decode(buf: &[u8]) -> Result<Self, WireError> {
-        let pid = buf
-            .get(0..4)
-            .and_then(|s| s.try_into().ok())
-            .map(u32::from_ne_bytes)
-            .ok_or(WireError::BadLength)?;
-        let n = read_count(buf, 4)?;
-        let span = n.checked_mul(4).ok_or(WireError::BadLength)?;
-        let region = buf
-            .get(8..8usize.checked_add(span).ok_or(WireError::BadLength)?)
-            .ok_or(WireError::BadLength)?;
-        let mut gids = Vec::with_capacity(n);
-        for chunk in region.chunks_exact(4) {
-            let g: [u8; 4] = chunk.try_into().map_err(|_| WireError::BadLength)?;
-            gids.push(u32::from_ne_bytes(g));
-        }
-        Ok(Self { pid, gids })
-    }
-}
-
 /// A response message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Response {
@@ -664,12 +573,11 @@ mod tests {
     #[test]
     fn request_round_trips_v4() {
         let req = Request {
-            op: Op::AddAddr,
+            op: Op::DelAddr,
             ctx: 7,
             addr: "127.7.3.1".parse().expect("v4"),
             prefix: 24,
             interface: "lo".to_owned(),
-            cgroup_path: PathBuf::new(),
         };
         let bytes = req.encode();
         assert_eq!(bytes.len(), REQUEST_LEN);
@@ -679,12 +587,11 @@ mod tests {
     #[test]
     fn request_round_trips_v6_and_egress() {
         let req = Request {
-            op: Op::SetupEgress,
+            op: Op::DelAddr,
             ctx: 3,
             addr: "fd00:1:2::1".parse().expect("v6"),
             prefix: 64,
             interface: "kennel-abc".to_owned(),
-            cgroup_path: PathBuf::from("/sys/fs/cgroup/kennel/3"),
         };
         let bytes = req.encode();
         assert_eq!(Request::decode(&bytes), Ok(req));
@@ -776,44 +683,8 @@ mod tests {
     }
 
     #[test]
-    fn setup_egress_op_round_trips() {
-        assert_eq!(
-            Op::from_byte(Op::SetupEgress.to_byte()),
-            Some(Op::SetupEgress)
-        );
-    }
-
-    #[test]
-    fn set_gid_map_op_round_trips() {
-        assert_eq!(Op::from_byte(Op::SetGidMap.to_byte()), Some(Op::SetGidMap));
-    }
-
-    #[test]
-    fn gidmap_payload_round_trips() {
-        let payload = GidMapPayload {
-            pid: 4242,
-            gids: vec![1000, 20, 24],
-        };
-        let bytes = payload.encode();
-        assert_eq!(GidMapPayload::decode(&bytes), Ok(payload));
-    }
-
-    #[test]
-    fn gidmap_payload_rejects_truncated_gids() {
-        // Claim two gids but provide one.
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&7u32.to_ne_bytes()); // pid
-        bytes.extend_from_slice(&2u32.to_ne_bytes()); // n_gids = 2
-        bytes.extend_from_slice(&20u32.to_ne_bytes()); // only one gid
-        assert_eq!(GidMapPayload::decode(&bytes), Err(WireError::BadLength));
-    }
-
-    #[test]
-    fn gidmap_payload_rejects_absurd_count() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&7u32.to_ne_bytes()); // pid
-        bytes.extend_from_slice(&u32::MAX.to_ne_bytes()); // n_gids = 4 billion
-        assert_eq!(GidMapPayload::decode(&bytes), Err(WireError::BadLength));
+    fn del_addr_op_round_trips() {
+        assert_eq!(Op::from_byte(Op::DelAddr.to_byte()), Some(Op::DelAddr));
     }
 
     #[test]
@@ -832,12 +703,11 @@ mod tests {
     fn decode_rejects_bad_length_and_op() {
         assert_eq!(Request::decode(&[0u8; 10]), Err(WireError::BadLength));
         let mut bytes = Request {
-            op: Op::AddAddr,
+            op: Op::DelAddr,
             ctx: 0,
             addr: "0.0.0.0".parse().expect("v4"),
             prefix: 24,
             interface: String::new(),
-            cgroup_path: PathBuf::new(),
         }
         .encode();
         // Corrupt the op byte.

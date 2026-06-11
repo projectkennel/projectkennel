@@ -3,13 +3,13 @@
 //! This is the privileged side of the trust boundary
 //! (`docs/architecture/04-trust-boundaries.md`, boundary 1): every request is
 //! validated against the reserved scope *before* any privileged syscall. The
-//! privileged work routes through `kennel-syscall` (netlink for addresses) and
+//! privileged work routes through `kennel-lib-syscall` (netlink for addresses) and
 //! `std::fs` (cgroup directories); this crate stays `#![forbid(unsafe_code)]`.
 
 use std::ffi::CString;
 
-use crate::validate::{validate_addr, validate_gid_map, AddrRequest, Refusal, ReservedScope};
-use crate::wire::{EgressPayload, GidMapPayload, Op, Request, Response};
+use crate::validate::{validate_addr, AddrRequest, Refusal, ReservedScope};
+use crate::wire::{EgressPayload, Op, Request, Response};
 
 /// Stable refusal codes carried on the wire (`Response::refusal`).
 const fn refusal_code(r: &Refusal) -> u8 {
@@ -18,8 +18,6 @@ const fn refusal_code(r: &Refusal) -> u8 {
         Refusal::AddrOutOfScope => 2,
         Refusal::InterfaceNotAllowed => 3,
         Refusal::InterfaceNameTooLong => 4,
-        Refusal::GidNotMember { .. } => 5,
-        Refusal::EmptyGidMap => 6,
     }
 }
 
@@ -35,10 +33,6 @@ pub const REFUSAL_NO_SCOPE: u8 = 100;
 /// attaching BPF to another user's or a system cgroup.
 pub const REFUSAL_CGROUP_NOT_OWNED: u8 = 101;
 
-/// A refusal code for "the target process of a `gid_map` request is not owned by
-/// the caller" — a user may only write the `gid_map` of its own process's userns.
-pub const REFUSAL_PID_NOT_OWNED: u8 = 102;
-
 /// A short, stable description of a wire refusal code.
 ///
 /// For the `message` field of a `priv.refuse` audit event (`02-3`). Mirrors the
@@ -52,11 +46,8 @@ pub const fn refusal_message(code: u8) -> &'static str {
         2 => "address is outside the reserved per-kennel subnet",
         3 => "interface is not `lo` or a `<namespace>-<id>` dummy",
         4 => "interface name exceeds the kernel length limit",
-        5 => "caller is not a member of a requested gid",
-        6 => "gid_map request carried no gids",
         REFUSAL_NO_SCOPE => "helper has no configured reserved scope for this user",
         REFUSAL_CGROUP_NOT_OWNED => "target cgroup is not owned by the caller",
-        REFUSAL_PID_NOT_OWNED => "target process is not owned by the caller",
         _ => "refused",
     }
 }
@@ -69,91 +60,19 @@ fn errno_of(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(0)
 }
 
-/// Validate and perform `req`.
+/// Validate and perform `req` — the one remaining standalone op, `Op::DelAddr` (teardown).
 ///
-/// Every operation is confined to the caller's allocation (`scope`), so a user
-/// with no allocation can do nothing. A [`Op::SetupEgress`] request additionally
-/// carries an `egress` payload (the BPF map contents); the other ops ignore it.
-/// Returns the [`Response`] to send back.
+/// (The address *add* and the egress-BPF *attach* are folded into the factory's
+/// `construct_kennel` op — see `construct.rs`.) Confined to the caller's allocation (`scope`),
+/// so a user with no allocation can do nothing. Returns the [`Response`] to send back.
 #[must_use]
-pub fn perform(
-    req: &Request,
-    egress: Option<&EgressPayload>,
-    gidmap: Option<&GidMapPayload>,
-    scope: Option<&ReservedScope>,
-) -> Response {
+pub fn perform(req: &Request, scope: Option<&ReservedScope>) -> Response {
     let Some(scope) = scope else {
         return Response::refused(REFUSAL_NO_SCOPE);
     };
     match req.op {
-        Op::AddAddr | Op::DelAddr => perform_addr(req, scope),
-        // SetupEgress needs the variable payload; without it the request is malformed.
-        // The scope still gates *whether* the caller may act (the None check above);
-        // the cgroup itself is gated by directory ownership inside perform_egress.
-        Op::SetupEgress => {
-            egress.map_or_else(Response::protocol, |payload| perform_egress(req, payload))
-        }
-        // SetGidMap likewise carries a variable payload. The scope gates *whether*
-        // the caller may act; the gids are gated by membership and the pid by
-        // ownership, inside perform_set_gid_map.
-        Op::SetGidMap => gidmap.map_or_else(Response::protocol, perform_set_gid_map),
+        Op::DelAddr => perform_addr(req, scope),
     }
-}
-
-/// Write a workload's user-namespace `gid_map` so it keeps specific supplementary
-/// groups (§7.2.8). The security gates, in order:
-///
-/// 1. **Membership** — every gid must be one the caller already holds (its own gid
-///    set, which the helper inherits from `kenneld` = the user). Mapping a gid the
-///    user is not in would let the workload act as that group (the map is identity).
-/// 2. **Ownership** — `/proc/<pid>` must be owned by the caller's real uid, so a
-///    user can only write the `gid_map` of its own process's namespace.
-///
-/// Only then is the map written: one identity line (`<gid> <gid> 1`) per gid. The
-/// helper holds `CAP_SETGID` in the parent (init) user namespace, which is what
-/// lets it write a multi-gid map an unprivileged process could not.
-fn perform_set_gid_map(payload: &GidMapPayload) -> Response {
-    use std::fmt::Write as _;
-    use std::os::unix::fs::MetadataExt as _;
-
-    // The caller's group set: real gid + supplementary groups. The helper is a
-    // child of kenneld (the user), and setuid/file-caps leave the gid set untouched.
-    let mut caller_groups = kennel_syscall::unistd::supplementary_groups();
-    caller_groups.push(kennel_syscall::unistd::real_gid());
-    if let Err(r) = validate_gid_map(&payload.gids, &caller_groups) {
-        return Response::refused(refusal_code(&r));
-    }
-
-    // The target process must belong to the caller.
-    let proc_dir = format!("/proc/{}", payload.pid);
-    let owner = match std::fs::metadata(&proc_dir) {
-        Ok(m) => m.uid(),
-        Err(e) => return Response::internal(errno_of(&e)),
-    };
-    if owner != kennel_syscall::unistd::real_uid() {
-        return Response::refused(REFUSAL_PID_NOT_OWNED);
-    }
-
-    // Identity-map each gid (`<gid> <gid> 1`). The kernel accepts multiple lines
-    // because the helper has CAP_SETGID in the parent user namespace.
-    let mut map = String::new();
-    for g in &payload.gids {
-        let _ = writeln!(map, "{g} {g} 1");
-    }
-    match std::fs::write(format!("{proc_dir}/gid_map"), map) {
-        Ok(()) => Response::ok(),
-        Err(e) => Response::internal(errno_of(&e)),
-    }
-}
-
-/// Load, populate, and attach the egress BPF programs to the target cgroup.
-///
-/// The cross-user boundary is **directory ownership**: the caller must own the
-/// cgroup directory (`attach_egress_programs` checks `st_uid`). The map contents
-/// are not checked — they only shape the kennel's own egress, which the user
-/// already controls.
-fn perform_egress(req: &Request, payload: &EgressPayload) -> Response {
-    attach_egress_programs(&req.cgroup_path, payload)
 }
 
 /// Load every egress program against ONE shared map set, populate it from
@@ -169,7 +88,8 @@ fn perform_egress(req: &Request, payload: &EgressPayload) -> Response {
 /// opened once and `fstat`ed, so the ownership check and the attach use the same
 /// inode (no TOCTOU).
 #[cfg(feature = "bpf-egress")]
-fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Response {
+#[must_use]
+pub fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Response {
     use std::os::fd::AsFd as _;
     use std::os::unix::fs::MetadataExt as _;
 
@@ -181,14 +101,14 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
         Ok(m) => m.uid(),
         Err(e) => return Response::internal(errno_of(&e)),
     };
-    if owner != kennel_syscall::unistd::real_uid() {
+    if owner != kennel_lib_syscall::unistd::real_uid() {
         return Response::refused(REFUSAL_CGROUP_NOT_OWNED);
     }
     let cgroup_fd = dir.as_fd();
 
     // One shared map set for the whole kennel: every program references the same
     // maps (so there is one `audit_ringbuf` to drain and one coherent set to pin).
-    let maps = match kennel_bpf::create_maps(kennel_bpf::KENNEL_MAPS) {
+    let maps = match kennel_lib_bpf::create_maps(kennel_lib_bpf::KENNEL_MAPS) {
         Ok(m) => m,
         Err(e) => return Response::internal(errno_of(&e)),
     };
@@ -196,17 +116,17 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
         return Response::internal(errno_of(&e));
     }
 
-    for spec in kennel_bpf::KENNEL_PROGRAMS {
-        let Some(elf) = kennel_bpf::programs::object(spec.name) else {
+    for spec in kennel_lib_bpf::KENNEL_PROGRAMS {
+        let Some(elf) = kennel_lib_bpf::programs::object(spec.name) else {
             // The binary was built without this program embedded — treat as unsupported.
             return Response::internal(ENOSYS);
         };
-        let prog = match kennel_bpf::load_program_against(elf, spec, &maps) {
+        let prog = match kennel_lib_bpf::load_program_against(elf, spec, &maps) {
             Ok(p) => p,
             Err(e) => return Response::internal(errno_of(&e)),
         };
         if let Err(e) =
-            kennel_bpf::sys::prog_attach_cgroup(cgroup_fd, prog.as_fd(), spec.attach_type)
+            kennel_lib_bpf::sys::prog_attach_cgroup(cgroup_fd, prog.as_fd(), spec.attach_type)
         {
             return Response::internal(errno_of(&e));
         }
@@ -249,7 +169,7 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
     if pin_id.is_empty() || !valid_pin_id(pin_id) {
         return;
     }
-    let caller_uid = kennel_syscall::unistd::real_uid();
+    let caller_uid = kennel_lib_syscall::unistd::real_uid();
     let base = pin_root(caller_uid);
     if ensure_bpffs(&base, caller_uid).is_err() {
         return;
@@ -268,7 +188,7 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
         let Ok(cpin) = std::ffi::CString::new(pin.as_os_str().as_encoded_bytes()) else {
             continue;
         };
-        if kennel_bpf::sys::obj_pin(fd.as_fd(), &cpin).is_err() {
+        if kennel_lib_bpf::sys::obj_pin(fd.as_fd(), &cpin).is_err() {
             continue;
         }
         let _ = std::os::unix::fs::chown(&pin, Some(caller_uid), None);
@@ -311,8 +231,8 @@ fn valid_pin_id(id: &str) -> bool {
 #[cfg(feature = "bpf-egress")]
 fn ensure_bpffs(base: &std::path::Path, caller_uid: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(base)?;
-    if !kennel_syscall::mount::is_bpffs(base).unwrap_or(false) {
-        kennel_syscall::mount::mount_bpffs(base)?;
+    if !kennel_lib_syscall::mount::is_bpffs(base).unwrap_or(false) {
+        kennel_lib_syscall::mount::mount_bpffs(base)?;
     }
     // Hand the bpffs root to the owning user, owner-only. Enforced every time
     // (cheap, root-only) so it self-heals a stale owner/mode.
@@ -373,24 +293,23 @@ fn bind_subnet_value(meta: &[u8], allowed_ports: &[u16]) -> Option<[u8; 44]> {
     Some(value)
 }
 
-/// Write `payload` into the shared egress map set (from `kennel_bpf::create_maps`).
+/// Write `payload` into the shared egress map set (from `kennel_lib_bpf::create_maps`).
 #[cfg(feature = "bpf-egress")]
 fn populate_maps(
     maps: &std::collections::BTreeMap<String, std::os::fd::OwnedFd>,
     payload: &EgressPayload,
 ) -> std::io::Result<()> {
-    use kennel_bpf::sys::{map_update, BPF_ANY};
-    use std::os::fd::AsFd as _;
+    use kennel_lib_bpf::sys::BPF_ANY;
 
+    // The safe `update_kennel_map` validates each (key, value) against the named map's
+    // KENNEL_MAPS geometry and does the unsafe `map_update` internally — so this
+    // `#![forbid(unsafe_code)]` crate needs no unsafe block of its own.
     let update = |name: &str, key: &[u8], value: &[u8]| -> std::io::Result<()> {
-        if let Some(fd) = maps.get(name) {
-            map_update(fd.as_fd(), key, value, BPF_ANY)?;
-        }
-        Ok(())
+        kennel_lib_bpf::update_kennel_map(maps, name, key, value, BPF_ANY)
     };
 
     update("kennel_meta_map", &0u32.to_ne_bytes(), &payload.meta)?;
-    // Per-kennel bind subnet (§7.3): the INADDR_ANY/in6addr_any rewrite target
+    // Per-kennel bind subnet (§7.5): the INADDR_ANY/in6addr_any rewrite target
     // for dev-server binds. The bind4/bind6 programs fail closed without it, so
     // a workload inside the kennel cannot bind a listening socket. The kennel's
     // own loopback addresses are already in the meta, so it derives from there.
@@ -412,9 +331,10 @@ fn populate_maps(
     Ok(())
 }
 
-/// Built without egress support: the helper cannot honour `SetupEgress`.
+/// Built without egress support: the factory cannot attach the egress BPF.
 #[cfg(not(feature = "bpf-egress"))]
-const fn attach_egress_programs(_path: &std::path::Path, _payload: &EgressPayload) -> Response {
+#[must_use]
+pub const fn attach_egress_programs(_path: &std::path::Path, _payload: &EgressPayload) -> Response {
     Response::internal(ENOSYS)
 }
 
@@ -432,15 +352,12 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     let Ok(cname) = CString::new(req.interface.clone()) else {
         return Response::protocol();
     };
-    let ifindex = match kennel_syscall::netlink::if_index(&cname) {
+    let ifindex = match kennel_lib_syscall::netlink::if_index(&cname) {
         Ok(i) => i,
         Err(e) => return Response::internal(errno_of(&e)),
     };
-    let result = match req.op {
-        Op::AddAddr => kennel_syscall::netlink::add_address(ifindex, req.addr, req.prefix),
-        _ => kennel_syscall::netlink::del_address(ifindex, req.addr, req.prefix),
-    };
-    match result {
+    // The only standalone address op is the teardown delete; the add is folded into construct.
+    match kennel_lib_syscall::netlink::del_address(ifindex, req.addr, req.prefix) {
         Ok(()) => Response::ok(),
         Err(e) => Response::internal(errno_of(&e)),
     }

@@ -12,7 +12,7 @@ After=kenneld.socket
 [Service]
 Type=simple
 # The libexec location (07-paths.md; matches the AppArmor profile attachment and
-# the kennel-config vendor default). install.sh rewrites this if relocated.
+# the kennel-lib-config vendor default). install.sh rewrites this if relocated.
 ExecStart=/usr/libexec/kennel/kenneld
 # Delegate this service's cgroup subtree to the daemon so it can create and
 # remove the per-kennel cgroups itself, unprivileged (07-paths.md
@@ -23,3 +23,10 @@ Delegate=yes
 # socket), /etc/kennel (allocation + trust store), and the privhelper.
 NoNewPrivileges=no
 Restart=on-failure
+# Aggregate host backstop for the whole delegated subtree (the daemon plus every
+# kennel): a runaway or hostile kennel cannot exhaust the host's task/fd budget.
+# Per-kennel isolation (pids.max / memory.max on each kennel cgroup, so one
+# kennel cannot starve another) is layered on top by the daemon at startup.
+# Generous, so legitimate parallel builds inside kennels are unaffected.
+TasksMax=8192
+LimitNOFILE=16384

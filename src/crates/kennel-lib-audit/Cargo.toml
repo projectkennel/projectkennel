@@ -1,0 +1,29 @@
+[package]
+name = "kennel-lib-audit"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel unified audit writer: the seam between event sources (BPF, netproxy, privhelper, spawn, kenneld) and sinks. Owns the canonical event envelope, one sanitisation pass, audit-level filtering, and fan-out to the file, stdout, syslog, and (optional) journald sinks."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The single content-sanitisation pass (CODING-STANDARDS.md §10.3/§10.4) every
+# sink inherits; see the `sanitise` note in `02-3-audit-schema.md`.
+kennel-lib-text = { path = "../kennel-lib-text" }
+# Only the journald sink needs FFI (sd_journal_sendv lives in kennel-lib-syscall,
+# the one crate permitted `unsafe`). Optional so the default build links no
+# libsystemd and pulls in no FFI surface.
+kennel-lib-syscall = { path = "../kennel-lib-syscall", optional = true }
+
+[features]
+default = []
+# The journald sink. Links libsystemd via kennel-lib-syscall's sd_journal_sendv FFI
+# and requires libsystemd at build/run time. Off by default: file, stdout, and
+# syslog sinks are always available and need no extra library.
+audit-journald = ["dep:kennel-lib-syscall", "kennel-lib-syscall/audit-journald"]
+
+[lints]
+workspace = true

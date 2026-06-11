@@ -1,4 +1,4 @@
-//! The per-user SSH bastion's lifecycle and key state (`docs/design/07-8-ssh.md` §7.8.2).
+//! The per-user SSH bastion's lifecycle and key state (`docs/design/07-10-ssh.md` §7.10.2).
 //!
 //! `kenneld` runs **one** `kennel-sshd` for the session, shared by all the user's
 //! kennels — a sibling daemon, not a per-kennel child like the egress proxy. This
@@ -27,7 +27,7 @@ use crate::sshd::{self, AuthSource, SshdParams};
 pub struct Edge {
     /// The kennel that owns this grant (the deregistration key).
     pub kennel: String,
-    /// The policy-fixed destination host (validated by `kennel_policy::ssh`).
+    /// The policy-fixed destination host (validated by `kennel_lib_policy::ssh`).
     pub dest: String,
     /// The real key's `SHA256:` fingerprint the bastion signs the outbound hop with.
     pub real_fp: String,
@@ -35,7 +35,7 @@ pub struct Edge {
     pub synthetic_pub: String,
 }
 
-/// A root-owned `AuthorizedKeysCommand` the bastion vends keys through (§7.8.7).
+/// A root-owned `AuthorizedKeysCommand` the bastion vends keys through (§7.10.7).
 ///
 /// The production source of truth: rather than write the forced-command bindings to
 /// a file the unprivileged user owns (and could rewrite without `kenneld` ever
@@ -60,7 +60,7 @@ pub struct BastionConfig {
     /// host key, config, pid, and `authorized_keys` — sshd's safe-path check
     /// rejects world-writable ancestors (08 §8.1, finding 3).
     pub dir: PathBuf,
-    /// The installed `kennel-ssh-reorigin` the forced commands invoke.
+    /// The installed `kennel-bin-ssh-reorigin` the forced commands invoke.
     pub reorigin_bin: PathBuf,
     /// The loopback address the bastion listens on (the egress proxy forwards here).
     pub listen: IpAddr,
@@ -70,7 +70,7 @@ pub struct BastionConfig {
     /// command via the config's `SetEnv`).
     pub agent_sock: Option<PathBuf>,
     /// The root-owned `AuthorizedKeysCommand` to vend keys through (production,
-    /// §7.8.7). `None` falls back to a static `AuthorizedKeysFile` the bastion-user
+    /// §7.10.7). `None` falls back to a static `AuthorizedKeysFile` the bastion-user
     /// owns — the prototype/e2e source, which writes the bindings to disk.
     pub akc: Option<Akc>,
 }
@@ -149,7 +149,7 @@ impl Bastion {
     }
 
     /// The forced-command `authorized_keys` line(s) for an offered public key,
-    /// looked up against the live edges (§7.8.7) — the query the root-owned
+    /// looked up against the live edges (§7.10.7) — the query the root-owned
     /// `AuthorizedKeysCommand` (`kennel-akc`) makes on each bastion auth.
     ///
     /// `offered_key` is the `"<type> <base64>"` sshd hands the helper (`%t %k`); the
@@ -321,7 +321,7 @@ mod tests {
     fn config() -> BastionConfig {
         BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
-            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-ssh-reorigin"),
+            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
             listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 7022,
             agent_sock: Some(PathBuf::from("/run/user/1000/agent.sock")),

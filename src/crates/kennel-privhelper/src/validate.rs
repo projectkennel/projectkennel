@@ -128,14 +128,6 @@ pub enum Refusal {
     InterfaceNotAllowed,
     /// The interface name exceeds the kernel's 15-character limit.
     InterfaceNameTooLong,
-    /// A `gid_map` request named a group the caller is not a member of — mapping
-    /// it would let the workload act as that group (an escalation).
-    GidNotMember {
-        /// The offending gid.
-        gid: u32,
-    },
-    /// A `gid_map` request carried no gids (an empty map cannot be written).
-    EmptyGidMap,
 }
 
 impl std::fmt::Display for Refusal {
@@ -162,43 +154,11 @@ impl std::fmt::Display for Refusal {
                     "interface name exceeds the {IFNAME_MAX}-character kernel limit"
                 )
             }
-            Self::GidNotMember { gid } => {
-                write!(
-                    f,
-                    "caller is not a member of group {gid}, so it may not be mapped"
-                )
-            }
-            Self::EmptyGidMap => write!(f, "gid_map request carried no gids"),
         }
     }
 }
 
 impl std::error::Error for Refusal {}
-
-/// Validate a `gid_map` request: every gid must be one the caller already holds.
-///
-/// `caller_groups` is the helper's own group set — its real gid plus its
-/// supplementary groups — which equals the invoking user's, since the helper is a
-/// child of `kenneld` (the user) and `setuid`/file-caps leave the gid set
-/// untouched. Mapping a gid the user is **not** in would let the workload act as
-/// that group outside the kennel (the map is identity), so it is refused. This is
-/// the security core of the op, independent of `kenneld`'s own membership check.
-///
-/// # Errors
-///
-/// [`Refusal::EmptyGidMap`] if `gids` is empty, or [`Refusal::GidNotMember`] for
-/// the first gid not in `caller_groups`.
-pub fn validate_gid_map(gids: &[u32], caller_groups: &[u32]) -> Result<(), Refusal> {
-    if gids.is_empty() {
-        return Err(Refusal::EmptyGidMap);
-    }
-    for &gid in gids {
-        if !caller_groups.contains(&gid) {
-            return Err(Refusal::GidNotMember { gid });
-        }
-    }
-    Ok(())
-}
 
 /// Validate an address request against the reserved scope.
 ///
@@ -477,27 +437,5 @@ mod tests {
             ),
             Err(Refusal::InterfaceNameTooLong)
         );
-    }
-
-    // ---- validate_gid_map ----
-
-    #[test]
-    fn gid_map_all_member_gids_ok() {
-        // The caller is in 1000 (primary), 20, 24; mapping a subset is allowed.
-        assert!(validate_gid_map(&[1000, 20], &[1000, 20, 24]).is_ok());
-    }
-
-    #[test]
-    fn gid_map_non_member_gid_is_refused() {
-        // 27 is not in the caller's set — mapping it would be an escalation.
-        assert_eq!(
-            validate_gid_map(&[1000, 27], &[1000, 20, 24]),
-            Err(Refusal::GidNotMember { gid: 27 })
-        );
-    }
-
-    #[test]
-    fn gid_map_empty_is_refused() {
-        assert_eq!(validate_gid_map(&[], &[1000]), Err(Refusal::EmptyGidMap));
     }
 }

@@ -4,7 +4,7 @@
 //! trust store is a directory of Ed25519 public keys — one `*.pub` file per
 //! signer, the file stem its key id and the contents its base64-encoded 32-byte
 //! public key. The **system** store comes from the root-owned deployment config
-//! ([`kennel_config::Deployment::trust_dir`], default `/etc/kennel/keys`, plus the
+//! ([`kennel_lib_config::Deployment::trust_dir`], default `/etc/kennel/keys`, plus the
 //! vendor `/usr/lib/kennel/keys`) — never a user/environment override.
 //!
 //! The trust split (`07-paths`): a **settled run policy** the daemon enforces may be
@@ -16,12 +16,12 @@
 //! separate, **system-only** trust enforced at compile time, never here. Loading a
 //! policy reads the file, verifies its single signature against the trust store,
 //! substitutes the per-instance placeholders, and translates the result into a
-//! [`Plan`] — all via [`kennel_spawn::prepare`].
+//! [`Plan`] — all via [`kennel_lib_spawn::prepare`].
 
 use std::path::{Path, PathBuf};
 
-use kennel_policy::KeySet;
-use kennel_spawn::{Plan, RuntimeSubstitutions};
+use kennel_lib_policy::KeySet;
+use kennel_lib_spawn::{Plan, RuntimeSubstitutions};
 
 use crate::server::{Loaded, PolicyLoader};
 
@@ -157,19 +157,21 @@ impl PolicyLoader for TrustStoreLoader {
             .current_keys()
             .map_err(|e| format!("reading trust store: {e}"))?;
         // Verify + substitute once; derive both artefacts from the one policy
-        // (the same steps `kennel_spawn::prepare` runs, kept open here so the net
+        // (the same steps `kennel_lib_spawn::prepare` runs, kept open here so the net
         // section is available to configure the egress proxy).
-        let verified = kennel_policy::verify_settled(&bytes, &keys).map_err(|e| e.to_string())?;
-        let substituted = kennel_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
+        let verified =
+            kennel_lib_policy::verify_settled(&bytes, &keys).map_err(|e| e.to_string())?;
+        let substituted =
+            kennel_lib_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
         let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
             .map_err(|e| e.to_string())?;
         // Resolve the policy's supplementary groups to GIDs and membership-check them
-        // (§7.2): kenneld runs as the operator, so a group the operator is not in is
+        // (§7.4): kenneld runs as the operator, so a group the operator is not in is
         // refused — the privileged seal could otherwise over-grant. The kennel always
         // drops to exactly this set (empty ⇒ no supplementary groups at all).
         let groups = resolve_groups(&substituted.identity.groups)?;
         plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
-        // Re-derive the exec.deny footgun warnings at load (§7.1.4): a deny that falls
+        // Re-derive the exec.deny footgun warnings at load (§7.3.4): a deny that falls
         // inside an allowed directory, or that is set without any allow, cannot be
         // enforced by the allow-only Landlock LSM. The `kennel compile` step already
         // warned, but an operator running a pre-compiled artefact never saw it — emit
@@ -184,6 +186,7 @@ impl PolicyLoader for TrustStoreLoader {
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
+        let binder = substituted.binder;
         let audit = substituted.audit;
         let env = substituted.env;
         Ok(Loaded {
@@ -193,6 +196,7 @@ impl PolicyLoader for TrustStoreLoader {
             net,
             ssh,
             unix,
+            binder,
             groups,
             audit,
             env,
@@ -205,14 +209,14 @@ impl PolicyLoader for TrustStoreLoader {
 }
 
 /// Resolve the policy's supplementary group names to `(name, gid)` pairs, refusing
-/// any the operator is not a member of (§7.2).
+/// any the operator is not a member of (§7.4).
 ///
 /// kenneld runs as the operator, so its own group set is the operator's. A name that
 /// does not resolve, or resolves to a group the operator does not hold, is a
 /// fail-closed error: the privileged seal `setgroups` could otherwise grant a group
 /// the operator lacks (privilege escalation). De-duplicated, order-preserving.
 fn resolve_groups(names: &[String]) -> Result<Vec<(String, u32)>, String> {
-    use kennel_syscall::unistd;
+    use kennel_lib_syscall::unistd;
     let real_gid = unistd::real_gid();
     let held = unistd::supplementary_groups();
     let mut out: Vec<(String, u32)> = Vec::new();
@@ -235,7 +239,7 @@ fn resolve_groups(names: &[String]) -> Result<Vec<(String, u32)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kennel_policy::SigningKey;
+    use kennel_lib_policy::SigningKey;
     use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -259,7 +263,7 @@ mod tests {
 
     /// Write a signer's public key as a `<key_id>.pub` base64 file in `dir`.
     fn write_pubkey(dir: &Path, key: &SigningKey) {
-        let b64 = kennel_policy::b64::encode(&key.public_key_bytes());
+        let b64 = kennel_lib_policy::b64::encode(&key.public_key_bytes());
         std::fs::write(dir.join(format!("{}.pub", key.key_id())), b64).expect("write pubkey");
     }
 
@@ -329,8 +333,8 @@ mod tests {
         assert_eq!(keys.len(), 2, "clashing id deduped; user-only added");
         assert!(keys.get("mine").is_some(), "user-only key is trusted");
         let got = keys.get("shared").expect("shared id present");
-        let got_b64 = kennel_policy::b64::encode(&**got);
-        let want_b64 = kennel_policy::b64::encode(&sys_key.public_key_bytes());
+        let got_b64 = kennel_lib_policy::b64::encode(&**got);
+        let want_b64 = kennel_lib_policy::b64::encode(&sys_key.public_key_bytes());
         assert_eq!(got_b64, want_b64, "the system key wins the id clash");
 
         let _ = std::fs::remove_dir_all(&system);

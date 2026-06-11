@@ -1,0 +1,20 @@
+[package]
+name = "facade-ssh"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel ssh ProxyCommand: the tiny stdio dialer a confined kennel uses to reach the SSH bastion. A kennel has no network path off its loopback (per-kennel net-ns); this issues an INet CONNECT_INET transaction to kenneld over binder, receives the connection fd, and splices it to stdin/stdout — the same gateway every other egress crosses."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "facade-ssh"
+path = "src/main.rs"

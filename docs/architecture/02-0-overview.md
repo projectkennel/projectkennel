@@ -1,6 +1,6 @@
 # API surfaces — overview
 
-Project Kennel exposes several distinct APIs, each with its own stability commitment, its own versioning mechanism, and its own audience. This chapter is the *principle* layer: what we mean by an API, how the surfaces relate, and what discipline applies to changing them. Concrete syntax, schemas, wire formats, and field-by-field details are in the sub-chapters (`02-1` through `02-6`).
+Project Kennel exposes several distinct APIs, each with its own stability commitment, its own versioning mechanism, and its own audience. This chapter is the *principle* layer: what we mean by an API, how the surfaces relate, and what discipline applies to changing them. Concrete syntax, schemas, wire formats, and field-by-field details are in the sub-chapters (`02-1` through `02-8`).
 
 ---
 
@@ -40,9 +40,11 @@ May change between minor versions, but the project ensures internal consistency 
 
 | Surface | Sub-chapter |
 |---|---|
-| Privhelper IPC wire format | `02-4-ipc.md` |
-| kenneld control protocol | `02-4-ipc.md` |
-| BPF map ABI and ringbuf event format | `02-5-bpf-abi.md` |
+| Binder IPC — the inter-namespace gateway, kenneld as context manager | `02-4-binder.md` |
+| Network over binder (`org.projectkennel.INet`, roadmap) | `02-5-binder-net.md` |
+| Privhelper IPC wire format | `02-6-ipc.md` |
+| kenneld control protocol | `02-6-ipc.md` |
+| BPF map ABI and ringbuf event format | `02-7-bpf-abi.md` |
 
 ### Unstable
 
@@ -50,7 +52,7 @@ No commitment. Documented for review and audit (these are the review boundaries 
 
 | Surface | Sub-chapter |
 |---|---|
-| Crate-to-crate Rust public APIs | `02-6-internal-api.md` |
+| Crate-to-crate Rust public APIs | `02-8-internal-api.md` |
 
 ---
 
@@ -117,6 +119,7 @@ Changes to unstable surfaces (the crate-to-crate Rust API) are governed by the n
 - The concrete CLI subcommand list and flag semantics: `02-1-cli.md`.
 - The policy TOML schema definitions and template inheritance rules: `02-2-config-schema.md`.
 - The audit event types, fields, and `schema_version` evolution rules: `02-3-audit-schema.md`.
-- The privhelper request/response wire format and the kenneld control protocol: `02-4-ipc.md`.
-- The BPF map type declarations, attach points, and ringbuf event format: `02-5-bpf-abi.md`.
-- The crate public-API surfaces: `02-6-internal-api.md`.
+- The binder gateway contract — binderfs lifecycle, kenneld as context manager, the registry and facades, the construction/lifecycle plane: `02-4-binder.md`; the network-over-binder layer (roadmap): `02-5-binder-net.md`.
+- The privhelper request/response wire format and the kenneld control protocol: `02-6-ipc.md`.
+- The BPF map type declarations, attach points, and ringbuf event format: `02-7-bpf-abi.md`.
+- The crate public-API surfaces: `02-8-internal-api.md`.

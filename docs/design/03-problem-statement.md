@@ -44,6 +44,8 @@ None of these constitutes an organisational security posture, for three reasons 
 
 Project Kennel enforces at the kernel layer, with policy expressed in a vocabulary independent of any specific tool. The mechanism is the same whether the workload is Claude Code, Codex, a container, an npm install, or an MCP server. The policy is the same. The audit log is the same. The tool is interchangeable; the security posture is durable.
 
+Enforcement at the kernel layer also means the enforcement boundary cannot live in the same process as the workload it confines. A kennel is built inside its own namespaces and reaches anything outside them through exactly one kernel-mediated channel: a per-kennel binder bus whose context manager is the Project Kennel daemon, not the workload. That single mediated boundary is load-bearing — it is how the kennel is constructed and supervised, and how every grant the policy permits (a connected socket, a filtered D-Bus call, an inter-kennel service) is delivered, per call, with kernel-stamped caller identity the workload cannot forge. The application-layer-enforcement failure of per-tool sandboxes — policy in the process that the project files can already drive (CVE-2025-59536 and kin) — has no analogue here, because the deciding party is on the other side of a boundary the workload cannot cross from inside.
+
 ## 3.4 Scope
 
 In scope:

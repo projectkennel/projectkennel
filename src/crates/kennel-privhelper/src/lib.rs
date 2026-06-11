@@ -7,7 +7,7 @@
 //! within Project Kennel's reserved scope, performs the privileged operation,
 //! and exits. The privileged operations are: adding and removing per-kennel
 //! loopback addresses, and creating and deleting per-kennel cgroups
-//! (docs/architecture/01-process-model.md, 02-4-ipc.md).
+//! (docs/architecture/01-process-model.md, 02-6-ipc.md).
 //!
 //! This library holds the parts that are platform-independent and fully
 //! testable on any host: principally the request *validation* core
@@ -40,6 +40,7 @@
 pub mod addr;
 pub mod alloc;
 pub mod client;
+pub mod construct;
 pub mod exec;
 pub mod validate;
 pub mod wire;

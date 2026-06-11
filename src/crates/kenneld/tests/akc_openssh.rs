@@ -1,4 +1,4 @@
-//! Root-gated end-to-end proof of the production key source (§7.8.7): **stock
+//! Root-gated end-to-end proof of the production key source (§7.10.7): **stock
 //! OpenSSH, configured with the root-owned `AuthorizedKeysCommand`, authorises
 //! exactly the synthetic key bound to a live edge — by querying the running daemon**.
 //!
@@ -22,11 +22,11 @@
 //! production. Built/run like the other root test:
 //!
 //! ```text
-//! cargo test -p kenneld --features root-tests --no-run
+//! cargo test -p kenneld --features e2e --no-run
 //! sudo -E ./target/debug/deps/akc_openssh-<hash>
 //! ```
 
-#![cfg(feature = "root-tests")]
+#![cfg(feature = "e2e")]
 
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::os::unix::fs::PermissionsExt as _;
@@ -133,7 +133,7 @@ fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
 /// reason) when the proof cannot run here. Also prepares the privsep dir and pins the
 /// control-socket path to /run/user/0 (where the env-scrubbed AKC will look).
 fn preflight() -> Option<String> {
-    if kennel_syscall::unistd::real_uid() != 0 {
+    if kennel_lib_syscall::unistd::real_uid() != 0 {
         eprintln!("SKIP: must run as root (sudo) — the AKC binary must be root-owned");
         return None;
     }

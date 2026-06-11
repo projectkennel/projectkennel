@@ -5,14 +5,14 @@
 //! versions are wrong for a kennel (they point DNS at the host resolver, map
 //! `localhost` to the host's `127.0.0.1`, and list the host's users), so kenneld
 //! renders synthetic versions and the spawn binds them over `/etc/<file>` in the
-//! kennel's mount namespace (the "shadow" of `docs/design/07-3-network.md` §7.3.5/§7.3.10).
+//! kennel's mount namespace (the "shadow" of `docs/design/07-5-network.md` §7.5.5/§7.5.10).
 //!
 //! The set:
 //! - `hosts` — `localhost` → the kennel's own primary address (so the kennel's own
-//!   bound dev servers are reachable as `localhost`, §7.3.10), plus its hostname.
+//!   bound dev servers are reachable as `localhost`, §7.5.10), plus its hostname.
 //! - `resolv.conf` — points at the proxy address and fails fast; the kennel does
 //!   no direct DNS (cgroup BPF denies it), clients use `socks5h` so the proxy
-//!   resolves (§7.3.5).
+//!   resolves (§7.5.5).
 //! - `nsswitch.conf` — `files` for everything, `files dns` for hosts (the standard
 //!   order; `dns` is inert in-kennel but harmless).
 //! - `services`, `protocols` — the common IANA entries, so name↔number lookups
@@ -20,12 +20,12 @@
 //! - `passwd`, `group` — minimal synthetic entries for the kennel's uid/gid (so
 //!   `getpwuid` resolves `$HOME`/shell/name) without leaking the host's user list.
 //! - `host.conf` — the legacy `multi on`.
-//! - `profile`, `bash.bashrc` — the system shell-init files (§7.7.2a): a sane
+//! - `profile`, `bash.bashrc` — the system shell-init files (§7.9.2a): a sane
 //!   `umask` and a kennel-identifying prompt; read-only, rebuilt each spawn.
 //!
 //! Rendering is pure and unit-tested; [`materialize`] writes the set to a staging
 //! directory the spawn then bind-mounts. [`materialize_home_dotfiles`] does the same
-//! for the user shell-init dotfiles (`~/.bashrc`, `~/.profile`, §7.7.2a), which are
+//! for the user shell-init dotfiles (`~/.bashrc`, `~/.profile`, §7.9.2a), which are
 //! copied into the kennel home and reconstructed each spawn.
 
 use std::io;
@@ -67,11 +67,11 @@ pub struct EtcParams<'a> {
     /// the operator's real home (which would re-leak the identity the account name
     /// mask hides). The `passwd` entry's home field.
     pub home: &'a Path,
-    /// The granted supplementary groups `(name, gid)` (§7.2): resolved + membership-
+    /// The granted supplementary groups `(name, gid)` (§7.4): resolved + membership-
     /// checked by `kenneld`, named in `/etc/group` so `id` shows names not bare
     /// numbers. These are exactly the gids the seal `setgroups` to. Empty by default.
     pub groups: &'a [(String, u32)],
-    /// The kennel's login shell (§7.7.2a): the `passwd` `pw_shell` field. `/bin/sh`
+    /// The kennel's login shell (§7.9.2a): the `passwd` `pw_shell` field. `/bin/sh`
     /// unless the policy set `[exec].shell`.
     pub shell: &'a str,
     /// The kennel's primary IPv4 address, if it has one.
@@ -91,7 +91,7 @@ impl EtcParams<'_> {
 /// `/etc/hosts` — `localhost` maps to the kennel's own primary address.
 ///
 /// So a tool checking `localhost:<port>` reaches the kennel's bound service rather
-/// than the host's loopback (`docs/design/07-3-network.md` §7.3.10). The hostname maps
+/// than the host's loopback (`docs/design/07-5-network.md` §7.5.10). The hostname maps
 /// there too.
 #[must_use]
 pub fn hosts(p: &EtcParams<'_>) -> String {
@@ -167,7 +167,7 @@ pub fn passwd(p: &EtcParams<'_>) -> String {
 ///
 /// The workload's gid resolves to `kennel`. Inherited *supplementary* gids are not
 /// listed here, so they appear in `id` as bare numbers; dropping them entirely is the
-/// group-isolation hardening (needs privilege/userns, §7.2.8).
+/// group-isolation hardening (needs privilege/userns, §7.4.8).
 #[must_use]
 pub fn group(p: &EtcParams<'_>) -> String {
     use std::fmt::Write as _;
@@ -264,29 +264,29 @@ pub fn render(name: &str, p: &EtcParams<'_>) -> Option<String> {
     Some(body)
 }
 
-/// `/etc/profile` — the system-level POSIX login-shell init (§7.7.2a).
+/// `/etc/profile` — the system-level POSIX login-shell init (§7.9.2a).
 ///
 /// Synthesised, read-only, and rebuilt every spawn (never a persistence surface).
 /// It only sets a sane `umask` and sources `/etc/bash.bashrc` for bash; `PATH` and
 /// the rest of the environment are already synthesised into the workload's `envp`
-/// (§7.7.2), so this deliberately does not set them.
+/// (§7.9.2), so this deliberately does not set them.
 #[must_use]
 pub const fn profile() -> &'static str {
-    "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Read-only; rebuilt each spawn.\n\
+    "# Synthesised by Project Kennel (07-9-other.md §7.9.2a). Read-only; rebuilt each spawn.\n\
      umask 022\n\
      if [ -n \"${BASH_VERSION-}\" ] && [ -r /etc/bash.bashrc ]; then\n\
      \t. /etc/bash.bashrc\n\
      fi\n"
 }
 
-/// `/etc/bash.bashrc` — the system-level interactive-bash init (§7.7.2a).
+/// `/etc/bash.bashrc` — the system-level interactive-bash init (§7.9.2a).
 ///
 /// Sets a kennel-identifying prompt so an interactive shell is visibly inside the
 /// kennel. Synthesised, read-only, rebuilt every spawn.
 #[must_use]
 pub fn bash_bashrc(p: &EtcParams<'_>) -> String {
     format!(
-        "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Read-only; rebuilt each spawn.\n\
+        "# Synthesised by Project Kennel (07-9-other.md §7.9.2a). Read-only; rebuilt each spawn.\n\
          case $- in *i*) ;; *) return ;; esac\n\
          PS1='[kennel:{host} \\w]\\$ '\n",
         host = p.hostname,
@@ -312,7 +312,7 @@ pub fn materialize(dir: &Path, p: &EtcParams<'_>) -> io::Result<Vec<(PathBuf, Pa
     Ok(binds)
 }
 
-/// The default user shell-init dotfiles synthesised into the kennel home (§7.7.2a).
+/// The default user shell-init dotfiles synthesised into the kennel home (§7.9.2a).
 ///
 /// Thin shims that source the (also-synthesised, reconstructed) system rc, so the
 /// real prompt/`umask`/etc. live in `/etc/profile` + `/etc/bash.bashrc` and these
@@ -320,18 +320,18 @@ pub fn materialize(dir: &Path, p: &EtcParams<'_>) -> io::Result<Vec<(PathBuf, Pa
 const HOME_DOTFILES: &[(&str, &str)] = &[
     (
         ".profile",
-        "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Rebuilt each spawn.\n\
+        "# Synthesised by Project Kennel (07-9-other.md §7.9.2a). Rebuilt each spawn.\n\
          [ -r /etc/profile ] && . /etc/profile\n",
     ),
     (
         ".bashrc",
-        "# Synthesised by Project Kennel (07-7-other.md §7.7.2a). Rebuilt each spawn.\n\
+        "# Synthesised by Project Kennel (07-9-other.md §7.9.2a). Rebuilt each spawn.\n\
          [ -r /etc/bash.bashrc ] && . /etc/bash.bashrc\n",
     ),
 ];
 
 /// Synthesise the user shell-init dotfiles into `dir`, returning the
-/// `(source, <home>/<name>)` binds the spawn copies into the kennel home (§7.7.2a).
+/// `(source, <home>/<name>)` binds the spawn copies into the kennel home (§7.9.2a).
 ///
 /// Reconstructed every spawn (the view root is a fresh tmpfs), so a workload's edits
 /// within a run never persist — no self-poisoning surface. A dotfile whose name is in
@@ -361,7 +361,7 @@ pub fn materialize_home_dotfiles(
 
 /// The vanilla TLS + dynamic-linker `/etc` subtrees that exist on this host.
 ///
-/// Returned as the subset present on the host (§7.2.5, the "complete-but-vanilla"
+/// Returned as the subset present on the host (§7.4.5, the "complete-but-vanilla"
 /// `/etc`): the files a confined workload needs for TLS and dynamic linking.
 /// The synthetic set ([`materialize`]) covers the libc/NSS files that must be
 /// scrubbed (passwd/group/hosts/…). These, by contrast, are package-managed

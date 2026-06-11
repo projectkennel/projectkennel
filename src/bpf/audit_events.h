@@ -1,5 +1,5 @@
 /*
- * Project Kennel BPF audit-event ABI (architecture/02-5-bpf-abi.md).
+ * Project Kennel BPF audit-event ABI (architecture/02-7-bpf-abi.md).
  *
  * Events are packed structs written to the shared audit ringbuf. kenneld
  * drains them, resolves the kennel from ctx_byte, sanitises any strings, and

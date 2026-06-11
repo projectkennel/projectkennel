@@ -1,23 +1,23 @@
 //! The per-kennel audit writer kenneld builds, and the events it emits.
 //!
-//! kenneld constructs the `kennel-audit` writer from the settled
+//! kenneld constructs the `kennel-lib-audit` writer from the settled
 //! [`AuditRuntime`] and records lifecycle events through it (`02-3`).
 //! kenneld is one userspace audit *source* (daemon and kennel lifecycle); the
 //! netproxy is the other. Sink/writer assembly is shared via
-//! [`kennel_audit::build`]; kenneld maps the settled runtime onto it.
+//! [`kennel_lib_audit::build`]; kenneld maps the settled runtime onto it.
 
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use kennel_audit::build::{writer, SinkConfig};
-use kennel_audit::{
+use kennel_lib_audit::build::{writer, SinkConfig};
+use kennel_lib_audit::{
     Event, Level, Levels, Outcome, Resource, SinkKind, Source, Value, Writer, WriterContext,
 };
-use kennel_policy::{AuditRuntime, AuditSinkKind};
+use kennel_lib_policy::{AuditRuntime, AuditSinkKind};
 use kennel_privhelper::exec::refusal_message;
-use kennel_privhelper::wire::{EgressPayload, Response, Status};
+use kennel_privhelper::wire::{Response, Status};
 
 use crate::Privileged;
 
@@ -33,8 +33,8 @@ pub fn kennel_uuid() -> String {
         .ok()
         .and_then(|d| u64::try_from(d.as_millis()).ok())
         .unwrap_or(0);
-    let rand = kennel_syscall::random::bytes::<10>().unwrap_or([0_u8; 10]);
-    kennel_audit::format_uuid_v7(ms, rand)
+    let rand = kennel_lib_syscall::random::bytes::<10>().unwrap_or([0_u8; 10]);
+    kennel_lib_audit::format_uuid_v7(ms, rand)
 }
 
 /// Build the writer for a kennel from the settled `runtime`.
@@ -53,7 +53,7 @@ pub fn build_writer(
     let ctx = WriterContext {
         kennel: name.to_owned(),
         kennel_uuid,
-        host: kennel_audit::hostname(),
+        host: kennel_lib_audit::hostname(),
     };
     let cfg = SinkConfig {
         kinds: runtime.sinks.iter().map(|k| sink_kind(*k)).collect(),
@@ -67,6 +67,22 @@ pub fn build_writer(
         syslog_facility: runtime.syslog_facility.clone(),
     };
     writer(ctx, levels_from(runtime), &cfg)
+}
+
+/// A writer with **no sinks** — discards every event.
+///
+/// Used when a kennel has no audit state directory configured: every kennel now runs the
+/// factory + binder bus (`07-1`), so the registry/lifecycle always needs *a* writer, but
+/// with nothing to write to it is a sink-less drain. (Empty `SinkConfig.kinds` would default
+/// to the file sink, so this uses the lower-level `Writer::new` with an empty sink vector.)
+#[must_use]
+pub fn noop_writer(name: &str, kennel_uuid: String) -> Writer {
+    let ctx = WriterContext {
+        kennel: name.to_owned(),
+        kennel_uuid,
+        host: kennel_lib_audit::hostname(),
+    };
+    Writer::new(ctx, Levels::default(), Vec::new())
 }
 
 /// The maximum size of an `audit.toml` defaults file (a sanity guard).
@@ -91,23 +107,23 @@ fn overlay_files(paths: &[PathBuf]) -> AuditRuntime {
             Ok(m) => m.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                eprintln!("kennel-audit: cannot stat {}: {e}", path.display());
+                eprintln!("kennel-lib-audit: cannot stat {}: {e}", path.display());
                 continue;
             }
         };
         if len > MAX_AUDIT_TOML {
             eprintln!(
-                "kennel-audit: ignoring {} ({len} bytes exceeds the {MAX_AUDIT_TOML}-byte limit)",
+                "kennel-lib-audit: ignoring {} ({len} bytes exceeds the {MAX_AUDIT_TOML}-byte limit)",
                 path.display()
             );
             continue;
         }
         match std::fs::read_to_string(path) {
-            Ok(toml) => match kennel_policy::parse_audit_defaults(&toml) {
+            Ok(toml) => match kennel_lib_policy::parse_audit_defaults(&toml) {
                 Ok(rt) => defaults = defaults.overlay(&rt),
-                Err(e) => eprintln!("kennel-audit: ignoring {}: {e}", path.display()),
+                Err(e) => eprintln!("kennel-lib-audit: ignoring {}: {e}", path.display()),
             },
-            Err(e) => eprintln!("kennel-audit: cannot read {}: {e}", path.display()),
+            Err(e) => eprintln!("kennel-lib-audit: cannot read {}: {e}", path.display()),
         }
     }
     defaults
@@ -205,22 +221,6 @@ pub fn kennel_exit(reason: &'static str) -> Event {
         Source::Kenneld,
     )
     .field("reason", Value::str(reason))
-}
-
-/// `lifecycle.ttl-expired`: a kennel's TTL elapsed (§9.7).
-///
-/// `stage` records what the reaper did — `warn`/`renew` (left running),
-/// `terminating` (SIGTERM sent, grace started), or `killed` (SIGKILL after grace).
-#[must_use]
-pub fn ttl_expired(pid: u32, stage: &'static str) -> Event {
-    Event::new(
-        "lifecycle.ttl-expired",
-        Resource::Lifecycle,
-        Outcome::Info,
-        Source::Kenneld,
-    )
-    .pid(pid)
-    .field("stage", Value::str(stage))
 }
 
 /// `priv.invoke`: a privileged operation the helper performed (`02-3`).
@@ -331,29 +331,7 @@ fn addr_params(ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Value {
     ])
 }
 
-fn count(n: usize) -> Value {
-    Value::Uint(u64::try_from(n).unwrap_or(u64::MAX))
-}
-
 impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
-    fn add_address(
-        &self,
-        ctx: u16,
-        interface: &str,
-        addr: IpAddr,
-        prefix: u8,
-    ) -> io::Result<Response> {
-        let started = Instant::now();
-        let result = self.inner.add_address(ctx, interface, addr, prefix);
-        self.record(
-            "add-addr",
-            addr_params(ctx, interface, addr, prefix),
-            started,
-            &result,
-        );
-        result
-    }
-
     fn del_address(
         &self,
         ctx: u16,
@@ -372,32 +350,21 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
         result
     }
 
-    fn setup_egress(&self, cgroup: &Path, payload: &EgressPayload) -> io::Result<Response> {
-        let started = Instant::now();
-        let result = self.inner.setup_egress(cgroup, payload);
-        let params = Value::object(vec![
-            ("cgroup", Value::str(cgroup.display().to_string())),
-            ("allow_v4", count(payload.allow_v4.len())),
-            ("deny_v4", count(payload.deny_v4.len())),
-            ("allow_v6", count(payload.allow_v6.len())),
-            ("deny_v6", count(payload.deny_v6.len())),
-        ]);
-        self.record("setup-egress", params, started, &result);
-        result
-    }
-
-    fn set_gid_map(&self, pid: u32, gids: &[u32]) -> io::Result<Response> {
-        let started = Instant::now();
-        let result = self.inner.set_gid_map(pid, gids);
-        let params = Value::object(vec![
-            ("pid", Value::Uint(u64::from(pid))),
-            (
-                "gids",
-                Value::Array(gids.iter().map(|g| Value::Uint(u64::from(*g))).collect()),
-            ),
-        ]);
-        self.record("set-gid-map", params, started, &result);
-        result
+    /// Forward factory construction to the inner privhelper.
+    ///
+    /// Not recorded as a `priv.*` event here: construction is a long-lived process whose
+    /// outcome is the kennel's exit status, audited through the lifecycle chain, not a single
+    /// request/response op. Without this forward the decorator falls through to the trait
+    /// default and refuses the factory — which is exactly the production path `run_kennel`
+    /// takes (so the decorator, not just the raw helper, must support it).
+    fn construct_kennel(
+        &self,
+        construction_half: &[u8],
+        egress: Option<&[u8]>,
+        pty_fd: Option<std::os::fd::RawFd>,
+    ) -> io::Result<(std::process::Child, i32, std::os::fd::OwnedFd)> {
+        self.inner
+            .construct_kennel(construction_half, egress, pty_fd)
     }
 }
 
@@ -408,16 +375,7 @@ mod tests {
     /// A `Privileged` that returns one fixed response for every operation.
     struct FixedPriv(Response);
     impl Privileged for FixedPriv {
-        fn add_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
-            Ok(self.0)
-        }
         fn del_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
-            Ok(self.0)
-        }
-        fn setup_egress(&self, _: &Path, _: &EgressPayload) -> io::Result<Response> {
-            Ok(self.0)
-        }
-        fn set_gid_map(&self, _: u32, _: &[u32]) -> io::Result<Response> {
             Ok(self.0)
         }
     }
@@ -504,16 +462,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let writer = build_writer("ai-coding", &dir, &AuditRuntime::default(), "u7".to_owned());
 
-        // A refusal (code 2 = AddrOutOfScope) on add_address.
+        // A refusal (code 2 = AddrOutOfScope) on del_address (the one standalone priv op left).
         let refusing = FixedPriv(Response::refused(2));
         let audited = AuditedPrivileged::new(&refusing, Some(&writer));
         let addr = "127.0.0.1".parse::<IpAddr>().expect("addr");
-        let _ = audited.add_address(7, "lo", addr, 28);
+        let _ = audited.del_address(7, "lo", addr, 28);
 
-        // A success on set_gid_map.
+        // A success (invoke) on del_address.
         let ok = FixedPriv(Response::ok());
         let audited_ok = AuditedPrivileged::new(&ok, Some(&writer));
-        let _ = audited_ok.set_gid_map(1234, &[20, 44]);
+        let _ = audited_ok.del_address(8, "lo", addr, 28);
 
         // Dropping the writer joins the buffered sink so priv.jsonl is flushed.
         drop(writer);
@@ -521,18 +479,12 @@ mod tests {
 
         assert!(body.contains(r#""event":"priv.refuse""#), "{body}");
         assert!(body.contains(r#""source":"privhelper""#), "{body}");
-        assert!(body.contains(r#""operation":"add-addr""#), "{body}");
+        assert!(body.contains(r#""operation":"del-addr""#), "{body}");
         assert!(body.contains(r#""code":2"#), "{body}");
         assert!(body.contains("reserved per-kennel subnet"), "{body}");
         assert!(body.contains(r#""params":{"ctx":7,"#), "{body}");
         assert!(body.contains(r#""addr":"127.0.0.1""#), "{body}");
-
         assert!(body.contains(r#""event":"priv.invoke""#), "{body}");
-        assert!(body.contains(r#""operation":"set-gid-map""#), "{body}");
-        assert!(
-            body.contains(r#""params":{"pid":1234,"gids":[20,44]}"#),
-            "{body}"
-        );
         assert!(body.contains(r#""duration_ms":"#), "{body}");
         let _ = std::fs::remove_dir_all(&dir);
     }

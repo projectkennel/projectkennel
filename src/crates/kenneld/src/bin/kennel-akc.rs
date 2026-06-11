@@ -1,4 +1,4 @@
-//! `kennel-akc` — the bastion's root-owned `AuthorizedKeysCommand` (§7.8.7).
+//! `kennel-akc` — the bastion's root-owned `AuthorizedKeysCommand` (§7.10.7).
 //!
 //! OpenSSH `sshd` invokes this on every bastion authentication, passing the offered
 //! public key as `%t %k` (its type and base64 blob). The helper asks the **running**

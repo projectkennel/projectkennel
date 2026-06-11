@@ -15,50 +15,53 @@
 #![forbid(unsafe_code)]
 
 use std::io::{Read as _, Write as _};
+use std::os::fd::AsFd as _;
 use std::process::ExitCode;
 
-use kennel_privhelper::wire::{
-    EgressPayload, GidMapPayload, Op, Request, Response, Status, REQUEST_LEN,
-};
-use kennel_privhelper::{alloc, exec};
+use kennel_privhelper::wire::{Request, Response, Status, REQUEST_LEN};
+use kennel_privhelper::{alloc, construct, exec};
 
 fn main() -> ExitCode {
+    // Scrub the inherited environment before anything else. The helper runs privileged and
+    // takes no decision from the environment — identity is the kernel-stamped real uid and
+    // trust comes from root-owned config/allocation files — so a caller-controlled variable
+    // must not steer its runtime (panic verbosity, allocator tuning) nor leak onward (sec
+    // review: ambient environment). The kernel already strips LD_*; this clears the rest.
+    // `vars_os` is a snapshot, so removing during iteration is sound.
+    for (key, _) in std::env::vars_os() {
+        std::env::remove_var(key);
+    }
+
+    // The factory mode (`07-2`): kenneld invokes `kennel-privhelper construct` with a
+    // SOCK_SEQPACKET socket as stdin. It passes fds (so not the one-shot stdin/stdout framing
+    // below) and exits as soon as it has built the kennel and reported the init pid — it is not
+    // a reaper proxy; kenneld (a subreaper) adopts and waits the orphaned `kennel-bin-init`.
+    if std::env::args().nth(1).as_deref() == Some("construct") {
+        // Gate the factory on the caller holding a subkennel allocation, exactly as every
+        // one-shot op is gated below: an unallocated user performs no privileged operation
+        // (module docs). The factory replies over the SEQPACKET, not the stdout framing, so a
+        // refusal is a non-zero exit — kenneld sees the helper die without sending a pid.
+        if alloc::load(kennel_lib_syscall::unistd::real_uid()).is_none() {
+            eprintln!(
+                "kennel-privhelper: refusing `construct`: caller has no /etc/kennel/subkennel allocation"
+            );
+            return ExitCode::from(1);
+        }
+        construct::run_construct(std::io::stdin().as_fd());
+    }
     let mut buf = Vec::new();
     if std::io::stdin().read_to_end(&mut buf).is_err() {
         return respond(Response::protocol());
     }
-    // The fixed request is always the first REQUEST_LEN bytes.
+    // The one-shot path serves a single fixed-size request — the teardown `DelAddr` (the
+    // address add + egress attach are folded into the `construct` op above).
     let head = buf.get(..REQUEST_LEN).unwrap_or(&buf);
     let Ok(request) = Request::decode(head) else {
         return respond(Response::protocol());
     };
-    // SetupEgress and SetGidMap each carry a variable-length payload appended after
-    // the fixed request; the tail is parsed per op.
-    let tail = buf.get(REQUEST_LEN..).unwrap_or(&[]);
-    let egress = if request.op == Op::SetupEgress {
-        match EgressPayload::decode(tail) {
-            Ok(p) => Some(p),
-            Err(_) => return respond(Response::protocol()),
-        }
-    } else {
-        None
-    };
-    let gidmap = if request.op == Op::SetGidMap {
-        match GidMapPayload::decode(tail) {
-            Ok(p) => Some(p),
-            Err(_) => return respond(Response::protocol()),
-        }
-    } else {
-        None
-    };
     // The caller's real UID is the trusted identity; look up its allocation.
-    let scope = alloc::load(kennel_syscall::unistd::real_uid());
-    respond(exec::perform(
-        &request,
-        egress.as_ref(),
-        gidmap.as_ref(),
-        scope.as_ref(),
-    ))
+    let scope = alloc::load(kennel_lib_syscall::unistd::real_uid());
+    respond(exec::perform(&request, scope.as_ref()))
 }
 
 /// Write the response and map its status to the process exit code (matching the

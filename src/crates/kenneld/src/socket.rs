@@ -17,7 +17,12 @@ use std::path::PathBuf;
 #[must_use]
 pub fn runtime_dir() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
-        || PathBuf::from(format!("/run/user/{}", kennel_syscall::unistd::real_uid())),
+        || {
+            PathBuf::from(format!(
+                "/run/user/{}",
+                kennel_lib_syscall::unistd::real_uid()
+            ))
+        },
         PathBuf::from,
     );
     runtime.join("kennel")
@@ -36,7 +41,7 @@ pub fn socket_path() -> PathBuf {
 /// An OS error if creating the socket directory, removing a stale socket, or
 /// binding fails.
 pub fn listener() -> io::Result<UnixListener> {
-    if let Some(fd) = kennel_syscall::listenfd::take_listener() {
+    if let Some(fd) = kennel_lib_syscall::listenfd::take_listener() {
         return Ok(UnixListener::from(fd));
     }
     bind(&socket_path())

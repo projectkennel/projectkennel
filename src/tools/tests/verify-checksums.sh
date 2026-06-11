@@ -37,7 +37,7 @@ make_fixture() {
 		cat >"$dir/Cargo.lock" <<-EOF
 			version = 4
 			[[package]]
-			name = "kennel-text"
+			name = "kennel-lib-text"
 			version = "0.0.0"
 		EOF
 		return
@@ -70,7 +70,7 @@ make_fixture() {
 		checksum = "$sha"
 
 		[[package]]
-		name = "kennel-text"
+		name = "kennel-lib-text"
 		version = "0.0.0"
 	EOF
 }

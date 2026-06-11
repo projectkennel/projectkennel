@@ -121,7 +121,7 @@ Some sections in §7 use single-bracket TOML tables rather than arrays (`[fs.tmp
 
 ## 5.4 Template substitution variables
 
-Template policies may reference variables that are expanded at kennel-spawn time. Project Kennel substitutes these before applying the policy:
+Template policies may reference variables that are expanded at kennel-lib-spawn time. Project Kennel substitutes these before applying the policy:
 
 | Variable | Expands to |
 |---|---|
@@ -143,7 +143,7 @@ log_path = "~/.local/state/kennel/<kennel>/network.jsonl"
 SSH_AUTH_SOCK = "/run/kennel/<kennel>/home/.ssh/agent.sock"
 ```
 
-The proxy listener address cannot be assembled by lexical substitution: under the bit-packed address scheme (§7.3.2) the kennel's subnet is computed from `<tag>` and `<ctx>`, so the address is not octet-aligned. The config names only the host offset and port within the kennel's own subnet; Project Kennel computes the full address.
+The proxy listener address cannot be assembled by lexical substitution: under the bit-packed address scheme (§7.5.2) the kennel's subnet is computed from `<tag>` and `<ctx>`, so the address is not octet-aligned. The config names only the host offset and port within the kennel's own subnet; Project Kennel computes the full address.
 
 The substitution is purely lexical and happens before validation. Project Kennel refuses to spawn a kennel if any unsubstituted variable remains in the effective policy. User policies typically do not need to use these substitution variables directly; they appear in template-level rules where the template author knows that kennel-specific values are needed.
 
@@ -222,7 +222,7 @@ The minimum viable set of templates, each maintained as a first-class artefact:
 
 | Template | Purpose | Defends | Notable residuals |
 |---|---|---|---|
-| `base-confined` | The root of all confined templates. Deny-by-default across exec/fs/net: `no_new_privs`, deny setuid/setgid/setcap, empty `exec.allow` (runs nothing), no abstract unix sockets, the cloud-metadata + link-local invariant denies (RFC1918 stays reachable), a system read baseline + the compile-time `[lib]` closure filter. | T3.1, T2.7, baseline against T1.6 | Cannot be used directly (no exec/project scope) |
+| `base-confined` | The root of all confined templates. Deny-by-default across exec/fs/net: `no_new_privs`, deny setuid/setgid/setcap, empty `exec.allow` (runs nothing), no abstract unix sockets, the cloud-metadata + link-local invariant denies (RFC1918 stays reachable), a system read baseline covering the lib dirs (libraries load via READ — no `[lib]` execute-allowlist, §7.3.7). | T3.1, T2.7, baseline against T1.6 | Cannot be used directly (no exec/project scope) |
 | `ai-coding-strict` | AI agent on a single project. Worked example in `TEMPLATE-ai-coding-strict.md`. | T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7 | T1.8 (exfil via API); T2.2 (semantic regressions in code) |
 | `ai-coding-permissive` | Same shape, broader fs scope and open-net audit mode. | T1.1 partial | T1.8; weaker T2.1; documented as weaker |
 | `untrusted-build` | Build script from untrusted source. `net.mode = "none"` during install. | T1.2 strong, T1.5 strong | Needs offline mirrors for legitimate dependencies |
@@ -248,7 +248,8 @@ Templates can extend other templates. `ai-coding-strict` is defined as deltas fr
 base-confined          ← minimal: no_new_privs, deny setuid, deny-by-default exec
                          (empty exec.allow), deny abstract unix sockets, the
                          cloud-metadata + link-local invariant denies (RFC1918
-                         stays reachable), a read baseline + the [lib] closure.
+                         stays reachable), a read baseline covering the system
+                         lib dirs (libraries load via READ; §7.3.7).
                          (Every confined template inherits from this.)
   ↓
 ai-coding-strict       ← adds: project-tree fs scope (in user delta),
@@ -277,7 +278,7 @@ Three template-author tools deserve specific mention because they appear in the 
 
 Some host configuration files are needed inside the kennel but the host version contains sensitive content. A common case is `~/.gitconfig`: the agent needs git to know the user's email and signing preferences, but the host's `~/.gitconfig` often contains credential-helper URLs, embedded tokens, or `url.*.insteadOf` rewrites that point at internal hosts.
 
-`fs.home.sanitise` constructs a sanitised copy at kennel-spawn time:
+`fs.home.sanitise` constructs a sanitised copy at kennel-lib-spawn time:
 
 ```toml
 [[fs.home.sanitise]]
@@ -325,7 +326,7 @@ reason = "sign commits via a per-kennel gpg-agent"
 
 Project Kennel binds the granted host socket into the kennel's constructed view at the `shim` path (and, where given, sets the named `env` var to that path); the socket at the `real` path is the per-kennel instance. The same pattern applies to per-kennel keyring daemons and similar.
 
-**ssh-agent is special: prefer the bastion, not a raw shim.** An exposed ssh-agent socket is a destination-blind signing oracle: anything that can reach the socket can sign with every key the agent holds, against any host (T1.6, §7.8.1). The intended path for SSH egress is therefore the dedicated `[ssh]` section and the §7.8 re-origination bastion, which binds each synthetic key to a forced command for one fixed destination, so a kennel can never use a key against a host it was not granted and never holds the real key.
+**ssh-agent is special: prefer the bastion, not a raw shim.** An exposed ssh-agent socket is a destination-blind signing oracle: anything that can reach the socket can sign with every key the agent holds, against any host (T1.6, §7.10.1). The intended path for SSH egress is therefore the dedicated `[ssh]` section and the §7.10 re-origination bastion, which binds each synthetic key to a forced command for one fixed destination, so a kennel can never use a key against a host it was not granted and never holds the real key.
 
 A policy *may* still shim a real ssh-agent through `[[unix.allow]]` (with `env = "SSH_AUTH_SOCK"`); Project Kennel does not forbid the footgun. But because doing so re-creates the signing-oracle exposure the bastion exists to prevent, the framework flags it loudly — at validation, at compile, and at run time — so the author is choosing it with eyes open rather than by accident.
 

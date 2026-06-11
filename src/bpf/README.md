@@ -2,8 +2,8 @@
 
 The cgroup-attached BPF programs that enforce Project Kennel's network
 constraints, plus the map/event ABI shared with the Rust loader
-(`kennel-bpf`). The authoritative description of this surface is
-[docs/architecture/02-5-bpf-abi.md](../../docs/architecture/02-5-bpf-abi.md); the C-code
+(`kennel-lib-bpf`). The authoritative description of this surface is
+[docs/architecture/02-7-bpf-abi.md](../../docs/architecture/02-7-bpf-abi.md); the C-code
 discipline is [CODING-STANDARDS.md](../../docs/governance/CODING-STANDARDS.md) §4.1.
 
 ## Build status: compiled + verifier-clean on Linux 6.8.0
@@ -35,7 +35,7 @@ One verifier fix was needed versus the blind draft: the IPv6 programs
   `kennel_decide_*` paths and bind4/bind6/setsockopt/sock_create are
   verifier-clean, but their runtime behaviour (the bind rewrite, the V6ONLY
   force, the family allowlist, the v6 decision) has not been individually
-  exercised. That belongs with the `kennel-bpf` loader's integration tests.
+  exercised. That belongs with the `kennel-lib-bpf` loader's integration tests.
 - **The full kernel matrix.** Verified only on the local 6.8.0 kernel, which is
   *below* the project floor of 6.10 (BUILD-ENV.md) — a useful lower bound, but
   CI's ≥6.10 LTS/stable/mainline `bpftool prog load` matrix is still owed.
@@ -44,7 +44,7 @@ One verifier fix was needed versus the blind draft: the IPv6 programs
 
 | File | What |
 |---|---|
-| `maps.h` | Map definitions and the per-kennel map value structs. Single source of truth for the map ABI; the Rust side's types are generated to match (docs/architecture/02-5). |
+| `maps.h` | Map definitions and the per-kennel map value structs. Single source of truth for the map ABI; the Rust side's types are generated to match (docs/architecture/02-7). |
 | `audit_events.h` | Ringbuf event header and per-kind payload structs. |
 | `kennel.bpf.h` | Shared inline helpers (meta lookup, deny/allow evaluation, audit emit). Not a documented ABI surface; an implementation detail to keep each program small and the lookup logic in one reviewed place. |
 | `connect4.bpf.c`, `connect6.bpf.c` | Egress allowlist enforcement (the central programs). |
@@ -61,16 +61,16 @@ These programs are compiled against the kernel **UAPI** (`<linux/bpf.h>`), not a
 (`bpf_sock_addr`, `bpf_sock`, `bpf_sockopt`) and our own maps — nothing whose
 layout drifts across kernels — so CO-RE buys nothing here. Dropping it means no
 BTF/CO-RE relocation to resolve at load: the only relocations are `R_BPF_64_64`
-references from instructions to map symbols, which the loader (`kennel-bpf`)
+references from instructions to map symbols, which the loader (`kennel-lib-bpf`)
 resolves by symbol name against `maps.h`. (`-g` still emits BTF, so the objects
 remain `bpftool`-loadable too.) The previously-committed 3 MB `vmlinux.h` is
 gone.
 
 ## Building (on Linux)
 
-The Rust loader crate `kennel-bpf` loads these via a hand-rolled `bpf(2)` loader
+The Rust loader crate `kennel-lib-bpf` loads these via a hand-rolled `bpf(2)` loader
 over `libc`, using `object` only for ELF parsing — **not** libbpf-rs/libbpf-sys
-(see `docs/architecture/02-5`, `03-crate-decomposition.md`). Manual compile:
+(see `docs/architecture/02-7`, `03-crate-decomposition.md`). Manual compile:
 
 ```sh
 clang -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86 \
@@ -88,7 +88,7 @@ The multiarch include path (`/usr/include/x86_64-linux-gnu`) is where
   (the kernel fails the syscall, typically `EPERM`/`ECONNREFUSED`).
 - Lookup order in the connect/sendmsg programs is **deny-first**: the invariant
   deny trie is consulted before the allow trie, so an allow rule can never
-  cover an invariant-denied range (docs/architecture/02-5).
+  cover an invariant-denied range (docs/architecture/02-7).
 - Every pointer dereference is preceded by an explicit bounds check; loops are
   bounded; only whitelisted helpers (`HELPERS.md`) are called; `bpf_printk` is
   forbidden in shipped programs.

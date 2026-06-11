@@ -6,7 +6,7 @@
 //! cgroup as the migration common ancestor, so the workload — born in kenneld's
 //! cgroup — can be moved into its kennel cgroup unprivileged (the constraint that
 //! made top-level delegation impossible; see the cgroup-join note on
-//! `kennel_spawn`). Reading the *own* cgroup keeps this distro-agnostic: no
+//! `kennel_lib_spawn`). Reading the *own* cgroup keeps this distro-agnostic: no
 //! parsing for systemd-specific slice names.
 
 use std::io;
@@ -17,6 +17,71 @@ const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 
 /// The prefix for a per-kennel cgroup directory name (`kennel-<ctx>`).
 const KENNEL_PREFIX: &str = "kennel-";
+
+/// kenneld's own leaf cgroup, a child of its delegated base. The daemon moves itself here so the
+/// base can carry controllers for its kennel children (see [`prepare_delegation`]).
+const SUPERVISOR_LEAF: &str = "supervisor";
+
+/// Default per-kennel process/thread ceiling (`pids.max`) applied at bring-up.
+///
+/// Generous enough for legitimate parallel builds inside a kennel, while bounding a fork-bomb or a
+/// facade-driven thread explosion to a self-scoped failure of that one kennel. Overridable per
+/// template by `[resources]`.
+pub const DEFAULT_PIDS_MAX: u64 = 4096;
+
+/// Vacate the base cgroup so it can delegate the `pids`/`memory` controllers to its kennel children.
+///
+/// This lets each per-kennel cgroup carry its own [`write_pids_max`] / [`write_memory_max`].
+/// cgroup v2's *no-internal-process* rule forbids a cgroup from both holding member processes and
+/// enabling controllers in `cgroup.subtree_control`. kenneld's service cgroup (the `base`, delegated
+/// via `Delegate=yes`) holds the daemon, so it cannot pass controllers to the kennel cgroups until
+/// the daemon vacates it. This moves the daemon (whole thread group) into `base/supervisor`, leaving
+/// `base` process-free, then enables each controller independently — a host that delegates `pids`
+/// but not `memory` still gets the `pids` bound.
+///
+/// Call once at daemon startup, *before* any kennel cgroup is created. Best-effort at the call site:
+/// where delegation does not grant the controllers the per-kennel writes simply no-op, leaving the
+/// aggregate `kenneld.service` `TasksMax` as the host backstop.
+///
+/// # Errors
+///
+/// An OS error if the leaf cannot be created or the daemon cannot migrate into it (the subsequent
+/// `subtree_control` writes are themselves best-effort and never surfaced).
+pub fn prepare_delegation(base: &Path) -> io::Result<()> {
+    let leaf = base.join(SUPERVISOR_LEAF);
+    std::fs::create_dir_all(&leaf)?;
+    std::fs::write(leaf.join("cgroup.procs"), std::process::id().to_string())?;
+    for controller in ["+pids", "+memory"] {
+        let _ = std::fs::write(base.join("cgroup.subtree_control"), controller);
+    }
+    Ok(())
+}
+
+/// Cap the number of processes/threads in `cgroup` (cgroup v2 `pids.max`).
+///
+/// The kernel refuses `fork`/`clone` past the cap, bounding a fork-bomb or a facade-driven thread
+/// explosion to a self-scoped failure of that one kennel, independent of uid. Requires the `pids`
+/// controller to be enabled for `cgroup`'s parent (see [`prepare_delegation`]); the caller treats
+/// the write as best-effort.
+///
+/// # Errors
+///
+/// An OS error if `pids.max` does not exist (the controller is not delegated) or the write fails.
+pub fn write_pids_max(cgroup: &Path, max: u64) -> io::Result<()> {
+    std::fs::write(cgroup.join("pids.max"), max.to_string())
+}
+
+/// Cap the memory of `cgroup` in bytes (cgroup v2 `memory.max`).
+///
+/// Over the cap the kernel reclaims, then OOM-kills within the cgroup only. Requires the `memory`
+/// controller (see [`prepare_delegation`]); best-effort at the call site.
+///
+/// # Errors
+///
+/// An OS error if `memory.max` does not exist (the controller is not delegated) or the write fails.
+pub fn write_memory_max(cgroup: &Path, bytes: u64) -> io::Result<()> {
+    std::fs::write(cgroup.join("memory.max"), bytes.to_string())
+}
 
 /// kenneld's own cgroup, as an absolute path under `CGROUP_MOUNT`.
 ///
@@ -58,7 +123,7 @@ pub fn kennel_cgroup(base: &Path, ctx: u16) -> PathBuf {
 ///
 /// This is the correct way to stop a kennel's workload: with the unprivileged
 /// spawn the workload is PID 1 of a nested PID namespace reached via a double-fork
-/// (`kennel_spawn::spawn`), so the process kenneld holds a handle to is the
+/// (`kennel_lib_spawn::spawn`), so the process kenneld holds a handle to is the
 /// intermediate init, *not* the workload — signalling that pid by hand would leave
 /// the workload running. `cgroup.kill` reaches every member regardless of PID-
 /// namespace nesting (the intermediate, the workload, and any descendants), and
@@ -94,10 +159,33 @@ pub fn terminate_cgroup(cgroup: &Path) -> io::Result<()> {
     for line in procs.lines() {
         if let Ok(pid) = line.trim().parse::<u32>() {
             // Best-effort: ESRCH (already gone) is fine.
-            let _ = kennel_syscall::signal::terminate(pid);
+            let _ = kennel_lib_syscall::signal::terminate(pid);
         }
     }
     Ok(())
+}
+
+/// **Atomically suspend** every process in `cgroup` (cgroup v2 `cgroup.freeze` ← `1`).
+///
+/// The TTL custodian's primitive (§9.7): writing `1` quiesces the whole subtree in one
+/// step — no fork-escape race, unlike a per-pid `SIGSTOP` sweep — and it is reversible via
+/// [`thaw_cgroup`]. kenneld owns the kennel cgroup (its delegated subtree), so the write
+/// needs no privilege; this keeps the freezer in the trusted daemon, never exposed to the
+/// sandbox. Frozen processes cannot run (so cannot act past their deadline) until thawed.
+///
+/// # Errors
+/// An OS error if the cgroup has no `cgroup.freeze` (pre-5.2 kernel) or the write fails.
+pub fn freeze_cgroup(cgroup: &Path) -> io::Result<()> {
+    std::fs::write(cgroup.join("cgroup.freeze"), "1")
+}
+
+/// Thaw a [`freeze_cgroup`]'d cgroup (`cgroup.freeze` ← `0`), resuming every member exactly
+/// where it was suspended.
+///
+/// # Errors
+/// An OS error if the write fails (e.g. the cgroup was removed).
+pub fn thaw_cgroup(cgroup: &Path) -> io::Result<()> {
+    std::fs::write(cgroup.join("cgroup.freeze"), "0")
 }
 
 #[cfg(test)]
@@ -161,6 +249,24 @@ mod tests {
     }
 
     #[test]
+    fn freeze_then_thaw_writes_one_then_zero_to_cgroup_freeze() {
+        let dir = std::env::temp_dir().join(format!("kennel-cgfreeze-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        freeze_cgroup(&dir).expect("write cgroup.freeze=1");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cgroup.freeze")).expect("read"),
+            "1"
+        );
+        thaw_cgroup(&dir).expect("write cgroup.freeze=0");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cgroup.freeze")).expect("read"),
+            "0"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn terminate_cgroup_sigterms_every_member() {
         // Against a stand-in `cgroup.procs` listing a real, live child: the helper must
         // SIGTERM each pid it lists. We use a `sleep` whose pid we write into the file.
@@ -182,6 +288,27 @@ mod tests {
         assert!(
             !status.success(),
             "the SIGTERMed sleep must not exit cleanly"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_pids_max_and_memory_max_write_the_value() {
+        // Against a stand-in directory (a real controller write needs a delegated cgroup with the
+        // controller enabled, a daemon-level concern): the helpers must target `<cgroup>/pids.max`
+        // / `<cgroup>/memory.max` and write exactly the decimal value the kernel expects.
+        let dir = std::env::temp_dir().join(format!("kennel-cgcaps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        write_pids_max(&dir, 4096).expect("write pids.max");
+        write_memory_max(&dir, 1_073_741_824).expect("write memory.max");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pids.max")).expect("read pids.max"),
+            "4096"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("memory.max")).expect("read memory.max"),
+            "1073741824"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

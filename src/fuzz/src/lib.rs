@@ -3,11 +3,12 @@
 //! # Purpose
 //!
 //! CODING-STANDARDS.md §10.6: every parser of untrusted input carries a fuzz
-//! target. The boundaries (§10.1) covered here are the front-door network
-//! parsers (SOCKS5, HTTP, the protocol sniffer), the proxy config reader, the
-//! two IPC wire formats (the kenneld control protocol and the privhelper
-//! packed-struct request), and the signed-policy reader. Each must, for *any*
-//! input, return `Ok`/`Err` — never panic, never hang, never read out of bounds.
+//! target. The boundaries (§10.1) covered here are the egress front-door
+//! (the `CONNECT_INET` request wire the in-kennel facade frames), the binder
+//! driver-return command stream, the two IPC wire formats (the kenneld control
+//! protocol and the privhelper packed-struct request), and the signed-policy
+//! reader. Each must, for *any* input, return `Ok`/`Err`/`None` — never panic,
+//! never hang, never read out of bounds.
 //!
 //! # Approach (Path C)
 //!
@@ -31,26 +32,28 @@ use arbitrary::Unstructured;
 /// intentionally discarded: the property under test is "does not panic / hang /
 /// misbehave", and a returned `Err` is a *correct* outcome for junk input.
 pub fn fuzz_parsers(data: &[u8]) {
-    // Network front-door parsers (kennel-netproxy).
-    let _ = kennel_netproxy::protocol::detect(data);
-    let _ = kennel_netproxy::socks5::parse_greeting(data);
-    let _ = kennel_netproxy::socks5::parse_request(data);
-    let _ = kennel_netproxy::http::parse_request(data);
-
-    // The proxy config reader takes text; lossily view the bytes as UTF-8 (the
-    // reader must also tolerate arbitrary text, so this is a valid input).
-    let _ = kennel_netproxy::config::from_toml_str(&String::from_utf8_lossy(data));
+    // The egress front-door: the in-kennel facade (facade-socks5) frames each workload connect as a
+    // CONNECT_INET request `[transport | port | host]` and transacts it to kenneld over binder. The
+    // host (a DNS name) is fully workload-controlled, so the decoder is the untrusted parse (07-5).
+    let _ = kennel_lib_binder::service::inet::decode_request(data, 255);
 
     // IPC wire formats: the kenneld control protocol and the privhelper request.
     let _ = kenneld::control::Request::decode(data);
     let _ = kenneld::control::Response::decode(data);
     let _ = kennel_privhelper::wire::Request::decode(data);
 
+    // The binder driver-return command stream: the read buffer the kernel fills
+    // carries sender-controlled transaction payloads (07-1/02-4). The decoder must
+    // bounds-check any junk; a single parse plus the transaction-data decode.
+    let _ = kennel_lib_binder::proto::parse(data);
+    let _ = kennel_lib_binder::proto::TransactionData::from_bytes(data);
+    let _ = kennel_lib_binder::proto::flat_binder_object_fd_value(data);
+
     // The signed-policy reader: an empty trust store means the signature check
     // fails, but the TOML parse + schema-version gate run on the untrusted bytes
     // first, which is the surface we are fuzzing.
-    let keys = kennel_policy::KeySet::new();
-    let _ = kennel_policy::verify_settled(data, &keys);
+    let keys = kennel_lib_policy::KeySet::new();
+    let _ = kennel_lib_policy::verify_settled(data, &keys);
 }
 
 /// Drive the parsers from one fuzzer `seed`: feed the whole seed once, then use

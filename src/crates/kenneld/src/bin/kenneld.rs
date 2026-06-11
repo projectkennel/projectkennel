@@ -28,11 +28,18 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    // Become a child subreaper so an orphaned `kennel-bin-init` reparents to us: the privhelper
+    // factory exits as soon as it has reported the init pid (it is not a reaper proxy), and we
+    // must remain able to `waitpid` the kennel for its exit status (`07-2`). Set once, before
+    // any kennel is constructed.
+    kennel_lib_syscall::process::set_child_subreaper()
+        .map_err(|e| format!("set_child_subreaper: {e}"))?;
+
     // Deployment paths (helper binaries, the trust store) come from the
     // root-owned config cascade — never baked in, never user-overridable
-    // (07-paths.md; kennel_config::Deployment).
-    let deployment =
-        kennel_config::Deployment::load().map_err(|e| format!("loading deployment config: {e}"))?;
+    // (07-paths.md; kennel_lib_config::Deployment).
+    let deployment = kennel_lib_config::Deployment::load()
+        .map_err(|e| format!("loading deployment config: {e}"))?;
     let identity = build_identity(&deployment)?;
     let privileged = HelperClient::new(deployment.privhelper());
     // Settled run policies verify against the system trust store **then** the calling
@@ -40,7 +47,7 @@ fn run() -> Result<(), String> {
     // their own key, but a user key cannot shadow a system key id (system is first, so
     // it wins). Templates are a separate, system-only trust at compile time.
     let mut trust_dirs: Vec<std::path::PathBuf> = vec![deployment.trust_dir().to_path_buf()];
-    if let Some(user_keys) = kennel_config::user_key_dir() {
+    if let Some(user_keys) = kennel_lib_config::user_key_dir() {
         trust_dirs.push(user_keys);
     }
     let dir_refs: Vec<&std::path::Path> =
@@ -56,9 +63,9 @@ fn run() -> Result<(), String> {
 }
 
 /// Build the user's identity from kernel-trusted sources, taking the
-/// helper-binary locations from the resolved [`kennel_config::Deployment`].
-fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, String> {
-    let uid = kennel_syscall::unistd::real_uid();
+/// helper-binary locations from the resolved [`kennel_lib_config::Deployment`].
+fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity, String> {
+    let uid = kennel_lib_syscall::unistd::real_uid();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
@@ -66,34 +73,41 @@ fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, St
         .ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
     let cgroup_base =
         kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
-    let gid = kennel_syscall::unistd::real_gid();
+    // Vacate the base cgroup and enable the pids/memory controllers for the kennel children, so
+    // each kennel can carry its own pids.max/memory.max. Best-effort: where the controllers are not
+    // delegated the per-kennel caps no-op and the aggregate kenneld.service TasksMax is the backstop.
+    if let Err(e) = kenneld::cgroup::prepare_delegation(&cgroup_base) {
+        eprintln!("kenneld: warning: per-kennel resource controllers unavailable: {e}");
+    }
+    let gid = kennel_lib_syscall::unistd::real_gid();
     // Host-side only: the SSH bastion's AuthorizedKeysCommandUser. The kennel's own
     // synthetic /etc/passwd masks the account name to `kennel` (kenneld::etc).
     let username = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
     let proxy = Some(ProxySetup {
         binary: deployment.netproxy(),
         config_dir: socket::runtime_dir().join("proxy"),
+        socks5: deployment.socks5(),
     });
     let etc_base = Some(socket::runtime_dir().join("etc"));
     let view_base = Some(socket::runtime_dir().join("root"));
     // The per-kennel network audit log persists across runs, so it lives under
     // the state home (not the volatile runtime dir): ~/.local/state/kennel/<kennel>/
-    // network.jsonl (§7.3.4), honouring $XDG_STATE_HOME when set.
+    // network.jsonl (§7.5.4), honouring $XDG_STATE_HOME when set.
     let state_home =
         std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), PathBuf::from);
     let audit_base = Some(state_home.join("kennel"));
-    // The per-user SSH bastion (§7.8): one managed kennel-sshd for the session, on a
+    // The per-user SSH bastion (§7.10): one managed kennel-sshd for the session, on a
     // host-loopback port derived from the user's tag (so two users' daemons do not
     // clash on 127.0.0.1). Its forced commands sign with the user's own agent.
     //
-    // Keys are vended through the root-owned AuthorizedKeysCommand (§7.8.7): it queries
+    // Keys are vended through the root-owned AuthorizedKeysCommand (§7.10.7): it queries
     // this running daemon for the live forced-command bindings, so the bindings never
     // touch a file the user could rewrite. The helper is installed root-owned (OpenSSH's
     // safe-path check); it runs as the bastion user so it can reach our control socket.
     let bastion = Some(BastionSetup {
         dir: socket::runtime_dir().join("bastion"),
         reorigin_bin: deployment.ssh_reorigin(),
-        socks_connect_bin: deployment.socks_connect(),
+        ssh_bin: deployment.ssh(),
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 8022_u16.saturating_add(scope.tag()),
         agent_sock: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
@@ -114,5 +128,7 @@ fn build_identity(deployment: &kennel_config::Deployment) -> Result<Identity, St
         view_base,
         audit_base,
         bastion,
+        afunix_bin: Some(deployment.afunix()),
+        init_bin: Some(deployment.kennel_bin_init()),
     })
 }

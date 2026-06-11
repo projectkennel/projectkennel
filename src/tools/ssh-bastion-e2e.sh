@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# End-to-end proof of the per-kennel SSH re-origination bastion (07-8-ssh.md §7.8).
+# End-to-end proof of the per-kennel SSH re-origination bastion (07-10-ssh.md §7.10).
 #
 # Stands up, with stock OpenSSH and no root, a hermetic two-hop topology:
 #
 #     client (synthetic key)  --ssh-->  BASTION sshd  --forced command-->
-#         kennel-ssh-reorigin  --ssh (real key from agent)-->  DESTINATION sshd
+#         kennel-bin-ssh-reorigin  --ssh (real key from agent)-->  DESTINATION sshd
 #
-# and asserts the design's load-bearing properties (§7.8.9):
+# and asserts the design's load-bearing properties (§7.10.9):
 #   1. allow      — a synthetic-key login re-originates to the fixed destination,
 #                   forwarding $SSH_ORIGINAL_COMMAND.
 #   2. fixed dest — the workload cannot redirect: whatever command it sends, the
@@ -20,17 +20,17 @@
 # line mirrors `kenneld::sshd::authorized_keys_line`; those generators are locked by
 # unit tests, this script proves stock sshd actually behaves as the design assumes.
 #
-# Usage: ssh-bastion-e2e.sh [path-to-kennel-ssh-reorigin]
-#        (defaults to target/debug/kennel-ssh-reorigin relative to the repo root)
+# Usage: ssh-bastion-e2e.sh [path-to-kennel-bin-ssh-reorigin]
+#        (defaults to target/debug/kennel-bin-ssh-reorigin relative to the repo root)
 
 set -euo pipefail
 
 SSHD=/usr/sbin/sshd
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-REORIGIN="${1:-$REPO_ROOT/target/debug/kennel-ssh-reorigin}"
+REORIGIN="${1:-$REPO_ROOT/target/debug/kennel-bin-ssh-reorigin}"
 
 [ -x "$SSHD" ]      || { echo "no sshd at $SSHD" >&2; exit 2; }
-[ -x "$REORIGIN" ]  || { echo "no kennel-ssh-reorigin at $REORIGIN (build it first)" >&2; exit 2; }
+[ -x "$REORIGIN" ]  || { echo "no kennel-bin-ssh-reorigin at $REORIGIN (build it first)" >&2; exit 2; }
 
 # Stage outside world-writable /tmp: sshd's safe-path check rejects an
 # AuthorizedKeysFile whose ancestor is world-writable (08 §8.1, finding 3). The
@@ -116,7 +116,7 @@ printf '[127.0.0.1]:%s %s\n' "$DEST_PORT" "$(cat "$WORK/dest_host.pub")" >"$WORK
 # 3. The kenneld-owned outbound ssh_config (reorigin's `ssh -F`, via
 #    KENNEL_SSH_CONFIG): maps the fixed destination host to the destination port.
 #    In production the destination is a real host on :22; for the test we redirect
-#    the port here. This is the host-side, kenneld-owned config seam (§7.8.7) —
+#    the port here. This is the host-side, kenneld-owned config seam (§7.10.7) —
 #    never anything the kennel can influence.
 # ---------------------------------------------------------------------------
 cat >"$WORK/outbound_ssh_config" <<EOF
@@ -235,41 +235,9 @@ case "$BANNER" in
 esac
 
 echo
-echo "=== 5. full egress chain: ssh -> kennel-socks-connect -> netproxy (SOCKS5) -> bastion ==="
-# The real topology (§7.3/§7.8.4): a kennel can only reach its egress proxy, so its
-# ssh uses kennel-socks-connect (shipped, no nc needed) as a ProxyCommand to SOCKS5
-# through the proxy to the bastion (one allowlisted host-loopback service). Prove the
-# whole chain with the real kennel-netproxy and kennel-socks-connect binaries.
-NETPROXY="$REPO_ROOT/target/debug/kennel-netproxy"
-SOCKS_CONNECT="$REPO_ROOT/target/debug/kennel-socks-connect"
-if [ -x "$NETPROXY" ] && [ -x "$SOCKS_CONNECT" ]; then
-    PROXY_PORT="$(free_port)"
-    # Open mode + accept_private_resolved so the proxy forwards to the loopback
-    # bastion (in production this is a narrow [[net.loopback.host_services]] allow).
-    cat >"$WORK/netproxy.toml" <<EOF
-listen = ["127.0.0.1:$PROXY_PORT"]
-accept_private_resolved = true
-[net]
-mode = "open"
-EOF
-    "$NETPROXY" "$WORK/netproxy.toml" >"$WORK/netproxy.log" 2>&1 &
-    NETPROXY_PID=$!
-    for _ in $(seq 1 50); do 2>/dev/null >/dev/tcp/127.0.0.1/"$PROXY_PORT" && break; sleep 0.1; done
+# The egress *transport* (ssh's ProxyCommand → kenneld over binder → host-side delegate → bastion)
+# is proven by the kenneld e2e (tests/e2e.rs full_vertical: real binder, net-ns, facade-ssh)
+# + the INet conduit component tests. This script proves the bastion re-origination itself (steps
+# 1-4), which is transport-independent.
 
-    OUT="$(KENNEL_SOCKS_PROXY="127.0.0.1:$PROXY_PORT" timeout 20 ssh -F none \
-        -o IdentitiesOnly=yes -i "$WORK/synthetic" \
-        -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORK/client_known_hosts" \
-        -o BatchMode=yes \
-        -o "ProxyCommand=$SOCKS_CONNECT %h %p" \
-        -p "$BASTION_PORT" 127.0.0.1 "git-upload-pack 'via/proxy.git'" 2>"$WORK/c5.err" || true)"
-    kill "$NETPROXY_PID" 2>/dev/null || true
-    echo "    client saw: $OUT"
-    echo "$OUT" | grep -q "DEST_REACHED" || { cat "$WORK/c5.err" "$WORK/netproxy.log" >&2; fail "did not reach the destination through the proxy chain"; }
-    echo "$OUT" | grep -q "cmd=\[git-upload-pack 'via/proxy.git'\]" || fail "command not forwarded through the chain"
-    pass "ssh reached the bastion through kennel-socks-connect + netproxy and re-originated"
-else
-    echo "  SKIP: netproxy/socks-connect binaries not built"
-fi
-
-echo
-echo "ALL CHECKS PASSED — the re-origination bastion behaves as 07-8-ssh.md §7.8 specifies."
+echo "ALL CHECKS PASSED — the re-origination bastion behaves as 07-10-ssh.md §7.10 specifies."

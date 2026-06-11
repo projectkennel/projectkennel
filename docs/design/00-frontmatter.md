@@ -47,14 +47,17 @@ This document has three audiences. Read the chapters that match yours.
 | 4 | Trust boundaries and constructed views |
 | 5 | Template system |
 | 6 | Worked examples |
-| 7.1 | Policy surface: binary execution |
-| 7.2 | Policy surface: filesystem |
-| 7.3 | Policy surface: network |
-| 7.4 | Policy surface: AF_UNIX sockets and the shim model |
-| 7.5 | Policy surface: D-Bus (proxied) |
-| 7.6 | Policy surface: X11 (isolated only) |
-| 7.7 | Policy surface: process introspection, environment, capabilities, mounts, tty |
-| 7.8 | Policy surface: per-kennel SSH egress |
+| 7.1 | Binder: the inter-namespace gateway |
+| 7.2 | `kennel-bin-init` — the kennel's PID 1 |
+| 7.3 | Policy surface: binary execution |
+| 7.4 | Policy surface: filesystem |
+| 7.5 | Policy surface: network |
+| 7.6 | Policy surface: AF_UNIX sockets and the brokered-connect facade |
+| 7.7 | Policy surface: D-Bus (proxied) |
+| 7.8 | Policy surface: X11 (isolated only) |
+| 7.9 | Policy surface: process introspection, environment, capabilities, mounts, tty |
+| 7.10 | Policy surface: per-kennel SSH egress |
+| 7.11 | Network namespace isolation |
 | 8 | Enforcement architecture |
 | 9 | Policy lifecycle |
 | 10 | Failure modes and degraded operation |
@@ -69,7 +72,7 @@ The threat catalogue `THREATS.md` is a standalone companion artefact. The worked
 
 Each chapter is a separate file (`NN-chapter-name.md` or `NN-N-chapter-name.md` for §7 subsections) so chapters can be revised in parallel without merge conflicts. Numbering is stable; new chapters added later take a non-integer suffix rather than renumbering downstream.
 
-Cross-references use chapter number, e.g. "see §7.3". Within-chapter references use subsection numbers.
+Cross-references use chapter number, e.g. "see §7.5". Within-chapter references use subsection numbers.
 
 Code blocks in policy examples use TOML for the policy language and shell/C for implementation sketches. Policy examples are illustrative; the canonical schema lives in `schema/policy.toml.schema` in the Project Kennel repository.
 

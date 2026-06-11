@@ -8,7 +8,7 @@
 //! `ctx_byte`, and emitting a canonical `02-3` event with `source: bpf` through the
 //! same [`Writer`] the lifecycle and proxy events use.
 //!
-//! The drain is the consumer half of `02-5-bpf-abi.md` §The audit ring buffer.
+//! The drain is the consumer half of `02-7-bpf-abi.md` §The audit ring buffer.
 //! Events whose `ctx_byte` does not match this kennel (a corrupt or foreign
 //! sample on a per-kennel buffer) are dropped — defence in depth atop the
 //! one-buffer-per-kennel pinning.
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use kennel_audit::{Event, Outcome, Resource, Source, Value, Writer};
+use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
 
 /// `KENNEL_AUDIT_MAGIC` ("AEVN"), the first word of every event (`audit_events.h`).
 const AUDIT_MAGIC: u32 = 0x4145_564E;
@@ -74,7 +74,7 @@ impl Drain {
 
 /// The audit-ringbuf byte capacity (`KENNEL_MAPS`' `audit_ringbuf.max_entries`).
 fn ringbuf_capacity() -> Option<usize> {
-    kennel_bpf::KENNEL_MAPS
+    kennel_lib_bpf::KENNEL_MAPS
         .iter()
         .find(|m| m.name == "audit_ringbuf")
         .and_then(|m| usize::try_from(m.max_entries).ok())
@@ -93,12 +93,12 @@ pub fn spawn(pin_dir: PathBuf, ctx: u16, writer: Arc<Writer>) -> Option<Drain> {
     let cpath = CString::new(ringbuf.as_os_str().as_encoded_bytes()).ok()?;
     // Unprivileged BPF_OBJ_GET of the group/owner-accessible pin (the pin dir is
     // chowned to us, the caller). Absent pin ⇒ no drain.
-    let fd = kennel_bpf::sys::obj_get(&cpath).ok()?;
+    let fd = kennel_lib_bpf::sys::obj_get(&cpath).ok()?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
     let join = std::thread::Builder::new()
-        .name(format!("kennel-bpf-drain-{ctx}"))
+        .name(format!("kennel-lib-bpf-drain-{ctx}"))
         .spawn(move || drain_loop(&fd, capacity, ctx, &writer, &worker_stop))
         .ok()?;
     Some(Drain {
@@ -117,7 +117,7 @@ fn drain_loop(
     writer: &Writer,
     stop: &AtomicBool,
 ) {
-    let Ok(mut rb) = kennel_bpf::RingBuffer::new(fd.as_fd(), capacity) else {
+    let Ok(mut rb) = kennel_lib_bpf::RingBuffer::new(fd.as_fd(), capacity) else {
         return;
     };
     let poll_ms = i32::try_from(POLL_INTERVAL.as_millis()).unwrap_or(200);
@@ -136,7 +136,7 @@ fn drain_loop(
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Consume every committed record, emitting the ones that parse for this kennel.
-fn drain_available(rb: &mut kennel_bpf::RingBuffer<'_>, ctx: u16, writer: &Writer) {
+fn drain_available(rb: &mut kennel_lib_bpf::RingBuffer<'_>, ctx: u16, writer: &Writer) {
     let _ = rb.consume(|sample| {
         if let Some(event) = parse_event(sample, ctx) {
             writer.emit(&event);
@@ -332,7 +332,7 @@ fn clear_pin_dir(dir: &Path) {
 /// private structurally — no shared directory, no group, no permission tricks.
 #[must_use]
 pub fn pin_dir_for(id: &str) -> PathBuf {
-    let uid = kennel_syscall::unistd::real_uid();
+    let uid = kennel_lib_syscall::unistd::real_uid();
     PathBuf::from(format!("/run/user/{uid}/kennel/bpf")).join(id)
 }
 
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn pin_dir_is_in_the_users_xdg_runtime_dir() {
-        let uid = kennel_syscall::unistd::real_uid();
+        let uid = kennel_lib_syscall::unistd::real_uid();
         assert_eq!(
             pin_dir_for("ai-coding"),
             PathBuf::from(format!("/run/user/{uid}/kennel/bpf/ai-coding"))
