@@ -41,17 +41,17 @@ name = "openclaw-myproj"
 # even enumerate ~/.ssh, ~/.aws, ~/.config/gh, or sibling projects — they are not
 # "denied", they do not exist in its filesystem namespace (T1.1).
 #
+# Only fs.write is written: a writable path is implied-readable, so the settled
+# policy gets read on this tree too without a parallel fs.read.add (visible in
+# `kennel diff`). Grant read separately only for a read-ONLY path.
+#
 # CAVEAT, stated plainly: a secret that lives INSIDE this tree (a committed .env,
 # a stray id_rsa, a .git/config with a token) is readable by the agent, because
 # you granted the tree. Keep secrets out of project trees — the sandbox cannot
 # distinguish your code from your secrets once both are under a granted path.
-[[fs.read.add]]
-path = "~/projects/myproj/**"
-reason = "the project openclaw is working on"
-
 [[fs.write.add]]
 path = "~/projects/myproj/**"
-reason = "openclaw edits the project in place"
+reason = "openclaw edits the project in place (read implied)"
 
 
 # --- The model endpoint -----------------------------------------------------

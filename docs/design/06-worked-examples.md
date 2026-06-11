@@ -2,7 +2,7 @@
 
 Each example gives the policy, explains what the user is signing up for, and surfaces the residuals.
 
-Every leaf policy below derives from a vetted template by a small set of **deltas** — `[[fs.read.add]]`, `[[net.allow.add]]`, … — each of which carries a required `reason`. The template names a parent via a single versioned reference (`template_base = "<name>@v<ver>"`); the field-by-field schema is the reference in [`docs/architecture/02-2-config-schema.md`](../architecture/02-2-config-schema.md). **Every TOML block in this chapter parses and validates against the real policy parser** (`kennel_lib_policy::parse_leaf` + `validate`), checked with the oracle at `src/crates/kennel-lib-policy/examples/validate-policy.rs`; what a leaf cannot express (egress `mode`, bind ports, the invariant denylist — all template-level) is called out where it arises. For an end-to-end annotated leaf on an adversarial workload, see [`TEMPLATE-openclaw.md`](TEMPLATE-openclaw.md).
+Every leaf policy below derives from a vetted template by a small set of **deltas** — `[[fs.write.add]]`, `[[net.allow.add]]`, … — each of which carries a required `reason`. The template names a parent via a single versioned reference (`template_base = "<name>@v<ver>"`); the field-by-field schema is the reference in [`docs/architecture/02-2-config-schema.md`](../architecture/02-2-config-schema.md). A few grants are **implied** so you write the intent once (see §Implied rules in the schema reference): a writable path is readable, so a project tree is one `fs.write.add` (not a read+write pair); an `[[ssh.keys]]` host implies egress to it on :22. **Every TOML block in this chapter parses and validates against the real policy parser** (`kennel_lib_policy::parse_leaf` + `validate`), checked with the oracle at `src/crates/kennel-lib-policy/examples/validate-policy.rs`; what a leaf cannot express (egress `mode`, bind ports, the invariant denylist — all template-level) is called out where it arises. For an end-to-end annotated leaf on an adversarial workload, see [`TEMPLATE-openclaw.md`](TEMPLATE-openclaw.md).
 
 ## 6.1 AI coding agent on a project
 
@@ -14,13 +14,9 @@ The motivating use case. The user runs an AI agent (Claude Code, Cursor, Aider, 
 template_base = "ai-coding-strict@v1"
 name = "myproj-ai"
 
-[[fs.read.add]]
-path = "~/projects/myproj/**"
-reason = "the project"
-
 [[fs.write.add]]
 path = "~/projects/myproj/**"
-reason = "the project"
+reason = "the project (read implied)"
 
 [[net.allow.add]]
 name = "api.anthropic.com"
@@ -152,13 +148,9 @@ The user is developing a web application that needs the local Postgres instance.
 template_base = "ai-coding-strict@v1"
 name = "webapp-dev"
 
-[[fs.read.add]]
-path = "~/projects/webapp/**"
-reason = "the project"
-
 [[fs.write.add]]
 path = "~/projects/webapp/**"
-reason = "the project"
+reason = "the project (read implied)"
 
 [[net.allow.add]]
 name = "registry.npmjs.org"
@@ -210,13 +202,9 @@ A Rust build that downloads dozens of crates from crates.io and a few from git r
 template_base = "ai-coding-strict@v1"
 name = "rust-build"
 
-[[fs.read.add]]
-path = "~/projects/myrustapp/**"
-reason = "the project"
-
 [[fs.write.add]]
 path = "~/projects/myrustapp/**"
-reason = "the project"
+reason = "the project (read implied)"
 
 [[fs.write.add]]
 path = "~/.cargo/registry/**"
@@ -258,17 +246,12 @@ path = "~/data/dev-postgres/**"
 reason = "Postgres data directory"
 ```
 
-> **There is no `[container]` block** — an unknown-section error at parse. **The kennel *is* the
-> container**: `containerised-service` runs the service directly under the same confinement as every
-> other kennel (its own net-ns, constructed view, exec allowlist), with no second container runtime
-> underneath. The service binary, its bind ports, and its invariants live in the *template*; the
-> leaf adds only the data directory. The image / volume / published-port intent is expressed through
-> the template's exec allowlist, `[fs]` grants, and `[net.bind]` — not a container spec.
+The `containerised-service` template runs the service as the kennel itself: the service binary and its invariants live in the template, its published port is a `[net.bind]` entry, and its data and config are `[fs]` grants. The leaf adds only the data directory.
 
 **What's enforced.** The Postgres kennel:
 - Listens only on its own per-kennel loopback address (`127.<tag>.<ctx>.1:5432`), which appears on the host `lo` at that same address — the user's default context can connect; the LAN cannot.
 - Has access only to `~/data/dev-postgres/` plus the template's baseline read paths; no other host paths.
-- Runs under the same unprivileged user namespace + seccomp + Landlock as any kennel — there is no `--privileged`/`--pid=host`/`--network=host` to grant because there is no second runtime.
+- Runs under the same unprivileged user namespace + seccomp + Landlock as any kennel.
 
 **Residuals.**
 - **The Postgres binary and its libraries are trusted.** The template grants exec on the system Postgres; a compromise of that package is a supply-chain residual (T1.9), mitigated only by the same confinement applied to everything else.
@@ -286,18 +269,15 @@ The user works at a company that requires specific tools from a non-standard pat
 template_base = "ai-coding-strict@v1"
 name = "corp-ai"
 
-[[fs.read.add]]
+[[fs.write.add]]
 path = "~/projects/work/**"
-reason = "work project"
+reason = "work project (read implied)"
 
+# Read-only: the corp toolchain is consumed, never modified — so this stays fs.read.
 [[fs.read.add]]
 path = "/opt/corp-toolchain/**"
 reason = "company-installed dev tools"
 threats.exposed = ["T1.4"]
-
-[[fs.write.add]]
-path = "~/projects/work/**"
-reason = "work project"
 
 [[net.allow.add]]
 name = "api.anthropic.com"

@@ -206,6 +206,17 @@ The threat IDs must be present in the version of `THREATS.md` named by `threat_c
 
 ---
 
+## Implied rules
+
+Translation (source → settled policy) derives a few grants the author would otherwise have to restate. The author writes the intent once; the **settled policy carries the derived grants explicitly**, so `kennel diff` and the audit show exactly what was added — nothing widens invisibly. An implied grant never overrides an explicit one: if the author already wrote the target grant, theirs (with whatever extra ports/scope) wins and the rule is a no-op.
+
+- **`fs.write` implies `fs.read`.** Every path in the effective `fs.write` set is folded into `fs.read` if not already present. A writable tree is meant to be usable, which requires read; restating it as `fs.read` is noise.
+- **An `[[ssh.keys]]` host implies egress to it on port 22.** SSH leaves the kennel only over the egress gateway, so each granted host is added to the by-name allowlist (`net.allow_names`) on TCP/22. The author writes the `[ssh]` grant once, not also a parallel `[[net.allow]]`. (The bastion re-origination endpoint itself is a host service `kenneld` dials — see §7.10.)
+
+The egress endpoint's own reachability — the workload connecting to `facade-socks5` on the kennel loopback — is granted at bring-up (the proxy's address+port get the cgroup-BPF allow and the Landlock `CONNECT_TCP`), not written in policy: a kennel with egress can always reach its own egress endpoint by construction.
+
+---
+
 ## Framework invariants
 
 Certain properties cannot be weakened by any user delta, regardless of `reason`. These are framework invariants. The schema validator rejects policies that violate them.

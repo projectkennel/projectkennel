@@ -580,6 +580,24 @@ fn translate_net(
         }
     }
 
+    // Implied rule: an `[[ssh.keys]]` host grant implies egress to that host on port 22. SSH leaves
+    // the kennel only over the egress gateway, so a granted host must be in the allowlist on :22 —
+    // deriving it here means the author writes the ssh grant once, not also a parallel [[net.allow]].
+    // Skipped if the author already named the host (their entry, possibly with extra ports, wins).
+    if let Some(ssh) = &src.ssh {
+        for key in &ssh.keys {
+            for host in &key.hosts {
+                if !allow_names.iter().any(|r| &r.name == host) {
+                    allow_names.push(NameRule {
+                        name: host.clone(),
+                        ports: vec![22],
+                        protocol: Protocol::Tcp,
+                    });
+                }
+            }
+        }
+    }
+
     let mut deny_invariant: Vec<NetRule> = Vec::new();
     if let Some(deny) = &net.deny {
         for d in &deny.invariant {
@@ -674,8 +692,16 @@ fn translate_fs(
     let fs = src.fs.as_ref().ok_or_else(|| missing("fs"))?;
     let home = fs.home.as_ref().ok_or_else(|| missing("fs.home"))?;
 
-    let read = subst_each(fs.read.as_deref().unwrap_or_default(), deferred);
+    let mut read = subst_each(fs.read.as_deref().unwrap_or_default(), deferred);
     let write = subst_each(fs.write.as_deref().unwrap_or_default(), deferred);
+    // Implied rule: a writable path is readable. A policy author granting `fs.write` on a tree
+    // means it to be usable, which requires read; restating it as `fs.read` is noise. Fold each
+    // write path into read if not already present (order-preserving, deduped).
+    for w in &write {
+        if !read.contains(w) {
+            read.push(w.clone());
+        }
+    }
 
     let tmp = match &fs.tmp {
         Some(t) => TmpPolicy {
@@ -1643,6 +1669,55 @@ mod tests {
         );
         let over = parse(src.as_bytes()).expect("parse");
         assert!(translate_net(&over, &mut BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn fs_write_implies_fs_read() {
+        // A writable path is readable without restating it: fs.write folds into fs.read.
+        // (Source `fs.write` is a `Vec<String>` scalar list — the template form.)
+        let src = parse(b"name = \"k\"\n[fs]\nwrite = [\"~/proj/**\"]\n[fs.home]\n").expect("parse");
+        let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate");
+        assert!(
+            fs.read.contains(&"~/proj/**".to_owned()),
+            "a writable path is implied-readable; got read = {:?}",
+            fs.read
+        );
+        assert!(fs.write.contains(&"~/proj/**".to_owned()));
+    }
+
+    #[test]
+    fn ssh_host_implies_egress_allow_on_22() {
+        // An [[ssh.keys]] host grant derives a by-name :22 egress allow; the author writes no
+        // parallel [[net.allow]] (the implied-rule pass).
+        let src = parse(
+            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[ssh.keys]]\nfingerprint = \"SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt\"\nhosts = [\"git.internal\"]\n",
+        )
+        .expect("parse");
+        let net = translate_net(&src, &mut BTreeSet::new()).expect("translate");
+        let rule = net
+            .allow_names
+            .iter()
+            .find(|r| r.name == "git.internal")
+            .expect("ssh host derived into the egress allowlist");
+        assert_eq!(rule.ports, vec![22], "derived on port 22");
+    }
+
+    #[test]
+    fn an_authored_net_allow_for_an_ssh_host_is_not_duplicated() {
+        // If the author already named the host, their entry (with its own ports) wins — no dup.
+        let src = parse(
+            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[net.allow]]\nname = \"git.internal\"\nports = [22, 443]\nreason = \"git over ssh + https\"\n[[ssh.keys]]\nfingerprint = \"SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt\"\nhosts = [\"git.internal\"]\n",
+        )
+        .expect("parse");
+        let net = translate_net(&src, &mut BTreeSet::new()).expect("translate");
+        let matches: Vec<&NameRule> =
+            net.allow_names.iter().filter(|r| r.name == "git.internal").collect();
+        assert_eq!(matches.len(), 1, "the author's entry is not duplicated by the implied rule");
+        assert_eq!(
+            matches.first().expect("one match").ports,
+            vec![22, 443],
+            "the author's ports are preserved"
+        );
     }
 
     #[test]

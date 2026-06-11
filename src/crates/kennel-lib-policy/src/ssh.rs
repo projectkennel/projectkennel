@@ -44,20 +44,6 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
     };
     let mut errs: Vec<String> = Vec::new();
 
-    // Hosts the egress allowlist reaches on port 22: a by-name `net.allow` entry whose
-    // port set includes 22 (an empty port set means "all ports" — translate.rs).
-    let net_22: Vec<&str> = policy
-        .net
-        .as_ref()
-        .map(|n| {
-            n.allow
-                .iter()
-                .filter(|a| a.ports.is_empty() || a.ports.contains(&22))
-                .filter_map(|a| a.name.as_deref())
-                .collect()
-        })
-        .unwrap_or_default();
-
     for k in &ssh.keys {
         match k.fingerprint.as_deref() {
             None => errs.push("[[ssh.keys]] entry is missing a `fingerprint`".to_owned()),
@@ -71,15 +57,8 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
             let who = k.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
             errs.push(format!("[[ssh.keys]] `{who}` grants no `hosts`"));
         }
-        for h in &k.hosts {
-            if !net_22.contains(&h.as_str()) {
-                errs.push(format!(
-                    "[[ssh.keys]] host `{h}` is not in `net.allow` on port 22; SSH leaves the \
-                     kennel only over the egress proxy, so this is a dead grant or a recon hint. \
-                     Add a [[net.allow]] for `{h}` with `ports = [22]`."
-                ));
-            }
-        }
+        // An ssh-granted host no longer needs a parallel [[net.allow]] on :22 — translate derives
+        // the egress allow from the ssh grant (the implied-rule pass). So no precondition check here.
     }
 
     if ssh.allow_headless == Some(true) && !has_threat_tag(ssh) {
@@ -184,27 +163,15 @@ mod tests {
     }
 
     #[test]
-    fn a_host_outside_net_allow_22_is_rejected() {
-        // github is allowed on 443 only — not reachable over SSH.
+    fn an_ssh_grant_needs_no_parallel_net_allow() {
+        // The ssh host grant alone is valid — translate derives the :22 egress allow from it, so the
+        // author does not restate it as a [[net.allow]] (the implied-rule pass, translate.rs).
         let ssh = SshSection {
-            keys: vec![key(FP, &["github.com"])],
+            keys: vec![key(FP, &["git.internal"])],
             ..SshSection::default()
         };
-        let p = policy_with(ssh, &[("github.com", vec![443])]);
-        let err = validate(&p).expect_err("host not on :22");
-        assert!(
-            matches!(&err, PolicyError::SourceValidation(m) if m.iter().any(|s| s.contains("not in `net.allow` on port 22")))
-        );
-    }
-
-    #[test]
-    fn a_host_absent_from_net_allow_is_rejected() {
-        let ssh = SshSection {
-            keys: vec![key(FP, &["evil.example"])],
-            ..SshSection::default()
-        };
-        let p = policy_with(ssh, &[("github.com", vec![22])]);
-        assert!(validate(&p).is_err());
+        let p = policy_with(ssh, &[]); // no net.allow at all
+        assert!(validate(&p).is_ok(), "an ssh grant validates on its own");
     }
 
     #[test]

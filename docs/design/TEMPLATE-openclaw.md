@@ -24,13 +24,9 @@ For the meaning of every field — types, defaults, validation rules — see the
 template_base = "ai-coding-strict@v1"
 name = "openclaw-myproj"
 
-[[fs.read.add]]
-path = "~/projects/myproj/**"
-reason = "the project openclaw is working on"
-
 [[fs.write.add]]
 path = "~/projects/myproj/**"
-reason = "openclaw edits the project in place"
+reason = "openclaw edits the project in place (read implied)"
 
 [[net.allow.add]]
 name = "api.anthropic.com"
@@ -55,9 +51,9 @@ That is the entire user-authored policy. Everything else — the constructed `$H
 
 ## 3 — What each grant admits, and what it costs
 
-### The project tree (`fs.read.add` / `fs.write.add`)
+### The project tree (`fs.write.add`)
 
-openclaw gets read+write on **exactly** `~/projects/myproj/**` and nothing else under `$HOME`. This is the constructed-view model (§7.4): the kennel's `$HOME` is a fresh tmpfs into which only the granted paths are bound. The credential locations are not *denied* — they are **absent**. `~/.ssh`, `~/.aws`, `~/.config/gh`, your shell history, your other projects: the agent cannot read them, cannot enumerate them, cannot tell they exist. This is the structural answer to **T1.1** (credential and configuration reconnaissance): there is nothing to reconnoitre.
+openclaw gets read+write on **exactly** `~/projects/myproj/**` and nothing else under `$HOME` — from a single `fs.write.add`, because a writable path is implied-readable (the settled policy gets the read grant too, visible in `kennel diff`). This is the constructed-view model (§7.4): the kennel's `$HOME` is a fresh tmpfs into which only the granted paths are bound. The credential locations are not *denied* — they are **absent**. `~/.ssh`, `~/.aws`, `~/.config/gh`, your shell history, your other projects: the agent cannot read them, cannot enumerate them, cannot tell they exist. This is the structural answer to **T1.1** (credential and configuration reconnaissance): there is nothing to reconnoitre.
 
 **The irreducible cost, stated plainly:** a secret that lives *inside* the granted tree — a committed `.env`, a stray `id_rsa`, a `.git/config` with a token — is readable by the agent, because you granted the tree. The sandbox cannot distinguish your code from your secrets once both sit under a granted path. Keep secrets out of project trees. This is not a gap in the design; it is the boundary of what a path-granting sandbox can do.
 
