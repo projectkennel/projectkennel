@@ -30,6 +30,16 @@ const DIR_ENV: &str = "KENNEL_BINDER_DIR";
 
 #[test]
 fn transaction_round_trip_through_node_zero() {
+    // A skip is not a proof: this test needs root + a private mount namespace for the privileged
+    // operation, so on an unprivileged runner (`cargo test --all-features` in CI) it skips with
+    // cause rather than failing. `sudo unshare -m <test-binary>` still exercises it.
+    // SAFETY: geteuid is always-safe FFI (no args, no error path).
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!(
+            "skipping transaction_round_trip_through_node_zero: requires root + a private mount ns"
+        );
+        return;
+    }
     if std::env::var(ROLE_ENV).as_deref() == Ok("manager") {
         run_manager();
     } else {

@@ -23,6 +23,17 @@ const MAP_SIZE: usize = 128 * 1024;
 
 #[test]
 fn binderfs_mount_alloc_and_context_mgr() {
+    // A skip is not a proof: mounting binderfs needs CAP_SYS_ADMIN in a private mount namespace, so
+    // on an unprivileged runner (`cargo test --all-features` in CI) this skips with cause rather
+    // than failing. `sudo unshare -m <test-binary>` still exercises it.
+    // SAFETY: geteuid is always-safe FFI (no args, no error path).
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!(
+            "skipping binderfs_mount_alloc_and_context_mgr: requires root + a private mount ns \
+             (run: sudo unshare -m <test-binary>)"
+        );
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("kennel-lib-binder-root-{}", std::process::id()));
 
     binderfs::mount_instance(&dir, binderfs::DEFAULT_MAX_DEVICES)

@@ -15,14 +15,13 @@
 //!
 //! # Scope of this build
 //!
-//! The full pipeline is implemented: the pure part (verify → substitute →
-//! translate into a [`Plan`], all testable off the spawn path) and the execution
-//! step. [`spawn`] applies the irreversible seal in the forked child immediately
-//! before `execve` — namespace/mount setup, a fresh `/proc` + private `/tmp`, the
-//! synthetic-`/etc` binds, the constructed-`$HOME` `pivot_root`, the Landlock and
-//! seccomp seals, and cgroup join — via [`kennel_lib_syscall::spawn::spawn_sealed`], so
-//! the post-`fork` `unsafe` stays in the sanctioned crate. Egress BPF is attached by
-//! the privhelper out of band. The root e2e exercises the whole vertical.
+//! This crate is the pure half: verify → substitute → translate the signed policy into a
+//! [`Plan`] and a [`ConstructionHalf`]/[`Supervision`] pair, all testable off the spawn path.
+//! Execution is the privhelper **factory**: it clones the namespaces, writes the identity maps,
+//! builds the constructed view (`build_view_and_pivot`), and `fexecve`s `kennel-bin-init` as the
+//! kennel's uid-0 PID 1, which applies the irreversible seal (Landlock + seccomp + cgroup join)
+//! before running the workload. The post-`fork` `unsafe` lives in `kennel-lib-syscall`; egress BPF
+//! is attached in the same factory op. The root e2e exercises the whole vertical.
 
 #![forbid(unsafe_code)]
 

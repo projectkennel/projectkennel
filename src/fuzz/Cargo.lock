@@ -48,10 +48,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
+name = "host-netproxy"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-scm",
+]
+
+[[package]]
+name = "kennel-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "kennel-lib-binder",
+ "kennel-lib-policy",
+ "kennel-privhelper",
+ "kenneld",
+]
+
+[[package]]
 name = "kennel-lib-audit"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-text",
+]
+
+[[package]]
+name = "kennel-lib-binder"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -71,23 +96,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-fuzz"
-version = "0.0.0"
+name = "kennel-lib-landlock"
+version = "0.1.0"
 dependencies = [
- "arbitrary",
- "host-netproxy",
- "kennel-lib-policy",
- "kennel-privhelper",
- "kenneld",
+ "bitflags",
+ "libc",
 ]
 
 [[package]]
-name = "host-netproxy"
+name = "kennel-lib-os"
 version = "0.1.0"
 dependencies = [
- "basic-toml",
- "kennel-lib-audit",
- "serde",
+ "libc",
+ "nix",
 ]
 
 [[package]]
@@ -101,16 +122,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-privhelper"
+name = "kennel-lib-scm"
 version = "0.1.0"
 dependencies = [
- "kennel-lib-syscall",
+ "nix",
 ]
 
 [[package]]
 name = "kennel-lib-spawn"
 version = "0.1.0"
 dependencies = [
+ "kennel-lib-binder",
  "kennel-lib-bpf",
  "kennel-lib-policy",
  "kennel-lib-syscall",
@@ -121,6 +143,9 @@ name = "kennel-lib-syscall"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "kennel-lib-landlock",
+ "kennel-lib-os",
+ "kennel-lib-scm",
  "libc",
  "nix",
  "seccompiler",
@@ -131,17 +156,28 @@ name = "kennel-lib-text"
 version = "0.1.0"
 
 [[package]]
+name = "kennel-privhelper"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-config",
+ "kennel-lib-spawn",
+ "kennel-lib-syscall",
+]
+
+[[package]]
 name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "host-netproxy",
  "kennel-lib-audit",
+ "kennel-lib-binder",
  "kennel-lib-bpf",
  "kennel-lib-config",
  "kennel-lib-policy",
- "kennel-privhelper",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
+ "kennel-privhelper",
  "serde",
 ]
 

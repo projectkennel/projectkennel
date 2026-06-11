@@ -585,7 +585,7 @@ fn validate_kennel_name(name: &str) -> Result<(), String> {
 /// exits, tear it down, and report `Exited`.
 ///
 /// This is the production per-kennel path the daemon's [`serve`] loop calls — and the entry
-/// point the self-hosting e2e drives directly (real privhelper + a real [`TrustStoreLoader`]),
+/// point the self-hosting e2e drives directly (real privhelper + a real [`crate::policy::TrustStoreLoader`]),
 /// so the test exercises the same wiring production does, not a hand-built replica.
 // allow: one linear request lifecycle (reserve, load, ssh/unix/audit prep, spawn,
 // block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.

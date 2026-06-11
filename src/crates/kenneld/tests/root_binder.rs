@@ -29,6 +29,14 @@ const DIR_ENV: &str = "KENNEL_BINDER_DIR";
 
 #[test]
 fn registry_gate_over_the_binder_transport() {
+    // A skip is not a proof: this test needs root for the privileged operation, so on an
+    // unprivileged runner (`cargo test --all-features` in CI) it skips with cause rather than
+    // failing. `sudo … --features e2e` still exercises it.
+    // SAFETY: geteuid is always-safe FFI (no args, no error path).
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping registry_gate_over_the_binder_transport: requires root for the privileged operation");
+        return;
+    }
     if std::env::var(ROLE_ENV).as_deref() == Ok("manager") {
         run_manager();
     } else {

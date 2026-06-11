@@ -21,7 +21,7 @@ pub mod verb {
     /// Request an outbound network connection (the `INet` egress facade, §7.5.2).
     ///
     /// `facade-socks5` transacts the request payload `[transport: u8 | port: u16
-    /// big-endian | host: UTF-8]` (see [`transport`]) to kenneld, which decides under
+    /// big-endian | host: UTF-8]` (see [`crate::service::transport`]) to kenneld, which decides under
     /// `[net.proxy]`, resolves the name, pins the vetted address, and (with the conduit
     /// built) returns the connection fd.
     pub const CONNECT_INET: u32 = 6;
@@ -38,8 +38,8 @@ pub mod transport {
 
 /// The [`verb::CONNECT_INET`] request wire: `[transport: u8 | port: u16 big-endian | host: UTF-8]`.
 ///
-/// The single source of the layout: `facade-socks5` [`encode_request`]s, kenneld
-/// [`decode_request`]s (then maps the transport byte and the host to its policy types). The
+/// The single source of the layout: `facade-socks5` [`inet::encode_request`]s, kenneld
+/// [`inet::decode_request`]s (then maps the transport byte and the host to its policy types). The
 /// transport byte's validity is the decoder's caller's concern — this layer only frames bytes.
 pub mod inet {
     /// Encode a `CONNECT_INET` request.
@@ -120,8 +120,8 @@ pub mod lifecycle {
     ///
     /// kenneld freezes the kennel's cgroup (atomic suspend — kennel-bin-init is mid-call, so it just
     /// blocks), audits, and decides per the policy's expiry action. The **reply** byte is
-    /// [`ttl::RESUME`] (kenneld thawed; the call returns and the kennel picks up where it left
-    /// off) or [`ttl::TERMINATE`] (kennel-bin-init should exit; kenneld may also kill the frozen
+    /// [`crate::service::ttl::RESUME`] (kenneld thawed; the call returns and the kennel picks up where it left
+    /// off) or [`crate::service::ttl::TERMINATE`] (kennel-bin-init should exit; kenneld may also kill the frozen
     /// cgroup outright). No payload.
     pub const NOTIFY_TTL_EXPIRED: u32 = 0x105;
 }

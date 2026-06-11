@@ -66,12 +66,10 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
 /// `clone(2)` a child that is **PID 1** of a fresh PID namespace, entering all of
 /// `ns` in a single syscall, and run `child` in it.
 ///
-/// This is the privhelper-factory's construction primitive (`docs/design/07-2`):
-/// where the old unprivileged path did `unshare(CLONE_NEWUSER)` then a later
-/// [`fork_into_pid1`](crate::spawn::fork_into_pid1) double-fork to reach PID 1, the
-/// factory instead `clone`s once with `NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET]`: the
-/// cloned child is itself PID 1 of the new PID namespace (a `clone(CLONE_NEWPID)`
-/// child *is* the namespace init, unlike the `unshare` caller, which is not), so no
+/// This is the privhelper-factory's construction primitive (`docs/design/07-2`): it
+/// `clone`s once with `NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET]`, and the cloned child is
+/// itself PID 1 of the new PID namespace (a `clone(CLONE_NEWPID)` child *is* the
+/// namespace init, unlike an `unshare` caller, which is not), so no
 /// second fork is needed. The parent gets the child's **host** pid back — the fact
 /// kenneld needs to gate the binder lifecycle verbs and to open
 /// `/proc/<pid>/root/dev/binderfs/binder`.

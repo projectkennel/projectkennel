@@ -102,7 +102,7 @@ pub fn set_supplementary_groups(gids: &[u32]) -> io::Result<()> {
 /// Set the real, effective, and saved **gid** to `gid` (`setresgid`).
 ///
 /// Used by `kennel-bin-init` to drop the workload child from the kennel's uid-0/gid-0 init
-/// identity to the non-root operator's gid before `execve` ([`kennel-bin-init-and-uid0`]).
+/// identity to the non-root operator's gid before `execve`.
 /// Set the gid (and supplementary groups) **before** the uid: dropping the uid first
 /// would forfeit `CAP_SETGID` in the userns and leave the group identity stuck at root.
 ///
@@ -120,7 +120,7 @@ pub fn set_gid(gid: u32) -> io::Result<()> {
 /// The final step of the workload drop in `kennel-bin-init`: after the gid and
 /// supplementary groups are set, drop the uid to the non-root operator. Once this
 /// returns the process holds no uid-0 capability, and the subsequent `no_new_privs` +
-/// seccomp make the drop irreversible ([`kennel-bin-init-and-uid0`]).
+/// seccomp make the drop irreversible.
 ///
 /// # Errors
 ///

@@ -21,11 +21,11 @@
 //! to. That is fine here because the *answer* is policed, not trusted:
 //!
 //! - the name must already have cleared the allowlist
-//!   ([`crate::allow::Ruleset::decide_request`]) before we resolve it at all;
+//!   ([`crate::inet::allow::Ruleset::decide_request`]) before we resolve it at all;
 //! - each resolved address is re-checked against the deny rules
-//!   ([`crate::allow::Ruleset::decide_resolved`]); and
+//!   ([`crate::inet::allow::Ruleset::decide_resolved`]); and
 //! - a resolved address in special-use space (RFC1918 / ULA / loopback / ...) is
-//!   refused unless policy opts in ([`crate::allow::is_special_use`]).
+//!   refused unless policy opts in ([`crate::inet::allow::is_special_use`]).
 //!
 //! So a public name that resolves into private space — whether through a hostile
 //! resolver or system DNS answering for an internal zone — does not become a

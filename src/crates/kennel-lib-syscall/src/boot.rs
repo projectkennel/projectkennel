@@ -10,9 +10,9 @@
 //! cannot gate the *exec*; it gates the *pull*, from inside `kennel-bin-init`, over a socket the
 //! factory hands it at [`BOOT_SYNC_FD`]:
 //!
-//! 1. `kennel-bin-init` execs, then sends [`READY`] and **blocks** before opening the bus.
+//! 1. `kennel-bin-init` execs, then sends `READY` and **blocks** before opening the bus.
 //! 2. `kenneld` (holding the other end) sees `READY`, opens the now-reachable binderfs, claims
-//!    node 0, then sends [`GO`].
+//!    node 0, then sends `GO`.
 //! 3. `kennel-bin-init` wakes and pulls — the context manager is already serving (first-try success).
 //!
 //! Both ends ship from one release, so this module is the single source of the convention.
@@ -41,8 +41,8 @@ const READY: u8 = 1;
 /// `kenneld` → `kennel-bin-init`: "node 0 is claimed and serving — pull now."
 const GO: u8 = 2;
 
-/// `kennel-bin-init` side: announce we are up ([`READY`]) and block until `kenneld` confirms the bus
-/// is live ([`GO`]). Call this after `fexecve` and before opening the binder connection.
+/// `kennel-bin-init` side: announce we are up (`READY`) and block until `kenneld` confirms the bus
+/// is live (`GO`). Call this after `fexecve` and before opening the binder connection.
 ///
 /// # Errors
 ///
@@ -59,7 +59,7 @@ pub fn init_await_bus(fd: RawFd) -> io::Result<()> {
     }
 }
 
-/// `kenneld` side: wait for `kennel-bin-init` to announce it is up ([`READY`]).
+/// `kenneld` side: wait for `kennel-bin-init` to announce it is up (`READY`).
 ///
 /// # Errors
 ///
@@ -73,7 +73,7 @@ pub fn await_init_ready(fd: RawFd) -> io::Result<()> {
     }
 }
 
-/// `kenneld` side: tell `kennel-bin-init` the bus is live ([`GO`]) — call after claiming node 0.
+/// `kenneld` side: tell `kennel-bin-init` the bus is live (`GO`) — call after claiming node 0.
 ///
 /// # Errors
 ///

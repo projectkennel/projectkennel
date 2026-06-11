@@ -62,7 +62,7 @@ const CONSTRUCT_FAILED: i32 = 125;
 ///
 /// Never returns: the construction child `fexecve`s `kennel-bin-init` (or `_exit`s on
 /// failure), and this parent `_exit`s with the child's status once it terminates. A
-/// failure before the child exists exits [`CONSTRUCT_FAILED`].
+/// failure before the child exists exits `CONSTRUCT_FAILED`.
 pub fn run_construct(chan: BorrowedFd<'_>) -> ! {
     let code = match construct(chan) {
         Ok(code) => code,

@@ -27,7 +27,6 @@ description = "Fuzz/property harnesses for Project Kennel's untrusted-input pars
 # No `derive` feature -> arbitrary has no transitive dependencies. Pin confirmed
 # by the reviewer during the §5.5 vendoring step.
 arbitrary = { version = "=1.4.1", default-features = false }
-host-netproxy = { path = "../crates/host-netproxy" }
 kenneld = { path = "../crates/kenneld" }
 kennel-privhelper = { path = "../crates/kennel-privhelper" }
 kennel-lib-policy = { path = "../crates/kennel-lib-policy" }
