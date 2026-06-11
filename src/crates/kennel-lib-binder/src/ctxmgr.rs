@@ -136,7 +136,16 @@ impl ContextManager {
         sys::set_max_threads(self.conn.fd(), max_threads)?;
         let live = Arc::new(AtomicU32::new(0));
         let loopers = Arc::new(Mutex::new(Vec::new()));
-        Self::spawn_looper(self, true, max_threads, &live, &loopers, poll_ms, stop, handler);
+        Self::spawn_looper(
+            self,
+            true,
+            max_threads,
+            &live,
+            &loopers,
+            poll_ms,
+            stop,
+            handler,
+        );
         Ok(loopers)
     }
 
@@ -167,7 +176,14 @@ impl ContextManager {
                 } else {
                     cm.conn.register_looper()
                 };
-                cm.looper_loop(poll_ms, max_threads, &live, &loopers_for_loop, &stop, &handler);
+                cm.looper_loop(
+                    poll_ms,
+                    max_threads,
+                    &live,
+                    &loopers_for_loop,
+                    &stop,
+                    &handler,
+                );
                 live.fetch_sub(1, Ordering::AcqRel);
             });
         if let Ok(h) = spawned {
@@ -201,7 +217,16 @@ impl ContextManager {
                 && !stop.load(Ordering::Acquire)
                 && live.load(Ordering::Acquire) < max_threads
             {
-                Self::spawn_looper(self, false, max_threads, live, loopers, poll_ms, stop, handler);
+                Self::spawn_looper(
+                    self,
+                    false,
+                    max_threads,
+                    live,
+                    loopers,
+                    poll_ms,
+                    stop,
+                    handler,
+                );
             }
             for incoming in batch.transactions {
                 let reply = handler(&incoming);

@@ -389,15 +389,20 @@ impl Connection {
             .read_at(reply.buffer, total)
             .ok_or_else(|| io::Error::other("reply buffer out of range"))?;
         // The u32 length prefix bounds the payload exactly (excludes alignment padding).
-        let len_bytes: [u8; 4] = buf
-            .get(0..4)
-            .and_then(|s| s.try_into().ok())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "reply missing length prefix"))?;
+        let len_bytes: [u8; 4] =
+            buf.get(0..4)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "reply missing length prefix")
+                })?;
         let payload_len = u32::from_le_bytes(len_bytes) as usize;
         let payload = buf
             .get(4..4usize.saturating_add(payload_len))
             .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "reply shorter than its length prefix")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "reply shorter than its length prefix",
+                )
             })?
             .to_vec();
 
@@ -412,12 +417,18 @@ impl Connection {
             let obj_off = u64::from_ne_bytes(off_bytes);
             let obj = self
                 .map
-                .read_at(reply.buffer.wrapping_add(obj_off), proto::FLAT_BINDER_OBJECT_SIZE)
+                .read_at(
+                    reply.buffer.wrapping_add(obj_off),
+                    proto::FLAT_BINDER_OBJECT_SIZE,
+                )
                 .ok_or_else(|| io::Error::other("reply fd-object out of range"))?;
             let raw = proto::flat_binder_object_fd_value(obj)
                 .filter(|&fd| fd >= 0)
                 .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "reply carried no valid fd object")
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "reply carried no valid fd object",
+                    )
                 })?;
             // SAFETY: `raw` is a fd the binder driver just transferred to us, filtered `>= 0`
             // above — a valid fd we solely own.

@@ -1695,9 +1695,16 @@ mod tests {
         )
         .expect("parse");
         let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate fs");
-        assert!(fs.read.contains(&"~/foo".to_owned()), "$HOME/ → ~/ ; got {:?}", fs.read);
+        assert!(
+            fs.read.contains(&"~/foo".to_owned()),
+            "$HOME/ → ~/ ; got {:?}",
+            fs.read
+        );
         assert!(fs.read.contains(&"~/bar".to_owned()), "~/ stays ~/");
-        assert!(fs.read.contains(&"/usr".to_owned()), "non-home paths untouched");
+        assert!(
+            fs.read.contains(&"/usr".to_owned()),
+            "non-home paths untouched"
+        );
         assert!(
             !fs.read.iter().any(|p| p.contains("$HOME")),
             "no $HOME survives into settled"
@@ -1714,7 +1721,8 @@ mod tests {
     fn fs_write_implies_fs_read() {
         // A writable path is readable without restating it: fs.write folds into fs.read.
         // (Source `fs.write` is a `Vec<String>` scalar list — the template form.)
-        let src = parse(b"name = \"k\"\n[fs]\nwrite = [\"~/proj/**\"]\n[fs.home]\n").expect("parse");
+        let src =
+            parse(b"name = \"k\"\n[fs]\nwrite = [\"~/proj/**\"]\n[fs.home]\n").expect("parse");
         let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate");
         assert!(
             fs.read.contains(&"~/proj/**".to_owned()),
@@ -1749,9 +1757,16 @@ mod tests {
         )
         .expect("parse");
         let net = translate_net(&src, &mut BTreeSet::new()).expect("translate");
-        let matches: Vec<&NameRule> =
-            net.allow_names.iter().filter(|r| r.name == "git.internal").collect();
-        assert_eq!(matches.len(), 1, "the author's entry is not duplicated by the implied rule");
+        let matches: Vec<&NameRule> = net
+            .allow_names
+            .iter()
+            .filter(|r| r.name == "git.internal")
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "the author's entry is not duplicated by the implied rule"
+        );
         assert_eq!(
             matches.first().expect("one match").ports,
             vec![22, 443],

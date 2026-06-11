@@ -12,7 +12,7 @@ use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use kennel_lib_syscall::scm::{recv_with_fds, seqpacket_pair, send_with_raw_fds};
+use kennel_lib_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
 
 use crate::wire::{Op, Request, Response};
 
@@ -58,7 +58,11 @@ pub fn construct_kennel(
     // egress payload as the tail. The pty return socket (interactive runs) travels as the sole
     // SCM fd; it lives as a RawFd in the spawn plan, kept open by the caller for this call.
     let mut data = Vec::with_capacity(construction_half.len().saturating_add(4));
-    data.extend_from_slice(&u32::try_from(construction_half.len()).unwrap_or(u32::MAX).to_le_bytes());
+    data.extend_from_slice(
+        &u32::try_from(construction_half.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     data.extend_from_slice(construction_half);
     if let Some(eg) = egress {
         data.extend_from_slice(eg);

@@ -17,7 +17,8 @@ use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 /// # Errors
 /// An OS error if `fcntl(F_GETFD/F_SETFD)` fails.
 pub fn set_cloexec(fd: BorrowedFd<'_>) -> io::Result<()> {
-    let current = fcntl(fd, FcntlArg::F_GETFD).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    let current =
+        fcntl(fd, FcntlArg::F_GETFD).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
     let flags = FdFlag::from_bits_truncate(current) | FdFlag::FD_CLOEXEC;
     fcntl(fd, FcntlArg::F_SETFD(flags)).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
     Ok(())
@@ -37,9 +38,11 @@ pub fn dup_onto(src: BorrowedFd<'_>, dst: RawFd) -> io::Result<()> {
     // at `dst` we must clear it explicitly — otherwise the descriptor would not survive the
     // intended `fexecve`.
     if src.as_raw_fd() == dst {
-        let flags = fcntl(src, FcntlArg::F_GETFD).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        let flags =
+            fcntl(src, FcntlArg::F_GETFD).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
         let cleared = FdFlag::from_bits_truncate(flags) & !FdFlag::FD_CLOEXEC;
-        fcntl(src, FcntlArg::F_SETFD(cleared)).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        fcntl(src, FcntlArg::F_SETFD(cleared))
+            .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
         return Ok(());
     }
     // SAFETY: a plain dup2 of a valid borrowed descriptor onto a raw target number. We work

@@ -366,7 +366,8 @@ fn lifecycle_handle(
                         Reply::Data(one(ttl::TERMINATE)),
                     )
                 }
-                action @ (kennel_lib_policy::TtlAction::Warn | kennel_lib_policy::TtlAction::Renew) => {
+                action @ (kennel_lib_policy::TtlAction::Warn
+                | kennel_lib_policy::TtlAction::Renew) => {
                     // Thaw, then reply RESUME — the *same* blocking call returns and the kennel
                     // picks up where it left off (a momentary atomic pause + an audit event).
                     // `renew` behaves as a louder warn until the interactive prompt is wired.
@@ -427,12 +428,12 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
                 std::path::Path::new(&socket.real),
                 AFUNIX_CONNECT_DEADLINE,
             )
-                .map_or_else(
-                    // Granted but unreachable (absent / refused / timed out): never tie up the
-                    // looper on a wedged target.
-                    |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
-                    |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
-                )
+            .map_or_else(
+                // Granted but unreachable (absent / refused / timed out): never tie up the
+                // looper on a wedged target.
+                |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
+                |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
+            )
         },
     );
     writer.emit(
@@ -463,7 +464,8 @@ fn inet_connect(
 ) -> Reply {
     use crate::inet::allow::Destination;
     use crate::inet::dns::SystemResolver;
-    let Some((transport, port, dest)) = crate::inet::decode_request(&incoming.data, MAX_NAME) else {
+    let Some((transport, port, dest)) = crate::inet::decode_request(&incoming.data, MAX_NAME)
+    else {
         writer.emit(&inet_event(incoming, ctx, "", 0, Outcome::Error));
         return Reply::Data(one(status::BAD_REQUEST));
     };
@@ -494,11 +496,16 @@ fn inet_connect(
 
 /// The audit event for an `INet` CONNECT decision.
 fn inet_event(incoming: &Incoming, ctx: u16, dest: &str, port: u16, outcome: Outcome) -> Event {
-    Event::new("binder.inet-connect", Resource::Binder, outcome, Source::Kenneld)
-        .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
-        .field("dest", Value::untrusted(dest.to_owned()))
-        .field("port", Value::Uint(u64::from(port)))
-        .field("ctx", Value::Uint(u64::from(ctx)))
+    Event::new(
+        "binder.inet-connect",
+        Resource::Binder,
+        outcome,
+        Source::Kenneld,
+    )
+    .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+    .field("dest", Value::untrusted(dest.to_owned()))
+    .field("port", Value::Uint(u64::from(port)))
+    .field("ctx", Value::Uint(u64::from(ctx)))
 }
 
 /// A one-byte status reply.

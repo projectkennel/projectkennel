@@ -939,7 +939,8 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let key = load_signing_key(Path::new(key_path))?;
-    let signed = kennel_lib_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
+    let signed =
+        kennel_lib_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
     let env = signed.signature.ok_or("internal: signature not produced")?;
     // Append the signature as a new top-level table, preserving the original text.
     let block = format!(
@@ -1003,7 +1004,8 @@ fn keygen(args: &[String]) -> Result<ExitCode, String> {
 
     // 32 bytes from the OS CSPRNG (`getrandom`) → the Ed25519 seed.
     let mut seed = [0u8; 32];
-    kennel_lib_syscall::random::fill(&mut seed).map_err(|e| format!("reading OS randomness: {e}"))?;
+    kennel_lib_syscall::random::fill(&mut seed)
+        .map_err(|e| format!("reading OS randomness: {e}"))?;
     let key = kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
         .map_err(|e| format!("deriving key: {e}"))?;
 
@@ -1255,7 +1257,8 @@ fn subkennel_add(args: &[String]) -> Result<ExitCode, String> {
         allocs.iter().map(|a| a.gid_hex.as_str()).collect();
     let gid_hex = loop {
         let mut g = [0u8; 5];
-        kennel_lib_syscall::random::fill(&mut g).map_err(|e| format!("reading OS randomness: {e}"))?;
+        kennel_lib_syscall::random::fill(&mut g)
+            .map_err(|e| format!("reading OS randomness: {e}"))?;
         if g == [0u8; 5] {
             continue; // avoid the degenerate all-zero ULA id
         }

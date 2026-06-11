@@ -158,7 +158,8 @@ mod tests {
         assert!(decode_command(&[0x01, 0xBB, 0x00]).is_none()); // count 0
         assert!(decode_command(&[0x01, 0xBB, 0x01, 9, 1, 2, 3, 4]).is_none()); // unknown tag
         assert!(decode_command(&[0x01, 0xBB, 0x01, TAG_V4, 1, 2, 3]).is_none()); // truncated addr
-        assert!(decode_command(&[0x01, 0xBB, 0x01, TAG_V4, 1, 2, 3, 4, 0xFF]).is_none()); // junk
+        assert!(decode_command(&[0x01, 0xBB, 0x01, TAG_V4, 1, 2, 3, 4, 0xFF]).is_none());
+        // junk
     }
 
     #[test]

@@ -159,8 +159,10 @@ impl PolicyLoader for TrustStoreLoader {
         // Verify + substitute once; derive both artefacts from the one policy
         // (the same steps `kennel_lib_spawn::prepare` runs, kept open here so the net
         // section is available to configure the egress proxy).
-        let verified = kennel_lib_policy::verify_settled(&bytes, &keys).map_err(|e| e.to_string())?;
-        let substituted = kennel_lib_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
+        let verified =
+            kennel_lib_policy::verify_settled(&bytes, &keys).map_err(|e| e.to_string())?;
+        let substituted =
+            kennel_lib_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
         let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
             .map_err(|e| e.to_string())?;
         // Resolve the policy's supplementary groups to GIDs and membership-check them

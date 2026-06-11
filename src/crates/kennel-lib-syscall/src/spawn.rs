@@ -24,7 +24,6 @@ use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
-
 /// `fork` a child that **drops to the operator identity** and `execve`s `path`.
 ///
 /// The `kennel-bin-init` spawn-owner primitive (`docs/design/07-2` §7.2.2): init runs
@@ -159,12 +158,10 @@ pub fn fexecve(fd: BorrowedFd<'_>, argv: &[&CStr], envp: &[&CStr]) -> io::Error 
     io::Error::last_os_error()
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::ffi::CString;
     use std::io;
-
 
     #[test]
     fn fork_drop_exec_drops_to_self_and_relays_status() {
@@ -268,5 +265,4 @@ mod tests {
             }
         }
     }
-
 }

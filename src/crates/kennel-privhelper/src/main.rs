@@ -18,9 +18,7 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::process::ExitCode;
 
-use kennel_privhelper::wire::{
-    Request, Response, Status, REQUEST_LEN,
-};
+use kennel_privhelper::wire::{Request, Response, Status, REQUEST_LEN};
 use kennel_privhelper::{alloc, construct, exec};
 
 fn main() -> ExitCode {

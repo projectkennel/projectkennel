@@ -36,8 +36,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use kennel_lib_spawn::wire::decode_construction;
 use kennel_lib_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf, LoopbackAddr};
-use kennel_lib_syscall::fd::dup_onto;
 use kennel_lib_syscall::boot::BOOT_SYNC_FD;
+use kennel_lib_syscall::fd::dup_onto;
 use kennel_lib_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
 use kennel_lib_syscall::namespace::clone_pid1;
 use kennel_lib_syscall::pty::PTY_RETURN_FD;
@@ -145,7 +145,11 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //     ourselves and the child `fexecve`s this fd (sec review: trusted init source) — the
     //     same principle as the never-wire-supplied operator identity below (sec review §6).
     let init_path = kennel_lib_config::Deployment::load()
-        .map_err(|e| io::Error::other(format!("resolve kennel-bin-init from deployment config: {e}")))?
+        .map_err(|e| {
+            io::Error::other(format!(
+                "resolve kennel-bin-init from deployment config: {e}"
+            ))
+        })?
         .kennel_bin_init();
     let init_file = std::fs::File::open(&init_path).map_err(|e| {
         io::Error::new(
@@ -514,7 +518,10 @@ mod tests {
     #[test]
     fn maps_are_precise_root_plus_operator_plus_granted() {
         // Operator is root (the root-test case): a single 0 0 1 line, no overlap.
-        assert_eq!(build_identity_maps(0, 0, &[]), ("0 0 1\n".into(), "0 0 1\n".into()));
+        assert_eq!(
+            build_identity_maps(0, 0, &[]),
+            ("0 0 1\n".into(), "0 0 1\n".into())
+        );
         // Operator is a normal user: host root + the operator's own id — NOT the whole
         // 0..operator range (multi-extent is fine in one write() with CAP_SETFCAP).
         let (u, g) = build_identity_maps(1000, 1000, &[27, 44]);

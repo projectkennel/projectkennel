@@ -157,7 +157,8 @@ mod tests {
 
     #[test]
     fn empty_kinds_default_to_file() {
-        let dir = std::env::temp_dir().join(format!("kennel-lib-audit-build-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("kennel-lib-audit-build-{}", std::process::id()));
         let cfg = SinkConfig {
             kinds: Vec::new(),
             dir: dir.clone(),

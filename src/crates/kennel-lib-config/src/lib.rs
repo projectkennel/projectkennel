@@ -472,7 +472,8 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kennel-lib-config-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("kennel-lib-config-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
@@ -486,10 +487,7 @@ mod tests {
             d.privhelper(),
             Path::new("/usr/libexec/kennel/kennel-privhelper")
         );
-        assert_eq!(
-            d.netproxy(),
-            Path::new("/usr/libexec/kennel/host-netproxy")
-        );
+        assert_eq!(d.netproxy(), Path::new("/usr/libexec/kennel/host-netproxy"));
         assert_eq!(d.akc(), Path::new("/usr/libexec/kennel/kennel-akc"));
         assert_eq!(d.sshd(), Path::new("/usr/sbin/sshd"));
     }

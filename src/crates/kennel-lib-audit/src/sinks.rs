@@ -450,7 +450,8 @@ mod tests {
 
     #[test]
     fn file_sink_writes_per_class_files() {
-        let dir = std::env::temp_dir().join(format!("kennel-lib-audit-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("kennel-lib-audit-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let sink = FileSink::new(dir.clone(), None, None, None).expect("create");
         sink.write(&rec()).expect("write");

@@ -89,8 +89,16 @@ mod tests {
             return; // no /bin/sh — skip
         };
         let res = resolve_loaders(&[sh.to_string_lossy().into_owned()]);
-        assert!(res.warnings.is_empty(), "a readable binary yields no warning");
-        assert_eq!(res.loaders.len(), 1, "exactly one loader: {:?}", res.loaders);
+        assert!(
+            res.warnings.is_empty(),
+            "a readable binary yields no warning"
+        );
+        assert_eq!(
+            res.loaders.len(),
+            1,
+            "exactly one loader: {:?}",
+            res.loaders
+        );
         let loader = res.loaders.first().expect("exactly one loader");
         assert!(
             loader.contains("ld-") || loader.contains("ld."),

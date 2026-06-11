@@ -36,9 +36,9 @@ use kennel_lib_policy::{
     SeccompAction, SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction, UnixRuntime,
     UnixSocket,
 };
+use kennel_lib_spawn::{prepare, RuntimeSubstitutions};
 use kennel_privhelper::addr::{loopback_v4, V4_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
-use kennel_lib_spawn::{prepare, RuntimeSubstitutions};
 use kenneld::{start, Error, EtcSetup, HelperClient, Privileged, ProxySetup, Spec, UnixPrep};
 
 /// The operator's allocation, matching the `/etc/kennel/subkennel` line the runner
@@ -87,7 +87,12 @@ fn netproxy_path() -> PathBuf {
 /// `AF_UNIX` socket are staged. Production stages under the same path.
 fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
-        || PathBuf::from(format!("/run/user/{}", kennel_lib_syscall::unistd::real_uid())),
+        || {
+            PathBuf::from(format!(
+                "/run/user/{}",
+                kennel_lib_syscall::unistd::real_uid()
+            ))
+        },
         PathBuf::from,
     )
 }
@@ -335,9 +340,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         kenneld::PROXY_HOST,
     );
     let _ = helper.del_address(ctx, "lo", v4.into(), V4_PREFIX);
-    let _ = Command::new("pkill")
-        .args(["-x", "host-netproxy"])
-        .output();
+    let _ = Command::new("pkill").args(["-x", "host-netproxy"]).output();
 
     // The granted ~ subdir (with a file) and a non-granted sibling, under the real
     // home. In the view the granted path remaps beneath the shim root; the sibling
@@ -358,10 +361,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         "minted a synthetic ed25519 key"
     );
     let connect_bin = sibling_binary("facade-ssh");
-    assert!(
-        connect_bin.exists(),
-        "build facade-ssh (the runner does)"
-    );
+    assert!(connect_bin.exists(), "build facade-ssh (the runner does)");
     let bastion_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey";
     let host_grants = [kenneld::ssh::HostGrant {
         host: "github.com",
@@ -405,10 +405,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         }
     });
     let afunix_bin = sibling_binary("facade-afunix");
-    assert!(
-        afunix_bin.exists(),
-        "build facade-afunix (the runner does)"
-    );
+    assert!(afunix_bin.exists(), "build facade-afunix (the runner does)");
     let shim_path = PathBuf::from("/home/kennel/kennel-unix.sock");
     let unix_prep = UnixPrep {
         shims: vec![kenneld::UnixShim {
@@ -776,7 +773,8 @@ fn no_ipc_kennel_runs_through_the_factory() {
     let signed = kennel_lib_policy::sign_settled(&no_ipc_policy(&home), &key).expect("sign");
     let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
     let mut keys = kennel_lib_policy::KeySet::new();
-    keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
+    keys.insert(key.key_id(), &key.public_key_bytes())
+        .expect("trust key");
 
     let run = runtime_dir();
     let tag = std::process::id();
@@ -883,7 +881,8 @@ fn run_ttl_kennel(
     let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
     let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
     let mut keys = kennel_lib_policy::KeySet::new();
-    keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
+    keys.insert(key.key_id(), &key.public_key_bytes())
+        .expect("trust key");
 
     let run = runtime_dir();
     let tag = std::process::id();
@@ -966,7 +965,10 @@ fn ttl_exit_terminates_the_kennel_at_the_deadline() {
         elapsed < std::time::Duration::from_secs(15),
         "the 1s TTL must terminate the kennel well before the 30s sleep (took {elapsed:?})"
     );
-    assert_ne!(code, 0, "an exit-action TTL terminates the kennel (got a clean {code})");
+    assert_ne!(
+        code, 0,
+        "an exit-action TTL terminates the kennel (got a clean {code})"
+    );
 }
 
 /// **TTL `warn`, end to end (the suspend→resume symmetry).** A `sleep 3; exit 0` workload under
@@ -977,7 +979,11 @@ fn ttl_warn_suspends_then_resumes_the_workload() {
     let Some((elapsed, code)) = run_ttl_kennel(
         "ttlwarn",
         kennel_lib_policy::TtlAction::Warn,
-        vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 3; exit 0".to_owned()],
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 3; exit 0".to_owned(),
+        ],
     ) else {
         return;
     };
@@ -1047,7 +1053,8 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
     let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
     let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
     let mut keys = kennel_lib_policy::KeySet::new();
-    keys.insert(key.key_id(), &key.public_key_bytes()).expect("trust key");
+    keys.insert(key.key_id(), &key.public_key_bytes())
+        .expect("trust key");
 
     let run = runtime_dir();
     let tag = std::process::id();
@@ -1105,7 +1112,8 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
     let output = std::thread::scope(|s| {
         let reader = s.spawn(|| -> Vec<u8> {
             let mut byte = [0u8; 1];
-            let Ok((_n, fds)) = kennel_lib_syscall::scm::recv_with_fds(ours.as_fd(), &mut byte) else {
+            let Ok((_n, fds)) = kennel_lib_syscall::scm::recv_with_fds(ours.as_fd(), &mut byte)
+            else {
                 return Vec::new();
             };
             let Some(master) = fds.into_iter().next() else {

@@ -60,7 +60,11 @@ impl NetRuntime {
     ) -> Self {
         let mut allow: Vec<Rule> = net.allow.iter().filter_map(rule_from_cidr).collect();
         allow.extend(net.allow_names.iter().map(rule_from_name));
-        let deny: Vec<DenyRule> = net.deny_invariant.iter().filter_map(deny_from_cidr).collect();
+        let deny: Vec<DenyRule> = net
+            .deny_invariant
+            .iter()
+            .filter_map(deny_from_cidr)
+            .collect();
         Self {
             ruleset: Ruleset {
                 mode: net_mode(net.mode),
@@ -180,7 +184,8 @@ pub enum InetDecision {
 #[must_use]
 pub fn decode_request(data: &[u8], max_host: usize) -> Option<(Transport, u16, Destination)> {
     // The byte layout is the shared node-0 convention; map its raw output to the policy types.
-    let (transport_byte, port, host) = kennel_lib_binder::service::inet::decode_request(data, max_host)?;
+    let (transport_byte, port, host) =
+        kennel_lib_binder::service::inet::decode_request(data, max_host)?;
     let transport = match transport_byte {
         transport::TCP => Transport::Tcp,
         transport::UDP => Transport::Udp,
@@ -329,7 +334,8 @@ mod tests {
         assert!(decode_request(&[9, 0x01, 0xBB, b'x'], 255).is_none()); // unknown transport
         assert!(decode_request(&[transport::TCP, 0x01, 0xBB], 255).is_none()); // empty host
         assert!(decode_request(&[transport::TCP, 0x01, 0xBB, b'a', b'a'], 1).is_none()); // oversized
-        assert!(decode_request(&[transport::TCP, 0x01, 0xBB, 0xFF, 0xFE], 255).is_none()); // !utf8
+        assert!(decode_request(&[transport::TCP, 0x01, 0xBB, 0xFF, 0xFE], 255).is_none());
+        // !utf8
     }
 
     #[test]
@@ -397,7 +403,8 @@ mod tests {
     #[test]
     fn a_host_service_literal_is_an_allow_exception() {
         let mut rt = NetRuntime::denied();
-        rt.host_services.push(SocketAddr::new(v4("127.0.0.1"), 2222));
+        rt.host_services
+            .push(SocketAddr::new(v4("127.0.0.1"), 2222));
         let resolver = FakeResolver(Err(()));
         let dest = Destination::Addr(v4("127.0.0.1"));
         assert_eq!(
@@ -425,14 +432,14 @@ mod tests {
         });
 
         // The real delegate conduit server on a per-kennel command socket.
-        let sock = std::env::temp_dir().join(format!("kennel-inet-dial-{}.sock", std::process::id()));
+        let sock =
+            std::env::temp_dir().join(format!("kennel-inet-dial-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).expect("bind cmd socket");
         std::thread::spawn(move || host_netproxy::conduit::serve_conduit(&listener));
 
         // kenneld's side: dial via the delegate, get the kennel-facing conduit end back.
-        let mut end =
-            dial_via_delegate(&sock, echo_addr.port(), &[echo_addr.ip()]).expect("dial");
+        let mut end = dial_via_delegate(&sock, echo_addr.port(), &[echo_addr.ip()]).expect("dial");
         end.write_all(b"ping").expect("write");
         end.shutdown(Shutdown::Write).expect("half-close");
         let mut got = Vec::new();

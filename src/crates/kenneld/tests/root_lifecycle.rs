@@ -129,7 +129,10 @@ fn run_client() {
     let bytes = conn
         .transact(CONTEXT_MANAGER_HANDLE, lifecycle::GET_SANDBOX_PLAN, &[])
         .expect("pull the supervision-half");
-    assert_eq!(bytes, SUPERVISION, "the supervision bytes did not round-trip");
+    assert_eq!(
+        bytes, SUPERVISION,
+        "the supervision bytes did not round-trip"
+    );
 
     // Teardown.
     std::fs::File::create(dir.with_extension("stop")).expect("stop file");

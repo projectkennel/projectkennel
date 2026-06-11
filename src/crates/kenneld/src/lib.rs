@@ -44,11 +44,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use kennel_lib_policy::NetPolicy;
+use kennel_lib_spawn::{Plan, ProxyEndpoint, SpawnError};
+use kennel_lib_syscall::namespace::Namespaces;
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response};
-use kennel_lib_spawn::{Plan, ProxyEndpoint, SpawnError};
-use kennel_lib_syscall::namespace::Namespaces;
 
 /// The default proxy host offset within the kennel's subnet (`…|0001` / `::1`).
 ///
@@ -580,7 +580,10 @@ fn bring_up<P: Privileged + Sync>(
     // kennel. Best-effort — no-ops where the daemon could not delegate the `pids` controller (see
     // cgroup::prepare_delegation); the kenneld.service TasksMax remains the host backstop.
     if let Err(e) = cgroup::write_pids_max(cgroup, cgroup::DEFAULT_PIDS_MAX) {
-        eprintln!("kenneld: warning: pids.max not applied to {}: {e}", cgroup.display());
+        eprintln!(
+            "kenneld: warning: pids.max not applied to {}: {e}",
+            cgroup.display()
+        );
     }
 
     // 2. loopback addresses. The proxy's listen offset + port come from the signed
@@ -657,8 +660,11 @@ fn bring_up<P: Privileged + Sync>(
                 .iter()
                 .copied()
                 .collect::<Vec<std::net::SocketAddr>>();
-            let net_runtime =
-                crate::inet::NetRuntime::from_policy(net, host_services, Some(command_socket.clone()));
+            let net_runtime = crate::inet::NetRuntime::from_policy(
+                net,
+                host_services,
+                Some(command_socket.clone()),
+            );
             (Some(command_socket), net_runtime)
         } else {
             (None, crate::inet::NetRuntime::denied())
@@ -755,10 +761,7 @@ fn bring_up<P: Privileged + Sync>(
     let net_pivoting = view_root.is_some() && plan.view.is_some();
     if net_pivoting && command_socket.is_some() {
         if let Some(setup) = proxy {
-            let listen = SocketAddr::new(
-                state.v4.map_or_else(|| addr6.into(), IpAddr::from),
-                port,
-            );
+            let listen = SocketAddr::new(state.v4.map_or_else(|| addr6.into(), IpAddr::from), port);
             apply_socks5(plan, &setup.socks5, listen, command);
         }
     }
@@ -805,8 +808,10 @@ fn bring_up<P: Privileged + Sync>(
                     .to_string_lossy()
                     .into_owned()]);
                 for loader in resolution.loaders {
-                    plan.landlock_fs
-                        .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
+                    plan.landlock_fs.push((
+                        PathBuf::from(loader),
+                        AccessFs::READ_FILE | AccessFs::EXECUTE,
+                    ));
                 }
             }
         }
@@ -832,8 +837,15 @@ fn bring_up<P: Privileged + Sync>(
             "a kennel must be constructed via the factory, which requires a BinderPrep",
         )));
     };
-    let (mut child, init_pid, sync, supervision_bytes) =
-        construct_via_factory(privileged, plan, command, ctx, &loopback, &egress_bytes, state)?;
+    let (mut child, init_pid, sync, supervision_bytes) = construct_via_factory(
+        privileged,
+        plan,
+        command,
+        ctx,
+        &loopback,
+        &egress_bytes,
+        state,
+    )?;
     let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
 
     // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed — only then is its
@@ -956,7 +968,14 @@ fn supervision_from(
     argv.extend(command.get_args().map(|a| a.to_string_lossy().into_owned()));
     let env = command
         .get_envs()
-        .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
+        .filter_map(|(k, v)| {
+            v.map(|v| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+        })
         .collect();
     kennel_lib_spawn::Supervision {
         program,
@@ -1089,8 +1108,10 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
     let resolution =
         kennel_lib_policy::libresolve::resolve_loaders(&[shim_bin.to_string_lossy().into_owned()]);
     for loader in resolution.loaders {
-        plan.landlock_fs
-            .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
+        plan.landlock_fs.push((
+            PathBuf::from(loader),
+            AccessFs::READ_FILE | AccessFs::EXECUTE,
+        ));
     }
     // Register the proxy as a seal-launched aux: `facade-afunix <device>
     // <shim-path>=<name> ...`. It runs inside the sealed view, brokers by logical name
@@ -1121,13 +1142,18 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
             writable: false,
         });
     }
-    plan.landlock_fs
-        .push((socks5_bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
-    let resolution =
-        kennel_lib_policy::libresolve::resolve_loaders(&[socks5_bin.to_string_lossy().into_owned()]);
+    plan.landlock_fs.push((
+        socks5_bin.to_path_buf(),
+        AccessFs::READ_FILE | AccessFs::EXECUTE,
+    ));
+    let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[socks5_bin
+        .to_string_lossy()
+        .into_owned()]);
     for loader in resolution.loaders {
-        plan.landlock_fs
-            .push((PathBuf::from(loader), AccessFs::READ_FILE | AccessFs::EXECUTE));
+        plan.landlock_fs.push((
+            PathBuf::from(loader),
+            AccessFs::READ_FILE | AccessFs::EXECUTE,
+        ));
     }
     // `facade-socks5 <binder-device> <listen-addr>`, run inside the sealed view.
     plan.aux.push(kennel_lib_spawn::AuxProcess {
@@ -1136,7 +1162,14 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
     });
     // The workload's egress goes through facade-socks5. socks5h ⇒ the proxy resolves names.
     let url = format!("socks5h://{listen}");
-    for var in ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"] {
+    for var in [
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+    ] {
         command.env(var, &url);
     }
 }

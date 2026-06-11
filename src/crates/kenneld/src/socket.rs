@@ -17,7 +17,12 @@ use std::path::PathBuf;
 #[must_use]
 pub fn runtime_dir() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
-        || PathBuf::from(format!("/run/user/{}", kennel_lib_syscall::unistd::real_uid())),
+        || {
+            PathBuf::from(format!(
+                "/run/user/{}",
+                kennel_lib_syscall::unistd::real_uid()
+            ))
+        },
         PathBuf::from,
     );
     runtime.join("kennel")

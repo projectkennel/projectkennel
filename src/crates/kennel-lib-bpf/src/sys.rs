@@ -155,7 +155,12 @@ pub fn map_create(
 ///
 /// Returns the OS error if the fd is out of range or the kernel rejects the
 /// update (e.g. the map is read-only).
-pub unsafe fn map_update(map: BorrowedFd<'_>, key: &[u8], value: &[u8], flags: u64) -> io::Result<()> {
+pub unsafe fn map_update(
+    map: BorrowedFd<'_>,
+    key: &[u8],
+    value: &[u8],
+    flags: u64,
+) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let attr = MapElemAttr {
         map_fd: u32::try_from(map.as_raw_fd())

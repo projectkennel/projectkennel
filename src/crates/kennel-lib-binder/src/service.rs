@@ -73,7 +73,10 @@ pub mod inet {
         #[test]
         fn round_trips() {
             let bytes = encode_request(0, 443, "api.openai.com");
-            assert_eq!(decode_request(&bytes, 255), Some((0, 443, "api.openai.com")));
+            assert_eq!(
+                decode_request(&bytes, 255),
+                Some((0, 443, "api.openai.com"))
+            );
         }
 
         #[test]
@@ -81,7 +84,8 @@ pub mod inet {
             assert!(decode_request(&[0, 0x01], 255).is_none()); // short
             assert!(decode_request(&[0, 0x01, 0xBB], 255).is_none()); // empty host
             assert!(decode_request(&[0, 0x01, 0xBB, b'a', b'b'], 1).is_none()); // oversized
-            assert!(decode_request(&[0, 0x01, 0xBB, 0xFF, 0xFE], 255).is_none()); // !utf8
+            assert!(decode_request(&[0, 0x01, 0xBB, 0xFF, 0xFE], 255).is_none());
+            // !utf8
         }
     }
 }

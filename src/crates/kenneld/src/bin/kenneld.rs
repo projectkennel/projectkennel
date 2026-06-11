@@ -38,8 +38,8 @@ fn run() -> Result<(), String> {
     // Deployment paths (helper binaries, the trust store) come from the
     // root-owned config cascade — never baked in, never user-overridable
     // (07-paths.md; kennel_lib_config::Deployment).
-    let deployment =
-        kennel_lib_config::Deployment::load().map_err(|e| format!("loading deployment config: {e}"))?;
+    let deployment = kennel_lib_config::Deployment::load()
+        .map_err(|e| format!("loading deployment config: {e}"))?;
     let identity = build_identity(&deployment)?;
     let privileged = HelperClient::new(deployment.privhelper());
     // Settled run policies verify against the system trust store **then** the calling

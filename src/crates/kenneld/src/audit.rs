@@ -363,7 +363,8 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
         egress: Option<&[u8]>,
         pty_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(std::process::Child, i32, std::os::fd::OwnedFd)> {
-        self.inner.construct_kennel(construction_half, egress, pty_fd)
+        self.inner
+            .construct_kennel(construction_half, egress, pty_fd)
     }
 }
 

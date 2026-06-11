@@ -166,7 +166,12 @@ fn substitute_path(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &st
 /// path that actually exists in the view: `exec.path = ["~/.local/bin"]` becomes
 /// `/home/kennel/.local/bin` in `$PATH`, matching where a `~/.local/bin/...` `exec.allow` grant
 /// landed (its remap target is the same persona path).
-fn substitute_persona_path(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
+fn substitute_persona_path(
+    s: &str,
+    subst: &RuntimeSubstitutions,
+    user: &str,
+    group: &str,
+) -> String {
     // Resolve the home prefix to the persona home FIRST — before `substitute_str` would expand a
     // `<home>` token to the *operator's* home (a leak in a string the workload reads). The remaining
     // `<…>` tokens (ctx/uid/…) are then substituted normally.
@@ -249,7 +254,6 @@ pub fn prepare(
     let substituted = substitute(&verified, subst)?;
     Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
 }
-
 
 /// Build (but do not install) a Landlock ruleset from a plan's path and port rules.
 ///
@@ -792,7 +796,11 @@ mod tests {
             .iter()
             .filter(|b| b.source == Path::new("/srv/data/project"))
             .collect();
-        assert_eq!(project.len(), 1, "the shared path binds exactly once, not twice");
+        assert_eq!(
+            project.len(),
+            1,
+            "the shared path binds exactly once, not twice"
+        );
         assert!(
             project.first().expect("one bind").writable,
             "the deduped bind is writable (write wins over read)"
@@ -829,7 +837,10 @@ mod tests {
             .collect();
         let mut sorted = order.clone();
         sorted.sort_unstable();
-        assert_eq!(order, sorted, "fs binds under /srv are shortest-first: {order:?}");
+        assert_eq!(
+            order, sorted,
+            "fs binds under /srv are shortest-first: {order:?}"
+        );
     }
 
     #[test]
@@ -854,18 +865,27 @@ mod tests {
             .iter()
             .find(|b| b.target == Path::new("/home/kennel/foo"))
             .expect("~/foo binds at the persona home");
-        assert_eq!(foo.source, Path::new("/home/dev/foo"), "bound from the real host path");
+        assert_eq!(
+            foo.source,
+            Path::new("/home/dev/foo"),
+            "bound from the real host path"
+        );
 
         // The exec Landlock grant is on the persona path, so it matches what the workload execs.
         assert!(
-            plan.landlock_fs.iter().any(|(path, a)| path == Path::new("/home/kennel/foo/bin/tool")
-                && a.contains(AccessFs::EXECUTE)),
+            plan.landlock_fs
+                .iter()
+                .any(|(path, a)| path == Path::new("/home/kennel/foo/bin/tool")
+                    && a.contains(AccessFs::EXECUTE)),
             "exec.allow ~/foo/bin/tool grants execute on the persona path"
         );
 
         // The operator's real home appears in NO target or Landlock path (only as a bind source).
         assert!(
-            !plan.landlock_fs.iter().any(|(path, _)| path.starts_with("/home/dev")),
+            !plan
+                .landlock_fs
+                .iter()
+                .any(|(path, _)| path.starts_with("/home/dev")),
             "the operator home never appears in a Landlock target"
         );
         assert!(
@@ -1491,5 +1511,4 @@ mod tests {
         let err = prepare(&bytes, &empty, &subst()).expect_err("must reject");
         assert!(matches!(err, SpawnError::Policy(_)), "got {err:?}");
     }
-
 }

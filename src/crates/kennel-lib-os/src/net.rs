@@ -33,7 +33,7 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> io::Result<UnixSt
     )?;
 
     match connect(sock.as_raw_fd(), &addr) {
-        Ok(()) => {}                 // connected immediately (the common AF_UNIX case)
+        Ok(()) => {} // connected immediately (the common AF_UNIX case)
         Err(Errno::EINPROGRESS) => {
             // Async connect in flight: wait for writable within the deadline, then read SO_ERROR.
             let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);

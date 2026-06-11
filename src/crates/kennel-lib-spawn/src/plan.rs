@@ -699,7 +699,10 @@ impl Plan {
             // The resolved dynamic loaders (each allowlisted binary's PT_INTERP): exact
             // paths settled at compile time. `skip_missing` drops any the view omits.
             for loader in &ep.exec.loaders {
-                landlock_fs.push((remap_target(Path::new(loader), home, &shim_root), exec_access));
+                landlock_fs.push((
+                    remap_target(Path::new(loader), home, &shim_root),
+                    exec_access,
+                ));
             }
         }
 
@@ -818,9 +821,10 @@ impl Plan {
         // an invalid-policy error rather than silently dropped.
         let mut ulimits: Vec<(Resource, u64, u64)> = Vec::new();
         for (name, value) in &policy.ulimits.limits {
-            let resource = kennel_lib_syscall::process::resource_by_name(name).ok_or_else(|| {
-                SpawnError::InvalidPolicy(format!("unknown ulimit resource `{name}`"))
-            })?;
+            let resource =
+                kennel_lib_syscall::process::resource_by_name(name).ok_or_else(|| {
+                    SpawnError::InvalidPolicy(format!("unknown ulimit resource `{name}`"))
+                })?;
             let (soft, hard) = parse_ulimit_value(name, value)?;
             ulimits.push((resource, soft, hard));
         }

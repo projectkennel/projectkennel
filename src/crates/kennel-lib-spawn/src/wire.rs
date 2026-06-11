@@ -1050,7 +1050,10 @@ mod tests {
     fn round_trips_a_rich_supervision() {
         let s = rich_supervision();
         let back = decode_supervision(&encode_supervision(&s)).expect("decode");
-        assert_eq!(back, s, "the decoded supervision-half must equal the original");
+        assert_eq!(
+            back, s,
+            "the decoded supervision-half must equal the original"
+        );
     }
 
     #[test]
@@ -1122,7 +1125,10 @@ mod tests {
     fn round_trips_a_rich_construction() {
         let c = rich_construction();
         let back = decode_construction(&encode_construction(&c)).expect("decode");
-        assert_eq!(back, c, "the decoded construction-half must equal the original");
+        assert_eq!(
+            back, c,
+            "the decoded construction-half must equal the original"
+        );
     }
 
     #[test]

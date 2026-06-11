@@ -111,8 +111,8 @@ where
     // The flag bits and SIGCHLD are kernel constants known non-negative, so
     // `unsigned_abs` reproduces their exact bit value and `u64::from` widens totally —
     // no cast, no panic path.
-    let flags: u64 =
-        u64::from(to_clone_flags(ns).bits().unsigned_abs()) | u64::from(libc::SIGCHLD.unsigned_abs());
+    let flags: u64 = u64::from(to_clone_flags(ns).bits().unsigned_abs())
+        | u64::from(libc::SIGCHLD.unsigned_abs());
     // SAFETY: a raw `clone` syscall with a NULL child stack and all-zero
     // parent_tid/child_tid/tls behaves like `fork()` — the child returns 0 on a
     // copy-on-write copy of the caller's stack, the parent gets the child pid. Passing
@@ -315,7 +315,8 @@ mod tests {
             unsafe { libc::_exit(42) }
         };
         let pid = clone_pid1(Namespaces::empty(), child).expect("clone_pid1");
-        let status = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None).expect("waitpid");
+        let status =
+            nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None).expect("waitpid");
         assert!(
             matches!(status, nix::sys::wait::WaitStatus::Exited(_, 42)),
             "child should _exit(42): {status:?}"
@@ -340,7 +341,8 @@ mod tests {
             unsafe { libc::_exit(i32::from(me != 1)) }
         };
         let pid = clone_pid1(Namespaces::PID | Namespaces::USER, child).expect("clone_pid1");
-        let status = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None).expect("waitpid");
+        let status =
+            nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None).expect("waitpid");
         assert!(
             matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
             "cloned child must be PID 1 of its new PID namespace: {status:?}"

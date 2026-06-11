@@ -22,8 +22,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use kennel_lib_policy::NetPolicy;
-use kennel_privhelper::validate::ReservedScope;
 use kennel_lib_spawn::{Plan, RuntimeSubstitutions};
+use kennel_privhelper::validate::ReservedScope;
 
 use crate::control::{self, KennelInfo, Request, Response, StartRequest};
 use crate::ctx::CtxAllocator;
@@ -787,9 +787,9 @@ pub fn run_kennel<P, L>(
         };
         // The registry records every decision (§7.1.4). With no audit state dir, a sink-less
         // writer keeps the bus running without recording.
-        let writer = audit
-            .clone()
-            .unwrap_or_else(|| Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone())));
+        let writer = audit.clone().unwrap_or_else(|| {
+            Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone()))
+        });
         spec.binder = Some(crate::BinderPrep {
             policy: loaded.binder,
             unix: facade_unix,
@@ -990,10 +990,10 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
 
-    use kennel_privhelper::wire::Response as HelperResponse;
     use kennel_lib_syscall::landlock::AccessFs;
     use kennel_lib_syscall::namespace::Namespaces;
     use kennel_lib_syscall::seccomp::Action;
+    use kennel_privhelper::wire::Response as HelperResponse;
 
     #[test]
     fn valid_kennel_names_are_accepted() {

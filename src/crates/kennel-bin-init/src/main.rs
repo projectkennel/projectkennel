@@ -165,7 +165,11 @@ fn spawn_all(
     }
     // Best-effort lifecycle report: kenneld audits it (the bus, not a reply, is the
     // source of truth, and the verb may be unserved on an older daemon).
-    notify(conn, lifecycle::NOTIFY_BOOT_SYNC, &pids_payload(&facade_pids));
+    notify(
+        conn,
+        lifecycle::NOTIFY_BOOT_SYNC,
+        &pids_payload(&facade_pids),
+    );
 
     // 2. The workload: dropped to the operator AND confined.
     notify(conn, lifecycle::NOTIFY_WORKLOAD_EXEC, &[]);
@@ -276,7 +280,9 @@ fn supervise(
     if let Some(secs) = sup.ttl_seconds {
         if let Ok(secs) = u32::try_from(secs) {
             if let Err(e) = kennel_lib_syscall::process::arm_ttl_alarm(secs) {
-                eprintln!("kennel-bin-init: could not arm the TTL alarm: {e}; running without a TTL");
+                eprintln!(
+                    "kennel-bin-init: could not arm the TTL alarm: {e}; running without a TTL"
+                );
             }
         }
     }
@@ -325,7 +331,11 @@ fn supervise(
                     Ok(new_pid) => {
                         state.starts.push(Instant::now());
                         facades.insert(new_pid, state);
-                        notify(conn, lifecycle::NOTIFY_FACADE_RESTART, &new_pid.to_le_bytes());
+                        notify(
+                            conn,
+                            lifecycle::NOTIFY_FACADE_RESTART,
+                            &new_pid.to_le_bytes(),
+                        );
                     }
                     Err(e) => eprintln!(
                         "kennel-bin-init: failed to restart facade {}: {e}; leaving it down",
@@ -374,7 +384,10 @@ fn cstr_path(p: &Path) -> io::Result<CString> {
 
 /// Convert each string to a `CString`.
 fn to_cstrings(items: &[String]) -> io::Result<Vec<CString>> {
-    items.iter().map(|s| cstring(s.as_bytes(), "argument")).collect()
+    items
+        .iter()
+        .map(|s| cstring(s.as_bytes(), "argument"))
+        .collect()
 }
 
 /// Convert an environment map to `KEY=VALUE` `CString`s.
@@ -420,7 +433,10 @@ mod tests {
             .expect("test Instant is well past boot");
         let mut starts = vec![stale; START_LIMIT_BURST];
         assert!(may_restart(&mut starts, now));
-        assert!(starts.is_empty(), "stale starts are pruned out of the window");
+        assert!(
+            starts.is_empty(),
+            "stale starts are pruned out of the window"
+        );
     }
 
     #[test]
@@ -438,7 +454,10 @@ mod tests {
     fn facade_argv_uses_the_path_as_argv0() {
         let facade = AuxProcess {
             path: PathBuf::from("/usr/libexec/kennel/facade-afunix"),
-            args: vec!["/dev/binderfs/binder".to_owned(), "/run/x.sock=wl".to_owned()],
+            args: vec![
+                "/dev/binderfs/binder".to_owned(),
+                "/run/x.sock=wl".to_owned(),
+            ],
         };
         let argv = facade_argv(&facade).expect("argv");
         assert_eq!(

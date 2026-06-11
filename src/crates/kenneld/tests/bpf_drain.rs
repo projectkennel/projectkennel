@@ -42,7 +42,8 @@ fn drains_a_denied_connect_event_through_the_writer() {
     }
 
     // 1. Shared map set; load connect4 against it (the production load path).
-    let maps = kennel_lib_bpf::create_maps(kennel_lib_bpf::KENNEL_MAPS).expect("create shared maps");
+    let maps =
+        kennel_lib_bpf::create_maps(kennel_lib_bpf::KENNEL_MAPS).expect("create shared maps");
     let spec = kennel_lib_bpf::KENNEL_PROGRAMS
         .iter()
         .find(|p| p.name == "connect4")
