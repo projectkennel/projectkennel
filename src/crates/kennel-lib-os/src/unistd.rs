@@ -131,6 +131,26 @@ pub fn set_uid(uid: u32) -> io::Result<()> {
     nix::unistd::setresuid(u, u, u).map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
+/// Set **only the effective uid** (`seteuid`), leaving the real and saved uids intact so
+/// the caller can return to its prior identity.
+///
+/// The privhelper factory uses this to own the kennel user namespace by the **operator**:
+/// `CLONE_NEWUSER` records the creator's *effective* uid as the namespace owner, and the
+/// operator must own it so the operator `kenneld` holds `CAP_SYS_PTRACE` there and can open
+/// the binderfs via `/proc/<init>/root` (`07-2` §7.2.1a). The setuid-root factory therefore
+/// `seteuid`s to the operator immediately before the clone and back to 0 immediately after
+/// (to write the identity maps, which needs euid 0 + `CAP_SETFCAP`). A plain `setresuid`
+/// would forfeit the saved-uid 0 and make the return impossible.
+///
+/// # Errors
+///
+/// An OS error if the target uid is not the real or saved uid and the caller lacks
+/// `CAP_SETUID` (it does not, here: 0 ⇄ operator are the real/saved pair of a setuid-root
+/// process invoked by the operator).
+pub fn set_euid(uid: u32) -> io::Result<()> {
+    nix::unistd::seteuid(Uid::from_raw(uid)).map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
 /// Change the owner of `path` to `uid`:`gid` (`chown(2)`).
 ///
 /// The privhelper factory uses this to hand the freshly-allocated per-kennel binderfs

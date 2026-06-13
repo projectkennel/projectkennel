@@ -78,7 +78,10 @@ pub fn run_construct(chan: BorrowedFd<'_>) -> ! {
 /// `kennel-bin-init`, and wait for it — returning the child's exit status.
 // `op_uid`/`op_gid` are the domain names; the pedantic similar-names heuristic flags the
 // pair, but renaming would only obscure them.
-#[allow(clippy::similar_names)]
+// allow(too_many_lines): one cohesive privileged construction — recv, clone with the
+// operator-owned userns, write maps, hand off — that cannot be split without breaking the
+// linear fd/identity/clone ordering the security argument depends on.
+#[allow(clippy::similar_names, clippy::too_many_lines)]
 fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // 0. `chan` (our stdin) is the privileged kenneld↔helper SEQPACKET. The `clone` below
     //    copies our fd table into the construction child, so mark `chan` close-on-exec now:
@@ -175,39 +178,54 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let op_uid = real_uid();
     let op_gid = real_gid();
 
-    // 3. Clone the construction child as the OPERATOR (NOT escalated): this sets the new
-    //    user namespace's **owner** to the operator, so the operator `kenneld` is
-    //    privileged over the kennel's binderfs (an `FS_USERNS_MOUNT` whose `s_user_ns` is
-    //    the kennel userns) and can open it via `/proc/<init>/root`. A root-owned userns
-    //    would deny the operator that access. The child still gets full capabilities in the
-    //    new userns (a `CLONE_NEWUSER` child always does), so it can escalate to the
-    //    kennel's uid 0 itself for the root-owned construction (see below).
+    // 3. Clone the construction child with the new user namespace **owned by the operator**.
+    //    `CLONE_NEWUSER` records the creating process's *effective* uid as the namespace owner,
+    //    and the owner is what grants `CAP_SYS_PTRACE` in that userns to a process of the same
+    //    uid — so the operator `kenneld` can open the kennel's binderfs (an `FS_USERNS_MOUNT`
+    //    whose `s_user_ns` is this userns) via `/proc/<init>/root`. A root-owned userns denies
+    //    the operator that access (the `/proc/<init>/root` EACCES under Yama `ptrace_scope=1`).
+    //    The setuid-root factory therefore drops its *effective* uid to the operator across the
+    //    clone, then restores euid 0 to write the maps. The child still gets full capabilities
+    //    in the new userns (a `CLONE_NEWUSER` child always does), so it self-escalates to the
+    //    kennel's uid 0 for the root-owned construction (below).
     let granted = half.granted_gids.clone();
     let namespaces = half.namespaces; // captured before `half` moves into the child
     let child = move || {
+        // Each early return trips clone_pid1's `_exit(127)` backstop. Name the failing step on
+        // stderr first (inherited from the factory, so it reaches kenneld's journal): a silent
+        // 127 at this boundary is undebuggable, and the construction child has no other channel.
         // Wait until the parent has written our identity maps (so the kennel's uid 0 is
         // mappable); abort closed otherwise.
         if recv_ack(ready_r.as_fd()).ok().flatten() != Some(ACK_PROCEED) {
-            return; // clone_pid1 backstops a returning child with _exit(127)
+            eprintln!("kennel-privhelper: construction child: maps-ready ack not received");
+            return;
         }
         // Become the kennel's uid 0 (inside-0 = host root via the `0 0 1` map line) using the
         // userns capabilities the clone granted, so the view/dev/binderfs are root-owned.
-        if kennel_lib_syscall::unistd::set_gid(0).is_err()
-            || kennel_lib_syscall::unistd::set_uid(0).is_err()
-        {
+        if let Err(e) = kennel_lib_syscall::unistd::set_gid(0) {
+            eprintln!("kennel-privhelper: construction child: setgid(0) in userns: {e}");
+            return;
+        }
+        if let Err(e) = kennel_lib_syscall::unistd::set_uid(0) {
+            eprintln!("kennel-privhelper: construction child: setuid(0) in userns: {e}");
             return;
         }
         // All privileged construction runs here, as the kennel's uid 0, BEFORE the hand-off
         // — so the surfaces are root-owned and no operator code runs as userns-0. A failure
         // returns, tripping the _exit(127) backstop (no half-built kennel runs the workload).
-        if build_kennel(&half, op_uid, op_gid).is_err() {
+        if let Err(e) = build_kennel(&half, op_uid, op_gid) {
+            eprintln!("kennel-privhelper: construction child: build_kennel: {e}");
             return;
         }
         // Place the descriptors `kennel-bin-init` inherits at fixed numbers (`BOOT_SYNC_FD`, and
         // `PTY_RETURN_FD` for an interactive run), returning the init-binary fd to exec.
         let pty_ref = pty_fd.as_ref().map(AsFd::as_fd);
-        let Ok(init_file) = place_handoff_fds(init_file.as_fd(), init_sync.as_fd(), pty_ref) else {
-            return;
+        let init_file = match place_handoff_fds(init_file.as_fd(), init_sync.as_fd(), pty_ref) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("kennel-privhelper: construction child: place_handoff_fds: {e}");
+                return;
+            }
         };
         // Hand off to the trusted `kennel-bin-init` (resolved from root-owned config, not the
         // wire) **as the kennel's uid 0** (no drop): PID 1 must NOT share the operator uid, or
@@ -215,12 +233,28 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // `kennel-bin-init` itself drops the workload and facades to the operator. kenneld still
         // reaches `/proc/<init>/root` because the kennel userns is operator-owned, so the
         // operator kenneld holds CAP_SYS_PTRACE in it. Empty argv/envp (the pull model).
-        let _err = fexecve(init_file.as_fd(), &[], &[]);
-        // fexecve returned ⇒ failure; fall through to the _exit(127) backstop.
+        let err = fexecve(init_file.as_fd(), &[], &[]);
+        // fexecve returned ⇒ failure; name it, then fall through to the _exit(127) backstop.
+        eprintln!("kennel-privhelper: construction child: fexecve kennel-bin-init: {err}");
     };
+    // Drop the *effective* uid to the operator so the clone's `CLONE_NEWUSER` records the
+    // operator as the userns owner (see step 3); real/saved stay (operator, 0) so the parent
+    // restores euid 0 below to write the maps. A no-op when the operator already is root.
+    if op_uid != 0 {
+        kennel_lib_syscall::unistd::set_euid(op_uid)
+            .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid({op_uid}): {e}")))?;
+    }
     let init_pid = clone_pid1(namespaces, child)?;
 
-    // 4. Escalate the parent to real root ONLY to write the child's identity maps: mapping
+    // 4. Restore the parent's **effective** uid to 0 (undo the pre-clone operator drop) so the
+    //    setgid/setuid below regain `CAP_SETGID`/`CAP_SETUID`; the saved uid is still 0, so this
+    //    seteuid is permitted. The userns owner is already fixed (operator) at the clone.
+    if op_uid != 0 {
+        kennel_lib_syscall::unistd::set_euid(0)
+            .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid(0): {e}")))?;
+    }
+
+    // Escalate the parent to real root ONLY to write the child's identity maps: mapping
     //    host uid 0 into the kennel (the `0 0 1` line) requires the writer to own outside uid 0
     //    (`verify_root_map`, euid 0) and `CAP_SETFCAP` (since Linux 5.12). This does not
     //    change the userns owner (fixed at clone above). Then release the child and report
@@ -338,7 +372,8 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     use kennel_lib_syscall::mount;
 
     if half.cgroup_join {
-        join_cgroup(&half.cgroup)?;
+        join_cgroup(&half.cgroup)
+            .map_err(|e| io::Error::new(e.kind(), format!("join_cgroup: {e}")))?;
     }
     // In-namespace loopback (§7.3): a fresh net-ns starts with `lo` DOWN and no addresses. Bring it
     // up and add the kennel's own loopback addresses inside the net-ns — the mirror of the host-lo
@@ -355,10 +390,12 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     }
 
     // Detach mount propagation from the host before any mount in either path.
-    mount::make_root_private()?;
+    mount::make_root_private()
+        .map_err(|e| io::Error::new(e.kind(), format!("make_root_private: {e}")))?;
     if let (Some(view), Some(new_root)) = (&half.view, &half.new_root) {
         // Build + pivot into the constructed view.
-        build_view_and_pivot(view, new_root, &half.file_binds)?;
+        build_view_and_pivot(view, new_root, &half.file_binds)
+            .map_err(|e| io::Error::new(e.kind(), format!("build_view_and_pivot: {e}")))?;
         // The constructed $HOME is the WORKLOAD's private space (the home dir on the view-root
         // tmpfs plus the copied dotfiles / synthetic ~/.ssh). The construction child built it
         // as the kennel's uid 0, so it is root-owned — but the workload, the af-unix proxy,
