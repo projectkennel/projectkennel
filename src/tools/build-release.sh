@@ -45,10 +45,11 @@ VERSION="$(grep -m1 '^version = ' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 SHA="$(git -C "$ROOT" log -1 --format=%h 2>/dev/null || echo nogit)"
 EPOCH="$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)"
 
-# The seven binaries install.sh consumes. `-p kenneld` builds the kenneld, kennel,
-# and kennel-akc bins (src/bin/); the privhelper is built separately because it
-# needs the bpf-egress feature (and thus clang, on the build host).
-BINS="kenneld kennel kennel-akc host-netproxy kennel-bin-ssh-reorigin facade-ssh facade-socks5 kennel-privhelper"
+# The binaries install.sh consumes. `-p kenneld` builds the kenneld, kennel, and
+# kennel-akc bins (src/bin/); kennel-bin-init is the trusted uid-0 PID 1 the
+# privhelper factory fexecves (07-2); the privhelper is built separately because
+# it needs the bpf-egress feature (and thus clang, on the build host).
+BINS="kenneld kennel kennel-akc host-netproxy kennel-bin-ssh-reorigin facade-ssh facade-socks5 kennel-bin-init kennel-privhelper"
 
 # The highest GLIBC_x.y symbol version a binary references — the runtime glibc floor.
 glibc_floor() {
@@ -63,7 +64,8 @@ build_arch() {
 
 	echo "==> [$triple] building release binaries (reproducible, offline, locked)" >&2
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
-		-p kenneld -p host-netproxy -p facade-socks5 -p kennel-bin-ssh-reorigin -p facade-ssh
+		-p kenneld -p host-netproxy -p facade-socks5 -p kennel-bin-ssh-reorigin -p facade-ssh \
+		-p kennel-bin-init
 	# The privhelper LAST and with its feature, so its build is the bpf-egress one
 	# (a plain workspace build would clobber it; see 08-as-built-notes §8.3).
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
@@ -124,7 +126,7 @@ grant, the maintainer trust-store key, and the signed reference templates under
     sha256sum -c SHA256SUMS                       # the shipped binaries
     ls -l /usr/libexec/kennel/kennel-privhelper   # expect -rwsr-xr-x root root
 
-Contents: target/release/ (7 binaries), dist/ (config, systemd, apparmor),
+Contents: target/release/ (9 binaries), dist/ (config, systemd, apparmor),
 keys/*.pub, templates/<name>/policy.toml, src/tools/install.sh, install.sh.
 EOF
 

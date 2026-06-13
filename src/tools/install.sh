@@ -77,7 +77,8 @@ build_binaries() {
 	echo "install.sh: building release binaries (offline, frozen, locked)"
 	# -p kenneld builds the kenneld, kennel, and kennel-akc bins.
 	run cargo build --release --offline --frozen --locked \
-		-p kenneld -p host-netproxy -p facade-socks5 -p kennel-bin-ssh-reorigin -p facade-ssh
+		-p kenneld -p host-netproxy -p facade-socks5 -p kennel-bin-ssh-reorigin -p facade-ssh \
+		-p kennel-bin-init
 	# The privhelper needs its BPF feature; build it separately.
 	run cargo build --release --offline --frozen --locked \
 		-p kennel-privhelper --features bpf-egress
@@ -103,6 +104,11 @@ install_binaries() {
 	# privilege boundary; everything else runs as the user.
 	run install -m 0755 -o root -g root "$rel/kennel-privhelper" "$libexec/kennel-privhelper"
 	run chmod 4755 "$libexec/kennel-privhelper"
+	# The trusted init: the privhelper factory fexecves this as the kennel's uid-0
+	# PID 1, so it is a trust anchor — install it root-owned and not group/other
+	# writable (verify_trusted_init refuses any other owner or a 0o022 bit). It is
+	# NOT setuid: it gains uid 0 only inside the kennel's user namespace.
+	run install -m 0755 -o root -g root "$rel/kennel-bin-init" "$libexec/kennel-bin-init"
 }
 
 install_config() {
