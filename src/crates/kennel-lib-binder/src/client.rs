@@ -311,6 +311,7 @@ impl Connection {
 
     /// Extract the fd from a `BINDER_TYPE_FD` reply, then free the reply buffer.
     fn take_fd(&self, reply: TransactionData) -> io::Result<OwnedFd> {
+        let guard = BufferGuard::new(self, reply.buffer);
         let bytes = self
             .map
             .read_at(reply.buffer, proto::FLAT_BINDER_OBJECT_SIZE)
@@ -326,9 +327,7 @@ impl Connection {
         // SAFETY: `raw` was just transferred to us by the binder driver (a translated
         // BINDER_TYPE_FD object) and filtered `>= 0` above, so it is a valid fd we solely own.
         let owned = unsafe { sys::own_fd(raw) };
-        let mut w = Vec::new();
-        proto::write_free_buffer(&mut w, reply.buffer);
-        self.write_only(&w)?;
+        guard.free()?;
         Ok(owned)
     }
 
@@ -383,6 +382,7 @@ impl Connection {
     /// Extract the length-prefixed payload and the optional fd from a data-and-fd
     /// reply (the [`Self::transact_with_fd`] format), then free the reply buffer.
     fn take_data_and_fd(&self, reply: TransactionData) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
+        let guard = BufferGuard::new(self, reply.buffer);
         let total = usize::try_from(reply.data_size).unwrap_or(0);
         let buf = self
             .map
@@ -437,9 +437,7 @@ impl Connection {
             None
         };
 
-        let mut w = Vec::new();
-        proto::write_free_buffer(&mut w, reply.buffer);
-        self.write_only(&w)?;
+        guard.free()?;
         Ok((payload, fd))
     }
 
@@ -516,15 +514,14 @@ impl Connection {
 
     /// Copy a reply's data out of the mapping and free its buffer.
     fn take_buffer(&self, reply: TransactionData) -> io::Result<Vec<u8>> {
+        let guard = BufferGuard::new(self, reply.buffer);
         let len = usize::try_from(reply.data_size).unwrap_or(0);
         let bytes = self
             .map
             .read_at(reply.buffer, len)
             .ok_or_else(|| io::Error::other("reply buffer out of range"))?
             .to_vec();
-        let mut w = Vec::new();
-        proto::write_free_buffer(&mut w, reply.buffer);
-        self.write_only(&w)?;
+        guard.free()?;
         Ok(bytes)
     }
 
@@ -605,4 +602,50 @@ impl Connection {
 /// Convert a buffer length to the `u64` binder uses, rejecting the impossible.
 fn len_u64(len: usize) -> io::Result<u64> {
     u64::try_from(len).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "length too large"))
+}
+
+/// An RAII claim on a received/reply binder buffer: it issues `BC_FREE_BUFFER` when
+/// dropped, so a parse error on the extract path (`take_*`) cannot leak the kernel
+/// allocation. The kernel reclaims an endpoint's buffers when it closes, so a leak is
+/// bounded to a connection's life — but a client that hits malformed replies would
+/// otherwise burn its `map_size` mapping one wedged buffer at a time. The success path
+/// calls [`BufferGuard::free`] to release **and** propagate the write error; an early
+/// `?` lets `drop` free it best-effort instead.
+struct BufferGuard<'c> {
+    conn: &'c Connection,
+    buffer: u64,
+    freed: bool,
+}
+
+impl<'c> BufferGuard<'c> {
+    /// Claim `buffer` on `conn`; it is freed on drop unless [`free`](Self::free) runs first.
+    const fn new(conn: &'c Connection, buffer: u64) -> Self {
+        Self {
+            conn,
+            buffer,
+            freed: false,
+        }
+    }
+
+    /// Free the buffer now, surfacing the `BINDER_WRITE_READ` error if the free write
+    /// fails. Disarms the drop-guard so the buffer is freed exactly once.
+    fn free(mut self) -> io::Result<()> {
+        self.freed = true;
+        let mut w = Vec::new();
+        proto::write_free_buffer(&mut w, self.buffer);
+        self.conn.write_only(&w)
+    }
+}
+
+impl Drop for BufferGuard<'_> {
+    fn drop(&mut self) {
+        if self.freed {
+            return;
+        }
+        // Best-effort on the error path: there is no Result to surface from drop, and the
+        // kernel reclaims the buffer at endpoint close regardless.
+        let mut w = Vec::new();
+        proto::write_free_buffer(&mut w, self.buffer);
+        let _ = self.conn.write_only(&w);
+    }
 }
