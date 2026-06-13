@@ -184,7 +184,11 @@ fn spawn_all(
 
     // 2. The workload: dropped to the operator AND confined.
     notify(conn, lifecycle::NOTIFY_WORKLOAD_EXEC, &[]);
-    let program = cstr_path(&sup.program)?;
+    // Resolve a bare program name (no `/`) against the workload's synthesised `PATH`,
+    // inside the view (we are post-pivot). `execve(2)` itself never searches PATH, so
+    // `kennel run interactive -- bash` would otherwise ENOENT; only `/bin/bash` worked.
+    let resolved = resolve_program(&sup.program, &sup.env);
+    let program = cstr_path(&resolved)?;
     let argv = to_cstrings(&sup.argv)?;
     let argv_ref = borrow(&argv);
     let interactive = sup.interactive;
@@ -401,6 +405,35 @@ fn facade_argv(facade: &AuxProcess) -> io::Result<Vec<CString>> {
         argv.push(cstring(arg.as_bytes(), "argument")?);
     }
     Ok(argv)
+}
+
+/// Resolve the workload program against the synthesised `PATH`, mirroring how a shell
+/// finds a bare command — `execve(2)` itself never searches `PATH`.
+///
+/// A program containing a `/` (absolute or explicitly relative) is used verbatim. A bare
+/// name is looked up in each `PATH` entry from `env`, returning the first that exists as a
+/// regular file with an execute bit. The lookup runs in `kennel-bin-init` **post-pivot**, so
+/// it sees the kennel's view (and its `PATH` = the policy's `exec.path`), not the host. If
+/// nothing matches, the bare name is returned unchanged so `execve` fails with a clear
+/// ENOENT rather than this masking it.
+fn resolve_program(program: &Path, env: &[(String, String)]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    if program.as_os_str().as_bytes().contains(&b'/') {
+        return program.to_path_buf();
+    }
+    let path = env
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .map_or("", |(_, v)| v.as_str());
+    for dir in path.split(':').filter(|d| !d.is_empty()) {
+        let candidate = Path::new(dir).join(program);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                return candidate;
+            }
+        }
+    }
+    program.to_path_buf()
 }
 
 /// Convert a path to a `CString` for `execve`.
