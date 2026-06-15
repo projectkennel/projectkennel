@@ -412,6 +412,13 @@ pub struct Plan {
     /// non-interactive path, where stdio is whatever the controller passed. Not
     /// policy-derived — kenneld sets it at bring-up, like [`new_root`](Self::new_root).
     pub interactive_return_fd: Option<RawFd>,
+    /// The sha256-pinned workload binary fd kenneld opened + hashed, to be placed at
+    /// [`WORKLOAD_FD`] for `kennel-bin-init` to `fexecve` (the TOCTOU fix, §7.4). `Some`
+    /// only when the policy pins the workload's digest; `None` (the default) keeps the
+    /// resolve-and-execve path. Not policy-derived — kenneld sets it at bring-up.
+    ///
+    /// [`WORKLOAD_FD`]: kennel_lib_syscall::boot::WORKLOAD_FD
+    pub workload_fd: Option<RawFd>,
     /// Auxiliary processes to launch inside the kennel, in the seal after Landlock and
     /// before the workload `execve`, so they inherit the confined environment and die
     /// with the kennel's PID namespace (`07-1` §7.1.5). Used for the in-kennel proxies
@@ -492,6 +499,12 @@ pub struct Supervision {
     /// Whether a controlling-pty fd accompanies the reply (a `BINDER_TYPE_FD` object);
     /// the real fd is injected out of band, never serialised (see [`crate::wire`]).
     pub interactive: bool,
+    /// Whether the workload binary is sha256-pinned: kenneld opened+hashed it and passed the
+    /// fd at [`WORKLOAD_FD`], which `kennel-bin-init` `fexecve`s instead of resolving a path
+    /// (the TOCTOU fix, §7.4). The fd rides out of band; this is the presence flag.
+    ///
+    /// [`WORKLOAD_FD`]: kennel_lib_syscall::boot::WORKLOAD_FD
+    pub workload_fd_pinned: bool,
     /// The kennel's TTL in seconds (`None` ⇒ none). `kennel-bin-init` runs this timer and, at
     /// expiry, makes a blocking `NOTIFY_TTL_EXPIRED` binder call to kenneld, which freezes the
     /// cgroup and decides whether to resume or terminate (§9.7). The action itself is decided
@@ -523,6 +536,9 @@ impl Supervision {
 /// wire-supplied value (`kennel-bin-init-and-uid0`, security review §6). The granted
 /// supplementary `gids` are carried (they are policy) but re-validated host-side against
 /// the caller's membership before any map is written.
+// allow(struct_excessive_bools): a wire/data DTO, not a state machine — each bool is an
+// independent construction directive the factory reads (cgroup_join, lo, the two fd flags).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructionHalf {
     /// The namespaces the factory `clone`s with (`USER|MOUNT|PID|IPC[|NET]`).
@@ -553,6 +569,17 @@ pub struct ConstructionHalf {
     /// separate `add-addr` privhelper ops into the one `construct` op), re-validating each is
     /// within the caller's reserved scope before the netlink add. Empty ⇒ no loopback adds.
     pub loopback: Vec<LoopbackAddr>,
+    /// Whether an interactive controlling-pty return socket accompanies the construction
+    /// datagram as an `SCM_RIGHTS` fd (placed at [`crate::PTY_RETURN_FD`]). The factory needs
+    /// this — it decodes the half but forwards the supervision-half (which holds the workload
+    /// flag) opaquely — to know which inherited fds to place. The fds travel in a fixed order:
+    /// pty (if any) then workload (if any).
+    pub pty_fd_present: bool,
+    /// Whether the sha256-pinned workload binary fd accompanies the datagram, to be placed at
+    /// [`WORKLOAD_FD`] for `kennel-bin-init` to `fexecve` (§7.4).
+    ///
+    /// [`WORKLOAD_FD`]: kennel_lib_syscall::boot::WORKLOAD_FD
+    pub workload_fd_present: bool,
 }
 
 /// A per-kennel loopback address for the factory to add on host `lo` (§7.3).
@@ -867,6 +894,7 @@ impl Plan {
             supplementary_groups: None,
             ulimits,
             interactive_return_fd: None,
+            workload_fd: None,
             aux: Vec::new(),
             ttl_seconds: ep.lifecycle.ttl_seconds,
             ttl_action: ep.lifecycle.ttl_action,

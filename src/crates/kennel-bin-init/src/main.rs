@@ -187,6 +187,13 @@ fn spawn_all(
     // Resolve a bare program name (no `/`) against the workload's synthesised `PATH`,
     // inside the view (we are post-pivot). `execve(2)` itself never searches PATH, so
     // `kennel run interactive -- bash` would otherwise ENOENT; only `/bin/bash` worked.
+    // When the policy sha256-pins the workload, kenneld opened+hashed the binary and passed
+    // the exact fd at WORKLOAD_FD; `fexecve` THAT (no path relookup — the bytes that run are
+    // the bytes that were hashed). Otherwise resolve the path against PATH and `execve`. init
+    // makes no judgment here — it just execs the fd kenneld handed it, or the path it was told.
+    let exec_fd = sup
+        .workload_fd_pinned
+        .then_some(kennel_lib_syscall::boot::WORKLOAD_FD);
     let resolved = resolve_program(&sup.program, &sup.env);
     let program = cstr_path(&resolved)?;
     let argv = to_cstrings(&sup.argv)?;
@@ -239,6 +246,7 @@ fn spawn_all(
     };
     let workload_pid = fork_drop_exec_confined(
         &program,
+        exec_fd,
         &argv_ref,
         &envp_ref,
         sup.drop_gid,
@@ -562,6 +570,7 @@ mod tests {
             ulimits: Vec::new(),
             aux: Vec::new(),
             interactive: false,
+            workload_fd_pinned: false,
             ttl_seconds: None,
         };
         let bytes = kennel_lib_spawn::wire::encode_supervision(&sup);

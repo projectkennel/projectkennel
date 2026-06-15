@@ -135,6 +135,7 @@ pub trait Privileged {
         _construction_half: &[u8],
         _egress: Option<&[u8]>,
         _pty_fd: Option<std::os::fd::RawFd>,
+        _workload_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -176,8 +177,15 @@ impl Privileged for HelperClient {
         construction_half: &[u8],
         egress: Option<&[u8]>,
         pty_fd: Option<std::os::fd::RawFd>,
+        workload_fd: Option<std::os::fd::RawFd>,
     ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
-        kennel_privhelper::client::construct_kennel(&self.helper, construction_half, egress, pty_fd)
+        kennel_privhelper::client::construct_kennel(
+            &self.helper,
+            construction_half,
+            egress,
+            pty_fd,
+            workload_fd,
+        )
     }
 }
 
@@ -935,8 +943,12 @@ fn construct_via_factory<P: Privileged + Sync>(
     // boot-sync socket: the caller waits on it for kennel-bin-init's "ready", claims binder node 0,
     // then signals "go" (deterministic startup, `07-2` §7.2.1a). The factory exits the moment it
     // reports the pid, so the caller reaps the `Child` after the sync.
-    let (child, init_pid, sync) =
-        privileged.construct_kennel(&half_bytes, Some(egress_bytes), plan.interactive_return_fd)?;
+    let (child, init_pid, sync) = privileged.construct_kennel(
+        &half_bytes,
+        Some(egress_bytes),
+        plan.interactive_return_fd,
+        plan.workload_fd,
+    )?;
     state.factory = true;
 
     Ok((child, init_pid, sync, supervision_bytes))
@@ -964,6 +976,12 @@ fn construction_half_from(
         lo: plan.namespaces.contains(Namespaces::NET) && !loopback.is_empty(),
         ctx,
         loopback: loopback.to_vec(),
+        // Tell the factory which inherited fds accompany the datagram (sent pty-then-workload),
+        // so it places them at the right fixed numbers. It decodes the half but forwards the
+        // supervision-half (which holds the workload flag) opaquely, so the presence must be
+        // mirrored here.
+        pty_fd_present: plan.interactive_return_fd.is_some(),
+        workload_fd_present: plan.workload_fd.is_some(),
     }
 }
 
@@ -1008,6 +1026,9 @@ fn supervision_from(
         ulimits: plan.ulimits.clone(),
         aux: plan.aux.clone(),
         interactive: plan.interactive_return_fd.is_some(),
+        // Set when kenneld opened+hashed the workload binary and passes its fd at WORKLOAD_FD
+        // (the sha256 fd-pin); init then fexecves the fd rather than resolving a path.
+        workload_fd_pinned: plan.workload_fd.is_some(),
         // kennel-bin-init runs this timer and, at expiry, makes the blocking NOTIFY_TTL_EXPIRED
         // call to kenneld (which freezes + decides). The action is decided kenneld-side.
         ttl_seconds: plan.ttl_seconds,

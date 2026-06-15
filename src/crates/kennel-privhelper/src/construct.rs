@@ -58,6 +58,27 @@ const RECV_CAP: usize = 1 << 18;
 /// Exit code when construction fails before the child is running (parsing, clone, maps).
 const CONSTRUCT_FAILED: i32 = 125;
 
+/// Pop the next SCM fd from `fds` iff `present`, returning it (or `None` when not present).
+///
+/// The fds arrive in a fixed order (pty then workload), each gated by a construction-half
+/// flag. `present` with no fd left is a malformed datagram — fail closed. `role` names the
+/// fd for the error.
+fn pop_flagged_fd(
+    fds: &mut Vec<OwnedFd>,
+    present: bool,
+    role: &str,
+) -> io::Result<Option<OwnedFd>> {
+    if !present {
+        return Ok(None);
+    }
+    if fds.is_empty() {
+        return Err(io::Error::other(format!(
+            "construction datagram declares a {role} fd but none was passed"
+        )));
+    }
+    Ok(Some(fds.remove(0)))
+}
+
 /// Run the factory over `chan` (the `SOCK_SEQPACKET` end `kenneld` handed us as stdin).
 ///
 /// Never returns: the construction child `fexecve`s `kennel-bin-init` (or `_exit`s on
@@ -100,7 +121,6 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    close-on-exec) just before `fexecve` so the argv-less `kennel-bin-init` inherits it there.
     let mut buf = vec![0u8; RECV_CAP];
     let (n, mut wire_fds) = recv_with_fds(chan, &mut buf)?;
-    let pty_fd: Option<OwnedFd> = (!wire_fds.is_empty()).then(|| wire_fds.remove(0));
     let msg = buf.get(..n).unwrap_or(&[]);
     let ch_len = msg
         .get(0..4)
@@ -115,6 +135,13 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let egress_bytes = msg.get(ch_end..).unwrap_or(&[]);
     let half = decode_construction(ch_bytes)
         .map_err(|e| io::Error::other(format!("construction-half decode: {e:?}")))?;
+
+    // Pull the SCM fds in the FIXED send order (pty then workload), guided by the half's
+    // presence flags — so an absent pty does not misalign the workload fd. A flag set but no
+    // fd present is a malformed datagram (fail closed). `remove(0)` keeps the order.
+    let pty_fd: Option<OwnedFd> = pop_flagged_fd(&mut wire_fds, half.pty_fd_present, "pty")?;
+    let workload_fd: Option<OwnedFd> =
+        pop_flagged_fd(&mut wire_fds, half.workload_fd_present, "workload")?;
 
     // 1a. Provision the kennel's host-side network resources — folded into this one op (the
     //     former separate `add-addr`/`setup-egress` privhelper invocations are gone). Runs as
@@ -217,16 +244,19 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             eprintln!("kennel-privhelper: construction child: build_kennel: {e}");
             return;
         }
-        // Place the descriptors `kennel-bin-init` inherits at fixed numbers (`BOOT_SYNC_FD`, and
-        // `PTY_RETURN_FD` for an interactive run), returning the init-binary fd to exec.
+        // Place the descriptors `kennel-bin-init` inherits at fixed numbers (`BOOT_SYNC_FD`,
+        // `PTY_RETURN_FD` for an interactive run, and `WORKLOAD_FD` for a sha256-pinned
+        // workload), returning the init-binary fd to exec.
         let pty_ref = pty_fd.as_ref().map(AsFd::as_fd);
-        let init_file = match place_handoff_fds(init_file.as_fd(), init_sync.as_fd(), pty_ref) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("kennel-privhelper: construction child: place_handoff_fds: {e}");
-                return;
-            }
-        };
+        let workload_ref = workload_fd.as_ref().map(AsFd::as_fd);
+        let init_file =
+            match place_handoff_fds(init_file.as_fd(), init_sync.as_fd(), pty_ref, workload_ref) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("kennel-privhelper: construction child: place_handoff_fds: {e}");
+                    return;
+                }
+            };
         // Hand off to the trusted `kennel-bin-init` (resolved from root-owned config, not the
         // wire) **as the kennel's uid 0** (no drop): PID 1 must NOT share the operator uid, or
         // the operator-uid workload/facades could signal or ptrace it (07-2 §7.2.5).
@@ -310,19 +340,28 @@ fn place_handoff_fds(
     init_file: BorrowedFd<'_>,
     init_sync: BorrowedFd<'_>,
     pty_fd: Option<BorrowedFd<'_>>,
+    workload_fd: Option<BorrowedFd<'_>>,
 ) -> io::Result<OwnedFd> {
+    use kennel_lib_syscall::boot::WORKLOAD_FD;
     use kennel_lib_syscall::fd::dup_above;
-    let base = if PTY_RETURN_FD > BOOT_SYNC_FD {
-        PTY_RETURN_FD + 1
-    } else {
-        BOOT_SYNC_FD + 1
-    };
+    // Lift every fd we still need ABOVE the fixed target range first, so `dup2`-ing onto the
+    // low fixed numbers cannot clobber one of them. The range now spans BOOT_SYNC_FD,
+    // PTY_RETURN_FD, and WORKLOAD_FD.
+    let base = [PTY_RETURN_FD, BOOT_SYNC_FD, WORKLOAD_FD]
+        .into_iter()
+        .max()
+        .unwrap_or(BOOT_SYNC_FD)
+        .saturating_add(1);
     let init_file = dup_above(init_file, base)?;
     let init_sync = dup_above(init_sync, base)?;
     let pty_hi = pty_fd.map(|p| dup_above(p, base)).transpose()?;
+    let workload_hi = workload_fd.map(|w| dup_above(w, base)).transpose()?;
     dup_onto(init_sync.as_fd(), BOOT_SYNC_FD)?;
     if let Some(pty) = &pty_hi {
         dup_onto(pty.as_fd(), PTY_RETURN_FD)?;
+    }
+    if let Some(workload) = &workload_hi {
+        dup_onto(workload.as_fd(), WORKLOAD_FD)?;
     }
     Ok(init_file)
 }

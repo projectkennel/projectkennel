@@ -645,14 +645,23 @@ pub fn run_kennel<P, L>(
     // decision made here, on the host, before the kennel is built: kennel-bin-init is a
     // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
     // are running the policy's own workload (an unpinned `--` override is a different
-    // command the pin does not cover). The hash is over the host inode bound RO into the
-    // view, so it is the bytes that will exec.
+    // command the pin does not cover). On success it returns the OPEN fd of the verified
+    // binary, which we pin into the plan: the factory places it at WORKLOAD_FD and init
+    // `fexecve`s it (no path relookup → TOCTOU-free). `_workload_fd` must outlive the
+    // construction, so it stays in scope until the end of bring-up.
+    // Held only to keep the fd open (its raw value is what's used, via the plan); never read.
+    #[allow(clippy::collection_is_never_read)]
+    let _workload_fd;
     if !loaded.workload.sha256.is_empty() && req.argv.is_empty() {
-        if let Err(reason) =
-            verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256)
-        {
-            return fail(shared, &req.kennel, ctx, conn, "workload sha256", reason);
+        match verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256) {
+            Ok(fd) => {
+                loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
+                _workload_fd = Some(fd);
+            }
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload sha256", reason),
         }
+    } else {
+        _workload_fd = None;
     }
     // Interactive runs pass ONE connected socket (over which the seal returns a
     // controlling pty allocated inside the kennel's devpts); non-interactive runs
@@ -1018,31 +1027,30 @@ fn effective_workload(
     Ok((req.argv.clone(), req.cwd.clone()))
 }
 
-/// Verify the workload binary's SHA-256 against the policy's accepted-digest set (§7.4).
+/// Verify the workload binary's SHA-256 against the policy's accepted-digest set, returning
+/// the **open fd** of the verified binary for the fd-pin (§7.4).
 ///
-/// KNOWN RESIDUAL (TOCTOU): this hashes the host inode now; `kennel-bin-init` `execve`s it
-/// later, so a writer that swaps the inode in that sub-second window would run unverified
-/// bytes (the RO bind does not pin the inode). The airtight fix — open the binary here,
-/// hash `/proc/self/fd/N`, pass that fd to init, `fexecve` it (no relookup) — is planned
-/// (`08-as-built` roadmap, the `WORKLOAD_FD` fd-pin). The current check still defends the
-/// common cases: the workload swapping its own binary, a lower-privileged local race, and
-/// accidental mid-update churn.
+/// TOCTOU-free: the binary is `open`ed ONCE here; the digest is computed over
+/// `/proc/self/fd/<fd>` (the very inode now held open), and that same fd is handed to
+/// `kennel-bin-init` to `fexecve` — so the bytes hashed are the bytes that run, with no path
+/// relookup in between. A writer that swaps the on-disk path afterwards cannot affect the
+/// pinned fd.
 ///
 /// A **kenneld** decision (the dumb-executor init gets none): resolve `program` against the
-/// policy's `exec_path` on the host — the same inode that is bound read-only into the view,
-/// so it is the bytes that will `execve` — run the system `sha256sum`, and accept only if the
-/// digest is in `accepted`. The host `sha256sum` is the trusted hasher (no in-process crypto
-/// dependency in the privileged path). Fail closed: an unresolvable program, a `sha256sum`
-/// that cannot run, or a non-matching digest all refuse the spawn.
+/// policy's `exec_path` on the host, open it, hash it with the system `sha256sum` over the fd
+/// (the trusted hasher — no in-process crypto dependency in the privileged path), and accept
+/// only if the digest is in `accepted`. Fail closed: an unresolvable program, an open/hash
+/// failure, or a non-matching digest all refuse the spawn.
 ///
 /// # Errors
 ///
-/// A human-readable reason on resolution failure, hashing failure, or digest mismatch.
+/// A human-readable reason on resolution, open, hashing, or digest-mismatch failure.
 fn verify_workload_digest(
     program: Option<&String>,
     exec_path: &[String],
     accepted: &[String],
-) -> Result<(), String> {
+) -> Result<OwnedFd, String> {
+    use std::os::fd::AsRawFd as _;
     let program = program.ok_or("workload sha256 pin set but the workload argv is empty")?;
     // Resolve a bare name against the policy PATH (host side); an explicit path is used as-is.
     let resolved = if program.contains('/') {
@@ -1056,14 +1064,21 @@ fn verify_workload_digest(
                 format!("workload `{program}` not found on the policy PATH to hash it")
             })?
     };
+    // Open the binary ONCE; everything downstream keys on this fd (hash + fexecve).
+    let file = std::fs::File::open(&resolved)
+        .map_err(|e| format!("opening workload {} to pin it: {e}", resolved.display()))?;
+    // Hash the fd itself via /proc/<pid>/fd, so the digest is over the open inode, not a path
+    // that could be re-looked-up to different bytes. The pid is THIS process's (not
+    // `/proc/self`, which in the spawned sha256sum would be the child's own fd table).
+    let fd_path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
     let out = Command::new("sha256sum")
         .arg("-b")
-        .arg(&resolved)
+        .arg(&fd_path)
         .output()
-        .map_err(|e| format!("running sha256sum on {}: {e}", resolved.display()))?;
+        .map_err(|e| format!("running sha256sum on the workload fd: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "sha256sum failed on {}: {}",
+            "sha256sum failed on workload {}: {}",
             resolved.display(),
             String::from_utf8_lossy(&out.stderr).trim()
         ));
@@ -1075,7 +1090,7 @@ fn verify_workload_digest(
         .unwrap_or_default()
         .to_owned();
     if accepted.iter().any(|a| a == &digest) {
-        Ok(())
+        Ok(OwnedFd::from(file))
     } else {
         Err(format!(
             "workload {} sha256 {digest} is not in the policy's accepted set",
@@ -1308,6 +1323,7 @@ mod tests {
                 supplementary_groups: None,
                 ulimits: Vec::new(),
                 interactive_return_fd: None,
+                workload_fd: None,
                 aux: Vec::new(),
                 ttl_seconds: None,
                 ttl_action: kennel_lib_policy::TtlAction::Exit,

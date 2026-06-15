@@ -22,7 +22,7 @@
 
 use std::ffi::CStr;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 
 /// `fork` a child that **drops to the operator identity** and `execve`s `path`.
 ///
@@ -57,7 +57,7 @@ pub fn fork_drop_exec(
     groups: Option<&[u32]>,
     uid: u32,
 ) -> io::Result<libc::pid_t> {
-    fork_drop_exec_confined(path, argv, envp, gid, groups, uid, || Ok(()))
+    fork_drop_exec_confined(path, None, argv, envp, gid, groups, uid, || Ok(()))
 }
 
 /// As [`fork_drop_exec`], but run `seal` after the drop and before `execve`.
@@ -75,8 +75,12 @@ pub fn fork_drop_exec(
 /// Returns the OS error if `fork` fails. A child whose drop or `seal` fails `_exit`s
 /// `126`; one whose `execve` fails `_exit`s `127` — observed by the supervisor via
 /// `waitpid`.
+// allow(too_many_arguments): a fork/drop/seal/exec primitive — path-or-fd, argv, envp, the
+// three identity ids, and the seal are all irreducibly part of one confined spawn.
+#[allow(clippy::too_many_arguments)]
 pub fn fork_drop_exec_confined<F>(
     path: &CStr,
+    exec_fd: Option<RawFd>,
     argv: &[&CStr],
     envp: &[&CStr],
     gid: u32,
@@ -119,10 +123,20 @@ where
                 // parent's shared Drop/atexit state.
                 unsafe { libc::_exit(126) };
             }
-            // SAFETY: execve replaces the image; both arrays are NULL-terminated and
-            // point into the fork-copied CStrs. On failure it returns and we _exit.
+            // Exec the workload. With `exec_fd` set, `fexecve` the pinned fd — the exact
+            // inode kenneld hashed (the sha256 TOCTOU fix): no path relookup, so nothing can
+            // swap the binary between the hash and the exec. Otherwise `execve` the path.
+            // SAFETY: both pointer arrays are NULL-terminated and point into fork-copied
+            // CStrs; on success the image is replaced, on failure control returns and we _exit.
             unsafe {
-                libc::execve(path.as_ptr(), argv_p.as_ptr(), envp_p.as_ptr());
+                match exec_fd {
+                    Some(fd) => {
+                        libc::fexecve(fd, argv_p.as_ptr(), envp_p.as_ptr());
+                    }
+                    None => {
+                        libc::execve(path.as_ptr(), argv_p.as_ptr(), envp_p.as_ptr());
+                    }
+                }
                 libc::_exit(127);
             }
         }
@@ -202,6 +216,7 @@ mod tests {
 
         let pid = super::fork_drop_exec_confined(
             &path,
+            None,
             &argv,
             &[],
             gid,
@@ -228,7 +243,7 @@ mod tests {
         let script = CString::new("exit 0").expect("cstr script");
         let argv = [path.as_c_str(), dash_c.as_c_str(), script.as_c_str()];
 
-        let pid = super::fork_drop_exec_confined(&path, &argv, &[], gid, None, uid, || {
+        let pid = super::fork_drop_exec_confined(&path, None, &argv, &[], gid, None, uid, || {
             Err(io::Error::from_raw_os_error(libc::EPERM))
         })
         .expect("fork succeeds even though the seal will fail");

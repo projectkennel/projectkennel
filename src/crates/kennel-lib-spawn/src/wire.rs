@@ -517,6 +517,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         supplementary_groups,
         ulimits,
         interactive_return_fd: None,
+        workload_fd: None,
         aux,
         ttl_seconds,
         ttl_action,
@@ -652,6 +653,7 @@ pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
     }
 
     w.bool(s.interactive);
+    w.bool(s.workload_fd_pinned);
 
     match s.ttl_seconds {
         None => w.bool(false),
@@ -740,6 +742,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
     }
 
     let interactive = r.bool()?;
+    let workload_fd_pinned = r.bool()?;
     let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
 
     if r.pos != buf.len() {
@@ -761,6 +764,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         ulimits,
         aux,
         interactive,
+        workload_fd_pinned,
         ttl_seconds,
     })
 }
@@ -816,6 +820,8 @@ pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {
         }
         w.u8(lb.prefix);
     }
+    w.bool(c.pty_fd_present);
+    w.bool(c.workload_fd_present);
     w.buf
 }
 
@@ -863,6 +869,8 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         let prefix = r.u8()?;
         loopback.push(crate::plan::LoopbackAddr { addr, prefix });
     }
+    let pty_fd_present = r.bool()?;
+    let workload_fd_present = r.bool()?;
     if r.pos != buf.len() {
         return Err(PlanWireError::TooLarge); // trailing garbage
     }
@@ -877,6 +885,8 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         lo,
         ctx,
         loopback,
+        pty_fd_present,
+        workload_fd_present,
     })
 }
 
@@ -947,6 +957,7 @@ mod tests {
                 (resource_by_name("nproc").expect("nproc"), 64, 128),
             ],
             interactive_return_fd: None,
+            workload_fd: None,
             aux: vec![AuxProcess {
                 path: PathBuf::from("/usr/libexec/kennel/facade-afunix"),
                 args: vec![
@@ -989,6 +1000,7 @@ mod tests {
             supplementary_groups: None,
             ulimits: Vec::new(),
             interactive_return_fd: None,
+            workload_fd: None,
             aux: Vec::new(),
             ttl_seconds: None,
             ttl_action: kennel_lib_policy::TtlAction::Exit,
@@ -1042,6 +1054,7 @@ mod tests {
                 ],
             }],
             interactive: true,
+            workload_fd_pinned: false,
             ttl_seconds: Some(3600),
         }
     }
@@ -1073,6 +1086,7 @@ mod tests {
             ulimits: Vec::new(),
             aux: Vec::new(),
             interactive: false,
+            workload_fd_pinned: false,
             ttl_seconds: None,
         };
         let back = decode_supervision(&encode_supervision(&s)).expect("decode");
@@ -1118,6 +1132,8 @@ mod tests {
                     prefix: 64,
                 },
             ],
+            pty_fd_present: true,
+            workload_fd_present: true,
         }
     }
 
@@ -1144,6 +1160,8 @@ mod tests {
             lo: false,
             ctx: 0,
             loopback: Vec::new(),
+            pty_fd_present: false,
+            workload_fd_present: false,
         };
         let back = decode_construction(&encode_construction(&c)).expect("decode");
         assert_eq!(back, c);

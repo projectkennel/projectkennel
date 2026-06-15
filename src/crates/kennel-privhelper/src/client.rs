@@ -45,6 +45,7 @@ pub fn construct_kennel(
     construction_half: &[u8],
     egress: Option<&[u8]>,
     pty_fd: Option<RawFd>,
+    workload_fd: Option<RawFd>,
 ) -> io::Result<(Child, i32, OwnedFd)> {
     let (ours, theirs) = seqpacket_pair()?;
     let child = Command::new(helper)
@@ -55,8 +56,10 @@ pub fn construct_kennel(
 
     // One datagram, framed `[u32 ch_len][construction-half][egress]`: the length-prefix lets
     // the factory hand its decoder exactly the construction-half bytes, with the (optional)
-    // egress payload as the tail. The pty return socket (interactive runs) travels as the sole
-    // SCM fd; it lives as a RawFd in the spawn plan, kept open by the caller for this call.
+    // egress payload as the tail. Up to two SCM fds travel in a FIXED order — the pty return
+    // socket (interactive runs) then the sha256-pinned workload binary fd — and the
+    // construction-half's `pty_fd_present`/`workload_fd_present` flags tell the factory which
+    // is which. Both live as RawFds in the spawn plan, kept open by the caller for this call.
     let mut data = Vec::with_capacity(construction_half.len().saturating_add(4));
     data.extend_from_slice(
         &u32::try_from(construction_half.len())
@@ -67,7 +70,9 @@ pub fn construct_kennel(
     if let Some(eg) = egress {
         data.extend_from_slice(eg);
     }
-    let fds: Vec<RawFd> = pty_fd.into_iter().collect();
+    let mut fds: Vec<RawFd> = Vec::new();
+    fds.extend(pty_fd);
+    fds.extend(workload_fd);
     send_with_raw_fds(ours.as_fd(), &data, &fds)?;
 
     // The reply is the 4-byte init pid plus the kenneld end of the boot-sync socket as the sole
