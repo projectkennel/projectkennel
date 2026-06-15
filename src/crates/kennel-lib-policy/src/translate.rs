@@ -216,7 +216,7 @@ fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
 }
 
 /// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.4). Each entry is a
-/// `setrlimit` resource name (validated against [`ULIMIT_RESOURCES`]) and a value of
+/// `setrlimit` resource name (validated against [`crate::settled::ULIMIT_RESOURCES`]) and a value of
 /// the form `soft` or `soft:hard`, every token a number (optional `K`/`M`/`G`, 1024-
 /// based) or `unlimited`. The value is normalised to the settled form `soft` (when
 /// `soft == hard`) or `"soft hard"`, each token a decimal or the literal `unlimited`.

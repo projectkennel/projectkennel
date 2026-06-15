@@ -385,7 +385,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 /// returning the init-binary fd to `fexecve`.
 ///
 /// Every descriptor we still need (the init binary, the boot-sync socket, the pty socket) is
-/// first lifted ABOVE the target range with [`dup_above`], so `dup2`-ing onto the low fixed
+/// first lifted ABOVE the target range with [`kennel_lib_syscall::fd::dup_above`], so `dup2`-ing onto the low fixed
 /// numbers cannot clobber one of them — their natural fd numbers depend on what else is open and
 /// could otherwise land on a target (the bug an interactive run, with its extra pty fd, exposed).
 /// `dup_above` keeps close-on-exec; [`dup_onto`] clears it on the fixed targets so they survive

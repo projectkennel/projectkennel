@@ -218,7 +218,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// Prepare a kennel's SSH egress (§7.10): mint a synthetic key per grant, register
     /// each `(synthetic-key → dest, real-key)` edge with the per-user bastion (lazily
     /// starting `kennel-sshd`), and materialise the synthetic `~/.ssh` for the kennel
-    /// view rooted at `shim_root`. A no-op (empty [`SshPrep`]) when the kennel has no
+    /// view rooted at `shim_root`. A no-op (empty [`crate::SshPrep`]) when the kennel has no
     /// `[ssh]` grant or this daemon runs no bastion.
     ///
     /// # Errors

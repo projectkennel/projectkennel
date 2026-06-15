@@ -52,8 +52,9 @@ pub const fn refusal_message(code: u8) -> &'static str {
     }
 }
 
-/// `ENOSYS` on Linux — returned when a [`Op::SetupEgress`] request reaches a
-/// helper built without the `bpf-egress` feature.
+/// `ENOSYS` on Linux — returned by [`attach_egress_programs`] when the egress-BPF attach
+/// (folded into the factory's construct op) reaches a helper built without the `bpf-egress`
+/// feature.
 const ENOSYS: i32 = 38;
 
 fn errno_of(e: &std::io::Error) -> i32 {
