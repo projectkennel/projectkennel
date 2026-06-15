@@ -43,6 +43,12 @@ criteria = "safe-to-deploy"
 version = "0.2.186"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/rust-lang/libc at tag 0.2.186 via tools/audit-source.sh. build.rs confirmed to do target/toolchain cfg detection only; no proc-macros."
 
+[[audits.lexopt]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.2"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-15): byte-identical to github.com/blyxxyz/lexopt at tag v0.3.2 via tools/audit-source.sh (11 source files). Full source read: a single ~2k-line lib.rs, #![forbid(unsafe_code)], zero dependencies, no build.rs, no proc-macro. The only std::env use is args_os() (its purpose — argument parsing); no FFI/asm/process/net/fs. The kennel-cli argument parser."
+
 [[audits.memoffset]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
