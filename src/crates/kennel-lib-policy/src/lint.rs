@@ -21,11 +21,19 @@ pub fn lint_settled(policy: &SettledPolicy) -> Vec<String> {
 
     match net.mode {
         NetMode::None => {
-            // A no-network kennel: any egress grant or proxy listener is vacuous.
+            // A no-network kennel: any egress grant (proxy or BPF ACL) or proxy listener is
+            // vacuous — there is no network to reach.
             if !net.allow.is_empty() || !net.allow_names.is_empty() {
                 findings.push(
-                    "net.mode = none but net.allow is non-empty: the allowlist is vacuous (no \
-                     network exists to reach)"
+                    "net.mode = none but [net.proxy].allow is non-empty: the allowlist is vacuous \
+                     (no network exists to reach)"
+                        .to_owned(),
+                );
+            }
+            if !net.bpf_connect_allow.is_empty() || !net.bpf_connect_deny.is_empty() {
+                findings.push(
+                    "net.mode = none but [net.bpf].connect has rules: the kernel ACL is vacuous \
+                     (no network exists to reach)"
                         .to_owned(),
                 );
             }
@@ -44,6 +52,16 @@ pub fn lint_settled(policy: &SettledPolicy) -> Vec<String> {
                 findings.push(
                     "net.mode = host but a proxy listener is configured: host mode egresses \
                      directly (no SOCKS proxy) — the listener is enforced by nothing"
+                        .to_owned(),
+                );
+            }
+            // The compiler rejects an AUTHOR [net.proxy] rule under host (translate_net), but the
+            // inherited invariant floor (deny_invariant) folds in everywhere. A by-name proxy
+            // allow that somehow survived is enforced by nothing here — backstop it.
+            if !net.allow_names.is_empty() {
+                findings.push(
+                    "net.mode = host but [net.proxy].allow carries by-name rule(s): host mode has \
+                     no proxy to resolve names — use [net.bpf].connect (cidr) instead"
                         .to_owned(),
                 );
             }
