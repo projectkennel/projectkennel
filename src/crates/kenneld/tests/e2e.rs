@@ -385,8 +385,17 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let granted = pick_granted_group_named();
 
     // Sign the rich policy and trust the key — the real verify path runs in the loader.
+    // The workload (the view-proof script) is embedded in the SIGNED policy, not passed as
+    // request argv: this exercises the [workload] path end to end — the script travels through
+    // verify + substitute and the daemon fills argv from the loaded policy (req.argv empty).
     let key = SigningKey::from_seed("e2e-key", &[3u8; 32]).expect("key");
-    let policy = rich_policy(&home, &unix_sock, granted.as_ref());
+    let mut policy = rich_policy(&home, &unix_sock, granted.as_ref());
+    policy.workload = kennel_lib_policy::WorkloadRuntime {
+        argv: view_proof_script(v4, granted.as_ref(), gid),
+        cwd: None,
+        pinned: false,
+        sha256: Vec::new(),
+    };
     let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
     let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
     let mut keys = kennel_lib_policy::KeySet::new();
@@ -437,7 +446,9 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
     let req = StartRequest {
         policy: policy_file.clone(),
         kennel: "e2e".to_owned(),
-        argv: view_proof_script(v4, granted.as_ref(), gid),
+        // EMPTY argv: the daemon fills it from the signed policy's [workload] (above). This is
+        // the policy-driven path — the workload is signature-covered, not request-supplied.
+        argv: Vec::new(),
         cwd: PathBuf::from("/"),
         term: String::new(),
         interactive: false,
