@@ -79,6 +79,7 @@ fn run_manager() {
         unix,
         binder::Lifecycle::default(),
         kenneld::inet::NetRuntime::denied(),
+        std::sync::Arc::new(kenneld::inbound::InboundRuntime::new()),
         writer,
     )
     .expect("manager: become context manager");

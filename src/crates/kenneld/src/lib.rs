@@ -30,6 +30,7 @@ pub mod cgroup;
 pub mod control;
 pub mod ctx;
 pub mod etc;
+pub mod inbound;
 pub mod inet;
 pub mod policy;
 pub mod proxy;
@@ -203,6 +204,12 @@ pub struct ProxySetup {
     /// The `facade-socks5` binary bound into the view and launched by the seal: the workload's
     /// in-kennel SOCKS5 endpoint, which brokers each connect to node 0 as `CONNECT_INET`.
     pub socks5: PathBuf,
+    /// The `host-inetd` inbound BIND-delegate binary (host side) to launch for the §7.5.7 mirror:
+    /// it binds each policy-mirrored port on the host loopback and pushes accepted conduits back.
+    pub inetd: PathBuf,
+    /// The `facade-client` binary bound into the view and launched by the seal: the in-kennel end
+    /// that pulls inbound conduits (`BIND_INET`) and connects the workload's native listener.
+    pub facade_client: PathBuf,
 }
 
 /// What the synthetic `/etc` is built from: where to stage it and the workload's
@@ -373,6 +380,9 @@ pub struct Kennel {
     v6: Option<Ipv6Addr>,
     /// The egress-proxy child, if one was launched. Killed and reaped on teardown.
     proxy: Option<Child>,
+    /// The inbound BIND delegate child (`host-inetd`, §7.5.7), if one was launched. Killed and
+    /// reaped on teardown — its accept loops and the per-port reader threads end with it.
+    inetd: Option<Child>,
     /// The constructed-view staging mountpoint, if one was created. Removed on
     /// teardown (the tmpfs mounted on it lived in the workload's now-gone mount
     /// namespace, so only the empty host directory remains).
@@ -454,6 +464,7 @@ impl Kennel {
             self.v4,
             self.v6,
             self.proxy.take(),
+            self.inetd.take(),
             self.view_root.as_deref(),
         );
         Ok(status)
@@ -481,6 +492,7 @@ struct Provision {
     v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
+    inetd: Option<Child>,
     view_root: Option<PathBuf>,
     binder: Option<crate::binder::Manager>,
     /// The kennel was built by the privhelper factory (the returned `Child` is the
@@ -544,6 +556,7 @@ pub fn start<P: Privileged + Sync>(
             v4: state.v4,
             v6: state.v6,
             proxy: state.proxy,
+            inetd: state.inetd,
             view_root: state.view_root,
             binder: state.binder,
         }),
@@ -558,6 +571,7 @@ pub fn start<P: Privileged + Sync>(
                 state.v4,
                 state.v6,
                 state.proxy,
+                state.inetd,
                 state.view_root.as_deref(),
             );
             Err(e)
@@ -703,6 +717,15 @@ fn bring_up<P: Privileged + Sync>(
             (None, crate::inet::NetRuntime::denied())
         };
 
+    // 3b-inbound. The per-kennel inbound BIND mirror (§7.5.7): the queue the BIND_INET handler
+    //     drains, plus the set of policy-mirrored ports to bind host-side. The host-inetd delegate
+    //     launch + the eager registrations are deferred to *after* construct (below, beside the
+    //     egress delegate), so the kennel's loopback alias exists before host-inetd binds it. The
+    //     runtime is created unconditionally (empty when there is nothing to mirror) so the binder
+    //     handler always has a queue to consult.
+    let inbound_runtime = std::sync::Arc::new(crate::inbound::InboundRuntime::new());
+    let mirror_ports = mirror_bind_ports(net);
+
     // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
     //     binds that shadow them over the kennel's view. Built here because it
     //     needs the kennel's just-computed primary addresses.
@@ -796,6 +819,13 @@ fn bring_up<P: Privileged + Sync>(
         if let Some(setup) = proxy {
             let listen = SocketAddr::new(state.v4.map_or_else(|| addr6.into(), IpAddr::from), port);
             apply_socks5(plan, &setup.socks5, listen, command);
+            // 3c-inbound. The in-kennel inbound facade (§7.5.7): when the policy mirrors any bind
+            //     ports, bind facade-client into the view and launch it on those ports. It pulls
+            //     each inbound conduit (BIND_INET) and connects the workload's native listener.
+            if !mirror_ports.is_empty() {
+                let kennel_ip = listen.ip();
+                apply_facade_client(plan, &setup.facade_client, kennel_ip, &mirror_ports);
+            }
         }
     }
 
@@ -907,6 +937,42 @@ fn bring_up<P: Privileged + Sync>(
         state.proxy = Some(crate::proxy::spawn(&setup.binary, sock).map_err(Error::Proxy)?);
     }
 
+    // Launch the inbound BIND delegate (§7.5.7) and eagerly register each policy-mirrored port,
+    // also before releasing the binder pull so the host-side listeners are up before the workload
+    // runs. The kennel's loopback alias exists now (the factory added it), so host-inetd can bind
+    // it. For each registration kenneld starts a reader thread (off the binder pool) that drains
+    // host-inetd's accept notifications into the inbound queue the BIND_INET handler serves.
+    if let Some(setup) = proxy {
+        if !mirror_ports.is_empty() {
+            if let Some(kennel_ip) = state
+                .v4
+                .map(std::net::IpAddr::from)
+                .or_else(|| state.v6.map(std::net::IpAddr::from))
+            {
+                std::fs::create_dir_all(&setup.config_dir)?;
+                let inetd_sock = setup.config_dir.join(format!("inetd-cmd-{ctx}.sock"));
+                tracer.step(&format!(
+                    "bring-up: spawning inbound delegate {} for {} mirror port(s)",
+                    setup.inetd.display(),
+                    mirror_ports.len()
+                ));
+                state.inetd =
+                    Some(crate::proxy::spawn(&setup.inetd, &inetd_sock).map_err(Error::Proxy)?);
+                for &port in &mirror_ports {
+                    match crate::inbound::bind_via_delegate(&inetd_sock, kennel_ip, port) {
+                        Ok(conn) => {
+                            let rt = std::sync::Arc::clone(&inbound_runtime);
+                            std::thread::spawn(move || crate::inbound::run_reader(&rt, &conn));
+                        }
+                        Err(e) => eprintln!(
+                            "kenneld: warning: inbound mirror for port {port} not registered: {e}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
     // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
     // so kennel-bin-init can pull its supervision-half. kennel-bin-init has execed (boot-sync above), so
     // the device is reachable via /proc/<init>/root — a single open, no retry.
@@ -923,7 +989,14 @@ fn bring_up<P: Privileged + Sync>(
         tracer.step(&format!(
             "bring-up: acquiring binder node 0 via /proc/{init_pid_u32}/root"
         ));
-        match acquire_binder_node0(init_pid_u32, ctx, prep, lifecycle, net_runtime) {
+        match acquire_binder_node0(
+            init_pid_u32,
+            ctx,
+            prep,
+            lifecycle,
+            net_runtime,
+            std::sync::Arc::clone(&inbound_runtime),
+        ) {
             Ok(manager) => {
                 tracer.step("bring-up: binder node 0 acquired, lifecycle served");
                 state.binder = Some(manager);
@@ -942,6 +1015,28 @@ fn bring_up<P: Privileged + Sync>(
     kennel_lib_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
     let _ = child.wait();
     Ok(init_pid)
+}
+
+/// The set of ports the inbound BIND mirror (§7.5.7) exposes host-side: the explicit
+/// `[net.bind].allowed_ports` plus every single-port `[net.bpf].bind.allow` rule. A CIDR/range
+/// allow with no explicit port list has no finite eager set, so it is not mirrored here (a future
+/// lazy mode could); the eager mirror covers the declared ports. Deduplicated, order-stable.
+fn mirror_bind_ports(net: &kennel_lib_policy::NetPolicy) -> Vec<u16> {
+    let mut ports: Vec<u16> = Vec::new();
+    let mut push = |p: u16| {
+        if p != 0 && !ports.contains(&p) {
+            ports.push(p);
+        }
+    };
+    for &p in &net.bind_allowed_ports {
+        push(p);
+    }
+    for rule in &net.bpf_bind_allow {
+        if rule.port_min == rule.port_max {
+            push(rule.port_min);
+        }
+    }
+    ports
 }
 
 /// The factory construction step (`07-2`): build the construction- and supervision-halves and
@@ -1090,6 +1185,7 @@ fn acquire_binder_node0(
     prep: &BinderPrep,
     lifecycle: crate::binder::Lifecycle,
     net: crate::inet::NetRuntime,
+    inbound: std::sync::Arc<crate::inbound::InboundRuntime>,
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
@@ -1110,6 +1206,7 @@ fn acquire_binder_node0(
         prep.unix.clone(),
         lifecycle,
         net,
+        inbound,
         std::sync::Arc::clone(&prep.writer),
     )
 }
@@ -1248,9 +1345,47 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
     }
 }
 
+/// Bind `facade-client` into the view and launch it as a seal aux for the §7.5.7 inbound mirror.
+///
+/// `facade-client` is the in-kennel end of the mirror: for each `port` it transacts `BIND_INET` to
+/// node 0, and on a delivered conduit connects the workload's native listener at `<kennel-ip>:port`
+/// and splices. Sets no env (unlike the egress proxy) — the workload's own `bind()` is the trigger,
+/// not a client-side proxy setting. Mirrors `apply_socks5`'s view-bind + Landlock + loader grants.
+fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, ports: &[u16]) {
+    use kennel_lib_syscall::landlock::AccessFs;
+    if let Some(view) = plan.view.as_mut() {
+        view.binds.push(kennel_lib_spawn::BindMount {
+            source: client_bin.to_path_buf(),
+            target: client_bin.to_path_buf(),
+            writable: false,
+        });
+    }
+    plan.landlock_fs.push((
+        client_bin.to_path_buf(),
+        AccessFs::READ_FILE | AccessFs::EXECUTE,
+    ));
+    let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[client_bin
+        .to_string_lossy()
+        .into_owned()]);
+    for loader in resolution.loaders {
+        plan.landlock_fs.push((
+            PathBuf::from(loader),
+            AccessFs::READ_FILE | AccessFs::EXECUTE,
+        ));
+    }
+    // `facade-client <binder-device> <kennel-ip> <port>...`, run inside the sealed view.
+    let mut args = vec![IN_VIEW_BINDER_DEVICE.to_owned(), kennel_ip.to_string()];
+    args.extend(ports.iter().map(u16::to_string));
+    plan.aux.push(kennel_lib_spawn::AuxProcess {
+        path: client_bin.to_path_buf(),
+        args,
+    });
+}
+
 /// Best-effort reverse of bring-up: kill the proxy, remove the addresses, then the
 /// cgroup (which detaches the egress BPF). Each step is independent so a failure
 /// does not skip the rest.
+#[allow(clippy::too_many_arguments)] // the reverse-of-bring-up unwind inputs, one per resource
 fn teardown<P: Privileged>(
     privileged: &P,
     ctx: u16,
@@ -1258,9 +1393,11 @@ fn teardown<P: Privileged>(
     v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
+    inetd: Option<Child>,
     view_root: Option<&Path>,
 ) {
     reap_proxy(proxy);
+    reap_proxy(inetd); // same kill+reap; the inbound delegate's reader threads end with it
     if let Some(addr) = v6 {
         let _ = privileged.del_address(ctx, LOOPBACK, addr.into(), V6_PREFIX);
     }

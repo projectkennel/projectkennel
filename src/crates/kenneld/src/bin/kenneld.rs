@@ -87,6 +87,8 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
         binary: deployment.netproxy(),
         config_dir: socket::runtime_dir().join("proxy"),
         socks5: deployment.socks5(),
+        inetd: deployment.inetd(),
+        facade_client: deployment.facade_client(),
     });
     let etc_base = Some(socket::runtime_dir().join("etc"));
     let view_base = Some(socket::runtime_dir().join("root"));

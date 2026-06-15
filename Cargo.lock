@@ -200,6 +200,7 @@ name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "host-inetd",
  "host-netproxy",
  "kennel-lib-audit",
  "kennel-lib-binder",

@@ -233,6 +233,8 @@ struct RawDeployment {
     akc: Option<PathBuf>,
     afunix: Option<PathBuf>,
     socks5: Option<PathBuf>,
+    inetd: Option<PathBuf>,
+    facade_client: Option<PathBuf>,
     init: Option<PathBuf>,
     log_level: Option<LogLevel>,
 }
@@ -250,6 +252,8 @@ impl RawDeployment {
             akc: higher.akc.or(self.akc),
             afunix: higher.afunix.or(self.afunix),
             socks5: higher.socks5.or(self.socks5),
+            inetd: higher.inetd.or(self.inetd),
+            facade_client: higher.facade_client.or(self.facade_client),
             init: higher.init.or(self.init),
             log_level: higher.log_level.or(self.log_level),
         }
@@ -271,6 +275,8 @@ impl RawDeployment {
             akc: self.akc,
             afunix: self.afunix,
             socks5: self.socks5,
+            inetd: self.inetd,
+            facade_client: self.facade_client,
             init: self.init,
             log_level: self.log_level.unwrap_or_default(),
         }
@@ -290,6 +296,8 @@ pub struct Deployment {
     akc: Option<PathBuf>,
     afunix: Option<PathBuf>,
     socks5: Option<PathBuf>,
+    inetd: Option<PathBuf>,
+    facade_client: Option<PathBuf>,
     init: Option<PathBuf>,
     log_level: LogLevel,
 }
@@ -390,6 +398,18 @@ impl Deployment {
     #[must_use]
     pub fn socks5(&self) -> PathBuf {
         self.resolve_bin(self.socks5.as_deref(), "facade-socks5")
+    }
+
+    /// The `host-inetd` inbound BIND delegate (§7.5.7).
+    #[must_use]
+    pub fn inetd(&self) -> PathBuf {
+        self.resolve_bin(self.inetd.as_deref(), "host-inetd")
+    }
+
+    /// The `facade-client` in-kennel inbound facade (§7.5.7).
+    #[must_use]
+    pub fn facade_client(&self) -> PathBuf {
+        self.resolve_bin(self.facade_client.as_deref(), "facade-client")
     }
 
     /// The trusted root-owned `kennel-bin-init` the privhelper factory `fexecve`s as the

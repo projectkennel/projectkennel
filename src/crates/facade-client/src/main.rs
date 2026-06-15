@@ -69,7 +69,7 @@ fn main() -> ExitCode {
     for port in ports {
         let device = device.clone();
         handles.push(thread::spawn(move || {
-            service_port(&device, kennel_ip, port)
+            service_port(&device, kennel_ip, port);
         }));
     }
     for h in handles {

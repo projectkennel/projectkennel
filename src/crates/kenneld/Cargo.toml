@@ -36,6 +36,9 @@ basic-toml = "=0.1.10"
 # allow ruleset + resolver seam so the two never drift (crate::inet). Also round-trips the
 # proxy config we write back through the netproxy's own parser (the writer can't drift).
 host-netproxy = { path = "../host-netproxy" }
+# The inbound BIND delegate's wire (encode_bind/encode_notify): kenneld registers mirror ports and
+# decodes the delegate's accept notifications through the delegate's own codec (no drift). §7.5.7.
+host-inetd = { path = "../host-inetd" }
 # The `kennel` CLI argument parser (DEPENDENCIES.md §5.1 — vendored, audited). One
 # forbid-unsafe file, zero transitive deps; replaces the hand-rolled per-subcommand loops.
 lexopt = "=0.3.2"
