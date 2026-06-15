@@ -471,7 +471,7 @@ mod tests {
         let key = signing_key();
         let mut doc = sign_settled(&sample_policy(), &key).expect("sign");
         // Flip an enforced value the attacker would want changed.
-        doc.policy.effective_policy.net.mode = NetMode::Open;
+        doc.policy.effective_policy.net.mode = NetMode::Host;
         let bytes = to_bytes(&doc).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("must reject");
         assert!(

@@ -391,10 +391,16 @@ pub struct DevPassthrough {
 pub struct NetSection {
     /// Egress mode: `"none"` (own empty net-ns, no interfaces), `"constrained"` (own net-ns,
     /// SOCKS proxy, default-deny — the default), `"unconstrained"` (own net-ns, SOCKS proxy,
-    /// default-allow minus invariant + `net.deny` carve-outs), or `"open"` (host net-ns,
+    /// default-allow minus invariant + `net.deny` carve-outs), or `"host"` (host net-ns,
     /// direct egress, `net.allow` enforced by BPF/Landlock — no proxy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Required (non-empty) only when `mode = "host"`: the documented justification for
+    /// sharing the host network stack, which reinstates the host-recon residual (T1.6).
+    /// The compiler refuses `mode = host` without it and records `threats.reinstated`
+    /// (`07-5-network.md` §7.5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Whether the per-kennel proxy listens on IPv4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_listen_v4: Option<bool>,

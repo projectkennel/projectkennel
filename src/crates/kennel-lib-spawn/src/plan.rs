@@ -603,7 +603,7 @@ impl Plan {
         // shares the HOST net-ns for direct egress, gated by cgroup BPF + Landlock.
         let mut namespaces =
             Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
-        if ep.net.mode != NetMode::Open {
+        if ep.net.mode != NetMode::Host {
             namespaces |= Namespaces::NET;
         }
 
@@ -802,7 +802,7 @@ impl Plan {
         // network; `unconstrained` egresses through the proxy (Landlock grants the proxy port
         // via stamp_proxy), so its broad `net.allow` is not Landlock-mapped here.
         let mut landlock_net: Vec<(u16, AccessNet)> = Vec::new();
-        if matches!(ep.net.mode, NetMode::Constrained | NetMode::Open) {
+        if matches!(ep.net.mode, NetMode::Constrained | NetMode::Host) {
             for r in &ep.net.allow {
                 let tcp = matches!(r.protocol, Protocol::Tcp | Protocol::Any);
                 if tcp && r.port_min == r.port_max {

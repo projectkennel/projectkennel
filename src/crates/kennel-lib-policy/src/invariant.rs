@@ -63,7 +63,7 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     // exists), but assert the allowed set explicitly so a future schema addition cannot
     // silently weaken it. The mandatory invariant denies below apply in every mode.
     match ep.net.mode {
-        NetMode::None | NetMode::Constrained | NetMode::Unconstrained | NetMode::Open => {}
+        NetMode::None | NetMode::Constrained | NetMode::Unconstrained | NetMode::Host => {}
     }
     // The one egress destination that is NEVER defensible: the cloud-metadata IPv4
     // (the SSRF crown jewel). It must be an invariant deny on every policy — enforced

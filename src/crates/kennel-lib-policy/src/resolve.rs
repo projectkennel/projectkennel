@@ -362,6 +362,7 @@ fn fold_fs_dev(p: &FsDev, c: &FsDev) -> FsDev {
 fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
     NetSection {
         mode: or(&c.mode, &p.mode),
+        reason: or(&c.reason, &p.reason),
         proxy_listen_v4: or(&c.proxy_listen_v4, &p.proxy_listen_v4),
         proxy_listen_v6: or(&c.proxy_listen_v6, &p.proxy_listen_v6),
         proxy_listen_v4_address: or(&c.proxy_listen_v4_address, &p.proxy_listen_v4_address),

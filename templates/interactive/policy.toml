@@ -3,8 +3,8 @@
 #
 # A confined but genuinely usable workstation shell: bash + the standard coreutils,
 # text tools, editors, archives, process inspection, and the common network tools,
-# with OPEN egress (a human is at the keyboard; the cloud-metadata invariant still
-# applies). Execution is deny-by-default — the toolset below is exactly what runs;
+# with HOST egress (a human is at the keyboard; direct egress on the host stack, the
+# cloud-metadata invariant still applies). Execution is deny-by-default — the toolset below is exactly what runs;
 # the compiler resolves each tool's library closure (`[lib]`, inherited).
 #
 # $HOME and /tmp are writable (ephemeral); grant a project dir + persistence in your
@@ -21,10 +21,13 @@ template_name = "interactive"
 template_version = "1"
 template_base = "base-confined@v1"
 
-# Open egress: a human-driven shell needs the network (curl, git clone, ssh, …).
-# The cloud-metadata invariant deny still applies even in open mode.
+# Host egress: a human-driven shell needs unmediated network (curl, git clone, ssh, …)
+# on the host stack — no SOCKS proxy. This shares the host network namespace and so
+# reinstates the host-recon residual (T1.6), which is why `host` requires a reason; the
+# cloud-metadata invariant deny + the net.allow allowlist are still enforced via BPF/Landlock.
 [net]
-mode = "open"
+mode = "host"
+reason = "an interactive human shell needs direct, unmediated egress (git/ssh/curl) on the host network stack"
 
 # Re-list base-confined's read baseline (a template's fs.read replaces, not adds) and
 # widen /proc to the whole namespaced procfs so `ps`/`top`/`free` see this kennel's
@@ -93,8 +96,7 @@ path = ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
 ttl = "12h"
 ttl_action = "warn"
 
-
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "BPO+kNoDjuouqTCyKIg5BIMAXWR5Gow/ur0wkxwy5JyoEWXFRnG3z97n1nNZVHC3rr8Y/i4x3k3WkwpQvHYoDg=="
+signature = "/VRym77BSgcRyxaH/FSL95oqfj69qtoDBqcHWk6QYj94U1R+/KGo3gvzg/NgEV53AirLmlf7fWOLN5Io8SozCQ=="

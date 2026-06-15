@@ -8,7 +8,7 @@
 //! per-instance placeholders the runtime must still fill
 //! (`deferred_substitutions`). This is where the human forms become machine forms:
 //! `"169.254.169.254/32"` → `NetRule { cidr, prefix_len }`, `"512M"` → `size_mib`,
-//! `"8h"` → `ttl_seconds`, `"constrained"`/`"none"`/`"open"` → [`NetMode`].
+//! `"8h"` → `ttl_seconds`, `"constrained"`/`"none"`/`"unconstrained"`/`"host"` → [`NetMode`].
 //!
 //! # The runtime-relevant subset (02-2 §The settled policy, 08 §8.2)
 //!
@@ -575,11 +575,22 @@ fn parse_net_mode(mode: Option<&str>) -> Result<NetMode, PolicyError> {
         Some("constrained") | None => Ok(NetMode::Constrained),
         Some("none") => Ok(NetMode::None),
         Some("unconstrained") => Ok(NetMode::Unconstrained),
-        Some("open") => Ok(NetMode::Open),
+        Some("host") => Ok(NetMode::Host),
         Some(other) => Err(translation(format!(
-            "net.mode `{other}` is not one of none/constrained/unconstrained/open"
+            "net.mode `{other}` is not one of none/constrained/unconstrained/host"
         ))),
     }
+}
+
+/// Resolve the proxy listener for `mode`. Only the own-netns SOCKS modes
+/// (constrained/unconstrained) carry one — `host` (direct, no proxy) and `none` (no
+/// network) get the disabled marker regardless of any inherited `proxy_listen_*`. This is
+/// the engine-level fix for the "mode=host but still proxied" composition bug.
+fn resolve_proxy(mode: NetMode, addr: Option<&str>) -> Result<ProxyListen, PolicyError> {
+    if !matches!(mode, NetMode::Constrained | NetMode::Unconstrained) {
+        return Ok(ProxyListen::disabled());
+    }
+    addr.map_or_else(|| Ok(ProxyListen::default()), parse_proxy)
 }
 
 fn translate_net(
@@ -588,18 +599,17 @@ fn translate_net(
 ) -> Result<NetPolicy, PolicyError> {
     let net = src.net.as_ref().ok_or_else(|| missing("net"))?;
     let mode = parse_net_mode(net.mode.as_deref())?;
-    // `open` egresses directly (host netns, no SOCKS proxy) and `none` has no network, so
-    // neither stands up a proxy regardless of any inherited `proxy_listen_*`. Only the
-    // proxied modes (constrained/unconstrained) carry a proxy listener. This is the
-    // engine-level fix for the "mode=open but still proxied" composition bug.
-    let proxy = if matches!(mode, NetMode::Constrained | NetMode::Unconstrained) {
-        match net.proxy_listen_v4_address.as_deref() {
-            Some(addr) => parse_proxy(addr)?,
-            None => ProxyListen::default(),
-        }
-    } else {
-        ProxyListen::disabled()
-    };
+    // `host` shares the host net-ns and reinstates the host-recon residual (T1.6), so it is
+    // gated on a non-empty `net.reason` — the operator must justify the tradeoff
+    // (`07-5-network.md` §7.5.1). Refuse it otherwise.
+    if mode == NetMode::Host && net.reason.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(translation(
+            "net.mode = host shares the host network stack (reinstates T1.6 host-recon) and \
+             requires a non-empty net.reason"
+                .to_owned(),
+        ));
+    }
+    let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
 
     let mut allow: Vec<NetRule> = Vec::new();
     let mut allow_names: Vec<NameRule> = Vec::new();
@@ -1172,8 +1182,11 @@ mod tests {
         SourcePolicy {
             net: Some(crate::source::NetSection {
                 mode: Some(mode.to_owned()),
+                // `host` is reason-gated; supply one so the mode-mapping tests exercise the
+                // mode, not the gate (the gate has its own test below).
+                reason: Some("test".to_owned()),
                 // A non-default proxy_listen so we can prove the engine FORCES the proxy off
-                // for the non-proxied modes (the open-mode composition-bug fix).
+                // for the non-proxied modes (the host-mode composition-bug fix).
                 proxy_listen_v4_address: Some("2:1080".to_owned()),
                 ..crate::source::NetSection::default()
             }),
@@ -1193,13 +1206,13 @@ mod tests {
         assert_eq!(mode_of("none"), NetMode::None);
         assert_eq!(mode_of("constrained"), NetMode::Constrained);
         assert_eq!(mode_of("unconstrained"), NetMode::Unconstrained);
-        assert_eq!(mode_of("open"), NetMode::Open);
+        assert_eq!(mode_of("host"), NetMode::Host);
         let mut d = BTreeSet::new();
         assert!(translate_net(&net_with_mode("bogus"), &mut d).is_err());
     }
 
     #[test]
-    fn open_and_none_force_the_proxy_off_even_with_proxy_listen_set() {
+    fn host_and_none_force_the_proxy_off_even_with_proxy_listen_set() {
         let mut d = BTreeSet::new();
         // Proxied modes honour the proxy_listen address (offset 2).
         for m in ["constrained", "unconstrained"] {
@@ -1208,11 +1221,38 @@ mod tests {
             assert_eq!(net.proxy.offset, 2, "{m} honours proxy_listen");
         }
         // Non-proxied modes force the proxy OFF regardless of an inherited proxy_listen —
-        // the engine-level fix for "mode=open but still proxied".
-        for m in ["open", "none"] {
+        // the engine-level fix for "mode=host but still proxied".
+        for m in ["host", "none"] {
             let net = translate_net(&net_with_mode(m), &mut d).expect("translate");
             assert!(net.proxy.is_disabled(), "{m} must drop the proxy");
         }
+    }
+
+    #[test]
+    fn host_mode_requires_a_reason() {
+        let mut d = BTreeSet::new();
+        // No reason → refused.
+        let no_reason = SourcePolicy {
+            net: Some(crate::source::NetSection {
+                mode: Some("host".to_owned()),
+                ..crate::source::NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        let err = translate_net(&no_reason, &mut d).expect_err("host without reason");
+        assert!(matches!(err, PolicyError::Translation(_)));
+        // A whitespace-only reason is also rejected.
+        let blank = SourcePolicy {
+            net: Some(crate::source::NetSection {
+                mode: Some("host".to_owned()),
+                reason: Some("   ".to_owned()),
+                ..crate::source::NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        assert!(translate_net(&blank, &mut d).is_err());
+        // A real reason → accepted.
+        assert_eq!(mode_of("host"), NetMode::Host);
     }
 
     fn translate_template(src: &str) -> Translated {

@@ -39,9 +39,11 @@ pub enum NetMode {
     /// Own net namespace, egress via the SOCKS proxy, **default-allow**: everything
     /// passes except the always-on invariant denies and any `net.deny` carve-outs.
     Unconstrained,
-    /// Host net namespace, **direct** egress (no SOCKS proxy, no `HTTPS_PROXY`); the
-    /// `net.allow` allowlist is still enforced via BPF + Landlock.
-    Open,
+    /// **Host** net namespace, **direct** egress (no SOCKS proxy, no `HTTPS_PROXY`); the
+    /// `net.allow` allowlist is still enforced via BPF + Landlock. Shares the host network
+    /// stack, so it reinstates the host-recon residual (T1.6) — it requires a non-empty
+    /// `net.reason` and the compiler records `threats.reinstated` (`07-5-network.md` §7.5.1).
+    Host,
 }
 
 /// Transport protocol selector for a network rule.

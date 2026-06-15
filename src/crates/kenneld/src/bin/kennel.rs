@@ -1222,7 +1222,9 @@ fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
         NetMode::None => "none (no network)",
         NetMode::Constrained => "constrained (egress proxy, default-deny)",
         NetMode::Unconstrained => "unconstrained (egress proxy, default-allow + invariant denies)",
-        NetMode::Open => "open (host netns, direct egress, BPF/Landlock allowlist)",
+        NetMode::Host => {
+            "host (host netns, direct egress, BPF/Landlock allowlist; reinstates T1.6)"
+        }
     };
     println!("  network: {mode}");
     if !ep.net.allow.is_empty() || !ep.net.allow_names.is_empty() {

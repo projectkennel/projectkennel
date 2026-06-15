@@ -5,7 +5,7 @@
 //! internally incoherent — settings that contradict the resolved net mode, or grants
 //! that the mode renders vacuous. It exists because template inheritance can fold a
 //! field in that the leaf author never sees (the `interactive` net-mode bug: a leaf set
-//! `mode = "open"` but inherited a proxy listener), and `policy show` describes while
+//! `mode = "host"` but inherited a proxy listener), and `policy show` describes while
 //! `policy lint` judges.
 //!
 //! Each finding is a human-readable line. The shipped template corpus must lint clean
@@ -37,12 +37,12 @@ pub fn lint_settled(policy: &SettledPolicy) -> Vec<String> {
                 );
             }
         }
-        NetMode::Open => {
-            // Open is host-netns DIRECT egress: no SOCKS proxy. A proxy listener here is the
+        NetMode::Host => {
+            // `host` is host-netns DIRECT egress: no SOCKS proxy. A proxy listener here is the
             // composition bug the engine now forces off — flag it if it ever reappears.
             if !net.proxy.is_disabled() {
                 findings.push(
-                    "net.mode = open but a proxy listener is configured: open mode egresses \
+                    "net.mode = host but a proxy listener is configured: host mode egresses \
                      directly (no SOCKS proxy) — the listener is enforced by nothing"
                         .to_owned(),
                 );
@@ -132,14 +132,14 @@ mod tests {
         // Take a real template and inject the composition bug the engine now prevents, to prove
         // the linter would catch a regression.
         let mut p = settle("interactive");
-        assert_eq!(p.effective_policy.net.mode, NetMode::Open);
+        assert_eq!(p.effective_policy.net.mode, NetMode::Host);
         p.effective_policy.net.proxy = crate::settled::ProxyListen::default(); // a real listener
         let findings = lint_settled(&p);
         assert!(
             findings
                 .iter()
-                .any(|f| f.contains("open") && f.contains("proxy")),
-            "expected an open+proxy finding, got {findings:?}"
+                .any(|f| f.contains("host") && f.contains("proxy")),
+            "expected a host+proxy finding, got {findings:?}"
         );
     }
 }
