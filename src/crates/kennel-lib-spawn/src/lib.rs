@@ -699,6 +699,7 @@ mod tests {
             audit: kennel_lib_policy::AuditRuntime::default(),
             env: kennel_lib_policy::EnvRuntime::default(),
             ulimits: kennel_lib_policy::UlimitsRuntime::default(),
+            workload: kennel_lib_policy::WorkloadRuntime::default(),
         }
     }
 

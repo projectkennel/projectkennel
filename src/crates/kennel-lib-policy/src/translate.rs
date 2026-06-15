@@ -42,7 +42,7 @@ use crate::settled::{
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
     ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin,
-    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
+    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
@@ -68,6 +68,8 @@ pub struct Translated {
     pub env: EnvRuntime,
     /// The per-kennel resource limits (§7.4) — applied via `setrlimit` in the seal.
     pub ulimits: UlimitsRuntime,
+    /// The workload to run (§7.4) — argv, cwd, pin, and optional sha256.
+    pub workload: WorkloadRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -113,6 +115,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
     let ulimits = translate_ulimits(effective)?;
+    let workload = translate_workload(effective, &mut deferred)?;
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -131,8 +134,53 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         audit,
         env,
         ulimits,
+        workload,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Translate `[workload]` into the settled [`WorkloadRuntime`] (§7.4). `argv` carries
+/// through verbatim (a bare `argv[0]` is resolved against the kennel `PATH` at spawn,
+/// not here); `cwd` is `subst`-ed for `~`/`<home>` like other in-view paths; `sha256`,
+/// when set, is validated as 64 lowercase hex (the spawn verifies the binary against it
+/// before exec). An absent or argv-less `[workload]` yields an empty runtime (omitted
+/// from the canonical form), so a no-`[workload]` policy signs exactly as before.
+///
+/// # Errors
+///
+/// [`PolicyError::Translation`] if `sha256` is not 64 lowercase-hex characters.
+fn translate_workload(
+    src: &SourcePolicy,
+    deferred: &mut BTreeSet<String>,
+) -> Result<WorkloadRuntime, PolicyError> {
+    let Some(w) = src.workload.as_ref() else {
+        return Ok(WorkloadRuntime::default());
+    };
+    let argv = w.argv.clone().unwrap_or_default();
+    let cwd = w.cwd.as_deref().map(|c| subst(c, deferred));
+    let pinned = w.pinned.unwrap_or(false);
+    let sha256 = match w.sha256.as_deref() {
+        Some(h) if is_sha256_hex(h) => Some(h.to_owned()),
+        Some(other) => {
+            return Err(translation(format!(
+                "workload.sha256 `{other}` is not 64 lowercase-hex characters"
+            )))
+        }
+        None => None,
+    };
+    Ok(WorkloadRuntime {
+        argv,
+        cwd,
+        pinned,
+        sha256,
+    })
+}
+
+/// Whether `s` is a 64-character lowercase-hex SHA-256 digest.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() && b <= b'f')
 }
 
 /// Flatten the resolved `[binder]` section into the settled [`BinderRuntime`]: one
@@ -1053,6 +1101,60 @@ mod tests {
         assert!(translate_ulimits(&ulimits_src(&[("nofile", "lots")])).is_err());
     }
 
+    #[test]
+    fn workload_translates_argv_cwd_pin_and_valid_sha256() {
+        use crate::source::WorkloadSection;
+        let src = SourcePolicy {
+            workload: Some(WorkloadSection {
+                argv: Some(vec!["run-tests.sh".to_owned(), "--all".to_owned()]),
+                cwd: Some("~/suite".to_owned()),
+                pinned: Some(true),
+                sha256: Some("a".repeat(64)),
+            }),
+            ..SourcePolicy::default()
+        };
+        let mut deferred = BTreeSet::new();
+        let w = translate_workload(&src, &mut deferred).expect("translate workload");
+        assert_eq!(w.argv, vec!["run-tests.sh", "--all"]);
+        assert!(w.pinned);
+        assert_eq!(w.sha256.as_deref(), Some("a".repeat(64).as_str()));
+        // `~` is the canonical home form in the settled policy; the spawn resolves it to
+        // the persona home (home-persona-path-model), so it stays `~/suite` here.
+        assert_eq!(w.cwd.as_deref(), Some("~/suite"));
+    }
+
+    #[test]
+    fn workload_absent_yields_empty_runtime_omitted_from_canonical_form() {
+        let mut deferred = BTreeSet::new();
+        let w = translate_workload(&SourcePolicy::default(), &mut deferred).expect("translate");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn workload_rejects_malformed_sha256() {
+        use crate::source::WorkloadSection;
+        for bad in [
+            "tooshort",
+            &"A".repeat(64),
+            &"g".repeat(64),
+            &"a".repeat(63),
+        ] {
+            let src = SourcePolicy {
+                workload: Some(WorkloadSection {
+                    argv: Some(vec!["x".to_owned()]),
+                    sha256: Some(bad.to_owned()),
+                    ..WorkloadSection::default()
+                }),
+                ..SourcePolicy::default()
+            };
+            let mut deferred = BTreeSet::new();
+            assert!(
+                translate_workload(&src, &mut deferred).is_err(),
+                "sha256 `{bad}` should be rejected"
+            );
+        }
+    }
+
     fn translate_template(src: &str) -> Translated {
         let entry = parse(src.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &base_src()).expect("resolve");
@@ -1609,6 +1711,7 @@ mod tests {
             audit: t.audit,
             env: t.env,
             ulimits: t.ulimits,
+            workload: t.workload,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }

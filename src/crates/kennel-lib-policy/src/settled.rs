@@ -928,6 +928,46 @@ impl UlimitsRuntime {
     }
 }
 
+/// The workload a kennel runs (`[workload]`, §7.4).
+///
+/// Optional: when empty the workload is supplied at `kennel run … -- <cmd>`. When the
+/// policy carries an `argv`, `kennel run` with no `--` runs it; a `--` overrides it
+/// unless `pinned` is set (then `--force` is required). A *service* input like the other
+/// runtimes — omitted from the canonical form when empty, so a policy with no `[workload]`
+/// signs exactly as before. `cwd` is a string (not a `PathBuf`) because it may carry a
+/// deferred `~`/`<home>` placeholder the spawn resolves against the persona home.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadRuntime {
+    /// The command and its arguments (`argv[0]` is the program; resolved against the
+    /// kennel's `PATH` when bare). Empty ⇒ no policy-embedded workload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    /// The working directory inside the view, or `None` to let the spawn default it
+    /// (the persona home, then `/`). May carry a deferred `~`/`<home>` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// When true, refuse a CLI `--` override of `argv` unless `--force` is given — the
+    /// signed policy pins exactly what runs.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    /// Optional lowercase-hex SHA-256 of the workload binary (`argv[0]` resolved against
+    /// `PATH`). When set, the spawn hashes the resolved binary just before `execve` and
+    /// refuses to run it if the digest does not match — the signed policy pins not just
+    /// *which* program but its exact bytes. 64 hex chars; validated at translate time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl WorkloadRuntime {
+    /// Whether no workload is embedded (omitted from the canonical form). `pinned`/`cwd`/
+    /// `sha256` without an `argv` is vacuous, so only `argv` gates emptiness.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.argv.is_empty()
+    }
+}
+
 /// The settled policy body (everything the signature covers).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -980,6 +1020,11 @@ pub struct SettledPolicy {
     /// no `[ulimits]` signs exactly as before.
     #[serde(default, skip_serializing_if = "UlimitsRuntime::is_empty")]
     pub ulimits: UlimitsRuntime,
+    /// The workload to run (§7.4). A table like [`ulimits`](Self::ulimits) and declared
+    /// last; omitted from the canonical form when empty, so a policy with no `[workload]`
+    /// signs exactly as before.
+    #[serde(default, skip_serializing_if = "WorkloadRuntime::is_empty")]
+    pub workload: WorkloadRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

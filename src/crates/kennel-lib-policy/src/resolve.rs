@@ -47,7 +47,7 @@ use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
     CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
     LifecycleSection, NetAudit, NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection,
-    SeccompSection, SignalSection, SourcePolicy, SshSection, UnixSection,
+    SeccompSection, SignalSection, SourcePolicy, SshSection, UnixSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -230,6 +230,18 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
         audit: merge(&parent.audit, &child.audit, fold_audit),
         ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
+        workload: merge(&parent.workload, &child.workload, fold_workload),
+    }
+}
+
+/// Fold `[workload]` scalar-wins (child overrides), like `[lifecycle]`. argv is a
+/// replace (not a union) — a derived policy fully redefines what runs.
+fn fold_workload(p: &WorkloadSection, c: &WorkloadSection) -> WorkloadSection {
+    WorkloadSection {
+        argv: or(&c.argv, &p.argv),
+        cwd: or(&c.cwd, &p.cwd),
+        pinned: or(&c.pinned, &p.pinned),
+        sha256: or(&c.sha256, &p.sha256),
     }
 }
 

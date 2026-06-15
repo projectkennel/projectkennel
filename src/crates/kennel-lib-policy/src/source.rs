@@ -125,6 +125,10 @@ pub struct SourcePolicy {
     /// Validated at translate time; folds per-key like `[env].set`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ulimits: Option<BTreeMap<String, String>>,
+    /// The workload to run (`[workload]`). Optional: when absent, the command is given
+    /// at `kennel run … -- <cmd>`. Folds scalar-wins up the chain like `[lifecycle]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadSection>,
 }
 
 /// `[audit]`: sink selection, per-class levels, and per-sink tuning
@@ -717,6 +721,24 @@ pub struct ProcSection {
     /// Mount `/proc` with `hidepid=2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidepid: Option<bool>,
+}
+
+/// `[workload]` — the command the kennel runs, optionally pinned.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadSection {
+    /// The command + args (`argv[0]` is the program). Absent ⇒ supplied at `kennel run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// Working directory inside the view (may carry a `~`/`<home>` placeholder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Refuse a CLI `--` override of `argv` unless `--force` (pin exactly what runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    /// Lowercase-hex SHA-256 of the workload binary; the spawn verifies it before exec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// `[ptrace]` — ptrace across the kennel boundary.
