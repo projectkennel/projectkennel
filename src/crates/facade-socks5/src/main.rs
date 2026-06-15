@@ -230,7 +230,9 @@ mod tests {
         req.extend_from_slice(b"example.com");
         req.extend_from_slice(&443u16.to_be_bytes());
         assert_eq!(
-            negotiate(&req).expect("parse").expect("a connect, not a bare close"),
+            negotiate(&req)
+                .expect("parse")
+                .expect("a connect, not a bare close"),
             ("example.com".to_owned(), 443)
         );
     }
@@ -239,7 +241,9 @@ mod tests {
     fn parses_an_ipv4_connect() {
         let req = vec![5, 1, 0, 5, 1, 0, 1, 93, 184, 216, 34, 0x01, 0xBB];
         assert_eq!(
-            negotiate(&req).expect("parse").expect("a connect, not a bare close"),
+            negotiate(&req)
+                .expect("parse")
+                .expect("a connect, not a bare close"),
             ("93.184.216.34".to_owned(), 443)
         );
     }
