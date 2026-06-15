@@ -1,0 +1,71 @@
+# ============================================================================
+# Suite case: net-host-deny-wins — host mode, BPF connect ACL, deny beats allow.
+#
+# Proves the motivating §7.5.4 property of the [net.bpf] kernel ACL: under mode=host
+# (no proxy — the BPF connect4/6 hook IS the gate), a broad `allow` and a specific
+# `deny` coexist and DENY WINS. The author writes:
+#
+#     [[net.bpf.connect.allow]]  cidr = "*"            ports = [__PORT__]   # any host, this port
+#     [[net.bpf.connect.deny]]   cidr = "127.0.0.2/32"                      # ... except this one
+#
+# deny-first (kennel.bpf.h kennel_decide_v4: the deny trie is consulted before the allow
+# trie) means the denied address is refused even though `*:__PORT__` would otherwise allow
+# it. This is the "net.deny.add=10/8 ; net.allow.add=*:443 — deny wins" case, made
+# expressible by the [net.proxy]/[net.bpf] split and enforced at the socket layer.
+#
+# The runner (src/tools/policy-e2e.sh via this case's setup.sh) binds TWO host-side
+# listeners BEFORE the run — 127.0.0.2:__PORT__ (denied) and 127.0.0.3:__PORT__ (allowed)
+# — both reachable host-side, and substitutes __PORT__ below. Because mode=host shares the
+# host netns, both addresses ARE routable; the ONLY reason the denied one fails is the BPF
+# deny. The workload asserts:
+#   1. connect to 127.0.0.3:__PORT__ (allowed by `*:__PORT__`) SUCCEEDS;
+#   2. connect to 127.0.0.2:__PORT__ (allow-covered but explicitly denied) FAILS.
+# Both halves together prove deny-first at the kernel ACL, not "no route" (host-side both
+# are reachable) and not "nothing allowed" (the sibling address on the same port works).
+# Exit 0 ⇒ deny beats allow under mode=host.
+# ============================================================================
+
+template_name = "net-host-deny-wins"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "host"
+reason = "e2e: prove the [net.bpf] connect ACL denies a specific host while *:PORT is allowed"
+
+[net.bpf.connect]
+allow = [{ cidr = "*", ports = [__PORT__], reason = "any host on the test port" }]
+deny = [{ cidr = "127.0.0.2/32", reason = "the one host the allow must not reach" }]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    python3 -c "
+import socket
+# Allowed: 127.0.0.3 is covered by the *:PORT allow and NOT in the deny set -> must connect.
+s=socket.socket();s.settimeout(2)
+try:
+    s.connect(('127.0.0.3', __PORT__))
+    s.close()
+except OSError as e:
+    raise SystemExit('allowed host 127.0.0.3:__PORT__ should connect but did not: %s' % e)
+# Denied: 127.0.0.2 is allow-covered by *:PORT but explicitly denied -> deny wins, must fail.
+s=socket.socket();s.settimeout(2)
+try:
+    s.connect(('127.0.0.2', __PORT__))
+    raise SystemExit('denied host 127.0.0.2:__PORT__ connected -> deny did NOT win')
+except OSError:
+    pass
+finally:
+    s.close()
+"
+    """,
+]
