@@ -2,14 +2,17 @@
 //!
 //! The reverse of `host_netproxy::conduit`. kenneld is the decision point — the `[net.bpf].bind`
 //! cgroup ACL already gated the workload's `bind()`, so kenneld registers the allowed `ip:port`
-//! here. This delegate binds it on the host loopback, `accept()`s, and pushes each accepted
-//! connection's fd back to kenneld over the same `AF_UNIX` connection the registration arrived on.
+//! here. This delegate binds it on the host loopback, `accept()`s, mints a conduit socketpair,
+//! splices the accepted connection to the host end locally, and pushes the *kennel* end back to
+//! kenneld over the same `AF_UNIX` connection the registration arrived on. kenneld routes that one
+//! fd to `facade-client` and never touches a payload byte (the host-netproxy split, in reverse).
 //!
 //! No policy, no resolver — the "dumb listener" half of the split. The wire format (kenneld encodes
 //! the registration via [`encode_bind`], the delegate decodes; the delegate frames each
 //! notification's port via [`encode_notify`]) is internal-stable: both ship from one release.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 
@@ -65,7 +68,7 @@ fn decode_bind(data: &[u8]) -> Option<(IpAddr, u16)> {
 
 /// Encode the per-accept notification framing: `[port: u16 big-endian]`.
 ///
-/// The accepted connection's fd rides alongside as `SCM_RIGHTS`, not in this buffer. The port lets
+/// The conduit's kennel end rides alongside as `SCM_RIGHTS`, not in this buffer. The port lets
 /// kenneld route the conduit to the right `pending-inbound[port]` queue.
 #[must_use]
 pub const fn encode_notify(port: u16) -> [u8; 2] {
@@ -84,9 +87,11 @@ pub fn serve(listener: &std::os::unix::net::UnixListener) {
     }
 }
 
-/// Handle one registration: read `{bind command}`, bind the host-side listener, then accept forever
-/// and push each accepted connection's fd + port back to kenneld over `stream`. Returns (dropping
-/// the listener) on a malformed command, a bind failure, or once kenneld closes `stream`.
+/// Handle one registration: read `{bind command}`, bind the host-side listener, then accept
+/// forever. For each accepted connection, mint a socketpair, splice the accepted connection to the
+/// host end locally (kenneld stays out of the data path), and push the kennel end + port to kenneld
+/// over `stream`. Returns (dropping the listener) on a malformed command, a bind failure, or once
+/// kenneld closes `stream`.
 fn handle_registration(stream: &UnixStream) {
     let mut buf = [0u8; 64];
     // The registration carries no fd; read it as a plain datagram (recv_with_fds tolerates zero fds).
@@ -104,14 +109,41 @@ fn handle_registration(stream: &UnixStream) {
     };
     for conn in listener.incoming() {
         let Ok(accepted) = conn else { continue };
-        // Push the accepted fd + its port back to kenneld. If kenneld has gone, stop.
-        if kennel_lib_scm::send_with_fds(stream.as_fd(), &encode_notify(port), &[accepted.as_fd()])
-            .is_err()
+        // Mint the conduit socketpair: the host end stays here (spliced to the accepted
+        // connection), the kennel end goes to kenneld → facade-client. kenneld routes the kennel
+        // end as one opaque fd and never touches a payload byte (mirrors host-netproxy's split).
+        let Ok((host_end, kennel_end)) = UnixStream::pair() else {
+            continue; // drop this connection; the external client sees it close
+        };
+        // Push the kennel end + its port to kenneld. If kenneld has gone, stop serving.
+        if kennel_lib_scm::send_with_fds(
+            stream.as_fd(),
+            &encode_notify(port),
+            &[kennel_end.as_fd()],
+        )
+        .is_err()
         {
             return;
         }
-        // The accepted fd drops here; kenneld holds its received copy via SCM_RIGHTS.
+        drop(kennel_end); // kenneld holds its received copy via SCM_RIGHTS
+        std::thread::spawn(move || splice(accepted, host_end));
     }
+}
+
+/// Bidirectionally splice the accepted host-side TCP connection against the conduit's host end, one
+/// thread per direction, propagating half-close (both types implement `Read`/`Write` on `&T`).
+fn splice(accepted: TcpStream, host_end: UnixStream) {
+    let (Ok(accepted_r), Ok(host_r)) = (accepted.try_clone(), host_end.try_clone()) else {
+        return;
+    };
+    let up = std::thread::spawn(move || {
+        let _ = io::copy(&mut &accepted_r, &mut &host_end);
+        let _ = host_end.shutdown(Shutdown::Write);
+    });
+    let _ = io::copy(&mut &host_r, &mut &accepted);
+    let _ = accepted.shutdown(Shutdown::Write);
+    let _ = up.join();
+    drop(accepted); // own the connection to its close
 }
 
 #[cfg(test)]
@@ -175,21 +207,24 @@ mod tests {
         }
         let mut external = external.expect("connect to the mirrored host port");
 
-        // kenneld receives the accepted fd + the port notification on the command connection.
+        // kenneld receives the conduit's KENNEL end + the port notification on the command
+        // connection (host-inetd already spliced the accepted connection to the host end).
         let mut nbuf = [0u8; 8];
         let (n, mut fds) =
             kennel_lib_scm::recv_with_fds(cmd.as_fd(), &mut nbuf).expect("recv notification");
         assert_eq!(nbuf.get(..n), Some(&port.to_be_bytes()[..]), "port framing");
-        let accepted_fd = fds.pop().expect("an accepted fd");
+        let kennel_end = fds.pop().expect("a conduit fd");
         assert!(fds.is_empty(), "exactly one fd");
 
-        // The accepted fd is a connected TCP socket; std gives a safe OwnedFd → TcpStream
-        // conversion (no unsafe — this crate forbids it). Write through the external client and
-        // read it off the fd kenneld received, proving it is the same connection.
-        let mut tcp = TcpStream::from(accepted_fd);
+        // Bytes from the external client traverse external → accepted → host_end → kennel_end
+        // through host-inetd's splice. The kennel end is a UnixStream (the socketpair end), so
+        // reading it back yields what the external client wrote — proving the splice is live.
+        let mut conduit = UnixStream::from(kennel_end);
         external.write_all(b"hello").expect("client write");
         let mut got = [0u8; 5];
-        tcp.read_exact(&mut got).expect("read off accepted fd");
+        conduit
+            .read_exact(&mut got)
+            .expect("read off the conduit kennel end");
         assert_eq!(&got, b"hello");
 
         let _ = std::fs::remove_file(&sock);
