@@ -68,11 +68,35 @@ impl InboundRuntime {
 /// `host-inetd` pushes each accepted connection's conduit back on the *same* socket. The returned
 /// [`UnixStream`] is the registration connection the reader thread then services.
 ///
+/// Unlike the egress dial (driven lazily, long after the delegate is up), kenneld registers mirror
+/// ports *eagerly* right after spawning `host-inetd`, so the connect can race the delegate's
+/// `bind(2)` of its command socket. A short bounded retry closes that startup window; past it the
+/// delegate is presumed dead and the error propagates.
+///
 /// # Errors
 ///
-/// The OS error if the connect to the delegate or the registration send fails.
+/// The OS error if the delegate's socket never appears within the retry budget, or the registration
+/// send fails.
 pub fn bind_via_delegate(command_socket: &Path, addr: IpAddr, port: u16) -> io::Result<UnixStream> {
-    let conn = UnixStream::connect(command_socket)?;
+    // ~1s total: the delegate binds its socket within a few ms of spawn; this just covers that
+    // startup window. The final attempt's error propagates if the socket never appears.
+    const ATTEMPTS: u32 = 100;
+    const RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+    let mut last_err = io::Error::other("delegate socket never appeared");
+    let mut conn = None;
+    for _ in 0..ATTEMPTS {
+        match UnixStream::connect(command_socket) {
+            Ok(c) => {
+                conn = Some(c);
+                break;
+            }
+            Err(e) => {
+                last_err = e;
+                std::thread::sleep(RETRY);
+            }
+        }
+    }
+    let conn = conn.ok_or(last_err)?;
     let payload = host_inetd::listen::encode_bind(addr, port);
     kennel_lib_syscall::scm::send_with_fds(conn.as_fd(), &payload, &[])?;
     Ok(conn)
