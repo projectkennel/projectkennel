@@ -38,18 +38,184 @@ fn main() -> ExitCode {
     }
 }
 
+/// One CLI command, for both dispatch help and `--help`. The single source of truth:
+/// the top-level help renders from this table, so it cannot drift from what exists.
+struct CommandSpec {
+    /// The verb (`run`, `stop`, `policy`, …).
+    name: &'static str,
+    /// One-line summary for the command list.
+    summary: &'static str,
+    /// The full usage line (`kennel ` is prepended when shown).
+    usage: &'static str,
+}
+
+/// Top-level commands. `policy` is a noun group with its own sub-verbs (see `POLICY_VERBS`).
+const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "run",
+        summary: "run a workload confined by a policy, in the foreground",
+        usage: "run <policy> [<name>] [--key K] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
+    },
+    CommandSpec {
+        name: "stop",
+        summary: "stop a running kennel",
+        usage: "stop <name>",
+    },
+    CommandSpec {
+        name: "list",
+        summary: "list running kennels",
+        usage: "list",
+    },
+    CommandSpec {
+        name: "policy",
+        summary: "author, inspect, and compile policies (see `kennel policy --help`)",
+        usage: "policy <list|show|edit|generate|compile|validate|sign|lint> [...]",
+    },
+    CommandSpec {
+        name: "keygen",
+        summary: "generate a policy-signing key",
+        usage: "keygen <key-id> [--dir DIR] [--force]",
+    },
+    CommandSpec {
+        name: "subkennel",
+        summary: "manage /etc/kennel/subkennel allocations",
+        usage: "subkennel <add|check> [--uid N] [--namespace NS] [--tag N] [--file PATH]",
+    },
+    CommandSpec {
+        name: "audit",
+        summary: "show a kennel's audit log",
+        usage: "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
+    },
+];
+
+/// Sub-verbs of `kennel policy`.
+const POLICY_VERBS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "list",
+        summary: "list policies and templates in the search path",
+        usage: "policy list",
+    },
+    CommandSpec {
+        name: "show",
+        summary: "show what a policy resolves to (the effective policy)",
+        usage: "policy show <policy> [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "edit",
+        summary: "edit a policy's source in $EDITOR",
+        usage: "policy edit <name>",
+    },
+    CommandSpec {
+        name: "generate",
+        summary: "scaffold a new leaf policy",
+        usage: "policy generate <name> [--from <template>]",
+    },
+    CommandSpec {
+        name: "compile",
+        summary: "compile a source policy into a signed settled artefact",
+        usage: "policy compile <policy> [--output-path P] [--key K | --unsigned] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "validate",
+        summary: "resolve and check a policy without writing an artefact",
+        usage: "policy validate <policy> [--require-signed] [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "sign",
+        summary: "sign a source template/fragment with a key",
+        usage: "policy sign <template> --key <key> [--output <path>]",
+    },
+    CommandSpec {
+        name: "lint",
+        summary: "check the shipped template corpus for incoherences",
+        usage: "policy lint [--template-dir D]... [--trust-dir D]...",
+    },
+];
+
+/// Render the top-level help (the command list) to stdout.
+fn print_help() {
+    println!("usage: kennel <command> [args...]\n\ncommands:");
+    let width = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for c in COMMANDS {
+        println!("  {:<width$}  {}", c.name, c.summary, width = width);
+    }
+    println!("\nrun `kennel <command> --help` for a command's usage.");
+}
+
+/// Render `kennel policy` help (its sub-verb list) to stdout.
+fn print_policy_help() {
+    println!("usage: kennel policy <verb> [args...]\n\nverbs:");
+    let width = POLICY_VERBS.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for c in POLICY_VERBS {
+        println!("  {:<width$}  {}", c.name, c.summary, width = width);
+    }
+}
+
+/// Whether `args` contains a help request (`--help`/`-h`).
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
+/// The usage line for `verb` from a spec table, as a `kennel …` error string.
+fn usage_of(table: &[CommandSpec], verb: &str) -> String {
+    table.iter().find(|c| c.name == verb).map_or_else(
+        || format!("unknown command `{verb}` — run `kennel --help`"),
+        |c| format!("usage: kennel {}", c.usage),
+    )
+}
+
 fn dispatch(args: &[String]) -> Result<ExitCode, String> {
-    match args.split_first() {
-        Some((cmd, rest)) if cmd == "run" => run(rest),
-        Some((cmd, rest)) if cmd == "stop" => stop(rest),
-        Some((cmd, _)) if cmd == "list" => list(),
-        Some((cmd, rest)) if cmd == "compile" => compile(rest),
-        Some((cmd, rest)) if cmd == "validate" => validate(rest),
-        Some((cmd, rest)) if cmd == "sign" => sign(rest),
-        Some((cmd, rest)) if cmd == "keygen" => keygen(rest),
-        Some((cmd, rest)) if cmd == "subkennel" => subkennel(rest),
-        Some((cmd, rest)) if cmd == "audit" => audit(rest),
-        _ => Err("usage: kennel run <policy> <name> -- <cmd...> | kennel stop <name> | kennel list | kennel compile <policy> [--key K | --unsigned] | kennel validate <policy> | kennel sign <template> --key K | kennel keygen <key-id> [--dir D] [--force] | kennel subkennel <add|check> [...] | kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]".to_owned()),
+    let Some((cmd, rest)) = args.split_first() else {
+        print_help();
+        return Ok(ExitCode::SUCCESS);
+    };
+    if cmd == "help" || cmd == "--help" || cmd == "-h" {
+        print_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+    // `kennel <verb> --help` prints that verb's usage (the `policy` group handles its own).
+    if cmd != "policy" && wants_help(rest) && COMMANDS.iter().any(|c| c.name == cmd) {
+        println!("{}", usage_of(COMMANDS, cmd));
+        return Ok(ExitCode::SUCCESS);
+    }
+    match cmd.as_str() {
+        "run" => run(rest),
+        "stop" => stop(rest),
+        "list" => list(),
+        "policy" => dispatch_policy(rest),
+        "keygen" => keygen(rest),
+        "subkennel" => subkennel(rest),
+        "audit" => audit(rest),
+        other => Err(format!("unknown command `{other}` — run `kennel --help`")),
+    }
+}
+
+/// Dispatch `kennel policy <verb>`.
+fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
+    let Some((verb, rest)) = args.split_first() else {
+        print_policy_help();
+        return Ok(ExitCode::SUCCESS);
+    };
+    if verb == "help" || verb == "--help" || verb == "-h" {
+        print_policy_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+    if wants_help(rest) && POLICY_VERBS.iter().any(|c| c.name == verb) {
+        println!("{}", usage_of(POLICY_VERBS, verb));
+        return Ok(ExitCode::SUCCESS);
+    }
+    match verb.as_str() {
+        "list" => policy_list(rest),
+        "show" => policy_show(rest),
+        "edit" => policy_edit(rest),
+        "generate" => policy_generate(rest),
+        "compile" => compile(rest),
+        "validate" => validate(rest),
+        "sign" => sign(rest),
+        "lint" => policy_lint(rest),
+        other => Err(format!(
+            "unknown policy verb `{other}` — run `kennel policy --help`"
+        )),
     }
 }
 
@@ -914,6 +1080,226 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::from(policy_error_code(&e)))
         }
     }
+}
+
+/// `kennel policy list` — enumerate policies and templates in the search path.
+///
+/// Walks the `policies/` and `templates/` cascades (`~/.config/kennel`,
+/// `/etc/kennel`, `/usr/lib/kennel`) and prints each artefact's name, kind, and the
+/// directory it was found in. A read-only survey; touches no daemon.
+fn policy_list(args: &[String]) -> Result<ExitCode, String> {
+    if !args.is_empty() {
+        return Err(usage_of(POLICY_VERBS, "list"));
+    }
+    let user = kennel_lib_config::User::load().unwrap_or_default();
+    let mut found = false;
+    for (label, dirs) in [
+        ("policies", user.policy_dirs()),
+        ("templates", user.template_dirs()),
+    ] {
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut names: Vec<(String, &'static str)> = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let kind = if path.join(format!("{name}.settled.toml")).is_file() {
+                    "settled"
+                } else if path.join("policy.toml").is_file() {
+                    policy_kind(&path.join("policy.toml"))
+                } else {
+                    continue;
+                };
+                names.push((name.to_owned(), kind));
+            }
+            if names.is_empty() {
+                continue;
+            }
+            found = true;
+            names.sort();
+            println!("{label}: {}", dir.display());
+            for (name, kind) in names {
+                println!("  {name}  ({kind})");
+            }
+        }
+    }
+    if !found {
+        println!("no policies or templates found in the search path");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Classify a `policy.toml` as a `template` (has `template_name`) or `leaf` (has `name`),
+/// by a cheap parse. Unparseable or ambiguous files report `source`.
+fn policy_kind(path: &Path) -> &'static str {
+    let Ok(bytes) = std::fs::read(path) else {
+        return "source";
+    };
+    kennel_lib_policy::parse_source(&bytes).map_or("source", |p| {
+        if p.template_name.is_some() {
+            "template"
+        } else if p.name.is_some() {
+            "leaf"
+        } else {
+            "source"
+        }
+    })
+}
+
+/// `kennel policy show <policy>` — resolve a policy and print what it actually means.
+///
+/// Compiles a source policy in memory (or reads a settled artefact) and prints the
+/// effective policy in human-readable form: the network posture (mode + whether an
+/// egress proxy stands up), filesystem grants, the exec allowlist, the embedded
+/// workload, and the TTL. This is the tool to catch "the template says X but resolves
+/// to Y" — e.g. a `mode = open` policy that still carries a proxy listener.
+fn policy_show(args: &[String]) -> Result<ExitCode, String> {
+    let mut policy_arg: Option<String> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut p = lexopt::Parser::from_args(args.iter().cloned());
+    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+        match arg {
+            lexopt::Arg::Long("template-dir") => {
+                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
+            }
+            lexopt::Arg::Long("trust-dir") => {
+                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
+            }
+            lexopt::Arg::Value(v) if policy_arg.is_none() => {
+                policy_arg = Some(v.to_string_lossy().into_owned());
+            }
+            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "show")),
+        }
+    }
+    let policy_arg = policy_arg.ok_or_else(|| usage_of(POLICY_VERBS, "show"))?;
+    let (policy_file, _name) = resolve_policy(&policy_arg, false)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+
+    add_default_template_dirs(&mut template_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
+    let policy = if is_source_policy(&bytes) {
+        let source = FsTemplateSource {
+            dirs: template_dirs,
+        };
+        let keys = load_trust_store(&trust_dirs)?;
+        let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
+        let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
+        print_warnings(&compiled.warnings);
+        print_warnings(&kennel_lib_policy::resolve_settled_loaders(
+            &mut compiled.policy,
+        ));
+        compiled.policy
+    } else {
+        let keys = load_trust_store(&trust_dirs)?;
+        kennel_lib_policy::verify_settled(&bytes, &keys)
+            .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
+    };
+    print_effective_policy(&policy);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Print the effective policy in a human-readable summary (the `policy show` body).
+fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
+    use kennel_lib_policy::NetMode;
+    let ep = &policy.effective_policy;
+    println!("policy `{}`", policy.name);
+
+    // Network: the mode AND whether an egress proxy stands up. The daemon launches the
+    // SOCKS proxy for a constrained kennel; an `open` kennel egresses directly. So an
+    // `open` policy is INCOHERENT today if it still constrains egress through the proxy —
+    // exactly the `interactive` bug Thread 6 fixes. Report the mode and flag that case.
+    let mode = match ep.net.mode {
+        NetMode::Constrained => "constrained (egress proxy)",
+        NetMode::Open => "open (direct egress)",
+    };
+    println!("  network: {mode}");
+    if !ep.net.allow.is_empty() || !ep.net.allow_names.is_empty() {
+        println!(
+            "    allow: {} cidr rule(s), {} name rule(s)",
+            ep.net.allow.len(),
+            ep.net.allow_names.len()
+        );
+    }
+    if !ep.net.deny_invariant.is_empty() {
+        println!("    invariant denies: {}", ep.net.deny_invariant.len());
+    }
+
+    // Filesystem grants.
+    if !ep.fs.read.is_empty() {
+        println!("  fs.read: {}", ep.fs.read.join(", "));
+    }
+    if !ep.fs.write.is_empty() {
+        println!("  fs.write: {}", ep.fs.write.join(", "));
+    }
+
+    // Exec allowlist.
+    if ep.exec.allow.is_empty() {
+        println!("  exec: deny-all (no exec.allow)");
+    } else {
+        println!("  exec.allow: {} entry(ies)", ep.exec.allow.len());
+    }
+
+    // Workload (the [workload] feature).
+    if !policy.workload.is_empty() {
+        let pin = if policy.workload.pinned {
+            " [pinned]"
+        } else {
+            ""
+        };
+        let sha = if policy.workload.sha256.is_empty() {
+            String::new()
+        } else {
+            format!(" [{} sha256 pin(s)]", policy.workload.sha256.len())
+        };
+        println!("  workload: {}{pin}{sha}", policy.workload.argv.join(" "));
+    }
+
+    // TTL.
+    if let Some(ttl) = ep.lifecycle.ttl_seconds {
+        println!("  ttl: {ttl}s ({:?})", ep.lifecycle.ttl_action);
+    }
+}
+
+/// `kennel policy edit <name>` — open the policy's source in `$EDITOR`. (Thread 3.)
+fn policy_edit(_args: &[String]) -> Result<ExitCode, String> {
+    Err("`kennel policy edit` is not yet implemented".to_owned())
+}
+
+/// `kennel policy generate <name> [--from <template>]` — scaffold a leaf. (Thread 3.)
+fn policy_generate(_args: &[String]) -> Result<ExitCode, String> {
+    Err("`kennel policy generate` is not yet implemented".to_owned())
+}
+
+/// `kennel policy lint` — check the template corpus for incoherences. (Thread 4a.)
+fn policy_lint(_args: &[String]) -> Result<ExitCode, String> {
+    Err("`kennel policy lint` is not yet implemented".to_owned())
+}
+
+/// Read the next required value for `flag` from a lexopt parser.
+fn lexopt_value(p: &mut lexopt::Parser, flag: &str) -> Result<PathBuf, String> {
+    p.value()
+        .map(PathBuf::from)
+        .map_err(|_| format!("{flag} needs a value"))
+}
+
+/// Format an unexpected lexopt arg into a usage error for `verb`.
+fn lexopt_unexpected(arg: &lexopt::Arg<'_>, table: &[CommandSpec], verb: &str) -> String {
+    let what = match arg {
+        lexopt::Arg::Long(s) => format!("unknown flag `--{s}`"),
+        lexopt::Arg::Short(c) => format!("unknown flag `-{c}`"),
+        lexopt::Arg::Value(v) => format!("unexpected argument `{}`", v.to_string_lossy()),
+    };
+    format!("{what}\n{}", usage_of(table, verb))
 }
 
 /// `kennel sign <template> --key <key> [--output <path>]`
