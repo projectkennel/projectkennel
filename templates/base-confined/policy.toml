@@ -147,7 +147,7 @@ proxy_listen_v6 = true
 # RFC1918 / CGNAT are intentionally NOT invariant denies. Making private space
 # permanently unreachable is self-defeating — a kennel routinely needs a local dev
 # server, a LAN database, an internal registry, or a corp service. In `constrained`
-# mode (the default) nothing private is reachable anyway unless a `[[net.allow]]`
+# mode (the default) nothing private is reachable anyway unless a `[[net.proxy.allow]]`
 # names it; in `open` mode the operator has opted into arbitrary egress. Either way
 # that is the policy author's call, not an immovable floor.
 [[net.proxy.deny.invariant]]
@@ -237,7 +237,8 @@ deny = [
 #   nproc  = "512"
 #   core   = "0"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "z0yriVvQqN8JtjvytMoT0JF3/5twq9JRnXHDesTQZkLZZF0cCtrT6by6ZWUj2KaS3gd7BFWecqeyGL6WjIVPAg=="
+signature = "ilkpMX9AgAWzViZgPjBQ8Fd+/AZ1mW2Fh2OBDfnQmSfaBtgcx5hEiZuZReYCj58k07jplN48RW09edMRNjw0DQ=="

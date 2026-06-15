@@ -24,7 +24,7 @@ template_base = "base-confined@v1"
 # Host egress: a human-driven shell needs unmediated network (curl, git clone, ssh, …)
 # on the host stack — no SOCKS proxy. This shares the host network namespace and so
 # reinstates the host-recon residual (T1.6), which is why `host` requires a reason; the
-# cloud-metadata invariant deny + the net.allow allowlist are still enforced via BPF/Landlock.
+# cloud-metadata invariant deny + the net.bpf allowlist are still enforced via BPF/Landlock.
 [net]
 mode = "host"
 reason = "an interactive human shell needs direct, unmediated egress (git/ssh/curl) on the host network stack"
@@ -95,6 +95,7 @@ path = ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
 [lifecycle]
 ttl = "12h"
 ttl_action = "warn"
+
 
 [signature]
 algorithm = "ed25519"

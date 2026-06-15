@@ -67,7 +67,7 @@ reason = "openclaw edits the project in place (read implied)"
 # legitimately talks to a model API; the mitigations are external (don't grant a
 # tree with high-value secrets; the audit log records every connection; an
 # optional TLS-inspection layer if your threat model demands payload inspection).
-[[net.allow.add]]
+[[net.proxy.allow.add]]
 name = "api.anthropic.com"
 ports = [443]
 protocol = "tcp"
