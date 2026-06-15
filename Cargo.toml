@@ -34,8 +34,9 @@ members = [
     "src/crates/kennel-lib-text",
     # Binaries that are not a binder-connector end.
     "src/crates/kennel-bin-init",
-    # The host end of a binder connector (kenneld's dial delegate).
+    # The host ends of binder connectors (kenneld's dial + inbound-bind delegates).
     "src/crates/host-netproxy",
+    "src/crates/host-inetd",
     # The in-kennel ends of binder connectors (push workload traffic into binder).
     "src/crates/facade-afunix",
     "src/crates/facade-socks5",

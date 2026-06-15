@@ -63,6 +63,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "host-inetd"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-scm",
+]
+
+[[package]]
 name = "host-netproxy"
 version = "0.1.0"
 dependencies = [
