@@ -438,12 +438,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         .map(|_| r.u16())
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut file_binds = Vec::new();
-    for _ in 0..r.count()? {
-        let src = r.path()?;
-        let dst = r.path()?;
-        file_binds.push((src, dst));
-    }
+    let file_binds = get_file_binds(&mut r)?;
 
     let supplementary_groups = if r.bool()? {
         let mut gids = Vec::new();
@@ -557,6 +552,17 @@ struct Bpf {
     bind_deny_v4: Vec<crate::plan::LpmV4Entry>,
     bind_allow_v6: Vec<crate::plan::LpmV6Entry>,
     bind_deny_v6: Vec<crate::plan::LpmV6Entry>,
+}
+
+/// Read the count-prefixed `(source, target)` file-bind pairs.
+fn get_file_binds(r: &mut Reader<'_>) -> Result<Vec<(PathBuf, PathBuf)>, PlanWireError> {
+    let mut binds = Vec::new();
+    for _ in 0..r.count()? {
+        let src = r.path()?;
+        let dst = r.path()?;
+        binds.push((src, dst));
+    }
+    Ok(binds)
 }
 
 /// Read the eight ACL vectors in wire order (the inverse of the `put_lpm_*` run in `encode_plan`).

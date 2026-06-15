@@ -16,7 +16,7 @@ use kennel_lib_syscall::namespace::Namespaces;
 use kennel_lib_syscall::process::{Resource, RLIM_INFINITY};
 use kennel_lib_syscall::seccomp::{Action, Filter};
 
-use kennel_lib_policy::{NetMode, NetRule, Protocol, SeccompAction, SettledPolicy};
+use kennel_lib_policy::{NetMode, NetPolicy, NetRule, Protocol, SeccompAction, SettledPolicy};
 
 use crate::SpawnError;
 
@@ -146,6 +146,80 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
         }
     }
     Ok((v4, v6))
+}
+
+/// The eight cgroup-BPF LPM ACL vectors a plan carries: the connect ACL (deny-first, allow
+/// non-empty only in `host` mode) and the inbound BIND ACL (§7.5.7, deny-first, default-deny).
+struct BpfAcls {
+    allow_v4: Vec<LpmV4Entry>,
+    allow_v6: Vec<LpmV6Entry>,
+    deny_v4: Vec<LpmV4Entry>,
+    deny_v6: Vec<LpmV6Entry>,
+    bind_allow_v4: Vec<LpmV4Entry>,
+    bind_allow_v6: Vec<LpmV6Entry>,
+    bind_deny_v4: Vec<LpmV4Entry>,
+    bind_deny_v6: Vec<LpmV6Entry>,
+}
+
+impl BpfAcls {
+    /// Encode the connect + bind ACLs from the settled net policy (§7.5.4/§7.5.7).
+    ///
+    /// CONNECT allow base is non-empty only in `host` mode (the BPF is the egress gate there);
+    /// the proxied modes reach only the proxy endpoint, added by [`Plan::stamp_proxy`]. CONNECT
+    /// deny is enforced in every mode: the invariant floor + `[net.bpf].connect.deny` +
+    /// `[net.proxy].deny.policy`. BIND allow/deny are the author's `[net.bpf].bind` rules; the
+    /// kennel's own loopback `/28`-`/64` is seeded into bind-allow later by `stamp_proxy`.
+    fn from_policy(net: &NetPolicy) -> Result<Self, SpawnError> {
+        let connect_allow: &[NetRule] = if net.mode == NetMode::Host {
+            &net.bpf_connect_allow
+        } else {
+            &[]
+        };
+        let (allow_v4, allow_v6) = encode(connect_allow)?;
+        let mut deny_rules = net.deny_invariant.clone();
+        deny_rules.extend(net.bpf_connect_deny.iter().cloned());
+        deny_rules.extend(net.deny_author.iter().cloned());
+        let (deny_v4, deny_v6) = encode(&deny_rules)?;
+        let (bind_allow_v4, bind_allow_v6) = encode(&net.bpf_bind_allow)?;
+        let (bind_deny_v4, bind_deny_v6) = encode(&net.bpf_bind_deny)?;
+        Ok(Self {
+            allow_v4,
+            allow_v6,
+            deny_v4,
+            deny_v6,
+            bind_allow_v4,
+            bind_allow_v6,
+            bind_deny_v4,
+            bind_deny_v6,
+        })
+    }
+}
+
+/// Resolve the settled `[ulimits]` entries (§7.4) to `(resource, soft, hard)` triples for
+/// `setrlimit`. The translator already validated names and normalised values, so an unknown
+/// name here is a bug, surfaced as an invalid-policy error rather than silently dropped.
+fn resolve_ulimits(policy: &SettledPolicy) -> Result<Vec<(Resource, u64, u64)>, SpawnError> {
+    let mut ulimits = Vec::new();
+    for (name, value) in &policy.ulimits.limits {
+        let resource = kennel_lib_syscall::process::resource_by_name(name).ok_or_else(|| {
+            SpawnError::InvalidPolicy(format!("unknown ulimit resource `{name}`"))
+        })?;
+        let (soft, hard) = parse_ulimit_value(name, value)?;
+        ulimits.push((resource, soft, hard));
+    }
+    Ok(ulimits)
+}
+
+/// Map the single-port TCP rules in `rules` to `(port, access)` Landlock grants. Landlock has
+/// no port range, so only single-port (`port_min == port_max`) TCP/Any rules become grants; range
+/// rules are left to the BPF ACL. Used for both the connect (`CONNECT_TCP`) and bind (`BIND_TCP`)
+/// ACLs so Landlock never denies what the BPF ACL permits.
+fn single_port_tcp_grants(rules: &[NetRule], access: AccessNet) -> Vec<(u16, AccessNet)> {
+    rules
+        .iter()
+        .filter(|r| matches!(r.protocol, Protocol::Tcp | Protocol::Any) && r.port_min == r.port_max)
+        .map(|r| (r.port_min, access))
+        .collect()
 }
 
 /// The Landlock access a read-granted path subtree receives: read files and
@@ -850,14 +924,6 @@ impl Plan {
         // permits. In the proxied modes the workload connects only to the proxy port, which
         // `stamp_proxy` grants; `none` has no network. So the base is non-empty only for `host`.
         let mut landlock_net: Vec<(u16, AccessNet)> = Vec::new();
-        if ep.net.mode == NetMode::Host {
-            for r in &ep.net.bpf_connect_allow {
-                let tcp = matches!(r.protocol, Protocol::Tcp | Protocol::Any);
-                if tcp && r.port_min == r.port_max {
-                    landlock_net.push((r.port_min, AccessNet::CONNECT_TCP));
-                }
-            }
-        }
 
         let seccomp_deny_action = match ep.seccomp.deny_action {
             SeccompAction::Errno => Action::Errno(EPERM),
@@ -873,57 +939,24 @@ impl Plan {
             .filter_map(|name| kennel_lib_syscall::seccomp::syscall_number(name))
             .collect();
 
-        // Resource limits (§7.4): map each settled `[ulimits]` entry to its
-        // `setrlimit` resource + numeric soft/hard. The translator already validated
-        // names and normalised values, so an unknown name here is a bug, surfaced as
-        // an invalid-policy error rather than silently dropped.
-        let mut ulimits: Vec<(Resource, u64, u64)> = Vec::new();
-        for (name, value) in &policy.ulimits.limits {
-            let resource =
-                kennel_lib_syscall::process::resource_by_name(name).ok_or_else(|| {
-                    SpawnError::InvalidPolicy(format!("unknown ulimit resource `{name}`"))
-                })?;
-            let (soft, hard) = parse_ulimit_value(name, value)?;
-            ulimits.push((resource, soft, hard));
-        }
+        let ulimits = resolve_ulimits(policy)?;
 
-        // The cgroup-BPF connect ACL (§7.5.4 `[net.bpf]`), default-deny + deny-first.
-        //
-        // ALLOW base: only in `host` mode, where BPF is the egress gate and the author's
-        // `[net.bpf].connect.allow` IS the allowlist (the workload connects to the host stack
-        // directly). In the proxied modes the workload's ONLY reachable destination is the proxy
-        // endpoint, added by `stamp_proxy`; the author does not get a connect-allow union there
-        // (a BPF allow is a union — adding rules can only *widen*, and D2 forbids the author
-        // widening past the proxy lock). The author narrows the proxied egress via `deny` instead.
-        //
-        // DENY: deny-first and enforced in EVERY mode — the invariant floor + the author's
-        // `[net.bpf].connect.deny` + the proxy-side `[net.proxy].deny.policy` (`deny_author`).
-        let connect_allow: &[NetRule] = if ep.net.mode == NetMode::Host {
-            &ep.net.bpf_connect_allow
-        } else {
-            &[]
-        };
-        let (bpf_allow_v4, bpf_allow_v6) = encode(connect_allow)?;
-        let mut deny_rules = ep.net.deny_invariant.clone();
-        deny_rules.extend(ep.net.bpf_connect_deny.iter().cloned());
-        deny_rules.extend(ep.net.deny_author.iter().cloned());
-        let (bpf_deny_v4, bpf_deny_v6) = encode(&deny_rules)?;
-
-        // The inbound BIND ACL (§7.5.7), deny-first, default-deny: the author's
-        // `[net.bpf].bind.allow`/`.deny` CIDR+port rules. The kennel's own loopback /28 is seeded
-        // into the allow set by `stamp_proxy` (proxied modes — it needs the spawn-time loopback
-        // address); here we encode the author rules, which are the gate in `host` mode.
-        let (bpf_bind_allow_v4, bpf_bind_allow_v6) = encode(&ep.net.bpf_bind_allow)?;
-        let (bpf_bind_deny_v4, bpf_bind_deny_v6) = encode(&ep.net.bpf_bind_deny)?;
-        // Landlock always handles net; a single-port TCP bind-allow needs a BIND_TCP grant or
-        // Landlock denies the bind the BPF ACL permits (the connect side does the same for
-        // CONNECT_TCP). Range rules are left to the BPF ACL (Landlock has no port range).
-        for r in &ep.net.bpf_bind_allow {
-            let tcp = matches!(r.protocol, Protocol::Tcp | Protocol::Any);
-            if tcp && r.port_min == r.port_max {
-                landlock_net.push((r.port_min, AccessNet::BIND_TCP));
-            }
+        // The cgroup-BPF connect + bind ACLs (§7.5.4/§7.5.7), default-deny + deny-first —
+        // see `BpfAcls::from_policy` for the per-mode allow/deny composition.
+        let acls = BpfAcls::from_policy(&ep.net)?;
+        // A single-port TCP allow needs the matching Landlock grant or Landlock denies what the
+        // BPF ACL permits. Connect grants only in `host` mode (proxied modes reach only the proxy
+        // endpoint, granted by `stamp_proxy`); bind grants in every mode.
+        if ep.net.mode == NetMode::Host {
+            landlock_net.extend(single_port_tcp_grants(
+                &ep.net.bpf_connect_allow,
+                AccessNet::CONNECT_TCP,
+            ));
         }
+        landlock_net.extend(single_port_tcp_grants(
+            &ep.net.bpf_bind_allow,
+            AccessNet::BIND_TCP,
+        ));
 
         // The bind floor (§7.5.7): stamped into the kennel_meta `bind_port_min` slot
         // so the bind4/bind6 BPF can deny a privileged-port bind (T6).
@@ -940,14 +973,14 @@ impl Plan {
             landlock_net,
             seccomp_deny,
             seccomp_deny_action,
-            bpf_allow_v4,
-            bpf_deny_v4,
-            bpf_allow_v6,
-            bpf_deny_v6,
-            bpf_bind_allow_v4,
-            bpf_bind_deny_v4,
-            bpf_bind_allow_v6,
-            bpf_bind_deny_v6,
+            bpf_allow_v4: acls.allow_v4,
+            bpf_deny_v4: acls.deny_v4,
+            bpf_allow_v6: acls.allow_v6,
+            bpf_deny_v6: acls.deny_v6,
+            bpf_bind_allow_v4: acls.bind_allow_v4,
+            bpf_bind_deny_v4: acls.bind_deny_v4,
+            bpf_bind_allow_v6: acls.bind_allow_v6,
+            bpf_bind_deny_v6: acls.bind_deny_v6,
             bpf_meta,
             bind_allowed_ports: ep.net.bind_allowed_ports.clone(),
             file_binds: Vec::new(),
