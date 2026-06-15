@@ -599,8 +599,8 @@ pub struct Supervision {
     /// cgroup and decides whether to resume or terminate (§9.7). The action itself is decided
     /// kenneld-side, so it is not carried here.
     pub ttl_seconds: Option<u64>,
-    /// The spawn-path diagnostic verbosity (`log_level`, as a [`kennel_lib_config::LogLevel`]
-    /// `as u8`: 0=info, 1=debug, 2=trace). `kennel-bin-init` runs with an empty argv/envp and is
+    /// The spawn-path diagnostic verbosity (`log_level`, as `kennel_lib_config::LogLevel as u8`:
+    /// 0=info, 1=debug, 2=trace). `kennel-bin-init` runs with an empty argv/envp and is
     /// post-`pivot_root`, so it cannot read `system.toml` itself — kenneld threads the level here,
     /// over the supervision-half init pulls, so init's seal/spawn/supervise steps can trace to its
     /// (inherited, journald-bound) stderr. 0 ⇒ errors only, as before.
