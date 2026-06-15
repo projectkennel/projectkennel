@@ -41,6 +41,13 @@ narration is kept here; the chapter named is the source of truth.
 - **`kennel_meta` read-only sealing + readback verification** (`02-7-bpf-abi.md`) — the map
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
+- **Workload sha256 fd-pin** (`07-4` §7.4 `[workload].sha256`) — the policy carries a set of
+  accepted workload-binary digests and kenneld verifies the resolved binary against them with
+  the host `sha256sum` before handoff (`verify_workload_digest`). A TOCTOU residual remains: the
+  host inode is hashed at verify time but `kennel-bin-init` `execve`s it later. The airtight fix
+  is built around a `WORKLOAD_FD` fd-pin — kenneld opens the binary, hashes `/proc/self/fd/N`,
+  passes that fd through the construction channel (the pty/boot-sync fixed-fd pattern), and init
+  `fexecve`s it (no path relookup). Mechanism mapped, not yet wired.
 - **Composable fragment catalogue** (`05-templates.md` §5.10) — the `include` mechanism is
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment

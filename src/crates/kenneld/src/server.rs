@@ -1020,6 +1020,14 @@ fn effective_workload(
 
 /// Verify the workload binary's SHA-256 against the policy's accepted-digest set (§7.4).
 ///
+/// KNOWN RESIDUAL (TOCTOU): this hashes the host inode now; `kennel-bin-init` `execve`s it
+/// later, so a writer that swaps the inode in that sub-second window would run unverified
+/// bytes (the RO bind does not pin the inode). The airtight fix — open the binary here,
+/// hash `/proc/self/fd/N`, pass that fd to init, `fexecve` it (no relookup) — is planned
+/// (`08-as-built` roadmap, the `WORKLOAD_FD` fd-pin). The current check still defends the
+/// common cases: the workload swapping its own binary, a lower-privileged local race, and
+/// accidental mid-update churn.
+///
 /// A **kenneld** decision (the dumb-executor init gets none): resolve `program` against the
 /// policy's `exec_path` on the host — the same inode that is bound read-only into the view,
 /// so it is the bytes that will `execve` — run the system `sha256sum`, and accept only if the
