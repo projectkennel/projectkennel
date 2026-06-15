@@ -322,6 +322,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
         identity,
@@ -436,6 +437,7 @@ fn run_ttl_kennel(
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
         identity,
@@ -604,6 +606,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
         identity,

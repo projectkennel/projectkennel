@@ -148,6 +148,10 @@ pub struct Identity {
     /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
     /// the legacy in-process unprivileged spawn.
     pub init_bin: Option<PathBuf>,
+    /// Spawn-path diagnostic tracer (the `log_level` knob, §`system.toml`). Tags lines
+    /// `kenneld: [debug]/[trace] …`; no-ops at the default `info`. Carried here so every
+    /// step of `run_kennel`/`bring_up` can trace without re-reading config.
+    pub tracer: kennel_lib_config::Tracer,
 }
 
 /// How `kenneld` runs the per-user SSH bastion (§7.10). The daemon holds one
@@ -620,6 +624,8 @@ pub fn run_kennel<P, L>(
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
 {
+    let tr = shared.identity.tracer;
+    tr.step(&format!("run_kennel: starting `{}`", req.kennel));
     let ctx = match shared.reserve(&req.kennel) {
         Ok(ctx) => ctx,
         Err(resp) => {
@@ -633,6 +639,10 @@ pub fn run_kennel<P, L>(
             return;
         }
     };
+    tr.step(&format!(
+        "run_kennel: reserved ctx {ctx} for `{}`",
+        req.kennel
+    ));
 
     let subst = RuntimeSubstitutions {
         ctx,
@@ -647,10 +657,23 @@ pub fn run_kennel<P, L>(
         ula_gid: shared.identity.scope.ula_gid(),
     };
 
+    tr.step(&format!(
+        "run_kennel: loading policy {}",
+        req.policy.display()
+    ));
     let mut loaded = match shared.loader.load(&req.policy, &subst) {
         Ok(loaded) => loaded,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
     };
+    if tr.on() {
+        tr.step(&format!(
+            "run_kennel: policy loaded — net.mode={:?}, account={}, ssh grants={}, unix sockets={}",
+            loaded.net.mode,
+            loaded.account,
+            loaded.ssh.grants.len(),
+            loaded.unix.sockets.len()
+        ));
+    }
     // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
     // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
     // only here is the policy's workload known. The request wins unless the policy pins it.
@@ -658,6 +681,10 @@ pub fn run_kennel<P, L>(
         Ok(pair) => pair,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
     };
+    tr.detail(&format!(
+        "run_kennel: effective workload argv={argv:?} cwd={}",
+        cwd.display()
+    ));
     // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
     // decision made here, on the host, before the kennel is built: kennel-bin-init is a
     // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
@@ -711,6 +738,12 @@ pub fn run_kennel<P, L>(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("ssh");
+    if !loaded.ssh.grants.is_empty() {
+        tr.step(&format!(
+            "run_kennel: registering {} SSH grant(s) with the bastion",
+            loaded.ssh.grants.len()
+        ));
+    }
     let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root, &policy_ssh_dir) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
@@ -802,6 +835,7 @@ pub fn run_kennel<P, L>(
         ssh,
         unix,
         binder: None,
+        tracer: tr,
     };
 
     // Construct the per-kennel audit writer *before* start so the privileged
@@ -878,6 +912,7 @@ pub fn run_kennel<P, L>(
         command.env(key, value);
     }
 
+    tr.step("run_kennel: bring-up — building view, egress, factory construct, boot-sync");
     let kennel = match start(&audited, spec, &mut command) {
         Ok(kennel) => kennel,
         Err(e) => {
@@ -896,6 +931,7 @@ pub fn run_kennel<P, L>(
         }
     };
     let pid = kennel.id();
+    tr.step(&format!("run_kennel: workload running, pid={pid}"));
     shared.set_pid(&req.kennel, pid);
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::kennel_start(pid, ctx));
@@ -1411,6 +1447,10 @@ mod tests {
                 bastion: None,
                 afunix_bin: None,
                 init_bin: None,
+                tracer: kennel_lib_config::Tracer::new(
+                    "kenneld",
+                    kennel_lib_config::LogLevel::Info,
+                ),
             },
             OkPriv,
             FakeLoader,

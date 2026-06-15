@@ -300,6 +300,10 @@ pub struct Spec {
     /// manager is run; the seal still mounts no binderfs because the plan's view
     /// `binder` flag is false in that case).
     pub binder: Option<BinderPrep>,
+    /// Spawn-path diagnostic tracer (the `log_level` knob): `bring_up` traces each
+    /// step (egress, view, factory construct, boot-sync, proxy, binder node 0) through
+    /// it. No-op at the default `info`.
+    pub tracer: kennel_lib_config::Tracer,
 }
 
 /// One granted `AF_UNIX` socket the in-kennel proxy presents (§7.6).
@@ -511,6 +515,7 @@ pub fn start<P: Privileged + Sync>(
         ssh,
         unix,
         binder,
+        tracer,
     } = spec;
     let mut state = Provision::default();
 
@@ -528,6 +533,7 @@ pub fn start<P: Privileged + Sync>(
         &ssh,
         &unix,
         binder.as_ref(),
+        tracer,
         command,
         &mut state,
     ) {
@@ -578,6 +584,7 @@ fn bring_up<P: Privileged + Sync>(
     ssh: &SshPrep,
     unix: &UnixPrep,
     binder: Option<&BinderPrep>,
+    tracer: kennel_lib_config::Tracer,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<i32, Error> {
@@ -859,6 +866,11 @@ fn bring_up<P: Privileged + Sync>(
             "a kennel must be constructed via the factory, which requires a BinderPrep",
         )));
     };
+    tracer.step(&format!(
+        "bring-up: invoking privhelper factory (ctx {ctx}, {} loopback addr(s), {} egress bytes)",
+        loopback.len(),
+        egress_bytes.len()
+    ));
     let (mut child, init_pid, sync, supervision_bytes) = construct_via_factory(
         privileged,
         plan,
@@ -868,6 +880,9 @@ fn bring_up<P: Privileged + Sync>(
         &egress_bytes,
         state,
     )?;
+    tracer.step(&format!(
+        "bring-up: factory returned, kennel-bin-init pid={init_pid}; awaiting boot-sync (exec)"
+    ));
     let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
 
     // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed — only then is its
@@ -875,10 +890,15 @@ fn bring_up<P: Privileged + Sync>(
     // (and what the old retry loop was really waiting on). A failure here leaves the kennel up but
     // binder-less; the workload (which it gates) will not start, so surface it.
     kennel_lib_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
+    tracer.step("bring-up: boot-sync received — kennel-bin-init has execed");
 
     // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
     // kennel-bin-init start the workload), so its command socket is bound before the first INet request.
     if let (Some(setup), Some(sock)) = (proxy, command_socket.as_ref()) {
+        tracer.step(&format!(
+            "bring-up: spawning egress delegate {}",
+            setup.binary.display()
+        ));
         state.proxy = Some(crate::proxy::spawn(&setup.binary, sock).map_err(Error::Proxy)?);
     }
 
@@ -895,8 +915,14 @@ fn bring_up<P: Privileged + Sync>(
             cgroup: plan.cgroup.clone(),
             ttl_action: plan.ttl_action,
         };
+        tracer.step(&format!(
+            "bring-up: acquiring binder node 0 via /proc/{init_pid_u32}/root"
+        ));
         match acquire_binder_node0(init_pid_u32, ctx, prep, lifecycle, net_runtime) {
-            Ok(manager) => state.binder = Some(manager),
+            Ok(manager) => {
+                tracer.step("bring-up: binder node 0 acquired, lifecycle served");
+                state.binder = Some(manager);
+            }
             Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
         }
     }
@@ -905,6 +931,9 @@ fn bring_up<P: Privileged + Sync>(
     // it always blocks for this). Then reap the factory parent, which exits the moment it has
     // reported the pid; `kennel-bin-init` has reparented to kenneld (the subreaper), so the `Kennel`
     // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
+    tracer.step(
+        "bring-up: signalling bus-live — kennel-bin-init may pull its plan + start the workload",
+    );
     kennel_lib_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
     let _ = child.wait();
     Ok(init_pid)
