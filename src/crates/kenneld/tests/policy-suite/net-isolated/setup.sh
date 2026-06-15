@@ -36,11 +36,27 @@ while True:
 PY
 echo "$!" >"$SCRATCH/host_listener.pid"
 
-# Wait for the listener to come up (host-side sanity: it MUST be reachable from the host).
-for _ in $(seq 1 50); do
-    if 2>/dev/null >"/dev/tcp/127.0.0.1/$HOST_PORT"; then break; fi
-    sleep 0.1
-done
+# Wait for the listener to accept (host-side sanity: it MUST be reachable from the host).
+# A bounded python connect with its own per-attempt timeout — NOT a bash `>/dev/tcp`
+# redirect, which can block indefinitely if the connect neither succeeds nor refuses.
+if ! python3 - "$HOST_PORT" <<'PY'
+import socket, sys, time
+port = int(sys.argv[1])
+for _ in range(50):
+    s = socket.socket(); s.settimeout(0.5)
+    try:
+        s.connect(("127.0.0.1", port)); s.close()
+        raise SystemExit(0)
+    except OSError:
+        time.sleep(0.1)
+    finally:
+        s.close()
+raise SystemExit(1)
+PY
+then
+    echo "host listener never came up on 127.0.0.1:$HOST_PORT" >&2
+    exit 2
+fi
 
 # Generate the policy with the host port filled in.
 GEN="$SCRATCH/policy.toml"
