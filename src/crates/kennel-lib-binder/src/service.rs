@@ -82,16 +82,20 @@ pub mod inet {
     /// knows. The reverse of [`encode_request`].
     #[must_use]
     pub fn encode_bind_request(transport: u8, port: u16) -> Vec<u8> {
-        let _ = (transport, port);
-        todo!("bind-request encode — filled in the feat commit")
+        let mut out = Vec::with_capacity(3);
+        out.push(transport);
+        out.extend_from_slice(&port.to_be_bytes());
+        out
     }
 
     /// Decode a `BIND_INET` request into `(transport byte, port)`. `None` for a payload that is not
     /// exactly 3 bytes (untrusted input; the transport byte's validity is the caller's concern).
     #[must_use]
     pub fn decode_bind_request(data: &[u8]) -> Option<(u8, u16)> {
-        let _ = data;
-        todo!("bind-request decode — filled in the feat commit")
+        let [transport, hi, lo] = data else {
+            return None;
+        };
+        Some((*transport, u16::from_be_bytes([*hi, *lo])))
     }
 
     #[cfg(test)]
