@@ -34,6 +34,7 @@ missing prerequisite aborts with the precise cause.
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
 | `net-none`        | none | total isolation: own empty netns, connect to loopback **and** a public address both fail |
 | `net-constrained` | constrained | own netns loopback is up + bindable; the in-ns SOCKS endpoint listens at `<addr>:1080` |
+| `net-isolated`    | constrained | the kennel is in its OWN netns: it reaches its own in-ns loopback but CANNOT reach a host `127.0.0.1` listener (proves two distinct namespaces, not a filtered one). Setup binds a host-side listener. |
 | `ssh-egress`      | constrained | the full SSH re-origination cascade: workload `ssh` → facade-ssh → binder → netproxy → bastion → akc-vended forced command → `ssh` to a destination sshd, marker round-trips. No agent. |
 | `full-vertical`   | constrained | the whole constructed view in one workload: fs + masked id + net-ns + AF_UNIX facade + dev passthrough |
 
