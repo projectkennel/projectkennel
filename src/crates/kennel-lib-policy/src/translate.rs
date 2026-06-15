@@ -844,13 +844,25 @@ fn translate_bpf_rules(
 /// time rather than hitting an opaque map-update failure at spawn. A `cidr` that parses as
 /// neither family is left for `encode` to reject; it does not count toward either cap.
 fn check_bpf_map_cap<'a>(
-    _label: &str,
-    _rules: impl Iterator<Item = &'a NetRule>,
-    _cap: usize,
+    label: &str,
+    rules: impl Iterator<Item = &'a NetRule>,
+    cap: usize,
 ) -> Result<(), PolicyError> {
-    // Phase 1 stub (§7.1): signature in place so the test file compiles; the per-family
-    // counting + over-cap error is filled in the implementation commit. The over-capacity
-    // test fails against this stub (it never errors), as Phase 1 requires.
+    let (mut v4, mut v6) = (0usize, 0usize);
+    for r in rules {
+        if r.cidr.parse::<std::net::Ipv4Addr>().is_ok() {
+            v4 = v4.saturating_add(1);
+        } else if r.cidr.parse::<std::net::Ipv6Addr>().is_ok() {
+            v6 = v6.saturating_add(1);
+        }
+    }
+    let over = v4.max(v6);
+    if over > cap {
+        return Err(translation(format!(
+            "net.bpf {label} rules expand to {over} entries for one address family; the cgroup-BPF \
+             map holds {cap} per family (src/bpf/maps.h) — reduce the rule/port count"
+        )));
+    }
     Ok(())
 }
 
