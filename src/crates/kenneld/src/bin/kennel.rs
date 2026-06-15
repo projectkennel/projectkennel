@@ -1270,14 +1270,129 @@ fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
     }
 }
 
-/// `kennel policy edit <name>` — open the policy's source in `$EDITOR`. (Thread 3.)
-fn policy_edit(_args: &[String]) -> Result<ExitCode, String> {
-    Err("`kennel policy edit` is not yet implemented".to_owned())
+/// The user's own `policies/` dir (`$XDG_CONFIG_HOME/kennel/policies`, else
+/// `~/.config/kennel/policies`) — where `generate` writes and `edit` copies into. Mirrors
+/// `default_key_dir`'s base resolution so the two agree on the user-config root.
+fn user_policies_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("kennel").join("policies")
 }
 
-/// `kennel policy generate <name> [--from <template>]` — scaffold a leaf. (Thread 3.)
-fn policy_generate(_args: &[String]) -> Result<ExitCode, String> {
-    Err("`kennel policy generate` is not yet implemented".to_owned())
+/// `kennel policy edit <name>` — open the policy's source in `$EDITOR`.
+///
+/// Resolves `<name>` to its source `policy.toml`. If that source lives in a read-only
+/// system dir (`/etc/kennel`, `/usr/lib/kennel`), it is copied into the user's
+/// `policies/<name>/` first (copy-on-write) so edits never try to mutate the system copy;
+/// the user copy then shadows the system one in the cascade. `$EDITOR` (then `$VISUAL`,
+/// else `vi`) is launched on the resulting path.
+fn policy_edit(args: &[String]) -> Result<ExitCode, String> {
+    let [name] = args else {
+        return Err(usage_of(POLICY_VERBS, "edit"));
+    };
+    if !is_valid_policy_name(name) {
+        return Err(format!("`{name}` is not a valid policy name"));
+    }
+    let (source, _) = resolve_policy(name, false)?;
+    // A source under a system dir is copied into the user config first (COW), unless a
+    // user copy already shadows it.
+    let target = if is_under_system_dir(&source) {
+        let dest = user_policies_dir().join(name).join("policy.toml");
+        if !dest.is_file() {
+            let dest_dir = dest.parent().unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(dest_dir)
+                .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
+            std::fs::copy(&source, &dest)
+                .map_err(|e| format!("copying {} to {}: {e}", source.display(), dest.display()))?;
+            eprintln!(
+                "kennel: copied system policy into {} for editing",
+                dest.display()
+            );
+        }
+        dest
+    } else {
+        source
+    };
+    let editor = std::env::var_os("EDITOR")
+        .or_else(|| std::env::var_os("VISUAL"))
+        .unwrap_or_else(|| "vi".into());
+    let status = std::process::Command::new(&editor)
+        .arg(&target)
+        .status()
+        .map_err(|e| format!("launching editor {}: {e}", editor.to_string_lossy()))?;
+    if status.success() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Err(format!("editor exited with {status}"))
+    }
+}
+
+/// Whether `path` lives under a read-only system policy/template dir.
+fn is_under_system_dir(path: &Path) -> bool {
+    path.starts_with("/etc/kennel") || path.starts_with("/usr/lib/kennel")
+}
+
+/// `kennel policy generate <name> [--from <template>]` — scaffold a new leaf policy.
+///
+/// Writes `~/.config/kennel/policies/<name>/policy.toml`: a minimal leaf that inherits
+/// `--from` (default `base-confined@v1`), with a commented `[workload]` stub to fill in.
+/// Refuses to overwrite an existing policy. Prints next steps (`policy show`/`compile`).
+fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
+    let mut name: Option<String> = None;
+    let mut from = "base-confined@v1".to_owned();
+    let mut p = lexopt::Parser::from_args(args.iter().cloned());
+    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+        match arg {
+            lexopt::Arg::Long("from") => {
+                from = p
+                    .value()
+                    .map_err(|_| "--from needs a value")?
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            lexopt::Arg::Value(v) if name.is_none() => {
+                name = Some(v.to_string_lossy().into_owned());
+            }
+            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "generate")),
+        }
+    }
+    let name = name.ok_or_else(|| usage_of(POLICY_VERBS, "generate"))?;
+    if !is_valid_policy_name(&name) {
+        return Err(format!("`{name}` is not a valid policy name"));
+    }
+    // `--from` must be a `<template>@v<ver>` reference (the leaf's template_base).
+    if !from.contains('@') {
+        return Err(format!(
+            "--from `{from}` must be a versioned reference, e.g. `base-confined@v1`"
+        ));
+    }
+    let dir = user_policies_dir().join(&name);
+    let dest = dir.join("policy.toml");
+    if dest.exists() {
+        return Err(format!(
+            "{} already exists; refusing to overwrite",
+            dest.display()
+        ));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let scaffold = format!(
+        "# Leaf policy `{name}` — see `kennel policy show {name}` for what it resolves to.\n\
+         name = \"{name}\"\n\
+         template_base = \"{from}\"\n\
+         \n\
+         # The command this kennel runs (optional — omit to pass `-- <cmd>` at run time).\n\
+         # [workload]\n\
+         # argv = [\"/bin/bash\"]\n\
+         # pinned = false          # refuse a `-- <cmd>` override unless --force\n\
+         # sha256 = []             # accepted binary digests (empty = no pin)\n"
+    );
+    std::fs::write(&dest, scaffold).map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    eprintln!("generated {}", dest.display());
+    eprintln!("next: `kennel policy show {name}`, then `kennel policy compile {name}`");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `kennel policy lint` — check the template corpus for incoherences. (Thread 4a.)
