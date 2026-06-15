@@ -70,7 +70,7 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     // deny-first by the proxy even in `open` mode. RFC1918/CGNAT are deliberately NOT
     // mandated here: making private space permanently unreachable is self-defeating
     // (local dev servers, LAN/corp services, private registries), so the floor leaves
-    // them reachable via `open` mode or an explicit `[[net.allow]]`.
+    // them reachable via `host` mode or an explicit `[[net.proxy.allow]]`.
     let metadata_denied = ep
         .net
         .deny_invariant
@@ -78,7 +78,7 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
         .any(|r| r.cidr == "169.254.169.254");
     if !metadata_denied {
         v.push(InvariantViolation::new(
-            "net.deny.invariant",
+            "net.proxy.deny.invariant",
             "the cloud-metadata deny (169.254.169.254) is mandatory and must not be removed",
         ));
     }

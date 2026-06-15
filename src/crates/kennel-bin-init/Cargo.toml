@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 kennel-lib-binder = { path = "../kennel-lib-binder" }
+kennel-lib-config = { path = "../kennel-lib-config" }
 kennel-lib-spawn = { path = "../kennel-lib-spawn" }
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 

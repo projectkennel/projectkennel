@@ -1295,28 +1295,75 @@ fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
     let ep = &policy.effective_policy;
     println!("policy `{}`", policy.name);
 
-    // Network: the mode AND whether an egress proxy stands up. The daemon launches the
-    // SOCKS proxy for a constrained kennel; an `open` kennel egresses directly. So an
-    // `open` policy is INCOHERENT today if it still constrains egress through the proxy —
-    // exactly the `interactive` bug Thread 6 fixes. Report the mode and flag that case.
-    let mode = match ep.net.mode {
-        NetMode::None => "none (no network)",
-        NetMode::Constrained => "constrained (egress proxy, default-deny)",
-        NetMode::Unconstrained => "unconstrained (egress proxy, default-allow + invariant denies)",
-        NetMode::Host => {
-            "host (host netns, direct egress, BPF/Landlock allowlist; reinstates T1.6)"
-        }
+    // Network: the mode + the two enforcement planes (§7.5.4). `[net.proxy]` is the
+    // user-space egress policy (by-name+cidr, resolve-and-pin) the SOCKS delegate runs in the
+    // proxied modes; `[net.bpf]` is the kernel ACL (cidr+ports, deny-first) the cgroup BPF +
+    // Landlock enforce. Each is annotated with whether it is LIVE in this mode, so the reader
+    // sees which rules actually gate the workload (host = BPF only; proxied = both).
+    let net = &ep.net;
+    let proxied = matches!(net.mode, NetMode::Constrained | NetMode::Unconstrained);
+    let mode = match net.mode {
+        NetMode::None => "none (own empty netns, no network)",
+        NetMode::Constrained => "constrained (own netns, egress proxy, default-deny)",
+        NetMode::Unconstrained => "unconstrained (own netns, egress proxy, default-allow + denies)",
+        NetMode::Host => "host (host netns, direct egress, BPF/Landlock gate; reinstates T1.6)",
     };
     println!("  network: {mode}");
-    if !ep.net.allow.is_empty() || !ep.net.allow_names.is_empty() {
+
+    // [net.proxy] — live only in the proxied modes.
+    if !net.allow.is_empty() || !net.allow_names.is_empty() || !net.deny_author.is_empty() {
+        let live = if proxied {
+            "live"
+        } else {
+            "NOT enforced — no proxy in this mode"
+        };
+        println!("  [net.proxy] ({live}):");
+        if !net.allow.is_empty() || !net.allow_names.is_empty() {
+            println!(
+                "    allow: {} cidr, {} name",
+                net.allow.len(),
+                net.allow_names.len()
+            );
+        }
+        if !net.deny_author.is_empty() {
+            println!("    deny.policy: {} rule(s)", net.deny_author.len());
+        }
+    }
+    if !net.deny_invariant.is_empty() {
+        // The invariant floor is re-checked by the proxy AND encoded into the BPF deny map,
+        // so it is enforced deny-first in every mode.
         println!(
-            "    allow: {} cidr rule(s), {} name rule(s)",
-            ep.net.allow.len(),
-            ep.net.allow_names.len()
+            "  [net.proxy.deny.invariant]: {} rule(s) (enforced in every mode)",
+            net.deny_invariant.len()
         );
     }
-    if !ep.net.deny_invariant.is_empty() {
-        println!("    invariant denies: {}", ep.net.deny_invariant.len());
+
+    // [net.bpf] — the kernel ACL: the gate in host mode, defence-in-depth otherwise.
+    let bpf_nonempty = !net.bpf_connect_allow.is_empty()
+        || !net.bpf_connect_deny.is_empty()
+        || !net.bpf_bind_allow.is_empty()
+        || !net.bpf_bind_deny.is_empty();
+    if bpf_nonempty {
+        let role = if net.mode == NetMode::Host {
+            "the egress gate"
+        } else {
+            "defence-in-depth"
+        };
+        println!("  [net.bpf] ({role}):");
+        if !net.bpf_connect_allow.is_empty() || !net.bpf_connect_deny.is_empty() {
+            println!(
+                "    connect: {} allow, {} deny (cidr+ports)",
+                net.bpf_connect_allow.len(),
+                net.bpf_connect_deny.len()
+            );
+        }
+        if !net.bpf_bind_allow.is_empty() || !net.bpf_bind_deny.is_empty() {
+            println!(
+                "    bind: {} allow, {} deny (cidr+ports)",
+                net.bpf_bind_allow.len(),
+                net.bpf_bind_deny.len()
+            );
+        }
     }
 
     // Filesystem grants.

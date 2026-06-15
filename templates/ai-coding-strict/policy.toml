@@ -14,7 +14,7 @@
 # the user grants), T2.2 (semantic regressions in produced code).
 #
 # Rules below EXTEND base-confined's effective policy: list-valued sections
-# (exec.allow, net.allow, unix.allow) are additive; the inherited deny lists and
+# (exec.allow, net.proxy.allow, unix.allow) are additive; the inherited deny lists and
 # invariants are unchanged. See templates/README.md for enforcement status.
 # ============================================================================
 
@@ -60,43 +60,43 @@ allow = [
 # by the user's leaf policy (so the same template serves Claude, Codex, Gemini,
 # …). T1.9 (supply-chain compromise in a fetched dependency) is the residual on
 # every registry grant.
-[[net.allow]]
+[[net.proxy.allow]]
 name = "registry.npmjs.org"
 ports = [443]
 protocol = "tcp"
 reason = "npm package registry"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "pypi.org"
 ports = [443]
 protocol = "tcp"
 reason = "Python package index"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "files.pythonhosted.org"
 ports = [443]
 protocol = "tcp"
 reason = "Python package files (pypi redirect target)"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "crates.io"
 ports = [443]
 protocol = "tcp"
 reason = "Rust crate registry"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "static.crates.io"
 ports = [443]
 protocol = "tcp"
 reason = "Rust crate downloads"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "github.com"
 ports = [22, 443]
 protocol = "tcp"
 reason = "git over SSH and HTTPS"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "objects.githubusercontent.com"
 ports = [443]
 protocol = "tcp"
@@ -126,7 +126,8 @@ reason = "sign git commits/tags via a per-kennel gpg-agent, not the user's"
 ttl = "8h"
 ttl_action = "warn"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "Wz0Vl/W4uUJcUS3FhTjJsxJDIss3iGuRc12UENYG/Nz19u7yi6I7ewX+Hdy5a7cCzKZlbOMWH6+8yEJizu4+BQ=="
+signature = "Yx64NI5e4AV/VGNBcrKskFnmpclTe47QLRBFgo+IwJFzmxghPvwBLHcGXqegG0KZXMQWulc/iJpQ/qgQHvyiAQ=="

@@ -79,7 +79,11 @@ fn serve(device: &str, listen: &str) -> io::Result<()> {
 
 /// Handle one SOCKS5 connection: negotiate, broker the `CONNECT` to the facade, and splice.
 fn handle(device: &str, mut client: TcpStream) -> io::Result<()> {
-    let (host, port) = socks5_accept(&mut client)?;
+    let Some((host, port)) = socks5_accept(&mut client)? else {
+        // The client opened the SOCKS port and closed without sending anything (a TCP
+        // readiness/health probe). Not an error — drop it silently.
+        return Ok(());
+    };
     match broker(device, &host, port) {
         Ok(conduit) => {
             socks5_reply(&mut client, REP_SUCCEEDED)?;
@@ -105,9 +109,14 @@ fn broker(device: &str, host: &str, port: u16) -> io::Result<UnixStream> {
 
 /// Negotiate the SOCKS5 greeting + `CONNECT` request, returning the requested `(host, port)`. Only
 /// the no-auth method and the `CONNECT` command are supported (the workload's `socks5h://` egress).
-fn socks5_accept<S: Read + Write>(client: &mut S) -> io::Result<(String, u16)> {
-    // Greeting: VER=5, NMETHODS, METHODS… → reply NO-AUTH.
-    let [ver, nmethods] = read_array::<2, S>(client)?;
+fn socks5_accept<S: Read + Write>(client: &mut S) -> io::Result<Option<(String, u16)>> {
+    // Greeting: VER=5, NMETHODS, METHODS… → reply NO-AUTH. A client that closes BEFORE sending
+    // any byte (a bare connect/close — a TCP readiness probe) is a clean disconnect, not an
+    // error: report `None` so the caller drops it silently. A partial greeting (some bytes then
+    // EOF) is a genuine protocol error and propagates.
+    let Some([ver, nmethods]) = read_greeting(client)? else {
+        return Ok(None);
+    };
     if ver != 5 {
         return Err(invalid("not a SOCKS5 greeting"));
     }
@@ -142,7 +151,20 @@ fn socks5_accept<S: Read + Write>(client: &mut S) -> io::Result<(String, u16)> {
         return Err(invalid("SOCKS5 host out of range"));
     }
     let port = u16::from_be_bytes(read_array::<2, S>(client)?);
-    Ok((host, port))
+    Ok(Some((host, port)))
+}
+
+/// Read the 2-byte SOCKS5 greeting prefix, distinguishing a clean pre-greeting close from a
+/// partial one. `Ok(None)` = the client closed before sending ANY byte (a bare connect/close, e.g.
+/// a TCP readiness probe — normal, not logged). `Ok(Some(..))` = a full 2-byte prefix. `Err` = a
+/// partial greeting (1 byte then EOF) or a read error — a genuine protocol fault.
+fn read_greeting<S: Read>(client: &mut S) -> io::Result<Option<[u8; 2]>> {
+    let mut first = [0u8; 1];
+    if client.read(&mut first)? == 0 {
+        return Ok(None); // EOF at offset 0 — clean disconnect.
+    }
+    let [second] = read_array::<1, S>(client)?; // partial greeting now propagates as Err.
+    Ok(Some([first[0], second]))
 }
 
 /// Send a SOCKS5 reply with code `rep` and a `0.0.0.0:0` bound address (the workload ignores it).
@@ -181,13 +203,23 @@ mod tests {
     use super::*;
 
     /// Drive `socks5_accept` over a socketpair: the test plays the workload on one end, the shim
-    /// reads/replies on the other.
-    fn negotiate(request: &[u8]) -> io::Result<(String, u16)> {
-        let (mut workload, mut shim) = UnixStream::pair().expect("socketpair");
-        workload.write_all(request).expect("send socks5");
+    /// reads/replies on the other. The workload end is dropped after writing, so the shim sees EOF
+    /// once the written bytes are consumed (modelling a client that closes after its request).
+    fn negotiate(request: &[u8]) -> io::Result<Option<(String, u16)>> {
+        let (workload, mut shim) = UnixStream::pair().expect("socketpair");
+        let req = request.to_vec();
+        // Write the request, then keep draining the shim's replies (the NO-AUTH ack etc.) so the
+        // shim never blocks/EPIPEs on a full pipe, and close (EOF) only once the shim is done
+        // reading — modelling a client that finishes its request then disconnects.
+        let driver = thread::spawn(move || {
+            let mut w = workload;
+            w.write_all(&req).expect("send socks5");
+            w.shutdown(Shutdown::Write).expect("half-close write");
+            let _ = io::copy(&mut &w, &mut io::sink()); // drain replies until the shim closes
+        });
         let result = socks5_accept(&mut shim);
-        // Drain the shim's replies so the workload side does not block on a full pipe.
-        let _ = workload;
+        drop(shim); // let the driver's drain see EOF and finish
+        driver.join().expect("driver");
         result
     }
 
@@ -198,7 +230,9 @@ mod tests {
         req.extend_from_slice(b"example.com");
         req.extend_from_slice(&443u16.to_be_bytes());
         assert_eq!(
-            negotiate(&req).expect("parse"),
+            negotiate(&req)
+                .expect("parse")
+                .expect("a connect, not a bare close"),
             ("example.com".to_owned(), 443)
         );
     }
@@ -207,7 +241,9 @@ mod tests {
     fn parses_an_ipv4_connect() {
         let req = vec![5, 1, 0, 5, 1, 0, 1, 93, 184, 216, 34, 0x01, 0xBB];
         assert_eq!(
-            negotiate(&req).expect("parse"),
+            negotiate(&req)
+                .expect("parse")
+                .expect("a connect, not a bare close"),
             ("93.184.216.34".to_owned(), 443)
         );
     }
@@ -222,5 +258,18 @@ mod tests {
     #[test]
     fn rejects_a_non_socks5_greeting() {
         assert!(negotiate(&[4, 1, 0]).is_err());
+    }
+
+    #[test]
+    fn bare_connect_then_close_is_a_clean_disconnect_not_an_error() {
+        // A client that opens the SOCKS port and closes WITHOUT sending a greeting (a TCP
+        // health/readiness probe — exactly what the net-* e2e cases do) is normal: the shim must
+        // report a clean disconnect (`Ok(None)`), NOT an error that logs "failed to fill whole
+        // buffer". A connection that sends a PARTIAL greeting then closes IS a protocol error.
+        assert_eq!(negotiate(&[]).expect("bare close is clean"), None);
+        assert!(
+            negotiate(&[5]).is_err(),
+            "a partial greeting (1 of 2 bytes) is a real protocol error"
+        );
     }
 }

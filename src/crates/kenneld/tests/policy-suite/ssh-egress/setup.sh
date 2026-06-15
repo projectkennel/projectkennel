@@ -65,11 +65,21 @@ echo "$!" >"$SCRATCH/dest_sshd.pid"
 printf '[127.0.0.1]:%s %s\n' "$DEST_PORT" "$(cat "$SCRATCH/dest_host.pub")" \
     >"$SCRATCH/dest_known_hosts"
 
-# Wait for the destination sshd to accept connections.
-for _ in $(seq 1 50); do
-    if 2>/dev/null >/dev/tcp/127.0.0.1/"$DEST_PORT"; then break; fi
-    sleep 0.1
-done
+# Wait for the destination sshd to accept connections — a bounded python connect with a
+# per-attempt timeout (NOT a bash `>/dev/tcp` redirect, which can block indefinitely).
+python3 - "$DEST_PORT" <<'PY' || { echo "dest sshd never came up on 127.0.0.1:$DEST_PORT" >&2; exit 2; }
+import socket, sys, time
+port = int(sys.argv[1])
+for _ in range(50):
+    s = socket.socket(); s.settimeout(0.5)
+    try:
+        s.connect(("127.0.0.1", port)); s.close(); raise SystemExit(0)
+    except OSError:
+        time.sleep(0.1)
+    finally:
+        s.close()
+raise SystemExit(1)
+PY
 
 # facade-ssh is bound into the kennel view at the deployment path (libexec_dir/facade-ssh,
 # = the build tree under the suite's system.toml); the workload's stock ssh execs it as the

@@ -194,6 +194,57 @@ kennel_audit_bind(__u16 kind, __u8 family, __u16 port_be, const __u8 requested[1
 	bpf_ringbuf_submit(ev, 0);
 }
 
+/*
+ * IPv4 bind ACL decision (§7.5.7), deny-first over the dedicated bind_{deny,allow}_v4 tries.
+ * `addr_be` is the address actually being bound (network byte order, AFTER any INADDR_ANY
+ * rewrite); `port_be` is network order. Default-deny: a bind that misses the allow trie (or
+ * whose port the matching entry forbids) is denied. requested/rewritten are the 16-byte audit
+ * buffers the caller already built. Returns KENNEL_ALLOW / KENNEL_DENY.
+ */
+static __always_inline int
+kennel_bind_decide_v4(__u32 addr_be, __u16 port_be, __u8 protocol, const __u8 requested[16],
+		      const __u8 rewritten[16], const struct kennel_meta *meta)
+{
+	struct lpm_v4_key key = { .prefixlen = 32, .addr = addr_be };
+	__u16 port_host = bpf_ntohs(port_be);
+
+	if (bpf_map_lookup_elem(&bind_deny_v4, &key)) {
+		kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET, port_be, requested, rewritten, meta);
+		return KENNEL_DENY;
+	}
+	struct allow_entry *entry = bpf_map_lookup_elem(&bind_allow_v4, &key);
+	if (entry && kennel_entry_permits(entry, protocol, port_host)) {
+		kennel_audit_bind(AUDIT_NET_BIND_ALLOW, AF_INET, port_be, requested, rewritten, meta);
+		return KENNEL_ALLOW;
+	}
+	kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET, port_be, requested, rewritten, meta);
+	return KENNEL_DENY;
+}
+
+/* IPv6 bind ACL decision (§7.5.7), deny-first over bind_{deny,allow}_v6. `addr` points at the
+ * 16 bytes actually being bound (post-rewrite); `port_be` is network order. */
+static __always_inline int
+kennel_bind_decide_v6(const __u8 addr[16], __u16 port_be, __u8 protocol, const __u8 requested[16],
+		      const __u8 rewritten[16], const struct kennel_meta *meta)
+{
+	struct lpm_v6_key key = { .prefixlen = 128 };
+	__u16 port_host = bpf_ntohs(port_be);
+
+	__builtin_memcpy(key.addr, addr, 16);
+
+	if (bpf_map_lookup_elem(&bind_deny_v6, &key)) {
+		kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET6, port_be, requested, rewritten, meta);
+		return KENNEL_DENY;
+	}
+	struct allow_entry *entry = bpf_map_lookup_elem(&bind_allow_v6, &key);
+	if (entry && kennel_entry_permits(entry, protocol, port_host)) {
+		kennel_audit_bind(AUDIT_NET_BIND_ALLOW, AF_INET6, port_be, requested, rewritten, meta);
+		return KENNEL_ALLOW;
+	}
+	kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET6, port_be, requested, rewritten, meta);
+	return KENNEL_DENY;
+}
+
 /* Emit a socket-creation deny audit event. */
 static __always_inline void
 kennel_audit_sock(__u16 family, __u16 type, const struct kennel_meta *meta)

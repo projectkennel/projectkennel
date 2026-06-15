@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Program: cgroup/bind4
- * Purpose: Keep IPv4 dev-server binds inside the kennel. A bind to INADDR_ANY
- *          (0.0.0.0) is rewritten to the kennel's private loopback address, so
- *          the half of the JS ecosystem that defaults to 0.0.0.0 works but is
- *          only reachable from inside the kennel. A bind already within the
- *          kennel subnet is allowed; anything else is denied.
- * Verifier complexity budget: ~1k instructions (two array lookups, a masked
- *          compare, one ringbuf emit).
- * Maps used: kennel_meta_map, bind_subnet_map, audit_ringbuf.
- * Failure mode: rewrite + allow (return 1) for wildcard/in-subnet; deny
- *          (return 0, bind fails) otherwise. Fails closed if metadata or the
- *          bind subnet is missing.
+ * Purpose: Gate IPv4 binds by the [net.bpf].bind ACL (§7.5.7), deny-first. A bind
+ *          to INADDR_ANY (0.0.0.0) is rewritten to the kennel's private loopback
+ *          address first (so the JS ecosystem's 0.0.0.0 default works but is only
+ *          reachable inside the kennel), then the rewritten address is gated by the
+ *          ACL like any other. The ACL is default-deny; kenneld seeds it with the
+ *          kennel's own loopback /28 so an in-subnet/wildcard bind stays allowed by
+ *          default, while an author deny (or an out-of-set bind) is refused.
+ * Verifier complexity budget: ~1k instructions (meta + subnet lookups, the port
+ *          floor/allowlist, two LPM lookups, one ringbuf emit).
+ * Maps used: kennel_meta_map, bind_subnet_map, bind_deny_v4, bind_allow_v4,
+ *          audit_ringbuf.
+ * Failure mode: rewrite wildcard, then ALLOW iff the address misses bind_deny and
+ *          hits bind_allow; deny (return 0, bind fails) otherwise. Fails closed if
+ *          metadata or the bind subnet is missing.
  * Threat bearing: T6 (a dev server bound to 0.0.0.0 would otherwise be exposed
  *          to the LAN/host; rewriting confines it to the kennel).
  *
@@ -25,9 +28,6 @@
 #include "kennel.bpf.h"
 
 char LICENSE[] SEC("license") = "GPL";
-
-/* /24 network mask in network byte order. */
-#define KENNEL_V4_MASK24 bpf_htonl(0xFFFFFF00u)
 
 SEC("cgroup/bind4")
 int kennel_bind4(struct bpf_sock_addr *ctx)
@@ -73,19 +73,20 @@ int kennel_bind4(struct bpf_sock_addr *ctx)
 		}
 	}
 
-	if (addr == 0) { /* INADDR_ANY: rewrite to the kennel loopback */
+	/* INADDR_ANY: rewrite to the kennel loopback FIRST, then gate the rewritten address by
+	 * the ACL — a wildcard bind must still satisfy [net.bpf].bind (deny-first). */
+	__u32 effective = addr;
+	if (addr == 0) {
 		ctx->user_ip4 = bs->v4_addr;
+		effective = bs->v4_addr;
 		__builtin_memcpy(rewritten, &bs->v4_addr, 4);
 		kennel_audit_bind(AUDIT_NET_BIND_REWRITE, AF_INET, port_be, requested,
 				  rewritten, meta);
-		return KENNEL_ALLOW;
 	}
 
-	if ((addr & KENNEL_V4_MASK24) == (bs->v4_addr & KENNEL_V4_MASK24)) {
-		/* Already inside the kennel's /24: allow unchanged. */
-		return KENNEL_ALLOW;
-	}
-
-	kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET, port_be, requested, rewritten, meta);
-	return KENNEL_DENY;
+	/* The inbound BIND ACL (§7.5.7), deny-first, default-deny. kenneld seeds the kennel's own
+	 * loopback /28 into bind_allow, so an in-subnet or wildcard-rewritten bind stays allowed by
+	 * default; an author deny (or a bind outside the allow set) is refused. */
+	return kennel_bind_decide_v4(effective, port_be, (__u8)ctx->protocol, requested, rewritten,
+				     meta);
 }

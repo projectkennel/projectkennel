@@ -216,7 +216,7 @@ fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
 }
 
 /// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.4). Each entry is a
-/// `setrlimit` resource name (validated against [`ULIMIT_RESOURCES`]) and a value of
+/// `setrlimit` resource name (validated against [`crate::settled::ULIMIT_RESOURCES`]) and a value of
 /// the form `soft` or `soft:hard`, every token a number (optional `K`/`M`/`G`, 1024-
 /// based) or `unlimited`. The value is normalised to the settled form `soft` (when
 /// `soft == hard`) or `"soft hard"`, each token a decimal or the literal `unlimited`.
@@ -601,66 +601,40 @@ fn translate_net(
                 .to_owned(),
         ));
     }
-    let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
-
-    let mut allow: Vec<NetRule> = Vec::new();
-    let mut allow_names: Vec<NameRule> = Vec::new();
-    for entry in &net.allow {
-        let protocol = parse_protocol(entry.protocol.as_deref())?;
-        if let Some(cidr) = &entry.cidr {
-            let (addr, prefix_len) = parse_cidr(cidr)?;
-            let addr = subst(&addr, deferred);
-            if entry.ports.is_empty() {
-                allow.push(NetRule {
-                    cidr: addr,
-                    prefix_len,
-                    port_min: 0,
-                    port_max: u16::MAX,
-                    protocol,
-                });
-            } else {
-                for &p in &entry.ports {
-                    allow.push(NetRule {
-                        cidr: addr.clone(),
-                        prefix_len,
-                        port_min: p,
-                        port_max: p,
-                        protocol,
-                    });
-                }
-            }
-        } else if let Some(name) = &entry.name {
-            allow_names.push(NameRule {
-                name: name.clone(),
-                ports: entry.ports.clone(),
-                protocol,
-            });
-        } else {
+    // `host` runs no egress proxy (it shares the host net-ns and egresses directly), so any
+    // `[net.proxy]` rule under it can never be enforced (`07-5` §7.5.4). CIDR rules belong in
+    // `[net.bpf]` (the kernel ACL); by-name rules cannot be enforced in host mode at all.
+    if mode == NetMode::Host {
+        // Only AUTHOR proxy rules (`allow`, `deny.policy`) are rejected: the framework
+        // `deny.invariant` floor propagates into every policy (defence in depth) and is not
+        // removable, so its presence under `host` is structural, not an author choice.
+        let proxy_has_author_rules = net.proxy.as_ref().is_some_and(|p| {
+            !p.allow.is_empty() || p.deny.as_ref().is_some_and(|d| !d.policy.is_empty())
+        });
+        if proxy_has_author_rules {
             return Err(translation(
-                "net.allow entry has neither `name` nor `cidr`".to_owned(),
+                "net.mode = host has no egress proxy; move CIDR rules to [net.bpf]; by-name \
+                 rules cannot be enforced in host mode"
+                    .to_owned(),
             ));
         }
     }
+    let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
+
+    let (allow, allow_names, deny_invariant, deny_author) =
+        translate_proxy(net.proxy.as_ref(), deferred)?;
 
     // No implied egress is derived from `[ssh]`: the SSH destination is reached by the
     // host-side `ssh` the bastion runs as the operator (§7.10.4), entirely outside the
     // kennel's egress. The only egress the kennel needs is the bastion's own loopback
     // endpoint, which `kenneld` grants as a host-service literal at spawn — not a policy
-    // `net.allow` rule. So a destination never appears in the kennel's allowlist.
+    // `net.proxy.allow` rule. So a destination never appears in the kennel's allowlist.
 
-    let mut deny_invariant: Vec<NetRule> = Vec::new();
-    if let Some(deny) = &net.deny {
-        for d in &deny.invariant {
-            let (addr, prefix_len) = parse_cidr(&d.cidr)?;
-            deny_invariant.push(NetRule {
-                cidr: addr,
-                prefix_len,
-                port_min: 0,
-                port_max: u16::MAX,
-                protocol: Protocol::Any,
-            });
-        }
-    }
+    // The kernel ACL (`[net.bpf]`): CIDR+port connect/bind allow/deny, no names.
+    let (bpf_connect_allow, bpf_connect_deny) =
+        translate_bpf_acl(net.bpf.as_ref().and_then(|b| b.connect.as_ref()), deferred)?;
+    let (bpf_bind_allow, bpf_bind_deny) =
+        translate_bpf_acl(net.bpf.as_ref().and_then(|b| b.bind.as_ref()), deferred)?;
 
     // The bind floor (§7.5.7): a workload bind below `min_port` is denied by the
     // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
@@ -682,6 +656,35 @@ fn translate_net(
         )));
     }
 
+    // The cgroup-BPF LPM tries are fixed-capacity (src/bpf/maps.h): allow 1024, deny 256, PER
+    // FAMILY. The deny set is the invariant floor + the author's [net.bpf].*.deny +
+    // [net.proxy].deny.policy; the connect-allow set is the author's [net.bpf].connect.allow.
+    // Reject an over-capacity set at compile time, naming the limit — otherwise the (N+1)th
+    // map update fails opaquely at spawn (ENOSPC) far from the policy that caused it.
+    check_bpf_map_cap(
+        "deny",
+        deny_invariant
+            .iter()
+            .chain(&bpf_connect_deny)
+            .chain(&deny_author),
+        crate::settled::MAX_BPF_DENY_PER_FAMILY,
+    )?;
+    check_bpf_map_cap(
+        "allow",
+        bpf_connect_allow.iter(),
+        crate::settled::MAX_BPF_ALLOW_PER_FAMILY,
+    )?;
+    check_bpf_map_cap(
+        "bind allow",
+        bpf_bind_allow.iter(),
+        crate::settled::MAX_BPF_ALLOW_PER_FAMILY,
+    )?;
+    check_bpf_map_cap(
+        "bind deny",
+        bpf_bind_deny.iter(),
+        crate::settled::MAX_BPF_DENY_PER_FAMILY,
+    )?;
+
     Ok(NetPolicy {
         mode,
         bind_port_min,
@@ -690,7 +693,177 @@ fn translate_net(
         allow,
         allow_names,
         deny_invariant,
+        deny_author,
+        bpf_connect_allow,
+        bpf_connect_deny,
+        bpf_bind_allow,
+        bpf_bind_deny,
     })
+}
+
+/// Translate `[net.proxy]` into the settled proxy lists: `(allow, allow_names,
+/// deny_invariant, deny_author)`. CIDR allows become [`NetRule`]s (one per port, or a single
+/// all-ports rule); by-name allows become [`NameRule`]s; the deny `invariant`/`policy` arrays
+/// become `Protocol::Any` all-ports [`NetRule`]s. An allow with neither `name` nor `cidr` is
+/// an error.
+type ProxyLists = (Vec<NetRule>, Vec<NameRule>, Vec<NetRule>, Vec<NetRule>);
+fn translate_proxy(
+    proxy: Option<&crate::source::NetProxy>,
+    deferred: &mut BTreeSet<String>,
+) -> Result<ProxyLists, PolicyError> {
+    let mut allow: Vec<NetRule> = Vec::new();
+    let mut allow_names: Vec<NameRule> = Vec::new();
+    let mut deny_invariant: Vec<NetRule> = Vec::new();
+    let mut deny_author: Vec<NetRule> = Vec::new();
+    let Some(p) = proxy else {
+        return Ok((allow, allow_names, deny_invariant, deny_author));
+    };
+    for entry in &p.allow {
+        let protocol = parse_protocol(entry.protocol.as_deref())?;
+        if let Some(cidr) = &entry.cidr {
+            let (addr, prefix_len) = parse_cidr(cidr)?;
+            let addr = subst(&addr, deferred);
+            if entry.ports.is_empty() {
+                allow.push(NetRule {
+                    cidr: addr,
+                    prefix_len,
+                    port_min: 0,
+                    port_max: u16::MAX,
+                    protocol,
+                });
+            } else {
+                for &port in &entry.ports {
+                    allow.push(NetRule {
+                        cidr: addr.clone(),
+                        prefix_len,
+                        port_min: port,
+                        port_max: port,
+                        protocol,
+                    });
+                }
+            }
+        } else if let Some(name) = &entry.name {
+            allow_names.push(NameRule {
+                name: name.clone(),
+                ports: entry.ports.clone(),
+                protocol,
+            });
+        } else {
+            return Err(translation(
+                "net.proxy.allow entry has neither `name` nor `cidr`".to_owned(),
+            ));
+        }
+    }
+    if let Some(deny) = &p.deny {
+        let any_rule = |d: &crate::source::NetDenyRule| -> Result<NetRule, PolicyError> {
+            let (addr, prefix_len) = parse_cidr(&d.cidr)?;
+            Ok(NetRule {
+                cidr: addr,
+                prefix_len,
+                port_min: 0,
+                port_max: u16::MAX,
+                protocol: Protocol::Any,
+            })
+        };
+        for d in &deny.invariant {
+            deny_invariant.push(any_rule(d)?);
+        }
+        for d in &deny.policy {
+            deny_author.push(any_rule(d)?);
+        }
+    }
+    Ok((allow, allow_names, deny_invariant, deny_author))
+}
+
+/// Translate one `[net.bpf.connect]`/`[net.bpf.bind]` ACL into `(allow, deny)` settled
+/// [`NetRule`] lists. Each [`BpfRule`](crate::source::BpfRule) carries a CIDR (or `"*"` =
+/// `0.0.0.0/0` + `::/0`) plus ports + protocol — no names (the kernel cannot resolve them).
+/// A rule with no cidr is an error.
+fn translate_bpf_acl(
+    acl: Option<&crate::source::NetBpfAcl>,
+    deferred: &mut BTreeSet<String>,
+) -> Result<(Vec<NetRule>, Vec<NetRule>), PolicyError> {
+    let Some(acl) = acl else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let allow = translate_bpf_rules(&acl.allow, deferred)?;
+    let deny = translate_bpf_rules(&acl.deny, deferred)?;
+    Ok((allow, deny))
+}
+
+/// Expand a list of [`BpfRule`](crate::source::BpfRule)s into settled [`NetRule`]s: one rule
+/// per (cidr, port) pair (or per cidr when `ports` is empty), with `"*"` expanding to both
+/// `0.0.0.0/0` and `::/0`. A rule with no cidr is an error.
+fn translate_bpf_rules(
+    rules: &[crate::source::BpfRule],
+    deferred: &mut BTreeSet<String>,
+) -> Result<Vec<NetRule>, PolicyError> {
+    let mut out: Vec<NetRule> = Vec::new();
+    for rule in rules {
+        let protocol = parse_protocol(rule.protocol.as_deref())?;
+        let Some(cidr) = &rule.cidr else {
+            return Err(translation("net.bpf rule needs a cidr".to_owned()));
+        };
+        // `"*"` is any host: expand to the v4 and v6 default routes so the kernel ACL
+        // covers both families with one author rule.
+        let cidrs: Vec<(String, u8)> = if cidr.trim() == "*" {
+            vec![("0.0.0.0".to_owned(), 0), ("::".to_owned(), 0)]
+        } else {
+            vec![parse_cidr(cidr)?]
+        };
+        for (addr, prefix_len) in cidrs {
+            let addr = subst(&addr, deferred);
+            if rule.ports.is_empty() {
+                out.push(NetRule {
+                    cidr: addr,
+                    prefix_len,
+                    port_min: 0,
+                    port_max: u16::MAX,
+                    protocol,
+                });
+            } else {
+                for &port in &rule.ports {
+                    out.push(NetRule {
+                        cidr: addr.clone(),
+                        prefix_len,
+                        port_min: port,
+                        port_max: port,
+                        protocol,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Reject a settled rule set that would overflow its fixed-capacity per-family cgroup-BPF
+/// LPM trie. Counts v4 and v6 entries separately — they go to distinct maps (`*_v4`/`*_v6`),
+/// matching how `kennel_lib_spawn::plan::encode` routes a rule by parsing its `cidr` — and
+/// errors if either family exceeds `cap`, naming the limit so the author learns it at compile
+/// time rather than hitting an opaque map-update failure at spawn. A `cidr` that parses as
+/// neither family is left for `encode` to reject; it does not count toward either cap.
+fn check_bpf_map_cap<'a>(
+    label: &str,
+    rules: impl Iterator<Item = &'a NetRule>,
+    cap: usize,
+) -> Result<(), PolicyError> {
+    let (mut v4, mut v6) = (0usize, 0usize);
+    for r in rules {
+        if r.cidr.parse::<std::net::Ipv4Addr>().is_ok() {
+            v4 = v4.saturating_add(1);
+        } else if r.cidr.parse::<std::net::Ipv6Addr>().is_ok() {
+            v6 = v6.saturating_add(1);
+        }
+    }
+    let over = v4.max(v6);
+    if over > cap {
+        return Err(translation(format!(
+            "net.bpf {label} rules expand to {over} entries for one address family; the cgroup-BPF \
+             map holds {cap} per family (src/bpf/maps.h) — reduce the rule/port count"
+        )));
+    }
+    Ok(())
 }
 
 /// Parse a `"offset:port"` proxy-listen address.
@@ -1895,6 +2068,78 @@ mod tests {
             fs.read
         );
         assert!(fs.write.contains(&"~/proj/**".to_owned()));
+    }
+
+    /// Build a `mode = host` policy whose `[net.bpf].connect.deny` lists `n` distinct v4 CIDRs
+    /// (10.<a>.<b>.0/24, incrementing), each one map entry. With no `[net.proxy]` section the
+    /// settled deny set is exactly these `n` v4 rules — used to push the deny LPM trie to/over
+    /// its per-family capacity.
+    fn host_policy_with_n_connect_denies(n: usize) -> Vec<u8> {
+        use std::fmt::Write as _;
+        let mut s =
+            String::from("name = \"k\"\n[net]\nmode = \"host\"\nreason = \"direct egress\"\n");
+        for i in 0..n {
+            // 10.<a>.<b>.0/24 — distinct CIDRs across the v4 space, one entry each.
+            let a = (i / 256) % 256;
+            let b = i % 256;
+            let _ = write!(
+                s,
+                "[[net.bpf.connect.deny]]\ncidr = \"10.{a}.{b}.0/24\"\nreason = \"r\"\n"
+            );
+        }
+        s.into_bytes()
+    }
+
+    #[test]
+    fn bpf_deny_at_capacity_is_accepted() {
+        // 256 v4 connect denies = the deny_v4 map's exact capacity (src/bpf/maps.h). At the cap
+        // (not over it) translation succeeds and all 256 land in the settled deny set.
+        let cap = crate::settled::MAX_BPF_DENY_PER_FAMILY;
+        let src = parse(&host_policy_with_n_connect_denies(cap)).expect("parse");
+        let net = translate_net(&src, &mut BTreeSet::new()).expect("v4 deny set at cap");
+        let v4 = net
+            .bpf_connect_deny
+            .iter()
+            .filter(|r| r.cidr.parse::<std::net::Ipv4Addr>().is_ok())
+            .count();
+        assert_eq!(v4, cap, "all {cap} v4 denies survive translation");
+    }
+
+    #[test]
+    fn bpf_deny_over_capacity_is_rejected_naming_the_limit() {
+        // One past the deny_v4 cap must be a compile error that names the limit, rather than the
+        // (cap+1)th map update failing opaquely with ENOSPC at spawn.
+        let cap = crate::settled::MAX_BPF_DENY_PER_FAMILY;
+        let src = parse(&host_policy_with_n_connect_denies(cap + 1)).expect("parse");
+        let err = translate_net(&src, &mut BTreeSet::new()).expect_err("over the deny_v4 cap");
+        assert!(matches!(err, PolicyError::Translation(_)), "got {err:?}");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains(&cap.to_string()) && msg.contains("deny"),
+            "the error must name the per-family deny cap; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn bpf_cap_counts_families_separately() {
+        // A v6 default-route deny plus a modest v4 set must NOT trip the v4 cap on the v6 rule:
+        // the two families have independent maps. A small mixed policy translates cleanly.
+        let src = parse(
+            b"name = \"k\"\n[net]\nmode = \"host\"\nreason = \"r\"\n\
+              [[net.bpf.connect.deny]]\ncidr = \"::/0\"\nreason = \"v6 default\"\n\
+              [[net.bpf.connect.allow]]\ncidr = \"*\"\nports = [443]\nreason = \"any:443\"\n",
+        )
+        .expect("parse");
+        // `cidr = "*"` expands to one v4 + one v6 allow; neither family is near its 1024 cap.
+        let net = translate_net(&src, &mut BTreeSet::new()).expect("mixed families under cap");
+        assert!(net
+            .bpf_connect_allow
+            .iter()
+            .any(|r| r.cidr.parse::<std::net::Ipv4Addr>().is_ok()));
+        assert!(net
+            .bpf_connect_allow
+            .iter()
+            .any(|r| r.cidr.parse::<std::net::Ipv6Addr>().is_ok()));
     }
 
     #[test]

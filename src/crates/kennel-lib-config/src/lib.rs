@@ -143,6 +143,84 @@ fn user_config_dir() -> Option<PathBuf> {
 // ---- Deployment config -----------------------------------------------------
 
 /// The raw, all-optional `system.toml` schema (one parsed layer).
+/// Diagnostic verbosity for the spawn path (`log_level` in `system.toml`).
+///
+/// Distinct from the per-kennel `[audit]` subsystem (security events to sinks): this is
+/// free-form spawn-path tracing to stderr → journald, a global troubleshooting knob.
+/// `Info` (default) logs only errors/warnings as today; `Debug` traces each orchestration
+/// and construction step; `Trace` adds per-step parameters. Ordered so a consumer can ask
+/// `level >= Debug`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Errors and warnings only (the historical behaviour).
+    #[default]
+    Info,
+    /// Trace each spawn-path step (orchestration, factory, init seal).
+    Debug,
+    /// `Debug` plus per-step parameters (argv, addresses, fd numbers, errno detail).
+    Trace,
+}
+
+impl LogLevel {
+    /// Whether tracing is enabled at all (`Debug` or `Trace`) — the common guard.
+    #[must_use]
+    pub fn verbose(self) -> bool {
+        self >= Self::Debug
+    }
+}
+
+/// A spawn-path tracer: a [`LogLevel`] threshold plus a component tag, used to emit
+/// uniform `<component>: [debug] …` / `[trace] …` lines to stderr (→ journald).
+///
+/// Cheap to hold and copy; `step`/`detail` are no-ops below their level, so call sites
+/// stay unconditional (`tr.step(...)`) without an `if verbose` wrapper. The component tag
+/// names the emitter (`kenneld`, `kennel-privhelper`, `kennel-bin-init`) so interleaved
+/// journald lines are attributable. This is diagnostic logging, NOT the `[audit]`
+/// security subsystem (which routes structured events to configured sinks).
+#[derive(Debug, Clone, Copy)]
+pub struct Tracer {
+    level: LogLevel,
+    component: &'static str,
+}
+
+impl Tracer {
+    /// A tracer for `component` at `level`.
+    #[must_use]
+    pub const fn new(component: &'static str, level: LogLevel) -> Self {
+        Self { level, component }
+    }
+
+    /// Whether this tracer emits anything (`Debug`+). Use to skip building an
+    /// expensive message: `if tr.on() { tr.step(&format!(...)) }`.
+    #[must_use]
+    pub fn on(self) -> bool {
+        self.level.verbose()
+    }
+
+    /// This tracer's level as a `u8` (info=0, debug=1, trace=2) — for threading the
+    /// verbosity over a wire to a component that cannot read `system.toml` itself
+    /// (`kennel-bin-init`, post-`pivot_root`, via the supervision-half).
+    #[must_use]
+    pub const fn level_u8(self) -> u8 {
+        self.level as u8
+    }
+
+    /// Emit a `Debug`-level step line (a spawn-path milestone). No-op at `Info`.
+    pub fn step(self, msg: &str) {
+        if self.level >= LogLevel::Debug {
+            eprintln!("{}: [debug] {msg}", self.component);
+        }
+    }
+
+    /// Emit a `Trace`-level detail line (per-step parameters). No-op below `Trace`.
+    pub fn detail(self, msg: &str) {
+        if self.level >= LogLevel::Trace {
+            eprintln!("{}: [trace] {msg}", self.component);
+        }
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDeployment {
@@ -156,6 +234,7 @@ struct RawDeployment {
     afunix: Option<PathBuf>,
     socks5: Option<PathBuf>,
     init: Option<PathBuf>,
+    log_level: Option<LogLevel>,
 }
 
 impl RawDeployment {
@@ -172,6 +251,7 @@ impl RawDeployment {
             afunix: higher.afunix.or(self.afunix),
             socks5: higher.socks5.or(self.socks5),
             init: higher.init.or(self.init),
+            log_level: higher.log_level.or(self.log_level),
         }
     }
 
@@ -192,6 +272,7 @@ impl RawDeployment {
             afunix: self.afunix,
             socks5: self.socks5,
             init: self.init,
+            log_level: self.log_level.unwrap_or_default(),
         }
     }
 }
@@ -210,6 +291,7 @@ pub struct Deployment {
     afunix: Option<PathBuf>,
     socks5: Option<PathBuf>,
     init: Option<PathBuf>,
+    log_level: LogLevel,
 }
 
 impl Deployment {
@@ -262,6 +344,14 @@ impl Deployment {
     #[must_use]
     pub fn sshd(&self) -> &Path {
         &self.sshd
+    }
+
+    /// The diagnostic verbosity for the spawn path (`log_level` in `system.toml`,
+    /// default [`LogLevel::Info`]). Read by `kenneld` and the privhelper to gate
+    /// spawn-path tracing; see [`LogLevel`].
+    #[must_use]
+    pub const fn log_level(&self) -> LogLevel {
+        self.log_level
     }
 
     /// The setuid privhelper.
@@ -588,5 +678,56 @@ mod tests {
         write(&user, USER_FILE, "key_dirs = [\"/org/keys\"]\n");
         let u = User::load_from_dirs(&[user]).expect("load");
         assert_eq!(u.system_key_dirs(), vec![PathBuf::from("/org/keys")]);
+    }
+
+    // ---- LogLevel / Tracer: the spawn-path verbosity contract ----
+
+    #[test]
+    fn log_level_is_ordered_info_debug_trace() {
+        // Consumers gate on `level >= Debug`, so the ordering must be Info < Debug < Trace.
+        assert!(LogLevel::Info < LogLevel::Debug);
+        assert!(LogLevel::Debug < LogLevel::Trace);
+    }
+
+    #[test]
+    fn log_level_default_is_info() {
+        assert_eq!(LogLevel::default(), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_verbose_is_debug_and_above() {
+        assert!(!LogLevel::Info.verbose());
+        assert!(LogLevel::Debug.verbose());
+        assert!(LogLevel::Trace.verbose());
+    }
+
+    #[test]
+    fn log_level_u8_maps_info0_debug1_trace2() {
+        // The wire byte threaded to kennel-bin-init (which cannot read system.toml).
+        assert_eq!(Tracer::new("t", LogLevel::Info).level_u8(), 0);
+        assert_eq!(Tracer::new("t", LogLevel::Debug).level_u8(), 1);
+        assert_eq!(Tracer::new("t", LogLevel::Trace).level_u8(), 2);
+    }
+
+    #[test]
+    fn tracer_on_tracks_verbose() {
+        assert!(!Tracer::new("t", LogLevel::Info).on());
+        assert!(Tracer::new("t", LogLevel::Debug).on());
+        assert!(Tracer::new("t", LogLevel::Trace).on());
+    }
+
+    #[test]
+    fn log_level_deserialises_lowercase_from_toml() {
+        // The system.toml knob is `log_level = "debug"` (lowercase), via RawDeployment.
+        #[derive(serde::Deserialize)]
+        struct Holder {
+            log_level: LogLevel,
+        }
+        let h: Holder = basic_toml::from_str("log_level = \"trace\"").expect("parse trace");
+        assert_eq!(h.log_level, LogLevel::Trace);
+        let h: Holder = basic_toml::from_str("log_level = \"debug\"").expect("parse debug");
+        assert_eq!(h.log_level, LogLevel::Debug);
+        let h: Holder = basic_toml::from_str("log_level = \"info\"").expect("parse info");
+        assert_eq!(h.log_level, LogLevel::Info);
     }
 }

@@ -74,7 +74,7 @@ write = [
 # Constrained is inherited from base-confined: the cgroup BPF denies direct egress
 # (fail-closed) and a wildcard bind is rewritten to the kennel's loopback. Most dev
 # services need NO outbound egress; if yours pulls from a registry or calls a
-# dependency, add a `[[net.allow]]` for exactly that destination in your leaf.
+# dependency, add a `[[net.proxy.allow]]` for exactly that destination in your leaf.
 [net]
 mode = "constrained"
 

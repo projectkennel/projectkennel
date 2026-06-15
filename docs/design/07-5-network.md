@@ -13,11 +13,11 @@ A kennel's relationship to the network is one of:
 | `none` | `CLONE_NEWNET`, empty stack | No `connect()`, no `bind()` to inet families, no inet socket creation at all — zero network surface | Untrusted post-install scripts, untrusted-code inspection |
 | `constrained` | `CLONE_NEWNET` + loopback alias | Specific allowlist of destinations, via the per-kennel proxy across the binder gateway | AI agents, package installs from known registries |
 | `unconstrained` | `CLONE_NEWNET` + loopback alias | Public internet via the proxy; the invariant denylist only (cloud metadata + link-local); socket-level capability shaping retained | Build-from-source kennels that genuinely need open egress with audit retained |
-| `host` | host net-ns (shared) | Public internet via the proxy, mandatory; BPF is the primary enforcement primitive | Packet capture, raw socket tooling, root-context kennels |
+| `host` | host net-ns (shared) | Direct egress on the host stack — NO proxy; the `[net.bpf]` connect/bind ACL (deny-first) is the egress gate | Packet capture, raw socket tooling, root-context kennels |
 
 The default in defensible templates is `constrained`. `unconstrained` is documented as weaker and used only where the workflow truly requires open egress; it keeps the net-ns boundary and the audit stream but drops the allowlist down to the invariant denies. `none` is the strongest and appropriate for several common cases (npm post-install, repo inspection); it is the zero-cost case — the empty network namespace needs no loopback alias, no shim, no proxy.
 
-`host` is the one mode that does **not** get its own network namespace: the kennel shares the host network stack directly. This reinstates the host-network-reconnaissance residual (T1.6) in full — the workload can read the host's interfaces, routes, listening sockets, and neighbour table — so it is an explicit, acknowledged tradeoff: the operator opts in with a `reason`, BPF becomes the primary enforcement primitive (the net-ns boundary does not exist), and the proxy stays mandatory for audit continuity.
+`host` is the one mode that does **not** get its own network namespace: the kennel shares the host network stack directly. This reinstates the host-network-reconnaissance residual (T1.6) in full — the workload can read the host's interfaces, routes, listening sockets, and neighbour table — so it is an explicit, acknowledged tradeoff: the operator opts in with a `reason`. There is **no proxy** in host mode (the net-ns boundary does not exist, so there is nothing to funnel through it); the `[net.bpf]` connect/bind ACL is the egress gate, deny-first, enforced by the cgroup BPF + Landlock, and egress audit comes from the BPF connect ring buffer. A by-name allow (`[net.proxy]`) is therefore inexpressible under `host` and rejected at compile time — host-mode policy uses CIDR + ports in `[net.bpf]`.
 
 ## 7.5.2 The proxy-as-gateway model
 
@@ -147,20 +147,37 @@ cidr = "172.16.0.0/12"
 [[net.proxy.deny]]
 cidr = "192.168.0.0/16"
 
-# ── [net.bpf]: the kernel-level socket shaping and the bind gate ──
+# ── [net.bpf]: the kernel/syscall ACL (the cgroup connect4/6 + bind4/6 BPF and the
+#    matching Landlock CONNECT_TCP/BIND_TCP grants) ──
+#
+# This is the kernel-level ACL, present in EVERY mode with different content. By CIDR +
+# ports only — NO names (the kernel cannot resolve a name; by-name egress is [net.proxy]).
+# Deny-first: a deny match refuses regardless of any allow. Author-writable in every mode,
+# intersected with the framework lock — the author can only NARROW, never widen:
+#   - mode = host: [net.bpf].connect IS the egress gate (direct egress, no proxy).
+#   - mode = constrained/unconstrained: defence-in-depth. The workload's only reachable
+#     destination is the proxy endpoint (the framework adds it); an author connect rule
+#     cannot widen past that — it only further restricts via deny.
+#   - mode = none: vacuous (no network).
 [net.bpf]
-# Socket-family / type / protocol shaping (defence in depth; the primary egress
-# gate in mode = host). Denying a family at inet_sock_create returns EPERM.
+# Socket-family / type / protocol shaping (deny a family at inet_sock_create → EPERM).
 families = ["AF_INET", "AF_INET6", "AF_UNIX"]
 deny_families = ["AF_NETLINK", "AF_PACKET", "AF_BLUETOOTH", "AF_VSOCK"]
 
-# The bind gate. Each [[net.bpf.bind]] is an allow rule evaluated at the cgroup
-# bind hook; a bind not matched is denied at the syscall. Every ALLOWED bind is
-# reported to kenneld to drive the host-side mirror (§7.5.7).
-[[net.bpf.bind]]
-families = ["v4", "v6"]
-ports = []                       # empty = any ephemeral
-min_port = 1024
+# The outbound CONNECT ACL (cidr + ports, deny-first). `cidr = "*"` = any host
+# (0.0.0.0/0 + ::/0). In host mode this is the egress allowlist.
+[[net.bpf.connect.allow]]
+cidr = "*"                       # any host …
+ports = [443]                    # … but only on 443
+[[net.bpf.connect.deny]]
+cidr = "10.0.0.0/8"              # … except RFC1918, denied deny-first (wins over the allow)
+
+# The inbound BIND ACL (cidr + ports, deny-first), evaluated at the cgroup bind hook; a
+# bind not matched is denied at the syscall. Every ALLOWED bind is (roadmap) reported to
+# kenneld to drive the host-side mirror (§7.5.7 — the mirror is not yet built).
+[[net.bpf.bind.allow]]
+cidr = "127.0.0.1"
+ports = [8080]
 
 # Loopback handling — see §7.5.6
 [net.loopback]

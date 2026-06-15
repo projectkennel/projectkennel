@@ -65,7 +65,10 @@ pub use settled::{
     UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
-pub use source::{parse as parse_source, SourcePolicy};
+pub use source::{
+    parse as parse_source, BpfRule, NetAllow, NetBpf, NetBpfAcl, NetDenyRule, NetProxy,
+    NetProxyDeny, NetSection, SourcePolicy,
+};
 pub use source_sig::{
     sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
 };
@@ -181,6 +184,11 @@ mod tests {
                     }],
                     bind_port_min: 0,
                     bind_allowed_ports: Vec::new(),
+                    deny_author: Vec::new(),
+                    bpf_connect_allow: Vec::new(),
+                    bpf_connect_deny: Vec::new(),
+                    bpf_bind_allow: Vec::new(),
+                    bpf_bind_deny: Vec::new(),
                 },
                 fs: FsPolicy {
                     home_shadow: true,

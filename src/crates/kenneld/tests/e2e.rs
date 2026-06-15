@@ -111,6 +111,11 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                     port_max: 65535,
                     protocol: Protocol::Any,
                 }],
+                deny_author: Vec::new(),
+                bpf_connect_allow: Vec::new(),
+                bpf_connect_deny: Vec::new(),
+                bpf_bind_allow: Vec::new(),
+                bpf_bind_deny: Vec::new(),
                 bind_port_min: 0,
                 bind_allowed_ports: Vec::new(),
             },
@@ -317,6 +322,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
         identity,
@@ -431,6 +437,7 @@ fn run_ttl_kennel(
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
         identity,
@@ -599,6 +606,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
         identity,

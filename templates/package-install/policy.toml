@@ -42,7 +42,7 @@ allow = [
 
 
 # --- Network: one registry by default ---------------------------------------
-[[net.allow]]
+[[net.proxy.allow]]
 name = "registry.npmjs.org"
 ports = [443]
 protocol = "tcp"

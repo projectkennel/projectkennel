@@ -45,12 +45,14 @@ narration is kept here; the chapter named is the source of truth.
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
   tests, not mechanism.
-- **`host` / `unconstrained` network modes** (`07-5-network.md` §7.5.6) — the per-kennel
-  network namespace + INet egress conduit are **built** (see below; T1.6 closed for the net-ns
-  modes). What remains roadmap is the *mode split*: only the net-ns egress path exists today;
-  `mode = host` (deliberately re-shares the host net-ns, reinstating the recon residual as
-  `threats.reinstated`) and `mode = unconstrained` are designed but not yet wired into the
-  settled schema, and the `[net.proxy]`/`[net.bpf]` nesting they imply is not built.
+- **Inbound host-side BIND mirror** (`07-5-network.md` §7.5.6/§7.5.7) — the four network modes, the
+  `[net.proxy]`/`[net.bpf]` split, and BOTH the `[net.bpf].connect` AND `[net.bpf].bind` CIDR ACLs
+  are built (see below): the bind ACL is wired into the cgroup `bind4`/`6` BPF (deny-first over
+  dedicated `bind_{allow,deny}_v{4,6}` tries) and proven on hardware. What remains roadmap is only
+  the host-side *mirror*: the INet `BIND` verb that exposes a kennel-bound port host-side at the
+  kennel's own loopback address, so an operator's `ss`/`lsof` maps it back. Until then a bound port
+  is reachable only inside the kennel's net-ns (the gate decides whether the bind is permitted; the
+  mirror would decide whether it is reachable from the host).
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
@@ -110,6 +112,17 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   binder gateway (`facade-socks5` → `CONNECT_INET` → kenneld → `host-netproxy` dumb dialer); the
   net-ns boundary *is* the egress gate and cgroup-BPF drops to defence-in-depth. Closes T1.6 for
   the net-ns modes (`/proc/net` + netlink now reflect the kennel's own stack): `07-5-network.md`,
+  `02-5-binder-net.md`.
+- **Four network modes + the `[net.proxy]`/`[net.bpf]` split** — the mode enum is the four-tier
+  taxonomy `none`/`constrained`/`unconstrained`/`host`: `none` is an own empty net-ns,
+  `constrained`/`unconstrained` an own net-ns + SOCKS proxy (default-deny vs. default-allow-minus-
+  invariant), `host` shares the host net-ns for direct egress with no proxy (`reason`-gated, auto
+  `threats.reinstated = ["T1.6"]`). Policy is split by enforcer: `[net.proxy]` (the user-space
+  by-name allow + `deny.invariant`/`deny.policy` the proxy enforces, proxied modes only — a
+  by-name rule under `host` is a compile error) and `[net.bpf]` (the kernel CIDR+port ACL, no
+  names, present in every mode, author-narrows-only against the framework lock). The
+  `[net.bpf].connect` ACL is enforced (cgroup `connect4`/`6` BPF + Landlock `CONNECT_TCP`,
+  deny-first); all layers intersect and evaluate deny-first: `07-5-network.md`,
   `02-5-binder-net.md`.
 - **Run-environment synthesis** — `env_clear` + synthesised `envp`, `[exec].shell`, system
   rc, user dotfiles, `[fs.home].persist`: design `07-9-other.md` §7.9.2a.
@@ -179,8 +192,9 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   closure (the earlier filter was unenforceable). Boundary verified by `kennel-lib-spawn`'s
   `exec_gating` test; design `07-3-exec.md` §7.3.4/§7.3.7.
 - **Narrowed net invariant** — the non-removable deny set is cloud-metadata + link-local only;
-  RFC1918/CGNAT/ULA are reachable (by `[[net.allow]]` in `constrained`, freely in `open`). A
-  policy may still author its own RFC1918 `[[net.deny]]`: design `07-5-network.md` §7.5.
+  RFC1918/CGNAT/ULA are reachable (by `[[net.proxy.allow]]` in `constrained`, freely in
+  `unconstrained`). A policy may still author its own RFC1918 deny via `[[net.proxy.deny.policy]]`:
+  design `07-5-network.md` §7.5.
 - **Interactive controlling terminal** — the seal allocates the workload's pty inside the
   kennel's own post-`pivot_root` devpts (so `ttyname`/`tty` resolve and the operator's tty is
   never exposed), `setsid` + `TIOCSCTTY` + `dup2`s it onto stdio, and hands the master back to

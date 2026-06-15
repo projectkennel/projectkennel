@@ -1,0 +1,60 @@
+# ============================================================================
+# Suite case: net-isolated — the kennel is in its OWN network namespace.
+#
+# Proves the core containment property of per-kennel net-ns (§7.5.6): a constrained
+# kennel CANNOT reach the HOST's 127.0.0.1 services — they live in a different network
+# namespace, so there is no route at all (not merely a filtered one). This is what
+# net-none and net-constrained do NOT prove: net-none only shows connect() fails (a
+# shared netns + BPF-deny would look identical), and net-constrained only shows the
+# kennel's OWN loopback works.
+#
+# The runner (src/tools/policy-e2e.sh via this case's setup.sh) binds a host-side
+# listener on 127.0.0.1:<port> BEFORE the run and substitutes __HOST_PORT__ below. The
+# workload asserts:
+#   1. connect to the kennel's OWN in-ns loopback SOCKS endpoint (<addr>:1080) SUCCEEDS
+#      — the kennel has a live loopback in its own netns;
+#   2. connect to the HOST listener at 127.0.0.1:__HOST_PORT__ FAILS — that listener is
+#      in the host netns, unreachable from the kennel's own netns.
+# Both halves together prove TWO distinct namespaces (own loopback up, host loopback
+# unreachable), not a single filtered stack. Exit 0 ⇒ isolation holds.
+#
+# The host port is deliberately one NOT in any BPF allowlist, so a pass cannot be
+# attributed to a BPF deny — the demonstration is "no route", not "filtered".
+# ============================================================================
+
+template_name = "net-isolated"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "constrained"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/awk", "/usr/bin/seq", "/usr/bin/sleep", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    addr=$(awk 'NR==1{print $1}' /etc/hosts) \
+    && for i in $(seq 1 20); do python3 -c "import socket,sys;s=socket.socket();s.settimeout(1);s.connect((sys.argv[1],1080));s.close()" "$addr" 2>/dev/null && break; sleep 0.5; done \
+    && python3 -c "import socket,sys;s=socket.socket();s.settimeout(1);s.connect((sys.argv[1],1080));s.close()" "$addr" \
+    && python3 -c "
+import socket
+# The HOST listener lives in the host netns — from the kennel's OWN netns it must be
+# unreachable (no route). A successful connect would mean we are NOT isolated.
+s=socket.socket();s.settimeout(2)
+try:
+    s.connect(('127.0.0.1', __HOST_PORT__))
+    raise SystemExit(1)   # reached the host loopback => NOT isolated
+except OSError:
+    pass                  # unreachable => isolated, as required
+finally:
+    s.close()
+"
+    """,
+]

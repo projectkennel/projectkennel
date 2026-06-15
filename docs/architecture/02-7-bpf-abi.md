@@ -160,6 +160,17 @@ port below `kennel_meta.bind_port_min`, and — when `n_ports > 0` — deny a po
 in `allowed_ports` (a bounded, verifier-clean loop). The two halves of the
 bind-port policy: the floor rides `kennel_meta`, the allowlist rides `bind_subnet`.
 
+**`bind_allow_v4`** / **`bind_allow_v6`** / **`bind_deny_v4`** / **`bind_deny_v6`** (BPF_MAP_TYPE_LPM_TRIE)
+
+The inbound BIND ACL (§7.5.7): the same key/value layout and capacities as the connect
+`allow_*`/`deny_*` tries (allow 1024, deny 256 per family), but a dedicated set so the bind
+and connect ACLs are independent. After the port checks and the `INADDR_ANY`/`::` rewrite,
+`bind4`/`bind6` gate the (rewritten) address deny-first — `bind_deny_*` then `bind_allow_*`
+with the same protocol/port check — and default-deny on a miss. kenneld seeds `bind_allow_*`
+with the kennel's own loopback `/28`(v4)/`/64`(v6) so an in-subnet or wildcard-rewritten bind
+stays allowed without an author rule; `[net.bpf].bind.allow`/`.deny` add to the tries. A
+permitted bind emits `AUDIT_NET_BIND_ALLOW`; a refused one `AUDIT_NET_BIND_DENY`.
+
 > **Roadmap — bind hook drives the loopback mirror.** Under the per-kennel net-ns redesign
 > ([`02-5-binder-net.md`](02-5-binder-net.md) §The host-side mirror and `BIND`), the workload
 > binds **natively inside** its own net-ns rather than having `INADDR_ANY` rewritten to a shared
@@ -246,7 +257,7 @@ The loader's setup for one kennel:
 
 1. Open the embedded BPF object (`include_bytes!` into the loader binary).
 2. Create the per-kennel map set *once* (`create_maps`).
-3. Populate `kennel_meta`, `allow_v4`, `allow_v6`, `deny_v4`, `deny_v6`, `bind_subnet` from the resolved policy.
+3. Populate `kennel_meta`, `allow_v4`, `allow_v6`, `deny_v4`, `deny_v6`, `bind_subnet`, and the bind ACL tries (`bind_allow_v4`/`v6`, `bind_deny_v4`/`v6`) from the resolved policy.
 4. Load every program against that shared set (`load_program_against`), attaching to the kennel's cgroup (under `/sys/fs/cgroup/<namespace>/<ctx>/`, where `<namespace>` defaults to `kennel`).
 5. Pin the shared maps under `/run/user/<uid>/kennel/bpf/<id>/` (Map pinning, below).
 6. The cgroup is then ready; the workload can be moved into it.

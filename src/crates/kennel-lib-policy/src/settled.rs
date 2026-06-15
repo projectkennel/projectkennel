@@ -218,6 +218,30 @@ pub struct NetPolicy {
     /// present; cannot be removed by any delta.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_invariant: Vec<NetRule>,
+    /// Author denylist from `[net.proxy.deny.policy]` (`07-5` §7.5.4): the optional,
+    /// removable CIDR denies the proxy evaluates deny-first alongside
+    /// [`deny_invariant`](Self::deny_invariant). Honoured only by the proxy (the proxied
+    /// modes); omitted from the canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_author: Vec<NetRule>,
+    /// The kernel CONNECT allow ACL from `[net.bpf.connect.allow]` (`07-5` §7.5.4): CIDR+port
+    /// rules the cgroup `connect4`/`connect6` BPF permits. No names (the kernel cannot resolve
+    /// them). Omitted from the canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bpf_connect_allow: Vec<NetRule>,
+    /// The kernel CONNECT deny ACL from `[net.bpf.connect.deny]` (`07-5` §7.5.4): CIDR+port
+    /// rules the cgroup connect BPF refuses, evaluated deny-first. Omitted from the canonical
+    /// form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bpf_connect_deny: Vec<NetRule>,
+    /// The kernel BIND allow ACL from `[net.bpf.bind.allow]` (`07-5` §7.5.4): CIDR+port rules
+    /// the cgroup `bind4`/`bind6` BPF permits. Omitted from the canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bpf_bind_allow: Vec<NetRule>,
+    /// The kernel BIND deny ACL from `[net.bpf.bind.deny]` (`07-5` §7.5.4): CIDR+port rules the
+    /// cgroup bind BPF refuses, evaluated deny-first. Omitted from the canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bpf_bind_deny: Vec<NetRule>,
 }
 
 /// `skip_serializing_if` helper: a `u16` that is `0`.
@@ -232,6 +256,22 @@ const fn is_zero_u16(v: &u16) -> bool {
 /// listing more is a translation error (the author learns the limit rather than having
 /// ports silently dropped).
 pub const MAX_BIND_PORTS: usize = 8;
+
+/// Capacity of each per-family cgroup-BPF **allow** LPM trie (`allow_v4`/`allow_v6`).
+///
+/// AUTHORITATIVE SOURCE: `src/bpf/maps.h` (`allow_v4`/`allow_v6` `max_entries`). Mirrored
+/// here so translation can reject an over-large allowlist with a clear error rather than
+/// letting the `(N+1)`th map update fail opaquely at spawn (`ENOSPC`/`E2BIG`). Counted
+/// per family per map AFTER `cidr = "*"` expands to both families.
+pub const MAX_BPF_ALLOW_PER_FAMILY: usize = 1024;
+
+/// Capacity of each per-family cgroup-BPF **deny** LPM trie (`deny_v4`/`deny_v6`).
+///
+/// AUTHORITATIVE SOURCE: `src/bpf/maps.h` (`deny_v4`/`deny_v6` `max_entries`). The deny
+/// map carries the invariant floor PLUS the author's `[net.bpf].*.deny` and
+/// `[net.proxy].deny.policy` — author-extensible since the `[net.proxy]`/`[net.bpf]`
+/// split — so this bound is now reachable and must be enforced at compile time.
+pub const MAX_BPF_DENY_PER_FAMILY: usize = 256;
 
 /// Private-`/tmp` tmpfs parameters (§7.4.6).
 ///

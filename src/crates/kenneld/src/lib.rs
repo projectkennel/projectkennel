@@ -300,6 +300,10 @@ pub struct Spec {
     /// manager is run; the seal still mounts no binderfs because the plan's view
     /// `binder` flag is false in that case).
     pub binder: Option<BinderPrep>,
+    /// Spawn-path diagnostic tracer (the `log_level` knob): `bring_up` traces each
+    /// step (egress, view, factory construct, boot-sync, proxy, binder node 0) through
+    /// it. No-op at the default `info`.
+    pub tracer: kennel_lib_config::Tracer,
 }
 
 /// One granted `AF_UNIX` socket the in-kennel proxy presents (§7.6).
@@ -511,6 +515,7 @@ pub fn start<P: Privileged + Sync>(
         ssh,
         unix,
         binder,
+        tracer,
     } = spec;
     let mut state = Provision::default();
 
@@ -528,6 +533,7 @@ pub fn start<P: Privileged + Sync>(
         &ssh,
         &unix,
         binder.as_ref(),
+        tracer,
         command,
         &mut state,
     ) {
@@ -578,6 +584,7 @@ fn bring_up<P: Privileged + Sync>(
     ssh: &SshPrep,
     unix: &UnixPrep,
     binder: Option<&BinderPrep>,
+    tracer: kennel_lib_config::Tracer,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<i32, Error> {
@@ -659,6 +666,10 @@ fn bring_up<P: Privileged + Sync>(
             deny_v4: plan.bpf_deny_v4.clone(),
             allow_v6: plan.bpf_allow_v6.clone(),
             deny_v6: plan.bpf_deny_v6.clone(),
+            bind_allow_v4: plan.bpf_bind_allow_v4.clone(),
+            bind_deny_v4: plan.bpf_bind_deny_v4.clone(),
+            bind_allow_v6: plan.bpf_bind_allow_v6.clone(),
+            bind_deny_v6: plan.bpf_bind_deny_v6.clone(),
             bind_allowed_ports: plan.bind_allowed_ports.clone(),
             pin_id: id.to_owned(),
         }
@@ -859,6 +870,11 @@ fn bring_up<P: Privileged + Sync>(
             "a kennel must be constructed via the factory, which requires a BinderPrep",
         )));
     };
+    tracer.step(&format!(
+        "bring-up: invoking privhelper factory (ctx {ctx}, {} loopback addr(s), {} egress bytes)",
+        loopback.len(),
+        egress_bytes.len()
+    ));
     let (mut child, init_pid, sync, supervision_bytes) = construct_via_factory(
         privileged,
         plan,
@@ -866,8 +882,12 @@ fn bring_up<P: Privileged + Sync>(
         ctx,
         &loopback,
         &egress_bytes,
+        tracer.level_u8(),
         state,
     )?;
+    tracer.step(&format!(
+        "bring-up: factory returned, kennel-bin-init pid={init_pid}; awaiting boot-sync (exec)"
+    ));
     let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
 
     // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed — only then is its
@@ -875,10 +895,15 @@ fn bring_up<P: Privileged + Sync>(
     // (and what the old retry loop was really waiting on). A failure here leaves the kennel up but
     // binder-less; the workload (which it gates) will not start, so surface it.
     kennel_lib_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
+    tracer.step("bring-up: boot-sync received — kennel-bin-init has execed");
 
     // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
     // kennel-bin-init start the workload), so its command socket is bound before the first INet request.
     if let (Some(setup), Some(sock)) = (proxy, command_socket.as_ref()) {
+        tracer.step(&format!(
+            "bring-up: spawning egress delegate {}",
+            setup.binary.display()
+        ));
         state.proxy = Some(crate::proxy::spawn(&setup.binary, sock).map_err(Error::Proxy)?);
     }
 
@@ -895,8 +920,14 @@ fn bring_up<P: Privileged + Sync>(
             cgroup: plan.cgroup.clone(),
             ttl_action: plan.ttl_action,
         };
+        tracer.step(&format!(
+            "bring-up: acquiring binder node 0 via /proc/{init_pid_u32}/root"
+        ));
         match acquire_binder_node0(init_pid_u32, ctx, prep, lifecycle, net_runtime) {
-            Ok(manager) => state.binder = Some(manager),
+            Ok(manager) => {
+                tracer.step("bring-up: binder node 0 acquired, lifecycle served");
+                state.binder = Some(manager);
+            }
             Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
         }
     }
@@ -905,6 +936,9 @@ fn bring_up<P: Privileged + Sync>(
     // it always blocks for this). Then reap the factory parent, which exits the moment it has
     // reported the pid; `kennel-bin-init` has reparented to kenneld (the subreaper), so the `Kennel`
     // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
+    tracer.step(
+        "bring-up: signalling bus-live — kennel-bin-init may pull its plan + start the workload",
+    );
     kennel_lib_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
     let _ = child.wait();
     Ok(init_pid)
@@ -917,6 +951,7 @@ fn bring_up<P: Privileged + Sync>(
 /// node 0). The factory exits as soon as it has reported the pid, so it is reaped here, and the
 /// orphaned init has reparented to kenneld (the `set_child_subreaper`) before we return.
 #[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
+#[allow(clippy::too_many_arguments)] // one cohesive factory call; the args are the construction inputs
 fn construct_via_factory<P: Privileged + Sync>(
     privileged: &P,
     plan: &Plan,
@@ -924,13 +959,14 @@ fn construct_via_factory<P: Privileged + Sync>(
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     egress_bytes: &[u8],
+    log_level: u8,
     state: &mut Provision,
 ) -> Result<(Child, i32, std::os::fd::OwnedFd, Vec<u8>), Error> {
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
     let construction = construction_half_from(plan, ctx, loopback);
-    let supervision = supervision_from(plan, command, drop_uid, drop_gid);
+    let supervision = supervision_from(plan, command, drop_uid, drop_gid, log_level);
     let half_bytes = kennel_lib_spawn::wire::encode_construction(&construction);
     let supervision_bytes = kennel_lib_spawn::wire::encode_supervision(&supervision);
 
@@ -994,6 +1030,7 @@ fn supervision_from(
     command: &Command,
     drop_uid: u32,
     drop_gid: u32,
+    log_level: u8,
 ) -> kennel_lib_spawn::Supervision {
     let program = PathBuf::from(command.get_program());
     let mut argv = vec![command.get_program().to_string_lossy().into_owned()];
@@ -1032,6 +1069,8 @@ fn supervision_from(
         // kennel-bin-init runs this timer and, at expiry, makes the blocking NOTIFY_TTL_EXPIRED
         // call to kenneld (which freezes + decides). The action is decided kenneld-side.
         ttl_seconds: plan.ttl_seconds,
+        // The verbosity kennel-bin-init traces at — it cannot read system.toml post-pivot.
+        log_level,
     }
 }
 

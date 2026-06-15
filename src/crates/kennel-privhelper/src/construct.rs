@@ -48,7 +48,10 @@ use kennel_lib_syscall::unistd::{real_gid, real_uid};
 use crate::validate::{validate_addr, AddrRequest, ReservedScope};
 use crate::wire::EgressPayload;
 
-/// The interface the per-kennel loopback addresses live on (shared host net namespace).
+/// The loopback interface name (`lo`). The kennel's own addresses are added to `lo` on BOTH
+/// sides of the boundary: inside the kennel's own net-ns (where the workload sees them) and,
+/// as a mirror, on the host `lo` (so an operator's `ss`/`lsof` maps a kennel address back to
+/// the kennel, §7.5.6). Host (`mode = host`) shares the host `lo` directly and adds no in-ns copy.
 const LOOPBACK: &str = "lo";
 
 /// Receive buffer for the construction datagram: the length-prefixed construction-half plus
@@ -119,8 +122,22 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    to run as uid 0 is NOT taken from the wire — see step 1b). It arrives
     //    `MSG_CMSG_CLOEXEC`; the construction child re-homes it at `PTY_RETURN_FD` (clearing
     //    close-on-exec) just before `fexecve` so the argv-less `kennel-bin-init` inherits it there.
+    // The spawn-path tracer (the `log_level` knob): resolved from the root-owned deployment
+    // config, the same cascade the privhelper already reads for `kennel-bin-init` below. The
+    // privhelper's stderr is inherited from kenneld, so these lines reach the same journal. The
+    // child trace lines below are especially load-bearing: the construction child's only failure
+    // signal upstream is its `_exit(127)`, so a step trace is the sole way to see WHERE it died.
+    let tracer = kennel_lib_config::Deployment::load().map_or_else(
+        |_| kennel_lib_config::Tracer::new("kennel-privhelper", kennel_lib_config::LogLevel::Info),
+        |d| kennel_lib_config::Tracer::new("kennel-privhelper", d.log_level()),
+    );
+
     let mut buf = vec![0u8; RECV_CAP];
     let (n, mut wire_fds) = recv_with_fds(chan, &mut buf)?;
+    tracer.step(&format!(
+        "construct: received datagram ({n} bytes, {} fds)",
+        wire_fds.len()
+    ));
     let msg = buf.get(..n).unwrap_or(&[]);
     let ch_len = msg
         .get(0..4)
@@ -146,15 +163,42 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // 1a. Provision the kennel's host-side network resources — folded into this one op (the
     //     former separate `add-addr`/`setup-egress` privhelper invocations are gone). Runs as
     //     the operator with the helper's file caps (`cap_net_admin` + the BPF caps), before any
-    //     privilege change, in the host net namespace (the kennel still shares it). Each
-    //     loopback address is re-validated against the caller's reserved subnet — the operator
-    //     does not get to pick arbitrary addresses — then added on `lo`; the egress BPF, if
-    //     present, is attached to the kennel cgroup (whose ownership the attach re-checks).
+    //     privilege change, in the **host** net namespace. This adds the kennel's loopback
+    //     addresses as a MIRROR on the host `lo`: a proxied kennel runs in its OWN net-ns (the
+    //     in-ns copy is added later, in `build_kennel`), and this host-side mirror is what makes
+    //     a kennel address visible to the operator's `ss`/`lsof` and reachable by the host-side
+    //     BIND delegate (§7.5.6/§7.5.7). `mode = host` shares the host `lo` outright (no own
+    //     net-ns, no in-ns copy). Each address is re-validated against the caller's reserved
+    //     subnet — the operator does not get to pick arbitrary addresses — then added on `lo`;
+    //     the egress BPF, if present, is attached to the kennel cgroup (ownership re-checked).
     let Some(scope) = crate::alloc::load(real_uid()) else {
         return Err(io::Error::other("caller has no reserved scope"));
     };
+    tracer.step(&format!(
+        "construct: adding {} host loopback address(es) (ctx {})",
+        half.loopback.len(),
+        half.ctx
+    ));
+    // Diagnostic (trace): the effective uid + capability words at the host-side add, so an
+    // EPERM here is attributable to euid/caps rather than the netns or the address itself.
+    {
+        let euid = kennel_lib_syscall::unistd::effective_uid();
+        let caps = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let cap_eff = caps
+            .lines()
+            .find(|l| l.starts_with("CapEff:"))
+            .unwrap_or("CapEff: ?");
+        let addrs: Vec<String> = half.loopback.iter().map(|l| l.addr.to_string()).collect();
+        tracer.detail(&format!(
+            "construct: euid={euid} {cap_eff} addrs={addrs:?} ns=host-add"
+        ));
+    }
     add_loopback_addresses(&half.loopback, half.ctx, &scope)?;
     if !egress_bytes.is_empty() {
+        tracer.step(&format!(
+            "construct: attaching egress BPF ({} bytes) to cgroup",
+            egress_bytes.len()
+        ));
         let payload = EgressPayload::decode(egress_bytes)
             .map_err(|e| io::Error::other(format!("egress payload decode: {e:?}")))?;
         let resp = crate::exec::attach_egress_programs(&half.cgroup, &payload);
@@ -223,6 +267,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // 127 at this boundary is undebuggable, and the construction child has no other channel.
         // Wait until the parent has written our identity maps (so the kennel's uid 0 is
         // mappable); abort closed otherwise.
+        tracer.step("construct: child cloned, awaiting maps-ready ack from parent");
         if recv_ack(ready_r.as_fd()).ok().flatten() != Some(ACK_PROCEED) {
             eprintln!("kennel-privhelper: construction child: maps-ready ack not received");
             return;
@@ -237,6 +282,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             eprintln!("kennel-privhelper: construction child: setuid(0) in userns: {e}");
             return;
         }
+        tracer.step("construct: child is kennel uid 0; building view/binderfs");
         // All privileged construction runs here, as the kennel's uid 0, BEFORE the hand-off
         // — so the surfaces are root-owned and no operator code runs as userns-0. A failure
         // returns, tripping the _exit(127) backstop (no half-built kennel runs the workload).
@@ -244,6 +290,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             eprintln!("kennel-privhelper: construction child: build_kennel: {e}");
             return;
         }
+        tracer.step("construct: view built; placing handoff fds + fexecve kennel-bin-init");
         // Place the descriptors `kennel-bin-init` inherits at fixed numbers (`BOOT_SYNC_FD`,
         // `PTY_RETURN_FD` for an interactive run, and `WORKLOAD_FD` for a sha256-pinned
         // workload), returning the init-binary fd to exec.
@@ -275,6 +322,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid({op_uid}): {e}")))?;
     }
     let init_pid = clone_pid1(namespaces, child)?;
+    tracer.step(&format!(
+        "construct: cloned PID 1 (host pid {init_pid}); writing identity maps"
+    ));
 
     // 4. Restore the parent's **effective** uid to 0 (undo the pre-clone operator drop) so the
     //    setgid/setuid below regain `CAP_SETGID`/`CAP_SETUID`; the saved uid is still 0, so this
@@ -308,6 +358,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 
     // "build": maps are written, so the child may become uid 0, construct the binderfs, and
     // `fexecve` `kennel-bin-init` (which then blocks on the boot-sync socket before pulling).
+    tracer.step("construct: identity maps written; releasing child to build + fexecve");
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
     drop(ready_w);
 
@@ -315,6 +366,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (now reachable via
     // /proc/<pid>/root), and signals "go". With that off our hands, the factory's job is done.
     send_with_raw_fds(chan, &init_pid.to_le_bytes(), &[daemon_sync.as_raw_fd()])?;
+    tracer.step(&format!(
+        "construct: reported init pid {init_pid} + boot-sync socket to kenneld; factory done"
+    ));
 
     // 5. Done. The factory's whole job was to build the kennel, write the maps, and report the init
     //    pid (plus the boot-sync socket) — `kennel-bin-init` is now PID 1 of the new namespace and an
@@ -331,7 +385,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 /// returning the init-binary fd to `fexecve`.
 ///
 /// Every descriptor we still need (the init binary, the boot-sync socket, the pty socket) is
-/// first lifted ABOVE the target range with [`dup_above`], so `dup2`-ing onto the low fixed
+/// first lifted ABOVE the target range with [`kennel_lib_syscall::fd::dup_above`], so `dup2`-ing onto the low fixed
 /// numbers cannot clobber one of them — their natural fd numbers depend on what else is open and
 /// could otherwise land on a target (the bug an interactive run, with its extra pty fd, exposed).
 /// `dup_above` keeps close-on-exec; [`dup_onto`] clears it on the fixed targets so they survive
@@ -414,11 +468,14 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         join_cgroup(&half.cgroup)
             .map_err(|e| io::Error::new(e.kind(), format!("join_cgroup: {e}")))?;
     }
-    // In-namespace loopback (§7.3): a fresh net-ns starts with `lo` DOWN and no addresses. Bring it
-    // up and add the kennel's own loopback addresses inside the net-ns — the mirror of the host-lo
-    // alias the factory already added (the same addresses on both sides of the boundary). The
-    // construction child holds CAP_NET_ADMIN over its own new userns+netns, so this is unprivileged.
-    // The addresses were re-validated against the caller's reserved scope before the host add above.
+    // In-namespace loopback (§7.5.6): a proxied kennel runs in its OWN net-ns (`half.lo` is set
+    // only when the plan unshared NEWNET and the kennel has addresses — i.e. constrained/
+    // unconstrained; `none` has no addresses, `host` shares the host stack). A fresh net-ns
+    // starts with `lo` DOWN and no addresses, so bring it up and add the kennel's own addresses
+    // here — these are the copy the WORKLOAD sees (the host-side add in step 1a is the operator-
+    // visible mirror on the other side of the boundary). The construction child holds
+    // CAP_NET_ADMIN over its own new userns+netns, so this is unprivileged; the addresses were
+    // re-validated against the caller's reserved scope before the host add above.
     if half.lo {
         let cname = std::ffi::CString::new(LOOPBACK).map_err(|_| io::Error::other("bad ifname"))?;
         let lo = kennel_lib_syscall::netlink::if_index(&cname)?;

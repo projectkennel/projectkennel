@@ -1,41 +1,42 @@
 #!/usr/bin/env bash
 #
-# Run the policy test SUITE: every case under src/crates/kenneld/tests/policy-suite/ is
-# a self-checking signed policy whose [workload] inspects the constructed kennel from
-# the inside and exits 0 iff the slice it proves holds. This runner drives each case
-# through the REAL daemon — `kennel run <case> <name>` against a live `kenneld` — so the
-# suite exercises the production path end to end (07-2, 08-enforcement §8.2), with no
-# hand-built Rust harness. The kennel's exit code IS each case's verdict.
+# Run the policy test SUITE against the REAL installed Project Kennel — the standard
+# toolchain, not a bespoke daemon. Every case under
+# src/crates/kenneld/tests/policy-suite/<case>/ is a self-checking signed policy whose
+# [workload] inspects the constructed kennel from the inside and exits 0 iff the slice it
+# proves holds; this driver runs each through `kennel run <case>` against the installed,
+# systemd-managed `kenneld.service`. The kennel's exit code IS each case's verdict.
 #
-# As with the rest of the project: a skip is not a proof. Where a prerequisite cannot be
-# met the runner aborts with the precise cause rather than reporting a false pass.
+# WHY drive the installed service (not `systemd-run` + a build-tree kenneld): the spawn
+# path threads YAMA / cgroups / AppArmor / userns / Landlock / seccomp, and getting that
+# environment right is exactly what install.sh + the kenneld.service unit (Delegate=yes,
+# the AppArmor profile, the setuid privhelper) already encode. Re-deriving a slice of it
+# in the test harness drifts and breaks; using the production install is both simpler and
+# a truer test. (This replaced an earlier systemd-run-based runner that kept dying.)
 #
-# It performs the one-time host setup the unprivileged spawn path requires and then runs
-# the cases as the ordinary operator (no sudo for the runs themselves):
+# A skip is not a proof: a missing prerequisite aborts with the precise cause.
 #
-#   1. builds the helper binaries (privhelper with --features bpf-egress LAST so a later
-#      workspace build cannot clobber its embedded BPF objects), the facades, kenneld,
-#      kennel, and kennel-bin-init;
-#   2. `sudo setcap` the factory caps on the privhelper (the production install posture —
-#      07-paths, never sudo at runtime);
-#   3. provisions an /etc/kennel/subkennel allocation for the operator's uid (tag 42);
-#   4. installs a root-owned kennel-bin-init at the libexec path the privhelper resolves;
-#   5. writes /etc/kennel/system.toml pointing libexec_dir at the build tree (so the
-#      daemon finds the dev helper binaries — the root-only deployment cascade, 07-paths);
-#   6. ensures the operator holds a signing key (the daemon trusts the user key dir);
-#   7. loads an AppArmor profile granting `userns` to kenneld + the privhelper;
-#   8. stages the fixtures a policy cannot carry (the AF_UNIX echo listener + the granted
-#      home subtree), starts kenneld under `systemd-run --user --scope -p Delegate=yes`
-#      (a writable delegated cgroup), and runs every case.
+# What it does:
+#   1. build the release + run `sudo tools/install.sh` (the real install) — unless
+#      --no-install (use what is already installed);
+#   2. provision the admin inputs install.sh deliberately does NOT fabricate: this user's
+#      /etc/kennel/subkennel allocation (tag 42) and a suite signing key the daemon trusts;
+#   3. (re)start the installed kenneld.service so it runs the just-installed binary;
+#   4. stage the shared fixtures a policy cannot carry (the AF_UNIX echo listener + the
+#      granted home subtree), then run each case via the installed `kennel` CLI.
 #
-# The sudo steps are reversible and local; everything is undone on exit. Usage:
-#   src/tools/policy-e2e.sh [case-name ...]      # no args = every case
+# Usage:
+#   src/tools/policy-e2e.sh [--no-install] [--debug] [case-name ...]   # no cases = all
+#     --no-install   skip build+install; use the already-installed kennel
+#     --debug        set log_level=debug in /etc/kennel/system.toml for the run
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 SUITE_DIR="$REPO_ROOT/src/crates/kenneld/tests/policy-suite"
+LIBEXEC="/usr/libexec/kennel"
+KENNEL="$LIBEXEC/kennel"
 
 UID_NUM="$(id -u)"
 if [ "$UID_NUM" = "0" ]; then
@@ -43,80 +44,71 @@ if [ "$UID_NUM" = "0" ]; then
     exit 2
 fi
 
-# --- constants the cases depend on -------------------------------------------
+DO_INSTALL=1
+DEBUG=0
+CASES=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-install) DO_INSTALL=0 ;;
+        --debug) DEBUG=1 ;;
+        -*) echo "unknown flag: $arg" >&2; exit 2 ;;
+        *) CASES+=("$arg") ;;
+    esac
+done
+
+# Constants the cases depend on (the reserved scope the suite policies assume).
 SUBKENNEL_TAG=42
 SUBKENNEL_NS="kennel-dev"
 SUBKENNEL_LINE="${UID_NUM}:${SUBKENNEL_TAG}:0000000002:${SUBKENNEL_NS}"
-AA_PROFILE_NAME="kennel_suite"
-AA_PROFILE_FILE="$(mktemp /tmp/kennel-suite-aa.XXXXXX)"
-INIT_DEST="/usr/libexec/kennel/kennel-bin-init"
-AKC_DEST="/usr/libexec/kennel/kennel-akc"
-SYSTEM_TOML="/etc/kennel/system.toml"
+SUITE_KEY_ID="kennel-suite"
+KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
+SUITE_KEY="$KEY_DIR/$SUITE_KEY_ID.key"
 ECHO_SOCK_DIR="/run/kennel-e2e"
 ECHO_SOCK="$ECHO_SOCK_DIR/echo.sock"
 HOME_FIXTURE="$HOME/kennel-e2e"
+SYSTEM_TOML="/etc/kennel/system.toml"
 
-# Restore state for things we may have swapped in.
-SUBKENNEL_SAVED=""
-INIT_DEST_BACKUP=""
-INIT_DEST_CREATED=""
-AKC_DEST_BACKUP=""
-AKC_DEST_CREATED=""
-SYSTEM_TOML_BACKUP=""
-SYSTEM_TOML_CREATED=""
 ECHO_PID=""
+SUBKENNEL_SAVED=""
+SYSTEM_TOML_SAVED=""        # prior /etc/kennel/system.toml contents (restored on exit)
+SYSTEM_TOML_EXISTED=0
 
 cleanup() {
     [ -n "$ECHO_PID" ] && kill "$ECHO_PID" 2>/dev/null || true
-    if [ -f "$AA_PROFILE_FILE" ]; then
-        sudo apparmor_parser -R "$AA_PROFILE_FILE" 2>/dev/null || true
-        rm -f "$AA_PROFILE_FILE"
-    fi
     if [ -n "$SUBKENNEL_SAVED" ]; then
         sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_SAVED}|" /etc/kennel/subkennel 2>/dev/null || true
     fi
-    if [ -n "$INIT_DEST_CREATED" ]; then
-        sudo rm -f "$INIT_DEST" 2>/dev/null || true
-    elif [ -n "$INIT_DEST_BACKUP" ]; then
-        sudo cp -f "$INIT_DEST_BACKUP" "$INIT_DEST" 2>/dev/null || true
-        rm -f "$INIT_DEST_BACKUP"
-    fi
-    if [ -n "$AKC_DEST_CREATED" ]; then
-        sudo rm -f "$AKC_DEST" 2>/dev/null || true
-    elif [ -n "$AKC_DEST_BACKUP" ]; then
-        sudo cp -f "$AKC_DEST_BACKUP" "$AKC_DEST" 2>/dev/null || true
-        rm -f "$AKC_DEST_BACKUP"
-    fi
-    if [ -n "$SYSTEM_TOML_CREATED" ]; then
-        sudo rm -f "$SYSTEM_TOML" 2>/dev/null || true
-    elif [ -n "$SYSTEM_TOML_BACKUP" ]; then
-        sudo cp -f "$SYSTEM_TOML_BACKUP" "$SYSTEM_TOML" 2>/dev/null || true
-        rm -f "$SYSTEM_TOML_BACKUP"
+    # Restore the system.toml we may have rewritten for --debug.
+    if [ "$DEBUG" = 1 ]; then
+        if [ "$SYSTEM_TOML_EXISTED" = 1 ]; then
+            printf '%s' "$SYSTEM_TOML_SAVED" | sudo tee "$SYSTEM_TOML" >/dev/null 2>&1 || true
+        else
+            sudo rm -f "$SYSTEM_TOML" 2>/dev/null || true
+        fi
+        systemctl --user restart kenneld.service 2>/dev/null || true
     fi
     sudo rm -rf "$ECHO_SOCK_DIR" 2>/dev/null || true
     rm -rf "$HOME_FIXTURE" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-echo "== building binaries =="
-cargo build -p host-netproxy -p facade-socks5 -p facade-afunix -p facade-ssh \
-    -p kennel-bin-init || exit 1
-cargo build -p kenneld --bin kenneld --bin kennel || exit 1
-cargo build -p kennel-privhelper --features bpf-egress || exit 1
+# 1. Build + install the real thing (the production path), unless told to use the
+#    already-installed kennel.
+if [ "$DO_INSTALL" = 1 ]; then
+    echo "== building release =="
+    cargo build --release --offline --frozen --locked \
+        -p kenneld -p host-netproxy -p facade-socks5 -p facade-ssh -p kennel-bin-init \
+        || { echo "build failed" >&2; exit 1; }
+    cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress \
+        || { echo "privhelper build failed" >&2; exit 1; }
+    echo "== installing (sudo tools/install.sh --no-build) =="
+    sudo bash "$REPO_ROOT/src/tools/install.sh" --no-build || { echo "install failed" >&2; exit 1; }
+fi
+[ -x "$KENNEL" ] || { echo "kennel not installed at $KENNEL — run without --no-install" >&2; exit 2; }
 
-PRIVHELPER="$REPO_ROOT/target/debug/kennel-privhelper"
-KENNELD="$REPO_ROOT/target/debug/kenneld"
-KENNEL="$REPO_ROOT/target/debug/kennel"
-for b in "$PRIVHELPER" "$KENNELD" "$KENNEL"; do
-    [ -x "$b" ] || { echo "missing built binary: $b" >&2; exit 1; }
-done
-
-echo "== factory capabilities on the privhelper (sudo, one-time) =="
-sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep "$PRIVHELPER"
-getcap "$PRIVHELPER"
-
+# 2. The admin inputs install.sh deliberately does not fabricate (07-paths §5):
+#    the subkennel allocation for this user, and a signing key the daemon trusts.
 echo "== /etc/kennel/subkennel allocation for uid $UID_NUM (sudo) =="
-sudo mkdir -p /etc/kennel
 sudo touch /etc/kennel/subkennel
 EXISTING="$(sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel 2>/dev/null | head -1 || true)"
 if [ -z "$EXISTING" ]; then
@@ -127,93 +119,44 @@ elif [ "$EXISTING" != "$SUBKENNEL_LINE" ]; then
 fi
 sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel
 
-echo "== root-owned kennel-bin-init at $INIT_DEST (sudo) =="
-INIT_SRC="$REPO_ROOT/target/debug/kennel-bin-init"
-sudo mkdir -p "$(dirname "$INIT_DEST")"
-if [ -e "$INIT_DEST" ]; then
-    INIT_DEST_BACKUP="$(mktemp /tmp/kennel-suite-init.XXXXXX)"
-    sudo cp -f "$INIT_DEST" "$INIT_DEST_BACKUP"
-else
-    INIT_DEST_CREATED=1
-fi
-sudo cp -f "$INIT_SRC" "$INIT_DEST"
-sudo chown 0:0 "$INIT_DEST"
-sudo chmod 0755 "$INIT_DEST"
-
-echo "== root-owned kennel-akc at $AKC_DEST (sudo) =="
-# The SSH bastion's AuthorizedKeysCommand must be root-owned — OpenSSH's safe-path check
-# rejects an AKC the unprivileged user could rewrite. The build-tree binary is
-# operator-owned, so install a root-owned copy and point the deployment `akc` key at it.
-AKC_SRC="$REPO_ROOT/target/debug/kennel-akc"
-if [ -x "$AKC_SRC" ]; then
-    sudo mkdir -p "$(dirname "$AKC_DEST")"
-    if [ -e "$AKC_DEST" ]; then
-        AKC_DEST_BACKUP="$(mktemp /tmp/kennel-suite-akc.XXXXXX)"
-        sudo cp -f "$AKC_DEST" "$AKC_DEST_BACKUP"
-    else
-        AKC_DEST_CREATED=1
-    fi
-    sudo cp -f "$AKC_SRC" "$AKC_DEST"
-    sudo chown 0:0 "$AKC_DEST"
-    sudo chmod 0755 "$AKC_DEST"
-fi
-
-echo "== /etc/kennel/system.toml → build-tree helpers (sudo) =="
-# The daemon resolves helper-binary paths only from the root-owned deployment cascade
-# (no env override, by design — 07-paths). Point libexec_dir at the build tree so the
-# dev kenneld finds the freshly-built privhelper/facades/init.
-if [ -e "$SYSTEM_TOML" ]; then
-    SYSTEM_TOML_BACKUP="$(mktemp /tmp/kennel-suite-systoml.XXXXXX)"
-    sudo cp -f "$SYSTEM_TOML" "$SYSTEM_TOML_BACKUP"
-else
-    SYSTEM_TOML_CREATED=1
-fi
-sudo tee "$SYSTEM_TOML" >/dev/null <<EOF
-# Written by src/tools/policy-e2e.sh for the dev suite; restored on exit.
-libexec_dir = "$REPO_ROOT/target/debug"
-init = "$INIT_DEST"
-akc = "$AKC_DEST"
-EOF
-cat "$SYSTEM_TOML"
-
-echo "== operator signing key (the daemon trusts the user key dir) =="
-# `kennel run` compiles+signs the source policy in memory; the daemon then verifies the
-# signature against the user key dir (which it trusts alongside the system trust dir).
-# Use a dedicated suite key so the choice is unambiguous even when the operator holds
-# several keys (otherwise `kennel run` refuses with "multiple signing keys").
-KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
-SUITE_KEY="$KEY_DIR/kennel-suite.key"
+echo "== suite signing key (the daemon trusts the user key dir) =="
+# `kennel run` compiles+signs each source policy in memory; the daemon verifies against the
+# user key dir (trusted alongside /etc/kennel/keys). A dedicated key keeps `--key` unambiguous.
 if [ ! -f "$SUITE_KEY" ]; then
-    "$KENNEL" keygen kennel-suite || { echo "keygen failed" >&2; exit 1; }
+    "$KENNEL" keygen "$SUITE_KEY_ID" || { echo "keygen failed" >&2; exit 1; }
 fi
 [ -f "$SUITE_KEY" ] || { echo "suite key not at $SUITE_KEY after keygen" >&2; exit 1; }
-echo "  signing key: $SUITE_KEY"
 
-echo "== AppArmor userns profile over kenneld + the privhelper (sudo) =="
-cat > "$AA_PROFILE_FILE" <<EOF
-abi <abi/4.0>,
-include <tunables/global>
-profile $AA_PROFILE_NAME $KENNELD flags=(unconfined) {
-  userns,
-}
-profile ${AA_PROFILE_NAME}_privhelper $PRIVHELPER flags=(unconfined) {
-  userns,
-}
-EOF
-if [ -e /sys/kernel/security/apparmor ]; then
-    sudo apparmor_parser -r -W "$AA_PROFILE_FILE"
-    echo "  loaded over kenneld + privhelper"
-else
-    echo "  (AppArmor not present; relying on unrestricted userns)"
+# Optional: turn on spawn-path verbose logging for this run (restored on exit).
+if [ "$DEBUG" = 1 ]; then
+    echo "== enabling log_level=debug in $SYSTEM_TOML (sudo; restored on exit) =="
+    if sudo test -e "$SYSTEM_TOML"; then
+        SYSTEM_TOML_EXISTED=1
+        SYSTEM_TOML_SAVED="$(sudo cat "$SYSTEM_TOML")"
+    fi
+    # Preserve any existing keys, then set/replace log_level.
+    { [ "$SYSTEM_TOML_EXISTED" = 1 ] && printf '%s\n' "$SYSTEM_TOML_SAVED" | grep -v '^log_level'; \
+      echo 'log_level = "debug"'; } | sudo tee "$SYSTEM_TOML" >/dev/null
 fi
 
-echo "== staging fixtures =="
-# The granted ~ subtree (+ a non-granted sibling) the fs cases inspect.
+# 3. Ensure the installed service is running the just-installed binary.
+echo "== (re)starting the installed kenneld.service =="
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user restart kenneld.service 2>/dev/null \
+    || systemctl --user start kenneld.service 2>/dev/null \
+    || { echo "could not start kenneld.service" >&2; exit 1; }
+SOCK="${XDG_RUNTIME_DIR:-/run/user/$UID_NUM}/kennel/control.sock"
+ok=0
+for _ in $(seq 1 50); do [ -S "$SOCK" ] && { ok=1; break; }; sleep 0.1; done
+[ "$ok" = 1 ] || { echo "kenneld.service did not bind $SOCK; journalctl --user -u kenneld.service" >&2; exit 1; }
+echo "  control socket: $SOCK"
+
+# 4. Shared fixtures a policy cannot carry.
+echo "== staging shared fixtures =="
 rm -rf "$HOME_FIXTURE"
 mkdir -p "$HOME_FIXTURE/granted" "$HOME_FIXTURE/secret"
 printf 'OK\n' > "$HOME_FIXTURE/granted/file"
 printf 'SECRET\n' > "$HOME_FIXTURE/secret/file"
-# The host AF_UNIX echo listener the full-vertical facade brokers (ping -> pong).
 sudo mkdir -p "$ECHO_SOCK_DIR"
 sudo chown "$UID_NUM" "$ECHO_SOCK_DIR"
 rm -f "$ECHO_SOCK"
@@ -224,94 +167,71 @@ try:
     os.unlink(p)
 except FileNotFoundError:
     pass
-s = socket.socket(socket.AF_UNIX)
-s.bind(p)
-s.listen(16)
+s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(16)
 while True:
     try:
         c, _ = s.accept()
     except OSError:
         break
-    data = c.recv(16)
-    if data == b'ping':
+    if c.recv(16) == b'ping':
         c.sendall(b'pong')
     c.close()
 PY
 ECHO_PID=$!
 for _ in $(seq 1 20); do [ -S "$ECHO_SOCK" ] && break; sleep 0.1; done
 [ -S "$ECHO_SOCK" ] || { echo "echo listener did not bind $ECHO_SOCK" >&2; exit 1; }
-echo "  echo listener: $ECHO_SOCK (pid $ECHO_PID)"
 
-# --- the cases ---------------------------------------------------------------
-if [ "$#" -gt 0 ]; then
-    CASES=("$@")
-else
-    CASES=()
+# The cases to run.
+if [ "${#CASES[@]}" -eq 0 ]; then
     for d in "$SUITE_DIR"/*/; do CASES+=("$(basename "$d")"); done
 fi
 
-echo "== running the suite under a delegated cgroup =="
-# The whole run happens inside one delegated scope so kenneld has a writable cgroup
-# subtree. The scope starts kenneld, runs every case against it via `kennel run`, prints
-# a summary, kills kenneld, and exits with the scope's pass/fail status (which becomes
-# this script's exit code). Args after `--` are the case names.
-systemd-run --user --scope -p Delegate=yes --quiet -- \
-  bash -c '
-    set -u
-    REPO_ROOT="$1"; KENNELD="$2"; KENNEL="$3"; SUITE_DIR="$4"; UID_NUM="$5"; SUITE_KEY="$6"; shift 6
-    # Exported so per-case setup.sh hooks inherit them (ssh-egress needs REPO_ROOT).
-    export REPO_ROOT SUITE_DIR UID_NUM
-    "$KENNELD" >/tmp/kennel-suite-kenneld.log 2>&1 &
-    KPID=$!
-    trap "kill $KPID 2>/dev/null || true" EXIT
-    SOCK="${XDG_RUNTIME_DIR:-/run/user/$UID_NUM}/kennel/control.sock"
-    for _ in $(seq 1 40); do [ -S "$SOCK" ] && break; sleep 0.1; done
-    if [ ! -S "$SOCK" ]; then
-        echo "kenneld did not bind its control socket; log:" >&2
-        cat /tmp/kennel-suite-kenneld.log >&2
-        exit 1
+export REPO_ROOT SUITE_DIR
+echo "== running ${#CASES[@]} case(s) against the installed service =="
+pass=0; fail=0; results=""
+for name in "${CASES[@]}"; do
+    pol="$SUITE_DIR/$name/policy.toml"
+    printf "== %-16s " "$name"
+    if [ ! -f "$pol" ]; then
+        echo "?? (no such case)"; results="$results\n  ?? $name"; fail=$((fail+1)); continue
     fi
-    pass=0; fail=0; results=""
-    for name in "$@"; do
-        pol="$SUITE_DIR/$name/policy.toml"
-        printf "== %-16s " "$name"
-        if [ ! -f "$pol" ]; then
-            echo "?? (no such case)"; results="$results\n  ?? $name"; fail=$((fail+1)); continue
+    # Per-case setup hook: a case needing host fixtures it cannot carry ships a setup.sh,
+    # run with (case-dir, scratch-dir); it stages the fixtures and prints the policy path to
+    # run (a generated copy with host values filled in) on its LAST stdout line. teardown.sh
+    # (if any) runs after. A bounded timeout keeps a wedged fixture from hanging the suite.
+    run_pol="$pol"
+    scratch="/tmp/kennel-suite-$name.scratch"
+    if [ -x "$SUITE_DIR/$name/setup.sh" ]; then
+        rm -rf "$scratch"; mkdir -p "$scratch"
+        if ! gen=$(timeout 60 "$SUITE_DIR/$name/setup.sh" "$SUITE_DIR/$name" "$scratch" \
+                    2>"/tmp/kennel-suite-$name.setup.log"); then
+            echo "FAIL (setup) — see /tmp/kennel-suite-$name.setup.log"
+            results="$results\n  FAIL(setup) $name"; fail=$((fail+1))
+            [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
+            continue
         fi
-        # Per-case setup hook: a case that needs host fixtures it cannot carry (e.g.
-        # ssh-egress: a destination sshd + the operator real key) ships a `setup.sh`. The
-        # runner runs it with the case dir + a scratch dir; the hook stages the fixtures
-        # and prints the policy path to actually run (a generated copy with host-specific
-        # values filled in) on its LAST stdout line. A non-zero hook fails the case. Its
-        # `teardown.sh` (if any) runs after the case.
-        run_pol="$pol"
-        if [ -x "$SUITE_DIR/$name/setup.sh" ]; then
-            scratch="/tmp/kennel-suite-$name.scratch"
-            rm -rf "$scratch"; mkdir -p "$scratch"
-            if ! gen=$("$SUITE_DIR/$name/setup.sh" "$SUITE_DIR/$name" "$scratch" 2>"/tmp/kennel-suite-$name.setup.log"); then
-                echo "FAIL (setup) — see /tmp/kennel-suite-$name.setup.log"
-                results="$results\n  FAIL(setup) $name"; fail=$((fail+1)); continue
-            fi
-            # setup.sh prints only the generated policy path to stdout (fixtures + noise go
-            # to stderr / files), and `$(...)` already strips the trailing newline, so the
-            # capture is the path verbatim.
-            run_pol="$gen"
-        fi
-        # Distinct kennel instance name per case; </dev/null = non-interactive (no pty).
-        # The workload exit code is forwarded as the run status.
-        "$KENNEL" run "$run_pol" "$name" --key "$SUITE_KEY" --template-dir "$REPO_ROOT/templates" </dev/null \
-            >"/tmp/kennel-suite-$name.log" 2>&1
-        rc=$?
-        [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "/tmp/kennel-suite-$name.scratch" 2>/dev/null || true
-        if [ "$rc" = 0 ]; then
-            echo "PASS"; results="$results\n  PASS  $name"; pass=$((pass+1))
-        else
-            echo "FAIL (exit $rc) — see /tmp/kennel-suite-$name.log"
-            results="$results\n  FAIL($rc) $name"; fail=$((fail+1))
-        fi
-    done
-    echo
-    echo "== suite summary: $pass passed, $fail failed =="
-    printf "%b\n" "$results"
-    [ "$fail" = 0 ]
-  ' _ "$REPO_ROOT" "$KENNELD" "$KENNEL" "$SUITE_DIR" "$UID_NUM" "$SUITE_KEY" "${CASES[@]}"
+        run_pol="$gen"
+    fi
+    # Distinct instance name per case; </dev/null = non-interactive. A timeout bounds a
+    # wedged spawn. The workload exit code is the run status.
+    timeout 90 "$KENNEL" run "$run_pol" "$name" --key "$SUITE_KEY" \
+        --template-dir "$REPO_ROOT/templates" --trust-dir "$KEY_DIR" </dev/null \
+        >"/tmp/kennel-suite-$name.log" 2>&1
+    rc=$?
+    [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
+    rm -rf "$scratch"
+    if [ "$rc" = 0 ]; then
+        echo "PASS"; results="$results\n  PASS  $name"; pass=$((pass+1))
+    elif [ "$rc" = 124 ]; then
+        echo "FAIL (timeout) — see /tmp/kennel-suite-$name.log"
+        results="$results\n  FAIL(timeout) $name"; fail=$((fail+1))
+    else
+        echo "FAIL (exit $rc) — see /tmp/kennel-suite-$name.log"
+        results="$results\n  FAIL($rc) $name"; fail=$((fail+1))
+    fi
+done
+
+echo
+echo "== suite summary: $pass passed, $fail failed =="
+printf "%b\n" "$results"
+[ "$fail" = 0 ]

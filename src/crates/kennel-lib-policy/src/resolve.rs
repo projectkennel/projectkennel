@@ -22,7 +22,7 @@
 //!   `=` (set/override/merge) half, which is everything the in-tree templates use.
 //! - **Object sub-tables** (`fs.home`, `net.bind`, `dbus`, …): merged shallowly,
 //!   field-by-field, with the child overriding.
-//! - **Invariant denies** (`net.deny.invariant`): *unioned*, never replaced —
+//! - **Invariant denies** (`net.proxy.deny.invariant`): *unioned*, never replaced —
 //!   invariants propagate down the chain and a child can only add to them
 //!   (`02-2` §Framework invariants, `docs/design/05-templates.md` §5.5). This is the one
 //!   list field that does not follow the bare-set rule, precisely because its
@@ -46,8 +46,9 @@
 use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
     CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
-    LifecycleSection, NetAudit, NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection,
-    SeccompSection, SignalSection, SourcePolicy, SshSection, UnixSection, WorkloadSection,
+    LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny,
+    NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection, SourcePolicy,
+    SshSection, UnixSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -367,20 +368,27 @@ fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
         proxy_listen_v6: or(&c.proxy_listen_v6, &p.proxy_listen_v6),
         proxy_listen_v4_address: or(&c.proxy_listen_v4_address, &p.proxy_listen_v4_address),
         proxy_listen_v6_address: or(&c.proxy_listen_v6_address, &p.proxy_listen_v6_address),
-        // Bare-set: a child's non-empty allow list replaces the parent's.
-        allow: if c.allow.is_empty() {
-            p.allow.clone()
-        } else {
-            c.allow.clone()
-        },
-        deny: merge(&p.deny, &c.deny, fold_net_deny),
+        proxy: merge(&p.proxy, &c.proxy, fold_net_proxy),
+        bpf: merge(&p.bpf, &c.bpf, fold_net_bpf),
         bind: merge(&p.bind, &c.bind, fold_net_bind),
         ipv6: merge(&p.ipv6, &c.ipv6, fold_net_ipv6),
         audit: merge(&p.audit, &c.audit, fold_net_audit),
     }
 }
 
-fn fold_net_deny(p: &NetDeny, c: &NetDeny) -> NetDeny {
+fn fold_net_proxy(p: &NetProxy, c: &NetProxy) -> NetProxy {
+    NetProxy {
+        // Bare-set: a child's non-empty allow list replaces the parent's.
+        allow: if c.allow.is_empty() {
+            p.allow.clone()
+        } else {
+            c.allow.clone()
+        },
+        deny: merge(&p.deny, &c.deny, fold_net_proxy_deny),
+    }
+}
+
+fn fold_net_proxy_deny(p: &NetProxyDeny, c: &NetProxyDeny) -> NetProxyDeny {
     // Invariant denies UNION and never drop — invariants propagate down the chain.
     let mut invariant = p.invariant.clone();
     for d in &c.invariant {
@@ -388,7 +396,39 @@ fn fold_net_deny(p: &NetDeny, c: &NetDeny) -> NetDeny {
             invariant.push(d.clone());
         }
     }
-    NetDeny { invariant }
+    // The author denylist is bare-set: a child's non-empty list replaces the parent's.
+    let policy = if c.policy.is_empty() {
+        p.policy.clone()
+    } else {
+        c.policy.clone()
+    };
+    NetProxyDeny { invariant, policy }
+}
+
+fn fold_net_bpf(p: &NetBpf, c: &NetBpf) -> NetBpf {
+    NetBpf {
+        // Socket-family shaping is scalar-wins (child overrides when set).
+        families: or(&c.families, &p.families),
+        deny_families: or(&c.deny_families, &p.deny_families),
+        connect: merge(&p.connect, &c.connect, fold_net_bpf_acl),
+        bind: merge(&p.bind, &c.bind, fold_net_bpf_acl),
+    }
+}
+
+fn fold_net_bpf_acl(p: &NetBpfAcl, c: &NetBpfAcl) -> NetBpfAcl {
+    // Each direction's allow/deny is bare-set: a child's non-empty list replaces the parent's.
+    NetBpfAcl {
+        allow: if c.allow.is_empty() {
+            p.allow.clone()
+        } else {
+            c.allow.clone()
+        },
+        deny: if c.deny.is_empty() {
+            p.deny.clone()
+        } else {
+            c.deny.clone()
+        },
+    }
 }
 
 fn fold_net_bind(p: &NetBind, c: &NetBind) -> NetBind {
@@ -637,7 +677,8 @@ mod tests {
             "base's deny_setuid invariant flag is inherited"
         );
         let net = eff.net.as_ref().expect("net");
-        let nd = net.deny.as_ref().expect("net.deny");
+        let proxy = net.proxy.as_ref().expect("net.proxy");
+        let nd = proxy.deny.as_ref().expect("net.proxy.deny");
         assert!(
             nd.invariant.iter().any(|d| d.cidr == "169.254.169.254/32"),
             "invariant deny inherited"
@@ -649,7 +690,7 @@ mod tests {
             allow.iter().any(|a| a.contains("git")),
             "ai-coding-strict tool present"
         );
-        assert!(net
+        assert!(proxy
             .allow
             .iter()
             .any(|a| a.name.as_deref() == Some("github.com")));
@@ -680,7 +721,13 @@ mod tests {
         );
         // The invariant denies still propagate even though mode is none (the
         // mandatory cloud-metadata deny; RFC1918 is no longer an invariant).
-        let nd = net.deny.as_ref().expect("net.deny");
+        let nd = net
+            .proxy
+            .as_ref()
+            .expect("net.proxy")
+            .deny
+            .as_ref()
+            .expect("net.proxy.deny");
         assert!(nd.invariant.iter().any(|d| d.cidr == "169.254.169.254/32"));
     }
 
@@ -711,8 +758,8 @@ mod tests {
 
     #[test]
     fn invariant_denies_union_across_the_chain() {
-        let parent = "template_name = \"p\"\n[[net.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"rfc1918\"\n";
-        let child = "template_name = \"c\"\ntemplate_base = \"p@v1\"\n[[net.deny.invariant]]\ncidr = \"192.168.0.0/16\"\nreason = \"rfc1918\"\n";
+        let parent = "template_name = \"p\"\n[[net.proxy.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"rfc1918\"\n";
+        let child = "template_name = \"c\"\ntemplate_base = \"p@v1\"\n[[net.proxy.deny.invariant]]\ncidr = \"192.168.0.0/16\"\nreason = \"rfc1918\"\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
         let nd = resolved
@@ -720,6 +767,9 @@ mod tests {
             .net
             .as_ref()
             .expect("net")
+            .proxy
+            .as_ref()
+            .expect("net.proxy")
             .deny
             .as_ref()
             .expect("deny");
