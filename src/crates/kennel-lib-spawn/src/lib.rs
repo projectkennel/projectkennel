@@ -1466,6 +1466,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bind_acl_seeds_loopback_and_encodes_author_rules() {
+        // §7.5.7 inbound BIND ACL, deny-first + default-deny. from_policy must:
+        //   (1) SEED the kennel's own loopback /28 into bpf_bind_allow_v4 (so an in-subnet or
+        //       wildcard-rewritten bind stays allowed without the author writing anything);
+        //   (2) encode the author's [net.bpf].bind.allow as bind-allow + a Landlock BIND_TCP;
+        //   (3) encode the author's [net.bpf].bind.deny as bind-deny (deny-first, wins).
+        let mut p = policy_with_placeholders();
+        // Author allows binding 0.0.0.0/0 on 8080 (any addr, that port) and denies one host.
+        p.effective_policy.net.bpf_bind_allow = vec![NetRule {
+            cidr: "0.0.0.0".to_owned(),
+            prefix_len: 0,
+            port_min: 8080,
+            port_max: 8080,
+            protocol: Protocol::Tcp,
+        }];
+        p.effective_policy.net.bpf_bind_deny = vec![NetRule {
+            cidr: "127.0.0.9".to_owned(),
+            prefix_len: 32,
+            port_min: 0,
+            port_max: 65535,
+            protocol: Protocol::Any,
+        }];
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+
+        // (1) the loopback /28 seed is present in bind-allow: an entry whose LPM key is a /28
+        //     (prefix_len = u32 LE in key bytes 0..4) on a 127.x loopback address (key bytes 4..8).
+        let seeded = plan.bpf_bind_allow_v4.iter().any(|(k, _)| {
+            let prefix = u32::from_ne_bytes([k[0], k[1], k[2], k[3]]);
+            prefix == 28 && k[4] == 127
+        });
+        // (2) the author allow encodes too: at least 2 bind-allow v4 entries (seed + author).
+        assert!(
+            plan.bpf_bind_allow_v4.len() >= 2,
+            "bind-allow holds the loopback /28 seed + the author 0.0.0.0/0:8080 rule, got {}",
+            plan.bpf_bind_allow_v4.len()
+        );
+        assert!(
+            seeded,
+            "the kennel's own loopback /28 is seeded into bind-allow"
+        );
+        // (2b) the single-port author allow maps to a Landlock BIND_TCP grant on 8080.
+        assert!(
+            plan.landlock_net
+                .iter()
+                .any(|(port, a)| *port == 8080 && a.contains(AccessNet::BIND_TCP)),
+            "author bind.allow :8080 → Landlock BIND_TCP, got {:?}",
+            plan.landlock_net
+        );
+        // (3) the author deny encodes deny-first.
+        assert_eq!(
+            plan.bpf_bind_deny_v4.len(),
+            1,
+            "author bind.deny 127.0.0.9/32 encodes to bind-deny"
+        );
+    }
+
     /// A plan with two v4 allow rules and one deny, from the shared fixture.
     fn fixture_plan() -> Plan {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");

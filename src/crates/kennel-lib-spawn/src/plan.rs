@@ -380,6 +380,16 @@ pub struct Plan {
     pub bpf_allow_v6: Vec<LpmV6Entry>,
     /// BPF `deny_v6` LPM entries (invariant deny CIDRs), consulted deny-first.
     pub bpf_deny_v6: Vec<LpmV6Entry>,
+    /// BPF `bind_allow_v4` LPM entries — the inbound BIND ACL allowlist (§7.5.7). Seeded
+    /// with the kennel's own loopback /28 (so in-subnet/wildcard binds stay allowed) plus
+    /// the author's `[net.bpf].bind.allow` rules. Default-deny: a bind missing this is denied.
+    pub bpf_bind_allow_v4: Vec<LpmV4Entry>,
+    /// BPF `bind_deny_v4` LPM entries — the author's `[net.bpf].bind.deny`, consulted deny-first.
+    pub bpf_bind_deny_v4: Vec<LpmV4Entry>,
+    /// BPF `bind_allow_v6` LPM entries (the v6 bind allowlist; see `bpf_bind_allow_v4`).
+    pub bpf_bind_allow_v6: Vec<LpmV6Entry>,
+    /// BPF `bind_deny_v6` LPM entries (the v6 bind denylist; see `bpf_bind_deny_v4`).
+    pub bpf_bind_deny_v6: Vec<LpmV6Entry>,
     /// The `kennel_meta` map value (64 bytes) for `kennel_meta_map[0]`.
     pub bpf_meta: [u8; 64],
     /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.5.7) to write into the
@@ -894,6 +904,14 @@ impl Plan {
         deny_rules.extend(ep.net.deny_author.iter().cloned());
         let (bpf_deny_v4, bpf_deny_v6) = encode(&deny_rules)?;
 
+        // The inbound BIND ACL (§7.5.7), deny-first, default-deny: the author's
+        // `[net.bpf].bind.allow`/`.deny` CIDR+port rules. The kennel's own loopback /28 is seeded
+        // into the allow set by `stamp_bind` (it needs the spawn-time loopback address), so an
+        // in-subnet or wildcard-rewritten bind stays allowed by default; here we encode only the
+        // author rules. Phase 1 stub: empty until the encode lands.
+        let (bpf_bind_allow_v4, bpf_bind_allow_v6) = (Vec::new(), Vec::new());
+        let (bpf_bind_deny_v4, bpf_bind_deny_v6) = (Vec::new(), Vec::new());
+
         // The bind floor (§7.5.7): stamped into the kennel_meta `bind_port_min` slot
         // so the bind4/bind6 BPF can deny a privileged-port bind (T6).
         let mut bpf_meta = meta_bytes(ctx);
@@ -913,6 +931,10 @@ impl Plan {
             bpf_deny_v4,
             bpf_allow_v6,
             bpf_deny_v6,
+            bpf_bind_allow_v4,
+            bpf_bind_deny_v4,
+            bpf_bind_allow_v6,
+            bpf_bind_deny_v6,
             bpf_meta,
             bind_allowed_ports: ep.net.bind_allowed_ports.clone(),
             file_binds: Vec::new(),

@@ -304,6 +304,27 @@ pub fn encode_plan(p: &Plan) -> Vec<u8> {
         w.fixed(k);
         w.fixed(v);
     }
+    // Inbound BIND ACL entries (§7.5.7), same fixed-tuple geometry as the connect maps.
+    w.count(p.bpf_bind_allow_v4.len());
+    for (k, v) in &p.bpf_bind_allow_v4 {
+        w.fixed(k);
+        w.fixed(v);
+    }
+    w.count(p.bpf_bind_deny_v4.len());
+    for (k, v) in &p.bpf_bind_deny_v4 {
+        w.fixed(k);
+        w.fixed(v);
+    }
+    w.count(p.bpf_bind_allow_v6.len());
+    for (k, v) in &p.bpf_bind_allow_v6 {
+        w.fixed(k);
+        w.fixed(v);
+    }
+    w.count(p.bpf_bind_deny_v6.len());
+    for (k, v) in &p.bpf_bind_deny_v6 {
+        w.fixed(k);
+        w.fixed(v);
+    }
     w.fixed(&p.bpf_meta);
     w.count(p.bind_allowed_ports.len());
     for port in &p.bind_allowed_ports {
@@ -446,6 +467,10 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
     let bpf_deny_v4 = get_lpm_v4(&mut r)?;
     let bpf_allow_v6 = get_lpm_v6(&mut r)?;
     let bpf_deny_v6 = get_lpm_v6(&mut r)?;
+    let bpf_bind_allow_v4 = get_lpm_v4(&mut r)?;
+    let bpf_bind_deny_v4 = get_lpm_v4(&mut r)?;
+    let bpf_bind_allow_v6 = get_lpm_v6(&mut r)?;
+    let bpf_bind_deny_v6 = get_lpm_v6(&mut r)?;
     let bpf_meta = r.fixed::<64>()?;
     let mut bind_allowed_ports = Vec::new();
     for _ in 0..r.count()? {
@@ -511,6 +536,10 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         bpf_deny_v4,
         bpf_allow_v6,
         bpf_deny_v6,
+        bpf_bind_allow_v4,
+        bpf_bind_deny_v4,
+        bpf_bind_allow_v6,
+        bpf_bind_deny_v6,
         bpf_meta,
         bind_allowed_ports,
         file_binds,
@@ -943,6 +972,18 @@ mod tests {
             bpf_deny_v4: vec![([0; 8], [255; 8])],
             bpf_allow_v6: vec![([7; 20], [3; 8])],
             bpf_deny_v6: vec![([1; 20], [2; 8]), ([9; 20], [8; 8])],
+            bpf_bind_allow_v4: vec![(
+                [28, 0, 0, 0, 127, 2, 160, 16],
+                [0x90, 0x1f, 0x90, 0x1f, 6, 0, 0, 0],
+            )],
+            bpf_bind_deny_v4: vec![([32, 0, 0, 0, 127, 0, 0, 9], [0; 8])],
+            bpf_bind_allow_v6: vec![(
+                [
+                    0x80, 0, 0, 0, 0xfd, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+                ],
+                [0; 8],
+            )],
+            bpf_bind_deny_v6: vec![([0x80; 20], [1; 8])],
             bpf_meta: {
                 let mut m = [0u8; 64];
                 m[0] = 0xAB;
@@ -997,6 +1038,10 @@ mod tests {
             bpf_deny_v4: Vec::new(),
             bpf_allow_v6: Vec::new(),
             bpf_deny_v6: Vec::new(),
+            bpf_bind_allow_v4: Vec::new(),
+            bpf_bind_deny_v4: Vec::new(),
+            bpf_bind_allow_v6: Vec::new(),
+            bpf_bind_deny_v6: Vec::new(),
             bpf_meta: [0u8; 64],
             bind_allowed_ports: Vec::new(),
             file_binds: Vec::new(),
