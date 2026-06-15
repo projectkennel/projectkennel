@@ -37,6 +37,7 @@ pub mod invariant;
 pub mod keys;
 pub mod leaf;
 pub mod libresolve;
+pub mod lint;
 pub mod lock;
 pub mod resolve;
 pub mod settled;
@@ -52,6 +53,7 @@ pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use leaf::{parse as parse_leaf, LeafPolicy};
+pub use lint::lint_settled;
 pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use settled::{

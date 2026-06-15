@@ -1397,9 +1397,86 @@ fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `kennel policy lint` — check the template corpus for incoherences. (Thread 4a.)
-fn policy_lint(_args: &[String]) -> Result<ExitCode, String> {
-    Err("`kennel policy lint` is not yet implemented".to_owned())
+/// `kennel policy lint` — check the templates in the search path for incoherences.
+///
+/// Compiles every `<name>/policy.toml` found in the template cascade (in memory, dev trust)
+/// and runs `lint_settled` on the resolved policy, reporting any finding — settings that
+/// contradict the resolved net mode, or grants the mode makes vacuous. Exit 0 if all clean,
+/// 7 if any template lints with a finding (a CI-friendly distinct code).
+fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut p = lexopt::Parser::from_args(args.iter().cloned());
+    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+        match arg {
+            lexopt::Arg::Long("template-dir") => {
+                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
+            }
+            lexopt::Arg::Long("trust-dir") => {
+                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
+            }
+            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "lint")),
+        }
+    }
+    add_default_template_dirs(&mut template_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
+    let keys = load_trust_store(&trust_dirs)?;
+    let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
+    let source = FsTemplateSource {
+        dirs: template_dirs.clone(),
+    };
+
+    // Enumerate template names across the cascade (deduped — a closer dir shadows a farther).
+    let mut seen: Vec<String> = Vec::new();
+    for dir in &template_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.join("policy.toml").is_file() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if !seen.iter().any(|s| s == name) {
+                    seen.push(name.to_owned());
+                }
+            }
+        }
+    }
+    seen.sort();
+
+    let mut total = 0usize;
+    let mut linted = 0usize;
+    for name in &seen {
+        let Some(bytes) = source.fetch(name, "v1") else {
+            continue;
+        };
+        let mut compiled = match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{name}: did not compile: {e}");
+                total = total.saturating_add(1);
+                continue;
+            }
+        };
+        print_warnings(&kennel_lib_policy::resolve_settled_loaders(
+            &mut compiled.policy,
+        ));
+        let findings = kennel_lib_policy::lint_settled(&compiled.policy);
+        linted = linted.saturating_add(1);
+        for f in &findings {
+            println!("{name}: {f}");
+            total = total.saturating_add(1);
+        }
+    }
+    if total == 0 {
+        eprintln!("lint: {linted} template(s) clean");
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("lint: {total} finding(s) across {linted} template(s)");
+        Ok(ExitCode::from(7))
+    }
 }
 
 /// Read the next required value for `flag` from a lexopt parser.
