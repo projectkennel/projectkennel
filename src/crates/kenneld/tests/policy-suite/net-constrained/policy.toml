@@ -1,0 +1,39 @@
+# ============================================================================
+# Suite case: net-constrained — own netns + the facade-socks5 broker.
+#
+# Proves §7.5 mode=constrained: the in-ns SOCKS endpoint is listening at the kennel's
+# own loopback address (read from the synthetic /etc/hosts, NOT hardcoded —
+# ctx-independent) on port 1080, and a `connect` to it succeeds. A successful connect
+# proves BOTH that the in-ns loopback is up (the construction child brought it up + added
+# the address) AND that facade-socks5 is brokering. Exit 0 ⇒ the constrained egress plane
+# stood up.
+#
+# NOTE: the workload does NOT `bind` a TCP socket — a confined workload cannot bind an
+# arbitrary TCP port (the §7.5.7 bind floor + allowlist; Landlock denies BIND_TCP to any
+# port not in [net] bind, so a bind here would correctly EACCES). The connect proves the
+# address is live without needing a bind grant.
+# ============================================================================
+
+template_name = "net-constrained"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "constrained"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/awk", "/usr/bin/seq", "/usr/bin/sleep", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    addr=$(awk 'NR==1{print $1}' /etc/hosts) \
+    && for i in $(seq 1 20); do python3 -c "import socket,sys;s=socket.socket();s.settimeout(1);s.connect((sys.argv[1],1080));s.close()" "$addr" 2>/dev/null && break; sleep 0.5; done \
+    && python3 -c "import socket,sys;s=socket.socket();s.settimeout(1);s.connect((sys.argv[1],1080));s.close()" "$addr"
+    """,
+]

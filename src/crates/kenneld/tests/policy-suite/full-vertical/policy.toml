@@ -1,0 +1,100 @@
+# ============================================================================
+# Suite case: full-vertical — the whole constructed view in one workload.
+#
+# A self-checking policy: the [workload] is a `/bin/sh -c` chain that inspects the
+# constructed kennel from *inside* and exits 0 iff every clause holds. The exit code IS
+# the verdict — there is no Rust harness. The daemon builds this kennel from the signed
+# policy exactly as in production (07-2, 08-enforcement §8.2). Run via the suite runner:
+#
+#   src/tools/policy-e2e.sh            # provisions fixtures, then `kennel run` each case
+#
+# Fixtures the runner provides (a policy can't carry them): a host AF_UNIX echo listener
+# at /run/kennel-e2e/echo.sock, and ~/kennel-e2e/{granted/file,secret/file}.
+#
+# The kennel's own loopback address is NOT hardcoded — the workload reads it from the
+# synthetic /etc/hosts (`<v4>\tlocalhost <name>`), so the case is independent of which
+# ctx the daemon allocates.
+# ============================================================================
+
+template_name = "full-vertical"
+template_version = "1"
+template_base = "base-confined@v1"
+
+# Constrained egress: own net-ns + the facade-socks5 broker (default-deny allowlist).
+# The workload proves the in-ns loopback is up and the SOCKS endpoint is listening.
+[net]
+mode = "constrained"
+
+# Read the granted subdir of the constructed $HOME (the sibling `secret` is never named,
+# so it must be ENOENT in the view), plus the toolchain the proof script needs. A
+# template's fs.read REPLACES the base baseline, so re-list it.
+[fs]
+read = [
+    "/usr/**", "/lib/**", "/lib64/**",
+    "/etc/ssl/**", "/etc/pki/**",
+    "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    "~/kennel-e2e/granted",
+]
+
+[exec]
+shell = "/bin/sh"
+allow = [
+    "/bin/sh", "/bin/dash",
+    "/usr/bin/grep", "/usr/bin/awk", "/usr/bin/test", "/usr/bin/[",
+    "/usr/bin/sleep", "/usr/bin/id", "/usr/bin/seq",
+    "/usr/bin/python3", "/usr/bin/python3.*",
+]
+
+# /dev/net/tun passthrough (§7.4.8): the proof opens it RW iff present; /dev/mem absent.
+[fs.dev]
+allow = ["/dev/null", "/dev/urandom", "/dev/tty"]
+
+[[fs.dev.passthrough]]
+path = "/dev/net/tun"
+reason = "the full-vertical e2e proves a real host device passes through into the constructed /dev"
+threats = { exposed = ["T4.2"] }
+
+# The AF_UNIX facade (§7.4): node 0 brokers a connection to the host echo listener the
+# runner binds at this fixed path and presents it at the shim path. Pings expect `pong`.
+[unix]
+[[unix.allow]]
+name = "echo"
+real = "/run/kennel-e2e/echo.sock"
+shim = "~/kennel-unix.sock"
+reason = "the full-vertical e2e proves the AF_UNIX facade brokers a host listener into the kennel"
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    addr=$(awk 'NR==1{print $1}' /etc/hosts) \
+    && grep -q 'localhost full-vertical' /etc/hosts \
+    && test -r "$HOME/kennel-e2e/granted/file" \
+    && ! test -e "$HOME/kennel-e2e/secret" \
+    && for i in $(seq 1 20); do test -S "$HOME/kennel-unix.sock" && break; sleep 0.5; done \
+    && test -S "$HOME/kennel-unix.sock" \
+    && ! test -e "$HOME/kennel-not-granted.sock" \
+    && test "$(python3 -c "import socket,os,time
+p=os.environ['HOME']+'/kennel-unix.sock'
+for _ in range(40):
+ try:
+  s=socket.socket(socket.AF_UNIX);s.connect(p);s.sendall(b'ping')
+  r=s.recv(16)
+  if r==b'pong':
+   print('pong',end='');break
+ except OSError:
+  pass
+ time.sleep(0.25)")" = pong \
+    && { test -c /dev/net/tun \
+         && python3 -c "import os;os.close(os.open('/dev/net/tun',os.O_RDWR))" \
+         || ! test -e /dev/net/tun; } \
+    && ! test -e /dev/mem \
+    && for i in $(seq 1 20); do python3 -c "import socket,sys;s=socket.socket();s.settimeout(1);s.connect((sys.argv[1],1080));s.close()" "$addr" 2>/dev/null && break; sleep 0.5; done \
+    && python3 -c "import socket,sys;s=socket.socket();s.settimeout(1);s.connect((sys.argv[1],1080));s.close()" "$addr" \
+    && grep -q '^kennel:' /etc/passwd \
+    && grep -q '^kennel:' /etc/group \
+    && grep -q ':/home/kennel:' /etc/passwd \
+    && for x in $(id -G); do [ "$x" = 65534 ] || [ "$x" = "$(id -g)" ] || exit 9; done \
+    && sleep 2
+    """,
+]
