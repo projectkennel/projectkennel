@@ -97,7 +97,7 @@ omissions, because the doc names fields the parser does not accept (or vice vers
 - **`[identity]`** (`07-4-filesystem.md` §7.4.8) — **PARTIAL.** `groups` shown by example; `user`
   and `group` (both default `kennel`) appear only in prose. Owed: a three-field table.
 
-Clean (delegation resolves, no action): `[exec]` (§7.3.4), `[ssh]`/`[[ssh.keys]]`/`[[ssh.known_hosts]]`
+Clean (delegation resolves, no action): `[exec]` (§7.3.4), `[ssh]`/`[[ssh.destinations]]`
 (§7.10.8), `[ulimits]` (§7.4.12), `[cap]`/`[proc]`/`[ptrace]`/`[signal]` (§7.9.1/§7.9.3).
 
 ### Built — now described in the chapters
