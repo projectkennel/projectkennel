@@ -45,12 +45,14 @@ narration is kept here; the chapter named is the source of truth.
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
   tests, not mechanism.
-- **`[net.bpf].bind` CIDR gate + inbound host-side mirror** (`07-5-network.md` §7.5.6) — the four
-  network modes, the `[net.proxy]`/`[net.bpf]` split, and the `[net.bpf].connect` ACL are all built
-  (see below). What remains roadmap is the *inbound* path: the `[net.bpf].bind` ACL language parses
-  and settles, but the CIDR bind gate is not yet wired into the cgroup `bind4`/`6` BPF, and the
-  host-side mirror (the INet `BIND` verb exposing a bound port host-side) is not built. The
-  bind-port floor (`[net.bind].min_port`/`allowed_ports`) is the bind protection enforced today.
+- **Inbound host-side BIND mirror** (`07-5-network.md` §7.5.6/§7.5.7) — the four network modes, the
+  `[net.proxy]`/`[net.bpf]` split, and BOTH the `[net.bpf].connect` AND `[net.bpf].bind` CIDR ACLs
+  are built (see below): the bind ACL is wired into the cgroup `bind4`/`6` BPF (deny-first over
+  dedicated `bind_{allow,deny}_v{4,6}` tries) and proven on hardware. What remains roadmap is only
+  the host-side *mirror*: the INet `BIND` verb that exposes a kennel-bound port host-side at the
+  kennel's own loopback address, so an operator's `ss`/`lsof` maps it back. Until then a bound port
+  is reachable only inside the kennel's net-ns (the gate decides whether the bind is permitted; the
+  mirror would decide whether it is reachable from the host).
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another

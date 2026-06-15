@@ -561,11 +561,13 @@ Governs what the workload may `bind(2)`. All fields optional.
 | `log_path` | string | where the per-kennel egress JSONL log is written. |
 | `level` | string | egress audit verbosity: `"summary"` or `"full"`. |
 
-> **Roadmap residual.** The `[net.bpf].bind` ACL parses and settles, but the CIDR bind gate and the
-> host-side inbound mirror (the INet `BIND` verb that would expose a bound port host-side) are not
-> yet built on this branch — they are a planned follow-up in design §7.5 /
-> [`02-5-binder-net.md`](02-5-binder-net.md). The four-mode taxonomy, the `[net.proxy]`/`[net.bpf]`
-> split, and the `[net.bpf].connect` ACL (BPF + Landlock, deny-first) are **built and enforced**.
+> **Roadmap residual.** The four-mode taxonomy, the `[net.proxy]`/`[net.bpf]` split, and BOTH the
+> `[net.bpf].connect` AND `[net.bpf].bind` ACLs (BPF + Landlock, deny-first) are **built and
+> enforced** — the bind ACL gates every `bind()` at the cgroup `bind4`/`6` hook against dedicated
+> `bind_{allow,deny}_v{4,6}` tries. What remains roadmap is only the host-side inbound *mirror* (the
+> INet `BIND` verb that would expose a bound port host-side at the kennel's own loopback address) —
+> a planned follow-up in design §7.5 / [`02-5-binder-net.md`](02-5-binder-net.md). Until it lands, a
+> permitted bind is reachable only inside the kennel's net-ns.
 
 ---
 
