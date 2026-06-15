@@ -244,6 +244,10 @@ impl Request {
 ///   72..76   n_allow_v6      u32
 ///   76..80   n_deny_v6       u32
 ///   80..     allow_v4 (16 B each) | deny_v4 (16) | allow_v6 (28) | deny_v6 (28)
+///   then     n_bind_allow_v4 u32 | n_bind_deny_v4 u32 | n_bind_allow_v6 u32 |
+///            n_bind_deny_v6 u32 | bind_allow_v4… | bind_deny_v4… | bind_allow_v6… |
+///            bind_deny_v6…  (the §7.5.7 inbound BIND ACL block)
+///   then     bind_allowed_ports tail, then pin_id tail
 /// ```
 ///
 /// The map contents are *not* scope-validated: they only define the kennel's
@@ -262,6 +266,14 @@ pub struct EgressPayload {
     pub allow_v6: Vec<V6Entry>,
     /// `deny_v6` LPM entries.
     pub deny_v6: Vec<V6Entry>,
+    /// `bind_allow_v4` LPM entries — the inbound BIND ACL allowlist (§7.5.7).
+    pub bind_allow_v4: Vec<V4Entry>,
+    /// `bind_deny_v4` LPM entries — the BIND ACL denylist (deny-first).
+    pub bind_deny_v4: Vec<V4Entry>,
+    /// `bind_allow_v6` LPM entries.
+    pub bind_allow_v6: Vec<V6Entry>,
+    /// `bind_deny_v6` LPM entries.
+    pub bind_deny_v6: Vec<V6Entry>,
     /// The bind-port allowlist (`[net.bind].allowed_ports`, §7.5.7) for the
     /// `bind_subnet` map (host order). Empty ⇒ any port at or above the floor. Capped
     /// at [`MAX_BIND_PORTS`] on decode (the BPF array is fixed-size).
@@ -409,6 +421,24 @@ impl EgressPayload {
             b.extend_from_slice(k);
             b.extend_from_slice(v);
         }
+        // Inbound BIND ACL block (§7.5.7): four counts then the entries, same fixed-tuple
+        // geometry as the connect maps above.
+        for n in [
+            self.bind_allow_v4.len(),
+            self.bind_deny_v4.len(),
+            self.bind_allow_v6.len(),
+            self.bind_deny_v6.len(),
+        ] {
+            b.extend_from_slice(&u32::try_from(n).unwrap_or(u32::MAX).to_ne_bytes());
+        }
+        for (k, v) in self.bind_allow_v4.iter().chain(&self.bind_deny_v4) {
+            b.extend_from_slice(k);
+            b.extend_from_slice(v);
+        }
+        for (k, v) in self.bind_allow_v6.iter().chain(&self.bind_deny_v6) {
+            b.extend_from_slice(k);
+            b.extend_from_slice(v);
+        }
         // Bind-port allowlist tail: a count then the host-order ports. Appended last so
         // the existing prefix layout is unchanged.
         b.extend_from_slice(
@@ -459,6 +489,36 @@ impl EgressPayload {
         let (deny_v6, used) =
             read_v6_entries(rest.get(off..).ok_or(WireError::BadLength)?, n_deny_v6)?;
         off = off.checked_add(used).ok_or(WireError::BadLength)?;
+
+        // Inbound BIND ACL block: four counts (each a u32) then the entries.
+        let acl = rest.get(off..).ok_or(WireError::BadLength)?;
+        let n_bind_allow_v4 = read_count(acl, 0)?;
+        let n_bind_deny_v4 = read_count(acl, 4)?;
+        let n_bind_allow_v6 = read_count(acl, 8)?;
+        let n_bind_deny_v6 = read_count(acl, 12)?;
+        let acl_rest = acl.get(16..).ok_or(WireError::BadLength)?;
+        let (bind_allow_v4, used) = read_v4_entries(acl_rest, n_bind_allow_v4)?;
+        let mut acl_off = used;
+        let (bind_deny_v4, used) = read_v4_entries(
+            acl_rest.get(acl_off..).ok_or(WireError::BadLength)?,
+            n_bind_deny_v4,
+        )?;
+        acl_off = acl_off.checked_add(used).ok_or(WireError::BadLength)?;
+        let (bind_allow_v6, used) = read_v6_entries(
+            acl_rest.get(acl_off..).ok_or(WireError::BadLength)?,
+            n_bind_allow_v6,
+        )?;
+        acl_off = acl_off.checked_add(used).ok_or(WireError::BadLength)?;
+        let (bind_deny_v6, used) = read_v6_entries(
+            acl_rest.get(acl_off..).ok_or(WireError::BadLength)?,
+            n_bind_deny_v6,
+        )?;
+        acl_off = acl_off.checked_add(used).ok_or(WireError::BadLength)?;
+        // Advance past the whole ACL block (16 count bytes + entries) to the ports tail.
+        off = off
+            .checked_add(16)
+            .and_then(|o| o.checked_add(acl_off))
+            .ok_or(WireError::BadLength)?;
         let ports_tail = rest.get(off..).unwrap_or(&[]);
         let (bind_allowed_ports, used) = read_bind_ports(ports_tail)?;
         let pin_id = read_pin_id(ports_tail.get(used..).unwrap_or(&[]))?;
@@ -469,6 +529,10 @@ impl EgressPayload {
             deny_v4,
             allow_v6,
             deny_v6,
+            bind_allow_v4,
+            bind_deny_v4,
+            bind_allow_v6,
+            bind_deny_v6,
             bind_allowed_ports,
             pin_id,
         })
@@ -605,6 +669,15 @@ mod tests {
             deny_v4: vec![([0xff; 8], [0; 8]), ([0x11; 8], [0x22; 8])],
             allow_v6: vec![([3u8; 20], [4u8; 8])],
             deny_v6: Vec::new(),
+            bind_allow_v4: vec![([28, 0, 0, 0, 127, 2, 160, 16], [0; 8])],
+            bind_deny_v4: vec![([32, 0, 0, 0, 127, 0, 0, 9], [0xaa; 8])],
+            bind_allow_v6: vec![(
+                [
+                    64, 0, 0, 0, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+                [5u8; 8],
+            )],
+            bind_deny_v6: Vec::new(),
             bind_allowed_ports: vec![8080, 9090],
             pin_id: "ai-coding".to_owned(),
         };
@@ -623,6 +696,10 @@ mod tests {
             deny_v4: Vec::new(),
             allow_v6: Vec::new(),
             deny_v6: Vec::new(),
+            bind_allow_v4: Vec::new(),
+            bind_deny_v4: Vec::new(),
+            bind_allow_v6: Vec::new(),
+            bind_deny_v6: Vec::new(),
             bind_allowed_ports: vec![1234],
             pin_id: String::new(),
         };
@@ -647,6 +724,10 @@ mod tests {
             deny_v4: Vec::new(),
             allow_v6: Vec::new(),
             deny_v6: Vec::new(),
+            bind_allow_v4: Vec::new(),
+            bind_deny_v4: Vec::new(),
+            bind_allow_v6: Vec::new(),
+            bind_deny_v6: Vec::new(),
             bind_allowed_ports: vec![443],
             pin_id: "kennel-9f3a".to_owned(),
         };

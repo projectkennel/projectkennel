@@ -1467,12 +1467,13 @@ mod tests {
     }
 
     #[test]
-    fn bind_acl_seeds_loopback_and_encodes_author_rules() {
+    fn bind_acl_encodes_author_rules_and_landlock() {
         // §7.5.7 inbound BIND ACL, deny-first + default-deny. from_policy must:
-        //   (1) SEED the kennel's own loopback /28 into bpf_bind_allow_v4 (so an in-subnet or
-        //       wildcard-rewritten bind stays allowed without the author writing anything);
-        //   (2) encode the author's [net.bpf].bind.allow as bind-allow + a Landlock BIND_TCP;
-        //   (3) encode the author's [net.bpf].bind.deny as bind-deny (deny-first, wins).
+        //   (1) encode the author's [net.bpf].bind.allow as bind-allow + a Landlock BIND_TCP
+        //       grant per single port;
+        //   (2) encode the author's [net.bpf].bind.deny as bind-deny (deny-first, wins).
+        // The kennel's own loopback /28 seed is added by stamp_proxy (it needs the spawn-time
+        // loopback address); that path is covered separately below.
         let mut p = policy_with_placeholders();
         // Author allows binding 0.0.0.0/0 on 8080 (any addr, that port) and denies one host.
         p.effective_policy.net.bpf_bind_allow = vec![NetRule {
@@ -1497,23 +1498,14 @@ mod tests {
         )
         .expect("plan");
 
-        // (1) the loopback /28 seed is present in bind-allow: an entry whose LPM key is a /28
-        //     (prefix_len = u32 LE in key bytes 0..4) on a 127.x loopback address (key bytes 4..8).
-        let seeded = plan.bpf_bind_allow_v4.iter().any(|(k, _)| {
-            let prefix = u32::from_ne_bytes([k[0], k[1], k[2], k[3]]);
-            prefix == 28 && k[4] == 127
-        });
-        // (2) the author allow encodes too: at least 2 bind-allow v4 entries (seed + author).
-        assert!(
-            plan.bpf_bind_allow_v4.len() >= 2,
-            "bind-allow holds the loopback /28 seed + the author 0.0.0.0/0:8080 rule, got {}",
+        // (1) the author allow encodes to a single bind-allow v4 entry (no seed yet — no stamp).
+        assert_eq!(
+            plan.bpf_bind_allow_v4.len(),
+            1,
+            "author bind.allow 0.0.0.0/0:8080 encodes to one bind-allow entry, got {}",
             plan.bpf_bind_allow_v4.len()
         );
-        assert!(
-            seeded,
-            "the kennel's own loopback /28 is seeded into bind-allow"
-        );
-        // (2b) the single-port author allow maps to a Landlock BIND_TCP grant on 8080.
+        // (1b) the single-port author allow maps to a Landlock BIND_TCP grant on 8080.
         assert!(
             plan.landlock_net
                 .iter()
@@ -1521,12 +1513,39 @@ mod tests {
             "author bind.allow :8080 → Landlock BIND_TCP, got {:?}",
             plan.landlock_net
         );
-        // (3) the author deny encodes deny-first.
+        // (2) the author deny encodes deny-first.
         assert_eq!(
             plan.bpf_bind_deny_v4.len(),
             1,
             "author bind.deny 127.0.0.9/32 encodes to bind-deny"
         );
+    }
+
+    #[test]
+    fn stamp_proxy_seeds_the_loopback_28_into_bind_allow() {
+        // A proxied kennel rewrites a wildcard bind to its own loopback and allows in-subnet
+        // binds; stamp_proxy seeds that /28 into bind-allow so those binds pass the (default-deny)
+        // ACL without the author writing a rule. The seed address is the proxy endpoint's v4.
+        let plan = fixture_plan(); // constrained, from the shared fixture
+        let before = plan.bpf_bind_allow_v4.len();
+        let mut plan = plan;
+        let v4 = std::net::Ipv4Addr::new(127, 2, 160, 16);
+        plan.stamp_proxy(&ProxyEndpoint {
+            v4: Some(v4),
+            v6: std::net::Ipv6Addr::LOCALHOST,
+            port: 1080,
+        });
+        // Exactly one new bind-allow entry: a /28 on the proxy endpoint's v4 (the loopback subnet).
+        assert_eq!(
+            plan.bpf_bind_allow_v4.len(),
+            before + 1,
+            "stamp_proxy adds one /28 bind-allow seed"
+        );
+        let seeded = plan.bpf_bind_allow_v4.iter().any(|(k, _)| {
+            let prefix = u32::from_ne_bytes([k[0], k[1], k[2], k[3]]);
+            prefix == 28 && k.get(4..8) == Some(&v4.octets()[..])
+        });
+        assert!(seeded, "the proxy endpoint's /28 is seeded into bind-allow");
     }
 
     /// A plan with two v4 allow rules and one deny, from the shared fixture.

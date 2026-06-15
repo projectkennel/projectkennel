@@ -283,48 +283,16 @@ pub fn encode_plan(p: &Plan) -> Vec<u8> {
     }
     put_action(&mut w, p.seccomp_deny_action);
 
-    // BPF LPM entries (fixed-size tuples) + meta + bind ports
-    w.count(p.bpf_allow_v4.len());
-    for (k, v) in &p.bpf_allow_v4 {
-        w.fixed(k);
-        w.fixed(v);
-    }
-    w.count(p.bpf_deny_v4.len());
-    for (k, v) in &p.bpf_deny_v4 {
-        w.fixed(k);
-        w.fixed(v);
-    }
-    w.count(p.bpf_allow_v6.len());
-    for (k, v) in &p.bpf_allow_v6 {
-        w.fixed(k);
-        w.fixed(v);
-    }
-    w.count(p.bpf_deny_v6.len());
-    for (k, v) in &p.bpf_deny_v6 {
-        w.fixed(k);
-        w.fixed(v);
-    }
-    // Inbound BIND ACL entries (§7.5.7), same fixed-tuple geometry as the connect maps.
-    w.count(p.bpf_bind_allow_v4.len());
-    for (k, v) in &p.bpf_bind_allow_v4 {
-        w.fixed(k);
-        w.fixed(v);
-    }
-    w.count(p.bpf_bind_deny_v4.len());
-    for (k, v) in &p.bpf_bind_deny_v4 {
-        w.fixed(k);
-        w.fixed(v);
-    }
-    w.count(p.bpf_bind_allow_v6.len());
-    for (k, v) in &p.bpf_bind_allow_v6 {
-        w.fixed(k);
-        w.fixed(v);
-    }
-    w.count(p.bpf_bind_deny_v6.len());
-    for (k, v) in &p.bpf_bind_deny_v6 {
-        w.fixed(k);
-        w.fixed(v);
-    }
+    // BPF LPM entries (fixed-size tuples): the connect ACL (allow/deny v4/v6) then the
+    // inbound BIND ACL (§7.5.7), same geometry, then meta + bind ports.
+    put_lpm_v4(&mut w, &p.bpf_allow_v4);
+    put_lpm_v4(&mut w, &p.bpf_deny_v4);
+    put_lpm_v6(&mut w, &p.bpf_allow_v6);
+    put_lpm_v6(&mut w, &p.bpf_deny_v6);
+    put_lpm_v4(&mut w, &p.bpf_bind_allow_v4);
+    put_lpm_v4(&mut w, &p.bpf_bind_deny_v4);
+    put_lpm_v6(&mut w, &p.bpf_bind_allow_v6);
+    put_lpm_v6(&mut w, &p.bpf_bind_deny_v6);
     w.fixed(&p.bpf_meta);
     w.count(p.bind_allowed_ports.len());
     for port in &p.bind_allowed_ports {
@@ -463,19 +431,12 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
     }
     let seccomp_deny_action = get_action(&mut r)?;
 
-    let bpf_allow_v4 = get_lpm_v4(&mut r)?;
-    let bpf_deny_v4 = get_lpm_v4(&mut r)?;
-    let bpf_allow_v6 = get_lpm_v6(&mut r)?;
-    let bpf_deny_v6 = get_lpm_v6(&mut r)?;
-    let bpf_bind_allow_v4 = get_lpm_v4(&mut r)?;
-    let bpf_bind_deny_v4 = get_lpm_v4(&mut r)?;
-    let bpf_bind_allow_v6 = get_lpm_v6(&mut r)?;
-    let bpf_bind_deny_v6 = get_lpm_v6(&mut r)?;
+    let bpf = get_bpf_acls(&mut r)?;
     let bpf_meta = r.fixed::<64>()?;
-    let mut bind_allowed_ports = Vec::new();
-    for _ in 0..r.count()? {
-        bind_allowed_ports.push(r.u16()?);
-    }
+    let n_ports = r.count()?;
+    let bind_allowed_ports = (0..n_ports)
+        .map(|_| r.u16())
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut file_binds = Vec::new();
     for _ in 0..r.count()? {
@@ -532,14 +493,14 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         landlock_net,
         seccomp_deny,
         seccomp_deny_action,
-        bpf_allow_v4,
-        bpf_deny_v4,
-        bpf_allow_v6,
-        bpf_deny_v6,
-        bpf_bind_allow_v4,
-        bpf_bind_deny_v4,
-        bpf_bind_allow_v6,
-        bpf_bind_deny_v6,
+        bpf_allow_v4: bpf.allow_v4,
+        bpf_deny_v4: bpf.deny_v4,
+        bpf_allow_v6: bpf.allow_v6,
+        bpf_deny_v6: bpf.deny_v6,
+        bpf_bind_allow_v4: bpf.bind_allow_v4,
+        bpf_bind_deny_v4: bpf.bind_deny_v4,
+        bpf_bind_allow_v6: bpf.bind_allow_v6,
+        bpf_bind_deny_v6: bpf.bind_deny_v6,
         bpf_meta,
         bind_allowed_ports,
         file_binds,
@@ -584,6 +545,50 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         proc_hidepid,
         binder,
     })
+}
+
+/// The eight BPF LPM ACL vectors, in wire order: the connect ACL then the BIND ACL.
+struct Bpf {
+    allow_v4: Vec<crate::plan::LpmV4Entry>,
+    deny_v4: Vec<crate::plan::LpmV4Entry>,
+    allow_v6: Vec<crate::plan::LpmV6Entry>,
+    deny_v6: Vec<crate::plan::LpmV6Entry>,
+    bind_allow_v4: Vec<crate::plan::LpmV4Entry>,
+    bind_deny_v4: Vec<crate::plan::LpmV4Entry>,
+    bind_allow_v6: Vec<crate::plan::LpmV6Entry>,
+    bind_deny_v6: Vec<crate::plan::LpmV6Entry>,
+}
+
+/// Read the eight ACL vectors in wire order (the inverse of the `put_lpm_*` run in `encode_plan`).
+fn get_bpf_acls(r: &mut Reader<'_>) -> Result<Bpf, PlanWireError> {
+    Ok(Bpf {
+        allow_v4: get_lpm_v4(r)?,
+        deny_v4: get_lpm_v4(r)?,
+        allow_v6: get_lpm_v6(r)?,
+        deny_v6: get_lpm_v6(r)?,
+        bind_allow_v4: get_lpm_v4(r)?,
+        bind_deny_v4: get_lpm_v4(r)?,
+        bind_allow_v6: get_lpm_v6(r)?,
+        bind_deny_v6: get_lpm_v6(r)?,
+    })
+}
+
+/// Write a count-prefixed run of v4 LPM `(key, value)` tuples (the inverse of [`get_lpm_v4`]).
+fn put_lpm_v4(w: &mut Writer, entries: &[crate::plan::LpmV4Entry]) {
+    w.count(entries.len());
+    for (k, v) in entries {
+        w.fixed(k);
+        w.fixed(v);
+    }
+}
+
+/// Write a count-prefixed run of v6 LPM `(key, value)` tuples (the inverse of [`get_lpm_v6`]).
+fn put_lpm_v6(w: &mut Writer, entries: &[crate::plan::LpmV6Entry]) {
+    w.count(entries.len());
+    for (k, v) in entries {
+        w.fixed(k);
+        w.fixed(v);
+    }
 }
 
 fn get_lpm_v4(r: &mut Reader<'_>) -> Result<Vec<crate::plan::LpmV4Entry>, PlanWireError> {

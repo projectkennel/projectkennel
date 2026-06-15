@@ -328,6 +328,20 @@ fn populate_maps(
     for (key, value) in &payload.deny_v6 {
         update("deny_v6", key, value)?;
     }
+    // The inbound BIND ACL (§7.5.7): the bind4/bind6 programs gate every bind deny-first
+    // against these dedicated maps. Default-deny — an empty allow set denies every bind.
+    for (key, value) in &payload.bind_allow_v4 {
+        update("bind_allow_v4", key, value)?;
+    }
+    for (key, value) in &payload.bind_deny_v4 {
+        update("bind_deny_v4", key, value)?;
+    }
+    for (key, value) in &payload.bind_allow_v6 {
+        update("bind_allow_v6", key, value)?;
+    }
+    for (key, value) in &payload.bind_deny_v6 {
+        update("bind_deny_v6", key, value)?;
+    }
     Ok(())
 }
 

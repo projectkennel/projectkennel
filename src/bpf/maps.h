@@ -128,6 +128,42 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } allow_v6 SEC(".maps");
 
+/* Inbound BIND ACL (§7.5.7), deny-first, dedicated maps (independent of the connect
+ * allow/deny tries above). A bind to <addr>:<port> is permitted iff it misses bind_deny
+ * and hits bind_allow; default-deny otherwise. kenneld seeds bind_allow with the kennel's
+ * own loopback /28 so a wildcard-rewritten or in-subnet bind stays allowed by default. */
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 256);
+	__type(key, struct lpm_v4_key);
+	__type(value, struct allow_entry);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} bind_deny_v4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 256);
+	__type(key, struct lpm_v6_key);
+	__type(value, struct allow_entry);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} bind_deny_v6 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 1024);
+	__type(key, struct lpm_v4_key);
+	__type(value, struct allow_entry);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} bind_allow_v4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 1024);
+	__type(key, struct lpm_v6_key);
+	__type(value, struct allow_entry);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} bind_allow_v6 SEC(".maps");
+
 /* Bind subnet (index 0). */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);

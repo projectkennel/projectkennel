@@ -138,6 +138,10 @@ const fn empty_payload() -> kennel_privhelper::wire::EgressPayload {
         deny_v4: Vec::new(),
         allow_v6: Vec::new(),
         deny_v6: Vec::new(),
+        bind_allow_v4: Vec::new(),
+        bind_deny_v4: Vec::new(),
+        bind_allow_v6: Vec::new(),
+        bind_deny_v6: Vec::new(),
         bind_allowed_ports: Vec::new(),
         pin_id: String::new(),
     }
@@ -163,6 +167,10 @@ fn loads_and_attaches_egress_to_an_owned_cgroup() {
         deny_v4: Vec::new(),
         allow_v6: Vec::new(),
         deny_v6: Vec::new(),
+        bind_allow_v4: Vec::new(),
+        bind_deny_v4: Vec::new(),
+        bind_allow_v6: Vec::new(),
+        bind_deny_v6: Vec::new(),
         bind_allowed_ports: Vec::new(),
         pin_id: String::new(),
     };
@@ -207,6 +215,10 @@ fn pins_the_shared_maps_in_the_xdg_runtime_dir() {
         deny_v4: Vec::new(),
         allow_v6: Vec::new(),
         deny_v6: Vec::new(),
+        bind_allow_v4: Vec::new(),
+        bind_deny_v4: Vec::new(),
+        bind_allow_v6: Vec::new(),
+        bind_deny_v6: Vec::new(),
         bind_allowed_ports: Vec::new(),
         pin_id: pin_id.to_owned(),
     };

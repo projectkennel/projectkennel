@@ -39,6 +39,11 @@ const KENNEL_ALLOW_FLAG_PROXY: u8 = 0x01;
 const HOST_PREFIX_V4: u8 = 32;
 /// LPM prefix length for a host route to the IPv6 proxy address (`/128`).
 const HOST_PREFIX_V6: u8 = 128;
+/// The per-kennel loopback subnet prefixes (§7.5.6): the kennel's own addresses live in a
+/// `/28` (v4) / `/64` (v6) carved from the reserved range. `stamp_proxy` seeds this subnet
+/// into the bind ACL so an in-subnet or wildcard-rewritten bind is allowed by default.
+const LOOPBACK_PREFIX_V4: u8 = 28;
+const LOOPBACK_PREFIX_V6: u8 = 64;
 
 /// One BPF IPv4 LPM map entry: an `(lpm_v4_key, allow_entry)` byte pair.
 pub type LpmV4Entry = ([u8; 8], [u8; 8]);
@@ -906,11 +911,19 @@ impl Plan {
 
         // The inbound BIND ACL (§7.5.7), deny-first, default-deny: the author's
         // `[net.bpf].bind.allow`/`.deny` CIDR+port rules. The kennel's own loopback /28 is seeded
-        // into the allow set by `stamp_bind` (it needs the spawn-time loopback address), so an
-        // in-subnet or wildcard-rewritten bind stays allowed by default; here we encode only the
-        // author rules. Phase 1 stub: empty until the encode lands.
-        let (bpf_bind_allow_v4, bpf_bind_allow_v6) = (Vec::new(), Vec::new());
-        let (bpf_bind_deny_v4, bpf_bind_deny_v6) = (Vec::new(), Vec::new());
+        // into the allow set by `stamp_proxy` (proxied modes — it needs the spawn-time loopback
+        // address); here we encode the author rules, which are the gate in `host` mode.
+        let (bpf_bind_allow_v4, bpf_bind_allow_v6) = encode(&ep.net.bpf_bind_allow)?;
+        let (bpf_bind_deny_v4, bpf_bind_deny_v6) = encode(&ep.net.bpf_bind_deny)?;
+        // Landlock always handles net; a single-port TCP bind-allow needs a BIND_TCP grant or
+        // Landlock denies the bind the BPF ACL permits (the connect side does the same for
+        // CONNECT_TCP). Range rules are left to the BPF ACL (Landlock has no port range).
+        for r in &ep.net.bpf_bind_allow {
+            let tcp = matches!(r.protocol, Protocol::Tcp | Protocol::Any);
+            if tcp && r.port_min == r.port_max {
+                landlock_net.push((r.port_min, AccessNet::BIND_TCP));
+            }
+        }
 
         // The bind floor (§7.5.7): stamped into the kennel_meta `bind_port_min` slot
         // so the bind4/bind6 BPF can deny a privileged-port bind (T6).
@@ -985,6 +998,21 @@ impl Plan {
             self.landlock_net
                 .push((endpoint.port, AccessNet::CONNECT_TCP));
         }
+
+        // Seed the kennel's own loopback subnet (§7.5.6) into the inbound BIND ACL: a proxied
+        // kennel rewrites a wildcard bind to this loopback and allows in-subnet binds, so the
+        // subnet must pass the (default-deny) bind ACL without the author writing a rule. A full
+        // port range over the /28 (v4) / /64 (v6); the bind ACL is deny-first, so an author
+        // bind-deny inside the subnet still wins.
+        let any_port = allow_entry(0, u16::MAX, Protocol::Any, 0);
+        if let Some(v4) = endpoint.v4 {
+            self.bpf_bind_allow_v4
+                .push((lpm_v4_key(v4.octets(), LOOPBACK_PREFIX_V4), any_port));
+        }
+        self.bpf_bind_allow_v6.push((
+            lpm_v6_key(endpoint.v6.octets(), LOOPBACK_PREFIX_V6),
+            any_port,
+        ));
     }
 
     /// Build the seccomp filter this plan describes. Pure — the filter is not

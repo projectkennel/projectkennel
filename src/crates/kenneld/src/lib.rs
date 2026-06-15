@@ -666,6 +666,10 @@ fn bring_up<P: Privileged + Sync>(
             deny_v4: plan.bpf_deny_v4.clone(),
             allow_v6: plan.bpf_allow_v6.clone(),
             deny_v6: plan.bpf_deny_v6.clone(),
+            bind_allow_v4: plan.bpf_bind_allow_v4.clone(),
+            bind_deny_v4: plan.bpf_bind_deny_v4.clone(),
+            bind_allow_v6: plan.bpf_bind_allow_v6.clone(),
+            bind_deny_v6: plan.bpf_bind_deny_v6.clone(),
             bind_allowed_ports: plan.bind_allowed_ports.clone(),
             pin_id: id.to_owned(),
         }
