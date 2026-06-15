@@ -37,9 +37,10 @@ members = [
     # The host ends of binder connectors (kenneld's dial + inbound-bind delegates).
     "src/crates/host-netproxy",
     "src/crates/host-inetd",
-    # The in-kennel ends of binder connectors (push workload traffic into binder).
+    # The in-kennel ends of binder connectors (push workload traffic into binder, or pull it back).
     "src/crates/facade-afunix",
     "src/crates/facade-socks5",
+    "src/crates/facade-client",
     "src/crates/facade-ssh",
 ]
 

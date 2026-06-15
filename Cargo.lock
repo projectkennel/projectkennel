@@ -49,6 +49,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "facade-client"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-binder",
+]
+
+[[package]]
 name = "facade-socks5"
 version = "0.1.0"
 dependencies = [
