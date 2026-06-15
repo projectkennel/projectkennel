@@ -143,6 +143,76 @@ fn user_config_dir() -> Option<PathBuf> {
 // ---- Deployment config -----------------------------------------------------
 
 /// The raw, all-optional `system.toml` schema (one parsed layer).
+/// Diagnostic verbosity for the spawn path (`log_level` in `system.toml`).
+///
+/// Distinct from the per-kennel `[audit]` subsystem (security events to sinks): this is
+/// free-form spawn-path tracing to stderr → journald, a global troubleshooting knob.
+/// `Info` (default) logs only errors/warnings as today; `Debug` traces each orchestration
+/// and construction step; `Trace` adds per-step parameters. Ordered so a consumer can ask
+/// `level >= Debug`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Errors and warnings only (the historical behaviour).
+    #[default]
+    Info,
+    /// Trace each spawn-path step (orchestration, factory, init seal).
+    Debug,
+    /// `Debug` plus per-step parameters (argv, addresses, fd numbers, errno detail).
+    Trace,
+}
+
+impl LogLevel {
+    /// Whether tracing is enabled at all (`Debug` or `Trace`) — the common guard.
+    #[must_use]
+    pub fn verbose(self) -> bool {
+        self >= Self::Debug
+    }
+}
+
+/// A spawn-path tracer: a [`LogLevel`] threshold plus a component tag, used to emit
+/// uniform `<component>: [debug] …` / `[trace] …` lines to stderr (→ journald).
+///
+/// Cheap to hold and copy; `step`/`detail` are no-ops below their level, so call sites
+/// stay unconditional (`tr.step(...)`) without an `if verbose` wrapper. The component tag
+/// names the emitter (`kenneld`, `kennel-privhelper`, `kennel-bin-init`) so interleaved
+/// journald lines are attributable. This is diagnostic logging, NOT the `[audit]`
+/// security subsystem (which routes structured events to configured sinks).
+#[derive(Debug, Clone, Copy)]
+pub struct Tracer {
+    level: LogLevel,
+    component: &'static str,
+}
+
+impl Tracer {
+    /// A tracer for `component` at `level`.
+    #[must_use]
+    pub const fn new(component: &'static str, level: LogLevel) -> Self {
+        Self { level, component }
+    }
+
+    /// Whether this tracer emits anything (`Debug`+). Use to skip building an
+    /// expensive message: `if tr.on() { tr.step(&format!(...)) }`.
+    #[must_use]
+    pub fn on(self) -> bool {
+        self.level.verbose()
+    }
+
+    /// Emit a `Debug`-level step line (a spawn-path milestone). No-op at `Info`.
+    pub fn step(self, msg: &str) {
+        if self.level >= LogLevel::Debug {
+            eprintln!("{}: [debug] {msg}", self.component);
+        }
+    }
+
+    /// Emit a `Trace`-level detail line (per-step parameters). No-op below `Trace`.
+    pub fn detail(self, msg: &str) {
+        if self.level >= LogLevel::Trace {
+            eprintln!("{}: [trace] {msg}", self.component);
+        }
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDeployment {
@@ -156,6 +226,7 @@ struct RawDeployment {
     afunix: Option<PathBuf>,
     socks5: Option<PathBuf>,
     init: Option<PathBuf>,
+    log_level: Option<LogLevel>,
 }
 
 impl RawDeployment {
@@ -172,6 +243,7 @@ impl RawDeployment {
             afunix: higher.afunix.or(self.afunix),
             socks5: higher.socks5.or(self.socks5),
             init: higher.init.or(self.init),
+            log_level: higher.log_level.or(self.log_level),
         }
     }
 
@@ -192,6 +264,7 @@ impl RawDeployment {
             afunix: self.afunix,
             socks5: self.socks5,
             init: self.init,
+            log_level: self.log_level.unwrap_or_default(),
         }
     }
 }
@@ -210,6 +283,7 @@ pub struct Deployment {
     afunix: Option<PathBuf>,
     socks5: Option<PathBuf>,
     init: Option<PathBuf>,
+    log_level: LogLevel,
 }
 
 impl Deployment {
@@ -262,6 +336,14 @@ impl Deployment {
     #[must_use]
     pub fn sshd(&self) -> &Path {
         &self.sshd
+    }
+
+    /// The diagnostic verbosity for the spawn path (`log_level` in `system.toml`,
+    /// default [`LogLevel::Info`]). Read by `kenneld` and the privhelper to gate
+    /// spawn-path tracing; see [`LogLevel`].
+    #[must_use]
+    pub const fn log_level(&self) -> LogLevel {
+        self.log_level
     }
 
     /// The setuid privhelper.
