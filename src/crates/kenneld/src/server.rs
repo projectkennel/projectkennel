@@ -641,6 +641,19 @@ pub fn run_kennel<P, L>(
         Ok(pair) => pair,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
     };
+    // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
+    // decision made here, on the host, before the kennel is built: kennel-bin-init is a
+    // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
+    // are running the policy's own workload (an unpinned `--` override is a different
+    // command the pin does not cover). The hash is over the host inode bound RO into the
+    // view, so it is the bytes that will exec.
+    if !loaded.workload.sha256.is_empty() && req.argv.is_empty() {
+        if let Err(reason) =
+            verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256)
+        {
+            return fail(shared, &req.kennel, ctx, conn, "workload sha256", reason);
+        }
+    }
     // Interactive runs pass ONE connected socket (over which the seal returns a
     // controlling pty allocated inside the kennel's devpts); non-interactive runs
     // pass the three stdio fds. `return_sock` must outlive the spawn so the forked
@@ -1005,6 +1018,64 @@ fn effective_workload(
     Ok((req.argv.clone(), req.cwd.clone()))
 }
 
+/// Verify the workload binary's SHA-256 against the policy's accepted-digest set (§7.4).
+///
+/// A **kenneld** decision (the dumb-executor init gets none): resolve `program` against the
+/// policy's `exec_path` on the host — the same inode that is bound read-only into the view,
+/// so it is the bytes that will `execve` — run the system `sha256sum`, and accept only if the
+/// digest is in `accepted`. The host `sha256sum` is the trusted hasher (no in-process crypto
+/// dependency in the privileged path). Fail closed: an unresolvable program, a `sha256sum`
+/// that cannot run, or a non-matching digest all refuse the spawn.
+///
+/// # Errors
+///
+/// A human-readable reason on resolution failure, hashing failure, or digest mismatch.
+fn verify_workload_digest(
+    program: Option<&String>,
+    exec_path: &[String],
+    accepted: &[String],
+) -> Result<(), String> {
+    let program = program.ok_or("workload sha256 pin set but the workload argv is empty")?;
+    // Resolve a bare name against the policy PATH (host side); an explicit path is used as-is.
+    let resolved = if program.contains('/') {
+        PathBuf::from(program)
+    } else {
+        exec_path
+            .iter()
+            .map(|d| Path::new(d).join(program))
+            .find(|p| p.is_file())
+            .ok_or_else(|| {
+                format!("workload `{program}` not found on the policy PATH to hash it")
+            })?
+    };
+    let out = Command::new("sha256sum")
+        .arg("-b")
+        .arg(&resolved)
+        .output()
+        .map_err(|e| format!("running sha256sum on {}: {e}", resolved.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "sha256sum failed on {}: {}",
+            resolved.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // `sha256sum` prints `<hex>  <path>` (or `<hex> *<path>` with -b); take the first field.
+    let digest = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if accepted.iter().any(|a| a == &digest) {
+        Ok(())
+    } else {
+        Err(format!(
+            "workload {} sha256 {digest} is not in the policy's accepted set",
+            resolved.display()
+        ))
+    }
+}
+
 /// Build the workload command from `argv`/`cwd`, wiring the passed stdio fds if
 /// all three are present (otherwise the workload inherits the daemon's stdio).
 fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command, String> {
@@ -1118,6 +1189,41 @@ mod tests {
         let err = effective_workload(&start_req(&[], false), &workload(&[], None, false))
             .expect_err("no workload");
         assert!(err.contains("no workload"), "{err}");
+    }
+
+    #[test]
+    fn verify_workload_digest_accepts_matching_and_rejects_otherwise() {
+        // Hash a real temp file with the host sha256sum (the same tool the check uses), so
+        // the expected digest is whatever this host produces — no hard-coded constant.
+        let dir = std::env::temp_dir().join(format!("kennel-digest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let bin = dir.join("workload");
+        std::fs::write(&bin, b"#!/bin/sh\necho hi\n").expect("write");
+        let out = Command::new("sha256sum")
+            .arg("-b")
+            .arg(&bin)
+            .output()
+            .expect("sha256sum");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let real = stdout.split_whitespace().next().expect("digest").to_owned();
+        let exec_path = vec![dir.to_string_lossy().into_owned()];
+        let name = "workload".to_owned();
+
+        // Bare name resolved against the policy PATH, digest in the accepted set → ok.
+        assert!(
+            verify_workload_digest(Some(&name), &exec_path, std::slice::from_ref(&real)).is_ok()
+        );
+        // A non-matching set → refused.
+        let err = verify_workload_digest(Some(&name), &exec_path, &["0".repeat(64)])
+            .expect_err("mismatch");
+        assert!(err.contains("not in the policy's accepted set"), "{err}");
+        // A program that does not resolve → refused (fail closed).
+        let nope = "nope".to_owned();
+        assert!(
+            verify_workload_digest(Some(&nope), &exec_path, std::slice::from_ref(&real)).is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
