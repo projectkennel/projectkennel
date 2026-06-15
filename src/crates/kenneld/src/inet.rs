@@ -60,9 +60,13 @@ impl NetRuntime {
     ) -> Self {
         let mut allow: Vec<Rule> = net.allow.iter().filter_map(rule_from_cidr).collect();
         allow.extend(net.allow_names.iter().map(rule_from_name));
+        // Deny-first: the non-removable invariant floor PLUS the author's optional
+        // `[net.proxy].deny.policy` (`deny_author`). Both are re-checked against every resolved
+        // address, so a name that resolves into denied space is refused even in `unconstrained`.
         let deny: Vec<DenyRule> = net
             .deny_invariant
             .iter()
+            .chain(net.deny_author.iter())
             .filter_map(deny_from_cidr)
             .collect();
         Self {

@@ -823,16 +823,14 @@ impl Plan {
             binder: true,
         });
 
-        // Landlock net only expresses per-port allow; map single-port TCP/Any allow rules
-        // to CONNECT_TCP. Port *ranges* and CIDR scoping are left to BPF, the authoritative
-        // egress gate. This applies to every mode whose `net.allow` the workload connects to
-        // DIRECTLY — `constrained` (the proxy endpoint is added by stamp_proxy) and `open`
-        // (host netns, no proxy: the allowlist IS the gate, in Landlock + BPF). `none` has no
-        // network; `unconstrained` egresses through the proxy (Landlock grants the proxy port
-        // via stamp_proxy), so its broad `net.allow` is not Landlock-mapped here.
+        // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the
+        // authoritative gate; Landlock is defence-in-depth). In `host` mode map the author's
+        // `[net.bpf].connect.allow` single-port TCP rules so Landlock does not deny what BPF
+        // permits. In the proxied modes the workload connects only to the proxy port, which
+        // `stamp_proxy` grants; `none` has no network. So the base is non-empty only for `host`.
         let mut landlock_net: Vec<(u16, AccessNet)> = Vec::new();
-        if matches!(ep.net.mode, NetMode::Constrained | NetMode::Host) {
-            for r in &ep.net.allow {
+        if ep.net.mode == NetMode::Host {
+            for r in &ep.net.bpf_connect_allow {
                 let tcp = matches!(r.protocol, Protocol::Tcp | Protocol::Any);
                 if tcp && r.port_min == r.port_max {
                     landlock_net.push((r.port_min, AccessNet::CONNECT_TCP));
@@ -868,8 +866,27 @@ impl Plan {
             ulimits.push((resource, soft, hard));
         }
 
-        let (bpf_allow_v4, bpf_allow_v6) = encode(&ep.net.allow)?;
-        let (bpf_deny_v4, bpf_deny_v6) = encode(&ep.net.deny_invariant)?;
+        // The cgroup-BPF connect ACL (§7.5.4 `[net.bpf]`), default-deny + deny-first.
+        //
+        // ALLOW base: only in `host` mode, where BPF is the egress gate and the author's
+        // `[net.bpf].connect.allow` IS the allowlist (the workload connects to the host stack
+        // directly). In the proxied modes the workload's ONLY reachable destination is the proxy
+        // endpoint, added by `stamp_proxy`; the author does not get a connect-allow union there
+        // (a BPF allow is a union — adding rules can only *widen*, and D2 forbids the author
+        // widening past the proxy lock). The author narrows the proxied egress via `deny` instead.
+        //
+        // DENY: deny-first and enforced in EVERY mode — the invariant floor + the author's
+        // `[net.bpf].connect.deny` + the proxy-side `[net.proxy].deny.policy` (`deny_author`).
+        let connect_allow: &[NetRule] = if ep.net.mode == NetMode::Host {
+            &ep.net.bpf_connect_allow
+        } else {
+            &[]
+        };
+        let (bpf_allow_v4, bpf_allow_v6) = encode(connect_allow)?;
+        let mut deny_rules = ep.net.deny_invariant.clone();
+        deny_rules.extend(ep.net.bpf_connect_deny.iter().cloned());
+        deny_rules.extend(ep.net.deny_author.iter().cloned());
+        let (bpf_deny_v4, bpf_deny_v6) = encode(&deny_rules)?;
 
         // The bind floor (§7.5.7): stamped into the kennel_meta `bind_port_min` slot
         // so the bind4/bind6 BPF can deny a privileged-port bind (T6).

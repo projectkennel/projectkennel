@@ -617,7 +617,19 @@ mod tests {
                 net: NetPolicy {
                     mode: NetMode::Constrained,
                     proxy: kennel_lib_policy::ProxyListen::default(),
-                    allow: vec![
+                    allow: Vec::new(),
+                    allow_names: Vec::new(),
+                    deny_invariant: vec![NetRule {
+                        cidr: "169.254.169.254".to_owned(),
+                        prefix_len: 32,
+                        port_min: 0,
+                        port_max: 65535,
+                        protocol: Protocol::Any,
+                    }],
+                    deny_author: Vec::new(),
+                    // The kernel connect ACL (defence-in-depth in proxied modes; the gate in
+                    // host). Two CIDR allows the BPF/Landlock encoding tests verify.
+                    bpf_connect_allow: vec![
                         NetRule {
                             cidr: "93.184.216.0".to_owned(),
                             prefix_len: 24,
@@ -633,16 +645,6 @@ mod tests {
                             protocol: Protocol::Tcp,
                         },
                     ],
-                    allow_names: Vec::new(),
-                    deny_invariant: vec![NetRule {
-                        cidr: "169.254.169.254".to_owned(),
-                        prefix_len: 32,
-                        port_min: 0,
-                        port_max: 65535,
-                        protocol: Protocol::Any,
-                    }],
-                    deny_author: Vec::new(),
-                    bpf_connect_allow: Vec::new(),
                     bpf_connect_deny: Vec::new(),
                     bpf_bind_allow: Vec::new(),
                     bpf_bind_deny: Vec::new(),
@@ -1102,9 +1104,14 @@ mod tests {
             "the view root is listable but not file-readable"
         );
 
-        // Landlock net: only the single-port (443) TCP rule; the 1024-2048 range
-        // is left to BPF.
-        assert_eq!(plan.landlock_net, vec![(443u16, AccessNet::CONNECT_TCP)]);
+        // Landlock net: EMPTY base in a proxied (constrained) mode — the workload's only
+        // reachable destination is the proxy endpoint, granted by `stamp_proxy` (called by
+        // kenneld once the address is known), not by the policy's `[net.bpf].connect` rules.
+        // The connect ACL is the gate only in `host` mode (covered by a dedicated test).
+        assert!(
+            plan.landlock_net.is_empty(),
+            "constrained mode has no Landlock connect base (proxy endpoint is stamped later)"
+        );
 
         // Seccomp deny names resolved to numbers, in order.
         assert_eq!(
@@ -1119,19 +1126,16 @@ mod tests {
         // The filter builds without panicking.
         let _filter = plan.seccomp_filter();
 
-        // BPF egress: both v4 allow rules encode as (lpm_v4_key, allow_entry).
-        // 93.184.216.0/24 :443 TCP -> prefixlen 24, octets, port 443 twice, proto 6.
-        assert_eq!(plan.bpf_allow_v4.len(), 2);
-        let want_key = {
-            let [p0, p1, p2, p3] = 24u32.to_ne_bytes();
-            [p0, p1, p2, p3, 93, 184, 216, 0]
-        };
-        let want_val = {
-            let [a, b] = 443u16.to_ne_bytes();
-            [a, b, a, b, 6, 0, 0, 0]
-        };
-        assert_eq!(plan.bpf_allow_v4.first(), Some(&(want_key, want_val)));
-        // deny_invariant 169.254.169.254/32 any-proto.
+        // BPF egress: in a proxied (constrained) mode the connect-allow BASE is EMPTY — the
+        // workload reaches only the proxy endpoint, added by `stamp_proxy` later, never the
+        // `[net.bpf].connect` rules directly (a BPF allow is a union; the author cannot widen
+        // past the proxy lock — D2). The host-mode path (where the connect ACL IS the gate) is
+        // covered by `host_mode_connect_acl_encodes_to_bpf`.
+        assert!(
+            plan.bpf_allow_v4.is_empty(),
+            "constrained mode has no BPF connect-allow base (proxy endpoint stamped later)"
+        );
+        // deny_invariant 169.254.169.254/32 any-proto is enforced in EVERY mode (deny-first).
         assert_eq!(plan.bpf_deny_v4.len(), 1);
         // meta: magic "KNEL", abi 1, ctx 7.
         let magic = {
@@ -1384,8 +1388,11 @@ mod tests {
 
     #[test]
     fn v6_rules_encode_to_lpm_v6() {
+        // host mode: the `[net.bpf].connect` allowlist IS the egress gate, so its rules encode
+        // into the BPF allow maps (in proxied modes that base is empty — see plan_translates_policy).
         let mut p = policy_with_placeholders();
-        p.effective_policy.net.allow.push(NetRule {
+        p.effective_policy.net.mode = NetMode::Host;
+        p.effective_policy.net.bpf_connect_allow.push(NetRule {
             cidr: "2606:2800:220::".to_owned(),
             prefix_len: 48,
             port_min: 443,
@@ -1400,7 +1407,7 @@ mod tests {
         )
         .expect("plan");
 
-        // The two original rules stay v4; the new one lands in v6.
+        // The two fixture rules stay v4; the new one lands in v6.
         assert_eq!(plan.bpf_allow_v4.len(), 2);
         assert_eq!(plan.bpf_allow_v6.len(), 1);
         let (key, value) = plan.bpf_allow_v6.first().expect("v6 entry");
@@ -1416,6 +1423,47 @@ mod tests {
             [a, b, a, b, 6, 0, 0, 0]
         };
         assert_eq!(value, &want_val);
+    }
+
+    #[test]
+    fn host_mode_connect_acl_encodes_to_bpf_and_landlock() {
+        // host mode: [net.bpf].connect is the egress gate. Author allow → BPF allow + Landlock
+        // CONNECT_TCP (single-port); author deny → BPF deny (deny-first, alongside the invariant
+        // floor). This is the gate that makes "deny 10/8 + allow *:443" hold on the host stack.
+        let mut p = policy_with_placeholders();
+        p.effective_policy.net.mode = NetMode::Host;
+        // allow *:443 already present in the fixture (93.184.216.0/24:443 single-port); add an
+        // author deny for a CIDR to prove deny-first encoding.
+        p.effective_policy.net.bpf_connect_deny.push(NetRule {
+            cidr: "10.0.0.0".to_owned(),
+            prefix_len: 8,
+            port_min: 0,
+            port_max: 65535,
+            protocol: Protocol::Any,
+        });
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+
+        // The two fixture connect-allow rules encode (host = the gate).
+        assert_eq!(
+            plan.bpf_allow_v4.len(),
+            2,
+            "host connect-allow encodes to BPF"
+        );
+        // The single-port (443) TCP rule maps to a Landlock CONNECT_TCP grant; the 1024-2048
+        // range is left to BPF (Landlock has no range).
+        assert_eq!(plan.landlock_net, vec![(443u16, AccessNet::CONNECT_TCP)]);
+        // deny = invariant floor (169.254.169.254) + the author 10/8 deny, both deny-first.
+        assert_eq!(
+            plan.bpf_deny_v4.len(),
+            2,
+            "invariant + author deny both encode"
+        );
     }
 
     /// A plan with two v4 allow rules and one deny, from the shared fixture.
