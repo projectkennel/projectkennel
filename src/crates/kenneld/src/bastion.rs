@@ -3,8 +3,8 @@
 //! `kenneld` runs **one** `kennel-sshd` for the session, shared by all the user's
 //! kennels — a sibling daemon, not a per-kennel child like the egress proxy. This
 //! module is the state `kenneld` owns on its behalf: the set of granted
-//! `(synthetic-key → destination, real-key)` **edges**, one per `(real-key, host)`
-//! a kennel is granted. From that set it renders the bastion's `authorized_keys`
+//! `(synthetic-key → destination + options)` **edges**, one per granted destination.
+//! From that set it renders the bastion's `authorized_keys`
 //! (each edge is one `restrict,pty,command=…` line, `crate::sshd`), and it lazily
 //! starts the daemon when the first edge appears and stops it when the last one
 //! goes — so an idle session runs no bastion at all.
@@ -21,16 +21,20 @@ use std::process::Child;
 
 use crate::sshd::{self, AuthSource, SshdParams};
 
-/// One granted edge: a synthetic key that, on the bastion, re-originates to a fixed
-/// destination with a fixed real key.
+/// One granted edge: a synthetic key bound to a destination.
+///
+/// On the bastion the synthetic key's forced command runs `ssh <options> -- <dest>` as
+/// the operator. The destination + options are fixed by which synthetic key
+/// authenticated; the kennel cannot redirect it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     /// The kennel that owns this grant (the deregistration key).
     pub kennel: String,
-    /// The policy-fixed destination host (validated by `kennel_lib_policy::ssh`).
+    /// The policy-fixed destination the host-side `ssh` connects to (`git@github.com`).
     pub dest: String,
-    /// The real key's `SHA256:` fingerprint the bastion signs the outbound hop with.
-    pub real_fp: String,
+    /// Host-side `ssh` invocation options, prepended verbatim before `<dest>` in the
+    /// forced command (`-i …`, `-o …`, `-p …`). They run as the operator.
+    pub options: Vec<String>,
     /// The synthetic public-key line bound to this edge's forced command.
     pub synthetic_pub: String,
 }
@@ -60,15 +64,10 @@ pub struct BastionConfig {
     /// host key, config, pid, and `authorized_keys` — sshd's safe-path check
     /// rejects world-writable ancestors (08 §8.1, finding 3).
     pub dir: PathBuf,
-    /// The installed `kennel-bin-ssh-reorigin` the forced commands invoke.
-    pub reorigin_bin: PathBuf,
     /// The loopback address the bastion listens on (the egress proxy forwards here).
     pub listen: IpAddr,
     /// The bastion's port.
     pub port: u16,
-    /// The host-side agent socket that holds the real keys (handed to the forced
-    /// command via the config's `SetEnv`).
-    pub agent_sock: Option<PathBuf>,
     /// The root-owned `AuthorizedKeysCommand` to vend keys through (production,
     /// §7.10.7). `None` falls back to a static `AuthorizedKeysFile` the bastion-user
     /// owns — the prototype/e2e source, which writes the bindings to disk.
@@ -137,14 +136,7 @@ impl Bastion {
     pub fn render_authorized_keys(&self) -> String {
         self.edges
             .iter()
-            .map(|e| {
-                sshd::authorized_keys_line(
-                    &self.config.reorigin_bin,
-                    &e.dest,
-                    &e.real_fp,
-                    &e.synthetic_pub,
-                )
-            })
+            .map(|e| sshd::authorized_keys_line(&e.dest, &e.options, &e.synthetic_pub))
             .collect()
     }
 
@@ -163,21 +155,15 @@ impl Bastion {
         self.edges
             .iter()
             .filter(|e| key_id(&e.synthetic_pub) == Some(offered))
-            .map(|e| {
-                sshd::authorized_keys_line(
-                    &self.config.reorigin_bin,
-                    &e.dest,
-                    &e.real_fp,
-                    &e.synthetic_pub,
-                )
-            })
+            .map(|e| sshd::authorized_keys_line(&e.dest, &e.options, &e.synthetic_pub))
             .collect()
     }
 
-    /// Register an edge without starting the daemon — a crate-test seam so the
-    /// control-dispatch path can be exercised on live edges without `sshd`.
-    #[cfg(test)]
-    pub(crate) fn push_edge_for_test(&mut self, edge: Edge) {
+    /// Register an edge without starting the daemon — a test seam so the control-dispatch
+    /// path (and the root-owned-AKC integration test) can be exercised on live edges
+    /// without standing up `sshd`.
+    #[doc(hidden)]
+    pub fn push_edge_for_test(&mut self, edge: Edge) {
         self.edges.push(edge);
     }
 
@@ -277,7 +263,6 @@ impl Bastion {
             port: self.config.port,
             host_key: &host_key,
             pid_file: &self.config.pid_file(),
-            agent_sock: self.config.agent_sock.as_deref(),
             auth,
         };
         let config_path = self.config.config_file();
@@ -321,68 +306,85 @@ mod tests {
     fn config() -> BastionConfig {
         BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
-            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
             listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 7022,
-            agent_sock: Some(PathBuf::from("/run/user/1000/agent.sock")),
             akc: None,
         }
     }
 
-    fn edge(kennel: &str, dest: &str, fp: &str, pubkey: &str) -> Edge {
+    fn edge(kennel: &str, dest: &str, options: &[&str], pubkey: &str) -> Edge {
         Edge {
             kennel: kennel.into(),
             dest: dest.into(),
-            real_fp: fp.into(),
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
             synthetic_pub: pubkey.into(),
         }
     }
-
-    const FP_A: &str = "SHA256:AAAa1EZ7oO0qfsA5OSDosRRaFD9evYHhSlcrDPTVoZw";
-    const FP_B: &str = "SHA256:BBBb1EZ7oO0qfsA5OSDosRRaFD9evYHhSlcrDPTVoZx";
 
     #[test]
     fn render_authorized_keys_is_one_forced_command_line_per_edge() {
         let mut b = Bastion::new(config());
         // Inject edges directly (bypassing start) to test the pure rendering.
-        b.edges
-            .push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
-        b.edges
-            .push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
+        b.edges.push(edge(
+            "ka",
+            "git@github.com",
+            &["-i", "~/.ssh/id_gh"],
+            "ssh-ed25519 AAAASYN_A ka",
+        ));
+        b.edges.push(edge(
+            "kb",
+            "git@git.internal",
+            &[],
+            "ssh-ed25519 AAAASYN_B kb",
+        ));
         let ak = b.render_authorized_keys();
         let lines: Vec<&str> = ak.lines().collect();
         assert_eq!(lines.len(), 2);
         let l0 = lines.first().copied().unwrap_or_default();
         let l1 = lines.get(1).copied().unwrap_or_default();
-        assert!(l0.contains("--dest github.com") && l0.contains(FP_A) && l0.contains("AAAASYN_A"));
+        // The forced command runs `ssh <options> -- <dest> "$SSH_ORIGINAL_COMMAND"`.
         assert!(
-            l1.contains("--dest git.internal") && l1.contains(FP_B) && l1.contains("AAAASYN_B")
+            l0.contains("ssh '-i' '~/.ssh/id_gh' -- 'git@github.com'") && l0.contains("AAAASYN_A"),
+            "got {l0}"
+        );
+        assert!(
+            l1.contains("ssh -- 'git@git.internal'") && l1.contains("AAAASYN_B"),
+            "got {l1}"
         );
         assert!(lines
             .iter()
             .all(|l| l.starts_with("restrict,pty,command=\"")));
+        assert!(lines.iter().all(|l| l.contains("$SSH_ORIGINAL_COMMAND")));
     }
 
     #[test]
     fn authorized_keys_for_matches_the_offered_key_ignoring_comment() {
         let mut b = Bastion::new(config());
-        b.edges
-            .push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
-        b.edges
-            .push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
+        b.edges.push(edge(
+            "ka",
+            "git@github.com",
+            &[],
+            "ssh-ed25519 AAAASYN_A ka",
+        ));
+        b.edges.push(edge(
+            "kb",
+            "git@git.internal",
+            &[],
+            "ssh-ed25519 AAAASYN_B kb",
+        ));
 
         // Offered exactly as sshd hands the AKC: "<type> <base64>", no comment.
         let lines = b.authorized_keys_for("ssh-ed25519 AAAASYN_A");
         assert_eq!(lines.len(), 1, "exactly the matching edge");
         let l = lines.first().map(String::as_str).unwrap_or_default();
         assert!(l.starts_with("restrict,pty,command=\""));
-        assert!(l.contains("--dest github.com") && l.contains(FP_A) && l.contains("AAAASYN_A"));
+        assert!(l.contains("-- 'git@github.com'") && l.contains("AAAASYN_A"));
 
         // The other edge by its own key.
         assert!(b
             .authorized_keys_for("ssh-ed25519 AAAASYN_B")
             .first()
-            .is_some_and(|l| l.contains("git.internal")));
+            .is_some_and(|l| l.contains("git@git.internal")));
         // A non-synthetic / unknown key authorises nothing (the bastion refuses it).
         assert!(b
             .authorized_keys_for("ssh-ed25519 NOTASYNTHETICKEY")
@@ -395,7 +397,7 @@ mod tests {
     #[test]
     fn register_is_idempotent_on_the_synthetic_key() {
         let mut b = Bastion::new(config());
-        let e = edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka");
+        let e = edge("ka", "git@github.com", &[], "ssh-ed25519 AAAASYN_A ka");
         // Bookkeeping only (no spawn): exercise the de-dup directly.
         b.edges.push(e.clone());
         assert_eq!(b.edges().len(), 1);
@@ -408,10 +410,18 @@ mod tests {
     #[test]
     fn deregister_drops_only_the_named_kennels_edges() {
         let mut b = Bastion::new(config());
-        b.edges
-            .push(edge("ka", "github.com", FP_A, "ssh-ed25519 AAAASYN_A ka"));
-        b.edges
-            .push(edge("kb", "git.internal", FP_B, "ssh-ed25519 AAAASYN_B kb"));
+        b.edges.push(edge(
+            "ka",
+            "git@github.com",
+            &[],
+            "ssh-ed25519 AAAASYN_A ka",
+        ));
+        b.edges.push(edge(
+            "kb",
+            "git@git.internal",
+            &[],
+            "ssh-ed25519 AAAASYN_B kb",
+        ));
         // No daemon running, dir absent → deregister just prunes the edges.
         b.deregister("ka").expect("deregister");
         assert_eq!(b.edges().len(), 1);

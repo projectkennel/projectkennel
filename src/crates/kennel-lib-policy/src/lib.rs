@@ -61,9 +61,8 @@ pub use settled::{
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
     ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
-    SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshKnownHostPin, SshRuntime,
-    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
-    ULIMIT_RESOURCES,
+    SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction,
+    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};

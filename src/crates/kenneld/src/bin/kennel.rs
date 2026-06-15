@@ -307,6 +307,14 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         print_warnings(&kennel_lib_policy::resolve_settled_loaders(
             &mut compiled.policy,
         ));
+        // Mint/reuse the SSH synthetic keypairs beside the source policy (its dir), pinning
+        // the public halves into the settled grants before signing — same as the `compile`
+        // verb, so an in-memory `kennel run` of an `[ssh]` policy is signed over its keys too.
+        let ssh_dir = policy_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("ssh");
+        mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
         let key = load_signing_key(&key_path)?;
         let doc = kennel_lib_policy::sign_settled(&compiled.policy, &key)
             .map_err(|e| format!("signing: {e}"))?;
@@ -905,9 +913,17 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     print_warnings(&kennel_lib_policy::resolve_settled_loaders(
         &mut compiled.policy,
     ));
-    let policy = &compiled.policy;
 
-    let out = output_path.unwrap_or_else(|| default_settled_path(&policy_path, &policy.name));
+    let out =
+        output_path.unwrap_or_else(|| default_settled_path(&policy_path, &compiled.policy.name));
+
+    // Mint the per-destination SSH synthetic keypairs into `<artefact-dir>/ssh/` and pin
+    // each public half into the settled `[ssh]` grants BEFORE signing, so the signature
+    // covers the keys the bastion will trust (§7.10.3). Idempotent: an existing keypair is
+    // reused (persisted across recompiles), so the kennel's `~/.ssh` is stable.
+    let ssh_dir = out.parent().unwrap_or_else(|| Path::new(".")).join("ssh");
+    mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
+    let policy = &compiled.policy;
 
     // Byte-pin the resolved references: check the fresh lockfile against any prior
     // `<name>.lock` beside the output, then (re)write it. A re-tagged/re-signed
@@ -997,6 +1013,51 @@ fn print_warnings(warnings: &[String]) {
     for w in warnings {
         eprintln!("kennel: warning: {w}");
     }
+}
+
+/// Mint (or reuse) one synthetic ed25519 keypair per `[ssh]` destination under
+/// `ssh_dir`, recording each public half + key-file basename into the settled grant.
+///
+/// The synthetic key is the capability the kennel authenticates to the bastion with; it
+/// is NOT a real key and holds no access on its own (the bastion's forced command, keyed
+/// to this public half, runs `ssh <options> -- <dest>` as the operator host-side). Minting
+/// at compile time and pinning the public half into the signed artefact means the akc
+/// trusts only a key the signature covers. Idempotent: an existing `<key_id>` keypair is
+/// reused, so the kennel's `~/.ssh` is stable across recompiles (the keys persist beside
+/// the artefact in the policy dir).
+fn mint_ssh_keys(
+    policy: &mut kennel_lib_policy::SettledPolicy,
+    ssh_dir: &Path,
+) -> Result<(), String> {
+    if policy.ssh.grants.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(ssh_dir).map_err(|e| format!("creating {}: {e}", ssh_dir.display()))?;
+    for grant in &mut policy.ssh.grants {
+        let key_id = grant.key_id();
+        let key_path = ssh_dir.join(&key_id);
+        let pub_path = ssh_dir.join(format!("{key_id}.pub"));
+        if !key_path.exists() || !pub_path.exists() {
+            // Mint a fresh disposable keypair. `-N ""` (no passphrase): the kennel reads the
+            // private key non-interactively, and it is a capability token, not a secret of value.
+            let status = std::process::Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", ""])
+                .arg("-C")
+                .arg(format!("kennel-ssh {}", grant.dest))
+                .arg("-f")
+                .arg(&key_path)
+                .status()
+                .map_err(|e| format!("running ssh-keygen: {e}"))?;
+            if !status.success() {
+                return Err(format!("ssh-keygen failed for `{}`", grant.dest));
+            }
+        }
+        let pub_line = std::fs::read_to_string(&pub_path)
+            .map_err(|e| format!("reading {}: {e}", pub_path.display()))?;
+        pub_line.trim().clone_into(&mut grant.public_key);
+        grant.key_file = key_id;
+    }
+    Ok(())
 }
 
 /// The `<name>.lock` path beside the settled output.

@@ -679,45 +679,39 @@ pub struct SshSection {
     /// `allow_headless = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
-    /// `[[ssh.keys]]` — granted `(real-key, hosts)` edges. Each mints a disposable
-    /// synthetic key bound to a forced command on the bastion (§7.10.3).
+    /// `[[ssh.destinations]]` — the SSH egress allowlist. Each entry is one destination
+    /// the kennel may reach; `kenneld` mints a per-destination synthetic key (the
+    /// capability the kennel authenticates to the bastion with) bound to a forced
+    /// command that runs `ssh <options> -- <dest>` **as the operator on the host**
+    /// (§7.10.3). The destination — and which real key/port/config the host-side `ssh`
+    /// uses — is fixed by *which synthetic key authenticated*, never by the workload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keys: Vec<SshKey>,
-    /// `[[ssh.known_hosts]]` — host-key pins for granted destinations the operator's
-    /// own `known_hosts` lacks (§7.10.7). A granted host with no known key fails closed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub known_hosts: Vec<SshKnownHost>,
+    pub destinations: Vec<SshDestination>,
 }
 
-/// One `[[ssh.keys]]` entry: a real key and the destinations it may reach.
+/// One `[[ssh.destinations]]` entry: a destination the kennel may reach over the bastion.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SshKey {
-    /// The user's real key, by its stable `SHA256:<base64>` (`ssh-add -l`) identity.
-    /// The key material itself lives only in the user's host-side store.
+pub struct SshDestination {
+    /// The SSH destination, in the form the host-side `ssh` is invoked with
+    /// (`git@github.com`, `root@localhost`, a `~/.ssh/config` host alias). It is the
+    /// capability the minted synthetic key stands for, never parsed from the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fingerprint: Option<String>,
-    /// Destinations this key may reach (each `⊆ net.allow` on port 22).
+    pub dest: Option<String>,
+    /// Host-side `ssh` invocation options for this destination, passed verbatim as argv
+    /// tokens before `<dest>` in the bastion's forced command (`-i ~/.ssh/id_x`,
+    /// `-o IdentitiesOnly=yes`, `-p 2222`, …). They run **as the operator** and name
+    /// which real key/port/config the outbound hop uses — host-side, never the kennel's
+    /// choice. Trusted because the policy is operator-signed; passed as separate argv
+    /// tokens (no shell), so a metacharacter cannot break out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hosts: Vec<String>,
-    /// Why this key/host edge is granted (required).
+    pub options: Vec<String>,
+    /// Why this destination is granted (required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Threat tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
-}
-
-/// One `[[ssh.known_hosts]]` entry: a pinned host key for a granted destination.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SshKnownHost {
-    /// The destination hostname this key pins.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-    /// The host key in `authorized_keys`/`known_hosts` form (`ssh-ed25519 AAAA…`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
 }
 
 /// `[proc]` — procfs visibility (mirrors `[fs.proc]`; both appear in the corpus).
@@ -956,10 +950,12 @@ impl SourcePolicy {
             }
         }
         if let Some(ssh) = &self.ssh {
-            for k in &ssh.keys {
-                let who = k.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
-                if is_blank(k.reason.as_deref()) {
-                    errs.push(format!("[[ssh.keys]] \"{who}\" is missing a `reason`"));
+            for d in &ssh.destinations {
+                let who = d.dest.as_deref().unwrap_or("<no-dest>");
+                if is_blank(d.reason.as_deref()) {
+                    errs.push(format!(
+                        "[[ssh.destinations]] \"{who}\" is missing a `reason`"
+                    ));
                 }
             }
         }

@@ -13,9 +13,9 @@
 //! command with a pty: no password/kbd-interactive, no TCP/X11/agent forwarding, no
 //! tunnels, `PermitOpen none`, and SFTP wired to `/bin/false`. Combined with the
 //! per-key `restrict,pty` option set, SFTP/scp/port-forwarding are out of scope by
-//! construction for the first cut. `ExposeAuthInfo yes` writes `$SSH_USER_AUTH` so
-//! the forced command (`kennel-bin-ssh-reorigin`) can confirm which synthetic key
-//! authenticated.
+//! construction for the first cut. The forced command itself is just `ssh <options> --
+//! <dest> "$SSH_ORIGINAL_COMMAND"`, baked per synthetic key by the `AuthorizedKeysCommand`
+//! and run as the operator — no agent, no helper binary, no key material on this hop.
 //!
 //! # `AuthorizedKeys` source (§7.10.7)
 //!
@@ -68,12 +68,6 @@ pub struct SshdParams<'a> {
     pub host_key: &'a Path,
     /// The pid file path (under a safe-owned runtime dir).
     pub pid_file: &'a Path,
-    /// The agent socket the forced command signs the *outbound* connection with —
-    /// the user's host-side agent holding the granted real keys (§7.10.7). Emitted as
-    /// a server-side `SetEnv SSH_AUTH_SOCK=…` so `kennel-bin-ssh-reorigin` inherits it
-    /// (sshd otherwise hands a session no agent unless forwarding, which is denied).
-    /// `None` leaves it unset (the helper then finds no key and fails closed).
-    pub agent_sock: Option<&'a Path>,
     /// Where authorised keys come from.
     pub auth: AuthSource,
 }
@@ -100,12 +94,11 @@ pub fn sshd_config(p: &SshdParams<'_>) -> String {
     );
     // Expose which (synthetic) key authenticated to the forced command.
     s.push_str("\nExposeAuthInfo yes\n");
-    // Hand the forced command the host-side agent that holds the real keys, so the
-    // outbound ssh can sign — sshd gives a session no agent otherwise (forwarding is
-    // denied). Server-side SetEnv, not anything the kennel client can influence.
-    if let Some(sock) = p.agent_sock {
-        let _ = writeln!(s, "SetEnv SSH_AUTH_SOCK={}", sock.display());
-    }
+    // No agent is handed to the forced command: the outbound `ssh` runs as the operator
+    // and signs with whatever the operator's own `options` (`-i …`) name from their own
+    // host-side key store. An exposed agent socket would be the destination-blind signing
+    // oracle the bastion exists to prevent (§7.10.1) — so there is deliberately no
+    // `SetEnv SSH_AUTH_SOCK` here.
     // Publickey only.
     s.push_str(
         "\nPubkeyAuthentication yes\n\
@@ -146,32 +139,57 @@ pub fn sshd_config(p: &SshdParams<'_>) -> String {
     s
 }
 
-/// Build one `authorized_keys` line binding `synthetic_pubkey` to a forced command
-/// that re-originates to `dest` with the real key `real_fp` (§7.10.3).
+/// Build one `authorized_keys` line binding `synthetic_pubkey` to a forced command that
+/// runs `ssh <options…> -- <dest> "$SSH_ORIGINAL_COMMAND"` **as the operator** (§7.10.3).
 ///
 /// `restrict,pty` is the per-key option set: it denies forwarding/X11/agent/user-rc
-/// while keeping a tty. The destination and real-key fingerprint are baked in, so the
-/// workload — holding only the synthetic private key — can reach exactly this one
-/// `(host, key)` edge and cannot redirect the command.
+/// while keeping a tty. The destination and its host-side `ssh` options are baked in, so
+/// the workload — holding only the synthetic private key — reaches exactly this one
+/// destination and cannot redirect: it controls only `$SSH_ORIGINAL_COMMAND` (the remote
+/// command), forwarded as a single argument. There is no agent and no key material on
+/// either side of this hop; the operator's `options` (e.g. `-i ~/.ssh/id_x`) name which
+/// real key the host-side `ssh` signs with, in the operator's own key store.
 ///
-/// `synthetic_pubkey` is one whitespace-normalised public-key line (`ssh-ed25519
-/// AAAA… [comment]`); `reorigin_bin` is the absolute path to `kennel-bin-ssh-reorigin`.
-/// `dest` and `real_fp` MUST already be policy-validated (`kennel_lib_policy::ssh`); they
-/// are emitted verbatim inside the quoted command.
+/// `dest` and each `option` are shell-quoted into the forced command (sshd runs it via
+/// the login shell), so an awkward character cannot break out; `$SSH_ORIGINAL_COMMAND` is
+/// expanded by that shell and passed as one argument. `synthetic_pubkey` is one
+/// whitespace-normalised public-key line (`ssh-ed25519 AAAA… [comment]`).
 #[must_use]
-pub fn authorized_keys_line(
-    reorigin_bin: &Path,
-    dest: &str,
-    real_fp: &str,
-    synthetic_pubkey: &str,
-) -> String {
+pub fn authorized_keys_line(dest: &str, options: &[String], synthetic_pubkey: &str) -> String {
+    let mut cmd = String::from("ssh");
+    for opt in options {
+        cmd.push(' ');
+        cmd.push_str(&shell_quote(opt));
+    }
+    cmd.push_str(" -- ");
+    cmd.push_str(&shell_quote(dest));
+    // The remote command the workload sent, forwarded as a single argument. sshd sets
+    // $SSH_ORIGINAL_COMMAND in the forced command's environment (it is never concatenated
+    // into the command line), and the double quotes keep it one argv token. Those inner
+    // double quotes are escaped (`\"`) because the whole forced command is itself written
+    // inside the authorized_keys `command="…"` field — OpenSSH unescapes `\"` to `"`.
+    cmd.push_str(" \\\"$SSH_ORIGINAL_COMMAND\\\"");
     format!(
-        "restrict,pty,command=\"{bin} --dest {dest} --key {key}\" {pubkey}\n",
-        bin = reorigin_bin.display(),
-        dest = dest,
-        key = real_fp,
+        "restrict,pty,command=\"{cmd}\" {pubkey}\n",
+        cmd = cmd,
         pubkey = synthetic_pubkey.trim(),
     )
+}
+
+/// Single-quote a token for safe inclusion in the forced command's shell string. A
+/// single-quoted shell word is literal except for `'` itself, escaped as `'\''`.
+fn shell_quote(s: &str) -> String {
+    let mut q = String::with_capacity(s.len().saturating_add(2));
+    q.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            q.push_str("'\\''");
+        } else {
+            q.push(c);
+        }
+    }
+    q.push('\'');
+    q
 }
 
 /// Launch the bastion `sshd` in the foreground (`-D`), logging to stderr (`-e`),
@@ -238,7 +256,6 @@ mod tests {
             port: 7022,
             host_key: Path::new("/run/kennel/bastion/host_key"),
             pid_file: Path::new("/run/kennel/bastion/sshd.pid"),
-            agent_sock: Some(Path::new("/run/user/1000/kennel-ssh-agent.sock")),
             auth,
         }
     }
@@ -253,8 +270,8 @@ mod tests {
             "forced command needs $SSH_USER_AUTH"
         );
         assert!(
-            c.contains("SetEnv SSH_AUTH_SOCK=/run/user/1000/kennel-ssh-agent.sock"),
-            "agent reaches the forced command"
+            !c.contains("SSH_AUTH_SOCK"),
+            "no agent is handed to the forced command (the banned signing oracle, §7.10.1)"
         );
         assert!(c.contains("ListenAddress 127.0.42.1"));
         assert!(c.contains("Port 7022"));
@@ -297,25 +314,49 @@ mod tests {
     }
 
     #[test]
-    fn authorized_keys_line_bakes_in_dest_and_key_with_restrict_pty() {
+    fn authorized_keys_line_bakes_in_the_ssh_command_with_restrict_pty() {
         let line = authorized_keys_line(
-            Path::new("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
-            "github.com",
-            "SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt",
+            "git@github.com",
+            &["-i".to_owned(), "~/.ssh/id_gh".to_owned()],
             "ssh-ed25519 AAAASYNTHETIC synthetic-github\n",
         );
         assert!(
             line.starts_with("restrict,pty,command=\""),
             "restrict,pty per-key option set"
         );
-        assert!(line.contains("--dest github.com"), "destination baked in");
-        assert!(line.contains("--key SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt"));
+        // The forced command runs `ssh <options> -- <dest> "$SSH_ORIGINAL_COMMAND"` (the
+        // options and dest shell-quoted; the inner double quotes escaped for the
+        // authorized_keys `command="…"` field). No agent, no fingerprint.
+        assert!(
+            line.contains("command=\"ssh '-i' '~/.ssh/id_gh' -- 'git@github.com' \\\"$SSH_ORIGINAL_COMMAND\\\"\""),
+            "got {line}"
+        );
         assert!(
             line.trim_end()
                 .ends_with("ssh-ed25519 AAAASYNTHETIC synthetic-github"),
             "the synthetic pubkey"
         );
         assert!(line.ends_with('\n'));
+    }
+
+    #[test]
+    fn authorized_keys_line_shell_quotes_to_prevent_breakout() {
+        // An option carrying a single quote / shell metacharacters is single-quoted, so it
+        // cannot break out of the forced command (operator-signed, but defence in depth).
+        let line = authorized_keys_line(
+            "evil';rm -rf ~;'@host",
+            &["-o".to_owned(), "ProxyCommand=touch /tmp/x".to_owned()],
+            "ssh-ed25519 AAAA k\n",
+        );
+        // The dangerous tokens appear only inside single quotes; no bare `;` splits them.
+        assert!(
+            line.contains("'evil'\\'';rm -rf ~;'\\''@host'"),
+            "got {line}"
+        );
+        assert!(
+            line.contains("'-o' 'ProxyCommand=touch /tmp/x'"),
+            "got {line}"
+        );
     }
 
     #[test]

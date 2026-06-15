@@ -23,8 +23,8 @@
 //! a later increment (the template chain already overrides scalars).
 
 use crate::source::{
-    DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy, SshKey,
-    UnixAllow,
+    DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy,
+    SshDestination, UnixAllow,
 };
 use crate::PolicyError;
 use serde::{Deserialize, Serialize};
@@ -212,25 +212,25 @@ pub struct UnixAllowDelta {
     pub remove: Vec<UnixAllow>,
 }
 
-/// `[ssh.keys]` leaf deltas.
+/// `[ssh.destinations]` leaf deltas.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshLeaf {
-    /// `[[ssh.keys.add]]` / `[[ssh.keys.remove]]`.
+    /// `[[ssh.destinations.add]]` / `[[ssh.destinations.remove]]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keys: Option<SshKeyDelta>,
+    pub destinations: Option<SshDestinationDelta>,
 }
 
-/// An add/remove delta over SSH key grants.
+/// An add/remove delta over SSH destination grants.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SshKeyDelta {
+pub struct SshDestinationDelta {
     /// Entries to add.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub add: Vec<SshKey>,
-    /// Entries to remove, matched by `fingerprint`.
+    pub add: Vec<SshDestination>,
+    /// Entries to remove, matched by `dest`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub remove: Vec<SshKey>,
+    pub remove: Vec<SshDestination>,
 }
 
 /// `[exec.allow]` leaf deltas.
@@ -350,11 +350,13 @@ impl LeafPolicy {
             }
         }
         if let Some(ssh) = &self.ssh {
-            if let Some(d) = &ssh.keys {
+            if let Some(d) = &ssh.destinations {
                 for e in d.add.iter().chain(&d.remove) {
                     if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
-                        let who = e.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
-                        errs.push(format!("[[ssh.keys.*]] `{who}` is missing a `reason`"));
+                        let who = e.dest.as_deref().unwrap_or("<no-dest>");
+                        errs.push(format!(
+                            "[[ssh.destinations.*]] `{who}` is missing a `reason`"
+                        ));
                     }
                 }
             }
@@ -386,7 +388,7 @@ impl LeafPolicy {
         let ssh_ok = self
             .ssh
             .as_ref()
-            .is_none_or(|s| s.keys.as_ref().is_none_or(|k| k.remove.is_empty()));
+            .is_none_or(|s| s.destinations.as_ref().is_none_or(|d| d.remove.is_empty()));
         fs_ok && exec_ok && net_ok && unix_ok && ssh_ok
     }
 
@@ -468,16 +470,20 @@ impl LeafPolicy {
             }
         }
         if let Some(ssh) = &self.ssh {
-            if let Some(d) = &ssh.keys {
+            if let Some(d) = &ssh.destinations {
                 let target = effective.ssh.get_or_insert_with(Default::default);
                 for entry in &d.add {
-                    if !target.keys.iter().any(|e| ssh_key(e) == ssh_key(entry)) {
-                        target.keys.push(entry.clone());
+                    if !target
+                        .destinations
+                        .iter()
+                        .any(|e| ssh_dest(e) == ssh_dest(entry))
+                    {
+                        target.destinations.push(entry.clone());
                     }
                 }
                 target
-                    .keys
-                    .retain(|e| !d.remove.iter().any(|r| ssh_key(r) == ssh_key(e)));
+                    .destinations
+                    .retain(|e| !d.remove.iter().any(|r| ssh_dest(r) == ssh_dest(e)));
             }
         }
         // Scalar overrides (`[*.override]`): replace only the fields the leaf sets.
@@ -533,9 +539,9 @@ fn unix_key(a: &UnixAllow) -> &str {
     a.name.as_deref().or(a.real.as_deref()).unwrap_or("")
 }
 
-/// Unique key for an SSH key grant (the fingerprint).
-fn ssh_key(a: &SshKey) -> &str {
-    a.fingerprint.as_deref().unwrap_or("")
+/// Unique key for an SSH destination grant (the destination string).
+fn ssh_dest(a: &SshDestination) -> &str {
+    a.dest.as_deref().unwrap_or("")
 }
 
 /// Unique key for a device passthrough entry (the device path).

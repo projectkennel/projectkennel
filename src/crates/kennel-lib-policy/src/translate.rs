@@ -41,8 +41,8 @@ use crate::settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
-    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin,
-    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshRuntime,
+    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
@@ -533,37 +533,29 @@ fn translate_unix(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> UnixRu
 }
 
 /// Flatten the source `[ssh]` section into the settled [`SshRuntime`]: one
-/// [`SshGrant`] per `(host, fingerprint)` edge. Already compile-time-validated
-/// (`crate::ssh`), so the fingerprints and `hosts ⊆ net.allow:22` hold here.
+/// [`SshGrant`] per granted destination (`dest` + host-side `options`). Already
+/// compile-time-validated (`crate::ssh`), so every `dest` is non-empty here.
 fn translate_ssh(src: &SourcePolicy) -> SshRuntime {
     let Some(ssh) = &src.ssh else {
         return SshRuntime::default();
     };
-    let mut grants = Vec::new();
-    for key in &ssh.keys {
-        let Some(fp) = &key.fingerprint else { continue };
-        for host in &key.hosts {
-            grants.push(SshGrant {
-                host: host.clone(),
-                fingerprint: fp.clone(),
-            });
-        }
-    }
-    let known_hosts = ssh
-        .known_hosts
+    let grants = ssh
+        .destinations
         .iter()
-        .filter_map(|kh| match (&kh.host, &kh.key) {
-            (Some(host), Some(key)) => Some(SshKnownHostPin {
-                host: host.clone(),
-                key: key.clone(),
-            }),
-            _ => None,
+        .filter_map(|d| {
+            d.dest.as_ref().map(|dest| SshGrant {
+                dest: dest.clone(),
+                options: d.options.clone(),
+                // The synthetic keypair is minted by the compiler's I/O step (the CLI),
+                // post-translate and pre-sign; translation leaves these empty.
+                public_key: String::new(),
+                key_file: String::new(),
+            })
         })
         .collect();
     SshRuntime {
         allow_headless: ssh.allow_headless.unwrap_or(false),
         grants,
-        known_hosts,
     }
 }
 
@@ -650,23 +642,11 @@ fn translate_net(
         }
     }
 
-    // Implied rule: an `[[ssh.keys]]` host grant implies egress to that host on port 22. SSH leaves
-    // the kennel only over the egress gateway, so a granted host must be in the allowlist on :22 —
-    // deriving it here means the author writes the ssh grant once, not also a parallel [[net.allow]].
-    // Skipped if the author already named the host (their entry, possibly with extra ports, wins).
-    if let Some(ssh) = &src.ssh {
-        for key in &ssh.keys {
-            for host in &key.hosts {
-                if !allow_names.iter().any(|r| &r.name == host) {
-                    allow_names.push(NameRule {
-                        name: host.clone(),
-                        ports: vec![22],
-                        protocol: Protocol::Tcp,
-                    });
-                }
-            }
-        }
-    }
+    // No implied egress is derived from `[ssh]`: the SSH destination is reached by the
+    // host-side `ssh` the bastion runs as the operator (§7.10.4), entirely outside the
+    // kennel's egress. The only egress the kennel needs is the bastion's own loopback
+    // endpoint, which `kenneld` grants as a host-service literal at spawn — not a policy
+    // `net.allow` rule. So a destination never appears in the kennel's allowlist.
 
     let mut deny_invariant: Vec<NetRule> = Vec::new();
     if let Some(deny) = &net.deny {
@@ -1263,30 +1243,15 @@ mod tests {
 
     #[test]
     fn ssh_section_flattens_into_the_settled_runtime() {
-        use crate::source::{NetAllow, NetSection, SourcePolicy, SshKey, SshKnownHost, SshSection};
+        use crate::source::{SourcePolicy, SshDestination, SshSection};
         let src = SourcePolicy {
-            net: Some(NetSection {
-                allow: vec![NetAllow {
-                    name: Some("github.com".to_owned()),
-                    ports: vec![22],
-                    reason: Some("r".to_owned()),
-                    ..NetAllow::default()
-                }],
-                ..NetSection::default()
-            }),
             ssh: Some(SshSection {
                 allow_headless: Some(true),
-                keys: vec![SshKey {
-                    fingerprint: Some(
-                        "SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt".to_owned(),
-                    ),
-                    hosts: vec!["github.com".to_owned()],
+                destinations: vec![SshDestination {
+                    dest: Some("git@github.com".to_owned()),
+                    options: vec!["-i".to_owned(), "~/.ssh/id_github".to_owned()],
                     reason: Some("push".to_owned()),
                     threats: None,
-                }],
-                known_hosts: vec![SshKnownHost {
-                    host: Some("git.internal".to_owned()),
-                    key: Some("ssh-ed25519 AAAA".to_owned()),
                 }],
                 ..SshSection::default()
             }),
@@ -1295,14 +1260,9 @@ mod tests {
         let ssh = translate_ssh(&src);
         assert!(ssh.allow_headless);
         assert_eq!(ssh.grants.len(), 1);
-        assert_eq!(
-            ssh.grants.first().map(|g| g.host.as_str()),
-            Some("github.com")
-        );
-        assert_eq!(
-            ssh.known_hosts.first().map(|k| k.host.as_str()),
-            Some("git.internal")
-        );
+        let grant = ssh.grants.first().expect("one grant");
+        assert_eq!(grant.dest, "git@github.com");
+        assert_eq!(grant.options, vec!["-i", "~/.ssh/id_github"]);
         assert!(!ssh.is_empty());
         // No [ssh] ⇒ empty runtime, omitted from the canonical form (back-compat).
         assert!(translate_ssh(&SourcePolicy::default()).is_empty());
@@ -1938,44 +1898,21 @@ mod tests {
     }
 
     #[test]
-    fn ssh_host_implies_egress_allow_on_22() {
-        // An [[ssh.keys]] host grant derives a by-name :22 egress allow; the author writes no
-        // parallel [[net.allow]] (the implied-rule pass).
+    fn ssh_destination_derives_no_kennel_egress() {
+        // The SSH destination is reached host-side by the bastion's forced command, never by
+        // the kennel itself, so an [[ssh.destinations]] entry derives NO net.allow rule. The
+        // bastion endpoint is granted separately as a host-service literal at spawn (§7.10.4).
         let src = parse(
-            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[ssh.keys]]\nfingerprint = \"SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt\"\nhosts = [\"git.internal\"]\n",
+            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[ssh.destinations]]\ndest = \"git@git.internal\"\nreason = \"push\"\n",
         )
         .expect("parse");
         let net = translate_net(&src, &mut BTreeSet::new()).expect("translate");
-        let rule = net
-            .allow_names
-            .iter()
-            .find(|r| r.name == "git.internal")
-            .expect("ssh host derived into the egress allowlist");
-        assert_eq!(rule.ports, vec![22], "derived on port 22");
-    }
-
-    #[test]
-    fn an_authored_net_allow_for_an_ssh_host_is_not_duplicated() {
-        // If the author already named the host, their entry (with its own ports) wins — no dup.
-        let src = parse(
-            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[net.allow]]\nname = \"git.internal\"\nports = [22, 443]\nreason = \"git over ssh + https\"\n[[ssh.keys]]\nfingerprint = \"SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt\"\nhosts = [\"git.internal\"]\n",
-        )
-        .expect("parse");
-        let net = translate_net(&src, &mut BTreeSet::new()).expect("translate");
-        let matches: Vec<&NameRule> = net
-            .allow_names
-            .iter()
-            .filter(|r| r.name == "git.internal")
-            .collect();
-        assert_eq!(
-            matches.len(),
-            1,
-            "the author's entry is not duplicated by the implied rule"
-        );
-        assert_eq!(
-            matches.first().expect("one match").ports,
-            vec![22, 443],
-            "the author's ports are preserved"
+        assert!(
+            !net.allow_names
+                .iter()
+                .any(|r| r.name.contains("git.internal")),
+            "an ssh destination must NOT appear in the kennel egress allowlist; got {:?}",
+            net.allow_names
         );
     }
 

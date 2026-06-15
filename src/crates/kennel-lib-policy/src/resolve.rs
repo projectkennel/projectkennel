@@ -504,15 +504,10 @@ fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
         allow_headless: or(&c.allow_headless, &p.allow_headless),
         threats: or(&c.threats, &p.threats),
         // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
-        keys: if c.keys.is_empty() {
-            p.keys.clone()
+        destinations: if c.destinations.is_empty() {
+            p.destinations.clone()
         } else {
-            c.keys.clone()
-        },
-        known_hosts: if c.known_hosts.is_empty() {
-            p.known_hosts.clone()
-        } else {
-            c.known_hosts.clone()
+            c.destinations.clone()
         },
     }
 }

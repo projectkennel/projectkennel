@@ -79,10 +79,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-bin-ssh-reorigin"
-version = "0.1.0"
-
-[[package]]
 name = "kennel-lib-audit"
 version = "0.1.0"
 dependencies = [

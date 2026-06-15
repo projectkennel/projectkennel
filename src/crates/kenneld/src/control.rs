@@ -473,7 +473,7 @@ mod tests {
         round_trip_response(&Response::AuthorizedKeys { lines: Vec::new() });
         round_trip_response(&Response::AuthorizedKeys {
             lines: vec![
-                "restrict,pty,command=\"/opt/kennel/bin/kennel-bin-ssh-reorigin --dest github.com --key SHA256:AAA\" ssh-ed25519 AAAASYN ka\n".to_owned(),
+                "restrict,pty,command=\"ssh -- 'git@github.com' \\\"$SSH_ORIGINAL_COMMAND\\\"\" ssh-ed25519 AAAASYN ka\n".to_owned(),
             ],
         });
     }

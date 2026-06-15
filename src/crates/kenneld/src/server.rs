@@ -157,8 +157,6 @@ pub struct BastionSetup {
     /// The safe-owned runtime dir for the bastion's host key, config, and
     /// `authorized_keys` (under `$XDG_RUNTIME_DIR`, never world-writable).
     pub dir: PathBuf,
-    /// The host-side `kennel-bin-ssh-reorigin` the bastion's forced commands invoke.
-    pub reorigin_bin: PathBuf,
     /// The in-kennel path of `facade-ssh` (each synthetic `config`
     /// stanza's `ProxyCommand`); also the host path bound into the kennel view.
     pub ssh_bin: PathBuf,
@@ -166,10 +164,6 @@ pub struct BastionSetup {
     pub listen: IpAddr,
     /// The bastion's port.
     pub port: u16,
-    /// The host-side agent socket holding the user's real keys (`$SSH_AUTH_SOCK`),
-    /// handed to the forced command so it can sign the outbound hop. `None` ⇒ the
-    /// helper finds no key and fails closed.
-    pub agent_sock: Option<PathBuf>,
     /// The root-owned `AuthorizedKeysCommand` the bastion vends keys through
     /// (production, §7.10.7): it queries this running daemon for the live bindings,
     /// so no `authorized_keys` file is written. `None` falls back to a static
@@ -230,6 +224,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         kennel: &str,
         ssh: &kennel_lib_policy::SshRuntime,
         shim_root: &Path,
+        policy_ssh_dir: &Path,
     ) -> Result<crate::SshPrep, String> {
         let Some(setup) = self.identity.bastion.as_ref() else {
             return Ok(crate::SshPrep::default());
@@ -244,31 +239,43 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         let bastion = guard.get_or_insert_with(|| {
             crate::bastion::Bastion::new(crate::bastion::BastionConfig {
                 dir: setup.dir.clone(),
-                reorigin_bin: setup.reorigin_bin.clone(),
                 listen: setup.listen,
                 port: setup.port,
-                agent_sock: setup.agent_sock.clone(),
                 akc: setup.akc.clone(),
             })
         });
 
+        // The synthetic keypairs were minted at compile time and persist beside the signed
+        // artefact in `<policy-dir>/ssh/`; the public half is signature-pinned in each grant.
+        // Stage a copy of the private key for the kennel's `~/.ssh`, and register the edge
+        // with the SIGNED public key (never a key minted here) + the host-side `options`.
         let staging = setup.dir.join("synthetic").join(kennel);
         std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
         let mut host_files: Vec<(String, String)> = Vec::new();
         for grant in &ssh.grants {
-            let key_file = format!("id_{}", grant.host);
-            let comment = format!("kennel {kennel} -> {}", grant.host);
-            let pub_line = crate::ssh::mint_synthetic_key(&staging, &key_file, &comment)
+            if grant.public_key.is_empty() || grant.key_file.is_empty() {
+                return Err(format!(
+                    "ssh grant for `{}` has no minted key (recompile the policy with \
+                     `kennel policy compile`)",
+                    grant.dest
+                ));
+            }
+            let key_file = grant.key_file.clone();
+            crate::ssh::stage_synthetic_key(policy_ssh_dir, &staging, &key_file)
                 .map_err(|e| e.to_string())?;
             bastion
                 .register(crate::bastion::Edge {
                     kennel: kennel.to_owned(),
-                    dest: grant.host.clone(),
-                    real_fp: grant.fingerprint.clone(),
-                    synthetic_pub: pub_line,
+                    dest: grant.dest.clone(),
+                    options: grant.options.clone(),
+                    synthetic_pub: grant.public_key.clone(),
                 })
                 .map_err(|e| e.to_string())?;
-            host_files.push((grant.host.clone(), key_file));
+            // The synthetic `~/.ssh/config` stanza is keyed by the host the workload types
+            // (`ssh git@github.com` → `Host github.com`): OpenSSH matches `Host` against the
+            // hostname with any `user@` stripped, so the config alias is the host part while
+            // the bastion's forced command holds the full `dest`.
+            host_files.push((ssh_host_alias(&grant.dest).to_owned(), key_file));
         }
         let host_pub = bastion
             .host_pub()
@@ -555,6 +562,13 @@ const MAX_KENNEL_NAME: usize = 64;
 /// # Errors
 /// A human-readable reason if the name is empty, too long, or contains a character
 /// outside the grammar (in particular `/`, `.`, NUL, whitespace, or control bytes).
+/// The hostname part of an SSH destination — the `user@` prefix stripped. This is the
+/// alias the synthetic `~/.ssh/config` keys its `Host` stanza on, because OpenSSH matches
+/// `Host` against the hostname with any user removed (`ssh git@github.com` → `github.com`).
+fn ssh_host_alias(dest: &str) -> &str {
+    dest.rsplit_once('@').map_or(dest, |(_, host)| host)
+}
+
 fn validate_kennel_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("kennel name must not be empty".to_owned());
@@ -680,15 +694,21 @@ pub fn run_kennel<P, L>(
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     };
-    // Prepare SSH egress (§7.10): mint synthetic keys, register the edges with the
-    // per-user bastion, and build the synthetic ~/.ssh for the view. The ~/.ssh is
-    // rooted at the constructed-view HOME (the plan's shim root) when there is one.
+    // Prepare SSH egress (§7.10): stage the compile-time synthetic keys, register the
+    // edges with the per-user bastion, and build the synthetic ~/.ssh for the view. The
+    // ~/.ssh is rooted at the constructed-view HOME (the plan's shim root) when there is
+    // one; the persisted keypairs live in `<policy-dir>/ssh/` beside the settled artefact.
     let shim_root = loaded
         .plan
         .view
         .as_ref()
         .map_or_else(|| shared.identity.home.clone(), |v| v.shim_root.clone());
-    let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root) {
+    let policy_ssh_dir = req
+        .policy
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("ssh");
+    let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root, &policy_ssh_dir) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
         Err(reason) => {
@@ -1429,16 +1449,14 @@ mod tests {
         // Stand up a bastion with one live edge (no sshd) and query it as the AKC would.
         let mut bastion = Bastion::new(BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
-            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
             listen: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 7022,
-            agent_sock: None,
             akc: None,
         });
         bastion.push_edge_for_test(Edge {
             kennel: "ka".to_owned(),
-            dest: "github.com".to_owned(),
-            real_fp: "SHA256:AAAa1EZ7oO0qfsA5OSDosRRaFD9evYHhSlcrDPTVoZw".to_owned(),
+            dest: "git@github.com".to_owned(),
+            options: Vec::new(),
             synthetic_pub: "ssh-ed25519 AAAASYN_A ka".to_owned(),
         });
         *s.bastion.lock().expect("bastion lock") = Some(bastion);
@@ -1450,7 +1468,7 @@ mod tests {
         let line = lines.first().map(String::as_str).unwrap_or_default();
         assert_eq!(lines.len(), 1, "one matching edge");
         assert!(
-            line.contains("--dest github.com") && line.contains("AAAASYN_A"),
+            line.contains("-- 'git@github.com'") && line.contains("AAAASYN_A"),
             "got {line}"
         );
 

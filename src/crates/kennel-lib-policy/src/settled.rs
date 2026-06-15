@@ -489,40 +489,67 @@ pub struct SshRuntime {
     /// touch (loud, threat-tagged at compile time; §7.10.6).
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_headless: bool,
-    /// The granted `(destination, real-key)` edges — one bastion forced command each.
+    /// The granted destinations — one minted synthetic key + one bastion forced command
+    /// each (§7.10.3). The synthetic key is the capability the kennel authenticates with;
+    /// the destination + options are realised host-side by the bastion, as the operator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<SshGrant>,
-    /// Host-key pins for granted destinations the operator's store lacks (§7.10.7).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub known_hosts: Vec<SshKnownHostPin>,
 }
 
 impl SshRuntime {
-    /// Whether there is nothing to realise (no grant, no pin, default headless).
+    /// Whether there is nothing to realise (no grant, default headless).
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        !self.allow_headless && self.grants.is_empty() && self.known_hosts.is_empty()
+        !self.allow_headless && self.grants.is_empty()
     }
 }
 
-/// One granted SSH edge: a destination reachable with a specific real key.
+impl SshGrant {
+    /// A stable, filename-safe id for this destination's synthetic keypair under
+    /// `<policy-dir>/ssh/`. Derived from `dest` (not its index), so re-compiling a policy
+    /// whose destinations were reordered reuses the same persisted keys. The form is
+    /// `ssh-<16 hex>`: a non-cryptographic [`std::hash`] digest of `dest` — this is only a
+    /// filename (collision merely shares a key file between two literally-distinct dests,
+    /// which the compiler avoids by also de-duplicating destinations), not a security
+    /// boundary, so no `sha2` dependency is pulled in for it.
+    #[must_use]
+    pub fn key_id(&self) -> String {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.dest.hash(&mut h);
+        format!("ssh-{:016x}", h.finish())
+    }
+}
+
+/// One granted SSH destination: a host the kennel may reach over the bastion.
+///
+/// The synthetic keypair is minted at **compile time** (`kennel policy compile`), once
+/// per `(policy, destination)`, and persisted beside the artifact in the policy dir; the
+/// public half is recorded here and so is **signature-pinned** (the akc trusts only a key
+/// whose public half matches a signed grant), while the private half lives in a file the
+/// kennel's `~/.ssh` is materialised from.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshGrant {
-    /// The destination host (`⊆ net.allow:22`, checked at compile time).
-    pub host: String,
-    /// The real key's `SHA256:` fingerprint; the key itself lives host-side only.
-    pub fingerprint: String,
-}
-
-/// A pinned host key for a granted destination.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SshKnownHostPin {
-    /// The destination hostname.
-    pub host: String,
-    /// The host key (`ssh-ed25519 AAAA…`).
-    pub key: String,
+    /// The SSH destination the host-side `ssh` connects to (`git@github.com`), fixed by
+    /// which synthetic key authenticated — never parsed from the wire.
+    pub dest: String,
+    /// Host-side `ssh` invocation options, prepended verbatim (as argv tokens) before
+    /// `<dest>` in the bastion's forced command (`-i …`, `-o …`, `-p …`). They run as the
+    /// operator and name which real key/port/config the outbound hop uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// The synthetic public key bound to this destination (`ssh-ed25519 AAAA…`), pinned
+    /// by the policy signature: the akc authorises an offered key only if its public half
+    /// matches this. Empty until the compiler mints the keypair (an unsigned/in-memory
+    /// compile may leave it empty, in which case no SSH route is realised).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub public_key: String,
+    /// The basename of the minted keypair under `<policy-dir>/ssh/` (a stable, filename-
+    /// safe id derived from `dest`). The private half is `<key_file>`, the public half
+    /// `<key_file>.pub`; the kennel's `~/.ssh` is materialised from the private half.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_file: String,
 }
 
 /// The per-kennel `AF_UNIX` socket shims `kenneld` realises (`docs/design/07-6-afunix.md` §7.6).
