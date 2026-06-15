@@ -74,6 +74,7 @@ name = "kennel-bin-init"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-binder",
+ "kennel-lib-config",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
 ]

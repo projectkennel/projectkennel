@@ -107,12 +107,32 @@ fn run() -> io::Result<u8> {
     let bytes = pull_plan(&conn)?;
     let sup = decode_supervision(&bytes)
         .map_err(|e| io::Error::other(format!("supervision-half decode failed: {e:?}")))?;
+    // The spawn-path tracer (the `log_level` knob): kennel-bin-init runs post-`pivot_root` with an
+    // empty argv/envp and cannot read system.toml, so kenneld threaded the level into the
+    // supervision-half it just pulled. init's stderr is inherited (→ kenneld's journal), so these
+    // lines land beside kenneld's own. `from_u8` clamps an unknown value to Info.
+    let level = match sup.log_level {
+        1 => kennel_lib_config::LogLevel::Debug,
+        2 => kennel_lib_config::LogLevel::Trace,
+        _ => kennel_lib_config::LogLevel::Info,
+    };
+    let tr = kennel_lib_config::Tracer::new("kennel-bin-init", level);
+    tr.step(&format!(
+        "pulled supervision: program={} argv={:?} facades={}",
+        sup.program.display(),
+        sup.argv,
+        sup.aux.len()
+    ));
     // One synthesised environment, shared by the facades, the workload, and any facade the
     // supervisor re-forks (execve replaces env, so a borrow is enough). Built once here.
     let envp = env_cstrings(&sup.env)?;
     // The interactive pty return socket (when `sup.interactive`) was placed at `PTY_RETURN_FD`
     // by the factory before our `fexecve` — it is not pulled over the bus.
-    let (workload_pid, facade_pids) = spawn_all(&conn, &sup, &envp)?;
+    let (workload_pid, facade_pids) = spawn_all(&conn, &sup, &envp, tr)?;
+    tr.step(&format!(
+        "spawned workload pid={workload_pid} + {} facade(s); entering supervise loop",
+        facade_pids.len()
+    ));
     supervise(&conn, workload_pid, &sup, &envp, &facade_pids)
 }
 
@@ -164,6 +184,7 @@ fn spawn_all(
     conn: &Connection,
     sup: &Supervision,
     envp: &[CString],
+    tr: kennel_lib_config::Tracer,
 ) -> io::Result<(i32, Vec<i32>)> {
     let groups = sup.groups.as_deref();
     let envp_ref = borrow(envp);
@@ -172,6 +193,7 @@ fn spawn_all(
     //    are returned in `sup.aux` order so the supervisor can map a death back to its spec.
     let mut facade_pids = Vec::with_capacity(sup.aux.len());
     for facade in &sup.aux {
+        tr.detail(&format!("forking facade {}", facade.path.display()));
         facade_pids.push(fork_facade(facade, sup, &envp_ref)?);
     }
     // Best-effort lifecycle report: kenneld audits it (the bus, not a reply, is the
@@ -183,6 +205,15 @@ fn spawn_all(
     );
 
     // 2. The workload: dropped to the operator AND confined.
+    tr.step(&format!(
+        "spawning workload {} (pinned-fd={}, interactive={}, landlock {}fs/{}net, seccomp {})",
+        sup.program.display(),
+        sup.workload_fd_pinned,
+        sup.interactive,
+        sup.landlock_fs.len(),
+        sup.landlock_net.len(),
+        sup.seccomp_deny.len()
+    ));
     notify(conn, lifecycle::NOTIFY_WORKLOAD_EXEC, &[]);
     // Resolve a bare program name (no `/`) against the workload's synthesised `PATH`,
     // inside the view (we are post-pivot). `execve(2)` itself never searches PATH, so
@@ -572,6 +603,7 @@ mod tests {
             interactive: false,
             workload_fd_pinned: false,
             ttl_seconds: None,
+            log_level: 0,
         };
         let bytes = kennel_lib_spawn::wire::encode_supervision(&sup);
         let back = decode_supervision(&bytes).expect("decode");

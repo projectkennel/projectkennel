@@ -878,6 +878,7 @@ fn bring_up<P: Privileged + Sync>(
         ctx,
         &loopback,
         &egress_bytes,
+        tracer.level_u8(),
         state,
     )?;
     tracer.step(&format!(
@@ -946,6 +947,7 @@ fn bring_up<P: Privileged + Sync>(
 /// node 0). The factory exits as soon as it has reported the pid, so it is reaped here, and the
 /// orphaned init has reparented to kenneld (the `set_child_subreaper`) before we return.
 #[allow(clippy::similar_names)] // drop_uid / drop_gid are the domain names
+#[allow(clippy::too_many_arguments)] // one cohesive factory call; the args are the construction inputs
 fn construct_via_factory<P: Privileged + Sync>(
     privileged: &P,
     plan: &Plan,
@@ -953,13 +955,14 @@ fn construct_via_factory<P: Privileged + Sync>(
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     egress_bytes: &[u8],
+    log_level: u8,
     state: &mut Provision,
 ) -> Result<(Child, i32, std::os::fd::OwnedFd, Vec<u8>), Error> {
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
     let construction = construction_half_from(plan, ctx, loopback);
-    let supervision = supervision_from(plan, command, drop_uid, drop_gid);
+    let supervision = supervision_from(plan, command, drop_uid, drop_gid, log_level);
     let half_bytes = kennel_lib_spawn::wire::encode_construction(&construction);
     let supervision_bytes = kennel_lib_spawn::wire::encode_supervision(&supervision);
 
@@ -1023,6 +1026,7 @@ fn supervision_from(
     command: &Command,
     drop_uid: u32,
     drop_gid: u32,
+    log_level: u8,
 ) -> kennel_lib_spawn::Supervision {
     let program = PathBuf::from(command.get_program());
     let mut argv = vec![command.get_program().to_string_lossy().into_owned()];
@@ -1061,6 +1065,8 @@ fn supervision_from(
         // kennel-bin-init runs this timer and, at expiry, makes the blocking NOTIFY_TTL_EXPIRED
         // call to kenneld (which freezes + decides). The action is decided kenneld-side.
         ttl_seconds: plan.ttl_seconds,
+        // The verbosity kennel-bin-init traces at — it cannot read system.toml post-pivot.
+        log_level,
     }
 }
 

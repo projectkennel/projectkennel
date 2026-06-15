@@ -198,6 +198,14 @@ impl Tracer {
         self.level.verbose()
     }
 
+    /// This tracer's level as a `u8` (info=0, debug=1, trace=2) — for threading the
+    /// verbosity over a wire to a component that cannot read `system.toml` itself
+    /// (`kennel-bin-init`, post-`pivot_root`, via the supervision-half).
+    #[must_use]
+    pub const fn level_u8(self) -> u8 {
+        self.level as u8
+    }
+
     /// Emit a `Debug`-level step line (a spawn-path milestone). No-op at `Info`.
     pub fn step(self, msg: &str) {
         if self.level >= LogLevel::Debug {

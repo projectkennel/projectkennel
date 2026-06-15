@@ -662,6 +662,7 @@ pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
             w.u64(secs);
         }
     }
+    w.u8(s.log_level);
 
     w.buf
 }
@@ -744,6 +745,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
     let interactive = r.bool()?;
     let workload_fd_pinned = r.bool()?;
     let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
+    let log_level = r.u8()?;
 
     if r.pos != buf.len() {
         return Err(PlanWireError::TooLarge); // trailing garbage
@@ -766,6 +768,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         interactive,
         workload_fd_pinned,
         ttl_seconds,
+        log_level,
     })
 }
 
@@ -1056,6 +1059,7 @@ mod tests {
             interactive: true,
             workload_fd_pinned: false,
             ttl_seconds: Some(3600),
+            log_level: 0,
         }
     }
 
@@ -1088,6 +1092,7 @@ mod tests {
             interactive: false,
             workload_fd_pinned: false,
             ttl_seconds: None,
+            log_level: 0,
         };
         let back = decode_supervision(&encode_supervision(&s)).expect("decode");
         assert_eq!(back, s);

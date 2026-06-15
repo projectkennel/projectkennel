@@ -122,8 +122,22 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    to run as uid 0 is NOT taken from the wire — see step 1b). It arrives
     //    `MSG_CMSG_CLOEXEC`; the construction child re-homes it at `PTY_RETURN_FD` (clearing
     //    close-on-exec) just before `fexecve` so the argv-less `kennel-bin-init` inherits it there.
+    // The spawn-path tracer (the `log_level` knob): resolved from the root-owned deployment
+    // config, the same cascade the privhelper already reads for `kennel-bin-init` below. The
+    // privhelper's stderr is inherited from kenneld, so these lines reach the same journal. The
+    // child trace lines below are especially load-bearing: the construction child's only failure
+    // signal upstream is its `_exit(127)`, so a step trace is the sole way to see WHERE it died.
+    let tracer = kennel_lib_config::Deployment::load().map_or_else(
+        |_| kennel_lib_config::Tracer::new("kennel-privhelper", kennel_lib_config::LogLevel::Info),
+        |d| kennel_lib_config::Tracer::new("kennel-privhelper", d.log_level()),
+    );
+
     let mut buf = vec![0u8; RECV_CAP];
     let (n, mut wire_fds) = recv_with_fds(chan, &mut buf)?;
+    tracer.step(&format!(
+        "construct: received datagram ({n} bytes, {} fds)",
+        wire_fds.len()
+    ));
     let msg = buf.get(..n).unwrap_or(&[]);
     let ch_len = msg
         .get(0..4)
@@ -160,8 +174,17 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let Some(scope) = crate::alloc::load(real_uid()) else {
         return Err(io::Error::other("caller has no reserved scope"));
     };
+    tracer.step(&format!(
+        "construct: adding {} host loopback address(es) (ctx {})",
+        half.loopback.len(),
+        half.ctx
+    ));
     add_loopback_addresses(&half.loopback, half.ctx, &scope)?;
     if !egress_bytes.is_empty() {
+        tracer.step(&format!(
+            "construct: attaching egress BPF ({} bytes) to cgroup",
+            egress_bytes.len()
+        ));
         let payload = EgressPayload::decode(egress_bytes)
             .map_err(|e| io::Error::other(format!("egress payload decode: {e:?}")))?;
         let resp = crate::exec::attach_egress_programs(&half.cgroup, &payload);
@@ -230,6 +253,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // 127 at this boundary is undebuggable, and the construction child has no other channel.
         // Wait until the parent has written our identity maps (so the kennel's uid 0 is
         // mappable); abort closed otherwise.
+        tracer.step("construct: child cloned, awaiting maps-ready ack from parent");
         if recv_ack(ready_r.as_fd()).ok().flatten() != Some(ACK_PROCEED) {
             eprintln!("kennel-privhelper: construction child: maps-ready ack not received");
             return;
@@ -244,6 +268,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             eprintln!("kennel-privhelper: construction child: setuid(0) in userns: {e}");
             return;
         }
+        tracer.step("construct: child is kennel uid 0; building view/binderfs");
         // All privileged construction runs here, as the kennel's uid 0, BEFORE the hand-off
         // — so the surfaces are root-owned and no operator code runs as userns-0. A failure
         // returns, tripping the _exit(127) backstop (no half-built kennel runs the workload).
@@ -251,6 +276,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             eprintln!("kennel-privhelper: construction child: build_kennel: {e}");
             return;
         }
+        tracer.step("construct: view built; placing handoff fds + fexecve kennel-bin-init");
         // Place the descriptors `kennel-bin-init` inherits at fixed numbers (`BOOT_SYNC_FD`,
         // `PTY_RETURN_FD` for an interactive run, and `WORKLOAD_FD` for a sha256-pinned
         // workload), returning the init-binary fd to exec.
@@ -282,6 +308,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid({op_uid}): {e}")))?;
     }
     let init_pid = clone_pid1(namespaces, child)?;
+    tracer.step(&format!(
+        "construct: cloned PID 1 (host pid {init_pid}); writing identity maps"
+    ));
 
     // 4. Restore the parent's **effective** uid to 0 (undo the pre-clone operator drop) so the
     //    setgid/setuid below regain `CAP_SETGID`/`CAP_SETUID`; the saved uid is still 0, so this
@@ -315,6 +344,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 
     // "build": maps are written, so the child may become uid 0, construct the binderfs, and
     // `fexecve` `kennel-bin-init` (which then blocks on the boot-sync socket before pulling).
+    tracer.step("construct: identity maps written; releasing child to build + fexecve");
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
     drop(ready_w);
 
@@ -322,6 +352,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (now reachable via
     // /proc/<pid>/root), and signals "go". With that off our hands, the factory's job is done.
     send_with_raw_fds(chan, &init_pid.to_le_bytes(), &[daemon_sync.as_raw_fd()])?;
+    tracer.step(&format!(
+        "construct: reported init pid {init_pid} + boot-sync socket to kenneld; factory done"
+    ));
 
     // 5. Done. The factory's whole job was to build the kennel, write the maps, and report the init
     //    pid (plus the boot-sync socket) — `kennel-bin-init` is now PID 1 of the new namespace and an
