@@ -179,6 +179,20 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         half.loopback.len(),
         half.ctx
     ));
+    // Diagnostic (trace): the effective uid + capability words at the host-side add, so an
+    // EPERM here is attributable to euid/caps rather than the netns or the address itself.
+    {
+        let euid = kennel_lib_syscall::unistd::effective_uid();
+        let caps = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let cap_eff = caps
+            .lines()
+            .find(|l| l.starts_with("CapEff:"))
+            .unwrap_or("CapEff: ?");
+        let addrs: Vec<String> = half.loopback.iter().map(|l| l.addr.to_string()).collect();
+        tracer.detail(&format!(
+            "construct: euid={euid} {cap_eff} addrs={addrs:?} ns=host-add"
+        ));
+    }
     add_loopback_addresses(&half.loopback, half.ctx, &scope)?;
     if !egress_bytes.is_empty() {
         tracer.step(&format!(

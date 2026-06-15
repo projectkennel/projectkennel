@@ -679,4 +679,55 @@ mod tests {
         let u = User::load_from_dirs(&[user]).expect("load");
         assert_eq!(u.system_key_dirs(), vec![PathBuf::from("/org/keys")]);
     }
+
+    // ---- LogLevel / Tracer: the spawn-path verbosity contract ----
+
+    #[test]
+    fn log_level_is_ordered_info_debug_trace() {
+        // Consumers gate on `level >= Debug`, so the ordering must be Info < Debug < Trace.
+        assert!(LogLevel::Info < LogLevel::Debug);
+        assert!(LogLevel::Debug < LogLevel::Trace);
+    }
+
+    #[test]
+    fn log_level_default_is_info() {
+        assert_eq!(LogLevel::default(), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_verbose_is_debug_and_above() {
+        assert!(!LogLevel::Info.verbose());
+        assert!(LogLevel::Debug.verbose());
+        assert!(LogLevel::Trace.verbose());
+    }
+
+    #[test]
+    fn log_level_u8_maps_info0_debug1_trace2() {
+        // The wire byte threaded to kennel-bin-init (which cannot read system.toml).
+        assert_eq!(Tracer::new("t", LogLevel::Info).level_u8(), 0);
+        assert_eq!(Tracer::new("t", LogLevel::Debug).level_u8(), 1);
+        assert_eq!(Tracer::new("t", LogLevel::Trace).level_u8(), 2);
+    }
+
+    #[test]
+    fn tracer_on_tracks_verbose() {
+        assert!(!Tracer::new("t", LogLevel::Info).on());
+        assert!(Tracer::new("t", LogLevel::Debug).on());
+        assert!(Tracer::new("t", LogLevel::Trace).on());
+    }
+
+    #[test]
+    fn log_level_deserialises_lowercase_from_toml() {
+        // The system.toml knob is `log_level = "debug"` (lowercase), via RawDeployment.
+        #[derive(serde::Deserialize)]
+        struct Holder {
+            log_level: LogLevel,
+        }
+        let h: Holder = basic_toml::from_str("log_level = \"trace\"").expect("parse trace");
+        assert_eq!(h.log_level, LogLevel::Trace);
+        let h: Holder = basic_toml::from_str("log_level = \"debug\"").expect("parse debug");
+        assert_eq!(h.log_level, LogLevel::Debug);
+        let h: Holder = basic_toml::from_str("log_level = \"info\"").expect("parse info");
+        assert_eq!(h.log_level, LogLevel::Info);
+    }
 }

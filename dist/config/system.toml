@@ -24,6 +24,13 @@ sshd = "/usr/sbin/sshd"
 # traces each orchestration + construction + init-seal step; "trace" adds per-step
 # parameters. Set this when debugging a kennel that fails to spawn — it makes the
 # YAMA/cgroup/AppArmor/userns/Landlock/seccomp path legible instead of a black box.
+#
+# The trace spans TWO journals, by where each process lives:
+#   - the kenneld daemon  -> the USER journal:  journalctl --user -u kenneld.service
+#   - the privhelper factory, the construction child, kennel-bin-init, and the facades
+#     (everything inside the kennel) -> the SYSTEM journal:  sudo journalctl -t kenneld
+# Read both, merged by time, to see a spawn end to end; reading only the user journal
+# makes kennel-bin-init look silent when it is not.
 # log_level = "debug"
 
 # Explicit per-binary overrides (absolute paths; no ~ expansion). Uncomment to
