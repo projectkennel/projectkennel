@@ -1,0 +1,67 @@
+# ============================================================================
+# Suite case: net-bind-deny-wins — host mode, BPF inbound BIND ACL, deny beats allow.
+#
+# Proves the §7.5.7 [net.bpf].bind ACL: a workload bind() is gated at the cgroup bind4
+# hook, deny-first + default-deny. The author writes a broad allow and a specific deny:
+#
+#     [[net.bpf.bind.allow]]  cidr = "*"            ports = [18099]   # any addr, that port
+#     [[net.bpf.bind.deny]]   cidr = "127.0.0.2/32"                   # ... except this addr
+#
+# deny-first (kennel.bpf.h kennel_bind_decide_v4: the bind_deny trie is consulted before
+# bind_allow) means a bind to the denied address is refused even though "*:18099" would
+# otherwise allow it. This is the bind-side mirror of net-host-deny-wins (connect).
+#
+# Host mode: the kennel shares the host net stack, so both loopback addresses are real and
+# bindable host-side — the ONLY reason the denied bind fails is the BPF ACL. No fixture is
+# needed: the workload does the binding itself. The workload asserts:
+#   1. bind 127.0.0.3:18099 (allowed by *:18099, not denied) SUCCEEDS;
+#   2. bind 127.0.0.2:18099 (allow-covered but explicitly denied) FAILS (EACCES/EPERM).
+# Exit 0 ⇒ the bind ACL denies a specific address while *:PORT is otherwise allowed.
+# ============================================================================
+
+template_name = "net-bind-deny-wins"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "host"
+reason = "e2e: prove the [net.bpf].bind ACL denies a specific address while *:PORT is allowed"
+
+[net.bpf.bind]
+allow = [{ cidr = "*", ports = [18099], reason = "any address on the test port" }]
+deny = [{ cidr = "127.0.0.2/32", reason = "the one address the allow must not reach" }]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    python3 -c "
+import socket
+# Allowed: 127.0.0.3 is covered by the *:PORT bind-allow and NOT denied -> bind must succeed.
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('127.0.0.3', 18099))
+    s.close()
+except OSError as e:
+    raise SystemExit('allowed bind 127.0.0.3:18099 should succeed but did not: %s' % e)
+# Denied: 127.0.0.2 is allow-covered by *:PORT but explicitly denied -> deny wins, bind must fail.
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('127.0.0.2', 18099))
+    raise SystemExit('denied bind 127.0.0.2:18099 succeeded -> deny did NOT win')
+except OSError:
+    pass
+finally:
+    s.close()
+"
+    """,
+]
