@@ -1,0 +1,72 @@
+# ============================================================================
+# Suite case: ssh-egress — the full SSH re-origination cascade (§7.10).
+#
+# Proves the transport leg end to end through the real `kennel run`: the workload's
+# `ssh` → the synthetic ~/.ssh/config → ProxyCommand facade-ssh → binder CONNECT_INET →
+# kenneld → host-netproxy dials the bastion (a host_service, like the socks5 facade) →
+# bastion sshd → kennel-akc vends the forced command keyed by the synthetic key →
+# `ssh <options> -- <dest>` runs AS THE OPERATOR → reaches the destination sshd, whose
+# forced command echoes a marker. Exit 0 ⇒ the whole cascade held.
+#
+# There is NO agent anywhere: the host-side `ssh` signs with the operator's own real key,
+# named by `options` (`-i …`). The destination is reached host-side, outside the kennel's
+# egress — so the kennel needs no net.allow for it (only the bastion endpoint, which
+# kenneld grants as a host_service).
+#
+# The keypair for the destination is minted at compile time into <policy-dir>/ssh/ and
+# pinned (public half) into the signed grant; the runner stages the rest:
+#   - a destination sshd on 127.0.0.1:<port> accepting the operator's real key, with a
+#     forced command that prints SSH_EGRESS_OK;
+#   - the operator's real key + the dest host key in ~/.ssh (so the bastion's outbound
+#     ssh signs and verifies). The `<DEST_PORT>`/`<REAL_KEY>` tokens below are rewritten
+#     by src/tools/policy-e2e.sh before compile (they are host-run-specific).
+# ============================================================================
+
+template_name = "ssh-egress"
+template_version = "1"
+template_base = "base-confined@v1"
+
+# Constrained egress: the kennel reaches only the bastion (a host_service kenneld grants);
+# the real destination is reached host-side by the bastion, not by the kennel.
+[net]
+mode = "constrained"
+
+[fs]
+read = [
+    "/usr/**", "/lib/**", "/lib64/**",
+    "/etc/ssl/**", "/etc/pki/**",
+    "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+]
+
+[exec]
+shell = "/bin/sh"
+allow = [
+    "/bin/sh", "/bin/dash",
+    "/usr/bin/ssh", "/usr/bin/grep", "/usr/bin/test", "/usr/bin/[",
+    # facade-ssh is the ProxyCommand the synthetic config invokes; it is bound into the
+    # view by kenneld at the deployment path, granted here so the stock client can exec it.
+    "/usr/libexec/kennel/facade-ssh", "__FACADE_SSH__",
+]
+
+[ssh]
+[[ssh.destinations]]
+# Rewritten by the runner: dest user + the host-side options that name the operator's
+# real key, the destination port, and the dest host-key pin (all host-side, never the
+# kennel's choice).
+dest = "__DEST_USER__@127.0.0.1"
+options = [
+    "-p", "__DEST_PORT__",
+    "-i", "__REAL_KEY__",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "StrictHostKeyChecking=yes",
+    "-o", "UserKnownHostsFile=__DEST_KNOWN_HOSTS__",
+]
+reason = "the full-cascade e2e proves SSH re-origination through the bastion to a destination"
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    test "$(ssh -o BatchMode=yes 127.0.0.1 whoami 2>/dev/null)" = SSH_EGRESS_OK
+    """,
+]

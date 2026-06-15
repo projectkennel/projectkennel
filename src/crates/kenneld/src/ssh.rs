@@ -66,6 +66,11 @@ pub struct SshParams<'a> {
     /// reaches the bastion by an `INet` `CONNECT_INET` transaction to kenneld over binder (§7.5),
     /// receiving the connection fd and splicing it to stdin/stdout.
     pub ssh_bin: &'a str,
+    /// The login user each stanza connects to the bastion as — the **operator's** account,
+    /// since the bastion is a host-side daemon that runs the forced command as that user.
+    /// The kennel's own persona (`kennel`) is not a real account on the host, so without
+    /// this the bastion sshd refuses the login as an invalid user.
+    pub bastion_user: &'a str,
     /// The granted host edges — one `config` stanza each. Empty means the kennel has
     /// no SSH grant: `config` is then a header-only file and no host resolves.
     pub hosts: &'a [HostGrant<'a>],
@@ -90,6 +95,7 @@ pub fn config(p: &SshParams<'_>) -> String {
             "\nHost {host}\n\
              \tHostName {bastion}\n\
              \tPort {port}\n\
+             \tUser {user}\n\
              \tHostKeyAlias {alias}\n\
              \tProxyCommand {connect} %h %p\n\
              \tIdentityFile ~/.ssh/{key}\n\
@@ -98,6 +104,7 @@ pub fn config(p: &SshParams<'_>) -> String {
             host = h.host,
             bastion = p.bastion_host,
             port = p.bastion_port,
+            user = p.bastion_user,
             alias = BASTION_ALIAS,
             connect = p.ssh_bin,
             key = h.key_file,
@@ -221,6 +228,7 @@ mod tests {
             bastion_port: 7022,
             bastion_host_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey",
             ssh_bin: "/opt/kennel/bin/facade-ssh",
+            bastion_user: "operator",
             hosts: &[
                 HostGrant {
                     host: "github.com",

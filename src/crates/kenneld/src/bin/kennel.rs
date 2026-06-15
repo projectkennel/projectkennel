@@ -314,12 +314,23 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("ssh");
-        mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
+        let minted = mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
         let key = load_signing_key(&key_path)?;
         let doc = kennel_lib_policy::sign_settled(&compiled.policy, &key)
             .map_err(|e| format!("signing: {e}"))?;
         let out = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
-        let temp = TempSettled::write(&name, &out)?;
+        // When SSH keys were minted, the daemon resolves them at `<settled>.parent()/ssh`,
+        // so the temp settled MUST sit beside that `ssh/` dir (the source policy's dir).
+        // Without SSH there is no such coupling — stage under the runtime dir as usual.
+        let temp = if minted {
+            TempSettled::write_in(
+                policy_file.parent().unwrap_or_else(|| Path::new(".")),
+                &name,
+                &out,
+            )?
+        } else {
+            TempSettled::write(&name, &out)?
+        };
         let path = temp.path().to_path_buf();
         eprintln!(
             "kennel: compiled `{}` in memory for this run",
@@ -922,7 +933,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     // covers the keys the bastion will trust (§7.10.3). Idempotent: an existing keypair is
     // reused (persisted across recompiles), so the kennel's `~/.ssh` is stable.
     let ssh_dir = out.parent().unwrap_or_else(|| Path::new(".")).join("ssh");
-    mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
+    let _ = mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
     let policy = &compiled.policy;
 
     // Byte-pin the resolved references: check the fresh lockfile against any prior
@@ -986,6 +997,13 @@ impl TempSettled {
     fn write(name: &str, bytes: &[u8]) -> Result<Self, String> {
         let dir =
             std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        Self::write_in(&dir, name, bytes)
+    }
+
+    /// Write `bytes` to a unique path **in `dir`**, keyed by kennel name and pid. Used when
+    /// the settled artefact must sit beside a sibling the daemon resolves relative to it
+    /// (the `ssh/` minted-key dir) — so `<settled>.parent()/ssh` finds the keys.
+    fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> Result<Self, String> {
         let path = dir.join(format!("kennel-run-{name}-{}.settled", std::process::id()));
         std::fs::write(&path, bytes)
             .map_err(|e| format!("writing temp settled policy {}: {e}", path.display()))?;
@@ -1025,12 +1043,14 @@ fn print_warnings(warnings: &[String]) {
 /// trusts only a key the signature covers. Idempotent: an existing `<key_id>` keypair is
 /// reused, so the kennel's `~/.ssh` is stable across recompiles (the keys persist beside
 /// the artefact in the policy dir).
+/// Returns whether any key was minted (i.e. the policy has `[ssh]` grants) — the caller
+/// uses this to keep the settled artefact beside the `ssh/` dir the daemon resolves from.
 fn mint_ssh_keys(
     policy: &mut kennel_lib_policy::SettledPolicy,
     ssh_dir: &Path,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if policy.ssh.grants.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     std::fs::create_dir_all(ssh_dir).map_err(|e| format!("creating {}: {e}", ssh_dir.display()))?;
     for grant in &mut policy.ssh.grants {
@@ -1057,7 +1077,7 @@ fn mint_ssh_keys(
         pub_line.trim().clone_into(&mut grant.public_key);
         grant.key_file = key_id;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The `<name>.lock` path beside the settled output.

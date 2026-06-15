@@ -34,6 +34,7 @@ missing prerequisite aborts with the precise cause.
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
 | `net-none`        | none | total isolation: own empty netns, connect to loopback **and** a public address both fail |
 | `net-constrained` | constrained | own netns loopback is up + bindable; the in-ns SOCKS endpoint listens at `<addr>:1080` |
+| `ssh-egress`      | constrained | the full SSH re-origination cascade: workload `ssh` → facade-ssh → binder → netproxy → bastion → akc-vended forced command → `ssh` to a destination sshd, marker round-trips. No agent. |
 | `full-vertical`   | constrained | the whole constructed view in one workload: fs + masked id + net-ns + AF_UNIX facade + dev passthrough |
 
 The kennel's own loopback address is never hardcoded in the net cases — the workload
@@ -46,7 +47,17 @@ A policy cannot carry a live host resource, so the runner stages:
 
 - `~/kennel-e2e/granted/file` (content `OK`) and a non-granted `~/kennel-e2e/secret/file`;
 - a host `AF_UNIX` echo listener at `/run/kennel-e2e/echo.sock` (`ping` → `pong`) that the
-  `full-vertical` case's facade brokers into the kennel.
+  `full-vertical` case's facade brokers into the kennel;
+- a root-owned `kennel-akc` (the SSH bastion's `AuthorizedKeysCommand` must be root-owned).
+
+## Per-case setup hooks
+
+A case that needs host fixtures it cannot carry ships an executable `setup.sh` (and an
+optional `teardown.sh`). The runner runs `setup.sh <case-dir> <scratch-dir>`; the hook
+stages its fixtures and prints, on its **last stdout line**, the policy path to actually
+run (usually a generated copy with host-specific values filled in). `ssh-egress` uses this
+to stand up a destination sshd, mint the operator's real key + a host-key pin, and rewrite
+its `policy.toml` (`__DEST_PORT__`, `__REAL_KEY__`, …) before the run.
 
 ## Adding a case
 

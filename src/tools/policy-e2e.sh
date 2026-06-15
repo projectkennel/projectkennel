@@ -50,6 +50,7 @@ SUBKENNEL_LINE="${UID_NUM}:${SUBKENNEL_TAG}:0000000002:${SUBKENNEL_NS}"
 AA_PROFILE_NAME="kennel_suite"
 AA_PROFILE_FILE="$(mktemp /tmp/kennel-suite-aa.XXXXXX)"
 INIT_DEST="/usr/libexec/kennel/kennel-bin-init"
+AKC_DEST="/usr/libexec/kennel/kennel-akc"
 SYSTEM_TOML="/etc/kennel/system.toml"
 ECHO_SOCK_DIR="/run/kennel-e2e"
 ECHO_SOCK="$ECHO_SOCK_DIR/echo.sock"
@@ -59,6 +60,8 @@ HOME_FIXTURE="$HOME/kennel-e2e"
 SUBKENNEL_SAVED=""
 INIT_DEST_BACKUP=""
 INIT_DEST_CREATED=""
+AKC_DEST_BACKUP=""
+AKC_DEST_CREATED=""
 SYSTEM_TOML_BACKUP=""
 SYSTEM_TOML_CREATED=""
 ECHO_PID=""
@@ -77,6 +80,12 @@ cleanup() {
     elif [ -n "$INIT_DEST_BACKUP" ]; then
         sudo cp -f "$INIT_DEST_BACKUP" "$INIT_DEST" 2>/dev/null || true
         rm -f "$INIT_DEST_BACKUP"
+    fi
+    if [ -n "$AKC_DEST_CREATED" ]; then
+        sudo rm -f "$AKC_DEST" 2>/dev/null || true
+    elif [ -n "$AKC_DEST_BACKUP" ]; then
+        sudo cp -f "$AKC_DEST_BACKUP" "$AKC_DEST" 2>/dev/null || true
+        rm -f "$AKC_DEST_BACKUP"
     fi
     if [ -n "$SYSTEM_TOML_CREATED" ]; then
         sudo rm -f "$SYSTEM_TOML" 2>/dev/null || true
@@ -131,6 +140,24 @@ sudo cp -f "$INIT_SRC" "$INIT_DEST"
 sudo chown 0:0 "$INIT_DEST"
 sudo chmod 0755 "$INIT_DEST"
 
+echo "== root-owned kennel-akc at $AKC_DEST (sudo) =="
+# The SSH bastion's AuthorizedKeysCommand must be root-owned — OpenSSH's safe-path check
+# rejects an AKC the unprivileged user could rewrite. The build-tree binary is
+# operator-owned, so install a root-owned copy and point the deployment `akc` key at it.
+AKC_SRC="$REPO_ROOT/target/debug/kennel-akc"
+if [ -x "$AKC_SRC" ]; then
+    sudo mkdir -p "$(dirname "$AKC_DEST")"
+    if [ -e "$AKC_DEST" ]; then
+        AKC_DEST_BACKUP="$(mktemp /tmp/kennel-suite-akc.XXXXXX)"
+        sudo cp -f "$AKC_DEST" "$AKC_DEST_BACKUP"
+    else
+        AKC_DEST_CREATED=1
+    fi
+    sudo cp -f "$AKC_SRC" "$AKC_DEST"
+    sudo chown 0:0 "$AKC_DEST"
+    sudo chmod 0755 "$AKC_DEST"
+fi
+
 echo "== /etc/kennel/system.toml → build-tree helpers (sudo) =="
 # The daemon resolves helper-binary paths only from the root-owned deployment cascade
 # (no env override, by design — 07-paths). Point libexec_dir at the build tree so the
@@ -145,6 +172,7 @@ sudo tee "$SYSTEM_TOML" >/dev/null <<EOF
 # Written by src/tools/policy-e2e.sh for the dev suite; restored on exit.
 libexec_dir = "$REPO_ROOT/target/debug"
 init = "$INIT_DEST"
+akc = "$AKC_DEST"
 EOF
 cat "$SYSTEM_TOML"
 
@@ -231,6 +259,8 @@ systemd-run --user --scope -p Delegate=yes --quiet -- \
   bash -c '
     set -u
     REPO_ROOT="$1"; KENNELD="$2"; KENNEL="$3"; SUITE_DIR="$4"; UID_NUM="$5"; SUITE_KEY="$6"; shift 6
+    # Exported so per-case setup.sh hooks inherit them (ssh-egress needs REPO_ROOT).
+    export REPO_ROOT SUITE_DIR UID_NUM
     "$KENNELD" >/tmp/kennel-suite-kenneld.log 2>&1 &
     KPID=$!
     trap "kill $KPID 2>/dev/null || true" EXIT
@@ -248,11 +278,31 @@ systemd-run --user --scope -p Delegate=yes --quiet -- \
         if [ ! -f "$pol" ]; then
             echo "?? (no such case)"; results="$results\n  ?? $name"; fail=$((fail+1)); continue
         fi
+        # Per-case setup hook: a case that needs host fixtures it cannot carry (e.g.
+        # ssh-egress: a destination sshd + the operator real key) ships a `setup.sh`. The
+        # runner runs it with the case dir + a scratch dir; the hook stages the fixtures
+        # and prints the policy path to actually run (a generated copy with host-specific
+        # values filled in) on its LAST stdout line. A non-zero hook fails the case. Its
+        # `teardown.sh` (if any) runs after the case.
+        run_pol="$pol"
+        if [ -x "$SUITE_DIR/$name/setup.sh" ]; then
+            scratch="/tmp/kennel-suite-$name.scratch"
+            rm -rf "$scratch"; mkdir -p "$scratch"
+            if ! gen=$("$SUITE_DIR/$name/setup.sh" "$SUITE_DIR/$name" "$scratch" 2>"/tmp/kennel-suite-$name.setup.log"); then
+                echo "FAIL (setup) — see /tmp/kennel-suite-$name.setup.log"
+                results="$results\n  FAIL(setup) $name"; fail=$((fail+1)); continue
+            fi
+            # setup.sh prints only the generated policy path to stdout (fixtures + noise go
+            # to stderr / files), and `$(...)` already strips the trailing newline, so the
+            # capture is the path verbatim.
+            run_pol="$gen"
+        fi
         # Distinct kennel instance name per case; </dev/null = non-interactive (no pty).
         # The workload exit code is forwarded as the run status.
-        "$KENNEL" run "$pol" "$name" --key "$SUITE_KEY" --template-dir "$REPO_ROOT/templates" </dev/null \
+        "$KENNEL" run "$run_pol" "$name" --key "$SUITE_KEY" --template-dir "$REPO_ROOT/templates" </dev/null \
             >"/tmp/kennel-suite-$name.log" 2>&1
         rc=$?
+        [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "/tmp/kennel-suite-$name.scratch" 2>/dev/null || true
         if [ "$rc" = 0 ]; then
             echo "PASS"; results="$results\n  PASS  $name"; pass=$((pass+1))
         else

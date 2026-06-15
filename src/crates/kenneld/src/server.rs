@@ -299,6 +299,9 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             bastion_port: setup.port,
             bastion_host_key: &host_pub,
             ssh_bin: &connect_bin,
+            // The bastion login user is the operator: the bastion runs the forced command
+            // as them, and the kennel persona (`kennel`) is no real host account.
+            bastion_user: &self.identity.username,
             hosts: &host_grants,
         };
         let ssh_dir = shim_root.join(".ssh");
