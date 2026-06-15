@@ -69,6 +69,10 @@ pub struct StartRequest {
     /// master back over that socket for the CLI to proxy (§7.9.2). When false, the
     /// three passed fds are the workload's stdio.
     pub interactive: bool,
+    /// Force a CLI `argv` override of a `pinned` policy workload (`kennel run … --force`).
+    /// Ignored unless the policy's `[workload]` is pinned and `argv` is non-empty; then
+    /// the daemon refuses the override without it (§7.4).
+    pub force: bool,
 }
 
 /// A response from the daemon to the CLI.
@@ -232,6 +236,7 @@ impl Request {
                 put_str(&mut b, &req.cwd.to_string_lossy());
                 put_str(&mut b, &req.term);
                 put_u8(&mut b, u8::from(req.interactive));
+                put_u8(&mut b, u8::from(req.force));
             }
             Self::Stop { kennel } => {
                 put_u8(&mut b, 2);
@@ -260,6 +265,7 @@ impl Request {
                 cwd: PathBuf::from(r.string()?),
                 term: r.string()?,
                 interactive: r.u8()? != 0,
+                force: r.u8()? != 0,
             })),
             2 => Ok(Self::Stop {
                 kennel: r.string()?,
@@ -446,6 +452,7 @@ mod tests {
             cwd: PathBuf::from("/home/dev/project"),
             term: "xterm-256color".to_owned(),
             interactive: true,
+            force: false,
         }));
     }
 

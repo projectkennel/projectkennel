@@ -736,9 +736,11 @@ pub struct WorkloadSection {
     /// Refuse a CLI `--` override of `argv` unless `--force` (pin exactly what runs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
-    /// Lowercase-hex SHA-256 of the workload binary; the spawn verifies it before exec.
+    /// Accepted lowercase-hex SHA-256 digests of the workload binary; the spawn verifies
+    /// the binary against this set before exec. A list so multiple accepted versions of
+    /// one binary validate under a single policy. Absent/empty ⇒ no pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
+    pub sha256: Option<Vec<String>>,
 }
 
 /// `[ptrace]` — ptrace across the kennel boundary.

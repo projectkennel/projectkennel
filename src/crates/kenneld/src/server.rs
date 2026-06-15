@@ -83,6 +83,10 @@ pub struct Loaded {
     /// The lifecycle policy (§9.7): the optional TTL and what to do at expiry. Drives
     /// the TTL reaper in `run_kennel`. `ttl_seconds = None` ⇒ no reaper armed.
     pub lifecycle: kennel_lib_policy::LifecyclePolicy,
+    /// The workload the policy embeds (§7.4): `argv`/`cwd`/`pinned`/`sha256`. Empty ⇒ the
+    /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
+    /// request's argv (the request wins unless `pinned`); see `effective_workload`.
+    pub workload: kennel_lib_policy::WorkloadRuntime,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -630,6 +634,13 @@ pub fn run_kennel<P, L>(
         Ok(loaded) => loaded,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
     };
+    // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
+    // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
+    // only here is the policy's workload known. The request wins unless the policy pins it.
+    let (argv, cwd) = match effective_workload(req, &loaded.workload) {
+        Ok(pair) => pair,
+        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
+    };
     // Interactive runs pass ONE connected socket (over which the seal returns a
     // controlling pty allocated inside the kennel's devpts); non-interactive runs
     // pass the three stdio fds. `return_sock` must outlive the spawn so the forked
@@ -637,12 +648,12 @@ pub fn run_kennel<P, L>(
     let mut return_sock: Option<OwnedFd> = None;
     let mut command = if req.interactive {
         return_sock = fds.into_iter().next();
-        match command_for_interactive(&req.argv, &req.cwd) {
+        match command_for_interactive(&argv, &cwd) {
             Ok(command) => command,
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     } else {
-        match command_for(&req.argv, &req.cwd, fds) {
+        match command_for(&argv, &cwd, fds) {
             Ok(command) => command,
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
@@ -954,6 +965,46 @@ fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> Pa
     PathBuf::from(s)
 }
 
+/// Resolve the effective workload argv + cwd from the request and the policy's embedded
+/// `[workload]` (§7.4). The request's `--` argv overrides the policy's by default; a
+/// `pinned` policy refuses the override unless `req.force`. With no request argv the
+/// policy's argv (and its `cwd`, if any) drive the run.
+///
+/// # Errors
+///
+/// A human-readable reason when neither the request nor the policy supplies an argv, or
+/// when a non-empty request argv would override a pinned policy workload without `--force`.
+fn effective_workload(
+    req: &StartRequest,
+    workload: &kennel_lib_policy::WorkloadRuntime,
+) -> Result<(Vec<String>, PathBuf), String> {
+    if req.argv.is_empty() {
+        // Policy-driven: use the embedded workload, and its cwd if it set one.
+        if workload.argv.is_empty() {
+            return Err(
+                "no workload: the policy has no [workload] and no command was given \
+                 (kennel run … -- <cmd>)"
+                    .to_owned(),
+            );
+        }
+        let cwd = workload
+            .cwd
+            .as_deref()
+            .map_or_else(|| req.cwd.clone(), PathBuf::from);
+        return Ok((workload.argv.clone(), cwd));
+    }
+    // Request-supplied argv: overrides the policy workload unless it is pinned.
+    if workload.pinned && !req.force {
+        return Err(format!(
+            "policy [workload] is pinned to `{}`; refusing the `-- {}` override \
+             (pass --force to override)",
+            workload.argv.join(" "),
+            req.argv.join(" ")
+        ));
+    }
+    Ok((req.argv.clone(), req.cwd.clone()))
+}
+
 /// Build the workload command from `argv`/`cwd`, wiring the passed stdio fds if
 /// all three are present (otherwise the workload inherits the daemon's stdio).
 fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command, String> {
@@ -994,6 +1045,80 @@ mod tests {
     use kennel_lib_syscall::namespace::Namespaces;
     use kennel_lib_syscall::seccomp::Action;
     use kennel_privhelper::wire::Response as HelperResponse;
+
+    fn start_req(argv: &[&str], force: bool) -> StartRequest {
+        StartRequest {
+            policy: PathBuf::from("/x"),
+            kennel: "k".to_owned(),
+            argv: argv.iter().map(|s| (*s).to_owned()).collect(),
+            cwd: PathBuf::from("/cli/cwd"),
+            term: String::new(),
+            interactive: false,
+            force,
+        }
+    }
+
+    fn workload(
+        argv: &[&str],
+        cwd: Option<&str>,
+        pinned: bool,
+    ) -> kennel_lib_policy::WorkloadRuntime {
+        kennel_lib_policy::WorkloadRuntime {
+            argv: argv.iter().map(|s| (*s).to_owned()).collect(),
+            cwd: cwd.map(str::to_owned),
+            pinned,
+            sha256: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn effective_workload_uses_policy_when_no_cli_argv() {
+        let (argv, cwd) = effective_workload(
+            &start_req(&[], false),
+            &workload(&["run.sh", "--all"], Some("/suite"), false),
+        )
+        .expect("policy workload");
+        assert_eq!(argv, vec!["run.sh", "--all"]);
+        assert_eq!(cwd, PathBuf::from("/suite")); // the policy cwd, not the CLI cwd
+    }
+
+    #[test]
+    fn effective_workload_cli_overrides_unpinned_policy() {
+        let (argv, cwd) = effective_workload(
+            &start_req(&["bash"], false),
+            &workload(&["run.sh"], Some("/suite"), false),
+        )
+        .expect("override");
+        assert_eq!(argv, vec!["bash"]);
+        assert_eq!(cwd, PathBuf::from("/cli/cwd")); // the CLI cwd on override
+    }
+
+    #[test]
+    fn effective_workload_pinned_refuses_override_without_force() {
+        let err = effective_workload(
+            &start_req(&["bash"], false),
+            &workload(&["run.sh"], None, true),
+        )
+        .expect_err("pinned refuses");
+        assert!(err.contains("pinned"), "{err}");
+    }
+
+    #[test]
+    fn effective_workload_pinned_override_with_force() {
+        let (argv, _) = effective_workload(
+            &start_req(&["bash"], true),
+            &workload(&["run.sh"], None, true),
+        )
+        .expect("force overrides pin");
+        assert_eq!(argv, vec!["bash"]);
+    }
+
+    #[test]
+    fn effective_workload_errors_when_neither_supplies_argv() {
+        let err = effective_workload(&start_req(&[], false), &workload(&[], None, false))
+            .expect_err("no workload");
+        assert!(err.contains("no workload"), "{err}");
+    }
 
     #[test]
     fn valid_kennel_names_are_accepted() {
@@ -1100,6 +1225,7 @@ mod tests {
                     ttl_seconds: None,
                     ttl_action: kennel_lib_policy::TtlAction::Exit,
                 },
+                workload: kennel_lib_policy::WorkloadRuntime::default(),
             })
         }
     }

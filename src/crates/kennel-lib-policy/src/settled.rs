@@ -951,12 +951,14 @@ pub struct WorkloadRuntime {
     /// signed policy pins exactly what runs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
-    /// Optional lowercase-hex SHA-256 of the workload binary (`argv[0]` resolved against
-    /// `PATH`). When set, the spawn hashes the resolved binary just before `execve` and
-    /// refuses to run it if the digest does not match — the signed policy pins not just
-    /// *which* program but its exact bytes. 64 hex chars; validated at translate time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
+    /// Accepted lowercase-hex SHA-256 digests of the workload binary (`argv[0]` resolved
+    /// against `PATH`). When non-empty, the spawn hashes the resolved binary just before
+    /// `execve` and refuses to run it unless its digest is in this set — the signed policy
+    /// pins not just *which* program but its exact bytes. A SET (not one digest) so several
+    /// accepted versions of the same binary (e.g. successive Claude Code releases) validate
+    /// under one policy. Each is 64 hex chars; validated at translate time. Empty ⇒ no pin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sha256: Vec<String>,
 }
 
 impl WorkloadRuntime {

@@ -204,6 +204,7 @@ impl PolicyLoader for TrustStoreLoader {
             shell,
             home_persist,
             lifecycle,
+            workload: substituted.workload,
         })
     }
 }

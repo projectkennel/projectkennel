@@ -159,15 +159,15 @@ fn translate_workload(
     let argv = w.argv.clone().unwrap_or_default();
     let cwd = w.cwd.as_deref().map(|c| subst(c, deferred));
     let pinned = w.pinned.unwrap_or(false);
-    let sha256 = match w.sha256.as_deref() {
-        Some(h) if is_sha256_hex(h) => Some(h.to_owned()),
-        Some(other) => {
+    let mut sha256 = Vec::new();
+    for h in w.sha256.iter().flatten() {
+        if !is_sha256_hex(h) {
             return Err(translation(format!(
-                "workload.sha256 `{other}` is not 64 lowercase-hex characters"
-            )))
+                "workload.sha256 `{h}` is not 64 lowercase-hex characters"
+            )));
         }
-        None => None,
-    };
+        sha256.push(h.clone());
+    }
     Ok(WorkloadRuntime {
         argv,
         cwd,
@@ -1109,7 +1109,7 @@ mod tests {
                 argv: Some(vec!["run-tests.sh".to_owned(), "--all".to_owned()]),
                 cwd: Some("~/suite".to_owned()),
                 pinned: Some(true),
-                sha256: Some("a".repeat(64)),
+                sha256: Some(vec!["a".repeat(64), "b".repeat(64)]),
             }),
             ..SourcePolicy::default()
         };
@@ -1117,7 +1117,8 @@ mod tests {
         let w = translate_workload(&src, &mut deferred).expect("translate workload");
         assert_eq!(w.argv, vec!["run-tests.sh", "--all"]);
         assert!(w.pinned);
-        assert_eq!(w.sha256.as_deref(), Some("a".repeat(64).as_str()));
+        // A SET of accepted digests (multiple versions valid under one policy).
+        assert_eq!(w.sha256, vec!["a".repeat(64), "b".repeat(64)]);
         // `~` is the canonical home form in the settled policy; the spawn resolves it to
         // the persona home (home-persona-path-model), so it stays `~/suite` here.
         assert_eq!(w.cwd.as_deref(), Some("~/suite"));
@@ -1142,7 +1143,7 @@ mod tests {
             let src = SourcePolicy {
                 workload: Some(WorkloadSection {
                     argv: Some(vec!["x".to_owned()]),
-                    sha256: Some(bad.to_owned()),
+                    sha256: Some(vec![bad.to_owned()]),
                     ..WorkloadSection::default()
                 }),
                 ..SourcePolicy::default()

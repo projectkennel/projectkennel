@@ -61,24 +61,35 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
 /// not run `kennel compile` between edits. The in-memory build needs `--key` (kenneld
 /// verifies the settled signature against its trust store); the settled bytes are
 /// written to a short-lived temp file that is removed when the run returns.
+// allow(too_many_lines): one cohesive arg-parse → resolve → (maybe compile+sign) → start
+// sequence for the `run` subcommand; the lexopt CLI overhaul folds this into the shared
+// parser table.
+#[allow(clippy::too_many_lines)]
 fn run(args: &[String]) -> Result<ExitCode, String> {
-    // <head...> then "--" then the command.
-    let sep = args
+    // <head...> optionally then "--" then the command. The `--` is OPTIONAL: with no
+    // command the daemon runs the policy's embedded [workload] (§7.4); with a command it
+    // overrides the policy workload (unless pinned — then --force is required).
+    let (head, command) = args
         .iter()
         .position(|a| a == "--")
-        .ok_or("run needs `-- <cmd...>`")?;
-    let head = args.get(..sep).unwrap_or(&[]);
-    let command = args.get(sep.saturating_add(1)..).unwrap_or(&[]);
+        .map_or((args, &[][..]), |sep| {
+            (
+                args.get(..sep).unwrap_or(&[]),
+                args.get(sep.saturating_add(1)..).unwrap_or(&[]),
+            )
+        });
 
     let mut policy_arg: Option<&str> = None;
     let mut name_arg: Option<&str> = None;
     let mut key_path: Option<&str> = None;
+    let mut force = false;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut it = head.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--force" => force = true,
             "--template-dir" => {
                 template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
             }
@@ -89,11 +100,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             _ => return Err("unexpected extra argument before `--`".to_owned()),
         }
     }
-    let policy_arg = policy_arg
-        .ok_or("usage: kennel run <policy> [<name>] [--key K] [--template-dir D]... -- <cmd...>")?;
-    if command.is_empty() {
-        return Err("no command given after `--`".to_owned());
-    }
+    let policy_arg = policy_arg.ok_or(
+        "usage: kennel run <policy> [<name>] [--key K] [--force] [--template-dir D]... [-- <cmd...>]",
+    )?;
     // `<policy>` is a literal path if it exists, else a **name** resolved from the
     // `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`,
     // preferring the settled artefact). The kennel instance `<name>` is optional and
@@ -161,6 +170,8 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         // Interactive when stdin is a terminal: the seal allocates the workload's own
         // pty (job control) and hands its master back for us to proxy.
         interactive: io::stdin().is_terminal(),
+        // Force an override of a pinned policy [workload] (only meaningful with a `--` cmd).
+        force,
     });
 
     let mut conn = connect()?;

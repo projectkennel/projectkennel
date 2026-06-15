@@ -441,6 +441,7 @@ fn full_vertical_brings_up_and_tears_down_a_kennel_unprivileged() {
         cwd: PathBuf::from("/"),
         term: String::new(),
         interactive: false,
+        force: false,
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -746,6 +747,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         cwd: PathBuf::from("/"),
         term: String::new(),
         interactive: false,
+        force: false,
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -852,6 +854,7 @@ fn run_ttl_kennel(
         cwd: PathBuf::from("/"),
         term: String::new(),
         interactive: false,
+        force: false,
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -1027,6 +1030,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         cwd: PathBuf::from("/"),
         term: "xterm".to_owned(),
         interactive: true,
+        force: false,
     };
 
     let (mut control, mut server) = UnixStream::pair().expect("control socketpair");
