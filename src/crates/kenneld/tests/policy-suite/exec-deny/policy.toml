@@ -1,0 +1,33 @@
+# ============================================================================
+# Suite case: exec-deny — execution is deny-by-default (Landlock FS_EXECUTE).
+#
+# Proves the exec boundary: /bin/sh and /usr/bin/id are on the allowlist and run, but a
+# binary that is NOT listed (/usr/bin/env here) is refused at execve (Landlock denies
+# FS_EXECUTE). The workload runs an allowed binary, then attempts a non-allowed one and
+# asserts it FAILS. Exit 0 ⇒ the allowlist gated execve.
+# ============================================================================
+
+template_name = "exec-deny"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+# Deliberately NOT listing /usr/bin/env: the workload must fail to exec it.
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/id", "/usr/bin/test", "/usr/bin/[", "/bin/false"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    id >/dev/null \
+    && if /usr/bin/env true 2>/dev/null; then exit 7; fi \
+    && true
+    """,
+]

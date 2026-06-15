@@ -151,7 +151,6 @@ struct RawDeployment {
     sshd: Option<PathBuf>,
     privhelper: Option<PathBuf>,
     netproxy: Option<PathBuf>,
-    ssh_reorigin: Option<PathBuf>,
     ssh: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix: Option<PathBuf>,
@@ -168,7 +167,6 @@ impl RawDeployment {
             sshd: higher.sshd.or(self.sshd),
             privhelper: higher.privhelper.or(self.privhelper),
             netproxy: higher.netproxy.or(self.netproxy),
-            ssh_reorigin: higher.ssh_reorigin.or(self.ssh_reorigin),
             ssh: higher.ssh.or(self.ssh),
             akc: higher.akc.or(self.akc),
             afunix: higher.afunix.or(self.afunix),
@@ -189,7 +187,6 @@ impl RawDeployment {
             sshd: self.sshd.unwrap_or_else(|| PathBuf::from(DEFAULT_SSHD)),
             privhelper: self.privhelper,
             netproxy: self.netproxy,
-            ssh_reorigin: self.ssh_reorigin,
             ssh: self.ssh,
             akc: self.akc,
             afunix: self.afunix,
@@ -208,7 +205,6 @@ pub struct Deployment {
     sshd: PathBuf,
     privhelper: Option<PathBuf>,
     netproxy: Option<PathBuf>,
-    ssh_reorigin: Option<PathBuf>,
     ssh: Option<PathBuf>,
     akc: Option<PathBuf>,
     afunix: Option<PathBuf>,
@@ -278,12 +274,6 @@ impl Deployment {
     #[must_use]
     pub fn netproxy(&self) -> PathBuf {
         self.resolve_bin(self.netproxy.as_deref(), "host-netproxy")
-    }
-
-    /// The SSH bastion's forced-command re-originator.
-    #[must_use]
-    pub fn ssh_reorigin(&self) -> PathBuf {
-        self.resolve_bin(self.ssh_reorigin.as_deref(), "kennel-bin-ssh-reorigin")
     }
 
     /// The in-kennel SOCKS connector the bastion's `ProxyCommand` invokes.

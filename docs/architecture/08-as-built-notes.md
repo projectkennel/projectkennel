@@ -45,20 +45,12 @@ narration is kept here; the chapter named is the source of truth.
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
   tests, not mechanism.
-- **Per-kennel network namespace** (`07-5-network.md` §7.5.6,
-  THREATS T1.6) — a kennel currently shares the host network namespace (egress is gated by
-  the cgroup BPF + proxy, not net-ns isolation), so the workload can *read* host network state
-  (interfaces, routes, listening sockets, the LAN ARP table) via `/proc/net/*` and
-  `AF_NETLINK`. Recon-only — egress stays blocked — but a genuine info-disclosure residual.
-  The closure path is now designed (`07-5`): unshare `CLONE_NEWNET` in the construction
-  child, configure an in-namespace `lo`, and reach the host-side proxy across the boundary via
-  the `org.projectkennel.INet` binder facade (SOCKS5 → `facade-socks5` → `INet` `CONNECT` →
-  the `host-netproxy` delegate) rather than a direct loopback connect — re-architecting the
-  §7.5 loopback/egress model onto the four network modes (`none`/`constrained`/`unconstrained`/
-  `host`) + the loopback mirror. When that lands, T1.6 closes for `none`/`constrained`/
-  `unconstrained` (`mode = host` re-shares the host net-ns and deliberately reinstates the
-  recon, recorded as `threats.reinstated`); until then it remains a deferred, accepted residual.
-  Would also make the network-inspection tools report the kennel's own stack.
+- **`host` / `unconstrained` network modes** (`07-5-network.md` §7.5.6) — the per-kennel
+  network namespace + INet egress conduit are **built** (see below; T1.6 closed for the net-ns
+  modes). What remains roadmap is the *mode split*: only the net-ns egress path exists today;
+  `mode = host` (deliberately re-shares the host net-ns, reinstating the recon residual as
+  `threats.reinstated`) and `mode = unconstrained` are designed but not yet wired into the
+  settled schema, and the `[net.proxy]`/`[net.bpf]` nesting they imply is not built.
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
@@ -71,11 +63,54 @@ narration is kept here; the chapter named is the source of truth.
   rather than kept as design-level language. No shipped template uses it: `containerised-service`
   runs the service directly under the kennel (the kennel *is* the container).
 
+### Config-schema reference — documentation gaps owed (audit 2026-06-11)
+
+The schema reference (`02-2-config-schema.md`) is built: it carries full field-level tables for
+`[net]`/`[net.*]` and `[binder]`/`[ipc.spawn]`, and **delegates** every other section's
+field-by-field detail to its design chapter (§7.x). An audit of those delegation targets — checked
+against the parser structs in `src/crates/kennel-lib-policy/src/source.rs` as ground truth — found
+most resolve, but these do not. The mechanism is done; what is owed is backfilling these specific
+field tables (in the §7.x chapter, or pulled into `02-2`). Two are correctness bugs, not just
+omissions, because the doc names fields the parser does not accept (or vice versa).
+
+- **`[unix]` / `[[unix.allow]]`** (`07-6-afunix.md` §7.6.4) — **WRONG, not just thin.** The doc
+  documents the superseded shim-model field names `path`/`access`; the parser's `UnixAllow`
+  accepts `name`/`real`/`shim`/`env`/`reason`/`threats`. The doc also describes `[[unix.deny]]`
+  and `[[unix.allow_abstract]]` tables that the parser rejects (`deny_unknown_fields`). A policy
+  copied from the doc fails to parse. Owed: rewrite §7.6.4 to the real `UnixAllow` schema.
+- **`[lifecycle]`** (`09-policy-lifecycle.md` §9.7) — **PROSE-ONLY, with a stale source comment.**
+  No field table: `ttl` format/limits and the `ttl_action` enum are not specified. The accepted
+  `ttl_action` set is `exit | stop(alias) | warn | renew` (see `translate.rs` ~L880), but the
+  `LifecycleSection` doc-comment in `source.rs` claims only `"stop"/"warn"` — fix the comment too.
+  Owed: a `ttl`/`ttl_action` field table; note `reconsent_interval` (§9.8) is designed-not-built
+  and would be rejected at parse.
+- **`[env]`** (`07-9-other.md` §7.9.2) — **PROSE-ONLY.** Parser `EnvSection` is `pass`/`deny`/`set`;
+  the doc covers `set` by example and explicitly (and wrongly) says there is "no `pass` list".
+  Owed: a field table for all three.
+- **`[seccomp]`** (`07-9-other.md` §7.9.6) — **PARTIAL.** Parser is `profile`/`deny`/`allow`; the
+  doc omits `allow`. Owed: add `allow`.
+- **`[fs.*]` subtables** (`07-4-filesystem.md`) — **PARTIAL/PROSE-ONLY.** No field tables for
+  `[fs.home].persist`/`.readonly`, `[fs.tmp].mode`, `[fs.proc]` (`visibility`/`hidepid`), or
+  `[fs.dev]` (`allow`/`passthrough`) + `[[fs.dev.passthrough]].threats.mitigated`. The §7.4.4
+  prose also names `create`/`exec_allowed_from`, which the parser does not accept (verify and
+  strike). Owed: per-subtable field tables + reconcile the phantom fields.
+- **`[identity]`** (`07-4-filesystem.md` §7.4.8) — **PARTIAL.** `groups` shown by example; `user`
+  and `group` (both default `kennel`) appear only in prose. Owed: a three-field table.
+
+Clean (delegation resolves, no action): `[exec]` (§7.3.4), `[ssh]`/`[[ssh.destinations]]`
+(§7.10.8), `[ulimits]` (§7.4.12), `[cap]`/`[proc]`/`[ptrace]`/`[signal]` (§7.9.1/§7.9.3).
+
 ### Built — now described in the chapters
 
 Each graduated from this roadmap; its as-built detail lives in the named architecture
 chapter (and the design § for the mechanism). No build notes are kept here.
 
+- **Per-kennel network namespace + INet egress** — egress kennels unshare `CLONE_NEWNET` in the
+  construction child, bring up in-ns `lo` + the loopback mirror, and reach egress only across the
+  binder gateway (`facade-socks5` → `CONNECT_INET` → kenneld → `host-netproxy` dumb dialer); the
+  net-ns boundary *is* the egress gate and cgroup-BPF drops to defence-in-depth. Closes T1.6 for
+  the net-ns modes (`/proc/net` + netlink now reflect the kennel's own stack): `07-5-network.md`,
+  `02-5-binder-net.md`.
 - **Run-environment synthesis** — `env_clear` + synthesised `envp`, `[exec].shell`, system
   rc, user dotfiles, `[fs.home].persist`: design `07-9-other.md` §7.9.2a.
 - **Unified audit writer + four sinks** — file/stdout/syslog/journald, per-class filtering,

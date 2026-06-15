@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -88,6 +88,17 @@ fn main() -> ExitCode {
 /// Open the bus, pull the supervision-half, own the spawn, and supervise to exit.
 fn run() -> io::Result<u8> {
     require_kennel_userns()?;
+    // Authorise the operator kenneld to traverse our `/proc/<init>/root` under Yama
+    // `ptrace_scope=1` (07-2 §7.2.1a): it claims binder node 0 that way, but it is neither
+    // our process ancestor nor a holder of CAP_SYS_PTRACE in the initial userns Yama checks.
+    // Done BEFORE READY so the flag is set when kenneld opens the device. `_ANY` because
+    // kenneld lives in an ancestor PID namespace and has no pid we (kennel pid 1) could name;
+    // Yama's uid check still bars the lower-privileged operator-uid workload/facades from the
+    // uid-0 init. Best-effort: a kernel without Yama needs no relaxation, so a failure here
+    // must not abort the boot — surface it and continue to READY.
+    if let Err(e) = kennel_lib_syscall::process::set_ptracer_any() {
+        eprintln!("kennel-bin-init: PR_SET_PTRACER_ANY (Yama relaxation) failed, continuing: {e}");
+    }
     // Boot-sync (07-2 §7.2.1a): announce we have execed and block until kenneld has claimed binder
     // node 0, so the pull below is a single first-try transaction (no retry). The factory placed
     // our end of the sync socket at `BOOT_SYNC_FD` before our `fexecve`.
@@ -173,17 +184,43 @@ fn spawn_all(
 
     // 2. The workload: dropped to the operator AND confined.
     notify(conn, lifecycle::NOTIFY_WORKLOAD_EXEC, &[]);
-    let program = cstr_path(&sup.program)?;
+    // Resolve a bare program name (no `/`) against the workload's synthesised `PATH`,
+    // inside the view (we are post-pivot). `execve(2)` itself never searches PATH, so
+    // `kennel run interactive -- bash` would otherwise ENOENT; only `/bin/bash` worked.
+    // When the policy sha256-pins the workload, kenneld opened+hashed the binary and passed
+    // the exact fd at WORKLOAD_FD; `fexecve` THAT (no path relookup — the bytes that run are
+    // the bytes that were hashed). Otherwise resolve the path against PATH and `execve`. init
+    // makes no judgment here — it just execs the fd kenneld handed it, or the path it was told.
+    let exec_fd = sup
+        .workload_fd_pinned
+        .then_some(kennel_lib_syscall::boot::WORKLOAD_FD);
+    let resolved = resolve_program(&sup.program, &sup.env);
+    let program = cstr_path(&resolved)?;
     let argv = to_cstrings(&sup.argv)?;
     let argv_ref = borrow(&argv);
     let interactive = sup.interactive;
     let filter = (!sup.seccomp_deny.is_empty()).then(|| sup.seccomp_filter());
 
+    // The workload's working directory resolved against the **view**, not the host. The
+    // operator's launch cwd (`sup.cwd`) is a host path that usually does not exist inside the
+    // constructed view; trying to `chdir` into it would fail the seal and `_exit(126)` before
+    // the workload ever runs. So prefer it only if it resolves, then fall back to the persona
+    // `$HOME` (always constructed), then `/`. Starting in a valid directory is never fatal.
+    let home = sup
+        .env
+        .iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, v)| v.as_str());
+    let workload_cwd: PathBuf = sup
+        .cwd
+        .as_deref()
+        .filter(|c| c.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| home.map(PathBuf::from).filter(|h| h.is_dir()))
+        .unwrap_or_else(|| PathBuf::from("/"));
+
     let seal = || -> io::Result<()> {
-        // The workload's working directory (a path inside the view), before confinement.
-        if let Some(cwd) = &sup.cwd {
-            std::env::set_current_dir(cwd)?;
-        }
+        std::env::set_current_dir(&workload_cwd)?;
         // Controlling terminal FIRST, before Landlock/seccomp could gate the ioctls
         // (`07-9` §7.9.2). An interactive run allocates a pty in the view's devpts and returns
         // the master over the return socket the factory placed at `PTY_RETURN_FD`; otherwise
@@ -209,6 +246,7 @@ fn spawn_all(
     };
     let workload_pid = fork_drop_exec_confined(
         &program,
+        exec_fd,
         &argv_ref,
         &envp_ref,
         sup.drop_gid,
@@ -377,6 +415,35 @@ fn facade_argv(facade: &AuxProcess) -> io::Result<Vec<CString>> {
     Ok(argv)
 }
 
+/// Resolve the workload program against the synthesised `PATH`, mirroring how a shell
+/// finds a bare command — `execve(2)` itself never searches `PATH`.
+///
+/// A program containing a `/` (absolute or explicitly relative) is used verbatim. A bare
+/// name is looked up in each `PATH` entry from `env`, returning the first that exists as a
+/// regular file with an execute bit. The lookup runs in `kennel-bin-init` **post-pivot**, so
+/// it sees the kennel's view (and its `PATH` = the policy's `exec.path`), not the host. If
+/// nothing matches, the bare name is returned unchanged so `execve` fails with a clear
+/// ENOENT rather than this masking it.
+fn resolve_program(program: &Path, env: &[(String, String)]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    if program.as_os_str().as_bytes().contains(&b'/') {
+        return program.to_path_buf();
+    }
+    let path = env
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .map_or("", |(_, v)| v.as_str());
+    for dir in path.split(':').filter(|d| !d.is_empty()) {
+        let candidate = Path::new(dir).join(program);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                return candidate;
+            }
+        }
+    }
+    program.to_path_buf()
+}
+
 /// Convert a path to a `CString` for `execve`.
 fn cstr_path(p: &Path) -> io::Result<CString> {
     cstring(p.as_os_str().as_bytes(), "path")
@@ -503,6 +570,7 @@ mod tests {
             ulimits: Vec::new(),
             aux: Vec::new(),
             interactive: false,
+            workload_fd_pinned: false,
             ttl_seconds: None,
         };
         let bytes = kennel_lib_spawn::wire::encode_supervision(&sup);

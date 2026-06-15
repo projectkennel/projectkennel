@@ -1,0 +1,41 @@
+# ============================================================================
+# Suite case: net-none — total network isolation (own empty netns, not even lo).
+#
+# Proves §7.5 mode=none: the kennel has its own network namespace with NO interfaces
+# brought up — a connect to 127.0.0.1 AND to a public address both fail (the loopback
+# is down; no route exists). Exit 0 ⇒ the workload could reach nothing.
+# ============================================================================
+
+template_name = "net-none"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    python3 -c "
+import socket
+ok=True
+for tgt in [('127.0.0.1',80),('1.1.1.1',443)]:
+    s=socket.socket();s.settimeout(2)
+    try:
+        s.connect(tgt); ok=False   # any success = not isolated
+    except OSError:
+        pass
+    finally:
+        s.close()
+raise SystemExit(0 if ok else 1)
+"
+    """,
+]

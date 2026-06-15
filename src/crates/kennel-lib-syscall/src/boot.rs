@@ -36,6 +36,16 @@ const fn borrow(fd: RawFd) -> BorrowedFd<'static> {
 /// here, inherited across the `fexecve` — the sibling of [`crate::pty::PTY_RETURN_FD`].
 pub const BOOT_SYNC_FD: RawFd = 4;
 
+/// The fixed descriptor for the **sha256-pinned workload binary** (`07-4` §7.4).
+///
+/// When the policy pins the workload's digest, kenneld opens the resolved binary, hashes it
+/// via `/proc/self/fd`, and passes that exact fd through the construction channel; the factory
+/// places it here, inherited across the `fexecve` of `kennel-bin-init`, which `fexecve`s it for
+/// the workload — so the bytes that run are the bytes that were hashed (no path relookup, no
+/// TOCTOU). Absent when the policy carries no digest pin. Sibling of [`BOOT_SYNC_FD`] /
+/// [`crate::pty::PTY_RETURN_FD`].
+pub const WORKLOAD_FD: RawFd = 5;
+
 /// `kennel-bin-init` → `kenneld`: "I have `fexecve`'d; my binderfs is reachable via `/proc/<me>/root`."
 const READY: u8 = 1;
 /// `kenneld` → `kennel-bin-init`: "node 0 is claimed and serving — pull now."

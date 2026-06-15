@@ -20,6 +20,43 @@ pub fn set_no_new_privs() -> io::Result<()> {
     nix::sys::prctl::set_no_new_privs().map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
+/// Lift Yama's `ptrace_scope=1` restriction for the calling process (`PR_SET_PTRACER`
+/// set to `PR_SET_PTRACER_ANY`).
+///
+/// Any process that already passes the credential check may then `ptrace`-access the
+/// caller (and thus traverse its `/proc/<pid>/root`).
+///
+/// `kennel-bin-init` calls this before announcing boot-sync `READY`, so the operator
+/// `kenneld` — which is neither a process ancestor of the init nor a holder of
+/// `CAP_SYS_PTRACE` in the *initial* user namespace that Yama checks — can open the
+/// kennel's binderfs via `/proc/<init>/root` on a Yama-hardened host (07-2 §7.2.1a).
+/// `_ANY` rather than a pid because the only tracer, `kenneld`, lives in an ancestor
+/// PID namespace and so has no pid the kennel-pid-1 init could name. Yama still gates
+/// on the uid credential check, which the lower-privileged workload/facades (operator
+/// uid) cannot pass against the uid-0 init — so this does not expose the init to them.
+///
+/// nix exposes no `PR_SET_PTRACER` wrapper, so this is a direct `prctl(2)`.
+///
+/// # Errors
+///
+/// Returns the OS error if the `prctl` fails (e.g. Yama is not built in — harmless,
+/// the `/proc` access then needs no relaxation).
+pub fn set_ptracer_any() -> io::Result<()> {
+    // The gnu target's libc bindings omit these (only fuchsia/android/l4re carry them),
+    // so name the stable UAPI values directly: PR_SET_PTRACER is 0x59616d61 ("Yama"),
+    // PR_SET_PTRACER_ANY is all-ones (`-1` as the c_ulong vararg).
+    const PR_SET_PTRACER: libc::c_int = 0x5961_6d61;
+    const PR_SET_PTRACER_ANY: libc::c_ulong = libc::c_ulong::MAX;
+    // SAFETY: prctl(PR_SET_PTRACER, …) is a process-wide flag set with no pointer
+    // arguments; the unused args are 0 per the man page. It cannot corrupt memory.
+    let rc = unsafe { libc::prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 pub use nix::sys::resource::{Resource, RLIM_INFINITY};
 
 /// Map a short `[ulimits]` resource name to its `setrlimit(2)` [`Resource`].

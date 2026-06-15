@@ -27,7 +27,6 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 /// The `HostKeyAlias` the bastion's host key is pinned under.
 ///
@@ -67,6 +66,11 @@ pub struct SshParams<'a> {
     /// reaches the bastion by an `INet` `CONNECT_INET` transaction to kenneld over binder (§7.5),
     /// receiving the connection fd and splicing it to stdin/stdout.
     pub ssh_bin: &'a str,
+    /// The login user each stanza connects to the bastion as — the **operator's** account,
+    /// since the bastion is a host-side daemon that runs the forced command as that user.
+    /// The kennel's own persona (`kennel`) is not a real account on the host, so without
+    /// this the bastion sshd refuses the login as an invalid user.
+    pub bastion_user: &'a str,
     /// The granted host edges — one `config` stanza each. Empty means the kennel has
     /// no SSH grant: `config` is then a header-only file and no host resolves.
     pub hosts: &'a [HostGrant<'a>],
@@ -91,6 +95,7 @@ pub fn config(p: &SshParams<'_>) -> String {
             "\nHost {host}\n\
              \tHostName {bastion}\n\
              \tPort {port}\n\
+             \tUser {user}\n\
              \tHostKeyAlias {alias}\n\
              \tProxyCommand {connect} %h %p\n\
              \tIdentityFile ~/.ssh/{key}\n\
@@ -99,6 +104,7 @@ pub fn config(p: &SshParams<'_>) -> String {
             host = h.host,
             bastion = p.bastion_host,
             port = p.bastion_port,
+            user = p.bastion_user,
             alias = BASTION_ALIAS,
             connect = p.ssh_bin,
             key = h.key_file,
@@ -181,49 +187,35 @@ pub fn materialize(
     Ok(binds)
 }
 
-/// `ssh-keygen`'s public-key path for a private-key `path`: `<path>.pub`, appended
-/// (not `Path::with_extension`, which would mangle a name like `id_github.com`).
-fn pub_path_of(path: &Path) -> PathBuf {
-    let mut p = path.to_path_buf().into_os_string();
-    p.push(".pub");
-    PathBuf::from(p)
-}
-
-/// Mint a disposable synthetic ed25519 keypair into `dir` as `key_file` (private)
-/// and `key_file.pub`, returning the public-key line (§7.10.3).
+/// Stage the persisted synthetic private key `key_file` from the policy dir's `ssh/`
+/// subdir into the kennel's `~/.ssh` staging `dir`, clamped to `0600`.
 ///
-/// The private half goes into the kennel's constructed `~/.ssh` (this `dir`); the
-/// returned public line is what the bastion binds to a forced command in its
-/// `authorized_keys` (`crate::bastion`). Minting with stock `ssh-keygen` keeps the
-/// on-disk format exactly what `ssh` expects and hand-rolls no key serialisation. A
-/// pre-existing key at the path is removed first — these are disposable, one per
-/// `(real-key, host)` edge, regenerated freely.
+/// The keypair is minted **at compile time** (`kennel policy compile`) and persists
+/// beside the signed artefact in `<policy-dir>/ssh/<key_file>`; its public half is
+/// signature-pinned in the settled `[ssh]` grant (so the bastion's akc trusts only a key
+/// the signature covers). At spawn `kenneld` does not mint — it copies the private half
+/// into the kennel's constructed `~/.ssh`. No `.pub` is staged: the kennel needs only the
+/// private key, and the public half lives in the grant.
 ///
 /// # Errors
 ///
-/// An OS error if `ssh-keygen` cannot run, exits non-zero, or its `.pub` is unreadable.
-pub fn mint_synthetic_key(dir: &Path, key_file: &str, comment: &str) -> io::Result<String> {
+/// An OS error if the staging dir cannot be created, the source key is missing, or the
+/// copy / mode-set fails.
+pub fn stage_synthetic_key(policy_ssh_dir: &Path, dir: &Path, key_file: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(key_file);
-    // ssh-keygen writes the public half at "<path>.pub" — append, never
-    // `with_extension` (a key_file like "id_github.com" has a misleading extension).
-    let pub_path = pub_path_of(&path);
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(&pub_path);
-    let status = Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-C", comment, "-f"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !status.success() {
+    let source = policy_ssh_dir.join(key_file);
+    if !source.exists() {
         return Err(io::Error::other(format!(
-            "ssh-keygen failed to mint synthetic key `{key_file}`"
+            "synthetic key `{}` not found in {} (recompile the policy with \
+             `kennel policy compile`)",
+            key_file,
+            policy_ssh_dir.display()
         )));
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(std::fs::read_to_string(&pub_path)?.trim().to_owned())
+    let dest = dir.join(key_file);
+    std::fs::copy(&source, &dest)?;
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -236,6 +228,7 @@ mod tests {
             bastion_port: 7022,
             bastion_host_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestbastionhostkey",
             ssh_bin: "/opt/kennel/bin/facade-ssh",
+            bastion_user: "operator",
             hosts: &[
                 HostGrant {
                     host: "github.com",
@@ -351,33 +344,32 @@ mod tests {
     }
 
     #[test]
-    fn mint_synthetic_key_writes_a_private_key_and_returns_its_public_line() {
-        if Command::new("ssh-keygen")
-            .arg("-?")
-            .stderr(Stdio::null())
-            .stdout(Stdio::null())
-            .status()
-            .is_err()
-        {
-            return; // ssh-keygen not installed
-        }
-        let dir = std::env::temp_dir().join(format!("kenneld-mint-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let pub_line =
-            mint_synthetic_key(&dir, "id_github.com", "kennel synthetic github").expect("mint");
-        assert!(
-            pub_line.starts_with("ssh-ed25519 "),
-            "public line: {pub_line}"
-        );
-        let priv_path = dir.join("id_github.com");
-        assert!(priv_path.exists(), "private key written");
-        let mode = std::fs::metadata(&priv_path)
+    fn stage_synthetic_key_copies_the_persisted_key_and_clamps_its_mode() {
+        // The compile-time keypair lives in the policy dir; staging copies the private
+        // half into the kennel's ~/.ssh staging dir at 0600.
+        let base = std::env::temp_dir().join(format!("kenneld-stage-{}", std::process::id()));
+        let policy_ssh = base.join("policy/ssh");
+        let staging = base.join("staging");
+        std::fs::create_dir_all(&policy_ssh).expect("mk policy ssh");
+        std::fs::write(
+            policy_ssh.join("ssh-deadbeef"),
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n",
+        )
+        .expect("write key");
+
+        stage_synthetic_key(&policy_ssh, &staging, "ssh-deadbeef").expect("stage");
+        let staged = staging.join("ssh-deadbeef");
+        assert!(staged.exists(), "private key copied into the staging dir");
+        let mode = std::fs::metadata(&staged)
             .expect("stat")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o600, "private key is 0600");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o600, "staged key clamped to 0600");
+
+        // A missing source key fails loudly (a recompile is needed).
+        assert!(stage_synthetic_key(&policy_ssh, &staging, "ssh-absent").is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

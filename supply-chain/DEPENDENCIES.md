@@ -11,7 +11,7 @@ This ledger pairs with:
 
 ## Status
 
-Six direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins the shipped artefacts plus `arbitrary` (fuzz-only, §5.5-approved; used only by the non-shipped `fuzz/` crate). Further entries are added with the PR that introduces each dependency.
+Seven direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`, `lexopt`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins the shipped artefacts plus `arbitrary` (fuzz-only, §5.5-approved; used only by the non-shipped `fuzz/` crate). Further entries are added with the PR that introduces each dependency.
 
 ## System libraries (linked, not vendored)
 
@@ -43,6 +43,11 @@ The short list of things we use a dependency for rather than writing ourselves (
 - Security-ABI helpers where the kernel ABI is genuinely non-trivial: `seccompiler` (seccomp-BPF bytecode). Landlock and the BPF loader were instead hand-rolled (their vetted crates' cost — proc-macros/TCB for `landlock`; ~1435 vendored C files for `libbpf-sys`, 19 crates for `aya` — outweighed the small `unsafe` they save); the BPF loader uses `object` for ELF parsing only.
 - One async runtime, in the proxy and server crates only — never in the privhelper.
 - Hashing for the checksum verifier (`sha2`), itself bootstrapped per §5.5.1.
+- CLI argument parsing for the `kennel` front-end (`lexopt`). A correct getopt-style parser
+  (clustered short flags, `--opt=val` vs `--opt val`, `--`, `-` , non-UTF-8 `OsString` values)
+  is fiddly to hand-roll and security-irrelevant; `lexopt` is the minimal choice — one
+  `#![forbid(unsafe_code)]` file, zero transitive deps, no build.rs/proc-macro — over `clap`
+  (multiple unvendored transitives). Added 2026-06-15 (maintainer decision, this entry).
 
 Anything outside this list requires a maintainer decision recorded in the PR.
 
@@ -101,6 +106,15 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: 15 source files byte-identical to `github.com/jedisct1/rust-ed25519-compact` at tag 2.3.0. Source read for backdoors: no FFI/asm/process/net/fs/env; the single `unsafe` is the volatile secret-wipe; verification rejects non-canonical `S` (malleability) and weak/identity keys.
 - **Transitive deps added:** none. `getrandom`, `ct-codecs`, and `ed25519` are optional dependencies, gated behind the `random`/`pem`/`traits` features, none of which we enable. `x25519.rs` and `pem.rs` are not compiled.
 - **Proc-macros / build.rs:** none.
+
+### lexopt
+
+- **Version:** =0.3.2 (exact pin), default features.
+- **Justification:** The argument parser for the `kennel` CLI. A correct getopt-style parser — clustered short flags, `--opt=val` vs `--opt val`, the `--` separator, `-`, and non-UTF-8 `OsString` values — is fiddly and easy to get subtly wrong by hand across nine subcommands; `lexopt` is the minimal vetted option (§5.1 sanctioned category "CLI argument parsing"). Chosen over `clap` (which pulls multiple unvendored transitives — `clap_derive`/`anstyle`/`is_terminal` — and a proc-macro), per the "smallest dependency that does the job" rule: `lexopt` is a single `#![forbid(unsafe_code)]` file with zero transitive deps.
+- **Licence:** MIT.
+- **Reviewer:** remco (2026-06-15). Provenance verified independent of crates.io via `tools/audit-source.sh`: 11 source files byte-identical to `github.com/blyxxyz/lexopt` at tag v0.3.2 (recorded in `CHECKSUMS.toml`). Source read for backdoors: one ~2k-line `lib.rs`, `#![forbid(unsafe_code)]`, the sole `std::env` use is `args_os()` (the parser's input); no FFI/asm/process/net/fs.
+- **Transitive deps added:** none (empty `[dependencies]`).
+- **Proc-macros / build.rs:** none (`build = false`).
 
 ### arbitrary (fuzz-only)
 

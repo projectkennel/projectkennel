@@ -8,7 +8,7 @@
 //! per-instance placeholders the runtime must still fill
 //! (`deferred_substitutions`). This is where the human forms become machine forms:
 //! `"169.254.169.254/32"` → `NetRule { cidr, prefix_len }`, `"512M"` → `size_mib`,
-//! `"8h"` → `ttl_seconds`, `"constrained"`/`"none"`/`"open"` → [`NetMode`].
+//! `"8h"` → `ttl_seconds`, `"constrained"`/`"none"`/`"unconstrained"`/`"host"` → [`NetMode`].
 //!
 //! # The runtime-relevant subset (02-2 §The settled policy, 08 §8.2)
 //!
@@ -41,8 +41,8 @@ use crate::settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
-    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshKnownHostPin,
-    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
+    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshRuntime,
+    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use crate::source::{AuditSection, SourcePolicy};
 use crate::PolicyError;
@@ -68,6 +68,8 @@ pub struct Translated {
     pub env: EnvRuntime,
     /// The per-kennel resource limits (§7.4) — applied via `setrlimit` in the seal.
     pub ulimits: UlimitsRuntime,
+    /// The workload to run (§7.4) — argv, cwd, pin, and optional sha256.
+    pub workload: WorkloadRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -113,6 +115,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
     let ulimits = translate_ulimits(effective)?;
+    let workload = translate_workload(effective, &mut deferred)?;
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -131,8 +134,53 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         audit,
         env,
         ulimits,
+        workload,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Translate `[workload]` into the settled [`WorkloadRuntime`] (§7.4). `argv` carries
+/// through verbatim (a bare `argv[0]` is resolved against the kennel `PATH` at spawn,
+/// not here); `cwd` is `subst`-ed for `~`/`<home>` like other in-view paths; `sha256`,
+/// when set, is validated as 64 lowercase hex (the spawn verifies the binary against it
+/// before exec). An absent or argv-less `[workload]` yields an empty runtime (omitted
+/// from the canonical form), so a no-`[workload]` policy signs exactly as before.
+///
+/// # Errors
+///
+/// [`PolicyError::Translation`] if `sha256` is not 64 lowercase-hex characters.
+fn translate_workload(
+    src: &SourcePolicy,
+    deferred: &mut BTreeSet<String>,
+) -> Result<WorkloadRuntime, PolicyError> {
+    let Some(w) = src.workload.as_ref() else {
+        return Ok(WorkloadRuntime::default());
+    };
+    let argv = w.argv.clone().unwrap_or_default();
+    let cwd = w.cwd.as_deref().map(|c| subst(c, deferred));
+    let pinned = w.pinned.unwrap_or(false);
+    let mut sha256 = Vec::new();
+    for h in w.sha256.iter().flatten() {
+        if !is_sha256_hex(h) {
+            return Err(translation(format!(
+                "workload.sha256 `{h}` is not 64 lowercase-hex characters"
+            )));
+        }
+        sha256.push(h.clone());
+    }
+    Ok(WorkloadRuntime {
+        argv,
+        cwd,
+        pinned,
+        sha256,
+    })
+}
+
+/// Whether `s` is a 64-character lowercase-hex SHA-256 digest.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() && b <= b'f')
 }
 
 /// Flatten the resolved `[binder]` section into the settled [`BinderRuntime`]: one
@@ -485,61 +533,75 @@ fn translate_unix(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> UnixRu
 }
 
 /// Flatten the source `[ssh]` section into the settled [`SshRuntime`]: one
-/// [`SshGrant`] per `(host, fingerprint)` edge. Already compile-time-validated
-/// (`crate::ssh`), so the fingerprints and `hosts ⊆ net.allow:22` hold here.
+/// [`SshGrant`] per granted destination (`dest` + host-side `options`). Already
+/// compile-time-validated (`crate::ssh`), so every `dest` is non-empty here.
 fn translate_ssh(src: &SourcePolicy) -> SshRuntime {
     let Some(ssh) = &src.ssh else {
         return SshRuntime::default();
     };
-    let mut grants = Vec::new();
-    for key in &ssh.keys {
-        let Some(fp) = &key.fingerprint else { continue };
-        for host in &key.hosts {
-            grants.push(SshGrant {
-                host: host.clone(),
-                fingerprint: fp.clone(),
-            });
-        }
-    }
-    let known_hosts = ssh
-        .known_hosts
+    let grants = ssh
+        .destinations
         .iter()
-        .filter_map(|kh| match (&kh.host, &kh.key) {
-            (Some(host), Some(key)) => Some(SshKnownHostPin {
-                host: host.clone(),
-                key: key.clone(),
-            }),
-            _ => None,
+        .filter_map(|d| {
+            d.dest.as_ref().map(|dest| SshGrant {
+                dest: dest.clone(),
+                options: d.options.clone(),
+                // The synthetic keypair is minted by the compiler's I/O step (the CLI),
+                // post-translate and pre-sign; translation leaves these empty.
+                public_key: String::new(),
+                key_file: String::new(),
+            })
         })
         .collect();
     SshRuntime {
         allow_headless: ssh.allow_headless.unwrap_or(false),
         grants,
-        known_hosts,
     }
 }
 
 // ---- net -----------------------------------------------------------------------
+
+/// Parse the `net.mode` string into a [`NetMode`]; absent defaults to `constrained`.
+fn parse_net_mode(mode: Option<&str>) -> Result<NetMode, PolicyError> {
+    match mode {
+        Some("constrained") | None => Ok(NetMode::Constrained),
+        Some("none") => Ok(NetMode::None),
+        Some("unconstrained") => Ok(NetMode::Unconstrained),
+        Some("host") => Ok(NetMode::Host),
+        Some(other) => Err(translation(format!(
+            "net.mode `{other}` is not one of none/constrained/unconstrained/host"
+        ))),
+    }
+}
+
+/// Resolve the proxy listener for `mode`. Only the own-netns SOCKS modes
+/// (constrained/unconstrained) carry one — `host` (direct, no proxy) and `none` (no
+/// network) get the disabled marker regardless of any inherited `proxy_listen_*`. This is
+/// the engine-level fix for the "mode=host but still proxied" composition bug.
+fn resolve_proxy(mode: NetMode, addr: Option<&str>) -> Result<ProxyListen, PolicyError> {
+    if !matches!(mode, NetMode::Constrained | NetMode::Unconstrained) {
+        return Ok(ProxyListen::disabled());
+    }
+    addr.map_or_else(|| Ok(ProxyListen::default()), parse_proxy)
+}
 
 fn translate_net(
     src: &SourcePolicy,
     deferred: &mut BTreeSet<String>,
 ) -> Result<NetPolicy, PolicyError> {
     let net = src.net.as_ref().ok_or_else(|| missing("net"))?;
-    let mode = match net.mode.as_deref() {
-        // `none` is "constrained with an empty allowlist" — the proxy denies all.
-        Some("constrained" | "none") | None => NetMode::Constrained,
-        Some("open") => NetMode::Open,
-        Some(other) => {
-            return Err(translation(format!(
-                "net.mode `{other}` is not representable"
-            )))
-        }
-    };
-    let proxy = match net.proxy_listen_v4_address.as_deref() {
-        Some(addr) => parse_proxy(addr)?,
-        None => ProxyListen::default(),
-    };
+    let mode = parse_net_mode(net.mode.as_deref())?;
+    // `host` shares the host net-ns and reinstates the host-recon residual (T1.6), so it is
+    // gated on a non-empty `net.reason` — the operator must justify the tradeoff
+    // (`07-5-network.md` §7.5.1). Refuse it otherwise.
+    if mode == NetMode::Host && net.reason.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(translation(
+            "net.mode = host shares the host network stack (reinstates T1.6 host-recon) and \
+             requires a non-empty net.reason"
+                .to_owned(),
+        ));
+    }
+    let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
 
     let mut allow: Vec<NetRule> = Vec::new();
     let mut allow_names: Vec<NameRule> = Vec::new();
@@ -580,23 +642,11 @@ fn translate_net(
         }
     }
 
-    // Implied rule: an `[[ssh.keys]]` host grant implies egress to that host on port 22. SSH leaves
-    // the kennel only over the egress gateway, so a granted host must be in the allowlist on :22 —
-    // deriving it here means the author writes the ssh grant once, not also a parallel [[net.allow]].
-    // Skipped if the author already named the host (their entry, possibly with extra ports, wins).
-    if let Some(ssh) = &src.ssh {
-        for key in &ssh.keys {
-            for host in &key.hosts {
-                if !allow_names.iter().any(|r| &r.name == host) {
-                    allow_names.push(NameRule {
-                        name: host.clone(),
-                        ports: vec![22],
-                        protocol: Protocol::Tcp,
-                    });
-                }
-            }
-        }
-    }
+    // No implied egress is derived from `[ssh]`: the SSH destination is reached by the
+    // host-side `ssh` the bastion runs as the operator (§7.10.4), entirely outside the
+    // kennel's egress. The only egress the kennel needs is the bastion's own loopback
+    // endpoint, which `kenneld` grants as a host-service literal at spawn — not a policy
+    // `net.allow` rule. So a destination never appears in the kennel's allowlist.
 
     let mut deny_invariant: Vec<NetRule> = Vec::new();
     if let Some(deny) = &net.deny {
@@ -1053,6 +1103,138 @@ mod tests {
         assert!(translate_ulimits(&ulimits_src(&[("nofile", "lots")])).is_err());
     }
 
+    #[test]
+    fn workload_translates_argv_cwd_pin_and_valid_sha256() {
+        use crate::source::WorkloadSection;
+        let src = SourcePolicy {
+            workload: Some(WorkloadSection {
+                argv: Some(vec!["run-tests.sh".to_owned(), "--all".to_owned()]),
+                cwd: Some("~/suite".to_owned()),
+                pinned: Some(true),
+                sha256: Some(vec!["a".repeat(64), "b".repeat(64)]),
+            }),
+            ..SourcePolicy::default()
+        };
+        let mut deferred = BTreeSet::new();
+        let w = translate_workload(&src, &mut deferred).expect("translate workload");
+        assert_eq!(w.argv, vec!["run-tests.sh", "--all"]);
+        assert!(w.pinned);
+        // A SET of accepted digests (multiple versions valid under one policy).
+        assert_eq!(w.sha256, vec!["a".repeat(64), "b".repeat(64)]);
+        // `~` is the canonical home form in the settled policy; the spawn resolves it to
+        // the persona home (home-persona-path-model), so it stays `~/suite` here.
+        assert_eq!(w.cwd.as_deref(), Some("~/suite"));
+    }
+
+    #[test]
+    fn workload_absent_yields_empty_runtime_omitted_from_canonical_form() {
+        let mut deferred = BTreeSet::new();
+        let w = translate_workload(&SourcePolicy::default(), &mut deferred).expect("translate");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn workload_rejects_malformed_sha256() {
+        use crate::source::WorkloadSection;
+        for bad in [
+            "tooshort",
+            &"A".repeat(64),
+            &"g".repeat(64),
+            &"a".repeat(63),
+        ] {
+            let src = SourcePolicy {
+                workload: Some(WorkloadSection {
+                    argv: Some(vec!["x".to_owned()]),
+                    sha256: Some(vec![bad.to_owned()]),
+                    ..WorkloadSection::default()
+                }),
+                ..SourcePolicy::default()
+            };
+            let mut deferred = BTreeSet::new();
+            assert!(
+                translate_workload(&src, &mut deferred).is_err(),
+                "sha256 `{bad}` should be rejected"
+            );
+        }
+    }
+
+    fn net_with_mode(mode: &str) -> SourcePolicy {
+        SourcePolicy {
+            net: Some(crate::source::NetSection {
+                mode: Some(mode.to_owned()),
+                // `host` is reason-gated; supply one so the mode-mapping tests exercise the
+                // mode, not the gate (the gate has its own test below).
+                reason: Some("test".to_owned()),
+                // A non-default proxy_listen so we can prove the engine FORCES the proxy off
+                // for the non-proxied modes (the host-mode composition-bug fix).
+                proxy_listen_v4_address: Some("2:1080".to_owned()),
+                ..crate::source::NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        }
+    }
+
+    fn mode_of(m: &str) -> NetMode {
+        let mut d = BTreeSet::new();
+        translate_net(&net_with_mode(m), &mut d)
+            .expect("translate net")
+            .mode
+    }
+
+    #[test]
+    fn net_mode_strings_map_to_the_four_tiers() {
+        assert_eq!(mode_of("none"), NetMode::None);
+        assert_eq!(mode_of("constrained"), NetMode::Constrained);
+        assert_eq!(mode_of("unconstrained"), NetMode::Unconstrained);
+        assert_eq!(mode_of("host"), NetMode::Host);
+        let mut d = BTreeSet::new();
+        assert!(translate_net(&net_with_mode("bogus"), &mut d).is_err());
+    }
+
+    #[test]
+    fn host_and_none_force_the_proxy_off_even_with_proxy_listen_set() {
+        let mut d = BTreeSet::new();
+        // Proxied modes honour the proxy_listen address (offset 2).
+        for m in ["constrained", "unconstrained"] {
+            let net = translate_net(&net_with_mode(m), &mut d).expect("translate");
+            assert!(!net.proxy.is_disabled(), "{m} should be proxied");
+            assert_eq!(net.proxy.offset, 2, "{m} honours proxy_listen");
+        }
+        // Non-proxied modes force the proxy OFF regardless of an inherited proxy_listen —
+        // the engine-level fix for "mode=host but still proxied".
+        for m in ["host", "none"] {
+            let net = translate_net(&net_with_mode(m), &mut d).expect("translate");
+            assert!(net.proxy.is_disabled(), "{m} must drop the proxy");
+        }
+    }
+
+    #[test]
+    fn host_mode_requires_a_reason() {
+        let mut d = BTreeSet::new();
+        // No reason → refused.
+        let no_reason = SourcePolicy {
+            net: Some(crate::source::NetSection {
+                mode: Some("host".to_owned()),
+                ..crate::source::NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        let err = translate_net(&no_reason, &mut d).expect_err("host without reason");
+        assert!(matches!(err, PolicyError::Translation(_)));
+        // A whitespace-only reason is also rejected.
+        let blank = SourcePolicy {
+            net: Some(crate::source::NetSection {
+                mode: Some("host".to_owned()),
+                reason: Some("   ".to_owned()),
+                ..crate::source::NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        assert!(translate_net(&blank, &mut d).is_err());
+        // A real reason → accepted.
+        assert_eq!(mode_of("host"), NetMode::Host);
+    }
+
     fn translate_template(src: &str) -> Translated {
         let entry = parse(src.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &base_src()).expect("resolve");
@@ -1061,30 +1243,15 @@ mod tests {
 
     #[test]
     fn ssh_section_flattens_into_the_settled_runtime() {
-        use crate::source::{NetAllow, NetSection, SourcePolicy, SshKey, SshKnownHost, SshSection};
+        use crate::source::{SourcePolicy, SshDestination, SshSection};
         let src = SourcePolicy {
-            net: Some(NetSection {
-                allow: vec![NetAllow {
-                    name: Some("github.com".to_owned()),
-                    ports: vec![22],
-                    reason: Some("r".to_owned()),
-                    ..NetAllow::default()
-                }],
-                ..NetSection::default()
-            }),
             ssh: Some(SshSection {
                 allow_headless: Some(true),
-                keys: vec![SshKey {
-                    fingerprint: Some(
-                        "SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt".to_owned(),
-                    ),
-                    hosts: vec!["github.com".to_owned()],
+                destinations: vec![SshDestination {
+                    dest: Some("git@github.com".to_owned()),
+                    options: vec!["-i".to_owned(), "~/.ssh/id_github".to_owned()],
                     reason: Some("push".to_owned()),
                     threats: None,
-                }],
-                known_hosts: vec![SshKnownHost {
-                    host: Some("git.internal".to_owned()),
-                    key: Some("ssh-ed25519 AAAA".to_owned()),
                 }],
                 ..SshSection::default()
             }),
@@ -1093,14 +1260,9 @@ mod tests {
         let ssh = translate_ssh(&src);
         assert!(ssh.allow_headless);
         assert_eq!(ssh.grants.len(), 1);
-        assert_eq!(
-            ssh.grants.first().map(|g| g.host.as_str()),
-            Some("github.com")
-        );
-        assert_eq!(
-            ssh.known_hosts.first().map(|k| k.host.as_str()),
-            Some("git.internal")
-        );
+        let grant = ssh.grants.first().expect("one grant");
+        assert_eq!(grant.dest, "git@github.com");
+        assert_eq!(grant.options, vec!["-i", "~/.ssh/id_github"]);
         assert!(!ssh.is_empty());
         // No [ssh] ⇒ empty runtime, omitted from the canonical form (back-compat).
         assert!(translate_ssh(&SourcePolicy::default()).is_empty());
@@ -1609,21 +1771,24 @@ mod tests {
             audit: t.audit,
             env: t.env,
             ulimits: t.ulimits,
+            workload: t.workload,
         };
         crate::invariant::validate(&policy).expect("framework invariants must hold");
     }
 
     #[test]
-    fn untrusted_build_net_none_becomes_constrained_with_empty_allow() {
+    fn untrusted_build_net_none_is_a_real_isolated_mode() {
         let t = translate_template(UNTRUSTED_BUILD);
         let net = &t.effective_policy.net;
-        assert_eq!(net.mode, NetMode::Constrained, "none => constrained");
+        // `none` is now a distinct, fully-isolated mode (own empty net-ns, no interfaces),
+        // not an alias for constrained-with-empty-allow.
+        assert_eq!(net.mode, NetMode::None, "none => None");
         assert!(
             net.allow.is_empty() && net.allow_names.is_empty(),
             "no egress permitted"
         );
-        // The mandatory cloud-metadata invariant deny still propagates (RFC1918 is
-        // no longer an invariant — see base-confined [net]).
+        // The mandatory cloud-metadata invariant deny still propagates (defence in depth,
+        // even though a `none` kennel has no interface to reach it).
         assert!(net
             .deny_invariant
             .iter()
@@ -1733,44 +1898,21 @@ mod tests {
     }
 
     #[test]
-    fn ssh_host_implies_egress_allow_on_22() {
-        // An [[ssh.keys]] host grant derives a by-name :22 egress allow; the author writes no
-        // parallel [[net.allow]] (the implied-rule pass).
+    fn ssh_destination_derives_no_kennel_egress() {
+        // The SSH destination is reached host-side by the bastion's forced command, never by
+        // the kennel itself, so an [[ssh.destinations]] entry derives NO net.allow rule. The
+        // bastion endpoint is granted separately as a host-service literal at spawn (§7.10.4).
         let src = parse(
-            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[ssh.keys]]\nfingerprint = \"SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt\"\nhosts = [\"git.internal\"]\n",
+            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[ssh.destinations]]\ndest = \"git@git.internal\"\nreason = \"push\"\n",
         )
         .expect("parse");
         let net = translate_net(&src, &mut BTreeSet::new()).expect("translate");
-        let rule = net
-            .allow_names
-            .iter()
-            .find(|r| r.name == "git.internal")
-            .expect("ssh host derived into the egress allowlist");
-        assert_eq!(rule.ports, vec![22], "derived on port 22");
-    }
-
-    #[test]
-    fn an_authored_net_allow_for_an_ssh_host_is_not_duplicated() {
-        // If the author already named the host, their entry (with its own ports) wins — no dup.
-        let src = parse(
-            b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[net.allow]]\nname = \"git.internal\"\nports = [22, 443]\nreason = \"git over ssh + https\"\n[[ssh.keys]]\nfingerprint = \"SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt\"\nhosts = [\"git.internal\"]\n",
-        )
-        .expect("parse");
-        let net = translate_net(&src, &mut BTreeSet::new()).expect("translate");
-        let matches: Vec<&NameRule> = net
-            .allow_names
-            .iter()
-            .filter(|r| r.name == "git.internal")
-            .collect();
-        assert_eq!(
-            matches.len(),
-            1,
-            "the author's entry is not duplicated by the implied rule"
-        );
-        assert_eq!(
-            matches.first().expect("one match").ports,
-            vec![22, 443],
-            "the author's ports are preserved"
+        assert!(
+            !net.allow_names
+                .iter()
+                .any(|r| r.name.contains("git.internal")),
+            "an ssh destination must NOT appear in the kennel egress allowlist; got {:?}",
+            net.allow_names
         );
     }
 

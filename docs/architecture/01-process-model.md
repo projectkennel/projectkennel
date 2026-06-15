@@ -84,10 +84,14 @@ The supporting binaries:
   the **running kenneld** over the control socket (`Request::AuthorizedKeys`) for the
   line bound to the offered key. No `authorized_keys` file is written. A prototype
   `AuthorizedKeysFile` on a `0700` safe-owned path remains as an e2e fallback.
-- **`kennel-bin-ssh-reorigin`** — the unprivileged forced-command router that maps an
-  authenticated synthetic key to its fixed destination and execs outbound `ssh`.
-- **`kennel-socks-connect`** — the `ProxyCommand` that bridges `ssh` to the kennel's
-  SOCKS5 egress proxy (the workload may `connect()` only the proxy, §7.5).
+- **forced command (no binary)** — `kennel-akc` bakes the bastion's forced command
+  directly into the `authorized_keys` line it vends: `ssh <options> -- <dest>`, run as
+  the operator. There is no separate re-origination binary, no agent, and no
+  fingerprint selection — the destination and options are fixed in the signed grant.
+- **`facade-ssh`** — the in-kennel `ProxyCommand` that bridges the workload's `ssh` to
+  the bastion: it issues a binder `CONNECT_INET` to kenneld (node 0), which has
+  `host-netproxy` dial the bastion on the kennel's behalf (the workload may reach the
+  network only across the binder gateway, §7.10).
 
 The workload sees a synthetic read-only `~/.ssh` (one bastion-routed stanza per granted
 host, the disposable synthetic key, the bastion-pinned `known_hosts`); the user's real
@@ -187,7 +191,7 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    |   Workload (in cgroup, Landlock sealed)                              |
    |        |                                                             |
    |        +-->  $KENNEL_SOCKS_PROXY (kennel primary, :1080)            |
-   |        +-->  ssh -> kennel-socks-connect -> proxy -> bastion (§7.10) |
+   |        +-->  ssh -> facade-ssh -> kenneld -> netproxy -> bastion (§7.10) |
    |        +-->  /run/user/<uid>/bus  (D-Bus, via dbus-proxy)            |
    |                                                                      |
    |   BPF programs (attached to workload's cgroup)                       |
@@ -215,7 +219,7 @@ Notes on the diagram:
 
 - The "control protocol" between CLI and kenneld (`kenneld::control`) carries `Start` (with stdio fds, or the interactive pty-return socket, over `SCM_RIGHTS`), `Stop`, and `List`. Wire format in `02-6-ipc.md`.
 - The proxy and dbus-proxy `.ctl` sockets are *control* sockets owned by kenneld, not the data sockets used by the workload. The workload's data path to the proxy is the kennel's primary loopback (`$KENNEL_SOCKS_PROXY` — host offset 1 in its `/28`, port 1080), never the control socket.
-- SSH egress is re-originated through the per-user `kennel-sshd` bastion (§7.10): the workload's `ssh` reaches it via `kennel-socks-connect` → the egress proxy, authenticating with a disposable synthetic key in its constructed `~/.ssh`. The workload holds no real key and no agent socket; the bastion uses the user's host-side key.
+- SSH egress is routed through the per-user `kennel-sshd` bastion (§7.10): the workload's `ssh` reaches it via `facade-ssh` (a binder `CONNECT_INET` to kenneld, which has `host-netproxy` dial the bastion), authenticating with a compile-minted synthetic key in its constructed `~/.ssh`. The bastion's `kennel-akc` vends the forced command `ssh <options> -- <dest>`, run as the operator. The workload holds no real key and no agent socket; the bastion uses the user's host-side key.
 - BPF programs do not push events to userspace; they write into a ringbuf. A reader in kenneld drains the ringbuf and writes JSONL events to the audit directory.
 - The privhelper is invoked by kenneld during a kennel's bring-up and teardown. The addr/egress ops are one-shot; the **construct-kennel** op runs over a `SOCK_SEQPACKET` socketpair — kenneld sends the construction-half Plan and the stdio/pty fds (`SCM_RIGHTS`), and the op returns the init/workload host pids and, finally, the workload's exit status. The privhelper stays alive as `kennel-bin-init`'s parent for the kennel's lifetime.
 - The kennel's control plane is the **binder bus**, not an ad-hoc pipe: `kennel-bin-init` (PID 1) is a binder consumer transacting to node 0 (kenneld) for both its config pull (`GET_SANDBOX_PLAN`, returning the supervision-half Plan; the interactive pty rides the construction channel, not binder) and its lifecycle events (`NOTIFY_*`). kenneld gates these verbs on the init's host pid (a host context manager sees host pids, not the kennel-internal `1`), supplied by the privhelper at construction, never by the wire. The binder transaction surface is documented in `02-4-binder.md`.

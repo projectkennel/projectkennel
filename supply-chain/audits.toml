@@ -37,6 +37,12 @@ criteria = "safe-to-deploy"
 version = "2.3.0"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-31): 15 source files byte-identical to github.com/jedisct1/rust-ed25519-compact at tag 2.3.0. Source read for backdoors — no FFI/asm/process/net/fs/env; the one unsafe is the volatile secret-wipe; verification rejects non-canonical S (malleability) and weak/identity keys. Built default-features=false, features=[std]; x25519.rs/pem.rs not compiled."
 
+[[audits.lexopt]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.2"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-15): byte-identical to github.com/blyxxyz/lexopt at tag v0.3.2 via tools/audit-source.sh (11 source files). Full source read: a single ~2k-line lib.rs, #![forbid(unsafe_code)], zero dependencies, no build.rs, no proc-macro. The only std::env use is args_os() (its purpose — argument parsing); no FFI/asm/process/net/fs. The kennel-cli argument parser."
+
 [[audits.libc]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"

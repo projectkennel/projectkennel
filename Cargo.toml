@@ -3,7 +3,7 @@
 # One crate per architectural module (docs/architecture/03-crate-decomposition.md).
 # The prefix encodes where the crate runs — the security-relevant fact:
 #   kennel-lib-*  — libraries linked into the binaries (no runtime location of their own)
-#   kennel-bin-*  — binaries that are neither end of a binder connector (init, ssh-reorigin)
+#   kennel-bin-*  — binaries that are neither end of a binder connector (e.g. init)
 #   host-*        — the host end of a binder connector: a delegate kenneld drives (netproxy)
 #   facade-*      — the in-kennel end of a binder connector: pushes workload traffic into binder,
 #                   named for the protocol it fronts (facade-socks5, facade-afunix, facade-ssh)
@@ -34,7 +34,6 @@ members = [
     "src/crates/kennel-lib-text",
     # Binaries that are not a binder-connector end.
     "src/crates/kennel-bin-init",
-    "src/crates/kennel-bin-ssh-reorigin",
     # The host end of a binder connector (kenneld's dial delegate).
     "src/crates/host-netproxy",
     # The in-kennel ends of binder connectors (push workload traffic into binder).

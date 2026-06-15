@@ -125,6 +125,10 @@ pub struct SourcePolicy {
     /// Validated at translate time; folds per-key like `[env].set`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ulimits: Option<BTreeMap<String, String>>,
+    /// The workload to run (`[workload]`). Optional: when absent, the command is given
+    /// at `kennel run … -- <cmd>`. Folds scalar-wins up the chain like `[lifecycle]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadSection>,
 }
 
 /// `[audit]`: sink selection, per-class levels, and per-sink tuning
@@ -385,9 +389,18 @@ pub struct DevPassthrough {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetSection {
-    /// Egress mode: `"constrained"`, `"open"`, or `"none"`.
+    /// Egress mode: `"none"` (own empty net-ns, no interfaces), `"constrained"` (own net-ns,
+    /// SOCKS proxy, default-deny — the default), `"unconstrained"` (own net-ns, SOCKS proxy,
+    /// default-allow minus invariant + `net.deny` carve-outs), or `"host"` (host net-ns,
+    /// direct egress, `net.allow` enforced by BPF/Landlock — no proxy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Required (non-empty) only when `mode = "host"`: the documented justification for
+    /// sharing the host network stack, which reinstates the host-recon residual (T1.6).
+    /// The compiler refuses `mode = host` without it and records `threats.reinstated`
+    /// (`07-5-network.md` §7.5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Whether the per-kennel proxy listens on IPv4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_listen_v4: Option<bool>,
@@ -666,45 +679,39 @@ pub struct SshSection {
     /// `allow_headless = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
-    /// `[[ssh.keys]]` — granted `(real-key, hosts)` edges. Each mints a disposable
-    /// synthetic key bound to a forced command on the bastion (§7.10.3).
+    /// `[[ssh.destinations]]` — the SSH egress allowlist. Each entry is one destination
+    /// the kennel may reach; `kenneld` mints a per-destination synthetic key (the
+    /// capability the kennel authenticates to the bastion with) bound to a forced
+    /// command that runs `ssh <options> -- <dest>` **as the operator on the host**
+    /// (§7.10.3). The destination — and which real key/port/config the host-side `ssh`
+    /// uses — is fixed by *which synthetic key authenticated*, never by the workload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keys: Vec<SshKey>,
-    /// `[[ssh.known_hosts]]` — host-key pins for granted destinations the operator's
-    /// own `known_hosts` lacks (§7.10.7). A granted host with no known key fails closed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub known_hosts: Vec<SshKnownHost>,
+    pub destinations: Vec<SshDestination>,
 }
 
-/// One `[[ssh.keys]]` entry: a real key and the destinations it may reach.
+/// One `[[ssh.destinations]]` entry: a destination the kennel may reach over the bastion.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SshKey {
-    /// The user's real key, by its stable `SHA256:<base64>` (`ssh-add -l`) identity.
-    /// The key material itself lives only in the user's host-side store.
+pub struct SshDestination {
+    /// The SSH destination, in the form the host-side `ssh` is invoked with
+    /// (`git@github.com`, `root@localhost`, a `~/.ssh/config` host alias). It is the
+    /// capability the minted synthetic key stands for, never parsed from the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fingerprint: Option<String>,
-    /// Destinations this key may reach (each `⊆ net.allow` on port 22).
+    pub dest: Option<String>,
+    /// Host-side `ssh` invocation options for this destination, passed verbatim as argv
+    /// tokens before `<dest>` in the bastion's forced command (`-i ~/.ssh/id_x`,
+    /// `-o IdentitiesOnly=yes`, `-p 2222`, …). They run **as the operator** and name
+    /// which real key/port/config the outbound hop uses — host-side, never the kennel's
+    /// choice. Trusted because the policy is operator-signed; passed as separate argv
+    /// tokens (no shell), so a metacharacter cannot break out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hosts: Vec<String>,
-    /// Why this key/host edge is granted (required).
+    pub options: Vec<String>,
+    /// Why this destination is granted (required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Threat tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
-}
-
-/// One `[[ssh.known_hosts]]` entry: a pinned host key for a granted destination.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SshKnownHost {
-    /// The destination hostname this key pins.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-    /// The host key in `authorized_keys`/`known_hosts` form (`ssh-ed25519 AAAA…`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
 }
 
 /// `[proc]` — procfs visibility (mirrors `[fs.proc]`; both appear in the corpus).
@@ -717,6 +724,26 @@ pub struct ProcSection {
     /// Mount `/proc` with `hidepid=2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidepid: Option<bool>,
+}
+
+/// `[workload]` — the command the kennel runs, optionally pinned.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadSection {
+    /// The command + args (`argv[0]` is the program). Absent ⇒ supplied at `kennel run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// Working directory inside the view (may carry a `~`/`<home>` placeholder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Refuse a CLI `--` override of `argv` unless `--force` (pin exactly what runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    /// Accepted lowercase-hex SHA-256 digests of the workload binary; the spawn verifies
+    /// the binary against this set before exec. A list so multiple accepted versions of
+    /// one binary validate under a single policy. Absent/empty ⇒ no pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<Vec<String>>,
 }
 
 /// `[ptrace]` — ptrace across the kennel boundary.
@@ -923,10 +950,12 @@ impl SourcePolicy {
             }
         }
         if let Some(ssh) = &self.ssh {
-            for k in &ssh.keys {
-                let who = k.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
-                if is_blank(k.reason.as_deref()) {
-                    errs.push(format!("[[ssh.keys]] \"{who}\" is missing a `reason`"));
+            for d in &ssh.destinations {
+                let who = d.dest.as_deref().unwrap_or("<no-dest>");
+                if is_blank(d.reason.as_deref()) {
+                    errs.push(format!(
+                        "[[ssh.destinations]] \"{who}\" is missing a `reason`"
+                    ));
                 }
             }
         }

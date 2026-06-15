@@ -322,25 +322,15 @@ pub fn build_view_and_pivot(
     let under = |abs: &Path| new_root.join(abs.strip_prefix("/").unwrap_or(abs));
 
     // 1. The new root: a fresh tmpfs (scaffolding only; bound content is host-backed).
-    mount::mount_special("tmpfs", new_root)?;
+    mount::mount_special("tmpfs", new_root).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("mount tmpfs new_root {}: {e}", new_root.display()),
+        )
+    })?;
 
-    // 2. Bind the granted system + home paths in. Recursive, so submounts come
-    //    along; read-only unless the grant is writable (those resolve to the real
-    //    host inode, the persistence guarantee). A bind whose **source does not
-    //    exist** is skipped (skip-missing): a grant for an absent path is vacuous (the
-    //    Landlock rule is dropped too), and an optional socket shim — e.g. a per-kennel
-    //    agent not yet launched — must not abort the whole spawn.
-    for b in &view.binds {
-        if !b.source.exists() {
-            continue;
-        }
-        let dest = under(&b.target);
-        create_bind_target(&b.source, &dest)?;
-        mount::bind(&b.source, &dest, true)?;
-        if !b.writable {
-            mount::remount_readonly(&dest)?;
-        }
-    }
+    // 2. Bind the granted system + home paths in.
+    materialize_binds(&view.binds, &under)?;
 
     // 2b. Merged-usr compat symlinks (`/bin -> usr/bin`, `/lib64 -> usr/lib`, …).
     //    On modern systems these top-level dirs are symlinks into `/usr`; the view's
@@ -442,6 +432,53 @@ pub fn build_view_and_pivot(
     std::env::set_current_dir("/")?;
     mount::unmount_detach(Path::new("/.kennel-oldroot"))?;
     let _ = std::fs::remove_dir(Path::new("/.kennel-oldroot"));
+    Ok(())
+}
+
+/// Bind each granted system/home path into the view. Recursive, so submounts come along;
+/// read-only unless the grant is writable (those resolve to the real host inode, the
+/// persistence guarantee). `under` maps an in-kennel path to its staging location.
+///
+/// A bind whose **source does not exist** is skipped (skip-missing): a grant for an absent
+/// path is vacuous (the Landlock rule is dropped too), and an optional socket shim — e.g. a
+/// per-kennel agent not yet launched — must not abort the whole spawn. A read-only bind whose
+/// **target already exists** is also skipped: a broader earlier grant (e.g. `/usr/**`) already
+/// materialised it at the same host inode, and creating the mountpoint would land *inside* that
+/// read-only bind and fail EROFS (the facade binaries under `/usr/libexec/kennel` are exactly
+/// this case). A *writable* bind is never skipped — it must override a read-only parent.
+///
+/// # Errors
+///
+/// Returns the OS error if creating a mountpoint, the bind mount, or the read-only remount
+/// fails for a present, non-redundant bind.
+fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> io::Result<()> {
+    use kennel_lib_syscall::mount;
+    for b in binds {
+        if !b.source.exists() {
+            continue;
+        }
+        let dest = under(&b.target);
+        if !b.writable && dest.symlink_metadata().is_ok() {
+            continue;
+        }
+        create_bind_target(&b.source, &dest).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("create_bind_target {}: {e}", dest.display()),
+            )
+        })?;
+        mount::bind(&b.source, &dest, true).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("bind {}->{}: {e}", b.source.display(), dest.display()),
+            )
+        })?;
+        if !b.writable {
+            mount::remount_readonly(&dest).map_err(|e| {
+                io::Error::new(e.kind(), format!("remount_ro {}: {e}", dest.display()))
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -662,6 +699,7 @@ mod tests {
             audit: kennel_lib_policy::AuditRuntime::default(),
             env: kennel_lib_policy::EnvRuntime::default(),
             ulimits: kennel_lib_policy::UlimitsRuntime::default(),
+            workload: kennel_lib_policy::WorkloadRuntime::default(),
         }
     }
 
@@ -986,14 +1024,19 @@ mod tests {
         p.effective_policy.exec.loaders = vec!["/lib64/ld-linux-x86-64.so.2".to_owned()];
         let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
-        // Namespaces at the plan level: user (the unprivileged foundation) + mount/pid/ipc. The
-        // per-kennel net-ns (Namespaces::NET) is added by kenneld's bring-up for egress kennels
-        // (it needs the runtime loopback scope), not by this policy→plan translation.
+        // Namespaces at the plan level: user (the unprivileged foundation) + mount/pid/ipc, plus
+        // the per-kennel net-ns (Namespaces::NET) for every mode except `open`. The test policy is
+        // `constrained` (proxied), so it gets its own net-ns at the policy→plan translation — the
+        // netns decision now lives here, by mode, not bolted on later by kenneld.
         assert_eq!(
             plan.namespaces,
-            Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC
+            Namespaces::USER
+                | Namespaces::MOUNT
+                | Namespaces::PID
+                | Namespaces::IPC
+                | Namespaces::NET
         );
-        assert!(!plan.namespaces.contains(Namespaces::NET));
+        assert!(plan.namespaces.contains(Namespaces::NET));
 
         // cgroup lives under the caller's resource namespace, keyed by ctx.
         assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));

@@ -98,7 +98,9 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
     let audit_base = Some(state_home.join("kennel"));
     // The per-user SSH bastion (§7.10): one managed kennel-sshd for the session, on a
     // host-loopback port derived from the user's tag (so two users' daemons do not
-    // clash on 127.0.0.1). Its forced commands sign with the user's own agent.
+    // clash on 127.0.0.1). Each forced command runs `ssh <options> -- <dest>` as the
+    // operator, signing with whatever the policy's per-destination `options` name from the
+    // operator's own host-side key store — no agent, no key material kenneld can reach.
     //
     // Keys are vended through the root-owned AuthorizedKeysCommand (§7.10.7): it queries
     // this running daemon for the live forced-command bindings, so the bindings never
@@ -106,11 +108,9 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
     // safe-path check); it runs as the bastion user so it can reach our control socket.
     let bastion = Some(BastionSetup {
         dir: socket::runtime_dir().join("bastion"),
-        reorigin_bin: deployment.ssh_reorigin(),
         ssh_bin: deployment.ssh(),
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 8022_u16.saturating_add(scope.tag()),
-        agent_sock: std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
         akc: Some(kenneld::bastion::Akc {
             command: deployment.akc(),
             user: username.clone(),

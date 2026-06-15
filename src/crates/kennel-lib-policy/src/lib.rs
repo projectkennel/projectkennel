@@ -37,6 +37,7 @@ pub mod invariant;
 pub mod keys;
 pub mod leaf;
 pub mod libresolve;
+pub mod lint;
 pub mod lock;
 pub mod resolve;
 pub mod settled;
@@ -52,6 +53,7 @@ pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use leaf::{parse as parse_leaf, LeafPolicy};
+pub use lint::lint_settled;
 pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use settled::{
@@ -59,8 +61,8 @@ pub use settled::{
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
     ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
-    SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshKnownHostPin, SshRuntime,
-    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, ULIMIT_RESOURCES,
+    SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction,
+    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{parse as parse_source, SourcePolicy};
@@ -240,6 +242,7 @@ mod tests {
             audit: settled::AuditRuntime::default(),
             env: settled::EnvRuntime::default(),
             ulimits: settled::UlimitsRuntime::default(),
+            workload: settled::WorkloadRuntime::default(),
         }
     }
 
@@ -467,7 +470,7 @@ mod tests {
         let key = signing_key();
         let mut doc = sign_settled(&sample_policy(), &key).expect("sign");
         // Flip an enforced value the attacker would want changed.
-        doc.policy.effective_policy.net.mode = NetMode::Open;
+        doc.policy.effective_policy.net.mode = NetMode::Host;
         let bytes = to_bytes(&doc).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("must reject");
         assert!(

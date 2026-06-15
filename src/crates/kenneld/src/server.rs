@@ -83,6 +83,10 @@ pub struct Loaded {
     /// The lifecycle policy (§9.7): the optional TTL and what to do at expiry. Drives
     /// the TTL reaper in `run_kennel`. `ttl_seconds = None` ⇒ no reaper armed.
     pub lifecycle: kennel_lib_policy::LifecyclePolicy,
+    /// The workload the policy embeds (§7.4): `argv`/`cwd`/`pinned`/`sha256`. Empty ⇒ the
+    /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
+    /// request's argv (the request wins unless `pinned`); see `effective_workload`.
+    pub workload: kennel_lib_policy::WorkloadRuntime,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -153,8 +157,6 @@ pub struct BastionSetup {
     /// The safe-owned runtime dir for the bastion's host key, config, and
     /// `authorized_keys` (under `$XDG_RUNTIME_DIR`, never world-writable).
     pub dir: PathBuf,
-    /// The host-side `kennel-bin-ssh-reorigin` the bastion's forced commands invoke.
-    pub reorigin_bin: PathBuf,
     /// The in-kennel path of `facade-ssh` (each synthetic `config`
     /// stanza's `ProxyCommand`); also the host path bound into the kennel view.
     pub ssh_bin: PathBuf,
@@ -162,10 +164,6 @@ pub struct BastionSetup {
     pub listen: IpAddr,
     /// The bastion's port.
     pub port: u16,
-    /// The host-side agent socket holding the user's real keys (`$SSH_AUTH_SOCK`),
-    /// handed to the forced command so it can sign the outbound hop. `None` ⇒ the
-    /// helper finds no key and fails closed.
-    pub agent_sock: Option<PathBuf>,
     /// The root-owned `AuthorizedKeysCommand` the bastion vends keys through
     /// (production, §7.10.7): it queries this running daemon for the live bindings,
     /// so no `authorized_keys` file is written. `None` falls back to a static
@@ -226,6 +224,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         kennel: &str,
         ssh: &kennel_lib_policy::SshRuntime,
         shim_root: &Path,
+        policy_ssh_dir: &Path,
     ) -> Result<crate::SshPrep, String> {
         let Some(setup) = self.identity.bastion.as_ref() else {
             return Ok(crate::SshPrep::default());
@@ -240,31 +239,43 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         let bastion = guard.get_or_insert_with(|| {
             crate::bastion::Bastion::new(crate::bastion::BastionConfig {
                 dir: setup.dir.clone(),
-                reorigin_bin: setup.reorigin_bin.clone(),
                 listen: setup.listen,
                 port: setup.port,
-                agent_sock: setup.agent_sock.clone(),
                 akc: setup.akc.clone(),
             })
         });
 
+        // The synthetic keypairs were minted at compile time and persist beside the signed
+        // artefact in `<policy-dir>/ssh/`; the public half is signature-pinned in each grant.
+        // Stage a copy of the private key for the kennel's `~/.ssh`, and register the edge
+        // with the SIGNED public key (never a key minted here) + the host-side `options`.
         let staging = setup.dir.join("synthetic").join(kennel);
         std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
         let mut host_files: Vec<(String, String)> = Vec::new();
         for grant in &ssh.grants {
-            let key_file = format!("id_{}", grant.host);
-            let comment = format!("kennel {kennel} -> {}", grant.host);
-            let pub_line = crate::ssh::mint_synthetic_key(&staging, &key_file, &comment)
+            if grant.public_key.is_empty() || grant.key_file.is_empty() {
+                return Err(format!(
+                    "ssh grant for `{}` has no minted key (recompile the policy with \
+                     `kennel policy compile`)",
+                    grant.dest
+                ));
+            }
+            let key_file = grant.key_file.clone();
+            crate::ssh::stage_synthetic_key(policy_ssh_dir, &staging, &key_file)
                 .map_err(|e| e.to_string())?;
             bastion
                 .register(crate::bastion::Edge {
                     kennel: kennel.to_owned(),
-                    dest: grant.host.clone(),
-                    real_fp: grant.fingerprint.clone(),
-                    synthetic_pub: pub_line,
+                    dest: grant.dest.clone(),
+                    options: grant.options.clone(),
+                    synthetic_pub: grant.public_key.clone(),
                 })
                 .map_err(|e| e.to_string())?;
-            host_files.push((grant.host.clone(), key_file));
+            // The synthetic `~/.ssh/config` stanza is keyed by the host the workload types
+            // (`ssh git@github.com` → `Host github.com`): OpenSSH matches `Host` against the
+            // hostname with any `user@` stripped, so the config alias is the host part while
+            // the bastion's forced command holds the full `dest`.
+            host_files.push((ssh_host_alias(&grant.dest).to_owned(), key_file));
         }
         let host_pub = bastion
             .host_pub()
@@ -288,6 +299,9 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             bastion_port: setup.port,
             bastion_host_key: &host_pub,
             ssh_bin: &connect_bin,
+            // The bastion login user is the operator: the bastion runs the forced command
+            // as them, and the kennel persona (`kennel`) is no real host account.
+            bastion_user: &self.identity.username,
             hosts: &host_grants,
         };
         let ssh_dir = shim_root.join(".ssh");
@@ -551,6 +565,13 @@ const MAX_KENNEL_NAME: usize = 64;
 /// # Errors
 /// A human-readable reason if the name is empty, too long, or contains a character
 /// outside the grammar (in particular `/`, `.`, NUL, whitespace, or control bytes).
+/// The hostname part of an SSH destination — the `user@` prefix stripped. This is the
+/// alias the synthetic `~/.ssh/config` keys its `Host` stanza on, because OpenSSH matches
+/// `Host` against the hostname with any user removed (`ssh git@github.com` → `github.com`).
+fn ssh_host_alias(dest: &str) -> &str {
+    dest.rsplit_once('@').map_or(dest, |(_, host)| host)
+}
+
 fn validate_kennel_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("kennel name must not be empty".to_owned());
@@ -630,6 +651,35 @@ pub fn run_kennel<P, L>(
         Ok(loaded) => loaded,
         Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
     };
+    // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
+    // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
+    // only here is the policy's workload known. The request wins unless the policy pins it.
+    let (argv, cwd) = match effective_workload(req, &loaded.workload) {
+        Ok(pair) => pair,
+        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
+    };
+    // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
+    // decision made here, on the host, before the kennel is built: kennel-bin-init is a
+    // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
+    // are running the policy's own workload (an unpinned `--` override is a different
+    // command the pin does not cover). On success it returns the OPEN fd of the verified
+    // binary, which we pin into the plan: the factory places it at WORKLOAD_FD and init
+    // `fexecve`s it (no path relookup → TOCTOU-free). `_workload_fd` must outlive the
+    // construction, so it stays in scope until the end of bring-up.
+    // Held only to keep the fd open (its raw value is what's used, via the plan); never read.
+    #[allow(clippy::collection_is_never_read)]
+    let _workload_fd;
+    if !loaded.workload.sha256.is_empty() && req.argv.is_empty() {
+        match verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256) {
+            Ok(fd) => {
+                loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
+                _workload_fd = Some(fd);
+            }
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload sha256", reason),
+        }
+    } else {
+        _workload_fd = None;
+    }
     // Interactive runs pass ONE connected socket (over which the seal returns a
     // controlling pty allocated inside the kennel's devpts); non-interactive runs
     // pass the three stdio fds. `return_sock` must outlive the spawn so the forked
@@ -637,25 +687,31 @@ pub fn run_kennel<P, L>(
     let mut return_sock: Option<OwnedFd> = None;
     let mut command = if req.interactive {
         return_sock = fds.into_iter().next();
-        match command_for_interactive(&req.argv, &req.cwd) {
+        match command_for_interactive(&argv, &cwd) {
             Ok(command) => command,
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     } else {
-        match command_for(&req.argv, &req.cwd, fds) {
+        match command_for(&argv, &cwd, fds) {
             Ok(command) => command,
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     };
-    // Prepare SSH egress (§7.10): mint synthetic keys, register the edges with the
-    // per-user bastion, and build the synthetic ~/.ssh for the view. The ~/.ssh is
-    // rooted at the constructed-view HOME (the plan's shim root) when there is one.
+    // Prepare SSH egress (§7.10): stage the compile-time synthetic keys, register the
+    // edges with the per-user bastion, and build the synthetic ~/.ssh for the view. The
+    // ~/.ssh is rooted at the constructed-view HOME (the plan's shim root) when there is
+    // one; the persisted keypairs live in `<policy-dir>/ssh/` beside the settled artefact.
     let shim_root = loaded
         .plan
         .view
         .as_ref()
         .map_or_else(|| shared.identity.home.clone(), |v| v.shim_root.clone());
-    let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root) {
+    let policy_ssh_dir = req
+        .policy
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("ssh");
+    let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root, &policy_ssh_dir) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
         Err(reason) => {
@@ -954,6 +1010,118 @@ fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> Pa
     PathBuf::from(s)
 }
 
+/// Resolve the effective workload argv + cwd from the request and the policy's embedded
+/// `[workload]` (§7.4). The request's `--` argv overrides the policy's by default; a
+/// `pinned` policy refuses the override unless `req.force`. With no request argv the
+/// policy's argv (and its `cwd`, if any) drive the run.
+///
+/// # Errors
+///
+/// A human-readable reason when neither the request nor the policy supplies an argv, or
+/// when a non-empty request argv would override a pinned policy workload without `--force`.
+fn effective_workload(
+    req: &StartRequest,
+    workload: &kennel_lib_policy::WorkloadRuntime,
+) -> Result<(Vec<String>, PathBuf), String> {
+    if req.argv.is_empty() {
+        // Policy-driven: use the embedded workload, and its cwd if it set one.
+        if workload.argv.is_empty() {
+            return Err(
+                "no workload: the policy has no [workload] and no command was given \
+                 (kennel run … -- <cmd>)"
+                    .to_owned(),
+            );
+        }
+        let cwd = workload
+            .cwd
+            .as_deref()
+            .map_or_else(|| req.cwd.clone(), PathBuf::from);
+        return Ok((workload.argv.clone(), cwd));
+    }
+    // Request-supplied argv: overrides the policy workload unless it is pinned.
+    if workload.pinned && !req.force {
+        return Err(format!(
+            "policy [workload] is pinned to `{}`; refusing the `-- {}` override \
+             (pass --force to override)",
+            workload.argv.join(" "),
+            req.argv.join(" ")
+        ));
+    }
+    Ok((req.argv.clone(), req.cwd.clone()))
+}
+
+/// Verify the workload binary's SHA-256 against the policy's accepted-digest set, returning
+/// the **open fd** of the verified binary for the fd-pin (§7.4).
+///
+/// TOCTOU-free: the binary is `open`ed ONCE here; the digest is computed over
+/// `/proc/self/fd/<fd>` (the very inode now held open), and that same fd is handed to
+/// `kennel-bin-init` to `fexecve` — so the bytes hashed are the bytes that run, with no path
+/// relookup in between. A writer that swaps the on-disk path afterwards cannot affect the
+/// pinned fd.
+///
+/// A **kenneld** decision (the dumb-executor init gets none): resolve `program` against the
+/// policy's `exec_path` on the host, open it, hash it with the system `sha256sum` over the fd
+/// (the trusted hasher — no in-process crypto dependency in the privileged path), and accept
+/// only if the digest is in `accepted`. Fail closed: an unresolvable program, an open/hash
+/// failure, or a non-matching digest all refuse the spawn.
+///
+/// # Errors
+///
+/// A human-readable reason on resolution, open, hashing, or digest-mismatch failure.
+fn verify_workload_digest(
+    program: Option<&String>,
+    exec_path: &[String],
+    accepted: &[String],
+) -> Result<OwnedFd, String> {
+    use std::os::fd::AsRawFd as _;
+    let program = program.ok_or("workload sha256 pin set but the workload argv is empty")?;
+    // Resolve a bare name against the policy PATH (host side); an explicit path is used as-is.
+    let resolved = if program.contains('/') {
+        PathBuf::from(program)
+    } else {
+        exec_path
+            .iter()
+            .map(|d| Path::new(d).join(program))
+            .find(|p| p.is_file())
+            .ok_or_else(|| {
+                format!("workload `{program}` not found on the policy PATH to hash it")
+            })?
+    };
+    // Open the binary ONCE; everything downstream keys on this fd (hash + fexecve).
+    let file = std::fs::File::open(&resolved)
+        .map_err(|e| format!("opening workload {} to pin it: {e}", resolved.display()))?;
+    // Hash the fd itself via /proc/<pid>/fd, so the digest is over the open inode, not a path
+    // that could be re-looked-up to different bytes. The pid is THIS process's (not
+    // `/proc/self`, which in the spawned sha256sum would be the child's own fd table).
+    let fd_path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
+    let out = Command::new("sha256sum")
+        .arg("-b")
+        .arg(&fd_path)
+        .output()
+        .map_err(|e| format!("running sha256sum on the workload fd: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "sha256sum failed on workload {}: {}",
+            resolved.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // `sha256sum` prints `<hex>  <path>` (or `<hex> *<path>` with -b); take the first field.
+    let digest = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if accepted.iter().any(|a| a == &digest) {
+        Ok(OwnedFd::from(file))
+    } else {
+        Err(format!(
+            "workload {} sha256 {digest} is not in the policy's accepted set",
+            resolved.display()
+        ))
+    }
+}
+
 /// Build the workload command from `argv`/`cwd`, wiring the passed stdio fds if
 /// all three are present (otherwise the workload inherits the daemon's stdio).
 fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command, String> {
@@ -994,6 +1162,115 @@ mod tests {
     use kennel_lib_syscall::namespace::Namespaces;
     use kennel_lib_syscall::seccomp::Action;
     use kennel_privhelper::wire::Response as HelperResponse;
+
+    fn start_req(argv: &[&str], force: bool) -> StartRequest {
+        StartRequest {
+            policy: PathBuf::from("/x"),
+            kennel: "k".to_owned(),
+            argv: argv.iter().map(|s| (*s).to_owned()).collect(),
+            cwd: PathBuf::from("/cli/cwd"),
+            term: String::new(),
+            interactive: false,
+            force,
+        }
+    }
+
+    fn workload(
+        argv: &[&str],
+        cwd: Option<&str>,
+        pinned: bool,
+    ) -> kennel_lib_policy::WorkloadRuntime {
+        kennel_lib_policy::WorkloadRuntime {
+            argv: argv.iter().map(|s| (*s).to_owned()).collect(),
+            cwd: cwd.map(str::to_owned),
+            pinned,
+            sha256: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn effective_workload_uses_policy_when_no_cli_argv() {
+        let (argv, cwd) = effective_workload(
+            &start_req(&[], false),
+            &workload(&["run.sh", "--all"], Some("/suite"), false),
+        )
+        .expect("policy workload");
+        assert_eq!(argv, vec!["run.sh", "--all"]);
+        assert_eq!(cwd, PathBuf::from("/suite")); // the policy cwd, not the CLI cwd
+    }
+
+    #[test]
+    fn effective_workload_cli_overrides_unpinned_policy() {
+        let (argv, cwd) = effective_workload(
+            &start_req(&["bash"], false),
+            &workload(&["run.sh"], Some("/suite"), false),
+        )
+        .expect("override");
+        assert_eq!(argv, vec!["bash"]);
+        assert_eq!(cwd, PathBuf::from("/cli/cwd")); // the CLI cwd on override
+    }
+
+    #[test]
+    fn effective_workload_pinned_refuses_override_without_force() {
+        let err = effective_workload(
+            &start_req(&["bash"], false),
+            &workload(&["run.sh"], None, true),
+        )
+        .expect_err("pinned refuses");
+        assert!(err.contains("pinned"), "{err}");
+    }
+
+    #[test]
+    fn effective_workload_pinned_override_with_force() {
+        let (argv, _) = effective_workload(
+            &start_req(&["bash"], true),
+            &workload(&["run.sh"], None, true),
+        )
+        .expect("force overrides pin");
+        assert_eq!(argv, vec!["bash"]);
+    }
+
+    #[test]
+    fn effective_workload_errors_when_neither_supplies_argv() {
+        let err = effective_workload(&start_req(&[], false), &workload(&[], None, false))
+            .expect_err("no workload");
+        assert!(err.contains("no workload"), "{err}");
+    }
+
+    #[test]
+    fn verify_workload_digest_accepts_matching_and_rejects_otherwise() {
+        // Hash a real temp file with the host sha256sum (the same tool the check uses), so
+        // the expected digest is whatever this host produces — no hard-coded constant.
+        let dir = std::env::temp_dir().join(format!("kennel-digest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let bin = dir.join("workload");
+        std::fs::write(&bin, b"#!/bin/sh\necho hi\n").expect("write");
+        let out = Command::new("sha256sum")
+            .arg("-b")
+            .arg(&bin)
+            .output()
+            .expect("sha256sum");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let real = stdout.split_whitespace().next().expect("digest").to_owned();
+        let exec_path = vec![dir.to_string_lossy().into_owned()];
+        let name = "workload".to_owned();
+
+        // Bare name resolved against the policy PATH, digest in the accepted set → ok.
+        assert!(
+            verify_workload_digest(Some(&name), &exec_path, std::slice::from_ref(&real)).is_ok()
+        );
+        // A non-matching set → refused.
+        let err = verify_workload_digest(Some(&name), &exec_path, &["0".repeat(64)])
+            .expect_err("mismatch");
+        assert!(err.contains("not in the policy's accepted set"), "{err}");
+        // A program that does not resolve → refused (fail closed).
+        let nope = "nope".to_owned();
+        assert!(
+            verify_workload_digest(Some(&nope), &exec_path, std::slice::from_ref(&real)).is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn valid_kennel_names_are_accepted() {
@@ -1069,6 +1346,7 @@ mod tests {
                 supplementary_groups: None,
                 ulimits: Vec::new(),
                 interactive_return_fd: None,
+                workload_fd: None,
                 aux: Vec::new(),
                 ttl_seconds: None,
                 ttl_action: kennel_lib_policy::TtlAction::Exit,
@@ -1100,6 +1378,7 @@ mod tests {
                     ttl_seconds: None,
                     ttl_action: kennel_lib_policy::TtlAction::Exit,
                 },
+                workload: kennel_lib_policy::WorkloadRuntime::default(),
             })
         }
     }
@@ -1173,16 +1452,14 @@ mod tests {
         // Stand up a bastion with one live edge (no sshd) and query it as the AKC would.
         let mut bastion = Bastion::new(BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
-            reorigin_bin: PathBuf::from("/opt/kennel/bin/kennel-bin-ssh-reorigin"),
             listen: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 7022,
-            agent_sock: None,
             akc: None,
         });
         bastion.push_edge_for_test(Edge {
             kennel: "ka".to_owned(),
-            dest: "github.com".to_owned(),
-            real_fp: "SHA256:AAAa1EZ7oO0qfsA5OSDosRRaFD9evYHhSlcrDPTVoZw".to_owned(),
+            dest: "git@github.com".to_owned(),
+            options: Vec::new(),
             synthetic_pub: "ssh-ed25519 AAAASYN_A ka".to_owned(),
         });
         *s.bastion.lock().expect("bastion lock") = Some(bastion);
@@ -1194,7 +1471,7 @@ mod tests {
         let line = lines.first().map(String::as_str).unwrap_or_default();
         assert_eq!(lines.len(), 1, "one matching edge");
         assert!(
-            line.contains("--dest github.com") && line.contains("AAAASYN_A"),
+            line.contains("-- 'git@github.com'") && line.contains("AAAASYN_A"),
             "got {line}"
         );
 

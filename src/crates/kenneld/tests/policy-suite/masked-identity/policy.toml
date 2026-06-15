@@ -1,0 +1,35 @@
+# ============================================================================
+# Suite case: masked-identity — the workload's identity is the synthetic persona.
+#
+# Proves §7.4: $HOME is /home/kennel, $USER/passwd/group name `kennel` (no operator
+# identity leaks), and the supplementary groups are dropped to nothing (every gid is
+# the primary or the overflow nogroup). net=none so no network scaffolding runs at all
+# — this case is purely about identity. Exit 0 ⇒ the persona held.
+# ============================================================================
+
+template_name = "masked-identity"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/grep", "/usr/bin/test", "/usr/bin/[", "/usr/bin/id"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    test "$HOME" = /home/kennel \
+    && test "$USER" = kennel \
+    && grep -q '^kennel:' /etc/passwd \
+    && grep -q '^kennel:' /etc/group \
+    && grep -q ':/home/kennel:' /etc/passwd \
+    && for x in $(id -G); do [ "$x" = 65534 ] || [ "$x" = "$(id -g)" ] || exit 9; done
+    """,
+]

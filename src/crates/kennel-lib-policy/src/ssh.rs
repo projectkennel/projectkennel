@@ -6,26 +6,25 @@
 //! dropped from the settled `EffectivePolicy` (`translate.rs`). Its effects are
 //! realised at runtime by `kenneld`'s SSH re-origination bastion, the synthetic
 //! `~/.ssh`, and the egress allowlist — none of which the settled artefact carries.
-//! So the *only* place the framework can reject a malformed or dead SSH grant is
-//! here, at compile time, on the resolved source policy.
+//! So the *only* place the framework can reject a malformed SSH grant is here, at
+//! compile time, on the resolved source policy.
 //!
 //! # What this checks (§7.10.8)
 //!
-//! - **Every `fingerprint` is well-formed** — the modern `SHA256:<base64>` identity
-//!   `ssh-add -l` prints. A typo'd fingerprint mints a synthetic key that no real
-//!   key can ever back, so the grant is dead; catch it at compile time, not at the
-//!   bastion.
-//! - **Every `hosts` entry is `⊆ net.allow` on port 22.** SSH leaves the kennel only
-//!   over the egress proxy, and direct `:22` is denied; a host not in the egress
-//!   allowlist on 22 is either a dead grant or a recon hint (a destination named in
-//!   policy the kennel can never reach). Both are author errors.
-//! - **`allow_headless = true` carries a threat tag.** Letting a non-interactive
-//!   kennel drive a real key with no per-use touch is a real exposure (§7.10.6); the
+//! - **Every destination is non-empty.** A `[[ssh.destinations]]` entry with no `dest`
+//!   mints a synthetic key that stands for nothing — a dead grant; catch it here.
+//! - **`allow_headless = true` carries a threat tag.** Letting a non-interactive kennel
+//!   drive a granted destination with no per-use touch is a real exposure (§7.10.6); the
 //!   policy must record it as one (`[ssh].threats.exposed`).
 //!
+//! There is deliberately **no** `dest ⊆ net.allow` check: the SSH destination is reached
+//! by the *host-side* `ssh` the bastion's forced command runs, as the operator, entirely
+//! outside the kennel's egress purview (§7.10.4). The only egress the kennel needs is the
+//! bastion's own loopback endpoint, which `kenneld` grants as a host-service literal — not
+//! a policy `net.allow` rule. So a destination is never a kennel egress target.
+//!
 //! This validation runs on the *resolved* policy (after the chain is folded, includes
-//! applied, and a leaf's deltas merged), so an `[ssh]` grant may reference a
-//! `net.allow` host contributed anywhere up the chain or by the same leaf.
+//! applied, and a leaf's deltas merged).
 
 use crate::source::{SourcePolicy, SshSection};
 use crate::PolicyError;
@@ -44,27 +43,21 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
     };
     let mut errs: Vec<String> = Vec::new();
 
-    for k in &ssh.keys {
-        match k.fingerprint.as_deref() {
-            None => errs.push("[[ssh.keys]] entry is missing a `fingerprint`".to_owned()),
-            Some(fp) if !is_sha256_fingerprint(fp) => errs.push(format!(
-                "[[ssh.keys]] fingerprint `{fp}` is not a well-formed `SHA256:<base64>` \
-                 key fingerprint (the form `ssh-add -l` prints)"
-            )),
+    for d in &ssh.destinations {
+        match d.dest.as_deref() {
+            None => errs.push("[[ssh.destinations]] entry is missing a `dest`".to_owned()),
+            Some(dest) if dest.trim().is_empty() => {
+                errs.push("[[ssh.destinations]] `dest` is empty".to_owned());
+            }
             Some(_) => {}
         }
-        if k.hosts.is_empty() {
-            let who = k.fingerprint.as_deref().unwrap_or("<no-fingerprint>");
-            errs.push(format!("[[ssh.keys]] `{who}` grants no `hosts`"));
-        }
-        // An ssh-granted host no longer needs a parallel [[net.allow]] on :22 — translate derives
-        // the egress allow from the ssh grant (the implied-rule pass). So no precondition check here.
     }
 
     if ssh.allow_headless == Some(true) && !has_threat_tag(ssh) {
         errs.push(
-            "[ssh] `allow_headless = true` lets a non-interactive kennel drive a real key with \
-             no per-use touch; it must carry a threat tag (`[ssh].threats.exposed`)."
+            "[ssh] `allow_headless = true` lets a non-interactive kennel drive a granted \
+             destination with no per-use touch; it must carry a threat tag \
+             (`[ssh].threats.exposed`)."
                 .to_owned(),
         );
     }
@@ -76,64 +69,34 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
     }
 }
 
-/// Whether `[ssh]` carries an `exposed` threat tag (on the section or any key grant).
+/// Whether `[ssh]` carries an `exposed` threat tag (on the section or any destination).
 fn has_threat_tag(ssh: &SshSection) -> bool {
     let section = ssh.threats.as_ref().is_some_and(|t| !t.exposed.is_empty());
-    let per_key = ssh
-        .keys
+    let per_dest = ssh
+        .destinations
         .iter()
-        .any(|k| k.threats.as_ref().is_some_and(|t| !t.exposed.is_empty()));
-    section || per_key
-}
-
-/// Whether `fp` is a well-formed OpenSSH `SHA256:<base64>` key fingerprint.
-///
-/// `ssh-keygen`/`ssh-add -l` render a SHA-256 fingerprint as the literal `SHA256:`
-/// followed by the unpadded standard-base64 encoding of the 32-byte digest — exactly
-/// 43 characters over the `[A-Za-z0-9+/]` alphabet, no `=` padding.
-fn is_sha256_fingerprint(fp: &str) -> bool {
-    let Some(b64) = fp.strip_prefix("SHA256:") else {
-        return false;
-    };
-    b64.len() == 43
-        && b64
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
+        .any(|d| d.threats.as_ref().is_some_and(|t| !t.exposed.is_empty()));
+    section || per_dest
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{NetAllow, NetSection, SshKey, Threats};
+    use crate::source::{SshDestination, Threats};
 
-    // A real ed25519 fingerprint shape: "SHA256:" + 43 base64 chars.
-    const FP: &str = "SHA256:n0Vd5Bn8j3p2q1rStUvWxYzAbCdEfGhIjKlMnOpQrSt";
-
-    fn policy_with(ssh: SshSection, net_hosts: &[(&str, Vec<u16>)]) -> SourcePolicy {
-        SourcePolicy {
-            net: Some(NetSection {
-                allow: net_hosts
-                    .iter()
-                    .map(|(n, ports)| NetAllow {
-                        name: Some((*n).to_owned()),
-                        ports: ports.clone(),
-                        reason: Some("test".to_owned()),
-                        ..NetAllow::default()
-                    })
-                    .collect(),
-                ..NetSection::default()
-            }),
-            ssh: Some(ssh),
-            ..SourcePolicy::default()
+    fn dest(dest: &str) -> SshDestination {
+        SshDestination {
+            dest: Some(dest.to_owned()),
+            options: Vec::new(),
+            reason: Some("push".to_owned()),
+            threats: None,
         }
     }
 
-    fn key(fp: &str, hosts: &[&str]) -> SshKey {
-        SshKey {
-            fingerprint: Some(fp.to_owned()),
-            hosts: hosts.iter().map(|h| (*h).to_owned()).collect(),
-            reason: Some("push".to_owned()),
-            threats: None,
+    fn policy_with(ssh: SshSection) -> SourcePolicy {
+        SourcePolicy {
+            ssh: Some(ssh),
+            ..SourcePolicy::default()
         }
     }
 
@@ -143,73 +106,59 @@ mod tests {
     }
 
     #[test]
-    fn a_well_formed_grant_within_net_allow_22_validates() {
+    fn a_well_formed_destination_validates() {
         let ssh = SshSection {
-            keys: vec![key(FP, &["github.com"])],
+            destinations: vec![dest("git@github.com")],
             ..SshSection::default()
         };
-        let p = policy_with(ssh, &[("github.com", vec![22])]);
-        assert!(validate(&p).is_ok(), "{:?}", validate(&p));
+        assert!(validate(&policy_with(ssh)).is_ok());
     }
 
     #[test]
-    fn a_host_with_empty_ports_covers_22() {
+    fn a_destination_with_options_validates() {
         let ssh = SshSection {
-            keys: vec![key(FP, &["git.internal"])],
+            destinations: vec![SshDestination {
+                dest: Some("root@localhost".to_owned()),
+                options: vec!["-p".to_owned(), "2222".to_owned()],
+                reason: Some("deploy".to_owned()),
+                threats: None,
+            }],
             ..SshSection::default()
         };
-        let p = policy_with(ssh, &[("git.internal", vec![])]);
-        assert!(validate(&p).is_ok());
+        assert!(validate(&policy_with(ssh)).is_ok());
     }
 
     #[test]
-    fn an_ssh_grant_needs_no_parallel_net_allow() {
-        // The ssh host grant alone is valid — translate derives the :22 egress allow from it, so the
-        // author does not restate it as a [[net.allow]] (the implied-rule pass, translate.rs).
+    fn a_missing_dest_is_rejected() {
         let ssh = SshSection {
-            keys: vec![key(FP, &["git.internal"])],
+            destinations: vec![SshDestination {
+                dest: None,
+                options: Vec::new(),
+                reason: Some("x".to_owned()),
+                threats: None,
+            }],
             ..SshSection::default()
         };
-        let p = policy_with(ssh, &[]); // no net.allow at all
-        assert!(validate(&p).is_ok(), "an ssh grant validates on its own");
+        assert!(validate(&policy_with(ssh)).is_err());
     }
 
     #[test]
-    fn a_malformed_fingerprint_is_rejected() {
-        for bad in [
-            "github-key",
-            "MD5:aa:bb:cc",
-            "SHA256:tooshort",
-            "SHA256:has=padding+chars/xxxxxxxxxxxxxxxxxxxxxxxxx",
-        ] {
-            let ssh = SshSection {
-                keys: vec![key(bad, &["github.com"])],
-                ..SshSection::default()
-            };
-            let p = policy_with(ssh, &[("github.com", vec![22])]);
-            assert!(validate(&p).is_err(), "expected `{bad}` to be rejected");
-        }
-    }
-
-    #[test]
-    fn a_grant_with_no_hosts_is_rejected() {
+    fn an_empty_dest_is_rejected() {
         let ssh = SshSection {
-            keys: vec![key(FP, &[])],
+            destinations: vec![dest("   ")],
             ..SshSection::default()
         };
-        let p = policy_with(ssh, &[]);
-        assert!(validate(&p).is_err());
+        assert!(validate(&policy_with(ssh)).is_err());
     }
 
     #[test]
     fn allow_headless_without_a_threat_tag_is_rejected() {
         let ssh = SshSection {
             allow_headless: Some(true),
-            keys: vec![key(FP, &["github.com"])],
+            destinations: vec![dest("git@github.com")],
             ..SshSection::default()
         };
-        let p = policy_with(ssh, &[("github.com", vec![22])]);
-        let err = validate(&p).expect_err("untagged headless");
+        let err = validate(&policy_with(ssh)).expect_err("untagged headless");
         assert!(
             matches!(&err, PolicyError::SourceValidation(m) if m.iter().any(|s| s.contains("allow_headless")))
         );
@@ -223,26 +172,23 @@ mod tests {
                 exposed: vec!["T1.6".to_owned()],
                 mitigated: vec![],
             }),
-            keys: vec![key(FP, &["github.com"])],
-            ..SshSection::default()
+            destinations: vec![dest("git@github.com")],
         };
-        let p = policy_with(ssh, &[("github.com", vec![22])]);
-        assert!(validate(&p).is_ok());
+        assert!(validate(&policy_with(ssh)).is_ok());
     }
 
     #[test]
-    fn allow_headless_with_a_per_key_threat_tag_validates() {
-        let mut k = key(FP, &["github.com"]);
-        k.threats = Some(Threats {
+    fn allow_headless_with_a_per_destination_threat_tag_validates() {
+        let mut d = dest("git@github.com");
+        d.threats = Some(Threats {
             exposed: vec!["T1.6".to_owned()],
             mitigated: vec![],
         });
         let ssh = SshSection {
             allow_headless: Some(true),
-            keys: vec![k],
+            destinations: vec![d],
             ..SshSection::default()
         };
-        let p = policy_with(ssh, &[("github.com", vec![22])]);
-        assert!(validate(&p).is_ok());
+        assert!(validate(&policy_with(ssh)).is_ok());
     }
 }

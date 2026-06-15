@@ -1,25 +1,29 @@
-//! Root-gated end-to-end proof of the production key source (§7.10.7): **stock
-//! OpenSSH, configured with the root-owned `AuthorizedKeysCommand`, authorises
-//! exactly the synthetic key bound to a live edge — by querying the running daemon**.
+//! Root-gated proof of the production key source (§7.10.7): the **root-owned
+//! `kennel-akc` binary, invoked exactly as OpenSSH's `AuthorizedKeysCommand` invokes it
+//! (`%t %k` argv), vends the forced-command line for a synthetic key bound to a live
+//! edge — by querying the running daemon — and nothing for an unregistered key.**
 //!
-//! The chain exercised is the real one:
+//! This tests `kennel-akc` the way `sshd` uses it: `sshd` runs
+//! `AuthorizedKeysCommand <akc> %t %k` (the offered key's type + base64 blob as argv) and
+//! reads the `authorized_keys` line(s) from the helper's stdout. So the test runs the
+//! real binary with that argv and checks its stdout — no live `sshd`, no client login.
+//! The full `ssh → bastion → forced command → destination` chain is proven separately by
+//! the `kennel run`-driven SSH egress suite case (`src/tools/policy-e2e.sh`).
+//!
+//! The chain exercised here is the real daemon-side answer:
 //!
 //! ```text
-//!   ssh (synthetic key) --> bastion sshd (kenneld::sshd config, AuthSource::Command)
-//!       --> kennel-akc (root-owned binary, %t %k) --> control socket
-//!       --> Bastion::authorized_keys_for --> the restrict,pty,command=… line
-//!       --> sshd authorises --> the forced command runs
+//!   kennel-akc (root-owned binary, `%t %k`) --> control socket
+//!       --> Bastion::authorized_keys_for --> the restrict,pty,command=… line --> stdout
 //! ```
 //!
 //! The only stand-in is the control *server* loop: it calls the very same
-//! `Bastion::authorized_keys_for` that `kenneld::server`'s dispatch does (the
-//! dispatch itself is unit-tested), so the daemon-side answer is real code.
+//! `Bastion::authorized_keys_for` that `kenneld::server`'s dispatch does (the dispatch
+//! itself is unit-tested), so the daemon-side answer is real code.
 //!
-//! Why root: OpenSSH's safe-path check requires the `AuthorizedKeysCommand` binary to
-//! be **root-owned** — which is exactly the privilege Project Kennel installs with
-//! (the setuid privhelper). Chowning `kennel-akc` to root is the one privileged step;
-//! the bastion `sshd` and `kennel-akc` then run as the ordinary bastion user, as in
-//! production. Built/run like the other root test:
+//! Why root: OpenSSH's safe-path check requires the `AuthorizedKeysCommand` binary to be
+//! **root-owned** — exactly the privilege Project Kennel installs with. Chowning
+//! `kennel-akc` to root is the one privileged step. Built/run like the other root test:
 //!
 //! ```text
 //! cargo test -p kenneld --features e2e --no-run
@@ -28,13 +32,12 @@
 
 #![cfg(feature = "e2e")]
 
-use std::net::{IpAddr, Ipv4Addr, TcpListener};
-use std::os::unix::fs::PermissionsExt as _;
+use std::net::{IpAddr, Ipv4Addr};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use kenneld::bastion::{Akc, Bastion, BastionConfig, Edge};
 use kenneld::control::{self, Request, Response};
@@ -42,16 +45,14 @@ use kenneld::control::{self, Request, Response};
 type SharedBastion = Arc<Mutex<Bastion>>;
 
 #[test]
-fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
-    let Some(login_user) = preflight() else {
+fn root_owned_akc_vends_the_forced_command_for_a_registered_key() {
+    if !preflight() {
         return;
-    };
+    }
 
-    // Stage on an exec, root-owned, world-traversable filesystem: the AKC binary and
-    // the forced-command script must be executable (rules out noexec /run), every
-    // ancestor must be root-owned and not group/world-writable (rules out /tmp), and
-    // the login user must be able to traverse it to run the forced command (rules out
-    // 0700 /root). /opt satisfies all three.
+    // Stage on a root-owned, world-traversable, exec filesystem: the AKC binary must be
+    // executable and root-owned with no group/world-writable ancestor (sshd's safe-path
+    // check). /opt satisfies this; /tmp and /run do not.
     let stage = PathBuf::from("/opt").join(format!("kennel-akc-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(stage.join("bin")).expect("stage/bin");
@@ -61,117 +62,84 @@ fn stock_openssh_authorises_via_the_root_owned_akc_querying_kenneld() {
     // The one privileged step: install kennel-akc root-owned (safe-path check).
     let akc = install_root_owned_akc(&stage);
 
-    // A marker forced command (ignores the --dest/--key args the binding appends):
-    // a successful auth runs it and the client sees the marker.
-    let reorigin = stage.join("reorigin.sh");
-    std::fs::write(&reorigin, "#!/bin/sh\necho AKC_OK\n").expect("write reorigin");
-    chmod(&reorigin, 0o755);
-
-    // Keys: the synthetic edge key + an unauthorised rogue key; a throwaway "real" key
-    // supplies a well-formed fingerprint for the binding.
+    // The synthetic edge key + an unauthorised rogue key.
     let synthetic_pub = keygen(&stage.join("synthetic"), "synthetic-edge");
-    keygen(&stage.join("rogue"), "rogue-key");
-    let real_fp = fingerprint(&keygen_path(&stage.join("real"), "real-user-key"));
+    let rogue_pub = keygen(&stage.join("rogue"), "rogue-key");
 
-    // The control socket the AKC will reach (it resolves /run/user/0 once sshd scrubs
+    // The control socket the AKC reaches (it resolves /run/user/0 once sshd would scrub
     // its environment; preflight dropped XDG_RUNTIME_DIR so we bind the same path).
     let sock = kenneld::socket::socket_path();
 
-    // The real bastion: AuthSource::Command (the AKC), spawned by Bastion::register.
-    let port = free_port();
+    // A real bastion with one live edge, behind the same responder kenneld's dispatch uses.
     let bastion: SharedBastion = Arc::new(Mutex::new(Bastion::new(BastionConfig {
         dir: stage.join("bastion"),
-        reorigin_bin: reorigin,
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        port,
-        agent_sock: None,
+        port: 8022,
         akc: Some(Akc {
-            command: akc,
+            command: akc.clone(),
             user: "root".to_owned(),
         }),
     })));
-    let host_pub = register_edge(&bastion, &synthetic_pub, real_fp);
-
+    register_edge(&bastion, &synthetic_pub);
     spawn_responder(&sock, &bastion);
-    assert!(
-        wait_listening(port),
-        "the bastion sshd did not come up (privsep/config?)"
-    );
 
-    // The client pins the bastion host key (as the synthetic ~/.ssh/known_hosts would)
-    // and logs in as the ordinary user — the forced command runs there.
-    let known_hosts = stage.join("client_known_hosts");
-    std::fs::write(&known_hosts, format!("[127.0.0.1]:{port} {host_pub}\n")).expect("known_hosts");
+    // Invoke the AKC exactly as sshd does: `<akc> <type> <base64>` — the offered key's two
+    // whitespace fields, no comment. The registered (synthetic) key yields its forced
+    // command on stdout; the rogue key yields nothing (sshd then refuses it).
+    let want = bastion
+        .lock()
+        .expect("lock")
+        .authorized_keys_for(&key_argv(&synthetic_pub))
+        .first()
+        .cloned()
+        .expect("a vended line for the registered key");
+    let ok = run_akc(&akc, &synthetic_pub);
+    let rogue = run_akc(&akc, &rogue_pub);
 
-    let ok = run_client(&stage, "synthetic", port, &known_hosts, &login_user);
-    let ok_out = String::from_utf8_lossy(&ok.stdout).into_owned();
-    let authorised = ok.status.success() && ok_out.contains("AKC_OK");
-
-    let denied = run_client(&stage, "rogue", port, &known_hosts, &login_user);
-    let rogue_refused =
-        !denied.status.success() && !String::from_utf8_lossy(&denied.stdout).contains("AKC_OK");
-
-    // Teardown before asserting, so a failure still cleans up.
+    // Teardown before asserting so a failure still cleans up.
     bastion.lock().expect("lock").stop();
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_dir_all(&stage);
 
+    assert!(ok.status.success(), "akc must exit 0 for a registered key");
+    assert_eq!(
+        String::from_utf8_lossy(&ok.stdout),
+        want,
+        "the AKC prints exactly the forced-command line the live bastion vends"
+    );
+    // The vended line is the new model: `ssh <options> -- <dest> "$SSH_ORIGINAL_COMMAND"`.
     assert!(
-        authorised,
-        "stock sshd should authorise the synthetic key via the root-owned AKC querying kenneld \
-         (status {:?}, stdout {ok_out:?}, stderr {:?})",
-        ok.status,
-        String::from_utf8_lossy(&ok.stderr),
+        want.starts_with("restrict,pty,command=\"ssh ")
+            && want.contains("-- 'git@github.com'")
+            && want.contains("$SSH_ORIGINAL_COMMAND"),
+        "unexpected forced-command shape: {want}"
     );
     assert!(
-        rogue_refused,
-        "an unregistered (rogue) key must be refused — the AKC vends no line for it"
+        !rogue.status.success() && rogue.stdout.is_empty(),
+        "an unregistered (rogue) key must vend no line and fail closed"
     );
 }
 
-/// Check every precondition; return the ordinary login user, or `None` (printing a
-/// reason) when the proof cannot run here. Also prepares the privsep dir and pins the
-/// control-socket path to /run/user/0 (where the env-scrubbed AKC will look).
-fn preflight() -> Option<String> {
+/// Every precondition; `false` (printing a reason) when the proof cannot run here. Also
+/// pins the control-socket path to /run/user/0 (where the env-scrubbed AKC will look).
+fn preflight() -> bool {
     if kennel_lib_syscall::unistd::real_uid() != 0 {
         eprintln!("SKIP: must run as root (sudo) — the AKC binary must be root-owned");
-        return None;
+        return false;
     }
-    for tool in ["/usr/sbin/sshd", "ssh", "ssh-keygen"] {
-        if !have(tool) {
-            eprintln!("SKIP: {tool} not found");
-            return None;
-        }
+    if !have("ssh-keygen") {
+        eprintln!("SKIP: ssh-keygen not found");
+        return false;
     }
-    // The bastion sshd and forced command run as the user (its config denies root
-    // login); under `sudo -E` that is $SUDO_USER.
-    let login_user = std::env::var_os("SUDO_USER")?
-        .to_string_lossy()
-        .into_owned();
-    if login_user == "root" {
-        eprintln!("SKIP: $SUDO_USER is root; need an ordinary user to log in as");
-        return None;
-    }
-    if !Command::new("id")
-        .arg("sshd")
-        .status()
-        .is_ok_and(|s| s.success())
-    {
-        eprintln!("SKIP: the `sshd` privilege-separation user is absent");
-        return None;
-    }
-    let _ = std::fs::create_dir_all("/run/sshd");
-    let _ = std::fs::set_permissions("/run/sshd", std::fs::Permissions::from_mode(0o755));
-
-    // sshd scrubs the AKC environment, so kennel-akc (run as root) resolves
-    // /run/user/0/kennel/control.sock; drop XDG_RUNTIME_DIR so we bind the same path.
+    // The AKC (run as root) resolves /run/user/0/kennel/control.sock; drop XDG_RUNTIME_DIR
+    // so we bind the same path it will look at.
     std::env::remove_var("XDG_RUNTIME_DIR");
     let sock = kenneld::socket::socket_path();
     if let Some(parent) = sock.parent() {
         std::fs::create_dir_all(parent).expect("control socket dir");
     }
     let _ = std::fs::remove_file(&sock);
-    Some(login_user)
+    true
 }
 
 /// Install `kennel-akc` root-owned and `0755` under `stage/bin` — what OpenSSH's
@@ -186,30 +154,27 @@ fn install_root_owned_akc(stage: &Path) -> PathBuf {
     std::fs::copy(&src, &dst).expect("install kennel-akc");
     chmod(&dst, 0o755);
     assert_eq!(
-        owner_uid(&dst),
+        std::fs::metadata(&dst).expect("stat akc").uid(),
         0,
         "the AKC binary must be root-owned for sshd's safe-path check"
     );
     dst
 }
 
-/// Register the synthetic edge with the bastion (writing the AKC `sshd_config`, no
-/// `authorized_keys` file) and start the bastion `sshd`; return its host-key line.
-fn register_edge(bastion: &SharedBastion, synthetic_pub: &str, real_fp: String) -> String {
-    let mut b = bastion.lock().expect("lock");
-    b.register(Edge {
+/// Register the synthetic edge with the bastion (no `sshd` started — we only need the
+/// edge state behind the responder).
+fn register_edge(bastion: &SharedBastion, synthetic_pub: &str) {
+    bastion.lock().expect("lock").push_edge_for_test(Edge {
         kennel: "akc-e2e".to_owned(),
-        dest: "127.0.0.1".to_owned(),
-        real_fp,
+        dest: "git@github.com".to_owned(),
+        options: Vec::new(),
         synthetic_pub: synthetic_pub.to_owned(),
-    })
-    .expect("register edge (start bastion sshd)");
-    b.host_pub().expect("bastion host key").to_owned()
+    });
 }
 
 /// The control responder: stands in for kenneld's serve loop, answering the AKC's
 /// `AuthorizedKeys` query from the live `Bastion` edges (the same method the daemon's
-/// dispatch calls). Bound before any client connects; detached (process exit reaps it).
+/// dispatch calls). Bound before the AKC runs; detached (process exit reaps it).
 fn spawn_responder(sock: &Path, bastion: &SharedBastion) {
     let listener = UnixListener::bind(sock).expect("bind control socket");
     chmod(sock, 0o666);
@@ -226,111 +191,64 @@ fn spawn_responder(sock: &Path, bastion: &SharedBastion) {
     });
 }
 
-/// One client login: offers only `identity`, pins the bastion host key, logs in as
-/// `login_user` (the forced command runs there).
-fn run_client(
-    stage: &Path,
-    identity: &str,
-    port: u16,
-    known_hosts: &Path,
-    login_user: &str,
-) -> Output {
-    Command::new("ssh")
-        .args(["-F", "none", "-p", &port.to_string()])
-        .args(["-o", "IdentitiesOnly=yes", "-i"])
-        .arg(stage.join(identity))
-        .args(["-o", "StrictHostKeyChecking=yes", "-o"])
-        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-l",
-            login_user,
-            "127.0.0.1",
-            "anything",
-        ])
+/// Run `kennel-akc <type> <base64>` — the `%t %k` argv sshd hands its
+/// `AuthorizedKeysCommand` (no comment field).
+fn run_akc(akc: &Path, pubkey_line: &str) -> std::process::Output {
+    let mut fields = pubkey_line.split_whitespace();
+    let key_type = fields.next().unwrap_or_default();
+    let blob = fields.next().unwrap_or_default();
+    Command::new(akc)
+        .args([key_type, blob])
         .output()
-        .expect("run ssh")
+        .expect("run kennel-akc")
+}
+
+/// The `<type> <base64>` form (no comment) the responder matches an offered key by.
+fn key_argv(pubkey_line: &str) -> String {
+    pubkey_line
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // --- small helpers ---
 
 fn sibling_binary(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
-    exe.parent()
-        .and_then(Path::parent)
-        .expect("profile dir")
-        .join(name)
-}
-
-fn have(path: &str) -> bool {
-    Path::new(path).exists()
-        || Command::new("sh")
-            .arg("-c")
-            .arg(format!("command -v {path}"))
-            .status()
-            .is_ok_and(|s| s.success())
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind :0")
-        .local_addr()
-        .expect("addr")
-        .port()
+    let dir = exe.parent().and_then(Path::parent).expect("profile dir");
+    dir.join(name)
 }
 
 fn chmod(path: &Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 }
 
-fn owner_uid(path: &Path) -> u32 {
-    use std::os::unix::fs::MetadataExt as _;
-    std::fs::metadata(path).expect("stat").uid()
+fn have(tool: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {tool}"))
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
-/// `ssh-keygen` an ed25519 key at `path`; return its public-key line.
+/// Mint a throwaway ed25519 keypair at `path`; return the public-key line.
 fn keygen(path: &Path, comment: &str) -> String {
-    std::fs::read_to_string(keygen_path(path, comment).with_extension("pub"))
-        .expect("read pub")
-        .trim()
-        .to_owned()
-}
-
-/// As [`keygen`] but returns the public-key *path* (`<path>.pub`).
-fn keygen_path(path: &Path, comment: &str) -> PathBuf {
+    let _ = std::fs::remove_file(path);
+    let pub_path = {
+        let mut p = path.to_path_buf().into_os_string();
+        p.push(".pub");
+        PathBuf::from(p)
+    };
+    let _ = std::fs::remove_file(&pub_path);
     let status = Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", comment, "-f"])
         .arg(path)
         .status()
         .expect("ssh-keygen");
-    assert!(status.success(), "ssh-keygen failed for {}", path.display());
-    path.to_path_buf()
-}
-
-/// The `SHA256:` fingerprint of the key whose private half is at `path`.
-fn fingerprint(path: &Path) -> String {
-    let out = Command::new("ssh-keygen")
-        .arg("-lf")
-        .arg(path.with_extension("pub"))
-        .output()
-        .expect("fingerprint");
-    let fp = String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or_default()
-        .to_owned();
-    assert!(fp.starts_with("SHA256:"), "fingerprint: {fp}");
-    fp
-}
-
-fn wait_listening(port: u16) -> bool {
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
-    for _ in 0..50 {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    false
+    assert!(status.success(), "ssh-keygen failed");
+    std::fs::read_to_string(&pub_path)
+        .expect("read pubkey")
+        .trim()
+        .to_owned()
 }

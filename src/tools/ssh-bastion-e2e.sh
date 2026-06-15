@@ -235,9 +235,10 @@ case "$BANNER" in
 esac
 
 echo
-# The egress *transport* (ssh's ProxyCommand → kenneld over binder → host-side delegate → bastion)
-# is proven by the kenneld e2e (tests/e2e.rs full_vertical: real binder, net-ns, facade-ssh)
-# + the INet conduit component tests. This script proves the bastion re-origination itself (steps
-# 1-4), which is transport-independent.
+# The egress *transport* (the in-kennel ssh's ProxyCommand=facade-ssh → kenneld over binder
+# CONNECT_INET → host-side netproxy delegate → bastion) is proven by the `kennel run`-driven
+# policy suite (src/crates/kenneld/tests/policy-suite/ssh-egress, run by src/tools/policy-e2e.sh:
+# real binder, real bastion, real facade-ssh) + the INet conduit component tests. This script
+# proves the bastion re-origination itself (steps 1-4), which is transport-independent.
 
 echo "ALL CHECKS PASSED — the re-origination bastion behaves as 07-10-ssh.md §7.10 specifies."

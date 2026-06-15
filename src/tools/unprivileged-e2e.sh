@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Run the UNPRIVILEGED production e2e (kenneld tests/e2e.rs,
-# full_vertical_brings_up_and_tears_down_a_kennel_unprivileged) as the ordinary
-# operator — no sudo for the test itself. The test builds the whole vertical on the
-# user-namespace spawn path: an unprivileged identity-mapped userns constructs the
-# sandbox, and the file-caps privhelper adds the loopback addresses, attaches the
-# egress BPF, and writes the workload's gid_map to re-grant a supplementary group
-# (08-enforcement-architecture.md §8.2/§8.3, 07-4-filesystem.md §7.4.8).
+# Run the UNPRIVILEGED in-process production e2e (kenneld tests/e2e.rs: no_ipc, ttl_exit,
+# ttl_warn, interactive_pty) as the ordinary operator — no sudo for the tests themselves.
+# Each drives the real run_kennel on the user-namespace spawn path: an unprivileged
+# identity-mapped userns constructs the sandbox, and the file-caps privhelper writes the
+# maps and attaches the egress BPF (08-enforcement-architecture.md §8.2/§8.3,
+# 07-4-filesystem.md §7.4.8). The broader constructed-view behaviour (fs/identity/net/
+# AF_UNIX/dev) is proven by the `kennel run`-driven policy suite — src/tools/policy-e2e.sh.
 #
 # This script performs the one-time host setup the test requires and then runs it,
 # matching the project's "a skip is not a proof" rule: where a prerequisite cannot
@@ -178,6 +178,6 @@ echo "== running the unprivileged e2e under a delegated cgroup =="
 # under user@<uid>.service whose cgroup subtree the operator may write — so kenneld
 # can create the kennel's cgroup. --test-threads=1: each test is a cohesive scenario
 # that constructs a real kennel, so they must not run concurrently. No name filter —
-# run every self-hosting test in the binary (full vertical, no-IPC, …).
+# run every self-hosting test in the binary (no-IPC, ttl, interactive-pty).
 systemd-run --user --scope -p Delegate=yes --quiet -- \
     "$TESTBIN" --nocapture --test-threads=1

@@ -47,7 +47,7 @@ use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
     CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
     LifecycleSection, NetAudit, NetBind, NetDeny, NetIpv6, NetSection, ProcSection, PtraceSection,
-    SeccompSection, SignalSection, SourcePolicy, SshSection, UnixSection,
+    SeccompSection, SignalSection, SourcePolicy, SshSection, UnixSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -230,6 +230,18 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
         audit: merge(&parent.audit, &child.audit, fold_audit),
         ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
+        workload: merge(&parent.workload, &child.workload, fold_workload),
+    }
+}
+
+/// Fold `[workload]` scalar-wins (child overrides), like `[lifecycle]`. argv is a
+/// replace (not a union) — a derived policy fully redefines what runs.
+fn fold_workload(p: &WorkloadSection, c: &WorkloadSection) -> WorkloadSection {
+    WorkloadSection {
+        argv: or(&c.argv, &p.argv),
+        cwd: or(&c.cwd, &p.cwd),
+        pinned: or(&c.pinned, &p.pinned),
+        sha256: or(&c.sha256, &p.sha256),
     }
 }
 
@@ -350,6 +362,7 @@ fn fold_fs_dev(p: &FsDev, c: &FsDev) -> FsDev {
 fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
     NetSection {
         mode: or(&c.mode, &p.mode),
+        reason: or(&c.reason, &p.reason),
         proxy_listen_v4: or(&c.proxy_listen_v4, &p.proxy_listen_v4),
         proxy_listen_v6: or(&c.proxy_listen_v6, &p.proxy_listen_v6),
         proxy_listen_v4_address: or(&c.proxy_listen_v4_address, &p.proxy_listen_v4_address),
@@ -491,15 +504,10 @@ fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
         allow_headless: or(&c.allow_headless, &p.allow_headless),
         threats: or(&c.threats, &p.threats),
         // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
-        keys: if c.keys.is_empty() {
-            p.keys.clone()
+        destinations: if c.destinations.is_empty() {
+            p.destinations.clone()
         } else {
-            c.keys.clone()
-        },
-        known_hosts: if c.known_hosts.is_empty() {
-            p.known_hosts.clone()
-        } else {
-            c.known_hosts.clone()
+            c.destinations.clone()
         },
     }
 }

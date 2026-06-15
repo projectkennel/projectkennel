@@ -62,7 +62,7 @@ The full section list:
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
 | `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
 | `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
-| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.keys]]` fingerprint→hosts grants, `[[ssh.known_hosts]]`); carried in the settled policy (`SshRuntime`), realised by kenneld | §7.10 |
+| `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.destinations]]` = `dest` + host-side `ssh` `options`; no real-key fingerprint, no agent); carried in the settled policy (`SshRuntime`, with the compile-time-minted synthetic public key pinned per grant), realised by kenneld | §7.10 |
 | `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.4 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.9 |
 | `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.4 |
@@ -220,7 +220,7 @@ The threat IDs must be present in the version of `THREATS.md` named by `threat_c
 Translation (source → settled policy) derives a few grants the author would otherwise have to restate. The author writes the intent once; the **settled policy carries the derived grants explicitly**, so `kennel diff` and the audit show exactly what was added — nothing widens invisibly. An implied grant never overrides an explicit one: if the author already wrote the target grant, theirs (with whatever extra ports/scope) wins and the rule is a no-op.
 
 - **`fs.write` implies `fs.read`.** Every path in the effective `fs.write` set is folded into `fs.read` if not already present. A writable tree is meant to be usable, which requires read; restating it as `fs.read` is noise.
-- **An `[[ssh.keys]]` host implies egress to it on port 22.** SSH leaves the kennel only over the egress gateway, so each granted host is added to the by-name allowlist (`net.allow_names`) on TCP/22. The author writes the `[ssh]` grant once, not also a parallel `[[net.allow]]`. (The bastion re-origination endpoint itself is a host service `kenneld` dials — see §7.10.)
+- **`[[ssh.destinations]]` implies no kennel egress.** The SSH destination is reached host-side by the bastion's forced command (`ssh <options> -- <dest>`, run as the operator), not by the kennel — so a destination derives **no** `net.allow` rule. The only egress the kennel needs is the bastion's own loopback endpoint, which `kenneld` grants as a host-service literal at spawn (see §7.10), never a policy `net.allow`.
 
 The egress endpoint's own reachability — the workload connecting to `facade-socks5` on the kennel loopback — is granted at bring-up (the proxy's address+port get the cgroup-BPF allow and the Landlock `CONNECT_TCP`), not written in policy: a kennel with egress can always reach its own egress endpoint by construction.
 

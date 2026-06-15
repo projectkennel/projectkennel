@@ -1,6 +1,6 @@
 # API surfaces — internal Rust API
 
-The workspace has 14 crates: `kennel-lib-policy`, `kennel-lib-syscall`, `kennel-lib-bpf`, `kennel-lib-binder`, `kennel-lib-audit`, `kennel-lib-config`, `kennel-lib-spawn`, `host-netproxy`, `kennel-privhelper`, `kennel-bin-init`, `kenneld`, `kennel-lib-text`, `kennel-bin-ssh-reorigin`, and `kennel-socks-connect`. (`kennel-lib-binder` and `kennel-bin-init` are built; `facade-socks5`, the fifteenth, is roadmap — see below.) The control protocol (CLI ↔ kenneld) lives in `kenneld::control`; the privhelper wire protocol in `kennel-privhelper::wire`; the binder logic in `kenneld::binder`; the `kennel` CLI is `kenneld/src/bin/kennel.rs`. `kennel-lib-audit` is the unified audit writer (a first-class crate); `kennel-lib-config` is the layered deployment/user configuration. Everything is blocking, thread-per-connection — there is no async runtime in the workspace. The authoritative per-crate API is the rustdoc (`cargo doc --no-deps`); this chapter is the review-boundary index.
+The workspace has 18 crates: `kennel-lib-policy`, `kennel-lib-syscall`, `kennel-lib-os`, `kennel-lib-landlock`, `kennel-lib-scm`, `kennel-lib-bpf`, `kennel-lib-binder`, `kennel-lib-audit`, `kennel-lib-config`, `kennel-lib-spawn`, `host-netproxy`, `kennel-privhelper`, `kennel-bin-init`, `kenneld`, `kennel-lib-text`, `facade-afunix`, `facade-socks5`, and `facade-ssh`. The control protocol (CLI ↔ kenneld) lives in `kenneld::control`; the privhelper wire protocol in `kennel-privhelper::wire`; the binder logic in `kenneld::binder`; the `kennel` CLI is `kenneld/src/bin/kennel.rs`. `kennel-lib-audit` is the unified audit writer (a first-class crate); `kennel-lib-config` is the layered deployment/user configuration. Everything is blocking, thread-per-connection — there is no async runtime in the workspace. The authoritative per-crate API is the rustdoc (`cargo doc --no-deps`); this chapter is the review-boundary index.
 
 ## Stability commitment
 
@@ -164,7 +164,7 @@ Beyond the fixed-layout stdin/stdout ops (the network/cgroup ops), the privhelpe
 **Purpose.** Layered deployment/user configuration (`#![forbid(unsafe_code)]`), so no install-specific path is baked into a binary.
 
 **Public surface.**
-- `Deployment` — integrity-sensitive paths (`libexec_dir`, `trust_dir`, `sshd`, and the resolved helper-binary paths `privhelper` / `netproxy` / `ssh_reorigin` / `socks_connect` / `akc`), loaded from **root-owned** dirs only (`/usr/lib/kennel` then `/etc/kennel`); `load` / `load_from_dirs` / `defaults`.
+- `Deployment` — integrity-sensitive paths (`libexec_dir`, `trust_dir`, `sshd`, and the resolved helper-binary paths `privhelper` / `netproxy` / `akc` / `ssh` (= `facade-ssh`) / `socks5` / `afunix` / `kennel_bin_init`), loaded from **root-owned** dirs only (`/usr/lib/kennel` then `/etc/kennel`); `load` / `load_from_dirs` / `defaults`.
 - `User` — CLI conveniences (`template_dirs`, `key_dirs`), loaded from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`; `load` / `load_from_dirs`.
 - `ConfigError` — load/parse failure modes.
 
@@ -208,21 +208,13 @@ The **kenneld↔delegate socketpair protocol** *(roadmap — `02-5-binder-net.md
 
 **Notes.** The control protocol and the privhelper wire (`kennel-privhelper::wire`) are the natural fuzz-target homes. There is no separate `kennel-ipc-*` or `kennel-cli` crate — both are folded here. The Rust checksum-manifest verifier is also not a crate: the shell witness in `src/tools/verify-checksums.sh` (system `sha256sum`) is what runs today; a Rust twin is a roadmap item.
 
-### `kennel-bin-ssh-reorigin`
+### `facade-ssh`
 
-**Purpose.** The SSH re-origination forced command (`07-10-ssh.md` §7.10.4). The per-kennel bastion runs it as the forced `command=` bound to a synthetic key; `--dest` and `--key` are baked in by kenneld, so a workload holding a synthetic key can only ever reach the one destination with the one real key.
+**Purpose.** The in-kennel `ssh` `ProxyCommand` (`07-10-ssh.md`). A confined kennel has no network path off its loopback; `ssh` reaches the bastion the same way every outbound connection crosses the binder gateway. Invoked as `ProxyCommand facade-ssh %h %p`, it issues an `INet` `CONNECT_INET` transaction to kenneld (binder node 0), receives the connection fd, and splices it to stdin/stdout. kenneld has `host-netproxy` dial the bastion on the kennel's behalf; the bastion's `kennel-akc` vends the forced command `ssh <options> -- <dest>` run as the operator (no re-origination binary, no agent, no fingerprint selection).
 
-**Public surface (binary + library).** The library half (`src/lib.rs`) is the security-load-bearing, pure, unit-tested core: strict option-injection-proof `--dest`/`--key` parsing, the hostname and `SHA256:` grammars, `$SSH_USER_AUTH` publickey confirmation (fail-closed), fingerprint→agent-identity selection, and `--`-terminated outbound-`ssh` argv construction. `main.rs` is the thin IO tail (`ssh-add` enumeration, identity-file write, `execvp ssh`).
+**Public surface (binary).** `main.rs` opens the in-view binderfs device (`/dev/binderfs/binder`, or `KENNEL_BINDER_DEVICE`), issues the `CONNECT_INET` transaction, and splices the returned fd. Any failure exits non-zero, so `ssh` sees a dead `ProxyCommand` and fails closed.
 
-**Depends on.** **Std only — no Project Kennel crates and no external crates.** The forced command must stay minimal and auditable. Carries no key material (only the public half of the selected key is written).
-
-### `kennel-socks-connect`
-
-**Purpose.** A minimal SOCKS5 CONNECT stdio proxy — the `ssh` `ProxyCommand` a confined kennel uses to reach the bastion through the egress proxy (a kennel can `connect()` only to its proxy, and `ssh` has no built-in SOCKS client).
-
-**Public surface (binary + library).** The library half (`src/lib.rs`) is the pure SOCKS5 wire codec (greeting, CONNECT for IPv4/IPv6/domain, reply parsing), unit-tested. `main.rs` does the TCP connect and bidirectional stdio splice.
-
-**Depends on.** **Std only — no Project Kennel crates and no external crates.**
+**Depends on.** `kennel-lib-binder` (the client transaction surface). `#![forbid(unsafe_code)]`.
 
 ---
 

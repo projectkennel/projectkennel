@@ -237,8 +237,7 @@ deny = [
 #   nproc  = "512"
 #   core   = "0"
 
-
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "BLkI31d53tQklXWZbmDR8GYvnban+sUlgEpcTaQxmlypjOWxqfPsCQ98BDuISQUz3tBCaYfUMb56BAcfcyA2Bg=="
+signature = "z0yriVvQqN8JtjvytMoT0JF3/5twq9JRnXHDesTQZkLZZF0cCtrT6by6ZWUj2KaS3gd7BFWecqeyGL6WjIVPAg=="

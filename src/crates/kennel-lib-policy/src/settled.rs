@@ -22,15 +22,28 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Network enforcement mode. `unrestricted` is deliberately not representable
-/// (a framework invariant).
+/// Network enforcement mode — four tiers (`07-5-network.md` §7.5).
+///
+/// The proxy/own-netns pair (`constrained`/`unconstrained`) differ only in the proxy's
+/// default verdict; `open` is host-netns direct egress with its own BPF/Landlock allowlist;
+/// `none` is total isolation. A truly unrestricted (no invariant denies) mode is not
+/// representable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetMode {
-    /// Egress confined to the allowlist (the default posture).
+    /// No network at all: an own net namespace with no interfaces (not even `lo`).
+    None,
+    /// Own net namespace, egress via the SOCKS proxy, **default-deny**: only the
+    /// `net.allow` allowlist passes (the default posture).
     Constrained,
-    /// Egress unconfined by the allowlist (only the invariant denies apply).
-    Open,
+    /// Own net namespace, egress via the SOCKS proxy, **default-allow**: everything
+    /// passes except the always-on invariant denies and any `net.deny` carve-outs.
+    Unconstrained,
+    /// **Host** net namespace, **direct** egress (no SOCKS proxy, no `HTTPS_PROXY`); the
+    /// `net.allow` allowlist is still enforced via BPF + Landlock. Shares the host network
+    /// stack, so it reinstates the host-recon residual (T1.6) — it requires a non-empty
+    /// `net.reason` and the compiler records `threats.reinstated` (`07-5-network.md` §7.5.1).
+    Host,
 }
 
 /// Transport protocol selector for a network rule.
@@ -146,6 +159,23 @@ impl Default for ProxyListen {
             offset: 1,
             port: 1080,
         }
+    }
+}
+
+impl ProxyListen {
+    /// The "no proxy" marker — `offset 0` (reserved, never a real listener).
+    ///
+    /// Used by the non-proxied modes (`open`/`none`) so the daemon stands up no SOCKS facade
+    /// and the settled policy says so explicitly. [`is_disabled`](Self::is_disabled) tests it.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self { offset: 0, port: 0 }
+    }
+
+    /// Whether this is the [`disabled`](Self::disabled) (no-proxy) marker.
+    #[must_use]
+    pub const fn is_disabled(&self) -> bool {
+        self.offset == 0
     }
 }
 
@@ -459,40 +489,67 @@ pub struct SshRuntime {
     /// touch (loud, threat-tagged at compile time; §7.10.6).
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_headless: bool,
-    /// The granted `(destination, real-key)` edges — one bastion forced command each.
+    /// The granted destinations — one minted synthetic key + one bastion forced command
+    /// each (§7.10.3). The synthetic key is the capability the kennel authenticates with;
+    /// the destination + options are realised host-side by the bastion, as the operator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<SshGrant>,
-    /// Host-key pins for granted destinations the operator's store lacks (§7.10.7).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub known_hosts: Vec<SshKnownHostPin>,
 }
 
 impl SshRuntime {
-    /// Whether there is nothing to realise (no grant, no pin, default headless).
+    /// Whether there is nothing to realise (no grant, default headless).
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        !self.allow_headless && self.grants.is_empty() && self.known_hosts.is_empty()
+        !self.allow_headless && self.grants.is_empty()
     }
 }
 
-/// One granted SSH edge: a destination reachable with a specific real key.
+impl SshGrant {
+    /// A stable, filename-safe id for this destination's synthetic keypair under
+    /// `<policy-dir>/ssh/`. Derived from `dest` (not its index), so re-compiling a policy
+    /// whose destinations were reordered reuses the same persisted keys. The form is
+    /// `ssh-<16 hex>`: a non-cryptographic [`std::hash`] digest of `dest` — this is only a
+    /// filename (collision merely shares a key file between two literally-distinct dests,
+    /// which the compiler avoids by also de-duplicating destinations), not a security
+    /// boundary, so no `sha2` dependency is pulled in for it.
+    #[must_use]
+    pub fn key_id(&self) -> String {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.dest.hash(&mut h);
+        format!("ssh-{:016x}", h.finish())
+    }
+}
+
+/// One granted SSH destination: a host the kennel may reach over the bastion.
+///
+/// The synthetic keypair is minted at **compile time** (`kennel policy compile`), once
+/// per `(policy, destination)`, and persisted beside the artifact in the policy dir; the
+/// public half is recorded here and so is **signature-pinned** (the akc trusts only a key
+/// whose public half matches a signed grant), while the private half lives in a file the
+/// kennel's `~/.ssh` is materialised from.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshGrant {
-    /// The destination host (`⊆ net.allow:22`, checked at compile time).
-    pub host: String,
-    /// The real key's `SHA256:` fingerprint; the key itself lives host-side only.
-    pub fingerprint: String,
-}
-
-/// A pinned host key for a granted destination.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SshKnownHostPin {
-    /// The destination hostname.
-    pub host: String,
-    /// The host key (`ssh-ed25519 AAAA…`).
-    pub key: String,
+    /// The SSH destination the host-side `ssh` connects to (`git@github.com`), fixed by
+    /// which synthetic key authenticated — never parsed from the wire.
+    pub dest: String,
+    /// Host-side `ssh` invocation options, prepended verbatim (as argv tokens) before
+    /// `<dest>` in the bastion's forced command (`-i …`, `-o …`, `-p …`). They run as the
+    /// operator and name which real key/port/config the outbound hop uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// The synthetic public key bound to this destination (`ssh-ed25519 AAAA…`), pinned
+    /// by the policy signature: the akc authorises an offered key only if its public half
+    /// matches this. Empty until the compiler mints the keypair (an unsigned/in-memory
+    /// compile may leave it empty, in which case no SSH route is realised).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub public_key: String,
+    /// The basename of the minted keypair under `<policy-dir>/ssh/` (a stable, filename-
+    /// safe id derived from `dest`). The private half is `<key_file>`, the public half
+    /// `<key_file>.pub`; the kennel's `~/.ssh` is materialised from the private half.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_file: String,
 }
 
 /// The per-kennel `AF_UNIX` socket shims `kenneld` realises (`docs/design/07-6-afunix.md` §7.6).
@@ -928,6 +985,48 @@ impl UlimitsRuntime {
     }
 }
 
+/// The workload a kennel runs (`[workload]`, §7.4).
+///
+/// Optional: when empty the workload is supplied at `kennel run … -- <cmd>`. When the
+/// policy carries an `argv`, `kennel run` with no `--` runs it; a `--` overrides it
+/// unless `pinned` is set (then `--force` is required). A *service* input like the other
+/// runtimes — omitted from the canonical form when empty, so a policy with no `[workload]`
+/// signs exactly as before. `cwd` is a string (not a `PathBuf`) because it may carry a
+/// deferred `~`/`<home>` placeholder the spawn resolves against the persona home.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadRuntime {
+    /// The command and its arguments (`argv[0]` is the program; resolved against the
+    /// kennel's `PATH` when bare). Empty ⇒ no policy-embedded workload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    /// The working directory inside the view, or `None` to let the spawn default it
+    /// (the persona home, then `/`). May carry a deferred `~`/`<home>` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// When true, refuse a CLI `--` override of `argv` unless `--force` is given — the
+    /// signed policy pins exactly what runs.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    /// Accepted lowercase-hex SHA-256 digests of the workload binary (`argv[0]` resolved
+    /// against `PATH`). When non-empty, the spawn hashes the resolved binary just before
+    /// `execve` and refuses to run it unless its digest is in this set — the signed policy
+    /// pins not just *which* program but its exact bytes. A SET (not one digest) so several
+    /// accepted versions of the same binary (e.g. successive Claude Code releases) validate
+    /// under one policy. Each is 64 hex chars; validated at translate time. Empty ⇒ no pin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sha256: Vec<String>,
+}
+
+impl WorkloadRuntime {
+    /// Whether no workload is embedded (omitted from the canonical form). `pinned`/`cwd`/
+    /// `sha256` without an `argv` is vacuous, so only `argv` gates emptiness.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.argv.is_empty()
+    }
+}
+
 /// The settled policy body (everything the signature covers).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -980,6 +1079,11 @@ pub struct SettledPolicy {
     /// no `[ulimits]` signs exactly as before.
     #[serde(default, skip_serializing_if = "UlimitsRuntime::is_empty")]
     pub ulimits: UlimitsRuntime,
+    /// The workload to run (§7.4). A table like [`ulimits`](Self::ulimits) and declared
+    /// last; omitted from the canonical form when empty, so a policy with no `[workload]`
+    /// signs exactly as before.
+    #[serde(default, skip_serializing_if = "WorkloadRuntime::is_empty")]
+    pub workload: WorkloadRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.

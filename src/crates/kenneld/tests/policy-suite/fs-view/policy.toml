@@ -1,0 +1,34 @@
+# ============================================================================
+# Suite case: fs-view — the constructed filesystem view is exactly the grant.
+#
+# Proves §7.4: a granted ~ subdir is readable, a non-granted sibling is ENOENT (its
+# name is gone, not merely denied), the home tmpfs is writable (ephemeral), and a
+# categorically-denied host path (/etc/shadow) is absent. net=none. The runner stages
+# ~/kennel-e2e/{granted/file,secret/file} before the run. Exit 0 ⇒ the view held.
+# ============================================================================
+
+template_name = "fs-view"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "~/kennel-e2e/granted"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/test", "/usr/bin/[", "/usr/bin/cat", "/usr/bin/touch", "/usr/bin/rm"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    test -r "$HOME/kennel-e2e/granted/file" \
+    && test "$(cat "$HOME/kennel-e2e/granted/file")" = OK \
+    && ! test -e "$HOME/kennel-e2e/secret" \
+    && touch "$HOME/scratch-$$" && rm -f "$HOME/scratch-$$" \
+    && ! test -e /etc/shadow
+    """,
+]

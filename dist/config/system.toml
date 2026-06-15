@@ -23,6 +23,5 @@ sshd = "/usr/sbin/sshd"
 # relocate a single binary away from <libexec_dir>:
 # privhelper    = "/usr/libexec/kennel/kennel-privhelper"
 # netproxy      = "/usr/libexec/kennel/host-netproxy"
-# ssh_reorigin  = "/usr/libexec/kennel/kennel-bin-ssh-reorigin"
 # socks_connect = "/usr/libexec/kennel/kennel-socks-connect"
 # akc           = "/usr/libexec/kennel/kennel-akc"
