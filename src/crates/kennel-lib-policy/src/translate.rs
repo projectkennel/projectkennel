@@ -656,6 +656,35 @@ fn translate_net(
         )));
     }
 
+    // The cgroup-BPF LPM tries are fixed-capacity (src/bpf/maps.h): allow 1024, deny 256, PER
+    // FAMILY. The deny set is the invariant floor + the author's [net.bpf].*.deny +
+    // [net.proxy].deny.policy; the connect-allow set is the author's [net.bpf].connect.allow.
+    // Reject an over-capacity set at compile time, naming the limit — otherwise the (N+1)th
+    // map update fails opaquely at spawn (ENOSPC) far from the policy that caused it.
+    check_bpf_map_cap(
+        "deny",
+        deny_invariant
+            .iter()
+            .chain(&bpf_connect_deny)
+            .chain(&deny_author),
+        crate::settled::MAX_BPF_DENY_PER_FAMILY,
+    )?;
+    check_bpf_map_cap(
+        "allow",
+        bpf_connect_allow.iter(),
+        crate::settled::MAX_BPF_ALLOW_PER_FAMILY,
+    )?;
+    check_bpf_map_cap(
+        "bind allow",
+        bpf_bind_allow.iter(),
+        crate::settled::MAX_BPF_ALLOW_PER_FAMILY,
+    )?;
+    check_bpf_map_cap(
+        "bind deny",
+        bpf_bind_deny.iter(),
+        crate::settled::MAX_BPF_DENY_PER_FAMILY,
+    )?;
+
     Ok(NetPolicy {
         mode,
         bind_port_min,
@@ -806,6 +835,23 @@ fn translate_bpf_rules(
         }
     }
     Ok(out)
+}
+
+/// Reject a settled rule set that would overflow its fixed-capacity per-family cgroup-BPF
+/// LPM trie. Counts v4 and v6 entries separately — they go to distinct maps (`*_v4`/`*_v6`),
+/// matching how `kennel_lib_spawn::plan::encode` routes a rule by parsing its `cidr` — and
+/// errors if either family exceeds `cap`, naming the limit so the author learns it at compile
+/// time rather than hitting an opaque map-update failure at spawn. A `cidr` that parses as
+/// neither family is left for `encode` to reject; it does not count toward either cap.
+fn check_bpf_map_cap<'a>(
+    _label: &str,
+    _rules: impl Iterator<Item = &'a NetRule>,
+    _cap: usize,
+) -> Result<(), PolicyError> {
+    // Phase 1 stub (§7.1): signature in place so the test file compiles; the per-family
+    // counting + over-cap error is filled in the implementation commit. The over-capacity
+    // test fails against this stub (it never errors), as Phase 1 requires.
+    Ok(())
 }
 
 /// Parse a `"offset:port"` proxy-listen address.
@@ -2010,6 +2056,78 @@ mod tests {
             fs.read
         );
         assert!(fs.write.contains(&"~/proj/**".to_owned()));
+    }
+
+    /// Build a `mode = host` policy whose `[net.bpf].connect.deny` lists `n` distinct v4 CIDRs
+    /// (10.<a>.<b>.0/24, incrementing), each one map entry. With no `[net.proxy]` section the
+    /// settled deny set is exactly these `n` v4 rules — used to push the deny LPM trie to/over
+    /// its per-family capacity.
+    fn host_policy_with_n_connect_denies(n: usize) -> Vec<u8> {
+        use std::fmt::Write as _;
+        let mut s =
+            String::from("name = \"k\"\n[net]\nmode = \"host\"\nreason = \"direct egress\"\n");
+        for i in 0..n {
+            // 10.<a>.<b>.0/24 — distinct CIDRs across the v4 space, one entry each.
+            let a = (i / 256) % 256;
+            let b = i % 256;
+            let _ = write!(
+                s,
+                "[[net.bpf.connect.deny]]\ncidr = \"10.{a}.{b}.0/24\"\nreason = \"r\"\n"
+            );
+        }
+        s.into_bytes()
+    }
+
+    #[test]
+    fn bpf_deny_at_capacity_is_accepted() {
+        // 256 v4 connect denies = the deny_v4 map's exact capacity (src/bpf/maps.h). At the cap
+        // (not over it) translation succeeds and all 256 land in the settled deny set.
+        let cap = crate::settled::MAX_BPF_DENY_PER_FAMILY;
+        let src = parse(&host_policy_with_n_connect_denies(cap)).expect("parse");
+        let net = translate_net(&src, &mut BTreeSet::new()).expect("v4 deny set at cap");
+        let v4 = net
+            .bpf_connect_deny
+            .iter()
+            .filter(|r| r.cidr.parse::<std::net::Ipv4Addr>().is_ok())
+            .count();
+        assert_eq!(v4, cap, "all {cap} v4 denies survive translation");
+    }
+
+    #[test]
+    fn bpf_deny_over_capacity_is_rejected_naming_the_limit() {
+        // One past the deny_v4 cap must be a compile error that names the limit, rather than the
+        // (cap+1)th map update failing opaquely with ENOSPC at spawn.
+        let cap = crate::settled::MAX_BPF_DENY_PER_FAMILY;
+        let src = parse(&host_policy_with_n_connect_denies(cap + 1)).expect("parse");
+        let err = translate_net(&src, &mut BTreeSet::new()).expect_err("over the deny_v4 cap");
+        assert!(matches!(err, PolicyError::Translation(_)), "got {err:?}");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains(&cap.to_string()) && msg.contains("deny"),
+            "the error must name the per-family deny cap; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn bpf_cap_counts_families_separately() {
+        // A v6 default-route deny plus a modest v4 set must NOT trip the v4 cap on the v6 rule:
+        // the two families have independent maps. A small mixed policy translates cleanly.
+        let src = parse(
+            b"name = \"k\"\n[net]\nmode = \"host\"\nreason = \"r\"\n\
+              [[net.bpf.connect.deny]]\ncidr = \"::/0\"\nreason = \"v6 default\"\n\
+              [[net.bpf.connect.allow]]\ncidr = \"*\"\nports = [443]\nreason = \"any:443\"\n",
+        )
+        .expect("parse");
+        // `cidr = "*"` expands to one v4 + one v6 allow; neither family is near its 1024 cap.
+        let net = translate_net(&src, &mut BTreeSet::new()).expect("mixed families under cap");
+        assert!(net
+            .bpf_connect_allow
+            .iter()
+            .any(|r| r.cidr.parse::<std::net::Ipv4Addr>().is_ok()));
+        assert!(net
+            .bpf_connect_allow
+            .iter()
+            .any(|r| r.cidr.parse::<std::net::Ipv6Addr>().is_ok()));
     }
 
     #[test]
