@@ -229,15 +229,20 @@ pub struct DenyRule {
     pub ports: Vec<u16>,
 }
 
-/// The kennel's relationship to the network (`docs/design/07-5-network.md` §7.5.1).
+/// The kennel's relationship to the network, as the egress proxy sees it
+/// (`docs/design/07-5-network.md` §7.5.1).
+///
+/// Only the proxied policy modes reach the proxy; the host-netns `open` and the no-network
+/// `none` never run a delegate, so they collapse to `None` here (deny-all) — they are
+/// enforced by BPF/Landlock or by having no netns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetMode {
-    /// No egress at all.
+    /// No egress through the proxy (a no-network or non-proxied kennel).
     None,
-    /// Egress only to allowlisted destinations.
+    /// Egress only to allowlisted destinations (policy `constrained`, default-deny).
     Constrained,
-    /// Egress to anywhere not categorically denied.
-    Open,
+    /// Egress to anywhere not categorically denied (policy `unconstrained`, default-allow).
+    Unconstrained,
 }
 
 /// The resolved egress allowlist the proxy enforces: a mode plus the allow and
@@ -310,7 +315,7 @@ impl Ruleset {
                     return RequestDecision::Deny(DenyReason::DeniedByRule);
                 }
                 match self.mode {
-                    NetMode::Open => RequestDecision::Allow,
+                    NetMode::Unconstrained => RequestDecision::Allow,
                     NetMode::Constrained if self.allow_addr_match(*addr, port, transport) => {
                         RequestDecision::Allow
                     }
@@ -326,7 +331,7 @@ impl Ruleset {
                     return RequestDecision::Deny(DenyReason::DeniedByRule);
                 }
                 match self.mode {
-                    NetMode::Open => RequestDecision::Resolve,
+                    NetMode::Unconstrained => RequestDecision::Resolve,
                     NetMode::Constrained if self.allow_name_match(name, port, transport) => {
                         RequestDecision::Resolve
                     }
@@ -845,7 +850,7 @@ mod tests {
     #[test]
     fn open_allows_an_undenied_literal() {
         let rs = Ruleset {
-            mode: NetMode::Open,
+            mode: NetMode::Unconstrained,
             allow: vec![],
             deny: vec![deny(METADATA, 32)],
         };
@@ -858,7 +863,7 @@ mod tests {
     #[test]
     fn open_denies_a_denied_literal() {
         let rs = Ruleset {
-            mode: NetMode::Open,
+            mode: NetMode::Unconstrained,
             allow: vec![],
             deny: vec![deny(METADATA, 32)],
         };
@@ -871,7 +876,7 @@ mod tests {
     #[test]
     fn open_name_resolves() {
         let rs = Ruleset {
-            mode: NetMode::Open,
+            mode: NetMode::Unconstrained,
             allow: vec![],
             deny: vec![deny(METADATA, 32)],
         };
@@ -921,7 +926,7 @@ mod tests {
     #[test]
     fn open_mode_blacklisted_name_is_denied() {
         let rs = Ruleset {
-            mode: NetMode::Open,
+            mode: NetMode::Unconstrained,
             allow: vec![],
             deny: vec![deny_name(".tracker.example")],
         };
@@ -1035,7 +1040,7 @@ mod tests {
     #[test]
     fn resolved_address_in_open_mode_only_checks_deny() {
         let rs = Ruleset {
-            mode: NetMode::Open,
+            mode: NetMode::Unconstrained,
             allow: vec![],
             deny: vec![deny(METADATA, 32)],
         };

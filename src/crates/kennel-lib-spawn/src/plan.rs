@@ -595,11 +595,17 @@ impl Plan {
 
         // The unprivileged spawn: USER establishes the identity-mapped user
         // namespace (granting CAP_SYS_ADMIN within it) so MOUNT/IPC/PID and the
-        // mount/pivot_root need no real privilege; the spawn seal forks so the
-        // workload is PID 1 (required to mount a fresh /proc). NET is never
-        // unshared — egress is governed by the cgroup BPF + loopback proxy, not
-        // net-ns isolation (see field docs).
-        let namespaces = Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
+        // mount/pivot_root need no real privilege; `kennel-bin-init` is the kennel's PID 1
+        // (it mounts the fresh /proc and forks the workload). NET is unshared for every mode
+        // EXCEPT `open`: a proxied kennel (`constrained`/`unconstrained`) gets its own net-ns
+        // with an in-ns `lo` carrying the proxy's loopback alias (the only path out is the
+        // binder gateway); `none` gets an own EMPTY net-ns (no interfaces). `open` deliberately
+        // shares the HOST net-ns for direct egress, gated by cgroup BPF + Landlock.
+        let mut namespaces =
+            Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
+        if ep.net.mode != NetMode::Open {
+            namespaces |= Namespaces::NET;
+        }
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
 
@@ -788,11 +794,15 @@ impl Plan {
             binder: true,
         });
 
-        // Landlock net only expresses per-port allow; map single-port TCP/Any
-        // allow rules to CONNECT_TCP. Port *ranges* and CIDR scoping are left to
-        // BPF, which is the authoritative egress gate. Skip in `open` mode.
+        // Landlock net only expresses per-port allow; map single-port TCP/Any allow rules
+        // to CONNECT_TCP. Port *ranges* and CIDR scoping are left to BPF, the authoritative
+        // egress gate. This applies to every mode whose `net.allow` the workload connects to
+        // DIRECTLY — `constrained` (the proxy endpoint is added by stamp_proxy) and `open`
+        // (host netns, no proxy: the allowlist IS the gate, in Landlock + BPF). `none` has no
+        // network; `unconstrained` egresses through the proxy (Landlock grants the proxy port
+        // via stamp_proxy), so its broad `net.allow` is not Landlock-mapped here.
         let mut landlock_net: Vec<(u16, AccessNet)> = Vec::new();
-        if ep.net.mode == NetMode::Constrained {
+        if matches!(ep.net.mode, NetMode::Constrained | NetMode::Open) {
             for r in &ep.net.allow {
                 let tcp = matches!(r.protocol, Protocol::Tcp | Protocol::Any);
                 if tcp && r.port_min == r.port_max {

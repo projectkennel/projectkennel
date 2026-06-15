@@ -1024,14 +1024,19 @@ mod tests {
         p.effective_policy.exec.loaders = vec!["/lib64/ld-linux-x86-64.so.2".to_owned()];
         let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
 
-        // Namespaces at the plan level: user (the unprivileged foundation) + mount/pid/ipc. The
-        // per-kennel net-ns (Namespaces::NET) is added by kenneld's bring-up for egress kennels
-        // (it needs the runtime loopback scope), not by this policy→plan translation.
+        // Namespaces at the plan level: user (the unprivileged foundation) + mount/pid/ipc, plus
+        // the per-kennel net-ns (Namespaces::NET) for every mode except `open`. The test policy is
+        // `constrained` (proxied), so it gets its own net-ns at the policy→plan translation — the
+        // netns decision now lives here, by mode, not bolted on later by kenneld.
         assert_eq!(
             plan.namespaces,
-            Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC
+            Namespaces::USER
+                | Namespaces::MOUNT
+                | Namespaces::PID
+                | Namespaces::IPC
+                | Namespaces::NET
         );
-        assert!(!plan.namespaces.contains(Namespaces::NET));
+        assert!(plan.namespaces.contains(Namespaces::NET));
 
         // cgroup lives under the caller's resource namespace, keyed by ctx.
         assert_eq!(plan.cgroup, PathBuf::from("/sys/fs/cgroup/kennel-dev/7"));

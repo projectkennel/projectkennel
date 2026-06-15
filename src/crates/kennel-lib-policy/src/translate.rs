@@ -569,24 +569,36 @@ fn translate_ssh(src: &SourcePolicy) -> SshRuntime {
 
 // ---- net -----------------------------------------------------------------------
 
+/// Parse the `net.mode` string into a [`NetMode`]; absent defaults to `constrained`.
+fn parse_net_mode(mode: Option<&str>) -> Result<NetMode, PolicyError> {
+    match mode {
+        Some("constrained") | None => Ok(NetMode::Constrained),
+        Some("none") => Ok(NetMode::None),
+        Some("unconstrained") => Ok(NetMode::Unconstrained),
+        Some("open") => Ok(NetMode::Open),
+        Some(other) => Err(translation(format!(
+            "net.mode `{other}` is not one of none/constrained/unconstrained/open"
+        ))),
+    }
+}
+
 fn translate_net(
     src: &SourcePolicy,
     deferred: &mut BTreeSet<String>,
 ) -> Result<NetPolicy, PolicyError> {
     let net = src.net.as_ref().ok_or_else(|| missing("net"))?;
-    let mode = match net.mode.as_deref() {
-        // `none` is "constrained with an empty allowlist" — the proxy denies all.
-        Some("constrained" | "none") | None => NetMode::Constrained,
-        Some("open") => NetMode::Open,
-        Some(other) => {
-            return Err(translation(format!(
-                "net.mode `{other}` is not representable"
-            )))
+    let mode = parse_net_mode(net.mode.as_deref())?;
+    // `open` egresses directly (host netns, no SOCKS proxy) and `none` has no network, so
+    // neither stands up a proxy regardless of any inherited `proxy_listen_*`. Only the
+    // proxied modes (constrained/unconstrained) carry a proxy listener. This is the
+    // engine-level fix for the "mode=open but still proxied" composition bug.
+    let proxy = if matches!(mode, NetMode::Constrained | NetMode::Unconstrained) {
+        match net.proxy_listen_v4_address.as_deref() {
+            Some(addr) => parse_proxy(addr)?,
+            None => ProxyListen::default(),
         }
-    };
-    let proxy = match net.proxy_listen_v4_address.as_deref() {
-        Some(addr) => parse_proxy(addr)?,
-        None => ProxyListen::default(),
+    } else {
+        ProxyListen::disabled()
     };
 
     let mut allow: Vec<NetRule> = Vec::new();
@@ -1156,6 +1168,53 @@ mod tests {
         }
     }
 
+    fn net_with_mode(mode: &str) -> SourcePolicy {
+        SourcePolicy {
+            net: Some(crate::source::NetSection {
+                mode: Some(mode.to_owned()),
+                // A non-default proxy_listen so we can prove the engine FORCES the proxy off
+                // for the non-proxied modes (the open-mode composition-bug fix).
+                proxy_listen_v4_address: Some("2:1080".to_owned()),
+                ..crate::source::NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        }
+    }
+
+    fn mode_of(m: &str) -> NetMode {
+        let mut d = BTreeSet::new();
+        translate_net(&net_with_mode(m), &mut d)
+            .expect("translate net")
+            .mode
+    }
+
+    #[test]
+    fn net_mode_strings_map_to_the_four_tiers() {
+        assert_eq!(mode_of("none"), NetMode::None);
+        assert_eq!(mode_of("constrained"), NetMode::Constrained);
+        assert_eq!(mode_of("unconstrained"), NetMode::Unconstrained);
+        assert_eq!(mode_of("open"), NetMode::Open);
+        let mut d = BTreeSet::new();
+        assert!(translate_net(&net_with_mode("bogus"), &mut d).is_err());
+    }
+
+    #[test]
+    fn open_and_none_force_the_proxy_off_even_with_proxy_listen_set() {
+        let mut d = BTreeSet::new();
+        // Proxied modes honour the proxy_listen address (offset 2).
+        for m in ["constrained", "unconstrained"] {
+            let net = translate_net(&net_with_mode(m), &mut d).expect("translate");
+            assert!(!net.proxy.is_disabled(), "{m} should be proxied");
+            assert_eq!(net.proxy.offset, 2, "{m} honours proxy_listen");
+        }
+        // Non-proxied modes force the proxy OFF regardless of an inherited proxy_listen —
+        // the engine-level fix for "mode=open but still proxied".
+        for m in ["open", "none"] {
+            let net = translate_net(&net_with_mode(m), &mut d).expect("translate");
+            assert!(net.proxy.is_disabled(), "{m} must drop the proxy");
+        }
+    }
+
     fn translate_template(src: &str) -> Translated {
         let entry = parse(src.as_bytes()).expect("parse");
         let resolved = resolve(&entry, &base_src()).expect("resolve");
@@ -1718,16 +1777,18 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_build_net_none_becomes_constrained_with_empty_allow() {
+    fn untrusted_build_net_none_is_a_real_isolated_mode() {
         let t = translate_template(UNTRUSTED_BUILD);
         let net = &t.effective_policy.net;
-        assert_eq!(net.mode, NetMode::Constrained, "none => constrained");
+        // `none` is now a distinct, fully-isolated mode (own empty net-ns, no interfaces),
+        // not an alias for constrained-with-empty-allow.
+        assert_eq!(net.mode, NetMode::None, "none => None");
         assert!(
             net.allow.is_empty() && net.allow_names.is_empty(),
             "no egress permitted"
         );
-        // The mandatory cloud-metadata invariant deny still propagates (RFC1918 is
-        // no longer an invariant — see base-confined [net]).
+        // The mandatory cloud-metadata invariant deny still propagates (defence in depth,
+        // even though a `none` kennel has no interface to reach it).
         assert!(net
             .deny_invariant
             .iter()

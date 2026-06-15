@@ -43,7 +43,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use kennel_lib_policy::NetPolicy;
+use kennel_lib_policy::{NetMode, NetPolicy};
 use kennel_lib_spawn::{Plan, ProxyEndpoint, SpawnError};
 use kennel_lib_syscall::namespace::Namespaces;
 use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
@@ -591,66 +591,80 @@ fn bring_up<P: Privileged + Sync>(
     //    fits the 8-bit field it carries; a higher ctx is a v6-only kennel.
     let offset = net.proxy.offset;
     let port = net.proxy.port;
-    // Compute the per-kennel loopback addresses. The factory adds them on `lo` itself (folded
-    // into the one construct op — it re-validates each against the caller's reserved subnet),
-    // so here we only collect them for the construction-half and record them in `state` for
-    // teardown's `del_address`.
+    // Compute the per-kennel loopback addresses — but only for the **proxied** modes, which
+    // run a SOCKS facade on a per-kennel loopback alias. `none` (own empty netns, no
+    // interfaces) and `open` (host netns, direct egress, no proxy) get no alias. The factory
+    // adds them on `lo` itself (folded into the one construct op — it re-validates each against
+    // the caller's reserved subnet); here we only collect them for the construction-half and
+    // record them in `state` for teardown's `del_address`.
+    // `addr6` is always computed (used as the v6 listen/etc address below) but the loopback
+    // aliases are only ADDED for the proxied modes, which run a SOCKS facade on them. `none`
+    // and `open` add no alias (own empty netns / host netns direct).
+    let proxied = matches!(net.mode, NetMode::Constrained | NetMode::Unconstrained);
     let mut loopback: Vec<kennel_lib_spawn::LoopbackAddr> = Vec::new();
-    if let Ok(c) = u8::try_from(ctx) {
-        let addr = loopback_v4(scope.tag(), c, offset);
-        loopback.push(kennel_lib_spawn::LoopbackAddr {
-            addr: addr.into(),
-            prefix: V4_PREFIX,
-        });
-        state.v4 = Some(addr);
-    }
     let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
-    loopback.push(kennel_lib_spawn::LoopbackAddr {
-        addr: addr6.into(),
-        prefix: V6_PREFIX,
-    });
-    state.v6 = Some(addr6);
-
-    // Per-kennel network namespace (§7.5.1): an egress kennel gets its own net-ns, so the only path
-    // off its loopback is the binder gateway (no route to the host stack, no sibling reachability).
-    // The net-ns boundary is the egress gate; the construction child brings up the in-ns `lo` + the
-    // kennel's addresses (the mirror of the host-lo alias). cgroup-BPF stays as defence-in-depth.
-    if proxy.is_some() {
-        plan.namespaces |= Namespaces::NET;
+    if proxied {
+        if let Ok(c) = u8::try_from(ctx) {
+            let addr = loopback_v4(scope.tag(), c, offset);
+            loopback.push(kennel_lib_spawn::LoopbackAddr {
+                addr: addr.into(),
+                prefix: V4_PREFIX,
+            });
+            state.v4 = Some(addr);
+        }
+        loopback.push(kennel_lib_spawn::LoopbackAddr {
+            addr: addr6.into(),
+            prefix: V6_PREFIX,
+        });
+        state.v6 = Some(addr6);
     }
 
-    // Stamp the egress proxy into the plan before deriving the BPF payload: this
-    // adds the flagged allow-entry that lets the workload reach its proxy (and
-    // records the proxy in kennel_meta). Without it the BPF would deny every
-    // connect, the proxy included, so no egress could flow. `state.v4` is the
-    // proxy's v4 address (absent for a v6-only kennel); `addr6` its v6.
-    plan.stamp_proxy(&ProxyEndpoint {
-        v4: state.v4,
-        v6: addr6,
-        port,
-    });
+    // `none` mode: an own empty net namespace (NET unshared in the plan), no interfaces, no
+    // proxy, no egress BPF. The entire host-side network bring-up — proxy stamp, BPF payload,
+    // loopback adds, delegate launch — is skipped: there is nothing to gate when there is no
+    // network. Every INet request is refused (`NetRuntime::denied()`), and the empty
+    // `egress_bytes` tells the factory to attach no programs.
+    let no_network = net.mode == NetMode::None;
+
+    // Stamp the egress proxy into the plan before deriving the BPF payload — proxied modes
+    // only. This adds the flagged allow-entry that lets the workload reach its proxy (and
+    // records the proxy in kennel_meta); without it the BPF would deny the proxy too.
+    if proxy.is_some() && !no_network {
+        plan.stamp_proxy(&ProxyEndpoint {
+            v4: state.v4,
+            v6: addr6,
+            port,
+        });
+    }
 
     // 3. egress BPF. The factory attaches it (folded into the one construct op); here we just
     //    build and encode the payload to ride the construction datagram. The helper pins this
     //    kennel's maps under the owner's `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can
-    //    drain the audit ringbuf and the owner can inspect the maps (§02-7).
-    let payload = EgressPayload {
-        meta: plan.bpf_meta,
-        allow_v4: plan.bpf_allow_v4.clone(),
-        deny_v4: plan.bpf_deny_v4.clone(),
-        allow_v6: plan.bpf_allow_v6.clone(),
-        deny_v6: plan.bpf_deny_v6.clone(),
-        bind_allowed_ports: plan.bind_allowed_ports.clone(),
-        pin_id: id.to_owned(),
+    //    drain the audit ringbuf and the owner can inspect the maps (§02-7). `none` ships an
+    //    EMPTY payload — no programs to load or attach.
+    let egress_bytes = if no_network {
+        Vec::new()
+    } else {
+        EgressPayload {
+            meta: plan.bpf_meta,
+            allow_v4: plan.bpf_allow_v4.clone(),
+            deny_v4: plan.bpf_deny_v4.clone(),
+            allow_v6: plan.bpf_allow_v6.clone(),
+            deny_v6: plan.bpf_deny_v6.clone(),
+            bind_allowed_ports: plan.bind_allowed_ports.clone(),
+            pin_id: id.to_owned(),
+        }
+        .encode()
     };
-    let egress_bytes = payload.encode();
 
     // 3b. The per-kennel egress: the dial delegate's command socket + kenneld's decision runtime.
     //     The delegate launch is deferred to *after* construct (below); here we only fix the socket
-    //     path and build the in-process decision runtime from the signed policy. Skipped with no
-    //     egress delegate ⇒ no egress: every INet request is refused.
+    //     path and build the in-process decision runtime from the signed policy. ONLY the proxied
+    //     modes (constrained/unconstrained) run a SOCKS delegate + inject HTTPS_PROXY; `open`
+    //     (host netns, direct egress, BPF/Landlock-gated) and `none` (no network) run none, so
+    //     every INet request is refused for them (the workload egresses directly or not at all).
     let (command_socket, net_runtime): (Option<PathBuf>, crate::inet::NetRuntime) =
-        if let Some(setup) = proxy {
+        if let (true, Some(setup)) = (proxied, proxy) {
             std::fs::create_dir_all(&setup.config_dir)?;
             // The owner-only kenneld↔delegate conduit command socket (§7.5.2): the delegate binds
             // it; kenneld connects per INet CONNECT to drive the dial.

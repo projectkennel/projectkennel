@@ -1219,8 +1219,10 @@ fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
     // `open` policy is INCOHERENT today if it still constrains egress through the proxy —
     // exactly the `interactive` bug Thread 6 fixes. Report the mode and flag that case.
     let mode = match ep.net.mode {
-        NetMode::Constrained => "constrained (egress proxy)",
-        NetMode::Open => "open (direct egress)",
+        NetMode::None => "none (no network)",
+        NetMode::Constrained => "constrained (egress proxy, default-deny)",
+        NetMode::Unconstrained => "unconstrained (egress proxy, default-allow + invariant denies)",
+        NetMode::Open => "open (host netns, direct egress, BPF/Landlock allowlist)",
     };
     println!("  network: {mode}");
     if !ep.net.allow.is_empty() || !ep.net.allow_names.is_empty() {

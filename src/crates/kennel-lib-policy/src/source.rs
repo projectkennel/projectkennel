@@ -389,7 +389,10 @@ pub struct DevPassthrough {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetSection {
-    /// Egress mode: `"constrained"`, `"open"`, or `"none"`.
+    /// Egress mode: `"none"` (own empty net-ns, no interfaces), `"constrained"` (own net-ns,
+    /// SOCKS proxy, default-deny — the default), `"unconstrained"` (own net-ns, SOCKS proxy,
+    /// default-allow minus invariant + `net.deny` carve-outs), or `"open"` (host net-ns,
+    /// direct egress, `net.allow` enforced by BPF/Landlock — no proxy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Whether the per-kennel proxy listens on IPv4.

@@ -22,14 +22,25 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Network enforcement mode. `unrestricted` is deliberately not representable
-/// (a framework invariant).
+/// Network enforcement mode — four tiers (`07-5-network.md` §7.5).
+///
+/// The proxy/own-netns pair (`constrained`/`unconstrained`) differ only in the proxy's
+/// default verdict; `open` is host-netns direct egress with its own BPF/Landlock allowlist;
+/// `none` is total isolation. A truly unrestricted (no invariant denies) mode is not
+/// representable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetMode {
-    /// Egress confined to the allowlist (the default posture).
+    /// No network at all: an own net namespace with no interfaces (not even `lo`).
+    None,
+    /// Own net namespace, egress via the SOCKS proxy, **default-deny**: only the
+    /// `net.allow` allowlist passes (the default posture).
     Constrained,
-    /// Egress unconfined by the allowlist (only the invariant denies apply).
+    /// Own net namespace, egress via the SOCKS proxy, **default-allow**: everything
+    /// passes except the always-on invariant denies and any `net.deny` carve-outs.
+    Unconstrained,
+    /// Host net namespace, **direct** egress (no SOCKS proxy, no `HTTPS_PROXY`); the
+    /// `net.allow` allowlist is still enforced via BPF + Landlock.
     Open,
 }
 
@@ -146,6 +157,23 @@ impl Default for ProxyListen {
             offset: 1,
             port: 1080,
         }
+    }
+}
+
+impl ProxyListen {
+    /// The "no proxy" marker — `offset 0` (reserved, never a real listener).
+    ///
+    /// Used by the non-proxied modes (`open`/`none`) so the daemon stands up no SOCKS facade
+    /// and the settled policy says so explicitly. [`is_disabled`](Self::is_disabled) tests it.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self { offset: 0, port: 0 }
+    }
+
+    /// Whether this is the [`disabled`](Self::disabled) (no-proxy) marker.
+    #[must_use]
+    pub const fn is_disabled(&self) -> bool {
+        self.offset == 0
     }
 }
 

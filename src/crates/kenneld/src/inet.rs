@@ -107,12 +107,15 @@ impl NetRuntime {
     }
 }
 
-/// The settled schema has no `none` mode (a no-network kennel runs no egress delegate), so only the
-/// two egress modes map.
+/// Map a policy net mode to the proxy-runtime mode. Only the proxied policy modes
+/// (`constrained`/`unconstrained`) run a delegate that consults this; `none` (no network)
+/// and `open` (host-netns, direct, BPF/Landlock-enforced) never reach the proxy, so they
+/// collapse to `None` (deny-all) defensively.
 const fn net_mode(mode: kennel_lib_policy::NetMode) -> NetMode {
     match mode {
         kennel_lib_policy::NetMode::Constrained => NetMode::Constrained,
-        kennel_lib_policy::NetMode::Open => NetMode::Open,
+        kennel_lib_policy::NetMode::Unconstrained => NetMode::Unconstrained,
+        kennel_lib_policy::NetMode::None | kennel_lib_policy::NetMode::Open => NetMode::None,
     }
 }
 
