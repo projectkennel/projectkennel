@@ -159,9 +159,12 @@ fn socks5_accept<S: Read + Write>(client: &mut S) -> io::Result<Option<(String, 
 /// a TCP readiness probe — normal, not logged). `Ok(Some(..))` = a full 2-byte prefix. `Err` = a
 /// partial greeting (1 byte then EOF) or a read error — a genuine protocol fault.
 fn read_greeting<S: Read>(client: &mut S) -> io::Result<Option<[u8; 2]>> {
-    // Phase 1 stub (§7.1): the Option-returning structure is in place, but the clean-EOF
-    // detection is filled in the fix commit — so the bare-close test fails here as required.
-    Ok(Some(read_array::<2, S>(client)?))
+    let mut first = [0u8; 1];
+    if client.read(&mut first)? == 0 {
+        return Ok(None); // EOF at offset 0 — clean disconnect.
+    }
+    let [second] = read_array::<1, S>(client)?; // partial greeting now propagates as Err.
+    Ok(Some([first[0], second]))
 }
 
 /// Send a SOCKS5 reply with code `rep` and a `0.0.0.0:0` bound address (the workload ignores it).
