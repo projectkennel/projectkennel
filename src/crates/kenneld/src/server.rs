@@ -1357,6 +1357,11 @@ mod tests {
                 allow: Vec::new(),
                 allow_names: Vec::new(),
                 deny_invariant: Vec::new(),
+                deny_author: Vec::new(),
+                bpf_connect_allow: Vec::new(),
+                bpf_connect_deny: Vec::new(),
+                bpf_bind_allow: Vec::new(),
+                bpf_bind_deny: Vec::new(),
                 bind_port_min: 0,
                 bind_allowed_ports: Vec::new(),
             };

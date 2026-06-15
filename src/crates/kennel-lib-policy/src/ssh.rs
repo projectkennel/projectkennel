@@ -17,11 +17,11 @@
 //!   drive a granted destination with no per-use touch is a real exposure (§7.10.6); the
 //!   policy must record it as one (`[ssh].threats.exposed`).
 //!
-//! There is deliberately **no** `dest ⊆ net.allow` check: the SSH destination is reached
+//! There is deliberately **no** `dest ⊆ net.proxy.allow` check: the SSH destination is reached
 //! by the *host-side* `ssh` the bastion's forced command runs, as the operator, entirely
 //! outside the kennel's egress purview (§7.10.4). The only egress the kennel needs is the
 //! bastion's own loopback endpoint, which `kenneld` grants as a host-service literal — not
-//! a policy `net.allow` rule. So a destination is never a kennel egress target.
+//! a policy `net.proxy.allow` rule. So a destination is never a kennel egress target.
 //!
 //! This validation runs on the *resolved* policy (after the chain is folded, includes
 //! applied, and a leaf's deltas merged).

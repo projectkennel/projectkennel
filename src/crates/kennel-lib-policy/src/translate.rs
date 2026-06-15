@@ -601,66 +601,40 @@ fn translate_net(
                 .to_owned(),
         ));
     }
-    let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
-
-    let mut allow: Vec<NetRule> = Vec::new();
-    let mut allow_names: Vec<NameRule> = Vec::new();
-    for entry in &net.allow {
-        let protocol = parse_protocol(entry.protocol.as_deref())?;
-        if let Some(cidr) = &entry.cidr {
-            let (addr, prefix_len) = parse_cidr(cidr)?;
-            let addr = subst(&addr, deferred);
-            if entry.ports.is_empty() {
-                allow.push(NetRule {
-                    cidr: addr,
-                    prefix_len,
-                    port_min: 0,
-                    port_max: u16::MAX,
-                    protocol,
-                });
-            } else {
-                for &p in &entry.ports {
-                    allow.push(NetRule {
-                        cidr: addr.clone(),
-                        prefix_len,
-                        port_min: p,
-                        port_max: p,
-                        protocol,
-                    });
-                }
-            }
-        } else if let Some(name) = &entry.name {
-            allow_names.push(NameRule {
-                name: name.clone(),
-                ports: entry.ports.clone(),
-                protocol,
-            });
-        } else {
+    // `host` runs no egress proxy (it shares the host net-ns and egresses directly), so any
+    // `[net.proxy]` rule under it can never be enforced (`07-5` §7.5.4). CIDR rules belong in
+    // `[net.bpf]` (the kernel ACL); by-name rules cannot be enforced in host mode at all.
+    if mode == NetMode::Host {
+        // Only AUTHOR proxy rules (`allow`, `deny.policy`) are rejected: the framework
+        // `deny.invariant` floor propagates into every policy (defence in depth) and is not
+        // removable, so its presence under `host` is structural, not an author choice.
+        let proxy_has_author_rules = net.proxy.as_ref().is_some_and(|p| {
+            !p.allow.is_empty() || p.deny.as_ref().is_some_and(|d| !d.policy.is_empty())
+        });
+        if proxy_has_author_rules {
             return Err(translation(
-                "net.allow entry has neither `name` nor `cidr`".to_owned(),
+                "net.mode = host has no egress proxy; move CIDR rules to [net.bpf]; by-name \
+                 rules cannot be enforced in host mode"
+                    .to_owned(),
             ));
         }
     }
+    let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
+
+    let (allow, allow_names, deny_invariant, deny_author) =
+        translate_proxy(net.proxy.as_ref(), deferred)?;
 
     // No implied egress is derived from `[ssh]`: the SSH destination is reached by the
     // host-side `ssh` the bastion runs as the operator (§7.10.4), entirely outside the
     // kennel's egress. The only egress the kennel needs is the bastion's own loopback
     // endpoint, which `kenneld` grants as a host-service literal at spawn — not a policy
-    // `net.allow` rule. So a destination never appears in the kennel's allowlist.
+    // `net.proxy.allow` rule. So a destination never appears in the kennel's allowlist.
 
-    let mut deny_invariant: Vec<NetRule> = Vec::new();
-    if let Some(deny) = &net.deny {
-        for d in &deny.invariant {
-            let (addr, prefix_len) = parse_cidr(&d.cidr)?;
-            deny_invariant.push(NetRule {
-                cidr: addr,
-                prefix_len,
-                port_min: 0,
-                port_max: u16::MAX,
-                protocol: Protocol::Any,
-            });
-        }
-    }
+    // The kernel ACL (`[net.bpf]`): CIDR+port connect/bind allow/deny, no names.
+    let (bpf_connect_allow, bpf_connect_deny) =
+        translate_bpf_acl(net.bpf.as_ref().and_then(|b| b.connect.as_ref()), deferred)?;
+    let (bpf_bind_allow, bpf_bind_deny) =
+        translate_bpf_acl(net.bpf.as_ref().and_then(|b| b.bind.as_ref()), deferred)?;
 
     // The bind floor (§7.5.7): a workload bind below `min_port` is denied by the
     // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
@@ -690,7 +664,148 @@ fn translate_net(
         allow,
         allow_names,
         deny_invariant,
+        deny_author,
+        bpf_connect_allow,
+        bpf_connect_deny,
+        bpf_bind_allow,
+        bpf_bind_deny,
     })
+}
+
+/// Translate `[net.proxy]` into the settled proxy lists: `(allow, allow_names,
+/// deny_invariant, deny_author)`. CIDR allows become [`NetRule`]s (one per port, or a single
+/// all-ports rule); by-name allows become [`NameRule`]s; the deny `invariant`/`policy` arrays
+/// become `Protocol::Any` all-ports [`NetRule`]s. An allow with neither `name` nor `cidr` is
+/// an error.
+type ProxyLists = (Vec<NetRule>, Vec<NameRule>, Vec<NetRule>, Vec<NetRule>);
+fn translate_proxy(
+    proxy: Option<&crate::source::NetProxy>,
+    deferred: &mut BTreeSet<String>,
+) -> Result<ProxyLists, PolicyError> {
+    let mut allow: Vec<NetRule> = Vec::new();
+    let mut allow_names: Vec<NameRule> = Vec::new();
+    let mut deny_invariant: Vec<NetRule> = Vec::new();
+    let mut deny_author: Vec<NetRule> = Vec::new();
+    let Some(p) = proxy else {
+        return Ok((allow, allow_names, deny_invariant, deny_author));
+    };
+    for entry in &p.allow {
+        let protocol = parse_protocol(entry.protocol.as_deref())?;
+        if let Some(cidr) = &entry.cidr {
+            let (addr, prefix_len) = parse_cidr(cidr)?;
+            let addr = subst(&addr, deferred);
+            if entry.ports.is_empty() {
+                allow.push(NetRule {
+                    cidr: addr,
+                    prefix_len,
+                    port_min: 0,
+                    port_max: u16::MAX,
+                    protocol,
+                });
+            } else {
+                for &port in &entry.ports {
+                    allow.push(NetRule {
+                        cidr: addr.clone(),
+                        prefix_len,
+                        port_min: port,
+                        port_max: port,
+                        protocol,
+                    });
+                }
+            }
+        } else if let Some(name) = &entry.name {
+            allow_names.push(NameRule {
+                name: name.clone(),
+                ports: entry.ports.clone(),
+                protocol,
+            });
+        } else {
+            return Err(translation(
+                "net.proxy.allow entry has neither `name` nor `cidr`".to_owned(),
+            ));
+        }
+    }
+    if let Some(deny) = &p.deny {
+        let any_rule = |d: &crate::source::NetDenyRule| -> Result<NetRule, PolicyError> {
+            let (addr, prefix_len) = parse_cidr(&d.cidr)?;
+            Ok(NetRule {
+                cidr: addr,
+                prefix_len,
+                port_min: 0,
+                port_max: u16::MAX,
+                protocol: Protocol::Any,
+            })
+        };
+        for d in &deny.invariant {
+            deny_invariant.push(any_rule(d)?);
+        }
+        for d in &deny.policy {
+            deny_author.push(any_rule(d)?);
+        }
+    }
+    Ok((allow, allow_names, deny_invariant, deny_author))
+}
+
+/// Translate one `[net.bpf.connect]`/`[net.bpf.bind]` ACL into `(allow, deny)` settled
+/// [`NetRule`] lists. Each [`BpfRule`](crate::source::BpfRule) carries a CIDR (or `"*"` =
+/// `0.0.0.0/0` + `::/0`) plus ports + protocol — no names (the kernel cannot resolve them).
+/// A rule with no cidr is an error.
+fn translate_bpf_acl(
+    acl: Option<&crate::source::NetBpfAcl>,
+    deferred: &mut BTreeSet<String>,
+) -> Result<(Vec<NetRule>, Vec<NetRule>), PolicyError> {
+    let Some(acl) = acl else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let allow = translate_bpf_rules(&acl.allow, deferred)?;
+    let deny = translate_bpf_rules(&acl.deny, deferred)?;
+    Ok((allow, deny))
+}
+
+/// Expand a list of [`BpfRule`](crate::source::BpfRule)s into settled [`NetRule`]s: one rule
+/// per (cidr, port) pair (or per cidr when `ports` is empty), with `"*"` expanding to both
+/// `0.0.0.0/0` and `::/0`. A rule with no cidr is an error.
+fn translate_bpf_rules(
+    rules: &[crate::source::BpfRule],
+    deferred: &mut BTreeSet<String>,
+) -> Result<Vec<NetRule>, PolicyError> {
+    let mut out: Vec<NetRule> = Vec::new();
+    for rule in rules {
+        let protocol = parse_protocol(rule.protocol.as_deref())?;
+        let Some(cidr) = &rule.cidr else {
+            return Err(translation("net.bpf rule needs a cidr".to_owned()));
+        };
+        // `"*"` is any host: expand to the v4 and v6 default routes so the kernel ACL
+        // covers both families with one author rule.
+        let cidrs: Vec<(String, u8)> = if cidr.trim() == "*" {
+            vec![("0.0.0.0".to_owned(), 0), ("::".to_owned(), 0)]
+        } else {
+            vec![parse_cidr(cidr)?]
+        };
+        for (addr, prefix_len) in cidrs {
+            let addr = subst(&addr, deferred);
+            if rule.ports.is_empty() {
+                out.push(NetRule {
+                    cidr: addr,
+                    prefix_len,
+                    port_min: 0,
+                    port_max: u16::MAX,
+                    protocol,
+                });
+            } else {
+                for &port in &rule.ports {
+                    out.push(NetRule {
+                        cidr: addr.clone(),
+                        prefix_len,
+                        port_min: port,
+                        port_max: port,
+                        protocol,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Parse a `"offset:port"` proxy-listen address.

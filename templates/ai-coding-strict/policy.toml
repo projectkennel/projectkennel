@@ -60,43 +60,43 @@ allow = [
 # by the user's leaf policy (so the same template serves Claude, Codex, Gemini,
 # …). T1.9 (supply-chain compromise in a fetched dependency) is the residual on
 # every registry grant.
-[[net.allow]]
+[[net.proxy.allow]]
 name = "registry.npmjs.org"
 ports = [443]
 protocol = "tcp"
 reason = "npm package registry"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "pypi.org"
 ports = [443]
 protocol = "tcp"
 reason = "Python package index"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "files.pythonhosted.org"
 ports = [443]
 protocol = "tcp"
 reason = "Python package files (pypi redirect target)"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "crates.io"
 ports = [443]
 protocol = "tcp"
 reason = "Rust crate registry"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "static.crates.io"
 ports = [443]
 protocol = "tcp"
 reason = "Rust crate downloads"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "github.com"
 ports = [22, 443]
 protocol = "tcp"
 reason = "git over SSH and HTTPS"
 threats.exposed = ["T1.9"]
-[[net.allow]]
+[[net.proxy.allow]]
 name = "objects.githubusercontent.com"
 ports = [443]
 protocol = "tcp"

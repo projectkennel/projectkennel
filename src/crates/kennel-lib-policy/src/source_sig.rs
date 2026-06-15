@@ -335,7 +335,7 @@ mod tests {
     fn fragment_signing_verifies_through_trust_check() {
         let (key, ks) = keypair();
         let frag = crate::leaf::parse(
-            b"name = \"corp-egress\"\n[[net.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
+            b"name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
         )
         .expect("parse fragment");
         let signed = sign_leaf(&frag, &key).expect("sign fragment");

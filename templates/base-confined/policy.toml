@@ -150,13 +150,13 @@ proxy_listen_v6 = true
 # mode (the default) nothing private is reachable anyway unless a `[[net.allow]]`
 # names it; in `open` mode the operator has opted into arbitrary egress. Either way
 # that is the policy author's call, not an immovable floor.
-[[net.deny.invariant]]
+[[net.proxy.deny.invariant]]
 cidr = "169.254.169.254/32"
 reason = "cloud metadata IPv4 — never permitted from a kennel (mandatory invariant)"
-[[net.deny.invariant]]
+[[net.proxy.deny.invariant]]
 cidr = "fd00:ec2::254/128"
 reason = "AWS IPv6 metadata — never permitted"
-[[net.deny.invariant]]
+[[net.proxy.deny.invariant]]
 cidr = "fe80::/10"
 reason = "IPv6 link-local — no legitimate egress destination"
 

@@ -23,7 +23,7 @@
 //! a later increment (the template chain already overrides scalars).
 
 use crate::source::{
-    DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy,
+    BpfRule, DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy,
     SshDestination, UnixAllow,
 };
 use crate::PolicyError;
@@ -154,29 +154,73 @@ pub struct DevPassthroughDelta {
     pub remove: Vec<DevPassthrough>,
 }
 
-/// `[net.allow]` / `[net.deny]` leaf-and-fragment deltas.
+/// `[net.proxy]` / `[net.bpf]` leaf-and-fragment deltas (`07-5` §7.5.4).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetLeaf {
-    /// `[[net.allow.add]]` / `[[net.allow.remove]]`.
+    /// `[net.proxy]` deltas — the proxy egress allow/deny additions/removals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow: Option<NetAllowDelta>,
-    /// `[net.deny]` — its `invariant` array carries fragment-declared invariant
-    /// denies. Permitted only in fragments, not leaf policies.
+    pub proxy: Option<NetProxyLeaf>,
+    /// `[net.bpf]` deltas — the kernel-ACL connect/bind additions/removals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deny: Option<FragmentDeny>,
+    pub bpf: Option<NetBpfLeaf>,
     /// `[net.audit.override]` — scalar override of the inherited audit config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditLeaf>,
 }
 
-/// Fragment-declared invariant denies (`[[net.deny.invariant]]`).
+/// `[net.proxy]` leaf deltas: by-name/CIDR allow add/remove and the author denylist
+/// add/remove.
+///
+/// The non-removable `[[net.proxy.deny.invariant]]` floor is template- and
+/// fragment-author only — a leaf carrying one is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct FragmentDeny {
-    /// Non-removable deny CIDRs the fragment contributes.
+pub struct NetProxyLeaf {
+    /// `[[net.proxy.allow.add]]` / `[[net.proxy.allow.remove]]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<NetAllowDelta>,
+    /// `[net.proxy.deny]` — its `invariant` array carries fragment-declared invariant
+    /// denies (permitted only in fragments), `policy` the removable author denylist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<NetProxyDenyLeaf>,
+}
+
+/// `[net.proxy.deny]` leaf-and-fragment deltas.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetProxyDenyLeaf {
+    /// `[[net.proxy.deny.invariant]]` — non-removable deny CIDRs (fragments only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invariant: Vec<NetDenyRule>,
+    /// `[[net.proxy.deny.policy.add]]` / `[[net.proxy.deny.policy.remove]]` — the
+    /// removable author denylist deltas, keyed by `cidr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<NetDenyDelta>,
+}
+
+/// `[net.bpf]` leaf deltas: the kernel-ACL connect/bind allow/deny add/remove.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetBpfLeaf {
+    /// `[net.bpf.connect]` allow/deny deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<NetBpfAclLeaf>,
+    /// `[net.bpf.bind]` allow/deny deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<NetBpfAclLeaf>,
+}
+
+/// One direction (`connect`/`bind`) of `[net.bpf]` leaf deltas.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetBpfAclLeaf {
+    /// `[[net.bpf.<dir>.allow.add]]` / `[[net.bpf.<dir>.allow.remove]]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<BpfRuleDelta>,
+    /// `[[net.bpf.<dir>.deny.add]]` / `[[net.bpf.<dir>.deny.remove]]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<BpfRuleDelta>,
 }
 
 /// An add/remove delta over network allow entries.
@@ -189,6 +233,30 @@ pub struct NetAllowDelta {
     /// Entries to remove, matched by `name` (or `cidr`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<NetAllow>,
+}
+
+/// An add/remove delta over `[net.proxy.deny.policy]` deny rules, keyed by `cidr`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetDenyDelta {
+    /// Entries to add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<NetDenyRule>,
+    /// Entries to remove, matched by `cidr`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<NetDenyRule>,
+}
+
+/// An add/remove delta over `[net.bpf]` ACL rules, keyed by `cidr`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BpfRuleDelta {
+    /// Entries to add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<BpfRule>,
+    /// Entries to remove, matched by `cidr`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<BpfRule>,
 }
 
 /// `[unix.allow]` leaf deltas.
@@ -267,7 +335,7 @@ impl LeafPolicy {
         }
         if !self.invariant_denies().is_empty() {
             errs.push(
-                "a leaf policy may not declare `[[net.deny.invariant]]`; invariants are \
+                "a leaf policy may not declare `[[net.proxy.deny.invariant]]`; invariants are \
                  template- and fragment-author tools (docs/design/05-templates.md §5.5)"
                     .to_owned(),
             );
@@ -322,18 +390,7 @@ impl LeafPolicy {
             }
         }
         if let Some(net) = &self.net {
-            if let Some(d) = &net.allow {
-                for e in d.add.iter().chain(&d.remove) {
-                    if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
-                        let who = e
-                            .name
-                            .as_deref()
-                            .or(e.cidr.as_deref())
-                            .unwrap_or("<unnamed>");
-                        errs.push(format!("[[net.allow.*]] `{who}` is missing a `reason`"));
-                    }
-                }
-            }
+            check_net_reasons(net, errs);
         }
         if let Some(unix) = &self.unix {
             if let Some(d) = &unix.allow {
@@ -377,10 +434,25 @@ impl LeafPolicy {
                     .is_none_or(|d| d.passthrough.as_ref().is_none_or(|p| p.remove.is_empty()))
         });
         let exec_ok = self.exec.as_ref().is_none_or(|e| path_clean(&e.allow));
-        let net_ok = self
-            .net
-            .as_ref()
-            .is_none_or(|n| n.allow.as_ref().is_none_or(|a| a.remove.is_empty()));
+        let net_ok = self.net.as_ref().is_none_or(|n| {
+            let proxy_ok = n.proxy.as_ref().is_none_or(|p| {
+                p.allow.as_ref().is_none_or(|a| a.remove.is_empty())
+                    && p.deny
+                        .as_ref()
+                        .and_then(|d| d.policy.as_ref())
+                        .is_none_or(|x| x.remove.is_empty())
+            });
+            let bpf_ok = n.bpf.as_ref().is_none_or(|b| {
+                let acl_clean = |acl: &Option<NetBpfAclLeaf>| {
+                    acl.as_ref().is_none_or(|a| {
+                        a.allow.as_ref().is_none_or(|x| x.remove.is_empty())
+                            && a.deny.as_ref().is_none_or(|x| x.remove.is_empty())
+                    })
+                };
+                acl_clean(&b.connect) && acl_clean(&b.bind)
+            });
+            proxy_ok && bpf_ok
+        });
         let unix_ok = self
             .unix
             .as_ref()
@@ -392,21 +464,23 @@ impl LeafPolicy {
         fs_ok && exec_ok && net_ok && unix_ok && ssh_ok
     }
 
-    /// This policy's `[[net.allow.add]]` entries (for include conflict checks).
+    /// This policy's `[[net.proxy.allow.add]]` entries (for include conflict checks).
     #[must_use]
     pub fn net_allow_adds(&self) -> &[NetAllow] {
         self.net
             .as_ref()
-            .and_then(|n| n.allow.as_ref())
+            .and_then(|n| n.proxy.as_ref())
+            .and_then(|p| p.allow.as_ref())
             .map_or(&[], |a| a.add.as_slice())
     }
 
-    /// This policy's fragment-declared invariant denies (`[[net.deny.invariant]]`).
+    /// This policy's fragment-declared invariant denies (`[[net.proxy.deny.invariant]]`).
     #[must_use]
     pub fn invariant_denies(&self) -> &[NetDenyRule] {
         self.net
             .as_ref()
-            .and_then(|n| n.deny.as_ref())
+            .and_then(|n| n.proxy.as_ref())
+            .and_then(|p| p.deny.as_ref())
             .map_or(&[], |d| d.invariant.as_slice())
     }
 
@@ -444,17 +518,7 @@ impl LeafPolicy {
             apply_paths(&mut target.allow, exec.allow.as_ref());
         }
         if let Some(net) = &self.net {
-            if let Some(d) = &net.allow {
-                let target = effective.net.get_or_insert_with(Default::default);
-                for entry in &d.add {
-                    if !target.allow.iter().any(|e| net_key(e) == net_key(entry)) {
-                        target.allow.push(entry.clone());
-                    }
-                }
-                target
-                    .allow
-                    .retain(|e| !d.remove.iter().any(|r| net_key(r) == net_key(e)));
-            }
+            apply_net(effective, net);
         }
         if let Some(unix) = &self.unix {
             if let Some(d) = &unix.allow {
@@ -512,6 +576,133 @@ impl LeafPolicy {
             }
         }
     }
+}
+
+/// Apply a leaf's `[net.proxy]`/`[net.bpf]` deltas to the effective policy, in place.
+fn apply_net(effective: &mut SourcePolicy, net: &NetLeaf) {
+    if let Some(proxy) = &net.proxy {
+        if let Some(d) = &proxy.allow {
+            let target = effective
+                .net
+                .get_or_insert_with(Default::default)
+                .proxy
+                .get_or_insert_with(Default::default);
+            for entry in &d.add {
+                if !target.allow.iter().any(|e| net_key(e) == net_key(entry)) {
+                    target.allow.push(entry.clone());
+                }
+            }
+            target
+                .allow
+                .retain(|e| !d.remove.iter().any(|r| net_key(r) == net_key(e)));
+        }
+        if let Some(d) = proxy.deny.as_ref().and_then(|x| x.policy.as_ref()) {
+            let deny = effective
+                .net
+                .get_or_insert_with(Default::default)
+                .proxy
+                .get_or_insert_with(Default::default)
+                .deny
+                .get_or_insert_with(Default::default);
+            for entry in &d.add {
+                if !deny.policy.iter().any(|e| e.cidr == entry.cidr) {
+                    deny.policy.push(entry.clone());
+                }
+            }
+            deny.policy
+                .retain(|e| !d.remove.iter().any(|r| r.cidr == e.cidr));
+        }
+    }
+    if let Some(bpf) = &net.bpf {
+        apply_bpf_acl(effective, bpf.connect.as_ref(), BpfDir::Connect);
+        apply_bpf_acl(effective, bpf.bind.as_ref(), BpfDir::Bind);
+    }
+}
+
+/// Require a `reason` on every `[net.proxy]`/`[net.bpf]` delta entry.
+fn check_net_reasons(net: &NetLeaf, errs: &mut Vec<String>) {
+    let blank = |r: &Option<String>| r.as_deref().is_none_or(|x| x.trim().is_empty());
+    if let Some(proxy) = &net.proxy {
+        if let Some(d) = &proxy.allow {
+            for e in d.add.iter().chain(&d.remove) {
+                if blank(&e.reason) {
+                    let who = e
+                        .name
+                        .as_deref()
+                        .or(e.cidr.as_deref())
+                        .unwrap_or("<unnamed>");
+                    errs.push(format!(
+                        "[[net.proxy.allow.*]] `{who}` is missing a `reason`"
+                    ));
+                }
+            }
+        }
+        if let Some(policy) = proxy.deny.as_ref().and_then(|x| x.policy.as_ref()) {
+            for e in policy.add.iter().chain(&policy.remove) {
+                if blank(&e.reason) {
+                    errs.push(format!(
+                        "[[net.proxy.deny.policy.*]] `{}` is missing a `reason`",
+                        e.cidr
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(bpf) = &net.bpf {
+        for acl in bpf.connect.iter().chain(&bpf.bind) {
+            for d in acl.allow.iter().chain(&acl.deny) {
+                for e in d.add.iter().chain(&d.remove) {
+                    if blank(&e.reason) {
+                        let who = e.cidr.as_deref().unwrap_or("<no-cidr>");
+                        errs.push(format!("[[net.bpf.*]] `{who}` is missing a `reason`"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Which `[net.bpf]` direction an ACL delta targets.
+#[derive(Clone, Copy)]
+enum BpfDir {
+    /// `[net.bpf.connect]`.
+    Connect,
+    /// `[net.bpf.bind]`.
+    Bind,
+}
+
+/// Apply one `[net.bpf.connect]`/`[net.bpf.bind]` ACL delta (allow + deny, each keyed by
+/// `cidr`) to the effective policy, in place. Mirrors the allow/deny add/remove pattern of
+/// the other deltas.
+fn apply_bpf_acl(effective: &mut SourcePolicy, acl: Option<&NetBpfAclLeaf>, dir: BpfDir) {
+    let Some(acl) = acl else { return };
+    if acl.allow.is_none() && acl.deny.is_none() {
+        return;
+    }
+    let net = effective.net.get_or_insert_with(Default::default);
+    let bpf = net.bpf.get_or_insert_with(Default::default);
+    let target = match dir {
+        BpfDir::Connect => bpf.connect.get_or_insert_with(Default::default),
+        BpfDir::Bind => bpf.bind.get_or_insert_with(Default::default),
+    };
+    apply_bpf_rules(&mut target.allow, acl.allow.as_ref());
+    apply_bpf_rules(&mut target.deny, acl.deny.as_ref());
+}
+
+/// Apply an add/remove [`BpfRule`] delta (keyed by `cidr`) to a rule list, in place.
+fn apply_bpf_rules(target: &mut Vec<BpfRule>, delta: Option<&BpfRuleDelta>) {
+    let Some(delta) = delta else { return };
+    for entry in &delta.add {
+        if !target.iter().any(|e| bpf_key(e) == bpf_key(entry)) {
+            target.push(entry.clone());
+        }
+    }
+    target.retain(|e| !delta.remove.iter().any(|r| bpf_key(r) == bpf_key(e)));
+}
+
+/// Unique key for a `[net.bpf]` rule (its cidr).
+fn bpf_key(r: &BpfRule) -> &str {
+    r.cidr.as_deref().unwrap_or("")
 }
 
 /// Apply an add/remove path delta to an optional string list, in place.
@@ -606,7 +797,7 @@ reason = "the project I am working on"
 path = "~/projects/myproj/**"
 reason = "the project I am working on"
 
-[[net.allow.add]]
+[[net.proxy.allow.add]]
 name = "api.anthropic.com"
 ports = [443]
 reason = "Claude API"
@@ -636,13 +827,13 @@ threats.exposed = ["T1.8"]
             .expect("read")
             .iter()
             .any(|p| p == "/usr/**"));
-        let net = eff.net.expect("net");
-        assert!(net
+        let proxy = eff.net.expect("net").proxy.expect("net.proxy");
+        assert!(proxy
             .allow
             .iter()
             .any(|a| a.name.as_deref() == Some("api.anthropic.com")));
         // The inherited registry allows survive.
-        assert!(net
+        assert!(proxy
             .allow
             .iter()
             .any(|a| a.name.as_deref() == Some("github.com")));
@@ -681,20 +872,22 @@ threats.exposed = ["T2.1"]
         let leaf = r#"
 name = "n"
 template_base = "ai-coding-strict@v1"
-[[net.allow.remove]]
+[[net.proxy.allow.remove]]
 name = "github.com"
 reason = "this workflow does not use github"
 "#;
         let (eff, _) = effective_with_leaf(leaf);
-        let net = eff.net.expect("net");
+        let proxy = eff.net.expect("net").proxy.expect("net.proxy");
         assert!(
-            !net.allow
+            !proxy
+                .allow
                 .iter()
                 .any(|a| a.name.as_deref() == Some("github.com")),
             "github removed"
         );
         assert!(
-            net.allow
+            proxy
+                .allow
                 .iter()
                 .any(|a| a.name.as_deref() == Some("pypi.org")),
             "others remain"
@@ -706,7 +899,7 @@ reason = "this workflow does not use github"
         let leaf = r#"
 name = "n"
 template_base = "ai-coding-strict@v1"
-[[net.allow.add]]
+[[net.proxy.allow.add]]
 name = "github.com"
 ports = [443]
 reason = "already inherited; should not duplicate"
@@ -715,6 +908,8 @@ reason = "already inherited; should not duplicate"
         let n = eff
             .net
             .expect("net")
+            .proxy
+            .expect("net.proxy")
             .allow
             .iter()
             .filter(|a| a.name.as_deref() == Some("github.com"))

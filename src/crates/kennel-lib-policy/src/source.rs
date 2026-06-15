@@ -413,13 +413,20 @@ pub struct NetSection {
     /// IPv6 proxy listen address as `"offset:port"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_listen_v6_address: Option<String>,
-    /// `[[net.allow]]` — by-name (or by-CIDR) egress allow entries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<NetAllow>,
-    /// `[net.deny]` — deny entries, including the `[[net.deny.invariant]]` set.
+    /// `[net.proxy]` — the user-space egress policy the per-kennel proxy enforces
+    /// (`constrained`/`unconstrained`): by-name (+CIDR) allow/deny, resolve-and-pin, plus
+    /// the non-removable `[[net.proxy.deny.invariant]]` floor. Not enforced in `mode=host`
+    /// (no proxy runs there) — a `[net.proxy]` rule under `host` is a compile error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deny: Option<NetDeny>,
-    /// `[net.bind]` — bind-address rewriting policy.
+    pub proxy: Option<NetProxy>,
+    /// `[net.bpf]` — the kernel/syscall ACL (the cgroup `connect4/6` + `bind4/6` BPF and the
+    /// matching Landlock grants): CIDR + port allow/deny, deny-first, **no names**. Present in
+    /// every mode: in `host` it is the egress gate; in the proxied modes it is defence-in-depth
+    /// (intersected with the framework's proxy-endpoint lock — an author rule can only narrow).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bpf: Option<NetBpf>,
+    /// `[net.bind]` — bind-address rewriting policy (the wildcard-rewrite knobs; the bind
+    /// *allow/deny gate* is `[net.bpf.bind]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<NetBind>,
     /// `[net.ipv6]` — IPv6-specific options.
@@ -428,6 +435,93 @@ pub struct NetSection {
     /// `[net.audit]` — per-kennel egress audit log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<NetAudit>,
+}
+
+/// `[net.proxy]` — the user-space egress policy kenneld's proxy enforces (`07-5` §7.5.4).
+///
+/// Meaningful only in the proxied modes (`constrained`/`unconstrained`): kenneld resolves a
+/// name, vets the answer against `allow`, re-checks the resolved address against `deny` +
+/// `deny_invariant`, and pins it. In `mode=host` there is no proxy, so any rule here is a
+/// compile error (names cannot be enforced by the kernel ACL — use `[net.bpf]`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetProxy {
+    /// `[[net.proxy.allow]]` — by-name (or by-CIDR) egress allow entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<NetAllow>,
+    /// `[net.proxy.deny]` — the deny table: the non-removable `invariant` floor and the
+    /// optional author `policy` denylist, both CIDR, both evaluated deny-first before `allow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<NetProxyDeny>,
+}
+
+/// `[net.proxy.deny]` — the proxy denies: the framework floor + the optional author list.
+///
+/// Two arrays in one table (TOML cannot nest `[[net.proxy.deny]]` under
+/// `[[net.proxy.deny.invariant]]`): `invariant` is the non-removable floor (cloud-metadata /
+/// link-local), `policy` is the author's optional subtraction (RFC1918, a known-bad range).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetProxyDeny {
+    /// `[[net.proxy.deny.invariant]]` — cloud-metadata / link-local, non-removable (T1.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariant: Vec<NetDenyRule>,
+    /// `[[net.proxy.deny.policy]]` — the author's optional denylist (NOT mandatory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy: Vec<NetDenyRule>,
+}
+
+/// `[net.bpf]` — the kernel/syscall ACL (`07-5` §7.5.4): socket-family shaping + the
+/// directional connect/bind allow-deny gates the cgroup BPF and Landlock enforce.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetBpf {
+    /// Permitted socket families (defence in depth; e.g. `["AF_INET", "AF_INET6", "AF_UNIX"]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub families: Option<Vec<String>>,
+    /// Denied socket families (`inet_sock_create` returns EPERM): `AF_NETLINK`, `AF_PACKET`, …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_families: Option<Vec<String>>,
+    /// `[net.bpf.connect]` — the outbound CONNECT ACL (cidr + ports, deny-first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<NetBpfAcl>,
+    /// `[net.bpf.bind]` — the inbound BIND ACL (cidr + ports, deny-first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<NetBpfAcl>,
+}
+
+/// One direction of the `[net.bpf]` kernel ACL: CIDR+port allow/deny, deny-first.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetBpfAcl {
+    /// `[[net.bpf.connect.allow]]` / `[[net.bpf.bind.allow]]` — CIDR+port allow rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<BpfRule>,
+    /// `[[net.bpf.connect.deny]]` / `[[net.bpf.bind.deny]]` — CIDR+port deny rules (deny-first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<BpfRule>,
+}
+
+/// One `[net.bpf]` rule: a CIDR (or `"*"` = any host) + ports + protocol. **No name field** —
+/// the kernel ACL cannot resolve names, so a by-name rule is structurally inexpressible here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BpfRule {
+    /// The CIDR (`"10.0.0.0/8"`, a bare address, or `"*"` = `0.0.0.0/0` + `::/0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cidr: Option<String>,
+    /// Permitted ports (empty = any port).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+    /// Transport protocol (`"tcp"`, `"udp"`, `"any"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// Why this rule exists (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
 }
 
 /// One `[[net.allow]]` entry.
@@ -468,16 +562,8 @@ pub struct NetTls {
     pub required: Option<bool>,
 }
 
-/// `[net.deny]` — its `invariant` array carries the non-removable denies.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct NetDeny {
-    /// `[[net.deny.invariant]]` — cloud-metadata / RFC1918 / link-local / CGNAT.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub invariant: Vec<NetDenyRule>,
-}
-
-/// One `[[net.deny.invariant]]` entry: a CIDR plus its required `reason`.
+/// One `[[net.proxy.deny.invariant]]` / `[[net.proxy.deny.policy]]` entry: a CIDR plus its
+/// required `reason`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetDenyRule {
@@ -833,8 +919,8 @@ impl SourcePolicy {
     ///
     /// Checks: identity coherence (template vs leaf), `template_base`/`include`
     /// reference grammar, no duplicate includes, and a non-empty `reason` on every
-    /// capability-granting entry (`[[net.allow]]`, `[[net.deny.invariant]]`,
-    /// `[[unix.allow]]`).
+    /// capability-granting entry (`[[net.proxy.allow]]`, `[[net.proxy.deny.*]]`,
+    /// `[[net.bpf.*]]`, `[[unix.allow]]`).
     ///
     /// Chain resolution, signature verification, lockfile byte-pinning, and
     /// framework-invariant assertion are *cross-artefact* or *post-resolution*
@@ -904,23 +990,38 @@ impl SourcePolicy {
 
     fn check_reasons(&self, errs: &mut Vec<String>) {
         if let Some(net) = &self.net {
-            for a in &net.allow {
-                let who = a
-                    .name
-                    .as_deref()
-                    .or(a.cidr.as_deref())
-                    .unwrap_or("<unnamed>");
-                if is_blank(a.reason.as_deref()) {
-                    errs.push(format!("[[net.allow]] \"{who}\" is missing a `reason`"));
+            if let Some(proxy) = &net.proxy {
+                for a in &proxy.allow {
+                    let who = a
+                        .name
+                        .as_deref()
+                        .or(a.cidr.as_deref())
+                        .unwrap_or("<unnamed>");
+                    if is_blank(a.reason.as_deref()) {
+                        errs.push(format!(
+                            "[[net.proxy.allow]] \"{who}\" is missing a `reason`"
+                        ));
+                    }
+                }
+                if let Some(deny) = &proxy.deny {
+                    for d in deny.invariant.iter().chain(&deny.policy) {
+                        if is_blank(d.reason.as_deref()) {
+                            errs.push(format!(
+                                "[[net.proxy.deny]] \"{}\" is missing a `reason`",
+                                d.cidr
+                            ));
+                        }
+                    }
                 }
             }
-            if let Some(deny) = &net.deny {
-                for d in &deny.invariant {
-                    if is_blank(d.reason.as_deref()) {
-                        errs.push(format!(
-                            "[[net.deny.invariant]] \"{}\" is missing a `reason`",
-                            d.cidr
-                        ));
+            if let Some(bpf) = &net.bpf {
+                let acls = bpf.connect.iter().chain(&bpf.bind);
+                for acl in acls {
+                    for r in acl.allow.iter().chain(&acl.deny) {
+                        let who = r.cidr.as_deref().unwrap_or("<no-cidr>");
+                        if is_blank(r.reason.as_deref()) {
+                            errs.push(format!("[[net.bpf]] \"{who}\" is missing a `reason`"));
+                        }
                     }
                 }
             }
@@ -1070,7 +1171,7 @@ mod tests {
     fn base_confined_carries_the_invariant_denies_with_reasons() {
         let pol = parse(BASE_CONFINED.as_bytes()).expect("parse");
         let net = pol.net.expect("net section");
-        let deny = net.deny.expect("net.deny");
+        let deny = net.proxy.expect("net.proxy").deny.expect("net.proxy.deny");
         assert!(
             deny.invariant
                 .iter()
@@ -1101,12 +1202,13 @@ mod tests {
     fn ai_coding_strict_carries_its_net_allow_and_unix_agent() {
         let pol = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
         let net = pol.net.expect("net");
-        assert!(net
+        let proxy = net.proxy.expect("net.proxy");
+        assert!(proxy
             .allow
             .iter()
             .any(|a| a.name.as_deref() == Some("github.com")));
         assert!(
-            net.allow.iter().all(|a| !is_blank(a.reason.as_deref())),
+            proxy.allow.iter().all(|a| !is_blank(a.reason.as_deref())),
             "every allow has a reason"
         );
         let unix = pol.unix.expect("unix");
@@ -1219,7 +1321,7 @@ image = \"docker.io/library/postgres:17\"
     #[test]
     fn net_allow_without_reason_is_rejected() {
         let src = "name = \"n\"\ntemplate_base = \"base-confined@v1\"\n\
-                   [[net.allow]]\nname = \"evil.example\"\nports = [443]\n";
+                   [[net.proxy.allow]]\nname = \"evil.example\"\nports = [443]\n";
         let pol = parse(src.as_bytes()).expect("parse");
         let err = pol.validate().expect_err("missing reason must fail");
         assert!(

@@ -46,7 +46,7 @@ pub const ASSERTED_INVARIANTS: &[&str] = &[
     "exec.deny_writable",
     "fs.home.shadow",
     "net.mode",
-    "net.deny.invariant",
+    "net.proxy.deny.invariant",
     "proc.visibility",
 ];
 
@@ -107,7 +107,7 @@ pub fn compile(
         .clone()
         .unwrap_or_default();
     // The `[ssh]` section is source-only (dropped in translate); validate it here,
-    // on the resolved policy, while the cross-referenced `net.allow` is still visible.
+    // on the resolved policy, while the cross-referenced `net.proxy.allow` is still visible.
     crate::ssh::validate(&effective)?;
     let mut warnings = crate::unix::validate(&effective)?;
     warnings.extend(crate::binder::validate(&effective)?);
@@ -216,11 +216,11 @@ fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
 /// A fragment is a signed, version-pinned, **additive-only** policy piece (`02-2`
 /// §Includes): it may add rules but not remove or override. Fragments are applied
 /// after the inheritance chain and before the leaf's own deltas. Two fragments that
-/// add a conflicting `[[net.allow]]` for the same host (different ports/protocol) are
+/// add a conflicting `[[net.proxy.allow]]` for the same host (different ports/protocol) are
 /// an [`PolicyError::IncludeConflict`] — resolution is not last-wins. Returns the
 /// resolved fragments as chain links for the lockfile.
 ///
-/// Scope: fragment-declared **invariants** (`[[net.deny.invariant]]` inside a
+/// Scope: fragment-declared **invariants** (`[[net.proxy.deny.invariant]]` inside a
 /// fragment) are not yet honoured; fragment signatures, however, are verified
 /// against `trust` exactly like template ancestors.
 fn apply_includes(
@@ -278,7 +278,8 @@ fn apply_includes(
         let invariants = fragment.invariant_denies();
         if !invariants.is_empty() {
             let net = effective.net.get_or_insert_with(Default::default);
-            let deny = net.deny.get_or_insert_with(Default::default);
+            let proxy = net.proxy.get_or_insert_with(Default::default);
+            let deny = proxy.deny.get_or_insert_with(Default::default);
             for rule in invariants {
                 if !deny.invariant.iter().any(|e| e.cidr == rule.cidr) {
                     deny.invariant.push(rule.clone());
@@ -540,7 +541,7 @@ mod tests {
 
     #[test]
     fn includes_apply_additively_and_are_lock_pinned() {
-        let frag = "name = \"corp-egress\"\n[[net.allow.add]]\nname = \"proxy.corp.example\"\nports = [443]\nreason = \"corp egress proxy\"\n";
+        let frag = "name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp.example\"\nports = [443]\nreason = \"corp egress proxy\"\n";
         let source = source_with_fragments(&[("corp-egress", frag)]);
         let leaf = crate::leaf::parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
@@ -568,8 +569,8 @@ mod tests {
 
     #[test]
     fn conflicting_includes_are_rejected() {
-        let f1 = "name = \"a\"\n[[net.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n";
-        let f2 = "name = \"b\"\n[[net.allow.add]]\nname = \"proxy.corp\"\nports = [8443]\nreason = \"r\"\n";
+        let f1 = "name = \"a\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n";
+        let f2 = "name = \"b\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [8443]\nreason = \"r\"\n";
         let source = source_with_fragments(&[("frag-a", f1), ("frag-b", f2)]);
         let leaf = crate::leaf::parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"frag-a@v1\", \"frag-b@v1\"]\n",
@@ -581,7 +582,7 @@ mod tests {
 
     #[test]
     fn a_fragment_can_contribute_an_invariant_deny() {
-        let frag = "name = \"corp-deny\"\n[[net.deny.invariant]]\ncidr = \"203.0.113.0/24\"\nreason = \"corp blocklist\"\n";
+        let frag = "name = \"corp-deny\"\n[[net.proxy.deny.invariant]]\ncidr = \"203.0.113.0/24\"\nreason = \"corp blocklist\"\n";
         let source = source_with_fragments(&[("corp-deny", frag)]);
         let leaf = crate::leaf::parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-deny@v1\"]\n",
@@ -604,7 +605,7 @@ mod tests {
     #[test]
     fn a_leaf_may_not_declare_an_invariant_deny() {
         let leaf = crate::leaf::parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[net.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"r\"\n",
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[net.proxy.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"r\"\n",
         )
         .expect("parse leaf");
         let err = leaf
@@ -617,7 +618,8 @@ mod tests {
 
     #[test]
     fn a_remove_in_a_fragment_is_rejected() {
-        let frag = "name = \"bad\"\n[[net.allow.remove]]\nname = \"github.com\"\nreason = \"r\"\n";
+        let frag =
+            "name = \"bad\"\n[[net.proxy.allow.remove]]\nname = \"github.com\"\nreason = \"r\"\n";
         let source = source_with_fragments(&[("bad-frag", frag)]);
         let leaf = crate::leaf::parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"bad-frag@v1\"]\n",
@@ -631,7 +633,7 @@ mod tests {
 
     #[test]
     fn unsigned_include_is_refused_under_require_signed() {
-        let frag = "name = \"corp-egress\"\n[[net.allow.add]]\nname = \"x.corp\"\nports = [443]\nreason = \"r\"\n";
+        let frag = "name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"x.corp\"\nports = [443]\nreason = \"r\"\n";
         let source = source_with_fragments(&[("corp-egress", frag)]);
         let ks = KeySet::new();
         let leaf = crate::leaf::parse(
@@ -657,7 +659,7 @@ mod tests {
                 .into_bytes()
         };
         let frag = crate::leaf::parse(
-            b"name = \"corp-egress\"\n[[net.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
+            b"name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
         )
         .expect("parse fragment");
         let signed_frag = basic_toml::to_string(&sign_leaf(&frag, &key).expect("sign"))
