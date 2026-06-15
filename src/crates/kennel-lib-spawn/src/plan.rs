@@ -570,10 +570,12 @@ pub struct ConstructionHalf {
     /// within the caller's reserved scope before the netlink add. Empty ⇒ no loopback adds.
     pub loopback: Vec<LoopbackAddr>,
     /// Whether an interactive controlling-pty return socket accompanies the construction
-    /// datagram as an `SCM_RIGHTS` fd (placed at [`crate::PTY_RETURN_FD`]). The factory needs
+    /// datagram as an `SCM_RIGHTS` fd (placed at [`PTY_RETURN_FD`]). The factory needs
     /// this — it decodes the half but forwards the supervision-half (which holds the workload
     /// flag) opaquely — to know which inherited fds to place. The fds travel in a fixed order:
     /// pty (if any) then workload (if any).
+    ///
+    /// [`PTY_RETURN_FD`]: kennel_lib_syscall::pty::PTY_RETURN_FD
     pub pty_fd_present: bool,
     /// Whether the sha256-pinned workload binary fd accompanies the datagram, to be placed at
     /// [`WORKLOAD_FD`] for `kennel-bin-init` to `fexecve` (§7.4).
