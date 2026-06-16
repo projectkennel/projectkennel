@@ -31,9 +31,11 @@ All programs attach to per-kennel cgroups (one cgroup per kennel under `/sys/fs/
 > network-namespace redesign (design [`07-5-network.md`](../design/07-5-network.md),
 > architecture [`02-5-binder-net.md`](02-5-binder-net.md) §BPF policy enforcement) extends the
 > cgroup BPF role from the as-built egress gate to full `[net.bpf]` socket shaping for
-> `unconstrained` and `host` mode kennels. The egress programs above are **built**; everything
-> in this callout is **roadmap (designed, not built)**: the kennel still shares the host network
-> namespace.
+> `unconstrained` and `host` mode kennels. The egress programs above are **built**, and the
+> per-kennel network namespace is built (`kennel-lib-spawn::plan` unshares `Namespaces::NET` for
+> every mode but `host`); what remains **roadmap (designed, not built)** is the *extended*
+> socket-shaping in this callout — the families/types/protocols and CIDR-level `[[net.bpf.*]]`
+> shaping layered over the as-built egress gate.
 >
 > | Program | Attach point | Roadmap purpose |
 > |---|---|---|
@@ -171,16 +173,18 @@ with the kennel's own loopback `/28`(v4)/`/64`(v6) so an in-subnet or wildcard-r
 stays allowed without an author rule; `[net.bpf].bind.allow`/`.deny` add to the tries. A
 permitted bind emits `AUDIT_NET_BIND_ALLOW`; a refused one `AUDIT_NET_BIND_DENY`.
 
-> **Roadmap — bind hook drives the loopback mirror.** Under the per-kennel net-ns redesign
-> ([`02-5-binder-net.md`](02-5-binder-net.md) §The host-side mirror and `BIND`), the workload
-> binds **natively inside** its own net-ns rather than having `INADDR_ANY` rewritten to a shared
-> stack, and the `bind4`/`bind6` hook gains a second job beyond enforcement: for every bind it
-> *allows* against `[[net.bpf.bind]]` it emits a report (a new ringbuf event kind carrying
-> `ctx_byte`, family, address, and port) so kenneld can raise the host-side mirror — bind the
-> same `ip:port` on the host loopback alias via its host-side leg. A *denied* bind fails at the
-> syscall (`EACCES`) and is audited; no mirror is raised. The decision is policy's alone; the
-> report is the mechanism that keeps every allowed listener observable host-side at the kennel's
-> own IP. **Roadmap, not built** — as built there is one network namespace and no mirror.
+**The bind hook gates; the host-side mirror is raised eagerly from policy.** Under the per-kennel
+net-ns ([`02-5-binder-net.md`](02-5-binder-net.md) §The host-side mirror and `BIND`), the workload
+binds **natively inside** its own net-ns rather than having `INADDR_ANY` rewritten to a shared
+stack; the `bind4`/`bind6` hook's job is enforcement (a denied bind fails at the syscall with
+`EACCES` and is audited `net.bind-deny`). The host-side mirror (§7.5.7) is built as a **pull-based,
+eager** design rather than a bind-hook report: at bring-up kenneld registers each policy-mirrored
+port with the `host-inetd` delegate, which binds the same `ip:port` on the host loopback alias and
+accepts; `facade-client` (in the kennel) pulls each accepted connection over `BIND_INET` and
+connects the workload's native listener. The decision is policy's alone, and the mirror is live
+whether or not the workload is yet listening. *(A bind-hook **report** event — the BPF emitting each
+allowed bind so kenneld could mirror dynamically discovered ports — remains roadmap; the eager
+explicit-port set is what is built.)*
 
 ### Shared maps
 

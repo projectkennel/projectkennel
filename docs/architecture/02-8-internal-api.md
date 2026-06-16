@@ -67,15 +67,25 @@ The full workspace layout — directory structure, dependency graph, build featu
 
 **Roadmap (the net-ns redesign, `02-5-binder-net.md` §Relationship to `host-netproxy` crate).** When the per-kennel network namespace lands, the proxy's inbound half changes: it stops being reached by a TCP loopback SOCKS5 listener and instead becomes kenneld's **CONNECT delegate**. The SOCKS5 accept half (`src/server.rs` inbound) moves out to the new `facade-socks5` crate (inside the kennel net-ns); `host-netproxy` keeps the outbound dial, allowlist, DNS-vetting, and audit logic unchanged but gains a **delegate-socketpair reader** in place of the SOCKS5 listener — one reader thread on the `kenneld`↔delegate `socketpair`, dispatching a worker per `CONNECT` request that returns the connected fd by `SCM_RIGHTS`. It stays `#![forbid(unsafe_code)]` and **does not** link `kennel-lib-binder` (binder stays confined to kenneld + `facade-socks5`); `[net]` becomes `[net.proxy]` in its config reader.
 
-### `facade-socks5` *(roadmap — not yet built)*
+### `facade-socks5`
 
-**Purpose.** The kennel-side network shim introduced by the net-ns redesign (`02-5-binder-net.md`). A thin process inside the kennel net-ns: SOCKS5 inbound state machine, binder `INet` consumer, splice loop — it carries no policy. It is the new home of the SOCKS5 accept half that leaves `host-netproxy`, and the only roadmap process that links `kennel-lib-binder`.
+**Purpose.** The kennel-side egress shim (the net-ns redesign, `02-5-binder-net.md`). A thin process inside the kennel net-ns: a SOCKS5 **and** HTTP-proxy inbound state machine, binder `INet` consumer, splice loop — it carries no policy. It is the home of the proxy accept half that left `host-netproxy`, and (with `facade-client`, `facade-ssh`, `facade-afunix`) one of the in-kennel processes that links `kennel-lib-binder`.
 
-**Public surface (planned).** A binary crate with a library half: the SOCKS5 state machine (an untrusted-input parser of workload SOCKS5 requests — a fuzz target under `fuzz/` per CODING-STANDARDS §10.6), the `org.projectkennel.INet/default` consumer (`getService`, the `CONNECT`/`INBOUND` transactions), and the per-connection splice loop. One listener thread on `:1080`; one thread per accepted connection, each issuing one blocking binder transaction.
+**Public surface.** A binary crate (`main.rs` + `protocol.rs` + `http.rs`): the SOCKS5 state machine and the HTTP-proxy front-end (both untrusted-input parsers of workload requests — fuzz targets under `fuzz/` per CODING-STANDARDS §10.6), the `org.projectkennel.INet/default` consumer (`getService`, the `CONNECT_INET` transaction), and the per-connection splice loop (`kennel-lib-scm::splice`). One listener thread on `:1080`; a first-byte protocol sniff (`0x05` = SOCKS5, an uppercase ASCII letter = HTTP) shares the port between the two front-ends; one thread per accepted connection, each issuing one blocking binder transaction.
 
-**Depends on (planned).** `kennel-lib-binder` (the `INet` consumer client). Carries no policy and links no `kennel-lib-policy`.
+**Depends on.** `kennel-lib-binder` (the `INet` consumer client) and `kennel-lib-scm` (the shared bidirectional splice). Carries no policy and links no `kennel-lib-policy`.
 
-**Depended on by.** Nothing — a standalone binary the in-kennel reaper forks into the kennel's namespaces and view.
+**Depended on by.** Nothing — a standalone binary kenneld forks into the kennel's namespaces and view. (Its inbound mirror twin is `facade-client`, below.)
+
+### `facade-client`
+
+**Purpose.** The kennel-side **inbound BIND mirror** shim (`02-5-binder-net.md` §7.5.7, the reverse of `facade-socks5`). For each policy-mirrored bind port it transacts a `BIND_INET` to node 0, blocks for a host-side connection's conduit, then `connect()`s the workload's native in-kennel listener and splices. Pull-based and `CONNECT`-symmetric: kenneld mints both socketpair ends, so only a benign socketpair end crosses into the kennel.
+
+**Public surface.** A binary crate (`main.rs`): `facade-client <binder-device> <kennel-ip> <port>...`, one thread per mirrored port. No library half — it carries no reusable logic.
+
+**Depends on.** `kennel-lib-binder` (the `INet` consumer client) and `kennel-lib-scm` (the shared splice). `#![forbid(unsafe_code)]`; no policy, no `kennel-lib-policy`.
+
+**Depended on by.** Nothing — a standalone binary kenneld forks into the kennel's view.
 
 ### `kennel-lib-bpf`
 
@@ -84,12 +94,12 @@ The full workspace layout — directory structure, dependency graph, build featu
 **Public surface.** (There is no `BpfRuntime` handle, no `attach_to_cgroup`, and no `next_audit_event` — the surface is a loader plus a ringbuf reader.)
 - `load_program` / `Loaded` (`loader` module) — load and relocate one compiled program object; `Loaded` holds the resulting program/map fds.
 - `MapSpec` / `ProgramSpec` and the `KENNEL_MAPS` / `KENNEL_PROGRAMS` tables — the Rust descriptions of the maps and programs, mirroring `bpf/maps.h`.
-- `RingBuffer` (`ringbuf` module) — the lock-free `mmap`'d audit-event drain (drops on a full buffer). The reader exists in this crate; kenneld does not yet drive it (see the note under `kennel-lib-audit` and `03-crate-decomposition.md`).
+- `RingBuffer` (`ringbuf` module) — the lock-free `mmap`'d audit-event drain (drops on a full buffer). kenneld reopens the privhelper-pinned buffer with `BPF_OBJ_GET` and drives this reader per kennel (`kenneld::bpf_audit`).
 - `programs::object(name)` — the embedded compiled `.o` bytes, available only under the `embed-programs` feature.
 
 **Depends on.** `object` (ELF parsing) and `libc` (the `bpf(2)` FFI; `kennel-lib-bpf` is the second `unsafe` crate). It does **not** depend on `kennel-lib-policy`; the egress map entries are built by `kennel-lib-spawn::plan` and carried over the privhelper wire.
 
-**Depended on by.** `kennel-privhelper` *optionally* (under `bpf-egress`, for the egress load/attach). `kennel-lib-spawn` references it for the egress map-entry types; the actual cgroup attach is done by the privhelper, not in `kennel-lib-spawn`. The ringbuf reader is present but not yet wired into kenneld.
+**Depended on by.** `kennel-privhelper` *optionally* (under `bpf-egress`, for the egress load/attach). `kennel-lib-spawn` references it for the egress map-entry types; the actual cgroup attach is done by the privhelper, not in `kennel-lib-spawn`. `kenneld` drives the ringbuf reader (`bpf_audit`) to drain the per-kennel audit buffer.
 
 **Notes.** Crate-level `#![allow(unsafe_code)]` for the `bpf(2)` FFI boundary (confined to `sys.rs`); reviewed under §4. ELF parsing is delegated to `object`.
 
@@ -157,7 +167,7 @@ Beyond the fixed-layout stdin/stdout ops (the network/cgroup ops), the privhelpe
 
 **Depends on.** `kennel-lib-text` (the single sanitisation pass). The journald FFI and the UUIDv7 randomness — the only parts needing `unsafe`/FFI — live in `kennel-lib-syscall` (`journal`, `random`), not here.
 
-**Depended on by.** `kenneld` (builds the `Writer` from the settled `AuditRuntime`, emits lifecycle events) and `host-netproxy` (builds its own `Writer` from the per-kennel proxy config, emits each `net.egress` record). Not yet routed through the writer: the BPF ringbuf events — a roadmap remnant; see `03-crate-decomposition.md`.
+**Depended on by.** `kenneld` (builds the `Writer` from the settled `AuditRuntime`, emits lifecycle events, and routes the drained BPF ringbuf events through the same `Writer` with `source: bpf` via `kenneld::bpf_audit`) and `host-netproxy` (builds its own `Writer` from the per-kennel proxy config, emits each `net.egress` record).
 
 ### `kennel-lib-config`
 
@@ -190,7 +200,7 @@ Beyond the fixed-layout stdin/stdout ops (the network/cgroup ops), the privhelpe
 
 ### `kenneld` (library + binaries)
 
-**Purpose.** The per-user supervisor. The crate has a library half (`src/lib.rs`) providing the kennel registry and per-kennel orchestration, plus three binaries: `src/bin/kenneld.rs` (the daemon), `src/bin/kennel.rs` (the CLI), and `src/bin/kennel-akc.rs` (the root-owned `AuthorizedKeysCommand` helper that queries the running daemon for the SSH egress bastion; see `07-10`). It owns the control protocol and the per-kennel teardown. Draining the BPF ringbuf into the audit writer is not yet wired here (a roadmap remnant; see the `kennel-lib-audit` note and `03-crate-decomposition.md`).
+**Purpose.** The per-user supervisor. The crate has a library half (`src/lib.rs`) providing the kennel registry and per-kennel orchestration, plus three binaries: `src/bin/kenneld.rs` (the daemon), `src/bin/kennel.rs` (the CLI), and `src/bin/kennel-akc.rs` (the root-owned `AuthorizedKeysCommand` helper that queries the running daemon for the SSH egress bastion; see `07-10`). It owns the control protocol and the per-kennel teardown. It drains each kennel's pinned BPF audit ringbuf into the unified audit writer (`bpf_audit`, `source: bpf`), reopening the privhelper-pinned buffer with `BPF_OBJ_GET` on a per-kennel thread.
 
 **Public surface (library).**
 - `Kennel` — a live kennel; `Kennel::stop(&P)` performs immediate teardown (proxy reaped, addresses removed, cgroup deleted), returning the workload's exit status. There is no grace period, no draining state, and no reference counting: one `kennel run` is one kennel.

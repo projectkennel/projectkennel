@@ -114,7 +114,7 @@ Event-specific fields extend the envelope; see §Event types.
 
 The catalogue below names every event in the schema. Field lists are non-exhaustive — each sink representation in the sink sections describes the full field mapping for that sink.
 
-As-built: the events emitted through the writer today are the **lifecycle** events (kenneld, including the binder lifecycle verbs `lifecycle.plan-pull`/`boot-sync`/`facade-crash`/`workload-exec`), the **`net.connect-*`**/**`net.bind-*`** events (the cgroup BPF programs, drained from the `audit_ringbuf` by `kenneld::bpf_audit` with `source: bpf`), the per-request **`net.egress`** events (the per-kennel netproxy), the **`binder.register`**/**`binder.lookup`** registry events (kenneld as node 0), and the **`priv.*`** events (the privhelper). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively). The **`net.bind`**/**`net.bpf.deny`** (per-kennel net-ns), the **`binder.cross`** cross-instance relay, and **`kennel.spawn`** events are roadmap (the kennel still shares the host network namespace, and the inter-kennel relay / `SpawnKennel` are unbuilt). All are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
+As-built: the events emitted through the writer today are the **lifecycle** events (kenneld, including the binder lifecycle verbs `lifecycle.plan-pull`/`boot-sync`/`facade-crash`/`workload-exec`), the **`net.connect-*`**/**`net.bind-*`** events (the cgroup BPF programs, drained from the `audit_ringbuf` by `kenneld::bpf_audit` with `source: bpf`), the per-request **`net.egress`** events (the per-kennel netproxy), the **`binder.register`**/**`binder.lookup`** registry events (kenneld as node 0), and the **`priv.*`** events (the privhelper). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively). The bare **`net.bind`**/**`net.bpf.deny`** (the *extended* `[net.bpf]` socket-shaping + dynamic mirror-report, `02-7`), the **`binder.cross`** cross-instance relay, and **`kennel.spawn`** events are roadmap (the extended socket-shaping, the inter-kennel relay, and `SpawnKennel` are unbuilt). All are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
 
 ### Network (`resource: "net"`)
 
@@ -128,10 +128,16 @@ The connect/bind events below are *BPF-sourced*: the cgroup programs emit them i
 - **`net.connect-allow`** / **`net.connect-deny`** — connect() attempt, sourced from the BPF connect programs. Allow under audit-level rules; deny always. Adds `addr_family`, `addr`, `port`.
 - **`net.bind-allow`** / **`net.bind-deny`** / **`net.bind-rewrite`** — bind() attempt, sourced from the BPF bind programs. Adds `addr_requested`, `addr_rewritten` (for rewrites), `port`.
 
-**Status: roadmap (per-kennel net-ns).** The events in this block are part of the
-stable schema but are emitted only once the per-kennel network namespace, the four
-network modes, and the loopback mirror land (`02-5-binder-net.md`; the kennel today
-still **shares the host network namespace**). They are also BPF-sourced — kenneld
+The `net.connect-*` and `net.bind-*` events above are **built**: the per-kennel network
+namespace, the four network modes, and the loopback mirror are all in place, and these events
+are emitted today (`kenneld::bpf_audit` drains them from the `audit_ringbuf` with `source: bpf`,
+proven by `kenneld/tests/bpf_drain.rs`).
+
+**Status: roadmap (extended `[net.bpf]` socket-shaping).** The two events below are part of the
+stable schema but are emitted only once the *extended* socket-shaping (`02-7`) lands — the bare
+`net.bind` with its `mirrored` field needs the dynamic bind-hook mirror report (the built mirror
+is eager-from-policy, not a per-bind report), and `net.bpf.deny` needs the families/types/protocols
++ `[[net.bpf.*]]` shaping layered over the as-built egress gate. They are also BPF-sourced — kenneld
 drains them from the `audit_ringbuf` and emits them with `source: bpf`.
 
 - **`net.bind`** — a `bind()` at the cgroup `bind` hook (`[[net.bpf.bind]]` gate). Adds
@@ -142,11 +148,11 @@ drains them from the `audit_ringbuf` and emits them with `source: bpf`.
   socket-shaping hooks. Adds `family`, `type`, `protocol`, `addr`, `port`, and `rule`
   (the policy clause that denied it). Always `outcome: deny`.
 
-The `org.projectkennel.INet` network crossing (roadmap, `02-5-binder-net.md`) is
-audited as part of the per-request `net.egress` record below: the `INet` `CONNECT`
+The `org.projectkennel.INet` network crossing (`02-5-binder-net.md`) is
+audited as part of the per-request `net.egress` record below: the `INet` `CONNECT_INET`
 transaction is the binder front of the netproxy CONNECT delegate, so an allowed or
-denied dial surfaces through `net.egress` exactly as a SOCKS5 request does today —
-the binder transport is invisible to the audit layer. The `INet` `INBOUND` half (a
+denied dial surfaces through `net.egress` exactly as a SOCKS5 request does — the binder
+transport is invisible to the audit layer. The `INet` `BIND_INET` inbound half (the §7.5.7
 host-side mirror handing an accepted connection to the kennel) carries `outcome: info`
 for a delivered inbound and `outcome: error` for a delivery the shim could not splice;
 it adds no new event type — it rides the existing `net.egress` stream with `wire:

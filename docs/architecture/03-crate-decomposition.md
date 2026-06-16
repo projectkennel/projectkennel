@@ -159,7 +159,7 @@ The full public-API description for each crate lives in `02-8-internal-api.md`. 
 
 ### Audit (`kennel-lib-audit`)
 
-`kennel-lib-audit` (`#![forbid(unsafe_code)]`) is the unified writer: the canonical `Event`, one `kennel-lib-text` sanitisation pass, per-class level filtering, and a `Sink` trait fanning each event out to the file, stdout, syslog, and (feature `audit-journald`) journald sinks. The journald sink and the UUIDv7's randomness are the only parts needing FFI/`unsafe`; they live in `kennel-lib-syscall` (`journal`, `random`). kenneld builds the writer from the settled `AuditRuntime` and emits lifecycle events through it; the egress proxy builds its own writer from the per-kennel proxy config and emits each `net.egress` record through it (`host-netproxy::audit` → `kennel_lib_audit::Writer`). See `02-3-audit-schema.md` for the schema. Not yet routed through the writer: the BPF events — `kennel-lib-bpf::ringbuf` provides the kernel-ringbuf reader (drops on full), but nothing in kenneld yet drains it into the writer. A roadmap remnant.
+`kennel-lib-audit` (`#![forbid(unsafe_code)]`) is the unified writer: the canonical `Event`, one `kennel-lib-text` sanitisation pass, per-class level filtering, and a `Sink` trait fanning each event out to the file, stdout, syslog, and (feature `audit-journald`) journald sinks. The journald sink and the UUIDv7's randomness are the only parts needing FFI/`unsafe`; they live in `kennel-lib-syscall` (`journal`, `random`). kenneld builds the writer from the settled `AuditRuntime` and emits lifecycle events through it; the egress proxy builds its own writer from the per-kennel proxy config and emits each `net.egress` record through it (`host-netproxy::audit` → `kennel_lib_audit::Writer`). See `02-3-audit-schema.md` for the schema. The BPF events route through the same writer: `kennel-lib-bpf::ringbuf` provides the kernel-ringbuf reader (drops on full), and `kenneld::bpf_audit` reopens the privhelper-pinned per-kennel buffer with `BPF_OBJ_GET` and drains it into the writer with `source: bpf` (proven end to end by `kenneld/tests/bpf_drain.rs`).
 
 ### `kennel-lib-bpf`
 
@@ -225,7 +225,7 @@ The control protocol (CLI ↔ kenneld) lives in `kenneld::control` (`Request`/`R
 ### `kenneld`
 
 - Library + binaries. **Sync, blocking — `serve()` accepts and spawns one thread per connection. No async runtime.**
-- Owns the in-memory kennel registry, the per-kennel orchestration (`lib.rs`), the control protocol (`control.rs`), and the synthetic `/etc` (`etc.rs`) and synthetic `~/.ssh` (`ssh.rs`) generators. Draining the BPF ringbuf into the audit writer is not yet wired here — `kennel-lib-bpf::ringbuf` provides the reader, but kenneld does not drive it (a roadmap remnant; see the `kennel-lib-audit` note above).
+- Owns the in-memory kennel registry, the per-kennel orchestration (`lib.rs`), the control protocol (`control.rs`), and the synthetic `/etc` (`etc.rs`) and synthetic `~/.ssh` (`ssh.rs`) generators. It drains each kennel's pinned BPF audit ringbuf into the unified writer (`bpf_audit.rs`, `source: bpf`) — `kennel-lib-bpf::ringbuf` provides the reader, `bpf_audit` drives it per kennel.
 
 ### CLI (folded into `kenneld` as `src/bin/kennel.rs`)
 
