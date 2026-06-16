@@ -71,6 +71,7 @@ The full section list:
 | `[unsafe]` and `[unsafe.*]` | Advisory footgun umbrella: `[unsafe.ptrace]` / `[unsafe.signal]` cross-boundary allowlists whose scoping is real but enforced by the PID namespace + seccomp (not the section) — declaring them warns. | §7.9 |
 | `[lifecycle]` | TTL and TTL-action | §9 |
 | `[tty]` | Terminal hardening for interactive runs: filter dangerous terminal escapes (clipboard/notification/device-control) from the workload's PTY output | §7.9 |
+| `[trust]` | Masked workspace manifest: maintain a `.trust-manifest.json` at each writable root (host-readable, masked invisible inside the kennel) so host tooling can detect workspace-trigger tampering | §7.4 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
 This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for **every** section — `[net]`/`[net.*]` in §The `[net]` section, the rest in §The remaining sections — field reference, both kept exact against the parser. The §7.x design chapters carry the *rationale* for each section; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
@@ -749,6 +750,12 @@ visibility is **not** here — it lives in `[fs.proc]`, part of the constructed 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `filter_terminal_escapes` | bool | `true` | Filter dangerous terminal escapes from the workload's PTY output at the broker's single master-read point (`05` PTY broker). Drops OSC 52 (clipboard read/write), OSC 9 / 777 (desktop notifications), and the DCS/APC/PM/SOS device-control bands; passes benign sequences (OSC 0/1/2 title, 8 hyperlink, 4/104 palette, CSI cursor/colour, C0). Best-effort, not a proof: it shuts down the low-effort clipboard/notification-injection class (`T2.6`), not a terminal-specific desync. Set `false` only for a workload that legitimately needs raw escape passthrough. Applies to interactive (PTY) runs; non-interactive stdio is unaffected. |
+
+### `[trust]` — masked workspace manifest (§7.4, T2.8)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `manifest` | bool | `true` | Maintain a `.trust-manifest.json` at the root of every writable/persistent workspace. The CLI generates/refreshes it host-side pre-flight (pinning the SHA-256 of known execution triggers — `Makefile`, `package.json`, `.vscode/tasks.json`, `.git/hooks/*` — and listing untrusted-path globs); the spawn view **masks** it (an empty over-mount inside each writable bind), so the confined workload can neither read the pins nor forge them, while host IDEs read the untouched real file and refuse to run a trigger whose hash diverged (`T2.8`). Re-pin after legitimate edits with `kennel review`. Set `false` to opt a workload out (no manifest is generated or masked). |
 
 ### `[ssh]` — per-kennel SSH egress via the re-origination bastion (§7.10)
 

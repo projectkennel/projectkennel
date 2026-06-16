@@ -42,19 +42,19 @@ Add a directory to the signing\-key trust store used while authoring (repeatable
 \fBkennel attach <name>\fR
 reattach a terminal to a running kennel (Ctrl\-\ d to detach)
 .TP
+\fBkennel review <policy> [\-\-yes]\fR
+review + re\-pin a workspace's trust manifest after legitimate edits
+.TP
 \fBkennel stop <name>\fR
 stop a running kennel
-.TP
-\fBkennel list\fR
-list running kennels
 .RS
 .TP
 \fB(sub\-verbs)\fR
 See kennel\-policy(1) for list, show, edit, generate, compile, validate, sign, lint.
 .RE
 .TP
-\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|upgrade> [...]\fR
-author, inspect, sign, and check policies
+\fBkennel list\fR
+list running kennels
 .RS
 .TP
 \fB\-\-dir DIR\fR
@@ -66,8 +66,8 @@ Write the key pair to DIR instead of the default key store.
 Overwrite an existing key of the same id.
 .RE
 .TP
-\fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR
-generate a policy\-signing key
+\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|upgrade> [...]\fR
+author, inspect, sign, and check policies
 .RS
 .TP
 \fBadd\fR
@@ -99,8 +99,8 @@ A specific 12\-bit tag (otherwise allocated).
 Operate on PATH instead of /etc/kennel/subkennel.
 .RE
 .TP
-\fBkennel subkennel <add|check> [\-\-uid N] [\-\-namespace NS] [\-\-tag N] [\-\-file PATH]\fR
-manage /etc/kennel/subkennel allocations
+\fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR
+generate a policy\-signing key
 .RS
 .TP
 \fB\-\-resource CLASS\fR
