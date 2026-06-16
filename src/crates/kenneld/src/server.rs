@@ -579,13 +579,29 @@ where
     let Ok((request, fds)) = recv_request_with_fds(conn) else {
         return;
     };
-    // Trust boundary 6 (§04 trust boundaries): the kennel name arrives from the
-    // user's CLI over the control socket and flows into filesystem paths (the
-    // synthetic `/etc` staging dir, the per-kennel audit dir), the synthetic
-    // `/etc/hostname`, and the registry key. Validate its grammar — `[a-z0-9]`
-    // start, then `[a-z0-9-]`, ≤64 chars — *before* it is used anywhere, so a name
-    // with `/`, `..`, NUL, whitespace, or control bytes cannot traverse a path or
-    // inject a hostname. List/AuthorizedKeys carry no name.
+    dispatch_request(shared, request, fds, conn);
+}
+
+/// Validate and dispatch one decoded control request on `conn` (with its passed `fds`).
+///
+/// The body of [`handle_connection`] after decode — split out so the e2e tests can drive
+/// the *real* dispatch (e.g. `Attach`) without a shim that could diverge from production.
+///
+/// Trust boundary 6 (§04 trust boundaries): the kennel name arrives from the user's CLI
+/// over the control socket and flows into filesystem paths (the synthetic `/etc` staging
+/// dir, the per-kennel audit dir), the synthetic `/etc/hostname`, and the registry key.
+/// Validate its grammar — `[a-z0-9]` start, then `[a-z0-9-]`, ≤64 chars — *before* it is
+/// used anywhere, so a name with `/`, `..`, NUL, whitespace, or control bytes cannot
+/// traverse a path or inject a hostname. `List`/`AuthorizedKeys` carry no name.
+pub fn dispatch_request<P, L>(
+    shared: &Shared<P, L>,
+    request: Request,
+    fds: Vec<OwnedFd>,
+    conn: &mut UnixStream,
+) where
+    P: Privileged + Clone + Sync,
+    L: PolicyLoader,
+{
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
             Ok(()) => return run_kennel(shared, &req, fds, conn),
