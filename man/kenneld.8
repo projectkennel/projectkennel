@@ -1,0 +1,29 @@
+.TH "KENNELD" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+kenneld \- the per\-user Project Kennel supervisor daemon
+.SH SYNOPSIS
+\fBkenneld\fR
+.SH DESCRIPTION
+kenneld is the per\-user, socket\-activated supervisor for Project Kennel. It is not invoked directly: it is started on demand by its systemd socket unit when the \fBkennel\fR(1) CLI connects, and it persists for the user session.
+.PP
+For each \fBkennel run\fR, kenneld verifies the settled policy, invokes the \fBkennel\-privhelper\fR(8) factory to construct the kennel (namespaces, identity maps, the constructed view, the per\-kennel binderfs bus), acquires binder node 0, and supervises the facades and the workload until exit, then tears the kennel down. kenneld is unprivileged; the one privilege boundary is the privhelper.
+.PP
+kenneld resolves its helper binaries and trust store through a config cascade; see \fBsystem.toml\fR(5). Spawn diagnostics are controlled by the \fIlog_level\fR key there and split across the user and system journals.
+.SH FILES
+.TP
+\fI/usr/libexec/kennel/\fR
+The helper binaries kenneld forks (see the host\-*, facade\-*, kennel\-* .8 pages).
+.TP
+\fI/etc/kennel/system.toml\fR
+Integrity\-sensitive deployment config (binary paths, trust store). See system.toml(5).
+.TP
+\fI/etc/kennel/keys/\fR
+The daemon's signing\-key trust store.
+.TP
+\fI/etc/kennel/subkennel\fR
+Per\-user allocations kenneld requires to start a kennel. See subkennel(5).
+.TP
+\fI~/.local/state/kennel/<kennel>/\fR
+Per\-kennel audit log (append\-only).
+.SH SEE ALSO
+\fBkennel\fR(1), \fBkennel\-privhelper\fR(8), \fBsystem.toml\fR(5), \fBsubkennel\fR(5)

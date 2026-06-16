@@ -91,6 +91,11 @@ build_arch() {
 		n="$(basename "$d")"
 		install -D -m 0644 "${d}policy.toml" "$dest/templates/$n/policy.toml"
 	done
+	# The committed man pages (install.sh installs them into $mandir).
+	for p in "$ROOT"/man/*.[1-9]; do
+		[ -e "$p" ] || continue
+		install -D -m 0644 "$p" "$dest/man/$(basename "$p")"
+	done
 
 	cat > "$dest/install.sh" <<'WRAP'
 #!/usr/bin/env bash

@@ -1,0 +1,60 @@
+.TH "SYSTEM.TOML" "5" "" "Project Kennel" "File Formats"
+.SH NAME
+system.toml \- Project Kennel deployment configuration (integrity\-sensitive)
+.SH SYNOPSIS
+/etc/kennel/system.toml, /usr/lib/kennel/system.toml
+.SH DESCRIPTION
+system.toml holds the integrity\-sensitive paths kenneld resolves at startup: the helper\-binary directory, the signing\-key trust store, and the host sshd. It is \fBnot\fR user\-overridable \(em kenneld never reads ~/.config for these, because letting a user redirect the trust store would defeat policy signing.
+.PP
+Resolution is a cascade, lowest priority first: the vendor copy (/usr/lib/kennel/system.toml), then /etc/kennel/system.toml, each key overriding the layer below. Compiled\-in defaults apply where a key is unset, so a host with no file still runs.
+.SH FIELDS
+.TP
+\fBlibexec_dir\fR \(em path
+Directory of kenneld's helper binaries (default /usr/libexec/kennel).
+.TP
+\fBtrust_dir\fR \(em path
+The daemon's signing\-key trust store (default /etc/kennel/keys).
+.TP
+\fBsshd\fR \(em path
+The host sshd the per\-user SSH bastion launches (default /usr/sbin/sshd).
+.TP
+\fBlog_level\fR \(em string
+Spawn\-path diagnostic verbosity: info (default), debug, trace. Splits across the user and system journals.
+.SS per\-binary overrides
+Absolute paths; each defaults to <libexec_dir>/<name>. Override one binary's location:
+.TP
+\fBprivhelper\fR \(em path
+kennel\-privhelper \(em the suid privilege boundary.
+.TP
+\fBnetproxy\fR \(em path
+host\-netproxy \(em egress CONNECT delegate.
+.TP
+\fBsocks5\fR \(em path
+facade\-socks5 \(em in\-kennel SOCKS5/HTTP front\-end.
+.TP
+\fBinetd\fR \(em path
+host\-inetd \(em inbound BIND mirror delegate.
+.TP
+\fBfacade_client\fR \(em path
+facade\-client \(em in\-kennel inbound BIND pull end.
+.TP
+\fBafunix\fR \(em path
+facade\-afunix \(em AF_UNIX socket\-shim facade.
+.TP
+\fBssh\fR \(em path
+facade\-ssh \(em in\-kennel SSH egress connector.
+.TP
+\fBakc\fR \(em path
+kennel\-akc \(em sshd AuthorizedKeysCommand helper.
+.TP
+\fBinit\fR \(em path
+kennel\-bin\-init \(em trusted uid\-0 PID 1.
+.SH FILES
+.TP
+\fI/usr/lib/kennel/system.toml\fR
+Vendor (lowest\-priority) copy installed by the package.
+.TP
+\fI/etc/kennel/system.toml\fR
+Administrator overrides (highest priority).
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBconfig.toml\fR(5), \fBkennel\fR(1)

@@ -1,0 +1,9 @@
+.TH "HOST-NETPROXY" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+host\-netproxy \- egress CONNECT delegate (the dumb dialer)
+.SH SYNOPSIS
+(internal \(em forked by kenneld(8), not invoked directly)
+.SH DESCRIPTION
+host\-netproxy is kenneld's host\-network\-namespace egress delegate. kenneld resolves and pins a destination, then hands this process the pinned address and a conduit; it dials and splices. It holds no policy and no binder access.
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBkennel\fR(1)

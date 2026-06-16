@@ -1,0 +1,26 @@
+.TH "CONFIG.TOML" "5" "" "Project Kennel" "File Formats"
+.SH NAME
+config.toml \- Project Kennel user CLI configuration
+.SH SYNOPSIS
+~/.config/kennel/config.toml, /etc/kennel/config.toml, /usr/lib/kennel/config.toml
+.SH DESCRIPTION
+config.toml holds conveniences for the \fBkennel\fR(1) CLI: where it searches for templates, signing keys, and run policies while authoring. It is safe to edit as a user \(em it only steers the CLI's search, never enforcement. The daemon enforces against its own locked trust store (system.toml's trust_dir) regardless of anything here.
+.PP
+Search order, highest priority first: ~/.config/kennel/config.toml (or $XDG_CONFIG_HOME), /etc/kennel/config.toml, then the vendor copy. A set list \fBreplaces\fR the built\-in three\-layer default for that key.
+.SH FIELDS
+Each is a list of absolute paths (no ~ expansion).
+.TP
+\fBtemplate_dirs\fR \(em array of paths
+Where compile/validate resolve <name>@<version>.
+.TP
+\fBkey_dirs\fR \(em array of paths
+The authoring trust store. Note the trust split: templates verify only against the SYSTEM stores, never ~/.config/kennel/keys.
+.TP
+\fBpolicy_dirs\fR \(em array of paths
+Where kennel run <name> resolves a policy by name.
+.SH FILES
+.TP
+\fI~/.config/kennel/keys/\fR
+User signing keys (valid for run policies, not templates).
+.SH SEE ALSO
+\fBkennel\fR(1), \fBkennel\-policy\fR(1), \fBsystem.toml\fR(5)

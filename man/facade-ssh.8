@@ -1,0 +1,9 @@
+.TH "FACADE-SSH" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+facade\-ssh \- in\-kennel SSH egress connector
+.SH SYNOPSIS
+(internal \(em forked by kenneld(8), not invoked directly)
+.SH DESCRIPTION
+facade\-ssh is the in\-kennel connector for per\-kennel SSH egress. The kennel never holds a real key; this process reaches the re\-origination bastion, which runs the host\-side ssh as the operator against a destination fixed by which synthetic key authenticated.
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBkennel\fR(1)

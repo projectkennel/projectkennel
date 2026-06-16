@@ -47,6 +47,10 @@ lexopt = "=0.3.2"
 # The BPF-drain root test forks a child into a cgroup and attempts a connect to
 # produce a real denied-connect audit event; libc gives it fork/connect/_exit.
 libc = "=0.2.186"
+# Test-only: the manpage generator's `SYNC_*` copies of the CLI command tables.
+# A unit test asserts they match `COMMANDS`/`POLICY_VERBS`, so `man kennel` cannot
+# drift from the CLI. Dev-only — never linked into the shipped daemon.
+gen-man = { path = "../../tools/gen-man" }
 
 [features]
 # End-to-end orchestration test that drives the real setuid privhelper and

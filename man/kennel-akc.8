@@ -1,0 +1,9 @@
+.TH "KENNEL-AKC" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+kennel\-akc \- sshd AuthorizedKeysCommand helper
+.SH SYNOPSIS
+(internal \(em forked by kenneld(8), not invoked directly)
+.SH DESCRIPTION
+kennel\-akc is the root\-owned AuthorizedKeysCommand helper for the per\-kennel SSH egress bastion. sshd invokes it to fetch the synthetic public key for a connecting kennel; it queries the running kenneld. Bindings live only in kenneld \(em there is no authorized_keys file.
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBkennel\fR(1)
