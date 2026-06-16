@@ -26,6 +26,7 @@ members = [
     "src/crates/kennel-lib-bpf",
     "src/crates/kennel-lib-config",
     "src/crates/kennel-lib-landlock",
+    "src/crates/kennel-lib-manifest",
     "src/crates/kennel-lib-os",
     "src/crates/kennel-lib-policy",
     "src/crates/kennel-lib-scm",

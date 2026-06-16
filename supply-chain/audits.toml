@@ -43,6 +43,12 @@ criteria = "safe-to-deploy"
 version = "2.3.0"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-31): 15 source files byte-identical to github.com/jedisct1/rust-ed25519-compact at tag 2.3.0. Source read for backdoors — no FFI/asm/process/net/fs/env; the one unsafe is the volatile secret-wipe; verification rejects non-canonical S (malleability) and weak/identity keys. Built default-features=false, features=[std]; x25519.rs/pem.rs not compiled."
 
+[[audits.itoa]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.0.18"
+notes = "§5.5 (DEPENDENCIES.md, 2026-05-31; promoted to a safe-to-deploy audit 2026-06-16 when serde_json pulled it into the deployed CLI graph): byte-identical to github.com/dtolnay/itoa @ af77385d0daf4d0e949e81f2588be2e44f69f086 (tag 1.0.18), 10 source files + Cargo.toml.orig, via tools/audit-source.sh. A tiny integer-to-decimal formatter (dtolnay); zero deps, no build.rs, not a proc-macro, no FFI/process/net/fs/env. The unsafe is the crate's purpose — writing ASCII digits into a MaybeUninit byte buffer whose length is bounded by the integer type's max decimal width. Now reached via serde_json (the manifest path) as well as time."
+
 [[audits.lexopt]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
@@ -85,6 +91,12 @@ criteria = "safe-to-deploy"
 version = "0.5.0"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-30): byte-identical to github.com/rust-vmm/seccompiler at tag v0.5.0 via tools/audit-source.sh. No build.rs, no proc-macros. Built with default features (json/serde off). The vetted rust-vmm seccomp-BPF compiler — hand-rolling the bytecode is the dangerous case (§4)."
 
+[[audits.serde_json]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.0.150"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-16): byte-identical to github.com/serde-rs/json @ a1ae73ac6a6940a4a57c673aebaa13ed4dfe3e8c (tag v1.0.150), 85 source files + Cargo.toml.orig, via tools/audit-source.sh. The JSON parser/serializer state machine (dtolnay) on the masked-manifest host-side path; used default-features=false (std only — preserve_order/indexmap, arbitrary_precision, float_roundtrip, raw_value, unbounded_depth all off). Non-optional deps: serde + serde_core + itoa + memchr (pre-vendored) + zmij. No build.rs, not a proc-macro, no FFI/asm. The deliberate reuse-not-hand-roll choice for an untrusted-input parser (§4). Source review performed by the assistant and accepted by the maintainer. Linked only into the kennel CLI (kennel-lib-manifest), never kenneld."
+
 [[audits.unicode-ident]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
@@ -96,3 +108,9 @@ who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.15.0"
 notes = "§5.5 (DEPENDENCIES.md, 2026-06-16): byte-identical to github.com/alacritty/vte @ 3b3da71c34cc1256c7e20981cf03f8eb95e08ffc (tag v0.15.0), 13 source files + Cargo.toml.orig, via tools/audit-source.sh. The ANSI escape parser (Paul Williams state machine) on the PTY-filter path; used default-features=false (std only — no ansi/log/cursor-icon/bitflags/serde). No build.rs, no proc-macro, no FFI/asm, no std::process/net/fs/env (red-flag scan clean). 5 unsafe sites, all idiomatic: a MaybeUninit OSC-params array cast over its initialised prefix, and str::from_utf8_unchecked / unwrap_unchecked guarded by prior valid_up_to()/valid_bytes checks. Source review performed by the assistant and accepted by the maintainer on review of those findings."
+
+[[audits.zmij]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.0.21"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-16): byte-identical to github.com/dtolnay/zmij @ 6531ba31ccf5d14b604ca41f6e2414a8dd779af0 (tag 1.0.21), 14 source files + Cargo.toml.orig, via tools/audit-source.sh. A pure-math Schubfach float-to-decimal formatter — serde_json's float path (it replaced ryu); a REQUIRED normal dep of serde_json 1.0.150, not optional. Zero transitive deps, no build.rs, not a proc-macro, no FFI. The masked manifest carries no floats, so this path is never exercised at runtime; vendored only because serde_json links it unconditionally. Source review performed by the assistant and accepted by the maintainer. Linked only into the kennel CLI (transitively via serde_json), never kenneld."
