@@ -225,6 +225,17 @@ pub fn decide(
         if rt.is_host_service(*addr, port) {
             return InetDecision::Pinned(vec![*addr]);
         }
+        // A literal special-use address (loopback, ULA, RFC1918, link-local, …) is refused
+        // here, mirroring the resolved-name gate below. This closes the by-address path the
+        // ruleset alone would admit (an `unconstrained` mode, or a by-address `[net.allow]`):
+        // without it a workload could egress-dial a per-kennel inbound-mirror alias
+        // (`127.<tag>.<ctx>.x` / `fd<gid>:<tag>:<ctx>::`, §7.5.7) — looping a host-side *inbound*
+        // mirror port back into egress, and reaching a *sibling* kennel's alias is cross-kennel
+        // lateral movement across the net-ns boundary the mirror is meant to respect. The SSH
+        // bastion is the one sanctioned host-loopback literal and was already returned above.
+        if !rt.accept_private_resolved && is_special_use(*addr) {
+            return InetDecision::Denied;
+        }
     }
     match rt.ruleset.decide_request(dest, port, transport) {
         RequestDecision::Deny(_) => InetDecision::Denied,
@@ -416,6 +427,109 @@ mod tests {
         let dest = Destination::Addr(v4("127.0.0.1"));
         assert_eq!(
             decide(&rt, &resolver, &dest, 2222, Transport::Tcp),
+            InetDecision::Pinned(vec![v4("127.0.0.1")])
+        );
+    }
+
+    /// A runtime that allows any literal address the deny rules do not catch (`unconstrained`),
+    /// with no host-service carve-out — the worst case for the by-address special-use gate.
+    fn unconstrained() -> NetRuntime {
+        NetRuntime {
+            ruleset: Ruleset {
+                mode: NetMode::Unconstrained,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+            accept_private_resolved: false,
+            host_services: Vec::new(),
+            command_socket: None,
+        }
+    }
+
+    #[test]
+    fn a_literal_mirror_alias_is_denied_even_in_unconstrained() {
+        // §7.5.7 per-kennel inbound-mirror alias `127.<tag>.<ctx>.x`. Without the by-address
+        // special-use gate, `unconstrained` would dial it (looping inbound back into egress, or
+        // reaching a sibling kennel's alias — cross-kennel lateral movement). It must be denied.
+        let rt = unconstrained();
+        let resolver = FakeResolver(Err(())); // a literal never resolves
+        assert_eq!(
+            decide(
+                &rt,
+                &resolver,
+                &Destination::Addr(v4("127.42.7.1")),
+                8080,
+                Transport::Tcp
+            ),
+            InetDecision::Denied,
+            "an unconstrained workload must not egress-dial a host-loopback mirror alias"
+        );
+        // A v6 ULA mirror alias (`fd<gid>:<tag>:<ctx>::`) is likewise refused.
+        let ula = IpAddr::V6("fd00:0:0:42::1".parse().expect("v6"));
+        assert_eq!(
+            decide(
+                &rt,
+                &resolver,
+                &Destination::Addr(ula),
+                8080,
+                Transport::Tcp
+            ),
+            InetDecision::Denied,
+            "an unconstrained workload must not egress-dial a ULA mirror alias"
+        );
+        // A genuinely public literal is still allowed in unconstrained mode.
+        assert_eq!(
+            decide(
+                &rt,
+                &resolver,
+                &Destination::Addr(v4("93.184.216.34")),
+                443,
+                Transport::Tcp
+            ),
+            InetDecision::Pinned(vec![v4("93.184.216.34")]),
+            "a public literal is unaffected by the special-use gate"
+        );
+    }
+
+    #[test]
+    fn a_by_address_allow_of_a_mirror_alias_is_still_denied() {
+        // Even an explicit by-address `[net.allow]` for a loopback alias is refused — the gate
+        // sits ahead of the allow match, so a footgun policy cannot open the lateral hole.
+        let mut rt = constrained("unused.example");
+        rt.ruleset.allow.push(Rule {
+            matcher: Matcher::Cidr(Cidr::new(v4("127.42.7.1"), 32).expect("cidr")),
+            ports: Vec::new(),
+            protocol: RuleProtocol::Tcp,
+        });
+        let resolver = FakeResolver(Err(()));
+        assert_eq!(
+            decide(
+                &rt,
+                &resolver,
+                &Destination::Addr(v4("127.42.7.1")),
+                8080,
+                Transport::Tcp
+            ),
+            InetDecision::Denied
+        );
+    }
+
+    #[test]
+    fn accept_private_resolved_opts_a_literal_loopback_back_in() {
+        // The escape hatch: a policy that genuinely wants loopback egress sets
+        // `accept_private_resolved`, which also un-gates a literal special-use address. (The
+        // bastion does not need this — it rides the exact-literal host_services carve-out.)
+        let mut rt = unconstrained();
+        rt.accept_private_resolved = true;
+        let resolver = FakeResolver(Err(()));
+        assert_eq!(
+            decide(
+                &rt,
+                &resolver,
+                &Destination::Addr(v4("127.0.0.1")),
+                9000,
+                Transport::Tcp
+            ),
             InetDecision::Pinned(vec![v4("127.0.0.1")])
         );
     }

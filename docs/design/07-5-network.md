@@ -225,6 +225,8 @@ The kennel does not run DNS at all. Clients use `socks5h://` which defers resolu
 
 **The allowlist is by name, not IP.** The user writes `github.com`; kenneld enforces against whatever the name resolves to, then vets each resolved address against the denies. This is the right level of abstraction — IPs change, names are stable — and the answer-vetting means a malicious resolver answer cannot smuggle the kennel onto a denied address.
 
+**A literal special-use destination is refused, not just a resolved one.** The same special-use refusal (loopback, ULA, RFC1918, link-local, cloud-metadata, …) that vets a *resolved* name also gates a *literal* address request (a by-address `[net.proxy]` allow, or any literal in `unconstrained`). Without it, a workload could `CONNECT` to its own — or a **sibling kennel's** — §7.5.7 inbound-mirror alias (`127.<tag>.<ctx>.x` / `fd<gid>:<tag>:<ctx>::`), looping a host-side *inbound* port back into *egress* and crossing the per-kennel net-ns boundary the mirror is meant to respect (cross-kennel lateral movement, T1.6-adjacent). The gate sits ahead of the allow match, so even an explicit footgun by-address allow cannot open it; the SSH bastion is the one sanctioned host-loopback literal and rides the exact `addr:port` host-service carve-out. A policy that genuinely needs loopback egress opts in with `accept_private_resolved`, which un-gates both paths.
+
 **No DNS leakage.** kenneld is the only thing that resolves on the kennel's behalf, in the host namespace; the kennel has no resolver path of its own. tcpdump on the host's external interface during kennel operation shows zero DNS queries originating from the kennel — part of the test plan.
 
 ## 7.5.6 Loopback isolation
