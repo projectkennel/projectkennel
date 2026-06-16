@@ -180,4 +180,4 @@ echo "== running the unprivileged e2e under a delegated cgroup =="
 # that constructs a real kennel, so they must not run concurrently. No name filter —
 # run every self-hosting test in the binary (no-IPC, ttl, interactive-pty).
 systemd-run --user --scope -p Delegate=yes --quiet -- \
-    "$TESTBIN" --nocapture --test-threads=1
+    "$TESTBIN" --nocapture --test-threads=1 "$@"

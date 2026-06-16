@@ -5,19 +5,22 @@
 //!
 //! ```text
 //! kennel run <policy> <name> -- <cmd> [args...]   # run cmd confined, foreground
+//! kennel attach <name>                            # reattach a terminal to a running kennel
 //! kennel stop <name>                              # stop a running kennel
 //! kennel list                                     # list running kennels
 //! ```
 //!
-//! `run` is foreground: the daemon spawns the workload attached to this
-//! terminal (the three stdio fds are passed over `SCM_RIGHTS`), and this process
-//! blocks until it exits, then exits with the same code.
+//! `run` is foreground but **detachable**: for an interactive workload the daemon owns
+//! the controlling pty and proxies it to this terminal over one `SCM_RIGHTS` socket;
+//! `Ctrl-\ d` detaches without ending the workload, and `kennel attach <name>`
+//! reconnects later. A non-interactive `run` passes the three stdio fds and blocks to
+//! the workload's exit code, as before.
 
 #![forbid(unsafe_code)]
 
 use std::io;
 use std::io::IsTerminal as _;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -55,6 +58,11 @@ const COMMANDS: &[CommandSpec] = &[
         name: "run",
         summary: "run a workload confined by a policy, in the foreground",
         usage: "run <policy> [<name>] [--key K] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
+    },
+    CommandSpec {
+        name: "attach",
+        summary: "reattach a terminal to a running kennel (Ctrl-\\ d to detach)",
+        usage: "attach <name>",
     },
     CommandSpec {
         name: "stop",
@@ -190,6 +198,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     }
     match cmd.as_str() {
         "run" => run(rest),
+        "attach" => attach(rest),
         "stop" => stop(rest),
         "list" => list(),
         "policy" => dispatch_policy(rest),
@@ -373,7 +382,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
 
     let mut conn = connect()?;
     if io::stdin().is_terminal() {
-        return run_interactive(conn, &request);
+        return run_interactive(conn, &request, &name);
     }
     // Non-interactive (piped/redirected): pass our stdio straight through.
     let stdin = io::stdin();
@@ -408,84 +417,214 @@ impl Drop for RawGuard {
     }
 }
 
-/// Interactive `kennel run`: the workload's controlling pty is allocated by the spawn
-/// seal inside the kennel's *own* devpts (so `ttyname(3)`/`tty` resolve it), and the
-/// seal hands its master back to us over a socketpair. We put this terminal in raw
-/// mode and proxy bytes both ways until the workload exits. The workload's shell then
-/// has real job control (`^Z`/`fg`/`bg`); the terminal is restored on exit.
-fn run_interactive(mut conn: UnixStream, request: &Request) -> Result<ExitCode, String> {
+/// Interactive `kennel run`: kenneld owns the workload's controlling pty (allocated by
+/// the spawn seal inside the kennel's own devpts, so `ttyname(3)`/`tty` resolve it) and
+/// brokers it to us. We pass one connected socket; the daemon's PTY broker fans the
+/// kennel's filtered output to it and forwards our input to the master. We put this
+/// terminal in raw mode and proxy bytes both ways. `Ctrl-\ d` **detaches** without
+/// ending the workload (reattach with `kennel attach <name>`); the terminal is restored
+/// on detach and on exit.
+fn run_interactive(
+    mut conn: UnixStream,
+    request: &Request,
+    name: &str,
+) -> Result<ExitCode, String> {
     use kennel_lib_syscall::pty;
     let real_in = io::stdin();
     // Raw mode now; the guard restores the terminal on every return below.
     let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
     let _restore = RawGuard { prev };
-    // Block SIGWINCH before the relay thread is spawned so it can `sigwait` it.
     let _ = pty::block_winch();
 
-    // A socketpair the seal returns the pty master over: we keep `ours`, the daemon
-    // passes `theirs` (over SCM_RIGHTS) down into the workload's pre-exec seal.
+    // One socket pair: the daemon's broker proxies the kennel's pty over `theirs`; we
+    // keep `ours`. (Before, the seal sent the *master* fd to us; now the master stays in
+    // kenneld and only bytes cross.)
     let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     send(&conn, request, &[theirs.as_fd()])?;
     drop(theirs);
 
-    // The daemon confirms the launch (or reports a bring-up failure). On success the
-    // seal has, by now, sent the master over `ours`; reading the response first means a
-    // failed bring-up does not leave us blocking on a master that will never arrive.
+    // The daemon confirms the launch (or reports a bring-up failure).
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
         Response::Started { .. } => {}
         Response::Error(message) => return Err(message),
         other => return Err(format!("unexpected response: {other:?}")),
     }
-    let master = recv_pty_master(&ours)?;
-    // Size the workload's terminal to ours, then proxy until it exits.
-    if let Ok(ws) = pty::get_winsize(real_in.as_fd()) {
-        let _ = pty::set_winsize(master.as_fd(), &ws);
+    proxy_session(conn, ours, name)
+}
+
+/// `kennel attach <name>`: reconnect a terminal to a still-running kennel's pty. The
+/// daemon's broker takes over from any current client (the prior terminal gets a clean
+/// "detached: another client attached"). Same raw-mode proxy and `Ctrl-\ d` detach as
+/// an interactive `run`.
+fn attach(args: &[String]) -> Result<ExitCode, String> {
+    use kennel_lib_syscall::pty;
+    let [name] = args else {
+        return Err("usage: kennel attach <name>".to_owned());
+    };
+    if !io::stdin().is_terminal() {
+        return Err("kennel attach needs a terminal on stdin".to_owned());
     }
-    proxy_terminal(&master, real_in.as_fd())?;
-    // Block until the workload exits; `_restore` then puts the terminal back.
+    let real_in = io::stdin();
+    let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
+    let _restore = RawGuard { prev };
+    let _ = pty::block_winch();
+
+    let mut conn = connect()?;
+    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    send(
+        &conn,
+        &Request::Attach {
+            kennel: name.clone(),
+        },
+        &[theirs.as_fd()],
+    )?;
+    drop(theirs);
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-        Response::Exited { code } => Ok(exit_code(code)),
-        Response::Error(message) => Err(message),
-        other => Err(format!("unexpected response: {other:?}")),
+        Response::Attached { .. } => {}
+        Response::Error(message) => return Err(message),
+        other => return Err(format!("unexpected response: {other:?}")),
     }
+    proxy_session(conn, ours, name)
 }
 
-/// Receive the workload's controlling-pty master, sent by the spawn seal over `sock`
-/// as a single `SCM_RIGHTS` fd (with a one-byte payload).
-fn recv_pty_master(sock: &UnixStream) -> Result<OwnedFd, String> {
-    let mut buf = [0u8; 1];
-    let (_, mut fds) = kennel_lib_syscall::scm::recv_with_fds(sock.as_fd(), &mut buf)
-        .map_err(|e| format!("receiving the workload pty: {e}"))?;
-    fds.pop()
-        .ok_or_else(|| "the workload did not return a controlling terminal".to_owned())
+/// `Ctrl-\` (FS, `0x1c`) then `d`: the detach sequence (rarer in shell use than
+/// docker's `Ctrl-p Ctrl-q`). Watched in the stdin path before bytes reach the broker.
+const DETACH_LEAD: u8 = 0x1c;
+const DETACH_KEY: u8 = b'd';
+
+/// How a proxied terminal session ended: a local detach (`Ctrl-\ d`) versus the remote
+/// end closing (workload exit or a take-over by another client).
+enum SessionEnd {
+    /// The operator pressed the detach key — the workload keeps running.
+    Detached,
+    /// The broker closed our socket: the workload exited or another client took over.
+    /// The final outcome is read from the control connection.
+    Remote,
 }
 
-/// Spawn the background copies between this terminal and the pty `master`: stdin →
-/// master, master → stdout, and a SIGWINCH relay for live resizes. Each thread owns
-/// dup'd fds, so they outlive these borrows and are reaped when the process exits.
-fn proxy_terminal(master: &OwnedFd, real_in: BorrowedFd<'_>) -> Result<(), String> {
-    let dup = |fd: BorrowedFd<'_>| fd.try_clone_to_owned().map_err(|e| format!("fd dup: {e}"));
-    let to_workload = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
-    let from_workload = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
-    let winch_master = master.try_clone().map_err(|e| format!("pty dup: {e}"))?;
-    let stdin_dup = dup(real_in)?;
-    let stdout_dup = dup(io::stdout().as_fd())?;
-    let winch_in = dup(real_in)?;
-    // stdin → master
+/// Proxy this terminal to the kennel over the broker socket `ours` until detach or the
+/// workload ends. Three background pumps: stdin → broker (scanning for the detach
+/// sequence), broker → stdout, and a `SIGWINCH` → [`Request::Resize`] relay (the broker
+/// holds the master, so we relay the size rather than `ioctl` it). On a local detach we
+/// restore the terminal and exit 0; on a remote end we read the daemon's final
+/// `Exited`/`Detached` over `conn`.
+fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitCode, String> {
+    use std::sync::mpsc;
+    // Tell the broker our initial size, then relay every later SIGWINCH.
+    send_resize(name);
+    let (tx, rx) = mpsc::channel::<SessionEnd>();
+
+    // stdin → broker, watching for the `Ctrl-\ d` detach sequence.
+    let in_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
+    let stdin_dup = io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("stdin dup: {e}"))?;
+    let tx_in = tx.clone();
     std::thread::spawn(move || {
         let mut r = std::fs::File::from(stdin_dup);
-        let mut w = std::fs::File::from(to_workload);
-        let _ = std::io::copy(&mut r, &mut w);
+        let mut w = in_sock;
+        let mut buf = [0u8; 4096];
+        // `armed` means we forwarded nothing yet for a held DETACH_LEAD byte and are
+        // awaiting the next byte: DETACH_KEY → detach; anything else → emit the held
+        // lead then the byte. A lead at end-of-read stays held into the next read.
+        let mut armed = false;
+        loop {
+            use std::io::{Read as _, Write as _};
+            let n = match r.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut out: Vec<u8> = Vec::with_capacity(n.saturating_add(1));
+            let mut detached = false;
+            for &b in buf.get(..n).unwrap_or(&[]) {
+                if armed {
+                    armed = false;
+                    if b == DETACH_KEY {
+                        detached = true;
+                        break;
+                    }
+                    out.push(DETACH_LEAD); // the held lead was literal
+                    out.push(b);
+                } else if b == DETACH_LEAD {
+                    armed = true; // hold it back, decide on the next byte
+                } else {
+                    out.push(b);
+                }
+            }
+            if !out.is_empty() && w.write_all(&out).is_err() {
+                break;
+            }
+            if detached {
+                let _ = tx_in.send(SessionEnd::Detached);
+                return;
+            }
+        }
+        let _ = tx_in.send(SessionEnd::Remote);
     });
-    // master → stdout
+
+    // broker → stdout.
+    let mut out_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
     std::thread::spawn(move || {
-        let mut r = std::fs::File::from(from_workload);
-        let mut w = std::fs::File::from(stdout_dup);
-        let _ = std::io::copy(&mut r, &mut w);
+        let mut w = io::stdout();
+        let _ = std::io::copy(&mut out_sock, &mut w);
+        let _ = tx.send(SessionEnd::Remote);
     });
-    // SIGWINCH → propagate the new window size to the workload
-    std::thread::spawn(move || kennel_lib_syscall::pty::relay_winch(winch_in, winch_master));
-    Ok(())
+
+    // SIGWINCH → Resize relay.
+    let resize_name = name.to_owned();
+    std::thread::spawn(move || winch_resize_relay(&resize_name));
+
+    // Whichever pump ends first decides the session outcome.
+    match rx.recv() {
+        Ok(SessionEnd::Detached) => {
+            // Close our end so the broker drops us; the workload keeps running.
+            drop(ours);
+            eprintln!("\r\ndetached from `{name}` (workload still running; `kennel attach {name}` to reconnect)");
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(SessionEnd::Remote) | Err(_) => {
+            drop(ours);
+            // The broker closed us: read the daemon's final word over the control conn.
+            match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+                Response::Exited { code } => Ok(exit_code(code)),
+                Response::Detached { reason } => {
+                    eprintln!("\r\ndetached from `{name}`: {reason}");
+                    Ok(ExitCode::SUCCESS)
+                }
+                Response::Error(message) => Err(message),
+                other => Err(format!("unexpected response: {other:?}")),
+            }
+        }
+    }
+}
+
+/// Relay terminal-resize events to the daemon: `sigwait` `SIGWINCH`, read this
+/// terminal's new size, and send a [`Request::Resize`] for `name`. Runs after
+/// `block_winch`; returns on a `sigwait` error.
+fn winch_resize_relay(name: &str) {
+    while kennel_lib_syscall::pty::wait_winch().is_ok() {
+        send_resize(name);
+    }
+}
+
+/// Read this terminal's window size and send it to the daemon as a [`Request::Resize`]
+/// on a throwaway control connection (fire-and-forget; the broker `ioctl`s the master).
+fn send_resize(name: &str) {
+    use kennel_lib_syscall::pty;
+    let Ok(ws) = pty::get_winsize(io::stdin().as_fd()) else {
+        return;
+    };
+    let Ok(conn) = connect() else { return };
+    let _ = send(
+        &conn,
+        &Request::Resize {
+            kennel: name.to_owned(),
+            rows: ws.ws_row,
+            cols: ws.ws_col,
+        },
+        &[],
+    );
 }
 
 /// `kennel stop <name>`
@@ -520,10 +659,19 @@ fn list() -> Result<ExitCode, String> {
             if kennels.is_empty() {
                 println!("no running kennels");
             } else {
-                println!("{:<20} {:>5} {:>8}  STATE", "NAME", "CTX", "PID");
+                println!(
+                    "{:<20} {:>5} {:>8}  {:<8} CLIENT",
+                    "NAME", "CTX", "PID", "STATE"
+                );
                 for k in kennels {
                     let state = if k.running { "running" } else { "starting" };
-                    println!("{:<20} {:>5} {:>8}  {state}", k.kennel, k.ctx, k.pid);
+                    // The terminal-attachment state of an interactive kennel: a
+                    // detached kennel keeps running, reattachable with `kennel attach`.
+                    let client = if k.attached { "attached" } else { "detached" };
+                    println!(
+                        "{:<20} {:>5} {:>8}  {state:<8} {client}",
+                        k.kennel, k.ctx, k.pid
+                    );
                 }
             }
             Ok(ExitCode::SUCCESS)

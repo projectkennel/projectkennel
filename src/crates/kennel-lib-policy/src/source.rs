@@ -126,6 +126,10 @@ pub struct SourcePolicy {
     /// at `kennel run … -- <cmd>`. Folds scalar-wins up the chain like `[lifecycle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<WorkloadSection>,
+    /// Terminal hardening (`[tty]`, §7.9.5): the escape-sequence filter on the
+    /// workload→operator PTY stream. Folds scalar-wins up the chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty: Option<TtySection>,
 }
 
 /// `[audit]`: sink selection, per-class levels, and per-sink tuning
@@ -890,6 +894,19 @@ pub struct LifecycleSection {
     /// audited `warn` today (the interactive renewal prompt is still owed, §9.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_action: Option<String>,
+}
+
+/// `[tty]` — terminal hardening for an interactive (PTY) workload (§7.9.5).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TtySection {
+    /// Filter the dangerous escape sequences a workload could write toward the
+    /// operator's real terminal — OSC 52 (clipboard), OSC 9/777 (notifications),
+    /// and the DCS/APC/PM/SOS opaque bands (`kennel-lib-term`, T2.6). Benign
+    /// sequences (titles, hyperlinks, colour) pass through. Default `true`; set
+    /// `false` only in an interactive template that needs raw terminal control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_terminal_escapes: Option<bool>,
 }
 
 /// Parse source-policy TOML bytes into a [`SourcePolicy`].

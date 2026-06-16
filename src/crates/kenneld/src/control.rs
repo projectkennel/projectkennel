@@ -45,6 +45,26 @@ pub enum Request {
         /// comment is ignored on lookup.
         key: String,
     },
+    /// Attach a terminal to a running kennel's PTY (`kennel attach`). The CLI passes
+    /// one connected socket over `SCM_RIGHTS` (its proxied-terminal end), exactly as
+    /// `Start { interactive: true }` does; kenneld fans the kennel's filtered PTY
+    /// output to it and forwards its input to the master. Detaching is a client-side
+    /// action (the CLI closes the socket), so there is no detach request.
+    Attach {
+        /// The kennel to attach to.
+        kennel: String,
+    },
+    /// Resize a running kennel's PTY (the broker holds the master, so the window-size
+    /// `ioctl` happens in kenneld). The attached CLI sends this on `SIGWINCH` and once
+    /// at attach time; it carries no fds and gets no body response — fire and forget.
+    Resize {
+        /// The kennel whose master to resize.
+        kennel: String,
+        /// New terminal height in rows.
+        rows: u16,
+        /// New terminal width in columns.
+        cols: u16,
+    },
 }
 
 /// The payload of a [`Request::Start`].
@@ -104,6 +124,22 @@ pub enum Response {
         /// One `restrict,pty,command=…` line per matching edge.
         lines: Vec<String>,
     },
+    /// A terminal attached to a running kennel (the answer to [`Request::Attach`], or
+    /// the confirmation on a `Start` connection that has become the first client). The
+    /// CLI then proxies its terminal until the workload exits or it detaches.
+    Attached {
+        /// The kennel's context number.
+        ctx: u16,
+        /// The workload's process id.
+        pid: u32,
+    },
+    /// The client detached (or was detached by a takeover) without ending the
+    /// workload — the kennel keeps running, reattachable by name. `reason` is a short
+    /// human note (`"another client attached"`, `"detach key"`).
+    Detached {
+        /// Why the client detached.
+        reason: String,
+    },
     /// The request failed; the string is a human-readable reason.
     Error(String),
 }
@@ -119,6 +155,9 @@ pub struct KennelInfo {
     pub pid: u32,
     /// Whether the workload is still running.
     pub running: bool,
+    /// Whether a terminal is currently attached to this (interactive) kennel. False
+    /// for a detached or non-interactive kennel.
+    pub attached: bool,
 }
 
 /// A malformed control message.
@@ -247,6 +286,16 @@ impl Request {
                 put_u8(&mut b, 4);
                 put_str(&mut b, key);
             }
+            Self::Attach { kennel } => {
+                put_u8(&mut b, 5);
+                put_str(&mut b, kennel);
+            }
+            Self::Resize { kennel, rows, cols } => {
+                put_u8(&mut b, 6);
+                put_str(&mut b, kennel);
+                put_u16(&mut b, *rows);
+                put_u16(&mut b, *cols);
+            }
         }
         b
     }
@@ -272,6 +321,14 @@ impl Request {
             }),
             3 => Ok(Self::List),
             4 => Ok(Self::AuthorizedKeys { key: r.string()? }),
+            5 => Ok(Self::Attach {
+                kennel: r.string()?,
+            }),
+            6 => Ok(Self::Resize {
+                kennel: r.string()?,
+                rows: r.u16()?,
+                cols: r.u16()?,
+            }),
             _ => Err(WireError::BadTag),
         }
     }
@@ -297,6 +354,7 @@ impl Response {
                     put_u16(&mut b, k.ctx);
                     put_u32(&mut b, k.pid);
                     put_u8(&mut b, u8::from(k.running));
+                    put_u8(&mut b, u8::from(k.attached));
                 }
             }
             Self::Exited { code } => {
@@ -310,6 +368,15 @@ impl Response {
             Self::Error(message) => {
                 put_u8(&mut b, 4);
                 put_str(&mut b, message);
+            }
+            Self::Attached { ctx, pid } => {
+                put_u8(&mut b, 6);
+                put_u16(&mut b, *ctx);
+                put_u32(&mut b, *pid);
+            }
+            Self::Detached { reason } => {
+                put_u8(&mut b, 7);
+                put_str(&mut b, reason);
             }
         }
         b
@@ -339,6 +406,7 @@ impl Response {
                         ctx: r.u16()?,
                         pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
                         running: r.u8()? != 0,
+                        attached: r.u8()? != 0,
                     });
                 }
                 Ok(Self::Listing(kennels))
@@ -347,6 +415,13 @@ impl Response {
             4 => Ok(Self::Error(r.string()?)),
             5 => Ok(Self::AuthorizedKeys {
                 lines: r.strings()?,
+            }),
+            6 => Ok(Self::Attached {
+                ctx: r.u16()?,
+                pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+            }),
+            7 => Ok(Self::Detached {
+                reason: r.string()?,
             }),
             _ => Err(WireError::BadTag),
         }
@@ -479,6 +554,30 @@ mod tests {
     }
 
     #[test]
+    fn attach_messages_round_trip() {
+        round_trip_request(&Request::Attach {
+            kennel: "ai-coding".to_owned(),
+        });
+        round_trip_response(&Response::Attached { ctx: 7, pid: 4242 });
+        round_trip_response(&Response::Detached {
+            reason: "another client attached".to_owned(),
+        });
+        round_trip_response(&Response::Detached {
+            reason: String::new(),
+        });
+        round_trip_request(&Request::Resize {
+            kennel: "ai-coding".to_owned(),
+            rows: 50,
+            cols: 200,
+        });
+        round_trip_request(&Request::Resize {
+            kennel: String::new(),
+            rows: 0,
+            cols: 0,
+        });
+    }
+
+    #[test]
     fn responses_round_trip() {
         round_trip_response(&Response::Started { ctx: 7, pid: 4242 });
         round_trip_response(&Response::Stopped);
@@ -491,12 +590,14 @@ mod tests {
                 ctx: 7,
                 pid: 4242,
                 running: true,
+                attached: true,
             },
             KennelInfo {
                 kennel: "build".to_owned(),
                 ctx: 8,
                 pid: 99,
                 running: false,
+                attached: false,
             },
         ]));
     }

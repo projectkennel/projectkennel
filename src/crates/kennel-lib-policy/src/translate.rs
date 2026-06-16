@@ -108,6 +108,14 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
             .unwrap_or_default(),
     };
     let lifecycle = translate_lifecycle(effective)?;
+    // [tty]: the PTY escape filter, default on. Folds scalar-wins; absent ⇒ default.
+    let tty = crate::settled::TtyPolicy {
+        filter_terminal_escapes: effective
+            .tty
+            .as_ref()
+            .and_then(|t| t.filter_terminal_escapes)
+            .unwrap_or(true),
+    };
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective)?;
@@ -126,6 +134,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
             cap,
             seccomp,
             lifecycle,
+            tty,
         },
         ssh,
         unix,
@@ -2200,5 +2209,23 @@ mod tests {
         assert!(deferred.contains("<tag>"));
         assert!(deferred.contains("<gid>"));
         assert!(deferred.contains("<kennel>"));
+    }
+
+    #[test]
+    fn tty_filter_defaults_on_and_honours_an_explicit_false() {
+        // Absent [tty] ⇒ filtering on (the secure default) — a real template has no
+        // [tty] section.
+        let default = translate_template(AI_CODING_STRICT);
+        assert!(default.effective_policy.tty.filter_terminal_escapes);
+
+        // An explicit `filter_terminal_escapes = false` is carried to the settled
+        // policy (a leaf that turns the filter off, atop the base chain).
+        let off = translate_template(concat!(
+            "template_base = \"base-confined@v1\"\n",
+            "template_name = \"tty-off\"\n",
+            "template_version = \"1\"\n",
+            "[tty]\nfilter_terminal_escapes = false\n",
+        ));
+        assert!(!off.effective_policy.tty.filter_terminal_escapes);
     }
 }

@@ -199,6 +199,7 @@ dependencies = [
  "kennel-lib-policy",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
+ "kennel-lib-term",
  "kennel-privhelper",
  "lexopt",
  "serde",

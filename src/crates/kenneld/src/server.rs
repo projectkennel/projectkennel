@@ -83,6 +83,10 @@ pub struct Loaded {
     /// The lifecycle policy (§9.7): the optional TTL and what to do at expiry. Drives
     /// the TTL reaper in `run_kennel`. `ttl_seconds = None` ⇒ no reaper armed.
     pub lifecycle: kennel_lib_policy::LifecyclePolicy,
+    /// Whether to filter dangerous terminal escapes from the workload's PTY output
+    /// (`[tty].filter_terminal_escapes`, §7.9.5). The `PtyBroker` reads this to pick the
+    /// `kennel-lib-term` filter policy.
+    pub tty_filter: bool,
     /// The workload the policy embeds (§7.4): `argv`/`cwd`/`pinned`/`sha256`. Empty ⇒ the
     /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
     /// request's argv (the request wins unless `pinned`); see `effective_workload`.
@@ -181,6 +185,10 @@ struct KennelMeta {
     ctx: u16,
     /// `None` while the kennel is still starting (before the workload's pid is known).
     pid: Option<u32>,
+    /// The PTY broker for an interactive kennel, once the master is owned. `None` for
+    /// a non-interactive run (no terminal) or before the broker is built. A clone is
+    /// handed to an `Attach` so a later client reaches this running kennel's pump.
+    broker: Option<crate::pty_broker::PtyBroker>,
 }
 
 /// The mutable shared state: the context allocator and the kennel registry.
@@ -385,10 +393,49 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 "no free context (the kennel limit is reached)".to_owned(),
             ));
         };
-        reg.kennels
-            .insert(name.to_owned(), KennelMeta { ctx, pid: None });
+        reg.kennels.insert(
+            name.to_owned(),
+            KennelMeta {
+                ctx,
+                pid: None,
+                broker: None,
+            },
+        );
         drop(reg);
         Ok(ctx)
+    }
+
+    /// Record the interactive kennel's PTY broker once kenneld owns the master, so a
+    /// later `Attach` can reach this running kennel's pump.
+    fn set_broker(&self, name: &str, broker: crate::pty_broker::PtyBroker) {
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(meta) = reg.kennels.get_mut(name) {
+            meta.broker = Some(broker);
+        }
+    }
+
+    /// A clone of the named kennel's PTY broker, or `None` if the kennel is unknown,
+    /// not interactive, or not yet started.
+    fn broker_for(&self, name: &str) -> Option<crate::pty_broker::PtyBroker> {
+        let reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reg.kennels.get(name).and_then(|m| m.broker.clone())
+    }
+
+    /// The `(ctx, pid)` of a started kennel, or `None` if unknown or still starting.
+    fn ctx_pid(&self, name: &str) -> Option<(u16, u32)> {
+        let reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reg.kennels
+            .get(name)
+            .and_then(|m| m.pid.map(|pid| (m.ctx, pid)))
     }
 
     /// Record the workload's pid once it is spawned.
@@ -474,6 +521,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 ctx: meta.ctx,
                 pid: meta.pid.unwrap_or(0),
                 running: meta.pid.is_some(),
+                attached: meta
+                    .broker
+                    .as_ref()
+                    .is_some_and(crate::pty_broker::PtyBroker::is_attached),
             })
             .collect();
         drop(reg);
@@ -528,13 +579,29 @@ where
     let Ok((request, fds)) = recv_request_with_fds(conn) else {
         return;
     };
-    // Trust boundary 6 (§04 trust boundaries): the kennel name arrives from the
-    // user's CLI over the control socket and flows into filesystem paths (the
-    // synthetic `/etc` staging dir, the per-kennel audit dir), the synthetic
-    // `/etc/hostname`, and the registry key. Validate its grammar — `[a-z0-9]`
-    // start, then `[a-z0-9-]`, ≤64 chars — *before* it is used anywhere, so a name
-    // with `/`, `..`, NUL, whitespace, or control bytes cannot traverse a path or
-    // inject a hostname. List/AuthorizedKeys carry no name.
+    dispatch_request(shared, request, fds, conn);
+}
+
+/// Validate and dispatch one decoded control request on `conn` (with its passed `fds`).
+///
+/// The body of `handle_connection` after decode — split out so the e2e tests can drive
+/// the *real* dispatch (e.g. `Attach`) without a shim that could diverge from production.
+///
+/// Trust boundary 6 (§04 trust boundaries): the kennel name arrives from the user's CLI
+/// over the control socket and flows into filesystem paths (the synthetic `/etc` staging
+/// dir, the per-kennel audit dir), the synthetic `/etc/hostname`, and the registry key.
+/// Validate its grammar — `[a-z0-9]` start, then `[a-z0-9-]`, ≤64 chars — *before* it is
+/// used anywhere, so a name with `/`, `..`, NUL, whitespace, or control bytes cannot
+/// traverse a path or inject a hostname. `List`/`AuthorizedKeys` carry no name.
+pub fn dispatch_request<P, L>(
+    shared: &Shared<P, L>,
+    request: Request,
+    fds: Vec<OwnedFd>,
+    conn: &mut UnixStream,
+) where
+    P: Privileged + Clone + Sync,
+    L: PolicyLoader,
+{
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
             Ok(()) => return run_kennel(shared, &req, fds, conn),
@@ -554,6 +621,26 @@ where
         // AuthorizedKeys errors are routine (sshd polls for keys the bastion may not
         // hold), so they are not logged here to avoid spamming the journal.
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),
+        // Attach a terminal to a running kennel's PTY. Like `Start`, this owns its
+        // connection for the session (the CLI proxies its terminal until detach or
+        // workload exit), so it returns rather than falling through to the single
+        // response below.
+        Request::Attach { kennel } => match validate_kennel_name(&kennel) {
+            Ok(()) => return run_attach(shared, &kennel, fds, conn),
+            Err(e) => Response::Error(e),
+        },
+        // Resize the kennel's pty (the broker holds the master). Fire-and-forget: a
+        // `SIGWINCH` relay sends this on a throwaway connection; there is no reply, so
+        // it falls through to the single send below only on a bad name.
+        Request::Resize { kennel, rows, cols } => match validate_kennel_name(&kennel) {
+            Ok(()) => {
+                if let Some(broker) = shared.broker_for(&kennel) {
+                    broker.resize(rows, cols);
+                }
+                return;
+            }
+            Err(e) => Response::Error(e),
+        },
     };
     let _ = control::send_response(conn, &response);
 }
@@ -707,13 +794,35 @@ pub fn run_kennel<P, L>(
     } else {
         _workload_fd = None;
     }
-    // Interactive runs pass ONE connected socket (over which the seal returns a
-    // controlling pty allocated inside the kennel's devpts); non-interactive runs
-    // pass the three stdio fds. `return_sock` must outlive the spawn so the forked
-    // child inherits it during the pre-exec seal — it stays in scope below.
+    // Interactive runs pass ONE connected socket — the CLI's proxied-terminal end
+    // (`client_sock`). KENNELD owns the workload's pty master now (not the CLI): we
+    // mint our OWN socketpair, hand the seal its `master_send` end (over which the
+    // seal returns the master during pre-exec), and keep `master_recv`. The master
+    // then lands in kenneld's PtyBroker, which fans filtered output to whichever
+    // client is attached and survives the client detaching (§05). Non-interactive
+    // runs pass the three stdio fds, unchanged. `master_send` must outlive the spawn
+    // so the forked child inherits it during the pre-exec seal.
     let mut return_sock: Option<OwnedFd> = None;
+    let mut client_sock: Option<OwnedFd> = None;
+    let mut master_recv: Option<OwnedFd> = None;
     let mut command = if req.interactive {
-        return_sock = fds.into_iter().next();
+        client_sock = fds.into_iter().next();
+        match UnixStream::pair() {
+            Ok((recv, send)) => {
+                master_recv = Some(OwnedFd::from(recv));
+                return_sock = Some(OwnedFd::from(send));
+            }
+            Err(e) => {
+                return fail(
+                    shared,
+                    &req.kennel,
+                    ctx,
+                    conn,
+                    "pty master socketpair",
+                    e.to_string(),
+                )
+            }
+        }
         match command_for_interactive(&argv, &cwd) {
             Ok(command) => command,
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
@@ -782,6 +891,8 @@ pub fn run_kennel<P, L>(
     // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
     // ~/.config < policy). Captured before `loaded` is consumed below.
     let audit_runtime = crate::audit::load_audit_defaults().overlay(&loaded.audit);
+    // The PTY escape-filter decision (§7.9.5), captured before `loaded` is consumed.
+    let loaded_tty_filter = loaded.tty_filter;
     // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
     // egress proxy's writer so their events correlate. The per-kennel state dir is
     // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
@@ -947,6 +1058,37 @@ pub fn run_kennel<P, L>(
             Arc::clone(writer),
         )
     });
+    // For an interactive kennel, kenneld now owns the master: receive it from the
+    // seal over `master_recv`, build the PtyBroker (running the workload's output
+    // through the [tty] escape filter), register it so a later `kennel attach` reaches
+    // this running kennel, and make the `Start` connection's passed socket the first
+    // attached client. The broker outlives this connection — detaching the client does
+    // not end the workload. `broker` (a registry clone) is shut down on workload exit.
+    let broker = if req.interactive {
+        master_recv
+            .as_ref()
+            .and_then(|sock| recv_pty_master(sock).ok())
+            .map_or_else(
+                || {
+                    tr.step(
+                        "run_kennel: interactive kennel returned no pty master (filter inactive)",
+                    );
+                    None
+                },
+                |master| {
+                    let policy = if loaded_tty_filter {
+                        kennel_lib_term::FilterPolicy::default()
+                    } else {
+                        kennel_lib_term::FilterPolicy::passthrough()
+                    };
+                    let b = crate::pty_broker::PtyBroker::start(master, policy, client_sock.take());
+                    shared.set_broker(&req.kennel, b.clone());
+                    Some(b)
+                },
+            )
+    } else {
+        None
+    };
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
     // Block until the kennel exits, then tear down. TTL is enforced inside the kennel (§9.7):
@@ -955,6 +1097,11 @@ pub fn run_kennel<P, L>(
     // there). So this is a plain wait — on `exit` the handler kills the frozen cgroup, and this
     // wait returns the resulting status. The audited privileged records the teardown too.
     let status = kennel.stop(&audited);
+    // The workload exited: stop the PTY pump and drop any attached client (its CLI
+    // then sees EOF and exits). The broker is also dropped from the registry below.
+    if let Some(broker) = &broker {
+        broker.shutdown();
+    }
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
         writer.emit(&crate::audit::kennel_exit("stopped"));
@@ -972,6 +1119,57 @@ pub fn run_kennel<P, L>(
             code: exit_code(&status),
         },
     );
+}
+
+/// Handle a `kennel attach`: hand the connection's terminal socket to the running
+/// kennel's PTY broker (taking over any current client) and block until this client's
+/// session ends — `Exited` if the workload exits, `Detached` if a later attach takes
+/// over. No workload lifecycle here: the broker (and the kennel's own `run_kennel`
+/// thread) own that; attach is a pure subscriber.
+fn run_attach<P, L>(shared: &Shared<P, L>, kennel: &str, fds: Vec<OwnedFd>, conn: &mut UnixStream)
+where
+    P: Privileged + Clone + Sync,
+    L: PolicyLoader,
+{
+    let Some(broker) = shared.broker_for(kennel) else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error(format!(
+                "kennel `{kennel}` is not attachable (unknown, not interactive, or still starting)"
+            )),
+        );
+        return;
+    };
+    let Some(client_sock) = fds.into_iter().next() else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error("attach passed no terminal socket".to_owned()),
+        );
+        return;
+    };
+    let Some((ctx, pid)) = shared.ctx_pid(kennel) else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error(format!("no kennel named `{kennel}`")),
+        );
+        return;
+    };
+    let Some(generation) = broker.attach(client_sock) else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error(format!("kennel `{kennel}` has already exited")),
+        );
+        return;
+    };
+    let _ = control::send_response(conn, &Response::Attached { ctx, pid });
+    // Block until this client's session ends; report why.
+    let response = match broker.wait_for_outcome(generation) {
+        crate::pty_broker::AttachOutcome::WorkloadExited => Response::Exited { code: 0 },
+        crate::pty_broker::AttachOutcome::TakenOver => Response::Detached {
+            reason: "another client attached".to_owned(),
+        },
+    };
+    let _ = control::send_response(conn, &response);
 }
 
 /// Release the reservation, **log the reason**, and report it (a bring-up step
@@ -1022,6 +1220,20 @@ fn recv_request_with_fds(conn: &UnixStream) -> io::Result<(Request, Vec<OwnedFd>
     let request = Request::decode(body)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad request: {e:?}")))?;
     Ok((request, fds))
+}
+
+/// Receive the workload's controlling-pty master, sent by the spawn seal over `sock`
+/// as a single `SCM_RIGHTS` fd (with a one-byte payload). kenneld keeps this master
+/// in the `PtyBroker` (the CLI no longer holds it).
+fn recv_pty_master(sock: &OwnedFd) -> io::Result<OwnedFd> {
+    let mut buf = [0u8; 1];
+    let (_, mut fds) = kennel_lib_syscall::scm::recv_with_fds(sock.as_fd(), &mut buf)?;
+    fds.pop().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the seal returned no controlling terminal",
+        )
+    })
 }
 
 /// Resolve a `[unix]` socket path: fill the per-instance placeholders
@@ -1424,6 +1636,7 @@ mod tests {
                     ttl_action: kennel_lib_policy::TtlAction::Exit,
                 },
                 workload: kennel_lib_policy::WorkloadRuntime::default(),
+                tty_filter: true,
             })
         }
     }

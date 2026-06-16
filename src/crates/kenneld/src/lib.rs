@@ -34,6 +34,7 @@ pub mod inbound;
 pub mod inet;
 pub mod policy;
 pub mod proxy;
+pub mod pty_broker;
 pub mod server;
 pub mod socket;
 pub mod ssh;

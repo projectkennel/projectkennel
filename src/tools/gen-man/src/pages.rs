@@ -87,6 +87,11 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "run a workload confined by a policy, in the foreground",
         "run <policy> [<name>] [--key K] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
     ),
+    (
+        "attach",
+        "reattach a terminal to a running kennel (Ctrl-\\ d to detach)",
+        "attach <name>",
+    ),
     ("stop", "stop a running kennel", "stop <name>"),
     ("list", "list running kennels", "list"),
     (

@@ -495,6 +495,26 @@ pub struct LifecyclePolicy {
     pub ttl_action: TtlAction,
 }
 
+/// Terminal hardening (`[tty]`, §7.9.5): the PTY escape filter on the
+/// workload→operator stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TtyPolicy {
+    /// Filter the dangerous escape sequences (OSC 52 clipboard, OSC 9/777
+    /// notifications, DCS/APC/PM/SOS bands) out of the workload's terminal output
+    /// (T2.6). Default `true`.
+    pub filter_terminal_escapes: bool,
+}
+
+impl Default for TtyPolicy {
+    /// The secure default: filtering on.
+    fn default() -> Self {
+        Self {
+            filter_terminal_escapes: true,
+        }
+    }
+}
+
 /// The fully-resolved effective policy — the final rule sets only.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -513,6 +533,9 @@ pub struct EffectivePolicy {
     pub seccomp: SeccompPolicy,
     /// Lifecycle rules.
     pub lifecycle: LifecyclePolicy,
+    /// Terminal hardening (the PTY escape filter, §7.9.5).
+    #[serde(default)]
+    pub tty: TtyPolicy,
 }
 
 /// The per-kennel SSH runtime: the bastion grants `kenneld` realises (§7.10).

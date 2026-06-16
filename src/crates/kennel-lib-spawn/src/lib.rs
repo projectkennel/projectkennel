@@ -690,6 +690,7 @@ mod tests {
                     ttl_seconds: None,
                     ttl_action: TtlAction::Warn,
                 },
+                tty: kennel_lib_policy::TtyPolicy::default(),
             },
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),

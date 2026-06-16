@@ -70,6 +70,7 @@ The full section list:
 | `[seccomp]` | Seccomp filter | §7.9 |
 | `[unsafe]` and `[unsafe.*]` | Advisory footgun umbrella: `[unsafe.ptrace]` / `[unsafe.signal]` cross-boundary allowlists whose scoping is real but enforced by the PID namespace + seccomp (not the section) — declaring them warns. | §7.9 |
 | `[lifecycle]` | TTL and TTL-action | §9 |
+| `[tty]` | Terminal hardening for interactive runs: filter dangerous terminal escapes (clipboard/notification/device-control) from the workload's PTY output | §7.9 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
 This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for **every** section — `[net]`/`[net.*]` in §The `[net]` section, the rest in §The remaining sections — field reference, both kept exact against the parser. The §7.x design chapters carry the *rationale* for each section; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
@@ -742,6 +743,12 @@ visibility is **not** here — it lives in `[fs.proc]`, part of the constructed 
 |---|---|---|---|
 | `ttl` | string | none | Time-to-live, human form (`"8h"`, `"30m"`); resolved to seconds. |
 | `ttl_action` | string | `"exit"` | `"exit"` (alias `"stop"`) ends the kennel at expiry; `"warn"` emits an audit event and leaves it running; `"renew"` is an audited `warn` today (the interactive prompt is owed). |
+
+### `[tty]` — terminal hardening for interactive runs (§7.9.5)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `filter_terminal_escapes` | bool | `true` | Filter dangerous terminal escapes from the workload's PTY output at the broker's single master-read point (`05` PTY broker). Drops OSC 52 (clipboard read/write), OSC 9 / 777 (desktop notifications), and the DCS/APC/PM/SOS device-control bands; passes benign sequences (OSC 0/1/2 title, 8 hyperlink, 4/104 palette, CSI cursor/colour, C0). Best-effort, not a proof: it shuts down the low-effort clipboard/notification-injection class (`T2.6`), not a terminal-specific desync. Set `false` only for a workload that legitimately needs raw escape passthrough. Applies to interactive (PTY) runs; non-interactive stdio is unaffected. |
 
 ### `[ssh]` — per-kennel SSH egress via the re-origination bastion (§7.10)
 
