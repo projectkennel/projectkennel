@@ -515,6 +515,21 @@ impl Default for TtyPolicy {
     }
 }
 
+/// `[trust]` — the masked workspace manifest (§7.4, T2.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustPolicy {
+    /// Maintain a masked `.trust-manifest.json` at each writable root. Default `true`.
+    pub manifest: bool,
+}
+
+impl Default for TrustPolicy {
+    /// The secure default: the manifest is maintained.
+    fn default() -> Self {
+        Self { manifest: true }
+    }
+}
+
 /// The fully-resolved effective policy — the final rule sets only.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -536,6 +551,9 @@ pub struct EffectivePolicy {
     /// Terminal hardening (the PTY escape filter, §7.9.5).
     #[serde(default)]
     pub tty: TtyPolicy,
+    /// Workspace trust marker (the masked `.trust-manifest.json`, §7.4).
+    #[serde(default)]
+    pub trust: TrustPolicy,
 }
 
 /// The per-kennel SSH runtime: the bastion grants `kenneld` realises (§7.10).

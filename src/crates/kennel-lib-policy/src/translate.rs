@@ -116,6 +116,14 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
             .and_then(|t| t.filter_terminal_escapes)
             .unwrap_or(true),
     };
+    // [trust]: the masked workspace manifest, default on. Absent ⇒ default.
+    let trust = crate::settled::TrustPolicy {
+        manifest: effective
+            .trust
+            .as_ref()
+            .and_then(|t| t.manifest)
+            .unwrap_or(true),
+    };
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective)?;
@@ -135,6 +143,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
             seccomp,
             lifecycle,
             tty,
+            trust,
         },
         ssh,
         unix,
@@ -2227,5 +2236,21 @@ mod tests {
             "[tty]\nfilter_terminal_escapes = false\n",
         ));
         assert!(!off.effective_policy.tty.filter_terminal_escapes);
+    }
+
+    #[test]
+    fn trust_manifest_defaults_on_and_honours_an_explicit_false() {
+        // Absent [trust] ⇒ the manifest is maintained (secure default).
+        let default = translate_template(AI_CODING_STRICT);
+        assert!(default.effective_policy.trust.manifest);
+
+        // An explicit `[trust] manifest = false` opts out, carried to the settled policy.
+        let off = translate_template(concat!(
+            "template_base = \"base-confined@v1\"\n",
+            "template_name = \"trust-off\"\n",
+            "template_version = \"1\"\n",
+            "[trust]\nmanifest = false\n",
+        ));
+        assert!(!off.effective_policy.trust.manifest);
     }
 }

@@ -364,6 +364,14 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         policy_file
     };
 
+    // Pre-flight: ensure a `.trust-manifest.json` at each writable workspace root before
+    // the kennel boots (mirrors SSH-key provisioning). The kennel will mask the manifest
+    // invisible, so the agent cannot forge the integrity pins host tooling trusts (T2.8).
+    // Read from the settled bytes we hold; host-side, never contacts kenneld.
+    let settled_bytes = std::fs::read(&effective_policy)
+        .map_err(|e| format!("reading {} for pre-flight: {e}", effective_policy.display()))?;
+    ensure_workspace_manifests(&settled_bytes);
+
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let request = Request::Start(StartRequest {
         policy: effective_policy,
@@ -404,6 +412,85 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         Response::Error(message) => Err(message),
         other => Err(format!("unexpected response: {other:?}")),
     }
+}
+
+/// Ensure a masked-workspace manifest at the root of each writable host path the settled
+/// policy grants (§7.4, T2.8) — the CLI pre-flight half of the feature. Best-effort: a
+/// parse or generation failure warns and is skipped (it must never block a run; the worst
+/// case is a missing manifest, which the host IDE simply treats as "no trust marker").
+///
+/// Reads `fs.write` from the settled policy, expands the home prefix (`~`/`$HOME` → the
+/// operator's real home — the same expansion the spawn does to get the bind *source*),
+/// strips any `/**` glob, and for each existing directory writes a baseline manifest if
+/// one is absent. An existing manifest is left untouched — refreshing pins is the explicit
+/// `kennel review` step, never an implicit side effect of `run` (else it would launder an
+/// agent's edits).
+fn ensure_workspace_manifests(settled_bytes: &[u8]) {
+    let policy = match kennel_lib_policy::parse_settled_unverified(settled_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("kennel: skipping workspace manifests (cannot read settled policy: {e})");
+            return;
+        }
+    };
+    if !policy.effective_policy.trust.manifest {
+        return; // [trust].manifest = false: the operator opted out.
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        eprintln!("kennel: skipping workspace manifests (HOME is not set)");
+        return;
+    };
+    let generator = format!("kennel {}", env!("CARGO_PKG_VERSION"));
+    for entry in &policy.effective_policy.fs.write {
+        let Some(root) = writable_root(entry, &home) else {
+            continue; // not a home-or-absolute path we can resolve to a host dir
+        };
+        if !root.is_dir() {
+            continue; // a writable file (not a workspace dir) gets no manifest
+        }
+        let path = kennel_lib_manifest::manifest_path(&root);
+        if path.exists() {
+            continue; // leave it — refresh is `kennel review`, not `run`
+        }
+        let (manifest, errors) = kennel_lib_manifest::generate(&root, &generator);
+        for e in &errors {
+            eprintln!(
+                "kennel: manifest trigger skipped under {}: {e}",
+                root.display()
+            );
+        }
+        match manifest.to_json() {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("kennel: could not write {}: {e}", path.display());
+                } else {
+                    eprintln!("kennel: wrote trust manifest {}", path.display());
+                }
+            }
+            Err(e) => eprintln!("kennel: could not serialise {}: {e}", path.display()),
+        }
+    }
+}
+
+/// Resolve a settled `fs.write` entry to its host directory root: expand a leading
+/// `~`/`$HOME` to the operator's real `home`, strip a trailing `/**` or `/*` glob. Returns
+/// `None` for an entry that does not name a home-relative or absolute path (nothing the
+/// host can place a manifest under).
+fn writable_root(entry: &str, home: &Path) -> Option<PathBuf> {
+    let trimmed = entry
+        .strip_suffix("/**")
+        .or_else(|| entry.strip_suffix("/*"))
+        .unwrap_or(entry);
+    for tok in ["~", "$HOME"] {
+        if trimmed == tok {
+            return Some(home.to_path_buf());
+        }
+        if let Some(rest) = trimmed.strip_prefix(tok).and_then(|r| r.strip_prefix('/')) {
+            return Some(home.join(rest));
+        }
+    }
+    let path = Path::new(trimmed);
+    path.is_absolute().then(|| path.to_path_buf())
 }
 
 /// Restores the terminal to its saved (pre-raw) settings when dropped — on every

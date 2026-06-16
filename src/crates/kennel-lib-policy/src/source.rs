@@ -130,6 +130,10 @@ pub struct SourcePolicy {
     /// workload→operator PTY stream. Folds scalar-wins up the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tty: Option<TtySection>,
+    /// Workspace trust marker (`[trust]`, §7.4): the masked `.trust-manifest.json` at
+    /// each writable root. Folds scalar-wins up the chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<TrustSection>,
 }
 
 /// `[audit]`: sink selection, per-class levels, and per-sink tuning
@@ -907,6 +911,19 @@ pub struct TtySection {
     /// `false` only in an interactive template that needs raw terminal control.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_terminal_escapes: Option<bool>,
+}
+
+/// `[trust]` — the masked workspace manifest (§7.4, T2.8).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustSection {
+    /// Maintain a `.trust-manifest.json` at the root of every writable/persistent
+    /// workspace (the CLI generates it pre-flight; the view masks it invisible to the
+    /// workload, so the agent cannot forge the integrity pins host tooling trusts).
+    /// Default `true`; set `false` for a workload where host-side trigger trust is
+    /// irrelevant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<bool>,
 }
 
 /// Parse source-policy TOML bytes into a [`SourcePolicy`].
