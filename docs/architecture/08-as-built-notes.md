@@ -57,43 +57,6 @@ narration is kept here; the chapter named is the source of truth.
   rather than kept as design-level language. No shipped template uses it: `containerised-service`
   runs the service directly under the kennel (the kennel *is* the container).
 
-### Config-schema reference — documentation gaps owed (audit 2026-06-11)
-
-The schema reference (`02-2-config-schema.md`) is built: it carries full field-level tables for
-`[net]`/`[net.*]` and `[binder]`/`[ipc.spawn]`, and **delegates** every other section's
-field-by-field detail to its design chapter (§7.x). An audit of those delegation targets — checked
-against the parser structs in `src/crates/kennel-lib-policy/src/source.rs` as ground truth — found
-most resolve, but these do not. The mechanism is done; what is owed is backfilling these specific
-field tables (in the §7.x chapter, or pulled into `02-2`). Two are correctness bugs, not just
-omissions, because the doc names fields the parser does not accept (or vice versa).
-
-- **`[unix]` / `[[unix.allow]]`** (`07-6-afunix.md` §7.6.4) — **WRONG, not just thin.** The doc
-  documents the superseded shim-model field names `path`/`access`; the parser's `UnixAllow`
-  accepts `name`/`real`/`shim`/`env`/`reason`/`threats`. The doc also describes `[[unix.deny]]`
-  and `[[unix.allow_abstract]]` tables that the parser rejects (`deny_unknown_fields`). A policy
-  copied from the doc fails to parse. Owed: rewrite §7.6.4 to the real `UnixAllow` schema.
-- **`[lifecycle]`** (`09-policy-lifecycle.md` §9.7) — **PROSE-ONLY, with a stale source comment.**
-  No field table: `ttl` format/limits and the `ttl_action` enum are not specified. The accepted
-  `ttl_action` set is `exit | stop(alias) | warn | renew` (see `translate.rs` ~L880), but the
-  `LifecycleSection` doc-comment in `source.rs` claims only `"stop"/"warn"` — fix the comment too.
-  Owed: a `ttl`/`ttl_action` field table; note `reconsent_interval` (§9.8) is designed-not-built
-  and would be rejected at parse.
-- **`[env]`** (`07-9-other.md` §7.9.2) — **PROSE-ONLY.** Parser `EnvSection` is `pass`/`deny`/`set`;
-  the doc covers `set` by example and explicitly (and wrongly) says there is "no `pass` list".
-  Owed: a field table for all three.
-- **`[seccomp]`** (`07-9-other.md` §7.9.6) — **PARTIAL.** Parser is `profile`/`deny`/`allow`; the
-  doc omits `allow`. Owed: add `allow`.
-- **`[fs.*]` subtables** (`07-4-filesystem.md`) — **PARTIAL/PROSE-ONLY.** No field tables for
-  `[fs.home].persist`/`.readonly`, `[fs.tmp].mode`, `[fs.proc]` (`visibility`/`hidepid`), or
-  `[fs.dev]` (`allow`/`passthrough`) + `[[fs.dev.passthrough]].threats.mitigated`. The §7.4.4
-  prose also names `create`/`exec_allowed_from`, which the parser does not accept (verify and
-  strike). Owed: per-subtable field tables + reconcile the phantom fields.
-- **`[identity]`** (`07-4-filesystem.md` §7.4.8) — **PARTIAL.** `groups` shown by example; `user`
-  and `group` (both default `kennel`) appear only in prose. Owed: a three-field table.
-
-Clean (delegation resolves, no action): `[exec]` (§7.3.4), `[ssh]`/`[[ssh.destinations]]`
-(§7.10.8), `[ulimits]` (§7.4.12), `[cap]`/`[proc]`/`[ptrace]`/`[signal]` (§7.9.1/§7.9.3).
-
 ### Built — now described in the chapters
 
 Each graduated from this roadmap; its as-built detail lives in the named architecture
@@ -210,6 +173,15 @@ chapter (and the design § for the mechanism). No build notes are kept here.
 - **`kennel-checksum-verify`** — settled, not owed: the shell witness
   `src/tools/verify-checksums.sh` is the implementation (`06-build-and-test.md`); a Rust twin
   is a contingent §5.5.1 `sha2`-vendoring call.
+- **Config-schema reference — complete** (the 2026-06-11 documentation-gaps audit is closed).
+  `02-2-config-schema.md` now carries a field-level table for **every** section, kept exact
+  against the parser structs in `kennel-lib-policy/src/source.rs` (`[net]`/`[net.*]` and
+  `[binder]`/`[ipc.spawn]` inline as before; `[exec]`/`[fs.*]`/`[identity]`/`[env]`/`[cap]`/
+  `[seccomp]`/`[proc]`/`[ptrace]`/`[signal]`/`[lifecycle]`/`[ssh]`/`[unix]`/`[workload]`/
+  `[ulimits]`/`[audit.*]` in §The remaining sections). The earlier correctness bugs — the
+  `[unix]` `path`/`access` phantom fields, the `[env]` "no `pass`" claim, the `[fs]`
+  `create`/`exec_allowed_from` phantoms, and the `ttl_action` enum — are reconciled in the
+  design chapters and the `source.rs` doc-comments too.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

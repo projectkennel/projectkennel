@@ -74,7 +74,7 @@ The full section list:
 | `[lifecycle]` | TTL and TTL-action | §9 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
-This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for `[net]` and `[net.*]` (the §The `[net]` section below, kept exact against the parser). Each other section's specific fields are documented in the corresponding design-document chapter; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
+This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for **every** section — `[net]`/`[net.*]` in §The `[net]` section, the rest in §The remaining sections — field reference, both kept exact against the parser. The §7.x design chapters carry the *rationale* for each section; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
 
 ---
 
@@ -619,6 +619,199 @@ policy-compile error** — not a runtime check (design §7.1.4) — for any `[[b
 `[[binder.consume]]` `name` to begin with `org.projectkennel.`; only kenneld registers under that
 prefix. The compiler rejects such a policy by name, the same way it rejects an out-of-range
 `[net.mode]`.
+
+---
+
+## The remaining sections — field reference
+
+The `[net.*]` and `[binder]`/`[ipc.spawn]` sections are documented in full above. This section gives the field-level schema for every other section, kept exact against the parser (`kennel-lib-policy/src/source.rs`). Every struct is `#[serde(deny_unknown_fields)]`: a key not named here is rejected at parse. The design rationale for each lives in the §7.x chapter named in its heading.
+
+### `[exec]` — what may be `execve()`'d (§7.3)
+
+Execution is **deny-by-default**: an empty or absent `allow` denies all execve. A bare `**`/`/**` in `allow` is the explicit `permissive-exec` opt-out (the one case the compiler warns on).
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `allow` | array of path globs | absent → deny all | The execve allowlist. Accepts `~` and globs (§Path syntax). |
+| `deny` | array of path globs | none | Carves exceptions out of `allow` (refused even if an `allow` glob would admit). |
+| `deny_setuid` | bool | true (invariant) | Refuse setuid binaries at execve. |
+| `deny_setgid` | bool | true (invariant) | Refuse setgid binaries. |
+| `deny_setcap` | bool | true (invariant) | Refuse file-capability binaries. |
+| `deny_writable` | bool | true (invariant) | Refuse executing files in writable paths. |
+| `path` | array of strings | — | `$PATH` search roots recorded for the workload's environment (persona strings, §The home and the persona). |
+| `shell` | string | `/bin/sh` | The kennel's login shell (synthetic `passwd` `pw_shell` + `$SHELL`); must be in `allow` when an allowlist is enforced. |
+
+### `[fs]` and `[fs.*]` — filesystem access and shim construction (§7.4)
+
+`[fs]` scalars:
+
+| Field | Type | Notes |
+|---|---|---|
+| `read` | array of path globs | Paths granted read (and directory traversal / execute). |
+| `write` | array of path globs | Paths granted write (covers create/modify/delete — there is no separate `create` field). |
+| `deny` | array of path globs | Categorical denies, belt-and-braces over the constructed view, evaluated before any allow. |
+
+`[fs.home]` — the constructed `$HOME` shim (mandatory once resolved):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `shadow` | bool | true (invariant) | Whether `$HOME` is a constructed view (must be true once resolved). |
+| `persist` | array of home-relative paths | `[]` | Paths that **persist** writably across runs; everything else is reconstructed read-only each spawn (the self-persistence trade-off, surfaced in the diff). §7.9.2a. |
+| `readonly` | bool | false | Make the constructed `$HOME` read-only (suppresses the default home write grant; only `write`-granted `~/` paths stay writable). |
+
+`[fs.tmp]` — private `/tmp`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `private` | bool | Whether `/tmp` is a private tmpfs. |
+| `size` | string | Size cap, human form (`"512M"`, `"1G"`); resolved to MiB in the settled policy. |
+| `mode` | string | Mount mode, octal digits (`"0700"`). |
+
+`[fs.proc]` — procfs (mirrors `[proc]`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `visibility` | string | `"self"` is the only permitted value once resolved. |
+| `hidepid` | bool | Mount `/proc` with `hidepid=2`. |
+
+`[fs.dev]` — the constructed `/dev`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `allow` | array of paths | Trivial pseudo-device baseline (`/dev/null`, `/dev/urandom`, `/dev/tty`, …). |
+| `[[fs.dev.passthrough]]` | array of tables | Specific **real host devices** (a serial console, `/dev/ppp`, `/dev/net/tun`) — see below. §7.4.8. |
+
+`[[fs.dev.passthrough]]` entry:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `path` | string | yes | The device node, an absolute path under `/dev`. Bound from the host preserving owner/group/mode. |
+| `group` | string | — | The owning group that DAC-gates access (`dialout`, …); the user must already be a member. |
+| `reason` | string | yes | Why this device is exposed. |
+| `threats` | table | yes (`exposed`) | Threat tags — must carry an `exposed` tag (passthrough widens the kernel attack surface). |
+
+### `[identity]` — masked persona + supplementary groups (§7.4)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `user` | string | `kennel` | The masked user name (`$USER`/`$LOGNAME`, synthetic `passwd` account, base of `/home/<user>`). |
+| `group` | string | `kennel` | The masked **primary** group name. |
+| `groups` | array of strings | `[]` | **Supplementary** groups to retain; the operator must be a member of each (a group the user lacks is refused, never granted). Groups named by `[[fs.dev.passthrough]]` are added automatically. |
+
+### `[env]` — environment curation (§7.9)
+
+The environment is **synthesised** from policy, not inherited; a `pass`-from-parent grant is a discouraged, per-variable opt-in (warned, never the default — §7.9.2).
+
+| Field | Type | Notes |
+|---|---|---|
+| `pass` | array of globs | Variables passed through from the caller's environment (discouraged). |
+| `deny` | array of globs | Variables denied even if `pass`ed. |
+| `set` | table of string→string | Variables forced to a specific value (the recommended path). |
+
+### `[cap]` — capabilities and `no_new_privs` (§7.9)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `no_new_privs` | bool | true (invariant) | `PR_SET_NO_NEW_PRIVS`; must be true once resolved. |
+| `bounding_set` | array of strings | `[]` | Capabilities to retain; empty drops them all. |
+
+### `[seccomp]` — the seccomp filter (§7.9)
+
+The source carries a deny list; the resolver produces the settled allow list + default action.
+
+| Field | Type | Notes |
+|---|---|---|
+| `profile` | string | The baseline profile name (`"default"`). |
+| `deny` | array of strings | Syscalls denied on top of the profile. |
+| `allow` | array of strings | Syscalls explicitly allowed. |
+
+### `[proc]`, `[ptrace]`, `[signal]` — boundary controls (§7.9)
+
+`[proc]` (procfs visibility; mirrors `[fs.proc]`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `visibility` | string | `"self"` only, once resolved. |
+| `hidepid` | bool | Mount `/proc` with `hidepid=2`. |
+
+`[ptrace]` and `[signal]` share the same shape (across the kennel boundary):
+
+| Field | Type | Notes |
+|---|---|---|
+| `allow_targets` | array of strings | Permitted ptrace/signal targets (`"self"`, …). |
+| `allow_from` | array of strings | Permitted ptrace/signal sources. |
+
+### `[lifecycle]` — TTL and TTL action (§9.7)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `ttl` | string | none | Time-to-live, human form (`"8h"`, `"30m"`); resolved to seconds. |
+| `ttl_action` | string | `"exit"` | `"exit"` (alias `"stop"`) ends the kennel at expiry; `"warn"` emits an audit event and leaves it running; `"renew"` is an audited `warn` today (the interactive prompt is owed). |
+
+### `[ssh]` — per-kennel SSH egress via the re-origination bastion (§7.10)
+
+A kennel never holds a real key. The section is realised by kenneld's bastion; the workload authenticates to it with a per-destination synthetic key bound to a forced command.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `allow_headless` | bool | false | Whether a granted key may be driven by a non-interactive (CI) kennel with no per-use touch. Loud; when true, `threats` must carry an `exposed` tag. |
+| `threats` | table | — | Threat tags for the section. |
+| `[[ssh.destinations]]` | array of tables | `[]` | The SSH egress allowlist — see below. |
+
+`[[ssh.destinations]]` entry:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `dest` | string | yes | The SSH destination (`git@github.com`, a `~/.ssh/config` alias) — the capability the synthetic key stands for, never parsed from the wire. |
+| `options` | array of strings | — | Host-side `ssh` argv tokens before `<dest>` (`-i ~/.ssh/id_x`, `-p 2222`, …), run **as the operator** — names which real key/port/config the hop uses. Passed as separate argv tokens (no shell). |
+| `reason` | string | yes | Why this destination is granted. |
+| `threats` | table | — | Threat tags. |
+
+### `[unix]` — the AF_UNIX socket shim (§7.6)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `default` | string | `"deny"` | The default floor for unlisted sockets. |
+| `abstract` | string | `"deny"` | Abstract-namespace handling (a single toggle; serialised key is `abstract`, parsed to `abstract_ns`). |
+| `[[unix.allow]]` | array of tables | `[]` | The socket allowlist — see below. |
+
+`[[unix.allow]]` entry:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | A logical name for the grant. |
+| `real` | path | The real host socket path the shim connects to (accepts `~`/globs). |
+| `shim` | path | The in-view path the workload sees (accepts `~`/globs). |
+| `env` | string | An environment variable set to the shim path (for tools that read a socket path from env). |
+| `reason` | string | Why this socket is granted. |
+| `threats` | table | Threat tags. |
+
+### `[workload]` — the command the kennel runs
+
+| Field | Type | Notes |
+|---|---|---|
+| `argv` | array of strings | The command + args (`argv[0]` is the program); absent ⇒ supplied at `kennel run`. |
+| `cwd` | string | Working directory inside the view (may carry `~`/`<home>`). |
+| `pinned` | bool | Refuse a CLI `--` override of `argv` unless `--force`. |
+| `sha256` | array of hex strings | Accepted lowercase-hex SHA-256 digests of the workload binary; the spawn verifies before exec. Absent/empty ⇒ no pin. |
+
+### `[ulimits]` — `setrlimit(2)` resource limits (§7.4)
+
+A table of `resource = "limit"` pairs (e.g. `nofile = "4096"`, `nproc = "512"`, `as = "2G"`, `cpu = "60"`). Nothing is set by default; values fold per key up the template chain and are applied in the spawn seal after Landlock.
+
+### `[audit]` and `[audit.*]` — audit sinks and per-class levels (§8.6)
+
+The schema below is the shape; the full sink-parameter and per-class-level semantics live in [`02-3-audit-schema.md`](02-3-audit-schema.md).
+
+`[audit]`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `sinks` | array of strings | Which sinks are active (`"file"`, `"stdout"`, `"syslog"`, `"journald"`). |
+| `[audit.file]` | table | File-sink params: `dir`, `rotate_at_bytes`, `compress_after_seconds`, `retain_count`. |
+| `[audit.syslog]` | table | `facility`. |
+| `[audit.journald]` / `[audit.stdout]` | table | Present-to-enable (no fields). |
+| `[audit.network]` / `[audit.filesystem]` / `[audit.exec]` / `[audit.unix]` / `[audit.dbus]` | table | Per-class `level` override. |
 
 ---
 
