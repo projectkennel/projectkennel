@@ -90,3 +90,11 @@ sudo apparmor_parser -r -W /etc/apparmor.d/kenneld
 
 > [!NOTE]
 > If you used a custom `--prefix` during installation (for example, `/usr/libexec`), edit the profile path `/usr/libexec/kennel/kenneld` inside `/etc/apparmor.d/kenneld` to match the actual installed `kenneld` binary path.
+
+---
+
+## Next steps
+
+- **Operating a host** (trust store, signing keys, systemd, per-user provisioning, the config cascade, upgrades): [HOWTO-admin.md](HOWTO-admin.md).
+- **Running and authoring policies** (your first kennel, confining an agent, writing/signing a policy, reading the audit log): [HOWTO.md](HOWTO.md).
+- **Reference**: the installed man pages — `man kennel`, `man kenneld`, `man policy.toml`, `man system.toml`, `man subkennel`.
