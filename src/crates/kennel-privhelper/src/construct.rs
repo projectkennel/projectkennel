@@ -210,6 +210,13 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         }
     }
 
+    // 1a-bis. Ensure the binder filesystem is available BEFORE the construction child tries
+    //     to mount its per-kennel binderfs instance. `binder_linux` is not auto-loaded on most
+    //     hosts, and the child mounts in an unprivileged userns where it cannot `modprobe` — so
+    //     the failure would otherwise be a cryptic in-child `mount` ENODEV. We are root here
+    //     (pre-clone), so load it now if `/proc/filesystems` does not already list `binder`.
+    ensure_binderfs(&tracer);
+
     // 1b. Resolve and open the trusted `kennel-bin-init` from the **root-owned** deployment
     //     cascade (`/usr/lib/kennel` → `/etc/kennel`; never a user-writable dir or the
     //     environment — `kennel_lib_config::Deployment::load`). The operator (`kenneld`) does not
@@ -378,6 +385,47 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    the orphaned init and `waitpid`s it directly for the workload's exit status. One
     //    fewer resident host process per kennel.
     Ok(0)
+}
+
+/// Ensure the `binder` filesystem type is registered, loading `binder_linux` if not.
+///
+/// binderfs (`FS_USERNS_MOUNT`) is what every kennel mounts for its per-kennel bus, but the
+/// `binder_linux` module is not auto-loaded on a typical host — and the construction child
+/// mounts it in an unprivileged user namespace where `modprobe` is impossible. We run as root
+/// here (before the clone), so we load it once: cheap, idempotent (`modprobe` no-ops if the
+/// module is already in), and gated on `/proc/filesystems` so the common case (already loaded)
+/// costs only a read. Best-effort — a `modprobe` failure is logged, not fatal: a host with
+/// binder built-in (no module) still lists it, and a genuinely binder-less host fails later at
+/// the child's `mount` with a clear ENODEV either way.
+fn ensure_binderfs(tracer: &kennel_lib_config::Tracer) {
+    if binderfs_registered() {
+        return;
+    }
+    tracer.step("construct: `binder` fs absent from /proc/filesystems — modprobe binder_linux");
+    match std::process::Command::new("modprobe")
+        .arg("binder_linux")
+        .status()
+    {
+        Ok(s) if s.success() => {
+            if !binderfs_registered() {
+                tracer.step(
+                    "construct: modprobe binder_linux succeeded but `binder` still not registered",
+                );
+            }
+        }
+        Ok(s) => tracer.step(&format!("construct: modprobe binder_linux exited {s}")),
+        Err(e) => tracer.step(&format!(
+            "construct: could not run modprobe binder_linux: {e}"
+        )),
+    }
+}
+
+/// Whether the kernel has registered the `binder` filesystem (read `/proc/filesystems`).
+fn binderfs_registered() -> bool {
+    std::fs::read_to_string("/proc/filesystems").is_ok_and(|s| {
+        s.lines()
+            .any(|l| l.split_whitespace().any(|f| f == "binder"))
+    })
 }
 
 /// Place the descriptors `kennel-bin-init` inherits at the fixed numbers it reads — the boot-sync

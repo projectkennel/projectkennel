@@ -779,10 +779,18 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
         let _ = tx_in.send(SessionEnd::Remote);
     });
 
-    // broker → stdout.
+    // broker → stdout. Write to a `File` over the raw stdout fd, NOT `io::stdout()`: the
+    // latter is a `LineWriter` against a terminal, which holds any bytes after the last
+    // newline — so a shell prompt (`$ `, no trailing newline) would sit buffered until the
+    // next newline echoed, making every prompt invisible until you hit Enter. A `File` is
+    // unbuffered, so each chunk the broker sends reaches the terminal immediately.
+    let stdout_dup = io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("stdout dup: {e}"))?;
     let mut out_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
     std::thread::spawn(move || {
-        let mut w = io::stdout();
+        let mut w = std::fs::File::from(stdout_dup);
         let _ = std::io::copy(&mut out_sock, &mut w);
         let _ = tx.send(SessionEnd::Remote);
     });
