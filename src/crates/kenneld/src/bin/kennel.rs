@@ -65,6 +65,11 @@ const COMMANDS: &[CommandSpec] = &[
         usage: "attach <name>",
     },
     CommandSpec {
+        name: "review",
+        summary: "review + re-pin a workspace's trust manifest after legitimate edits",
+        usage: "review <policy> [--yes]",
+    },
+    CommandSpec {
         name: "stop",
         summary: "stop a running kennel",
         usage: "stop <name>",
@@ -199,6 +204,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     match cmd.as_str() {
         "run" => run(rest),
         "attach" => attach(rest),
+        "review" => review(rest),
         "stop" => stop(rest),
         "list" => list(),
         "policy" => dispatch_policy(rest),
@@ -470,6 +476,129 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
             Err(e) => eprintln!("kennel: could not serialise {}: {e}", path.display()),
         }
     }
+}
+
+/// `kennel review <policy> [--yes]` — the operator's sign-off on a workspace's trust
+/// manifest after legitimate edits (T2.8). The confined workload cannot update the manifest
+/// (it is masked), so changed/added execution triggers stay flagged until a human re-pins
+/// them here, host-side.
+///
+/// Resolves `<policy>` to its settled artefact (like `run`, preferring the compiled
+/// `<name>.settled.toml`), reads each writable root's `.trust-manifest.json`, and shows a
+/// diff of modified / removed / new triggers. With `--yes` (or on a `y` prompt) it
+/// re-pins: adopts the on-disk hashes and overwrites the manifest, so the host IDE unlocks.
+fn review(args: &[String]) -> Result<ExitCode, String> {
+    let mut policy_arg: Option<&str> = None;
+    let mut assume_yes = false;
+    for a in args {
+        match a.as_str() {
+            "--yes" | "-y" => assume_yes = true,
+            other if other.starts_with('-') => {
+                return Err(format!("kennel review: unknown flag `{other}`"));
+            }
+            other => {
+                if policy_arg.replace(other).is_some() {
+                    return Err("usage: kennel review <policy> [--yes]".to_owned());
+                }
+            }
+        }
+    }
+    let policy_arg = policy_arg.ok_or("usage: kennel review <policy> [--yes]")?;
+    let (policy_file, _name) = resolve_policy(policy_arg, true)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    if is_source_policy(&bytes) {
+        return Err(format!(
+            "`{}` is a source policy — compile it first (`kennel policy compile {policy_arg}`), then review the settled artefact",
+            policy_file.display()
+        ));
+    }
+    let policy = kennel_lib_policy::parse_settled_unverified(&bytes)
+        .map_err(|e| format!("reading settled policy {}: {e}", policy_file.display()))?;
+    if !policy.effective_policy.trust.manifest {
+        eprintln!("kennel: `[trust].manifest = false` for this policy — nothing to review");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set")?;
+    let generator = format!("kennel {}", env!("CARGO_PKG_VERSION"));
+
+    let mut roots_reviewed = 0usize;
+    let mut total_divergences = 0usize;
+    for entry in &policy.effective_policy.fs.write {
+        let Some(root) = writable_root(entry, &home) else {
+            continue;
+        };
+        let manifest_path = kennel_lib_manifest::manifest_path(&root);
+        if !manifest_path.is_file() {
+            continue; // no manifest at this root (e.g. not generated yet)
+        }
+        roots_reviewed = roots_reviewed.saturating_add(1);
+        let raw = std::fs::read(&manifest_path)
+            .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
+        let mut manifest = kennel_lib_manifest::Manifest::from_json(&raw)
+            .map_err(|e| format!("parsing {}: {e}", manifest_path.display()))?;
+        let changes = kennel_lib_manifest::review(&manifest, &root)
+            .map_err(|e| format!("reviewing {}: {e}", root.display()))?;
+        let divergences: Vec<_> = changes.iter().filter(|c| c.is_divergence()).collect();
+        if divergences.is_empty() {
+            println!("{}: no changes", root.display());
+            continue;
+        }
+        total_divergences = total_divergences.saturating_add(divergences.len());
+        println!("{}:", root.display());
+        for change in &divergences {
+            print_trigger_change(change);
+        }
+        let approved = assume_yes || prompt_yes(&format!("re-pin {}?", manifest_path.display()))?;
+        if approved {
+            kennel_lib_manifest::apply_review(&mut manifest, &changes, &generator);
+            let json = manifest
+                .to_json()
+                .map_err(|e| format!("serialising {}: {e}", manifest_path.display()))?;
+            std::fs::write(&manifest_path, json)
+                .map_err(|e| format!("writing {}: {e}", manifest_path.display()))?;
+            println!("  re-pinned {}", manifest_path.display());
+        } else {
+            println!("  left unchanged");
+        }
+    }
+
+    if roots_reviewed == 0 {
+        eprintln!("kennel: no trust manifests found for `{policy_arg}` (none generated yet?)");
+    } else if total_divergences == 0 {
+        eprintln!("kennel: all trust manifests are clean");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Print one `git diff`-style line for a trigger change.
+fn print_trigger_change(change: &kennel_lib_manifest::TriggerChange) {
+    use kennel_lib_manifest::TriggerChange;
+    match change {
+        TriggerChange::Modified { path, .. } => println!("  ~ {path} (modified)"),
+        TriggerChange::Removed { path } => println!("  - {path} (removed)"),
+        TriggerChange::New { path, .. } => println!("  + {path} (new, unpinned)"),
+        TriggerChange::Unchanged { .. } => {}
+    }
+}
+
+/// Prompt `question` on stderr and read a `y`/`n` answer from stdin. Non-`y` (incl. EOF) is
+/// "no". A non-terminal stdin defaults to "no" — an unattended `review` never auto-re-pins
+/// (use `--yes` to opt into that explicitly).
+fn prompt_yes(question: &str) -> Result<bool, String> {
+    use std::io::Write as _;
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprint!("{question} [y/N] ");
+    io::stderr().flush().map_err(|e| format!("stderr: {e}"))?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("stdin: {e}"))?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
 /// Resolve a settled `fs.write` entry to its host directory root: expand a leading

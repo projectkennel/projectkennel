@@ -92,6 +92,11 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "reattach a terminal to a running kennel (Ctrl-\\ d to detach)",
         "attach <name>",
     ),
+    (
+        "review",
+        "review + re-pin a workspace's trust manifest after legitimate edits",
+        "review <policy> [--yes]",
+    ),
     ("stop", "stop a running kennel", "stop <name>"),
     ("list", "list running kennels", "list"),
     (
