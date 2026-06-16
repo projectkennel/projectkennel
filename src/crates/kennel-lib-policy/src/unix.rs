@@ -21,13 +21,17 @@
 //!   to. (A future ABI-gated escape hatch may revisit this.)
 //! - **Every `[[unix.allow]]` has `real` and `shim`.** A shim is a bind mount from a
 //!   real host path to a path in the view; both ends are required.
-//! - **A `[[unix.allow]]` that shims an SSH agent is a *footgun*, warned not forbidden.**
-//!   An exposed ssh-agent socket is a destination-blind signing oracle (§7.10.1); the
-//!   intended path for SSH egress is the `[ssh]` section and the §7.10 re-origination
-//!   bastion. But a policy author *may* deliberately shim a real agent — the framework
-//!   warns loudly (here at compile, and again at runtime when `kenneld` realises the
-//!   shim) rather than amputating the choice. An entry named `ssh-agent` or setting
-//!   `SSH_AUTH_SOCK` raises a warning with that pointer; it does not fail the compile.
+//! - **A `[[unix.allow]]` that shims an SSH or GPG agent is a *footgun*, warned not
+//!   forbidden.** An exposed `ssh-agent` socket is a destination-blind signing oracle
+//!   (§7.10.1); a `gpg-agent` socket is the same oracle and worse (a signature stamps the
+//!   user's identity permanently onto arbitrary artefacts — there is no bastion equivalent,
+//!   design §11.1). The intended path for SSH egress is the `[ssh]` section and the §7.10
+//!   re-origination bastion; for commit signing the safe default is to sign on the host.
+//!   But a policy author *may* deliberately shim a real agent — the framework warns loudly
+//!   (here at compile, and again at runtime when `kenneld` realises the shim) rather than
+//!   amputating the choice. An entry named `ssh-agent`/`gpg-agent` or setting
+//!   `SSH_AUTH_SOCK`/`GPG_AGENT_INFO` raises a warning with that pointer; it does not fail
+//!   the compile.
 //!
 //! Validation runs on the *resolved* policy (chain folded, includes applied, leaf
 //! deltas merged). The required-`reason` check lives in `SourcePolicy::validate`.
@@ -108,6 +112,27 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
                  an exposed agent is a destination-blind signing oracle (§7.10.1). This is the intended \
                  job of the [ssh] section and the §7.10 re-origination bastion — shim a raw agent only if \
                  you accept that any code in the kennel can sign for any destination"
+            ));
+        }
+        // A gpg-agent socket is the same destination-blind oracle and WORSE: a signing
+        // oracle stamps the user's verified identity permanently onto arbitrary artefacts
+        // (malware, releases, forged commits), not just one authenticated session. There
+        // is no bastion equivalent (commit signing is data-integrity, not transport — the
+        // §7.10 re-origination trick does not carry over; design §11.1). Warned, not
+        // forbidden, per the footgun discipline.
+        let shims_gpg = a
+            .name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case("gpg-agent"))
+            || a.env.as_deref() == Some("GPG_AGENT_INFO");
+        if shims_gpg {
+            warnings.push(format!(
+                "[[unix.allow]] `{who}` shims a GPG agent (name = \"gpg-agent\" / env = \"GPG_AGENT_INFO\"): \
+                 an exposed agent is a destination-blind signing oracle — worse than ssh-agent, because a \
+                 signature permanently stamps your identity onto whatever the kennel asks it to sign \
+                 (malware, releases, forged commits). There is no bastion equivalent (design §11.1). Shim \
+                 it only if you accept that any code in the kennel can sign as you; the safe default is to \
+                 leave commit signing to the host (the workload commits unsigned)"
             ));
         }
     }
@@ -218,6 +243,26 @@ mod tests {
     }
 
     #[test]
+    fn a_gpg_agent_shim_warns_but_is_allowed_by_name() {
+        let unix = UnixSection {
+            allow: vec![allow(
+                "gpg-agent",
+                "~/.gnupg/kennels/<kennel>/S.gpg-agent",
+                "~/.gnupg/S.gpg-agent",
+            )],
+            ..UnixSection::default()
+        };
+        // Same footgun as ssh-agent, worse oracle: permitted, loudly warned.
+        let warnings = validate(&policy_with(unix)).expect("allowed with a warning");
+        assert!(
+            warnings
+                .iter()
+                .any(|s| s.contains("GPG agent") && s.contains("destination-blind")),
+            "gpg-agent shim must warn about the signing oracle: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn an_ssh_auth_sock_env_warns_but_is_allowed() {
         let mut a = allow("custom", "/run/x.sock", "~/.ssh/agent.sock");
         a.env = Some("SSH_AUTH_SOCK".to_owned());
@@ -231,10 +276,16 @@ mod tests {
 
     #[test]
     fn a_clean_grant_yields_no_warnings() {
+        // A non-agent socket: no signing-oracle footgun, so no warning. (An `ssh-agent`
+        // or `gpg-agent` grant deliberately DOES warn — see the dedicated tests above.)
         let unix = UnixSection {
             default: Some("deny".to_owned()),
             abstract_ns: Some("deny".to_owned()),
-            allow: vec![allow("gpg-agent", "/run/gpg.sock", "~/.gnupg/S.gpg-agent")],
+            allow: vec![allow(
+                "app-bus",
+                "/run/user/1000/app.sock",
+                "~/.local/run/app.sock",
+            )],
         };
         assert!(validate(&policy_with(unix)).expect("valid").is_empty());
     }

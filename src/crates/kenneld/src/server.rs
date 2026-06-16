@@ -886,6 +886,17 @@ pub fn run_kennel<P, L>(
                 req.kennel, sock.name
             );
         }
+        let shims_gpg_agent = sock.name.eq_ignore_ascii_case("gpg-agent")
+            || sock.env.as_deref() == Some("GPG_AGENT_INFO");
+        if shims_gpg_agent {
+            eprintln!(
+                "kenneld: warning: kennel `{}` shims a GPG agent (`{}`): an exposed agent is a \
+                 destination-blind signing oracle — worse than ssh-agent, a signature stamps your \
+                 identity onto whatever the kennel signs (malware, releases, forged commits). There \
+                 is no bastion equivalent (design §11.1); the safe default is to sign on the host.",
+                req.kennel, sock.name
+            );
+        }
     }
     // The audit runtime (§02-3): the installation/per-user `audit.toml` defaults
     // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
