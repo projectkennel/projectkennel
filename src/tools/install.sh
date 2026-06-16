@@ -26,11 +26,16 @@
 #
 # Usage:
 #   sudo tools/install.sh [--prefix DIR] [--no-build] [--dry-run]
+#                         [--provision-users [GROUP]]
 #
-#   --prefix DIR   libexec dir for the binaries (default: /usr/libexec/kennel)
-#   --mandir DIR   man-page root (default: /usr/share/man; pages go in manN/)
-#   --no-build     install the binaries already in target/release (skip cargo)
-#   --dry-run      print the actions without performing them
+#   --prefix DIR          libexec dir for the binaries (default: /usr/libexec/kennel)
+#   --mandir DIR          man-page root (default: /usr/share/man; pages go in manN/)
+#   --no-build            install the binaries already in target/release (skip cargo)
+#   --dry-run             print the actions without performing them
+#   --provision-users [G] write a /etc/kennel/subkennel allocation for every member of
+#                         group G (default `users`) — one per uid that lacks one. We are
+#                         root during install, so this saves each user the manual
+#                         `kennel subkennel add` + sudo-append. Omit to provision nobody.
 #
 # This script is reviewed like any other code (CODING-STANDARDS.md §15.4):
 # POSIX-ish bash, `set -euo pipefail`, no network calls, idempotent.
@@ -46,6 +51,7 @@ vendor_dir="/usr/lib/kennel"
 mandir="/usr/share/man"
 do_build=1
 dry_run=0
+provision_group=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -53,7 +59,16 @@ while [ $# -gt 0 ]; do
 		--mandir) mandir="${2:?--mandir needs a directory}"; shift 2 ;;
 		--no-build) do_build=0; shift ;;
 		--dry-run) dry_run=1; shift ;;
-		-h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+		# Provision a /etc/kennel/subkennel allocation for every member of GROUP
+		# (default `users`). We are root, so we can write the file directly — saving
+		# each member the manual `kennel subkennel add` step. Optional GROUP follows.
+		--provision-users)
+			if [ -n "${2:-}" ] && [ "${2#--}" = "$2" ]; then
+				provision_group="$2"; shift 2
+			else
+				provision_group="users"; shift
+			fi ;;
+		-h|--help) sed -n '2,40p' "$0"; exit 0 ;;
 		*) echo "install.sh: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -216,6 +231,56 @@ install_templates() {
 	done
 }
 
+provision_subkennel_users() {
+	# For every member of $provision_group, append a /etc/kennel/subkennel allocation
+	# (one per uid that lacks one). We drive `kennel subkennel add --uid N`, which owns
+	# the allocation invariants — lowest free 12-bit tag, a fresh non-colliding 40-bit
+	# ULA gid, and skip-if-already-present — and prints the file line on stdout. We
+	# append after EACH user so the next invocation sees it and never reuses a tag.
+	[ -n "$provision_group" ] || return 0
+	local sub=/etc/kennel/subkennel kbin="$libexec/kennel"
+	if [ ! -x "$kbin" ]; then
+		echo "install.sh: $kbin not found; cannot auto-provision subkennel" >&2
+		return 0
+	fi
+	local members uid name line
+	# Group members = the group line's comma list PLUS anyone whose PRIMARY gid is it.
+	local gid; gid="$(getent group "$provision_group" | cut -d: -f3)"
+	if [ -z "$gid" ]; then
+		echo "install.sh: group '$provision_group' not found; skipping auto-provision" >&2
+		return 0
+	fi
+	members="$(
+		{ getent group "$provision_group" | cut -d: -f4 | tr ',' '\n'
+		  getent passwd | awk -F: -v g="$gid" '$4==g {print $1}'
+		} | sed '/^$/d' | sort -u
+	)"
+	run install -d -m 0755 /etc/kennel
+	[ -e "$sub" ] || run touch "$sub"
+	echo "install.sh: provisioning subkennel allocations for group '$provision_group'"
+	local count=0
+	for name in $members; do
+		uid="$(id -u "$name" 2>/dev/null)" || continue
+		if grep -q "^${uid}:" "$sub" 2>/dev/null; then
+			echo "  - $name (uid $uid): already allocated"
+			continue
+		fi
+		if [ "$dry_run" -eq 1 ]; then
+			echo "  DRY-RUN: kennel subkennel add --uid $uid  >> $sub"
+			continue
+		fi
+		# Capture only stdout (the line); the human guidance goes to stderr.
+		if line="$("$kbin" subkennel add --uid "$uid" --file "$sub" 2>/dev/null)" && [ -n "$line" ]; then
+			printf '%s\n' "$line" >> "$sub"
+			echo "  + $name (uid $uid): $line"
+			count=$((count + 1))
+		else
+			echo "  ! $name (uid $uid): allocation failed (tags exhausted?)" >&2
+		fi
+	done
+	echo "install.sh: provisioned $count new allocation(s) in $sub"
+}
+
 print_next_steps() {
 	# Run the post-install checks ourselves and report PASS/ATTN, rather than telling
 	# the operator what to go check. Then print a copy-pastable per-user bring-up block,
@@ -269,6 +334,17 @@ print_next_steps() {
 		fi
 	fi
 
+	# Step 2 (claim an allocation) is unnecessary for users we just auto-provisioned.
+	local step2
+	if [ -n "$provision_group" ]; then
+		step2="  # (subkennel allocations were auto-provisioned for group '$provision_group' — skip this)
+  # kennel subkennel add   # only if your uid is NOT in that group"
+	else
+		step2="  # 2. claim a subkennel allocation. This prints the exact 'sudo' line to append it
+  #    (the file is root-owned, so the CLI cannot write it itself) — paste that next:
+  kennel subkennel add"
+	fi
+
 	cat <<EOF
 
 Per-user bring-up — run these as the user who will run kennels (NOT root):
@@ -276,9 +352,7 @@ $uid_line
   # 1. reach the helper binaries (kennel lives under libexec, off PATH by design):
   export PATH="\$PATH:$libexec"
 
-  # 2. claim a subkennel allocation. This prints the exact 'sudo' line to append it
-  #    (the file is root-owned, so the CLI cannot write it itself) — paste that next:
-  kennel subkennel add
+$step2
 
   # 3. start the per-user daemon (socket-activated on first use):
   systemctl --user enable --now kenneld.socket
@@ -311,4 +385,5 @@ install_apparmor
 install_etc_skeleton
 install_keys
 install_templates
+provision_subkennel_users
 [ "$dry_run" -eq 1 ] || print_next_steps
