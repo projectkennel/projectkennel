@@ -474,6 +474,142 @@
             font-weight: 600
         }
 
+        /* code snippets — terminal + policy */
+        .snippet {
+            font-family: var(--mono);
+            font-size: 13.5px;
+            line-height: 1.7;
+            color: var(--ink);
+            background: var(--paper-2);
+            border: 1px solid var(--rule-2);
+            border-radius: 10px;
+            padding: 20px 22px;
+            margin: 0 0 18px;
+            overflow-x: auto;
+            white-space: pre;
+            tab-size: 2;
+        }
+
+        .snippet .c {
+            color: var(--blue-soft)
+        }
+
+        /* a shell-prompt comment */
+        .snippet .p {
+            color: var(--blue);
+            font-weight: 500
+        }
+
+        /* the leading $ / token */
+        .snippet .k {
+            color: var(--ink-strong);
+            font-weight: 600
+        }
+
+        /* a keyword/name worth emphasis */
+        .snip-cap {
+            font-family: var(--mono);
+            font-size: 12px;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: var(--blue-soft);
+            margin: 0 0 10px
+        }
+
+        /* the verbs reference */
+        .verbs {
+            display: grid;
+            grid-template-columns: max-content 1fr;
+            gap: 6px 22px;
+            font-size: 16px;
+            margin: 2px 0 0;
+            align-items: baseline
+        }
+
+        .verbs code {
+            font-family: var(--mono);
+            font-size: 13.5px;
+            color: var(--ink-strong);
+            white-space: nowrap
+        }
+
+        .verbs span {
+            color: var(--blue-soft);
+            line-height: 1.5
+        }
+
+        @media(max-width:680px) {
+            .verbs {
+                grid-template-columns: 1fr;
+                gap: 2px 0
+            }
+
+            .verbs span {
+                margin-bottom: 10px
+            }
+        }
+
+        /* status: built vs roadmap */
+        .status {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1px;
+            background: var(--rule-2);
+            border: 1px solid var(--rule-2);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-top: 8px
+        }
+
+        @media(max-width:680px) {
+            .status {
+                grid-template-columns: 1fr
+            }
+        }
+
+        .status>div {
+            background: var(--paper-2);
+            padding: 24px 24px
+        }
+
+        .status h4 {
+            font-family: var(--mono);
+            font-size: 12px;
+            letter-spacing: .1em;
+            text-transform: uppercase;
+            margin: 0 0 12px;
+            color: var(--blue-soft)
+        }
+
+        .status ul {
+            margin: 0;
+            padding: 0;
+            list-style: none
+        }
+
+        .status li {
+            font-size: 15px;
+            line-height: 1.5;
+            color: var(--ink);
+            padding: 4px 0 4px 20px;
+            position: relative
+        }
+
+        .status li::before {
+            position: absolute;
+            left: 0;
+            color: var(--blue)
+        }
+
+        .status .built li::before {
+            content: "\2713"
+        }
+
+        .status .road li::before {
+            content: "\2192";
+            color: var(--blue-soft)
+        }
+
         /* where it fits */
         .cols {
             display: grid;
@@ -708,9 +844,10 @@
                 <a href="#why">Why</a>
                 <a href="#project">The practice</a>
                 <a href="#what">Runtime</a>
+                <a href="#try">Try it</a>
                 <a href="#how">How</a>
-                <a href="#fit">Where it fits</a>
                 <a href="#security">Security</a>
+                <a href="docs.html">Docs</a>
             </nav>
         </div>
     </header>
@@ -968,6 +1105,120 @@
             </div>
         </section>
 
+        <!-- TRY IT -->
+        <section id="try">
+            <div class="wrap">
+                <div class="sec-head rv">
+                    <p class="fig">Get started · on Linux</p>
+                    <h2>From download to a confined agent in three commands.</h2>
+                </div>
+                <div class="prose rv" style="margin-bottom:26px">
+                    <p>Project Kennel is <b>pre-release</b>: the reference runtime is built and runs the full
+                        vertical unprivileged on stock Linux (kernel 6.17, Landlock ABI ≥ 6), but interfaces and
+                        guarantees may still change. The install is offline — prebuilt binaries, no toolchain, no
+                        network — and adds one setuid-root helper for the three host-global operations a user
+                        namespace cannot reach.</p>
+                </div>
+
+                <div class="grid rv" style="grid-template-columns:1fr 1fr">
+                    <div class="cell">
+                        <p class="snip-cap">1 · install (root, once)</p>
+<pre class="snippet"><span class="c"># unpack a release tarball for your arch, then:</span>
+<span class="k">sudo</span> ./install.sh --provision-users</pre>
+                        <p style="font-size:15px;color:var(--blue-soft);margin:0">Installs the binaries under
+                            <code>/usr/libexec/kennel</code>, the per-user systemd units, the AppArmor userns grant,
+                            and the maintainer trust key. <code>--provision-users</code> allocates a subkennel line
+                            for every member of the <code>users</code> group.</p>
+                    </div>
+                    <div class="cell">
+                        <p class="snip-cap">2 · enable the daemon (each user)</p>
+<pre class="snippet"><span class="k">export</span> PATH=$PATH:/usr/libexec/kennel
+<span class="k">systemctl</span> --user enable --now kenneld.socket</pre>
+                        <p style="font-size:15px;color:var(--blue-soft);margin:0"><code>kenneld</code> is an ordinary
+                            user process, socket-activated on first use. No root daemon, no <code>sudo</code> at
+                            runtime.</p>
+                    </div>
+                </div>
+
+                <div class="prose rv" style="margin:26px 0 10px">
+                    <p class="snip-cap">3 · run something inside a kennel</p>
+                </div>
+<pre class="snippet rv"><span class="c"># confine an AI coding agent to this repo, a named toolchain, and a few registries:</span>
+<span class="k">kennel</span> run ai-coding-strict -- claude
+
+<span class="c"># a detachable interactive shell (Ctrl-\ d detaches; reattach later):</span>
+<span class="k">kennel</span> run interactive -- /bin/bash
+<span class="k">kennel</span> attach interactive</pre>
+
+                <div class="prose rv" style="margin-top:30px">
+                    <p>A policy is declarative, signed, version-pinned <b>code</b> — not behaviour, but
+                        kernel-level constraint. The shipped <code>ai-coding-strict</code> template, in part:</p>
+                </div>
+<pre class="snippet rv"><span class="c"># exec: only these binaries may run — nothing else, even if present</span>
+[exec]
+allow = [<span class="p">"/usr/bin/node"</span>, <span class="p">"/usr/bin/git"</span>, <span class="p">"/usr/bin/npm"</span>, <span class="p">"/usr/bin/python3"</span>, <span class="c">…</span>]
+
+<span class="c"># egress: named destinations through the audited broker; all else denied</span>
+[[net.proxy.allow]]
+name = <span class="p">"registry.npmjs.org"</span>
+ports = [443]
+threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant traces to a threat in the catalogue</span>
+
+<span class="c"># filesystem, identity, audit, ssh … inherited from base-confined@v1, then narrowed</span></pre>
+
+                <div class="grid rv" style="margin-top:30px">
+                    <div class="cell">
+                        <div class="n">THE CLI</div>
+                        <h3>A small surface</h3>
+                        <div class="verbs" style="margin-top:14px">
+                            <code>kennel run &lt;policy&gt; -- &lt;cmd&gt;</code>
+                            <span>start a workload confined by a policy (interactive runs are detachable)</span>
+                            <code>kennel attach &lt;name&gt;</code>
+                            <span>reconnect a terminal to a running kennel</span>
+                            <code>kennel review &lt;policy&gt;</code>
+                            <span>re-pin a workspace trust manifest after edits</span>
+                            <code>kennel stop / list</code>
+                            <span>stop a kennel; list the running ones</span>
+                            <code>kennel policy compile / sign / lint</code>
+                            <span>resolve + sign a policy; check the template corpus</span>
+                        </div>
+                    </div>
+                    <div class="cell">
+                        <div class="n">STATUS</div>
+                        <h3>Built vs. roadmap</h3>
+                        <div class="status" style="margin-top:14px">
+                            <div class="built">
+                                <h4>Runs today</h4>
+                                <ul>
+                                    <li>The full unprivileged spawn vertical</li>
+                                    <li>Egress proxy + cgroup-BPF allowlist + audit</li>
+                                    <li>AF_UNIX shim · SSH re-origination bastion</li>
+                                    <li>Masked workspace manifest · pty escape filter</li>
+                                    <li>Signed templates · policy compiler · lockfile</li>
+                                </ul>
+                            </div>
+                            <div class="road">
+                                <h4>Designed, not yet built</h4>
+                                <ul>
+                                    <li>D-Bus &amp; X11 facades</li>
+                                    <li>Binder cross-instance relay (MCP topology)</li>
+                                    <li><code>fs.scrub</code> / <code>fs.home.sanitise</code></li>
+                                    <li><code>kennel diff</code></li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="prose rv" style="margin-top:30px">
+                    <p>Full instructions, the policy language, and the man pages are in <a href="docs.html">the
+                            documentation</a>. Builds are on <a
+                            href="https://github.com/projectkennel/projectkennel/releases">the releases page</a>;
+                        the source is <a href="https://github.com/projectkennel/projectkennel">on GitHub</a>.</p>
+                </div>
+            </div>
+        </section>
+
         <!-- HOW -->
         <section id="how">
             <div class="wrap">
@@ -1091,8 +1342,9 @@
                 </div>
                 <div class="foot-col">
                     <h5>Project</h5>
+                    <a href="docs.html">Documentation</a>
                     <a href="https://github.com/projectkennel/projectkennel">Source</a>
-                    <a href="https://github.com/projectkennel/projectkennel/tree/main/docs/design">Design docs</a>
+                    <a href="https://github.com/projectkennel/projectkennel/releases">Releases</a>
                     <a href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md">Threat
                         catalogue</a>
                     <a

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Documentation — Project Kennel</title>
+    <meta name="description"
+        content="Project Kennel documentation: install and usage guides, the policy language, the threat catalogue, the design corpus, the architecture, and the trust-manifest schema." />
+    <meta property="og:title" content="Project Kennel — Documentation" />
+    <meta property="og:type" content="website" />
+    <meta name="theme-color" content="#f3efe4" />
+    <link rel="icon"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23222a63' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='14,52 50,20 86,52'/%3E%3Cpath d='M24,50 L24,84 L76,84 L76,50'/%3E%3Cpath d='M40,84 L40,64 Q40,58 46,58 L54,58 Q60,58 60,64 L60,84'/%3E%3Cpath d='M45,58 L45,52 A5,5 0 0 1 55,52 L55,58'/%3E%3C/g%3E%3Cg fill='%23222a63' stroke='none'%3E%3Ccircle cx='50' cy='70' r='4'/%3E%3Cpath d='M50,70 L46,80 L54,80 Z'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&display=swap"
+        rel="stylesheet" />
+    <style>
+        :root {
+            --paper: #f3efe4;
+            --paper-2: #efe9da;
+            --ink: #2a315c;
+            --ink-strong: #1a2150;
+            --blue: #222a63;
+            --blue-soft: #646a96;
+            --rule: rgba(34, 42, 99, .18);
+            --rule-2: rgba(34, 42, 99, .09);
+            --maxw: 1040px;
+            --serif: "Newsreader", Georgia, "Times New Roman", serif;
+            --mono: "IBM Plex Mono", ui-monospace, monospace;
+        }
+
+        * {
+            box-sizing: border-box
+        }
+
+        html {
+            scroll-behavior: smooth
+        }
+
+        body {
+            margin: 0;
+            background: var(--paper);
+            color: var(--ink);
+            font-family: var(--serif);
+            font-size: 18px;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased
+        }
+
+        .wrap {
+            max-width: var(--maxw);
+            margin: 0 auto;
+            padding: 0 28px
+        }
+
+        a {
+            color: var(--blue)
+        }
+
+        code {
+            font-family: var(--mono);
+            font-size: .86em;
+            color: var(--ink-strong)
+        }
+
+        header {
+            border-bottom: 1px solid var(--rule-2);
+            position: sticky;
+            top: 0;
+            background: rgba(243, 239, 228, .92);
+            backdrop-filter: blur(8px);
+            z-index: 10
+        }
+
+        .bar {
+            max-width: var(--maxw);
+            margin: 0 auto;
+            padding: 16px 28px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            text-decoration: none;
+            color: var(--blue)
+        }
+
+        .brand svg {
+            width: 26px;
+            height: 26px
+        }
+
+        .brand .wm {
+            font-family: var(--mono);
+            font-weight: 500;
+            letter-spacing: .02em;
+            color: var(--ink-strong)
+        }
+
+        nav a {
+            font-family: var(--mono);
+            font-size: 13.5px;
+            text-decoration: none;
+            color: var(--blue);
+            margin-left: 22px
+        }
+
+        nav a:hover {
+            color: var(--ink-strong)
+        }
+
+        .hero {
+            padding: 60px 0 18px
+        }
+
+        .fig {
+            font-family: var(--mono);
+            font-size: 12.5px;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            color: var(--blue-soft);
+            margin: 0 0 14px
+        }
+
+        h1 {
+            font-family: var(--serif);
+            font-weight: 500;
+            font-size: clamp(30px, 4vw, 44px);
+            line-height: 1.1;
+            letter-spacing: -.015em;
+            margin: 0 0 18px;
+            color: var(--ink-strong)
+        }
+
+        .lede {
+            max-width: 64ch;
+            font-size: 19px;
+            color: var(--ink);
+            margin: 0
+        }
+
+        section {
+            padding: 42px 0;
+            border-top: 1px solid var(--rule-2)
+        }
+
+        h2 {
+            font-family: var(--serif);
+            font-weight: 500;
+            font-size: clamp(24px, 3vw, 31px);
+            letter-spacing: -.01em;
+            color: var(--ink-strong);
+            margin: 0 0 6px
+        }
+
+        .sub {
+            color: var(--blue-soft);
+            font-size: 16px;
+            margin: 0 0 26px;
+            max-width: 60ch
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1px;
+            background: var(--rule-2);
+            border: 1px solid var(--rule-2);
+            border-radius: 12px;
+            overflow: hidden
+        }
+
+        @media(max-width:720px) {
+            .grid {
+                grid-template-columns: 1fr
+            }
+        }
+
+        .card {
+            background: var(--paper-2);
+            padding: 24px 24px;
+            text-decoration: none;
+            color: var(--ink);
+            display: block;
+            transition: background .15s
+        }
+
+        .card:hover {
+            background: #eae3d2
+        }
+
+        .card h3 {
+            font-family: var(--serif);
+            font-weight: 600;
+            font-size: 19px;
+            margin: 0 0 6px;
+            color: var(--ink-strong)
+        }
+
+        .card h3 .arr {
+            font-family: var(--mono);
+            color: var(--blue-soft);
+            font-size: 15px
+        }
+
+        .card p {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.5;
+            color: var(--blue-soft)
+        }
+
+        .snippet {
+            font-family: var(--mono);
+            font-size: 13.5px;
+            line-height: 1.7;
+            color: var(--ink);
+            background: var(--paper-2);
+            border: 1px solid var(--rule-2);
+            border-radius: 10px;
+            padding: 20px 22px;
+            overflow-x: auto;
+            white-space: pre;
+            margin: 0
+        }
+
+        .snippet .c {
+            color: var(--blue-soft)
+        }
+
+        .snippet .k {
+            color: var(--ink-strong);
+            font-weight: 600
+        }
+
+        .note {
+            font-size: 15px;
+            color: var(--blue-soft);
+            max-width: 64ch;
+            margin: 18px 0 0
+        }
+
+        footer {
+            border-top: 1px solid var(--rule-2);
+            padding: 34px 0;
+            margin-top: 20px
+        }
+
+        .foot {
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+            font-family: var(--mono);
+            font-size: 13px;
+            color: var(--blue-soft)
+        }
+
+        .foot a {
+            color: var(--blue);
+            text-decoration: none;
+            margin-right: 18px
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="bar">
+            <a class="brand" href="index.html" aria-label="Project Kennel home">
+                <svg viewBox="0 0 100 100" aria-hidden="true">
+                    <g fill="none" stroke="#222a63" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="14,52 50,20 86,52" />
+                        <path d="M24,50 L24,84 L76,84 L76,50" />
+                        <path d="M40,84 L40,64 Q40,58 46,58 L54,58 Q60,58 60,64 L60,84" />
+                        <path d="M45,58 L45,52 A5,5 0 0 1 55,52 L55,58" />
+                    </g>
+                    <g fill="#222a63" stroke="none">
+                        <circle cx="50" cy="70" r="4" />
+                        <path d="M50,70 L46,80 L54,80 Z" />
+                    </g>
+                </svg>
+                <span class="wm">kennel</span>
+            </a>
+            <nav>
+                <a href="index.html">Home</a>
+                <a href="index.html#try">Try it</a>
+                <a href="https://github.com/projectkennel/projectkennel">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <div class="wrap">
+            <div class="hero">
+                <p class="fig">Documentation</p>
+                <h1>Install it, run it, author policy, read the design.</h1>
+                <p class="lede">Project Kennel is pre-release; interfaces and guarantees may change. The
+                    authoritative reference is the installed man pages (<code>man kennel</code>,
+                    <code>man policy.toml</code>, <code>man kenneld</code>); the guides and the design corpus below
+                    live in the repository.</p>
+            </div>
+        </div>
+
+        <section>
+            <div class="wrap">
+                <h2>Using it</h2>
+                <p class="sub">Deploy on a host, run workloads, author and operate policy.</p>
+                <div class="grid">
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/INSTALL.md">
+                        <h3>Install <span class="arr">→</span></h3>
+                        <p>Deploy the runtime: the offline release tarball + <code>install.sh</code>, the privhelper,
+                            the per-user daemon, the AppArmor userns grant, kernel prerequisites.</p>
+                    </a>
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/HOWTO.md">
+                        <h3>Run &amp; author <span class="arr">→</span></h3>
+                        <p>Run a workload, the CLI verbs, write and compile a leaf policy, sign it, the detach /
+                            reattach model, and <code>kennel review</code>.</p>
+                    </a>
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/HOWTO-admin.md">
+                        <h3>Operate a host <span class="arr">→</span></h3>
+                        <p>The admin side: <code>/etc/kennel/subkennel</code> allocations, the trust store, org
+                            signing keys, deployment config, the audit stream.</p>
+                    </a>
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/tree/main/templates">
+                        <h3>Reference templates <span class="arr">→</span></h3>
+                        <p>The shipped, signed templates — <code>base-confined</code>,
+                            <code>ai-coding-strict</code>, <code>interactive</code>, and the rest — to derive your
+                            own policy from.</p>
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <h2>The policy language</h2>
+                <p class="sub">Declarative, signed, version-pinned. The schema is kept exact against the parser.</p>
+                <div class="grid">
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/docs/architecture/02-2-config-schema.md">
+                        <h3>Config schema <span class="arr">→</span></h3>
+                        <p>Every section and field — <code>[exec]</code>, <code>[fs]</code>, <code>[net]</code>,
+                            <code>[tty]</code>, <code>[trust]</code>, <code>[ssh]</code>, … — with inheritance and
+                            the settled form (<code>man policy.toml</code>).</p>
+                    </a>
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/docs/architecture/02-1-cli.md">
+                        <h3>The CLI <span class="arr">→</span></h3>
+                        <p><code>run</code> (detachable), <code>attach</code>, <code>review</code>,
+                            <code>stop</code>, <code>list</code>, and the <code>policy</code> group
+                            (<code>man kennel</code>).</p>
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <h2>The design</h2>
+                <p class="sub">The portable contribution: the threat model and the design that answers it,
+                    independent of the Linux runtime.</p>
+                <div class="grid">
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md">
+                        <h3>Threat catalogue <span class="arr">→</span></h3>
+                        <p>The adversary model as numbered, tagged threats (T1.x exfil/lateral, T2.x posture
+                            degradation, T3.x workload-class). The durable reference.</p>
+                    </a>
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/README.md">
+                        <h3>Design corpus <span class="arr">→</span></h3>
+                        <p>The full design: the thesis, trust boundaries, templates, and a chapter per resource
+                            (exec, filesystem, network, AF_UNIX, SSH, …).</p>
+                    </a>
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/tree/main/docs/architecture">
+                        <h3>Architecture <span class="arr">→</span></h3>
+                        <p>The as-built reference: process model, crate decomposition, the binder gateway, state and
+                            supervision, the BPF ABI, what remains roadmap (§8.1).</p>
+                    </a>
+                    <a class="card"
+                        href="https://github.com/projectkennel/projectkennel/blob/main/docs/governance/CODING-STANDARDS.md">
+                        <h3>Engineering standards <span class="arr">→</span></h3>
+                        <p>The normative rules the code is held to (the bar is OpenSSH / libpam) — the
+                            <code>unsafe</code> discipline, the supply-chain gate, the review bar.</p>
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <h2>The trust-manifest schema</h2>
+                <p class="sub">The masked workspace manifest (<code>.trust-manifest.json</code>, T2.8) is validated
+                    against a published JSON Schema — host IDEs read it natively.</p>
+<pre class="snippet"><span class="c"># the schema host tooling validates a workspace trust manifest against:</span>
+<span class="k">$</span> curl https://projectkennel.org/schemas/trust-manifest-v1.json</pre>
+                <p class="note">Referenced as the manifest's <code>$id</code>; served at <a
+                        href="/schemas/trust-manifest-v1.json">/schemas/trust-manifest-v1.json</a>.</p>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <div class="foot">
+                <div>
+                    <a href="index.html">Home</a>
+                    <a href="https://github.com/projectkennel/projectkennel">Source</a>
+                    <a href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md">Threats</a>
+                    <a href="https://github.com/projectkennel/projectkennel/blob/main/.github/SECURITY.md">Security</a>
+                </div>
+                <div>projectkennel.org · pre-release; interfaces and guarantees may change.</div>
+            </div>
+        </div>
+    </footer>
+</body>
+
+</html>
