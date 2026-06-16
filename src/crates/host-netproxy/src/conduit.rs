@@ -10,8 +10,7 @@
 //! "dumb dialer" half of the split. The wire format (kenneld encodes via [`encode_command`], the
 //! delegate decodes) is internal-stable: both ship from one release.
 
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -118,22 +117,10 @@ fn handle_conduit(stream: &UnixStream) {
     }
 }
 
-/// Bidirectionally splice the conduit (the in-kennel byte stream) against the upstream TCP socket,
-/// one thread per direction, propagating half-close (mirrors `server::relay`).
+/// Bidirectionally splice the conduit (the in-kennel byte stream) against the upstream TCP socket.
+/// The bidirectional relay is shared (`kennel_lib_scm::splice`) across the delegates and facades.
 fn relay(conduit: UnixStream, upstream: TcpStream) {
-    let (Ok(mut conduit_rd), Ok(mut upstream_wr)) = (conduit.try_clone(), upstream.try_clone())
-    else {
-        return;
-    };
-    let mut upstream_rd = upstream;
-    let mut conduit_wr = conduit;
-    let up = std::thread::spawn(move || {
-        let _ = io::copy(&mut conduit_rd, &mut upstream_wr);
-        let _ = upstream_wr.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut upstream_rd, &mut conduit_wr);
-    let _ = conduit_wr.shutdown(Shutdown::Write);
-    let _ = up.join();
+    kennel_lib_scm::splice::splice(conduit, upstream);
 }
 
 #[cfg(test)]
@@ -193,7 +180,7 @@ mod tests {
         let mut workload = b;
         workload.write_all(b"ping").expect("write");
         workload
-            .shutdown(Shutdown::Write)
+            .shutdown(std::net::Shutdown::Write)
             .expect("half-close so the echo returns");
         let mut got = Vec::new();
         workload.read_to_end(&mut got).expect("read echo");

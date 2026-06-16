@@ -33,7 +33,7 @@
 
 use std::fs::OpenOptions;
 use std::io;
-use std::net::{IpAddr, Shutdown, TcpStream};
+use std::net::{IpAddr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::thread;
@@ -130,19 +130,8 @@ fn deliver(conduit: UnixStream, kennel_ip: IpAddr, port: u16) {
     splice(conduit, upstream);
 }
 
-/// Bidirectionally splice the conduit (the kennel-end of kenneld's socketpair) against the
-/// workload's TCP connection, one thread per direction, propagating half-close. Mirrors
-/// `facade-socks5::splice` (both stream types implement `Read`/`Write` on `&T`).
+/// Bidirectionally splice the conduit (the kennel end of kenneld's socketpair) against the
+/// workload's TCP connection. The bidirectional relay is shared (`kennel_lib_scm::splice`).
 fn splice(conduit: UnixStream, upstream: TcpStream) {
-    let (Ok(conduit_r), Ok(upstream_r)) = (conduit.try_clone(), upstream.try_clone()) else {
-        return;
-    };
-    let up = thread::spawn(move || {
-        let _ = io::copy(&mut &upstream_r, &mut &conduit);
-        let _ = conduit.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut &conduit_r, &mut &upstream);
-    let _ = upstream.shutdown(Shutdown::Write);
-    let _ = up.join();
-    drop(upstream); // own the connection to its close (the splice's end of life)
+    kennel_lib_scm::splice::splice(conduit, upstream);
 }

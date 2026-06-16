@@ -20,6 +20,8 @@
 
 #![allow(unsafe_code)]
 
+pub mod splice;
+
 use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 

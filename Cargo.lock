@@ -53,6 +53,7 @@ name = "facade-client"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-binder",
+ "kennel-lib-scm",
 ]
 
 [[package]]
@@ -60,6 +61,7 @@ name = "facade-socks5"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-binder",
+ "kennel-lib-scm",
 ]
 
 [[package]]

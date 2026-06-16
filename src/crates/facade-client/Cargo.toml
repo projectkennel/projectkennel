@@ -11,6 +11,8 @@ repository.workspace = true
 
 [dependencies]
 kennel-lib-binder = { path = "../kennel-lib-binder" }
+# The shared bidirectional splice (the conduit relay), used after brokering a conduit fd.
+kennel-lib-scm = { path = "../kennel-lib-scm" }
 
 [lints]
 workspace = true

@@ -11,8 +11,7 @@
 //! the registration via [`encode_bind`], the delegate decodes; the delegate frames each
 //! notification's port via [`encode_notify`]) is internal-stable: both ship from one release.
 
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 
@@ -138,20 +137,10 @@ fn handle_registration(stream: &UnixStream) {
     }
 }
 
-/// Bidirectionally splice the accepted host-side TCP connection against the conduit's host end, one
-/// thread per direction, propagating half-close (both types implement `Read`/`Write` on `&T`).
+/// Bidirectionally splice the accepted host-side TCP connection against the conduit's host end.
+/// The bidirectional relay is shared (`kennel_lib_scm::splice`) across the delegates and facades.
 fn splice(accepted: TcpStream, host_end: UnixStream) {
-    let (Ok(accepted_r), Ok(host_r)) = (accepted.try_clone(), host_end.try_clone()) else {
-        return;
-    };
-    let up = std::thread::spawn(move || {
-        let _ = io::copy(&mut &accepted_r, &mut &host_end);
-        let _ = host_end.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut &host_r, &mut &accepted);
-    let _ = accepted.shutdown(Shutdown::Write);
-    let _ = up.join();
-    drop(accepted); // own the connection to its close
+    kennel_lib_scm::splice::splice(accepted, host_end);
 }
 
 #[cfg(test)]
