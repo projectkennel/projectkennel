@@ -47,8 +47,8 @@ use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
     BoundaryAcl, CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp,
     IdentitySection, LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy,
-    NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection, UnixSection, UnsafeSection,
-    WorkloadSection,
+    NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection, TtySection, UnixSection,
+    UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -230,6 +230,17 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         audit: merge(&parent.audit, &child.audit, fold_audit),
         ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
         workload: merge(&parent.workload, &child.workload, fold_workload),
+        tty: merge(&parent.tty, &child.tty, fold_tty),
+    }
+}
+
+/// Fold `[tty]` scalar-wins (child overrides), like `[lifecycle]`.
+fn fold_tty(p: &TtySection, c: &TtySection) -> TtySection {
+    TtySection {
+        filter_terminal_escapes: or(
+            &c.filter_terminal_escapes,
+            &p.filter_terminal_escapes,
+        ),
     }
 }
 

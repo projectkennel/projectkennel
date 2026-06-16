@@ -554,6 +554,13 @@ where
         // AuthorizedKeys errors are routine (sshd polls for keys the bastion may not
         // hold), so they are not logged here to avoid spamming the journal.
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),
+        // Attach to a running kennel's PTY. The broker (master ownership + pump in the
+        // registry) is the next commit on this branch; until it lands, attach is
+        // refused cleanly rather than half-served.
+        Request::Attach { kennel } => match validate_kennel_name(&kennel) {
+            Ok(()) => Response::Error("attach is not yet wired (PTY broker pending)".to_owned()),
+            Err(e) => Response::Error(e),
+        },
     };
     let _ = control::send_response(conn, &response);
 }

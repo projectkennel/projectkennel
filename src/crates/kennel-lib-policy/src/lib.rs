@@ -65,6 +65,7 @@ pub use settled::{
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
     ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
     SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction,
+    TtyPolicy,
     UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
@@ -233,6 +234,7 @@ mod tests {
                     ttl_seconds: Some(3600),
                     ttl_action: TtlAction::Exit,
                 },
+                tty: TtyPolicy::default(),
             },
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),

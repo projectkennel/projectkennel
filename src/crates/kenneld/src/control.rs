@@ -45,6 +45,15 @@ pub enum Request {
         /// comment is ignored on lookup.
         key: String,
     },
+    /// Attach a terminal to a running kennel's PTY (`kennel attach`). The CLI passes
+    /// one connected socket over `SCM_RIGHTS` (its proxied-terminal end), exactly as
+    /// `Start { interactive: true }` does; kenneld fans the kennel's filtered PTY
+    /// output to it and forwards its input to the master. Detaching is a client-side
+    /// action (the CLI closes the socket), so there is no detach request.
+    Attach {
+        /// The kennel to attach to.
+        kennel: String,
+    },
 }
 
 /// The payload of a [`Request::Start`].
@@ -103,6 +112,22 @@ pub enum Response {
     AuthorizedKeys {
         /// One `restrict,pty,command=…` line per matching edge.
         lines: Vec<String>,
+    },
+    /// A terminal attached to a running kennel (the answer to [`Request::Attach`], or
+    /// the confirmation on a `Start` connection that has become the first client). The
+    /// CLI then proxies its terminal until the workload exits or it detaches.
+    Attached {
+        /// The kennel's context number.
+        ctx: u16,
+        /// The workload's process id.
+        pid: u32,
+    },
+    /// The client detached (or was detached by a takeover) without ending the
+    /// workload — the kennel keeps running, reattachable by name. `reason` is a short
+    /// human note (`"another client attached"`, `"detach key"`).
+    Detached {
+        /// Why the client detached.
+        reason: String,
     },
     /// The request failed; the string is a human-readable reason.
     Error(String),
@@ -247,6 +272,10 @@ impl Request {
                 put_u8(&mut b, 4);
                 put_str(&mut b, key);
             }
+            Self::Attach { kennel } => {
+                put_u8(&mut b, 5);
+                put_str(&mut b, kennel);
+            }
         }
         b
     }
@@ -272,6 +301,9 @@ impl Request {
             }),
             3 => Ok(Self::List),
             4 => Ok(Self::AuthorizedKeys { key: r.string()? }),
+            5 => Ok(Self::Attach {
+                kennel: r.string()?,
+            }),
             _ => Err(WireError::BadTag),
         }
     }
@@ -311,6 +343,15 @@ impl Response {
                 put_u8(&mut b, 4);
                 put_str(&mut b, message);
             }
+            Self::Attached { ctx, pid } => {
+                put_u8(&mut b, 6);
+                put_u16(&mut b, *ctx);
+                put_u32(&mut b, *pid);
+            }
+            Self::Detached { reason } => {
+                put_u8(&mut b, 7);
+                put_str(&mut b, reason);
+            }
         }
         b
     }
@@ -347,6 +388,13 @@ impl Response {
             4 => Ok(Self::Error(r.string()?)),
             5 => Ok(Self::AuthorizedKeys {
                 lines: r.strings()?,
+            }),
+            6 => Ok(Self::Attached {
+                ctx: r.u16()?,
+                pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+            }),
+            7 => Ok(Self::Detached {
+                reason: r.string()?,
             }),
             _ => Err(WireError::BadTag),
         }
@@ -475,6 +523,20 @@ mod tests {
             lines: vec![
                 "restrict,pty,command=\"ssh -- 'git@github.com' \\\"$SSH_ORIGINAL_COMMAND\\\"\" ssh-ed25519 AAAASYN ka\n".to_owned(),
             ],
+        });
+    }
+
+    #[test]
+    fn attach_messages_round_trip() {
+        round_trip_request(&Request::Attach {
+            kennel: "ai-coding".to_owned(),
+        });
+        round_trip_response(&Response::Attached { ctx: 7, pid: 4242 });
+        round_trip_response(&Response::Detached {
+            reason: "another client attached".to_owned(),
+        });
+        round_trip_response(&Response::Detached {
+            reason: String::new(),
         });
     }
 
