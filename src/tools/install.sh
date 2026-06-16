@@ -26,11 +26,16 @@
 #
 # Usage:
 #   sudo tools/install.sh [--prefix DIR] [--no-build] [--dry-run]
+#                         [--provision-users [GROUP]]
 #
-#   --prefix DIR   libexec dir for the binaries (default: /usr/libexec/kennel)
-#   --mandir DIR   man-page root (default: /usr/share/man; pages go in manN/)
-#   --no-build     install the binaries already in target/release (skip cargo)
-#   --dry-run      print the actions without performing them
+#   --prefix DIR          libexec dir for the binaries (default: /usr/libexec/kennel)
+#   --mandir DIR          man-page root (default: /usr/share/man; pages go in manN/)
+#   --no-build            install the binaries already in target/release (skip cargo)
+#   --dry-run             print the actions without performing them
+#   --provision-users [G] write a /etc/kennel/subkennel allocation for every member of
+#                         group G (default `users`) — one per uid that lacks one. We are
+#                         root during install, so this saves each user the manual
+#                         `kennel subkennel add` + sudo-append. Omit to provision nobody.
 #
 # This script is reviewed like any other code (CODING-STANDARDS.md §15.4):
 # POSIX-ish bash, `set -euo pipefail`, no network calls, idempotent.
@@ -46,6 +51,7 @@ vendor_dir="/usr/lib/kennel"
 mandir="/usr/share/man"
 do_build=1
 dry_run=0
+provision_group=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -53,7 +59,16 @@ while [ $# -gt 0 ]; do
 		--mandir) mandir="${2:?--mandir needs a directory}"; shift 2 ;;
 		--no-build) do_build=0; shift ;;
 		--dry-run) dry_run=1; shift ;;
-		-h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+		# Provision a /etc/kennel/subkennel allocation for every member of GROUP
+		# (default `users`). We are root, so we can write the file directly — saving
+		# each member the manual `kennel subkennel add` step. Optional GROUP follows.
+		--provision-users)
+			if [ -n "${2:-}" ] && [ "${2#--}" = "$2" ]; then
+				provision_group="$2"; shift 2
+			else
+				provision_group="users"; shift
+			fi ;;
+		-h|--help) sed -n '2,40p' "$0"; exit 0 ;;
 		*) echo "install.sh: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -216,28 +231,147 @@ install_templates() {
 	done
 }
 
+provision_subkennel_users() {
+	# For every member of $provision_group, append a /etc/kennel/subkennel allocation
+	# (one per uid that lacks one). We drive `kennel subkennel add --uid N`, which owns
+	# the allocation invariants — lowest free 12-bit tag, a fresh non-colliding 40-bit
+	# ULA gid, and skip-if-already-present — and prints the file line on stdout. We
+	# append after EACH user so the next invocation sees it and never reuses a tag.
+	[ -n "$provision_group" ] || return 0
+	local sub=/etc/kennel/subkennel kbin="$libexec/kennel"
+	if [ ! -x "$kbin" ]; then
+		echo "install.sh: $kbin not found; cannot auto-provision subkennel" >&2
+		return 0
+	fi
+	local members uid name line
+	# Group members = the group line's comma list PLUS anyone whose PRIMARY gid is it.
+	local gid; gid="$(getent group "$provision_group" | cut -d: -f3)"
+	if [ -z "$gid" ]; then
+		echo "install.sh: group '$provision_group' not found; skipping auto-provision" >&2
+		return 0
+	fi
+	members="$(
+		{ getent group "$provision_group" | cut -d: -f4 | tr ',' '\n'
+		  getent passwd | awk -F: -v g="$gid" '$4==g {print $1}'
+		} | sed '/^$/d' | sort -u
+	)"
+	run install -d -m 0755 /etc/kennel
+	[ -e "$sub" ] || run touch "$sub"
+	echo "install.sh: provisioning subkennel allocations for group '$provision_group'"
+	local count=0
+	for name in $members; do
+		uid="$(id -u "$name" 2>/dev/null)" || continue
+		if grep -q "^${uid}:" "$sub" 2>/dev/null; then
+			echo "  - $name (uid $uid): already allocated"
+			continue
+		fi
+		if [ "$dry_run" -eq 1 ]; then
+			echo "  DRY-RUN: kennel subkennel add --uid $uid  >> $sub"
+			continue
+		fi
+		# Capture only stdout (the line); the human guidance goes to stderr.
+		if line="$("$kbin" subkennel add --uid "$uid" --file "$sub" 2>/dev/null)" && [ -n "$line" ]; then
+			printf '%s\n' "$line" >> "$sub"
+			echo "  + $name (uid $uid): $line"
+			count=$((count + 1))
+		else
+			echo "  ! $name (uid $uid): allocation failed (tags exhausted?)" >&2
+		fi
+	done
+	echo "install.sh: provisioned $count new allocation(s) in $sub"
+}
+
 print_next_steps() {
+	# Run the post-install checks ourselves and report PASS/ATTN, rather than telling
+	# the operator what to go check. Then print a copy-pastable per-user bring-up block,
+	# tailored to the invoking (sudo) user so it can be pasted verbatim.
+	local kennel_bin="$libexec/kennel"
+
+	echo
+	echo "Project Kennel: system install complete (binaries under $libexec, config under $vendor_dir)."
+	echo
+	echo "Post-install checks:"
+
+	# 1. privhelper setuid-root — the one thing that must be exactly right.
+	local ph="$libexec/kennel-privhelper" perms owner
+	perms="$(stat -c '%A' "$ph" 2>/dev/null || echo '?')"
+	owner="$(stat -c '%U' "$ph" 2>/dev/null || echo '?')"
+	if [ "$owner" = root ] && [ "${perms:3:1}" = s ]; then
+		echo "  [ok]   privhelper is setuid-root ($perms $owner)"
+	else
+		echo "  [ATTN] privhelper is NOT setuid-root ($perms $owner) — kennels will fail to construct"
+		echo "         fix: sudo chown root $ph && sudo chmod u+s $ph"
+	fi
+
+	# 2. binder filesystem available (the kennel bus). The privhelper modprobes it at
+	#    construct time, but flag it now so a binder-less kernel is obvious up front.
+	if grep -qw binder /proc/filesystems 2>/dev/null; then
+		echo "  [ok]   binder filesystem registered"
+	elif modinfo binder_linux >/dev/null 2>&1; then
+		echo "  [ok]   binder_linux module available (loaded on first kennel)"
+	else
+		echo "  [ATTN] no binder filesystem and no binder_linux module — the kernel needs"
+		echo "         CONFIG_ANDROID_BINDERFS; kennels cannot start without it"
+	fi
+
+	# 3. AppArmor userns restriction (Ubuntu 23.10+): our profile handles it, just report.
+	if [ -e /etc/apparmor.d/kenneld ]; then
+		echo "  [ok]   AppArmor userns profile installed"
+	elif [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+		echo "  [ATTN] unprivileged userns is AppArmor-restricted but no profile was installed"
+		echo "         (no /etc/apparmor.d on this host?) — kenneld may be denied CLONE_NEWUSER"
+	else
+		echo "  [ok]   unprivileged userns is not AppArmor-restricted"
+	fi
+
+	# The invoking user (sudo) — tailor the per-user block to them; fall back to a placeholder.
+	local u="${SUDO_USER:-}" uid_line=""
+	if [ -n "$u" ]; then
+		local uid; uid="$(id -u "$u" 2>/dev/null || echo '<uid>')"
+		uid_line="  # for $u (uid $uid)"
+		if grep -q "^${uid}:" /etc/kennel/subkennel 2>/dev/null; then
+			echo "  [ok]   /etc/kennel/subkennel has an allocation for $u (uid $uid)"
+		fi
+	fi
+
+	# Step 2 (claim an allocation) is unnecessary for users we just auto-provisioned.
+	local step2
+	if [ -n "$provision_group" ]; then
+		step2="  # (subkennel allocations were auto-provisioned for group '$provision_group' — skip this)
+  # kennel subkennel add   # only if your uid is NOT in that group"
+	else
+		step2="  # 2. claim a subkennel allocation. This prints the exact 'sudo' line to append it
+  #    (the file is root-owned, so the CLI cannot write it itself) — paste that next:
+  kennel subkennel add"
+	fi
+
 	cat <<EOF
 
-Project Kennel: system install complete (binaries under $libexec, config under $vendor_dir).
+Per-user bring-up — run these as the user who will run kennels (NOT root):
+$uid_line
+  # 1. reach the helper binaries (kennel lives under libexec, off PATH by design):
+  export PATH="\$PATH:$libexec"
 
-Remaining admin steps (root):
-  1. Provision /etc/kennel/subkennel with one allocation line per user:
-       <uid>:<tag>:<gid>:<namespace>      e.g.  1000:42:0000000001:kennel-alice
-  2. Add any org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
-     (The project's own template-signing key is already installed there.)
-  3. To override a deployment path, edit /etc/kennel/system.toml (it wins over the
-     vendor $vendor_dir/system.toml, per key).
+$step2
 
-Per-user enable (each user, unprivileged):
-       systemctl --user enable --now kenneld.socket
+  # 3. start the per-user daemon (socket-activated on first use):
+  systemctl --user enable --now kenneld.socket
 
-Verify the privhelper is setuid-root:
-       ls -l $libexec/kennel-privhelper      # expect -rwsr-xr-x root root
+  # 4. mint a personal policy-signing key (compiles your own leaf policies; when it is
+  #    the only key in your key dir, 'kennel run' picks it automatically — no --key needed):
+  kennel keygen $u-dev
 
-Documentation:
-       man kennel        # the CLI; see also kennel-policy(1), policy.toml(5)
-       man kenneld       # the daemon; see also system.toml(5), subkennel(5)
+  # 5. scaffold an interactive shell policy from the shipped template, then run it:
+  kennel policy generate my-shell --from interactive@v1
+  kennel run my-shell -- /bin/bash
+
+To make PATH permanent, add the export above to ~/.bashrc (or ~/.profile).
+
+Admin notes (root):
+  * Add org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
+  * Override a deployment path in /etc/kennel/system.toml (wins over $vendor_dir/system.toml).
+
+Docs:  man kennel · man kennel-policy · man policy.toml · man kenneld
 EOF
 }
 
@@ -251,4 +385,5 @@ install_apparmor
 install_etc_skeleton
 install_keys
 install_templates
+provision_subkennel_users
 [ "$dry_run" -eq 1 ] || print_next_steps
