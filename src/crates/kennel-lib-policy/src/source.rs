@@ -238,7 +238,9 @@ pub struct CapSection {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecSection {
-    /// Allowlisted absolute binary paths (empty list = no allowlist constraint here).
+    /// Allowlisted binary paths (the execve allowlist). Execution is deny-by-default:
+    /// an empty/absent allow denies ALL execve; a bare `**`/`/**` is the explicit
+    /// `permissive-exec` opt-out (the one case the compiler warns on). §7.3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
     /// Denylisted absolute paths or globs.
@@ -896,7 +898,9 @@ pub struct LifecycleSection {
     /// Time-to-live in human form (`"8h"`, `"1h"`, `"30m"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
-    /// What to do at TTL expiry (`"stop"` / `"warn"`).
+    /// What to do at TTL expiry: `"exit"` (alias `"stop"`, the default) ends the
+    /// kennel; `"warn"` emits an audit event and leaves it running; `"renew"` is an
+    /// audited `warn` today (the interactive renewal prompt is still owed, §9.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_action: Option<String>,
 }
