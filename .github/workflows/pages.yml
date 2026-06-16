@@ -1,0 +1,56 @@
+# Publish the projectkennel.org site (docs/website/) to GitHub Pages.
+#
+# The site is a hand-written single-page landing (docs/website/index.html) plus the
+# trust-manifest JSON Schema served at the path shipped code references — the manifest's
+# `$id` is https://projectkennel.org/schemas/trust-manifest-v1.json, so that path is
+# load-bearing. A pre-upload gate asserts the served copy is byte-identical to the
+# canonical docs/schemas/ source, so the two can never drift.
+name: pages (deploy projectkennel.org)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/website/**"
+      - "docs/schemas/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let an in-progress run finish (don't cancel a publish).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The schema served by the site MUST match the canonical source, or the manifest
+      # `$id` resolves to stale bytes. Fail the deploy on any drift.
+      - name: Schema endpoint matches the canonical source
+        run: |
+          canonical=docs/schemas/trust-manifest-v1.json
+          served=docs/website/schemas/trust-manifest-v1.json
+          if ! cmp -s "$canonical" "$served"; then
+            echo "::error::$served has drifted from $canonical — re-copy it (cp $canonical $served)"
+            diff -u "$canonical" "$served" || true
+            exit 1
+          fi
+          echo "schema endpoint is byte-identical to the canonical source"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/website
+      - id: deploy
+        uses: actions/deploy-pages@v4

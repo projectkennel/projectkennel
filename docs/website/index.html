@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Project Kennel — contain the code that runs inside your account</title>
+    <meta name="description"
+        content="Kennel lets you limit what a program running under your own account can touch — which files, what network, which other programs — so the code you didn't write can't quietly walk off with your keys. Linux, macOS, FreeBSD." />
+    <meta property="og:title" content="Project Kennel" />
+    <meta property="og:description"
+        content="A kennel for the code that lives in your $HOME. Limit what untrusted local code can reach — files, network, execution — with signed policy and a full audit trail." />
+    <meta property="og:type" content="website" />
+    <meta name="theme-color" content="#f3efe4" />
+    <link rel="icon"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23222a63' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='14,52 50,20 86,52'/%3E%3Cpath d='M24,50 L24,84 L76,84 L76,50'/%3E%3Cpath d='M40,84 L40,64 Q40,58 46,58 L54,58 Q60,58 60,64 L60,84'/%3E%3Cpath d='M45,58 L45,52 A5,5 0 0 1 55,52 L55,58'/%3E%3C/g%3E%3Cg fill='%23222a63' stroke='none'%3E%3Ccircle cx='50' cy='70' r='4'/%3E%3Cpath d='M50,70 L46,80 L54,80 Z'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&display=swap"
+        rel="stylesheet" />
+    <style>
+        :root {
+            --paper: #f3efe4;
+            --paper-2: #efe9da;
+            --ink: #2a315c;
+            --ink-strong: #1a2150;
+            --blue: #222a63;
+            --blue-soft: #646a96;
+            --rule: rgba(34, 42, 99, .18);
+            --rule-2: rgba(34, 42, 99, .09);
+            --grid: rgba(34, 42, 99, .05);
+            --maxw: 1140px;
+            --serif: "Newsreader", Georgia, "Times New Roman", serif;
+            --mono: "IBM Plex Mono", ui-monospace, monospace;
+        }
+
+        * {
+            box-sizing: border-box
+        }
+
+        html {
+            scroll-behavior: smooth
+        }
+
+        body {
+            margin: 0;
+            color: var(--ink);
+            background: var(--paper);
+            font-family: var(--serif);
+            font-size: 19px;
+            line-height: 1.7;
+            font-weight: 400;
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+            overflow-x: hidden;
+        }
+
+        /* engineering paper grid */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            pointer-events: none;
+            background-image:
+                linear-gradient(var(--grid) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+            background-size: 30px 30px;
+            mask-image: radial-gradient(circle at 50% 30%, #000, rgba(0, 0, 0, .55) 80%);
+        }
+
+        .wrap {
+            max-width: var(--maxw);
+            margin: 0 auto;
+            padding: 0 30px
+        }
+
+        a {
+            color: inherit
+        }
+
+        .mono {
+            font-family: var(--mono)
+        }
+
+        .fig {
+            font-family: var(--mono);
+            font-size: 11.5px;
+            letter-spacing: .2em;
+            text-transform: uppercase;
+            color: var(--blue-soft);
+            display: inline-flex;
+            align-items: center;
+            gap: 11px;
+            margin: 0 0 22px;
+        }
+
+        .fig::before {
+            content: "";
+            width: 24px;
+            height: 1px;
+            background: var(--blue-soft)
+        }
+
+        /* header */
+        header {
+            position: relative;
+            z-index: 5;
+            border-bottom: 1px solid var(--rule-2)
+        }
+
+        .bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 74px
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--blue)
+        }
+
+        .brand svg {
+            width: 30px;
+            height: 30px;
+            display: block
+        }
+
+        .brand .wm {
+            font-family: var(--serif);
+            font-weight: 500;
+            font-size: 23px;
+            letter-spacing: .01em
+        }
+
+        nav {
+            display: flex;
+            gap: 30px;
+            font-family: var(--mono);
+            font-size: 13px;
+            letter-spacing: .03em
+        }
+
+        nav a {
+            color: var(--blue-soft);
+            text-decoration: none;
+            transition: color .2s
+        }
+
+        nav a:hover {
+            color: var(--blue)
+        }
+
+        @media(max-width:760px) {
+            nav {
+                display: none
+            }
+        }
+
+        /* hero */
+        .hero {
+            padding: 92px 0 72px
+        }
+
+        .hero-grid {
+            display: grid;
+            grid-template-columns: 1.05fr .9fr;
+            gap: 60px;
+            align-items: center
+        }
+
+        @media(max-width:920px) {
+            .hero-grid {
+                grid-template-columns: 1fr;
+                gap: 48px
+            }
+
+            .hero {
+                padding: 58px 0 46px
+            }
+        }
+
+        h1 {
+            font-family: var(--serif);
+            font-weight: 500;
+            font-size: clamp(40px, 5.6vw, 72px);
+            line-height: 1.05;
+            letter-spacing: -.012em;
+            margin: 0 0 28px;
+            color: var(--ink-strong);
+        }
+
+        h1 em {
+            font-style: italic
+        }
+
+        .lede {
+            font-size: clamp(18px, 1.5vw, 21px);
+            line-height: 1.6;
+            color: var(--ink);
+            max-width: 50ch;
+            margin: 0 0 32px
+        }
+
+        .cta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            align-items: center
+        }
+
+        .btn {
+            font-family: var(--mono);
+            font-size: 13.5px;
+            letter-spacing: .02em;
+            text-decoration: none;
+            padding: 13px 21px;
+            border-radius: 8px;
+            transition: background .2s, border-color .2s, color .2s;
+            display: inline-flex;
+            gap: 9px;
+            align-items: center;
+        }
+
+        .btn-primary {
+            background: var(--blue);
+            color: var(--paper)
+        }
+
+        .btn-primary:hover {
+            background: #171e4d
+        }
+
+        .btn-ghost {
+            border: 1px solid var(--rule);
+            color: var(--blue)
+        }
+
+        .btn-ghost:hover {
+            border-color: var(--blue)
+        }
+
+        /* hero mark */
+        .heromark {
+            display: flex;
+            flex-direction: column;
+            align-items: center
+        }
+
+        .heromark img {
+            width: 100%;
+            max-width: 470px;
+            height: auto;
+            display: block;
+            mix-blend-mode: multiply
+        }
+
+        .heromark svg {
+            width: 100%;
+            max-width: 340px;
+            height: auto
+        }
+
+        .heromark .cap {
+            font-family: var(--mono);
+            font-size: 11.5px;
+            letter-spacing: .14em;
+            text-transform: uppercase;
+            color: var(--blue-soft);
+            margin-top: 16px
+        }
+
+        .ink-s {
+            stroke: var(--blue);
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round
+        }
+
+        .faint-s {
+            stroke: var(--blue);
+            opacity: .3;
+            fill: none;
+            stroke-linecap: round
+        }
+
+        .ink-f {
+            fill: var(--blue)
+        }
+
+        /* sections */
+        section {
+            padding: 80px 0;
+            border-top: 1px solid var(--rule-2)
+        }
+
+        .sec-head {
+            max-width: 64ch;
+            margin-bottom: 42px
+        }
+
+        .sec-head h2 {
+            font-family: var(--serif);
+            font-weight: 500;
+            font-size: clamp(28px, 3.6vw, 40px);
+            line-height: 1.12;
+            letter-spacing: -.01em;
+            margin: 0;
+            color: var(--ink-strong)
+        }
+
+        .sec-head h2 em {
+            font-style: italic
+        }
+
+        .prose p {
+            max-width: 66ch;
+            margin: 0 0 22px;
+            color: var(--ink)
+        }
+
+        .prose p:last-child {
+            margin-bottom: 0
+        }
+
+        .prose b {
+            font-weight: 600;
+            color: var(--ink-strong)
+        }
+
+        /* the one beat */
+        .beat {
+            margin: 6px 0 0;
+            padding: 8px 0 8px 30px;
+            border-left: 2px solid var(--blue)
+        }
+
+        .beat p {
+            font-style: italic;
+            font-size: clamp(20px, 2.2vw, 26px);
+            line-height: 1.4;
+            color: var(--ink-strong);
+            max-width: 56ch;
+            margin: 0
+        }
+
+        /* figure: schematic */
+        figure {
+            margin: 40px 0 0;
+            border: 1px solid var(--rule-2);
+            border-radius: 12px;
+            background: var(--paper-2);
+            padding: 30px 30px 22px
+        }
+
+        figure svg {
+            width: 100%;
+            height: auto;
+            display: block
+        }
+
+        figcaption {
+            font-family: var(--mono);
+            font-size: 11.5px;
+            letter-spacing: .14em;
+            text-transform: uppercase;
+            color: var(--blue-soft);
+            margin-top: 18px;
+            text-align: center
+        }
+
+        .s-line {
+            stroke: var(--blue);
+            fill: none
+        }
+
+        .s-label {
+            font-family: var(--mono);
+            font-size: 12.5px;
+            fill: var(--blue-soft)
+        }
+
+        .s-strong {
+            fill: var(--ink-strong)
+        }
+
+        .s-allow-box {
+            fill: rgba(34, 42, 99, .05);
+            stroke: var(--blue);
+            stroke-width: 1
+        }
+
+        .s-deny {
+            fill: var(--blue);
+            opacity: .42
+        }
+
+        .s-broker {
+            fill: rgba(34, 42, 99, .12);
+            stroke: var(--blue);
+            stroke-width: 1.4
+        }
+
+        /* capability grid */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1px;
+            background: var(--rule-2);
+            border: 1px solid var(--rule-2);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-top: 8px
+        }
+
+        @media(max-width:860px) {
+            .grid {
+                grid-template-columns: 1fr
+            }
+        }
+
+        .cell {
+            background: var(--paper-2);
+            padding: 28px 26px
+        }
+
+        .cell .n {
+            font-family: var(--mono);
+            font-size: 12px;
+            color: var(--blue-soft);
+            letter-spacing: .12em
+        }
+
+        .cell h3 {
+            font-family: var(--serif);
+            font-weight: 600;
+            font-size: 20px;
+            margin: 12px 0 8px;
+            letter-spacing: -.01em;
+            color: var(--ink-strong)
+        }
+
+        .cell p {
+            margin: 0;
+            font-size: 16px;
+            line-height: 1.55;
+            color: var(--ink)
+        }
+
+        .chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 11px;
+            margin-top: 30px
+        }
+
+        .chip {
+            font-family: var(--mono);
+            font-size: 12.5px;
+            letter-spacing: .01em;
+            color: var(--blue);
+            padding: 9px 15px;
+            border: 1px solid var(--rule);
+            border-radius: 999px
+        }
+
+        .chip b {
+            color: var(--ink-strong);
+            font-weight: 600
+        }
+
+        /* where it fits */
+        .cols {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 18px
+        }
+
+        @media(max-width:860px) {
+            .cols {
+                grid-template-columns: 1fr
+            }
+        }
+
+        .col {
+            border: 1px solid var(--rule-2);
+            border-radius: 12px;
+            padding: 28px 26px;
+            background: var(--paper-2)
+        }
+
+        .col.win {
+            border-color: var(--blue);
+            box-shadow: 0 1px 0 var(--blue)
+        }
+
+        .col .k {
+            font-family: var(--mono);
+            font-size: 11.5px;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            color: var(--blue-soft)
+        }
+
+        .col h3 {
+            font-family: var(--serif);
+            font-weight: 500;
+            font-size: 23px;
+            margin: 8px 0 13px;
+            color: var(--ink-strong)
+        }
+
+        .col p {
+            margin: 0;
+            font-size: 16px;
+            line-height: 1.55;
+            color: var(--ink)
+        }
+
+        .col .verdict {
+            margin-top: 15px;
+            font-family: var(--mono);
+            font-size: 12.5px;
+            color: var(--blue-soft)
+        }
+
+        .col.win .verdict {
+            color: var(--blue)
+        }
+
+        /* security */
+        .callout {
+            border: 1px solid var(--rule);
+            border-radius: 16px;
+            padding: 44px;
+            background: var(--paper-2)
+        }
+
+        .callout .sec-head {
+            margin-bottom: 28px
+        }
+
+        .seclist {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 24px 42px;
+            margin: 0;
+            padding: 0;
+            list-style: none
+        }
+
+        @media(max-width:760px) {
+            .seclist {
+                grid-template-columns: 1fr
+            }
+
+            .callout {
+                padding: 30px
+            }
+        }
+
+        .seclist li {
+            display: flex;
+            gap: 13px;
+            align-items: flex-start
+        }
+
+        .seclist .mk {
+            font-family: var(--mono);
+            color: var(--blue);
+            font-size: 13px;
+            margin-top: 5px
+        }
+
+        .seclist h4 {
+            margin: 0 0 4px;
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--ink-strong)
+        }
+
+        .seclist p {
+            margin: 0;
+            font-size: 15.5px;
+            line-height: 1.55;
+            color: var(--ink)
+        }
+
+        .seclist code {
+            font-family: var(--mono);
+            font-size: 13.5px;
+            color: var(--blue)
+        }
+
+        /* footer */
+        footer {
+            border-top: 1px solid var(--rule-2);
+            padding: 52px 0 60px;
+            color: var(--blue-soft)
+        }
+
+        .foot {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 30px
+        }
+
+        .foot-col h5 {
+            font-family: var(--mono);
+            font-size: 11px;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+            color: var(--blue-soft);
+            margin: 0 0 13px;
+            font-weight: 400
+        }
+
+        .foot-col a {
+            display: block;
+            font-family: var(--mono);
+            font-size: 13px;
+            margin-bottom: 9px;
+            color: var(--ink);
+            text-decoration: none
+        }
+
+        .foot-col a:hover {
+            color: var(--blue)
+        }
+
+        .foot-brand {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            color: var(--blue);
+            text-decoration: none;
+            margin-bottom: 14px
+        }
+
+        .foot-brand svg {
+            width: 26px;
+            height: 26px
+        }
+
+        .foot-brand .wm {
+            font-family: var(--serif);
+            font-weight: 500;
+            font-size: 21px
+        }
+
+        .fineprint {
+            margin-top: 38px;
+            font-family: var(--mono);
+            font-size: 12px;
+            color: var(--blue-soft);
+            line-height: 1.7
+        }
+
+        .rv {
+            opacity: 0;
+            transform: translateY(16px);
+            transition: opacity .7s cubic-bezier(.2, .7, .2, 1), transform .7s cubic-bezier(.2, .7, .2, 1)
+        }
+
+        .rv.in {
+            opacity: 1;
+            transform: none
+        }
+
+        @media(prefers-reduced-motion:reduce) {
+            html {
+                scroll-behavior: auto
+            }
+
+            .rv {
+                opacity: 1;
+                transform: none;
+                transition: none
+            }
+        }
+    </style>
+</head>
+
+<body id="top">
+
+    <header>
+        <div class="wrap bar">
+            <a class="brand" href="#top" aria-label="Project Kennel home">
+                <svg viewBox="0 0 100 100" aria-hidden="true">
+                    <g class="ink-s" stroke-width="6">
+                        <polyline points="14,52 50,20 86,52" />
+                        <path d="M24,50 L24,84 L76,84 L76,50" />
+                        <path d="M38,84 L38,66 Q38,60 44,60 L56,60 Q62,60 62,66 L62,84" stroke-width="5" />
+                        <path d="M45,60 L45,54 A5,5 0 0 1 55,54 L55,60" stroke-width="4.5" />
+                        <circle cx="50" cy="71" r="3.4" fill="var(--blue)" stroke="none" />
+                        <path d="M50,71 L46.6,79 L53.4,79 Z" fill="var(--blue)" stroke="none" />
+                    </g>
+                </svg>
+                <span class="wm">kennel</span>
+            </a>
+            <nav>
+                <a href="#why">Why</a>
+                <a href="#project">The practice</a>
+                <a href="#what">Runtime</a>
+                <a href="#how">How</a>
+                <a href="#fit">Where it fits</a>
+                <a href="#security">Security</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+
+        <!-- HERO -->
+        <section class="hero" style="border-top:none">
+            <div class="wrap hero-grid">
+                <div class="rv">
+                    <p class="fig">A best current practice</p>
+                    <h1>Decide what untrusted code is allowed to do — and <em>prove it</em>.</h1>
+                    <p class="lede"><b>Project Kennel</b> is the disciplined way to confine untrusted code: a threat
+                        catalogue you can cite, a design that answers it, and a working Linux runtime that proves the
+                        whole thing builds and audits — each derived from the last.</p>
+                    <div class="cta">
+                        <a class="btn btn-primary" href="#project">The three deliverables</a>
+                        <a class="btn btn-ghost" href="https://github.com/projectkennel/projectkennel">Source &amp;
+                            documents</a>
+                    </div>
+                </div>
+
+                <div class="rv heromark">
+                    <img src="kennel-hero.png"
+                        alt="Hand-drawn ballpoint sketch of a kennel: a doghouse with a barred, arched doorway and engineering dimension lines." />
+                    <p class="cap">Fig. 1 — the kennel</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- WHY -->
+        <section id="why">
+            <div class="wrap">
+                <div class="sec-head rv">
+                    <p class="fig">Why</p>
+                    <h2>The assumption the whole model rested on has quietly stopped being true.</h2>
+                </div>
+                <div class="prose rv">
+                    <p>For years, code under your account was code you wrote, installed, and were watching — so letting
+                        it inherit your full authority was fine. It isn't any more. A modern <span
+                            class="mono">$HOME</span> runs npm and pip trees, build plugins, language servers, and AI
+                        agents that write and run code on your behalf: pulled in wholesale, mostly unread, executing
+                        with access to your keys, your email, your browsing history, and all of your source.</p>
+                    <p>The kernel has been able to contain this for years — SELinux, AppArmor, Landlock — but those are
+                        authored by the OS vendor, not by the person running the code, so in practice they get switched
+                        off rather than used. And because nothing separates you from a program under your UID, every
+                        shortcut you take is inherited by whatever you run next. The boundary that matters moved inside
+                        your account; the means to defend it stayed outside, and out of reach.</p>
+                    <p>So you impose it from the outside instead. That is a kennel: a space you set up in advance, where
+                        the code runs freely but reaches only what you chose to put in with it.</p>
+                </div>
+                <div class="beat rv">
+                    <p>The dog isn't the threat. It's a good boy that, left loose while you're out, will earnestly and
+                        enthusiastically wreck the house. The code is the same: not malicious, just eager.</p>
+                </div>
+                <div class="prose rv" style="margin-top:24px">
+                    <p style="font-size:16px;color:var(--blue-soft)">The longer argument — why the existing mechanisms
+                        fail, why self-sandboxing misses the point, and where an organisation's own policy is meant to
+                        attach — is laid out in <a
+                            href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/README.md">the
+                            case for Kennel</a>.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- THE PRACTICE / DELIVERABLES -->
+        <section id="project">
+            <div class="wrap">
+                <div class="sec-head rv">
+                    <p class="fig">What "Project" means</p>
+                    <h2>A threat catalogue, a design that answers it, and a Linux runtime that proves it out.</h2>
+                </div>
+                <div class="prose rv">
+                    <p>The word <em>Project</em> is deliberate. Confining untrusted code is mostly a thinking problem —
+                        deciding <b>what</b> to confine, and being able to <b>show the working</b> — and only then a
+                        sandbox. Kennel publishes that reasoning as three deliverables, each derived from the one
+                        before, so the controls in the code trace back to named risks and the risks trace back to a
+                        stated practice.</p>
+                </div>
+
+                <div class="grid rv">
+                    <div class="cell">
+                        <div class="n">Deliverable 01</div>
+                        <h3>The threat catalogue</h3>
+                        <p>An explicit, stable-ID catalogue of the threats untrusted local code poses — real-world
+                            incident citations, MITRE ATT&amp;CK and compliance mappings. The durable, portable
+                            contribution: a security team can cite it whether or not they run any of our code.</p>
+                    </div>
+                    <div class="cell">
+                        <div class="n">Deliverable 02</div>
+                        <h3>The design</h3>
+                        <p>The reasoning that answers the catalogue: the adversary model, the trust boundary, and the
+                            policy surface a control must satisfy. Substrate-neutral by intent — any team could build a
+                            fresh runtime to it. In time, the kind of practice a framework like ISO&nbsp;27001 would
+                            test an organisation for.</p>
+                    </div>
+                    <div class="cell">
+                        <div class="n">Deliverable 03</div>
+                        <h3>The reference runtime</h3>
+                        <p>A working Linux implementation, composing existing kernel primitives, every control traceable
+                            to a threat. The worked proof that the design produces real, auditable software. The runtime
+                            is the example — not the point.</p>
+                    </div>
+                </div>
+
+                <div class="prose rv" style="margin-top:32px">
+                    <p>The order is the method, not a roadmap. The catalogue names the threats; the design is the
+                        reasoning that answers them; the runtime is what you get when you build controls that discharge
+                        each one. The traceability — control to threat to principle — is the deliverable. The catalogue
+                        and the design don't depend on running our code: cite the catalogue in your own posture, or
+                        build a fresh runtime to the design. The Linux runtime is one worked answer, not the only one.
+                        Start with <a
+                            href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md">the
+                            threat catalogue</a>, read <a
+                            href="https://github.com/projectkennel/projectkennel/tree/main/docs/design">the design</a>,
+                        or jump to <a href="https://github.com/projectkennel/projectkennel">the reference runtime</a>.
+                    </p>
+                    <p style="color:var(--blue-soft);font-size:16px">When Microsoft shipped <b>MXC</b> in 2026 —
+                        "policy-driven, layered isolation and containment" — it confirmed the category is real. Kennel's
+                        contribution is the part underneath the tool: the catalogue and the design that say <em>why</em>
+                        a given control belongs, written down to be argued with.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- WHAT / REFERENCE IMPLEMENTATION -->
+        <section id="what">
+            <div class="wrap">
+                <div class="sec-head rv">
+                    <p class="fig">Deliverable 03 · the reference runtime</p>
+                    <h2>A sandbox with teeth.</h2>
+                </div>
+                <div class="prose rv" style="margin-bottom:6px">
+                    <p>Most sandboxes advise; this one enforces. Default-deny throughout — it bounds the files a
+                        workload can see, brokers and logs its network, and runs only the binaries you name, on the real
+                        kernel and on your actual files. Each capability below traces back to a threat in the catalogue.
+                    </p>
+                </div>
+
+                <figure class="rv">
+                    <svg viewBox="0 0 680 430" role="img"
+                        aria-label="Diagram of a kennel. Its walls bound the files, so the rest of the account — keys, mail, history, other source, the open network — is out of reach. Only named tools run inside. The single barred doorway is the one way out, routing egress through an audited broker to an allowlisted destination.">
+                        <!-- account -->
+                        <rect x="12" y="12" width="656" height="406" rx="14" class="s-line" opacity=".22" />
+                        <text x="28" y="36" class="s-label">your account — one UID, and everything runs under it</text>
+
+                        <!-- boundary set from outside -->
+                        <text x="340" y="70" text-anchor="middle" class="s-label" opacity=".55">the boundary you
+                            set</text>
+                        <line x1="340" y1="74" x2="340" y2="98" class="s-line" opacity=".4" />
+
+                        <!-- out of reach (left) -->
+                        <text x="28" y="150" class="s-label s-deny" opacity=".6" style="letter-spacing:.12em">OUT OF
+                            REACH</text>
+                        <g class="s-label s-deny" opacity=".5">
+                            <text x="28" y="178">~/.ssh · keys</text>
+                            <text x="28" y="201">mail · history</text>
+                            <text x="28" y="224">your other source</text>
+                            <text x="28" y="247">the open network</text>
+                        </g>
+
+                        <!-- the three moves (right) -->
+                        <text x="486" y="150" class="s-label" opacity=".55" style="letter-spacing:.12em">THE THREE
+                            MOVES</text>
+                        <g class="s-label" opacity=".75">
+                            <text x="486" y="178">walls — bound the files</text>
+                            <text x="486" y="201">door — broker the network</text>
+                            <text x="486" y="224">inside — only named tools</text>
+                        </g>
+
+                        <!-- kennel -->
+                        <polyline class="s-line" stroke-width="2.4" points="214,182 340,100 466,182" />
+                        <polyline class="s-line" stroke-width="1.1" points="228,183 340,110 452,183" />
+                        <path class="s-line" stroke-width="2.4" fill="rgba(34,42,99,.045)"
+                            d="M250,180 L250,360 L430,360 L430,180" />
+                        <text x="340" y="146" text-anchor="middle" class="s-label s-strong"
+                            style="letter-spacing:.14em">THE KENNEL</text>
+                        <text x="340" y="166" text-anchor="middle" class="s-label" opacity=".7">the workload, free
+                            inside</text>
+
+                        <!-- granted, inside -->
+                        <rect x="262" y="184" width="156" height="27" rx="6" class="s-allow-box" />
+                        <text x="276" y="202" class="s-label">./project (rw)</text>
+                        <rect x="262" y="218" width="156" height="27" rx="6" class="s-allow-box" />
+                        <text x="276" y="236" class="s-label">~/.cache (ro)</text>
+                        <rect x="262" y="252" width="112" height="27" rx="6" class="s-allow-box" />
+                        <text x="276" y="270" class="s-label">node · git</text>
+
+                        <!-- barred door = the one way out -->
+                        <path class="s-line" stroke-width="2.4" fill="rgba(34,42,99,.06)"
+                            d="M310,360 L310,330 A30,30 0 0 1 370,330 L370,360" />
+                        <g class="s-line" stroke-width="1.1">
+                            <line x1="325" y1="310" x2="325" y2="360" />
+                            <line x1="340" y1="305" x2="340" y2="360" />
+                            <line x1="355" y1="310" x2="355" y2="360" />
+                        </g>
+
+                        <!-- egress flow -->
+                        <line x1="340" y1="360" x2="340" y2="380" class="s-line" stroke-width="1.4" />
+                        <rect x="248" y="380" width="184" height="30" rx="6" class="s-broker" />
+                        <text x="262" y="400" class="s-label s-strong">broker · audit</text>
+                        <line x1="432" y1="395" x2="476" y2="395" class="s-line" stroke-width="1.4" />
+                        <rect x="476" y="380" width="150" height="30" rx="6" class="s-allow-box" />
+                        <text x="490" y="400" class="s-label">api.host:443 &#10003;</text>
+                    </svg>
+                    <figcaption>Fig. 2 — granted in, everything else out, one audited way through the door</figcaption>
+                </figure>
+
+                <div class="grid rv">
+                    <div class="cell">
+                        <div class="n">01</div>
+                        <h3>A granted view, not a copy</h3>
+                        <p>The workload sees only the paths you grant — your actual repository, in place. No image to
+                            sync, no files shuffled in and out.</p>
+                    </div>
+                    <div class="cell">
+                        <div class="n">02</div>
+                        <h3>Allowlisted egress</h3>
+                        <p>Outbound traffic runs through a broker that checks it against a list of permitted
+                            destinations and records every connection. Anything not on the list simply can't be reached.
+                        </p>
+                    </div>
+                    <div class="cell">
+                        <div class="n">03</div>
+                        <h3>Only the binaries you name</h3>
+                        <p>Execution is limited to the programs the policy permits, so a compromised tool doesn't have
+                            the rest of your toolchain to reach for.</p>
+                    </div>
+                    <div class="cell">
+                        <div class="n">04</div>
+                        <h3>Hard to scout</h3>
+                        <p>Secrets and unrelated trees aren't just unreadable. Where the platform allows it, they aren't
+                            visible at all — there's nothing to map.</p>
+                    </div>
+                    <div class="cell">
+                        <div class="n">05</div>
+                        <h3>Policy as signed code</h3>
+                        <p>Policies are declarative, version-pinned, and signed. A template can't quietly weaken an
+                            invariant; resolution refuses it.</p>
+                    </div>
+                    <div class="cell">
+                        <div class="n">06</div>
+                        <h3>An audit trail you can keep</h3>
+                        <p>Every security-relevant decision is written to an append-only, structured log — meant for a
+                            SIEM, not for grepping after something has already gone wrong.</p>
+                    </div>
+                </div>
+                <div class="prose rv" style="margin-top:26px">
+                    <p style="color:var(--blue-soft);font-size:16px">The runtime is Linux, composing Landlock, cgroup
+                        BPF, seccomp and namespaces. It isn't the portable part — the threat catalogue and the design
+                        are, and a different team could build a runtime to them on another substrate entirely. Other
+                        backends (macOS Seatbelt, FreeBSD jails, a microVM) are possible future work, not a current
+                        claim.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- HOW -->
+        <section id="how">
+            <div class="wrap">
+                <div class="sec-head rv">
+                    <p class="fig">How</p>
+                    <h2>Not a new sandbox — a careful arrangement of the mechanisms your OS already ships, kept small
+                        enough to read end to end.</h2>
+                </div>
+                <div class="prose rv">
+                    <p>Kennel doesn't reimplement the kernel or put a runtime in front of it. It composes the
+                        enforcement the platform already provides and wires it to one declarative policy. Everything
+                        starts from deny: filesystem access is a specific grant rather than your whole home, outbound
+                        traffic is brokered and logged, and execution is limited to named binaries. A small privileged
+                        helper does the few steps that genuinely need root, so the workload itself never runs with
+                        elevated rights.</p>
+                    <p>Because Kennel governs <b>what a workload can reach</b> rather than the host kernel's attack
+                        surface, it sits comfortably underneath stronger isolation when a job calls for it. Run a kennel
+                        around a gVisor sandbox or a microVM and you add host-kernel-exploit containment without giving
+                        up the egress control, the recon-resistance, or the audit trail. Different layers doing
+                        different jobs — stacked only when it's worth it.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- WHERE IT FITS -->
+        <section id="fit">
+            <div class="wrap">
+                <div class="sec-head rv">
+                    <p class="fig">Where it fits</p>
+                    <h2>Between two options that don't quite work.</h2>
+                </div>
+                <div class="cols rv">
+                    <div class="col">
+                        <div class="k">The default</div>
+                        <h3>Give it everything</h3>
+                        <p>Hand the agent or the package your full account and trust that it — and everything it pulled
+                            in — behaves. Convenient, and the way most of it runs today.</p>
+                        <div class="verdict">one bad actor reaches your keys</div>
+                    </div>
+                    <div class="col">
+                        <div class="k">Heavyweight</div>
+                        <h3>Put it in a VM</h3>
+                        <p>Strong isolation, but a guest kernel to maintain, an image to keep current, and files moved
+                            in and out — enough friction that you stop using it for everyday work.</p>
+                        <div class="verdict">isolation you won't leave on</div>
+                    </div>
+                    <div class="col win">
+                        <div class="k">Project Kennel</div>
+                        <h3>Contain it in place</h3>
+                        <p>Per-workload grants on your real files at native speed, brokered egress, and a full audit
+                            trail — light enough to leave on. Put a VM underneath only when you need to.</p>
+                        <div class="verdict">containment you'll actually run</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SECURITY -->
+        <section id="security">
+            <div class="wrap">
+                <div class="callout rv">
+                    <div class="sec-head">
+                        <p class="fig">Security</p>
+                        <h2>Made to be distrusted, and read.</h2>
+                    </div>
+                    <ul class="seclist">
+                        <li><span class="mk">[+]</span>
+                            <div>
+                                <h4>Auditable by construction</h4>
+                                <p>A small trusted core, held to a high bar for review. Apache-2.0, with the BPF
+                                    components under GPL-2.0. You can read every line.</p>
+                            </div>
+                        </li>
+                        <li><span class="mk">[+]</span>
+                            <div>
+                                <h4>Signed, pinned policy</h4>
+                                <p>Templates are signature-verified before any field is read, and a policy can't
+                                    negotiate below the framework's invariants.</p>
+                            </div>
+                        </li>
+                        <li><span class="mk">[+]</span>
+                            <div>
+                                <h4>Structured audit</h4>
+                                <p>Append-only JSONL for every decision — policy loads, denied connects, signature
+                                    failures — ready to ship to a SIEM.</p>
+                            </div>
+                        </li>
+                        <li><span class="mk">[+]</span>
+                            <div>
+                                <h4>Coordinated disclosure</h4>
+                                <p>Found a specific, exploitable flaw? Report it privately at
+                                    <code>security@projectkennel.org</code>. Acknowledged within 72 hours.</p>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <div class="foot">
+                <div class="foot-col">
+                    <a class="foot-brand" href="#top">
+                        <svg viewBox="0 0 100 100" aria-hidden="true">
+                            <g class="ink-s" stroke-width="6">
+                                <polyline points="14,52 50,20 86,52" />
+                                <path d="M24,50 L24,84 L76,84 L76,50" />
+                                <path d="M38,84 L38,66 Q38,60 44,60 L56,60 Q62,60 62,66 L62,84" stroke-width="5" />
+                                <path d="M45,60 L45,54 A5,5 0 0 1 55,54 L55,60" stroke-width="4.5" />
+                                <circle cx="50" cy="71" r="3.4" fill="var(--blue)" stroke="none" />
+                                <path d="M50,71 L46.6,79 L53.4,79 Z" fill="var(--blue)" stroke="none" />
+                            </g>
+                        </svg>
+                        <span class="wm">kennel</span>
+                    </a>
+                    <p class="mono" style="max-width:32ch;font-size:13px;margin:0;color:var(--blue-soft)">Contain the
+                        code that lives in your&nbsp;$HOME.</p>
+                </div>
+                <div class="foot-col">
+                    <h5>Project</h5>
+                    <a href="https://github.com/projectkennel/projectkennel">Source</a>
+                    <a href="https://github.com/projectkennel/projectkennel/tree/main/docs/design">Design docs</a>
+                    <a href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md">Threat
+                        catalogue</a>
+                    <a
+                        href="https://github.com/projectkennel/projectkennel/blob/main/.github/CONTRIBUTING.md">Contributing</a>
+                </div>
+                <div class="foot-col">
+                    <h5>Reference runtime</h5>
+                    <a href="#what">Linux · Landlock / BPF</a>
+                    <a href="#project">Other substrates · future work</a>
+                </div>
+                <div class="foot-col">
+                    <h5>Contact</h5>
+                    <a href="mailto:security@projectkennel.org">security@projectkennel.org</a>
+                    <a href="https://github.com/projectkennel/projectkennel/blob/main/.github/SECURITY.md">Security
+                        policy</a>
+                </div>
+            </div>
+            <p class="fineprint">
+                projectkennel.org · projectkennel.com — pre-release; interfaces and guarantees may change.<br />
+                Apache-2.0 (userspace) · GPL-2.0-only (BPF components). No CLA. &copy; 2026 Project Kennel.
+            </p>
+        </div>
+    </footer>
+
+    <script>
+        (function () {
+            var els = Array.prototype.slice.call(document.querySelectorAll('.rv'));
+            if (!('IntersectionObserver' in window)) { els.forEach(function (e) { e.classList.add('in') }); return; }
+            var io = new IntersectionObserver(function (entries) {
+                entries.forEach(function (en) {
+                    if (en.isIntersecting) {
+                        var sib = Array.prototype.slice.call(en.target.parentElement.querySelectorAll(':scope > .rv'));
+                        en.target.style.transitionDelay = (Math.max(sib.indexOf(en.target), 0) * 70) + 'ms';
+                        en.target.classList.add('in');
+                        io.unobserve(en.target);
+                    }
+                });
+            }, { threshold: .12, rootMargin: '0px 0px -8% 0px' });
+            els.forEach(function (e) { io.observe(e) });
+        })();
+    </script>
+</body>
+
+</html>
