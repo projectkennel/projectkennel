@@ -54,6 +54,17 @@ pub enum Request {
         /// The kennel to attach to.
         kennel: String,
     },
+    /// Resize a running kennel's PTY (the broker holds the master, so the window-size
+    /// `ioctl` happens in kenneld). The attached CLI sends this on `SIGWINCH` and once
+    /// at attach time; it carries no fds and gets no body response — fire and forget.
+    Resize {
+        /// The kennel whose master to resize.
+        kennel: String,
+        /// New terminal height in rows.
+        rows: u16,
+        /// New terminal width in columns.
+        cols: u16,
+    },
 }
 
 /// The payload of a [`Request::Start`].
@@ -279,6 +290,12 @@ impl Request {
                 put_u8(&mut b, 5);
                 put_str(&mut b, kennel);
             }
+            Self::Resize { kennel, rows, cols } => {
+                put_u8(&mut b, 6);
+                put_str(&mut b, kennel);
+                put_u16(&mut b, *rows);
+                put_u16(&mut b, *cols);
+            }
         }
         b
     }
@@ -306,6 +323,11 @@ impl Request {
             4 => Ok(Self::AuthorizedKeys { key: r.string()? }),
             5 => Ok(Self::Attach {
                 kennel: r.string()?,
+            }),
+            6 => Ok(Self::Resize {
+                kennel: r.string()?,
+                rows: r.u16()?,
+                cols: r.u16()?,
             }),
             _ => Err(WireError::BadTag),
         }
@@ -542,6 +564,16 @@ mod tests {
         });
         round_trip_response(&Response::Detached {
             reason: String::new(),
+        });
+        round_trip_request(&Request::Resize {
+            kennel: "ai-coding".to_owned(),
+            rows: 50,
+            cols: 200,
+        });
+        round_trip_request(&Request::Resize {
+            kennel: String::new(),
+            rows: 0,
+            cols: 0,
         });
     }
 

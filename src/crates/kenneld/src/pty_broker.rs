@@ -25,7 +25,7 @@
 //! master fd (already in kenneld's TCB) and a benign client socket.
 
 use std::io::{Read as _, Write as _};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::{Arc, Condvar, Mutex};
 
 use kennel_lib_term::{Filter, FilterPolicy};
@@ -126,7 +126,7 @@ impl PtyBroker {
             let generation = inner.generation;
             let input_sock = borrow_for_io(&sock); // a dup for the input thread
             inner.client = Some(Client { sock }); // takeover: drops prior client
-            // Spawn the client→master input thread for this generation.
+                                                  // Spawn the client→master input thread for this generation.
             if let Ok(master) = inner.master.try_clone() {
                 self.spawn_input(input_sock, master, generation);
             }
@@ -200,6 +200,24 @@ impl PtyBroker {
     #[must_use]
     pub fn is_attached(&self) -> bool {
         self.inner.lock().is_ok_and(|i| i.client.is_some())
+    }
+
+    /// Resize the workload's pty (`TIOCSWINSZ` on the master, raising `SIGWINCH`
+    /// inside the kennel). The broker holds the master, so the client relays its
+    /// window size here on `SIGWINCH` rather than touching the fd itself.
+    pub fn resize(&self, rows: u16, cols: u16) {
+        if let Ok(inner) = self.inner.lock() {
+            if inner.done {
+                return;
+            }
+            let ws = kennel_lib_syscall::pty::Winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let _ = kennel_lib_syscall::pty::set_winsize(inner.master.as_fd(), &ws);
+        }
     }
 
     /// The pump: read the master, filter, append to the ring (bounded), and write to

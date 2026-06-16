@@ -202,6 +202,20 @@ pub fn relay_winch(from: OwnedFd, to: OwnedFd) {
     }
 }
 
+/// Block until the next `SIGWINCH` (`sigwait`), returning `Ok(())` per delivery.
+///
+/// Run on a dedicated thread after [`block_winch`] when the resize must be handled in
+/// process rather than relayed onto another fd (the CLI relays it to the daemon as a
+/// control request). Returns the OS error on a `sigwait` failure.
+///
+/// # Errors
+/// The OS error if `sigwait` fails.
+pub fn wait_winch() -> io::Result<()> {
+    let mut set = nix::sys::signal::SigSet::empty();
+    set.add(nix::sys::signal::Signal::SIGWINCH);
+    set.wait().map(|_| ()).map_err(io::Error::from)
+}
+
 /// If stdin (fd 0) is a terminal, adopt it as the controlling tty — best-effort.
 ///
 /// Called from the spawn seal; lives here so the `unsafe` fd-0 borrow stays in this

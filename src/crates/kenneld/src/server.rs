@@ -613,6 +613,18 @@ where
             Ok(()) => return run_attach(shared, &kennel, fds, conn),
             Err(e) => Response::Error(e),
         },
+        // Resize the kennel's pty (the broker holds the master). Fire-and-forget: a
+        // `SIGWINCH` relay sends this on a throwaway connection; there is no reply, so
+        // it falls through to the single send below only on a bad name.
+        Request::Resize { kennel, rows, cols } => match validate_kennel_name(&kennel) {
+            Ok(()) => {
+                if let Some(broker) = shared.broker_for(&kennel) {
+                    broker.resize(rows, cols);
+                }
+                return;
+            }
+            Err(e) => Response::Error(e),
+        },
     };
     let _ = control::send_response(conn, &response);
 }
@@ -1053,8 +1065,7 @@ pub fn run_kennel<P, L>(
                     } else {
                         kennel_lib_term::FilterPolicy::passthrough()
                     };
-                    let b =
-                        crate::pty_broker::PtyBroker::start(master, policy, client_sock.take());
+                    let b = crate::pty_broker::PtyBroker::start(master, policy, client_sock.take());
                     shared.set_broker(&req.kennel, b.clone());
                     Some(b)
                 },
@@ -1121,7 +1132,10 @@ where
         return;
     };
     let Some((ctx, pid)) = shared.ctx_pid(kennel) else {
-        let _ = control::send_response(conn, &Response::Error(format!("no kennel named `{kennel}`")));
+        let _ = control::send_response(
+            conn,
+            &Response::Error(format!("no kennel named `{kennel}`")),
+        );
         return;
     };
     let Some(generation) = broker.attach(client_sock) else {
