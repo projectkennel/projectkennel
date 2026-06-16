@@ -1,0 +1,24 @@
+[package]
+name = "kennel-lib-manifest"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel masked workspace manifest (.trust-manifest.json): the host-side schema types, baseline generation, execution-trigger hashing, and the review/diff logic for the cryptographic trust marker that travels with a writable workspace. Read natively by host IDEs, masked invisible inside the kennel; closes T2.8 (workspace-trigger tampering)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# JSON so host IDEs/LSPs validate the manifest natively against the published JSON
+# Schema (zero-friction adoption is the point). serde_json is the vetted parser/serializer
+# state machine — not hand-rolled (CODING-STANDARDS §5.5; the no-hand-rolled-parsers rule).
+# Vendored + §5.5-audited; pulls zmij (its Schubfach float formatter) as a normal dep.
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.150", default-features = false, features = ["std"] }
+# SHA-256 of execution triggers is computed via the system `sha256sum`, exactly as kenneld's
+# workload-pin verify does (server.rs `verify_workload_digest`): no in-crate crypto dep
+# (no-hand-rolled-crypto; the Rust sha2 twin is a contingent §5.5.1 call, not owed here).
+
+[lints]
+workspace = true

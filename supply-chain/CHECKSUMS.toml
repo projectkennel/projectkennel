@@ -386,3 +386,27 @@ verified-against = [
     "github.com/alacritty/vte @ 3b3da71c34cc1256c7e20981cf03f8eb95e08ffc (tag v0.15.0) — 13 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "The alacritty terminal-escape parser (Paul Williams' ANSI state machine). Used with default-features = false (the `std` feature only): the optional `ansi` feature (log + cursor-icon + bitflags) and `serde` are NOT enabled, so the only non-optional deps are arrayvec + memchr (both vendored, memchr pre-existing). It is the deliberate reuse-not-hand-roll choice for an untrusted-input parser (§5.1 + no-hand-rolled-parsers): a terminal escape parser is exactly the category the standards say to delegate to a vetted crate. No build.rs, not a proc-macro; licence Apache-2.0 OR MIT. Shipped: kennel-lib-term → CLI + kenneld PTY filter."
+
+[crate."serde_json"]
+version = "=1.0.150"
+crate-sha256 = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+audited-by = "remco"
+audited-on = "2026-06-16"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
+    "crates.io sparse index line for 1.0.150 — cksum equals the .crate sha256",
+    "github.com/serde-rs/json @ a1ae73ac6a6940a4a57c673aebaa13ed4dfe3e8c (tag v1.0.150) — 85 source files byte-identical via tools/audit-source.sh",
+]
+notes = "The JSON parser/serializer state machine (dtolnay/serde-rs). Used with default-features = false + the `std` feature only: the optional `indexmap`/`preserve_order`, `arbitrary_precision`, `float_roundtrip`, `raw_value`, and `unbounded_depth` features are NOT enabled, so the non-optional deps are serde + serde_core + itoa + memchr (all pre-vendored) plus zmij (its Schubfach float formatter, newly vendored). It is the deliberate reuse-not-hand-roll choice for an untrusted-input parser (§5.1 + no-hand-rolled-parsers) — a JSON parser is exactly the category the standards say to delegate. No build.rs, not a proc-macro; licence MIT OR Apache-2.0. Source review performed by the assistant and accepted by the maintainer. Shipped: kennel-lib-manifest (the .trust-manifest.json host-side types/generation/review) → the kennel CLI. NOT linked into kenneld."
+
+[crate."zmij"]
+version = "=1.0.21"
+crate-sha256 = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+audited-by = "remco"
+audited-on = "2026-06-16"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
+    "crates.io sparse index line for 1.0.21 — cksum equals the .crate sha256",
+    "github.com/dtolnay/zmij @ 6531ba31ccf5d14b604ca41f6e2414a8dd779af0 (tag 1.0.21) — 14 source files byte-identical via tools/audit-source.sh",
+]
+notes = "A pure-math Schubfach float-to-decimal formatter (dtolnay), serde_json's float code path (it replaced ryu). Required, NOT optional: serde_json 1.0.150 depends on `zmij ^1.0` as a normal dependency. ZERO transitive deps; no build.rs, not a proc-macro; licence MIT OR Apache-2.0. The masked manifest itself carries no float fields, so this code path is never exercised at runtime — it is vendored only because serde_json links it unconditionally. Source review performed by the assistant and accepted by the maintainer. Shipped transitively via serde_json → kennel-lib-manifest → the kennel CLI. NOT linked into kenneld."

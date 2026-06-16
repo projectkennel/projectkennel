@@ -147,3 +147,22 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Reviewer:** remco (2026-06-16). Provenance: byte-identical to `github.com/bluss/arrayvec` @ `0aede877fe0bfb1ba5e3c2024df8c0958d503a83` (tag 0.7.6), 18 source files + `Cargo.toml.orig`, via `tools/audit-source.sh`; `.crate` sha256 matches the independent re-download and the crates.io index `cksum`. Red-flag scan clean (no build.rs/proc-macro/FFI/asm/process/net/fs/env); unsafe is the crate's purpose (MaybeUninit-backed fixed-capacity storage). Source review by the assistant, accepted by the maintainer.
 - **Transitive deps added:** none (with `default-features = false`; the optional `borsh`/`serde`/`zeroize` are not enabled, and `bencher`/`matches`/`serde_test` are dev-only).
 - **Proc-macros / build.rs:** none.
+
+### serde_json
+
+- **Version:** =1.0.150 (exact pin), `default-features = false` + the `std` feature only.
+- **Justification:** The JSON parser/serializer state machine (dtolnay/serde-rs). `kennel-lib-manifest` uses it to read, validate, generate, and re-pin the masked workspace manifest (`.trust-manifest.json`) — the cryptographic trust marker host IDEs read against the published schema, masked invisible inside the kennel (closes **T2.8**, workspace-trigger tampering). JSON (not TOML) is mandated by the goal of zero-friction native host-IDE/LSP validation. This is the **reuse-not-hand-roll** call for an untrusted-input parser (§5.1, no-hand-rolled-parsers). The optional `preserve_order`/`indexmap`, `arbitrary_precision`, `float_roundtrip`, `raw_value`, and `unbounded_depth` features are **not** enabled.
+- **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
+- **Reviewer:** remco (2026-06-16). Provenance: byte-identical to `github.com/serde-rs/json` @ `a1ae73ac6a6940a4a57c673aebaa13ed4dfe3e8c` (tag v1.0.150), 85 source files + `Cargo.toml.orig`, via `tools/audit-source.sh`; `.crate` sha256 matches the independent re-download and the crates.io index `cksum`. Red-flag scan clean (no build.rs/proc-macro/FFI/asm). The source review was performed by the assistant and accepted by the maintainer.
+- **Transitive deps added:** `zmij` (new, below); `serde`, `serde_core`, `itoa`, `memchr` were already vendored. `indexmap` is optional and not enabled.
+- **Shipped into:** the `kennel` CLI only (via `kennel-lib-manifest`); **not** linked into `kenneld` — the enforcement TCB carries no JSON parser.
+- **Proc-macros / build.rs:** none.
+
+### zmij
+
+- **Version:** =1.0.21 (exact pin).
+- **Justification:** A pure-math Schubfach float-to-decimal formatter (dtolnay) — serde_json's float code path (it replaced `ryu`). **Required, not optional:** serde_json 1.0.150 depends on `zmij ^1.0` as a normal dependency, so vendoring serde_json forces it. The masked manifest itself carries **no float fields** (it is strings, objects, arrays), so this code path is never exercised at runtime; it is vendored only because serde_json links it unconditionally. Recorded here because it is a new vendored crate in the shipped graph.
+- **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
+- **Reviewer:** remco (2026-06-16). Provenance: byte-identical to `github.com/dtolnay/zmij` @ `6531ba31ccf5d14b604ca41f6e2414a8dd779af0` (tag 1.0.21), 14 source files + `Cargo.toml.orig`, via `tools/audit-source.sh`; `.crate` sha256 matches the independent re-download and the crates.io index `cksum`. Red-flag scan clean (no build.rs/proc-macro/FFI). Source review by the assistant, accepted by the maintainer.
+- **Transitive deps added:** none (zero normal dependencies).
+- **Proc-macros / build.rs:** none.

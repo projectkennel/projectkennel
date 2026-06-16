@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://projectkennel.org/schemas/trust-manifest-v1.json",
+  "title": "Project Kennel Trust Manifest",
+  "description": "Cryptographic boundaries and execution triggers for host-side tooling. A confined Project Kennel workload cannot see or rewrite this file (it is masked inside the kennel), so a host IDE can trust its pins to detect workspace-trigger tampering (T2.8).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "generator",
+    "execution"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "const": "1.0"
+    },
+    "generator": {
+      "type": "string",
+      "description": "The tool that generated or last updated this manifest."
+    },
+    "execution": {
+      "type": "object",
+      "description": "Defines what host tooling is allowed to execute.",
+      "additionalProperties": false,
+      "required": [
+        "triggers",
+        "boundaries"
+      ],
+      "properties": {
+        "triggers": {
+          "type": "object",
+          "description": "Key-value pairs mapping relative file paths to their expected SHA-256 hashes. Host tools must refuse to execute these files if the hash mismatches.",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^.*$": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "description": "A lowercase hex-encoded SHA-256 hash, prefixed with 'sha256:'."
+            }
+          }
+        },
+        "boundaries": {
+          "type": "object",
+          "description": "Negative trust spaces. Host tools must treat these paths as no-exec.",
+          "additionalProperties": false,
+          "required": [
+            "untrusted_paths"
+          ],
+          "properties": {
+            "untrusted_paths": {
+              "type": "array",
+              "description": "List of relative paths or globs that are strictly untrusted.",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    }
+  }
+}
