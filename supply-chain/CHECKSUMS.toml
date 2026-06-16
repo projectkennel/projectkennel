@@ -371,7 +371,7 @@ audited-on = "2026-06-16"
 verified-against = [
     "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
     "crates.io sparse index line for 0.7.6 — cksum equals the .crate sha256",
-    "github.com/bluss/arrayvec @ e07652bb19173dd67b5c1a94f008f114a70df641 (tag v0.7.6) — 28 source files byte-identical via tools/audit-source.sh",
+    "github.com/bluss/arrayvec @ 0aede877fe0bfb1ba5e3c2024df8c0958d503a83 (tag 0.7.6) — 18 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "A fixed-capacity stack vector; vte's only non-optional dep besides memchr. Used with default-features = false (only the `std` feature path vte needs), so ZERO transitive deps — borsh/serde/zeroize are optional and not enabled, bencher/matches/serde_test are dev-only. No build.rs, not a proc-macro; licence MIT OR Apache-2.0. Shipped: links into kennel-lib-term (the PTY escape filter) → the kennel CLI + kenneld."
 
@@ -383,6 +383,6 @@ audited-on = "2026-06-16"
 verified-against = [
     "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
     "crates.io sparse index line for 0.15.0 — cksum equals the .crate sha256",
-    "github.com/alacritty/vte @ 70514e90d5998e97e3fbb8c4f3e8663fc3d5af7d (tag 0.15.0) — 135 source files byte-identical via tools/audit-source.sh",
+    "github.com/alacritty/vte @ 3b3da71c34cc1256c7e20981cf03f8eb95e08ffc (tag v0.15.0) — 13 source files byte-identical via tools/audit-source.sh",
 ]
 notes = "The alacritty terminal-escape parser (Paul Williams' ANSI state machine). Used with default-features = false (the `std` feature only): the optional `ansi` feature (log + cursor-icon + bitflags) and `serde` are NOT enabled, so the only non-optional deps are arrayvec + memchr (both vendored, memchr pre-existing). It is the deliberate reuse-not-hand-roll choice for an untrusted-input parser (§5.1 + no-hand-rolled-parsers): a terminal escape parser is exactly the category the standards say to delegate to a vetted crate. No build.rs, not a proc-macro; licence Apache-2.0 OR MIT. Shipped: kennel-lib-term → CLI + kenneld PTY filter."
