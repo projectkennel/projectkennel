@@ -217,27 +217,87 @@ install_templates() {
 }
 
 print_next_steps() {
+	# Run the post-install checks ourselves and report PASS/ATTN, rather than telling
+	# the operator what to go check. Then print a copy-pastable per-user bring-up block,
+	# tailored to the invoking (sudo) user so it can be pasted verbatim.
+	local kennel_bin="$libexec/kennel"
+
+	echo
+	echo "Project Kennel: system install complete (binaries under $libexec, config under $vendor_dir)."
+	echo
+	echo "Post-install checks:"
+
+	# 1. privhelper setuid-root — the one thing that must be exactly right.
+	local ph="$libexec/kennel-privhelper" perms owner
+	perms="$(stat -c '%A' "$ph" 2>/dev/null || echo '?')"
+	owner="$(stat -c '%U' "$ph" 2>/dev/null || echo '?')"
+	if [ "$owner" = root ] && [ "${perms:3:1}" = s ]; then
+		echo "  [ok]   privhelper is setuid-root ($perms $owner)"
+	else
+		echo "  [ATTN] privhelper is NOT setuid-root ($perms $owner) — kennels will fail to construct"
+		echo "         fix: sudo chown root $ph && sudo chmod u+s $ph"
+	fi
+
+	# 2. binder filesystem available (the kennel bus). The privhelper modprobes it at
+	#    construct time, but flag it now so a binder-less kernel is obvious up front.
+	if grep -qw binder /proc/filesystems 2>/dev/null; then
+		echo "  [ok]   binder filesystem registered"
+	elif modinfo binder_linux >/dev/null 2>&1; then
+		echo "  [ok]   binder_linux module available (loaded on first kennel)"
+	else
+		echo "  [ATTN] no binder filesystem and no binder_linux module — the kernel needs"
+		echo "         CONFIG_ANDROID_BINDERFS; kennels cannot start without it"
+	fi
+
+	# 3. AppArmor userns restriction (Ubuntu 23.10+): our profile handles it, just report.
+	if [ -e /etc/apparmor.d/kenneld ]; then
+		echo "  [ok]   AppArmor userns profile installed"
+	elif [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+		echo "  [ATTN] unprivileged userns is AppArmor-restricted but no profile was installed"
+		echo "         (no /etc/apparmor.d on this host?) — kenneld may be denied CLONE_NEWUSER"
+	else
+		echo "  [ok]   unprivileged userns is not AppArmor-restricted"
+	fi
+
+	# The invoking user (sudo) — tailor the per-user block to them; fall back to a placeholder.
+	local u="${SUDO_USER:-}" uid_line=""
+	if [ -n "$u" ]; then
+		local uid; uid="$(id -u "$u" 2>/dev/null || echo '<uid>')"
+		uid_line="  # for $u (uid $uid)"
+		if grep -q "^${uid}:" /etc/kennel/subkennel 2>/dev/null; then
+			echo "  [ok]   /etc/kennel/subkennel has an allocation for $u (uid $uid)"
+		fi
+	fi
+
 	cat <<EOF
 
-Project Kennel: system install complete (binaries under $libexec, config under $vendor_dir).
+Per-user bring-up — run these as the user who will run kennels (NOT root):
+$uid_line
+  # 1. reach the helper binaries (kennel lives under libexec, off PATH by design):
+  export PATH="\$PATH:$libexec"
 
-Remaining admin steps (root):
-  1. Provision /etc/kennel/subkennel with one allocation line per user:
-       <uid>:<tag>:<gid>:<namespace>      e.g.  1000:42:0000000001:kennel-alice
-  2. Add any org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
-     (The project's own template-signing key is already installed there.)
-  3. To override a deployment path, edit /etc/kennel/system.toml (it wins over the
-     vendor $vendor_dir/system.toml, per key).
+  # 2. claim a subkennel allocation. This prints the exact 'sudo' line to append it
+  #    (the file is root-owned, so the CLI cannot write it itself) — paste that next:
+  kennel subkennel add
 
-Per-user enable (each user, unprivileged):
-       systemctl --user enable --now kenneld.socket
+  # 3. start the per-user daemon (socket-activated on first use):
+  systemctl --user enable --now kenneld.socket
 
-Verify the privhelper is setuid-root:
-       ls -l $libexec/kennel-privhelper      # expect -rwsr-xr-x root root
+  # 4. mint a personal policy-signing key (compiles your own leaf policies; when it is
+  #    the only key in your key dir, 'kennel run' picks it automatically — no --key needed):
+  kennel keygen $u-dev
 
-Documentation:
-       man kennel        # the CLI; see also kennel-policy(1), policy.toml(5)
-       man kenneld       # the daemon; see also system.toml(5), subkennel(5)
+  # 5. scaffold an interactive shell policy from the shipped template, then run it:
+  kennel policy generate my-shell --from interactive@v1
+  kennel run my-shell -- /bin/bash
+
+To make PATH permanent, add the export above to ~/.bashrc (or ~/.profile).
+
+Admin notes (root):
+  * Add org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
+  * Override a deployment path in /etc/kennel/system.toml (wins over $vendor_dir/system.toml).
+
+Docs:  man kennel · man kennel-policy · man policy.toml · man kenneld
 EOF
 }
 
