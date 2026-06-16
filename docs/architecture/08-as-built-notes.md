@@ -41,6 +41,13 @@ narration is kept here; the chapter named is the source of truth.
 - **`kennel_meta` read-only sealing + readback verification** (`02-7-bpf-abi.md`) — the map
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
+- **`kennel diff`** (`05-templates.md` §5.11/§5.13, `02-1-cli.md`) — the semantic,
+  threat-impact-annotated delta view (the `+`/`~`/`-` per-grant output with impact lines and
+  conflict detection) is designed, not built. What exists today: `kennel upgrade` shows the
+  honest *source* diff between template versions and re-pins the lock (built), and
+  `kennel policy show` prints the full effective policy. `kennel diff`'s value over those is the
+  *interpreted* delta (which grants widened/narrowed, with threat tags); that needs an
+  effective-policy differ, which is the owed work.
 - **Composable fragment catalogue** (`05-templates.md` §5.10) — the `include` mechanism is
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment

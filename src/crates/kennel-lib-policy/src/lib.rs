@@ -47,6 +47,7 @@ pub mod source_sig;
 pub mod ssh;
 pub mod translate;
 pub mod unix;
+pub mod version;
 
 pub use compile::{compile, compile_leaf, seal_unsigned, Compiled};
 pub use error::PolicyError;
@@ -73,6 +74,7 @@ pub use source_sig::{
     sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
 };
 pub use translate::{parse_audit_defaults, translate, Translated};
+pub use version::{is_newer as version_is_newer, parse_reference};
 
 /// The newest `settled_schema_version` this build accepts.
 pub const SETTLED_SCHEMA_VERSION: u32 = 1;

@@ -187,11 +187,13 @@ wins over the vendor copy. Every override key is documented inline in the shippe
    ```sh
    systemctl --user restart kenneld.socket kenneld.service
    ```
-3. If you re-signed any templates in place, the leaf lockfiles that pinned the
-   old bytes will now mismatch (exit code 6 on resolution). Re-record each lock by
-   recompiling the affected policy after reviewing the byte change — an unexpected
-   mismatch is a supply-chain signal, so review before re-recording rather than
-   deleting the lock blindly.
+3. If you published a new template version, users move to it deliberately with
+   `kennel upgrade <name>` (it shows the source diff, asks for consent, and re-pins
+   the lock — the sanctioned way to change a locked entry). If you re-signed a
+   template *in place* (same version, new bytes), existing locks will mismatch
+   (exit code 6) — that is the supply-chain tripwire working; prefer a version bump
+   over an in-place re-sign so users get a reviewable upgrade rather than a hard
+   error.
 4. Re-verify: `ls -l /usr/libexec/kennel/kennel-privhelper` (still setuid-root)
    and a smoke `kennel run interactive -- /bin/true` as a provisioned user.
 

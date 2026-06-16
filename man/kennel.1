@@ -126,6 +126,24 @@ Stream new events as they arrive.
 \fB\-\-print\-journalctl\-command\fR
 Print the equivalent journalctl invocation and exit.
 .RE
+.TP
+\fBkennel upgrade <name> [\-\-yes] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
+re\-pin a policy's template to a newer version (with review)
+.RS
+.TP
+\fB\-\-yes\fR
+Migrate without the interactive confirmation (for scripts/CI).
+.RE
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template search path (repeatable).
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Trust store the new version's signature verifies against (forwarded to the recompile).
+.RE
 .SH EXIT STATUS
 .TP
 \fB0\fR

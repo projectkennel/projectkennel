@@ -109,6 +109,11 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "show a kennel's audit log",
         "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
     ),
+    (
+        "upgrade",
+        "re-pin a policy's template to a newer version (with review)",
+        "upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
+    ),
 ];
 
 /// `kennel policy` sub-verbs, mirrored from `POLICY_VERBS`.
@@ -259,6 +264,15 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
                     ("--novel-only", "Suppress events seen in a prior run (new events only)."),
                     ("--follow", "Stream new events as they arrive."),
                     ("--print-journalctl-command", "Print the equivalent journalctl invocation and exit."),
+                ],
+            },
+            Command {
+                usage: SYNC_COMMANDS[7].2,
+                summary: SYNC_COMMANDS[7].1,
+                options: &[
+                    ("--yes", "Migrate without the interactive confirmation (for scripts/CI)."),
+                    ("--template-dir D", "Add a directory to the template search path (repeatable)."),
+                    ("--trust-dir D", "Trust store the new version's signature verifies against (forwarded to the recompile)."),
                 ],
             },
         ],
