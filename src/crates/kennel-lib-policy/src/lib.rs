@@ -65,8 +65,7 @@ pub use settled::{
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
     ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
     SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction,
-    TtyPolicy,
-    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, ULIMIT_RESOURCES,
+    TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{

@@ -237,10 +237,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
 /// Fold `[tty]` scalar-wins (child overrides), like `[lifecycle]`.
 fn fold_tty(p: &TtySection, c: &TtySection) -> TtySection {
     TtySection {
-        filter_terminal_escapes: or(
-            &c.filter_terminal_escapes,
-            &p.filter_terminal_escapes,
-        ),
+        filter_terminal_escapes: or(&c.filter_terminal_escapes, &p.filter_terminal_escapes),
     }
 }
 

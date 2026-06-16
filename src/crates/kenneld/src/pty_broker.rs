@@ -363,10 +363,10 @@ mod tests {
         s.set_read_timeout(Some(Duration::from_millis(500)))
             .expect("timeout");
         let mut buf = vec![0u8; n];
-        match std::io::Read::read(&mut s, &mut buf) {
-            Ok(got) => buf.get(..got).unwrap_or_default().to_vec(),
-            Err(_) => Vec::new(),
-        }
+        std::io::Read::read(&mut s, &mut buf).map_or_else(
+            |_| Vec::new(),
+            |got| buf.get(..got).unwrap_or_default().to_vec(),
+        )
     }
 
     /// A broker whose "master" is one end of a socketpair: the test writes the other
