@@ -520,10 +520,16 @@ fn list() -> Result<ExitCode, String> {
             if kennels.is_empty() {
                 println!("no running kennels");
             } else {
-                println!("{:<20} {:>5} {:>8}  STATE", "NAME", "CTX", "PID");
+                println!("{:<20} {:>5} {:>8}  {:<8} CLIENT", "NAME", "CTX", "PID", "STATE");
                 for k in kennels {
                     let state = if k.running { "running" } else { "starting" };
-                    println!("{:<20} {:>5} {:>8}  {state}", k.kennel, k.ctx, k.pid);
+                    // The terminal-attachment state of an interactive kennel: a
+                    // detached kennel keeps running, reattachable with `kennel attach`.
+                    let client = if k.attached { "attached" } else { "detached" };
+                    println!(
+                        "{:<20} {:>5} {:>8}  {state:<8} {client}",
+                        k.kennel, k.ctx, k.pid
+                    );
                 }
             }
             Ok(ExitCode::SUCCESS)

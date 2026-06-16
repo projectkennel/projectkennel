@@ -144,6 +144,9 @@ pub struct KennelInfo {
     pub pid: u32,
     /// Whether the workload is still running.
     pub running: bool,
+    /// Whether a terminal is currently attached to this (interactive) kennel. False
+    /// for a detached or non-interactive kennel.
+    pub attached: bool,
 }
 
 /// A malformed control message.
@@ -329,6 +332,7 @@ impl Response {
                     put_u16(&mut b, k.ctx);
                     put_u32(&mut b, k.pid);
                     put_u8(&mut b, u8::from(k.running));
+                    put_u8(&mut b, u8::from(k.attached));
                 }
             }
             Self::Exited { code } => {
@@ -380,6 +384,7 @@ impl Response {
                         ctx: r.u16()?,
                         pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
                         running: r.u8()? != 0,
+                        attached: r.u8()? != 0,
                     });
                 }
                 Ok(Self::Listing(kennels))
@@ -553,12 +558,14 @@ mod tests {
                 ctx: 7,
                 pid: 4242,
                 running: true,
+                attached: true,
             },
             KennelInfo {
                 kennel: "build".to_owned(),
                 ctx: 8,
                 pid: 99,
                 running: false,
+                attached: false,
             },
         ]));
     }

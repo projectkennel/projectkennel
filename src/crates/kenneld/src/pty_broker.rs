@@ -26,9 +26,18 @@
 
 use std::io::{Read as _, Write as _};
 use std::os::fd::OwnedFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use kennel_lib_term::{Filter, FilterPolicy};
+
+/// Why a client's session ended (the `kennel run`/`kennel attach` outcome).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachOutcome {
+    /// The workload exited — the kennel is gone; the caller reports `Exited`.
+    WorkloadExited,
+    /// This client was superseded by a take-over (another `attach`); report `Detached`.
+    TakenOver,
+}
 
 /// The ring-buffer capacity: the tail of filtered output retained for reattach
 /// scrollback and to keep the pump draining when detached (the workload throttles on
@@ -51,6 +60,9 @@ struct Inner {
     ring: Vec<u8>,
     /// The attached client, or `None` when detached.
     client: Option<Client>,
+    /// Monotonic client generation; bumped on each attach so a superseded client's
+    /// input thread can detect it has been replaced and exit.
+    generation: u64,
     /// Set once the workload has exited — the pump and any attach stop then.
     done: bool,
 }
@@ -61,6 +73,9 @@ struct Inner {
 #[derive(Clone)]
 pub struct PtyBroker {
     inner: Arc<Mutex<Inner>>,
+    /// Notified when `generation` or `done` changes, so a waiting `run_attach` learns
+    /// it was taken over or the workload exited.
+    changed: Arc<Condvar>,
 }
 
 impl PtyBroker {
@@ -72,34 +87,103 @@ impl PtyBroker {
         let inner = Arc::new(Mutex::new(Inner {
             master,
             ring: Vec::with_capacity(RING_CAPACITY),
-            client: initial_client.map(|sock| Client { sock }),
+            client: None,
+            generation: 0,
             done: false,
         }));
-        let broker = Self { inner };
+        let broker = Self {
+            inner,
+            changed: Arc::new(Condvar::new()),
+        };
         broker.spawn_pump(policy);
+        if let Some(sock) = initial_client {
+            let _ = broker.attach(sock);
+        }
         broker
     }
 
     /// Attach a new client terminal, taking over from any current one (the prior
     /// client's socket is dropped, so its CLI sees EOF and reports a clean detach).
-    /// Replays the ring tail so the reattached terminal shows recent output. Returns
-    /// `false` if the workload has already exited (nothing to attach to).
+    /// Replays the ring tail so the reattached terminal shows recent output, then
+    /// spawns the client→master input thread. Returns this attach's generation (pass
+    /// it to [`Self::wait_for_outcome`]), or `None` if the workload has already exited.
     #[must_use]
-    pub fn attach(&self, sock: OwnedFd) -> bool {
-        let Ok(mut inner) = self.inner.lock() else {
-            return false;
+    pub fn attach(&self, sock: OwnedFd) -> Option<u64> {
+        let generation = {
+            let Ok(mut inner) = self.inner.lock() else {
+                return None;
+            };
+            if inner.done {
+                return None;
+            }
+            // Replay the retained tail to the newcomer before it joins the live stream.
+            let tail = inner.ring.clone();
+            if !tail.is_empty() {
+                let mut w = borrow_for_io(&sock);
+                let _ = w.write_all(&tail);
+            }
+            inner.generation = inner.generation.wrapping_add(1);
+            let generation = inner.generation;
+            let input_sock = borrow_for_io(&sock); // a dup for the input thread
+            inner.client = Some(Client { sock }); // takeover: drops prior client
+            // Spawn the client→master input thread for this generation.
+            if let Ok(master) = inner.master.try_clone() {
+                self.spawn_input(input_sock, master, generation);
+            }
+            generation
         };
-        if inner.done {
-            return false;
+        // Wake any prior client's `wait_for_outcome` (it was taken over).
+        self.changed.notify_all();
+        Some(generation)
+    }
+
+    /// Block until this client's session ends: the workload exits ([`AttachOutcome::
+    /// WorkloadExited`]) or a take-over supersedes this `generation`
+    /// ([`AttachOutcome::TakenOver`]). The caller (`run_kennel`/`run_attach`) reports
+    /// `Exited`/`Detached` accordingly.
+    #[must_use]
+    pub fn wait_for_outcome(&self, generation: u64) -> AttachOutcome {
+        let Ok(mut inner) = self.inner.lock() else {
+            return AttachOutcome::WorkloadExited;
+        };
+        loop {
+            if inner.done {
+                return AttachOutcome::WorkloadExited;
+            }
+            if inner.generation != generation {
+                return AttachOutcome::TakenOver;
+            }
+            match self.changed.wait(inner) {
+                Ok(g) => inner = g,
+                Err(_) => return AttachOutcome::WorkloadExited,
+            }
         }
-        // Replay the retained tail to the newcomer before it joins the live stream.
-        let tail = inner.ring.clone();
-        if !tail.is_empty() {
-            let mut w = borrow_for_io(&sock);
-            let _ = w.write_all(&tail);
-        }
-        inner.client = Some(Client { sock }); // takeover: drops the previous client
-        true
+    }
+
+    /// Spawn the client→master input thread: copy the client's keystrokes to the pty
+    /// master until the client closes, the workload exits, or this client is superseded
+    /// by a take-over (generation mismatch).
+    fn spawn_input(&self, mut client_in: std::fs::File, master: OwnedFd, generation: u64) {
+        let inner = Arc::clone(&self.inner);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = match client_in.read(&mut buf) {
+                    Ok(0) | Err(_) => break, // client detached / closed
+                    Ok(n) => n,
+                };
+                let Ok(g) = inner.lock() else { break };
+                if g.done || g.generation != generation {
+                    break; // workload gone, or we were taken over
+                }
+                let mut w = borrow_for_io(&g.master);
+                drop(g);
+                if w.write_all(buf.get(..n).unwrap_or_default()).is_err() {
+                    break;
+                }
+            }
+            let _ = &master; // keep the master dup alive for this thread's lifetime
+        });
     }
 
     /// Mark the workload exited: stop pumping and drop any client (its CLI then sees
@@ -109,6 +193,7 @@ impl PtyBroker {
             inner.done = true;
             inner.client = None;
         }
+        self.changed.notify_all();
     }
 
     /// Whether a client is currently attached (for `list`'s attached/detached column).
@@ -123,6 +208,7 @@ impl PtyBroker {
     /// client; here is the output direction only.
     fn spawn_pump(&self, policy: FilterPolicy) {
         let inner = Arc::clone(&self.inner);
+        let changed = Arc::clone(&self.changed);
         std::thread::spawn(move || {
             let mut filter = Filter::new(policy);
             let mut buf = [0u8; 4096];
@@ -142,10 +228,12 @@ impl PtyBroker {
                     let mut r = borrow_for_io(&master);
                     match r.read(&mut buf) {
                         Ok(0) | Err(_) => {
-                            // Workload closed the pty (exit) — stop pumping.
+                            // Workload closed the pty (exit) — stop pumping and wake a
+                            // waiting client (it reports WorkloadExited).
                             if let Ok(mut g) = inner.lock() {
                                 g.done = true;
                             }
+                            changed.notify_all();
                             return;
                         }
                         Ok(n) => n,
@@ -207,7 +295,7 @@ mod tests {
         assert_eq!(ring.len(), RING_CAPACITY);
         assert!(ring.ends_with(b"TAIL"));
         // The oldest bytes were dropped.
-        assert_eq!(&ring[..4], b"xxxx");
+        assert_eq!(ring.get(..4), Some(b"xxxx".as_slice()));
     }
 
     #[test]
