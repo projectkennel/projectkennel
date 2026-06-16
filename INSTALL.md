@@ -28,7 +28,7 @@ sudo apt-get install -y clang libbpf-dev linux-libc-dev
 
 ## 1. Running the Installer
 
-Run the installer script with `sudo` to perform the system-wide installation. By default, it builds all release binaries (compiling `kennel-privhelper` with the `bpf-egress` feature) and installs them under `/opt/kennel`:
+Run the installer script with `sudo` to perform the system-wide installation. By default, it builds all release binaries (compiling `kennel-privhelper` with the `bpf-egress` feature) and installs them under `/usr/libexec/kennel` (the documented non-PATH helper location; see `docs/architecture/07-paths.md`):
 
 ```bash
 sudo src/tools/install.sh
@@ -38,7 +38,7 @@ sudo src/tools/install.sh
 
 The script accepts the following flags to customize the installation:
 
-* `--prefix DIR`: Set a custom installation directory prefix (default: `/opt/kennel`).
+* `--prefix DIR`: Set a custom installation directory prefix (default: `/usr/libexec/kennel`).
 * `--no-build`: Skip the `cargo build` step and install the binaries already compiled in `target/release/`.
 * `--dry-run`: Print the actions the installer would perform without modifying the system.
 * `-h` or `--help`: Display the usage guidelines.

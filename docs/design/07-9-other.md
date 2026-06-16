@@ -57,12 +57,13 @@ This is the deliberate inversion of the obvious approach. "Take the user's envir
 
 ```toml
 [env]
-# Optional: a file of KEY=value defaults to seed the environment from. Resolved
-# at compile time and its contents pinned into the settled policy (so the env is
-# signature-bound and reproducible, not read from disk at spawn). The shared,
-# reusable base — a team's standard locale/tooling vars — lives here; per-kennel
-# deviations go in `set`.
-template = "env/base.env"
+# ROADMAP (not yet built; rejected by the parser today — 08-as-built §8.1). A file
+# of KEY=value defaults to seed the environment from, resolved at compile time and
+# its contents pinned into the settled policy (so the env is signature-bound and
+# reproducible, not read from disk at spawn). The shared, reusable base — a team's
+# standard locale/tooling vars — would live here; per-kennel deviations go in `set`.
+# Until built, use [env].set for forced values; `pass`/`deny` for pass-through.
+template = "env/base.env"   # ROADMAP — not accepted by the parser yet
 
 # Forced values, layered over the template. PATH (from [exec].path, §7.3.6),
 # HOME (the shim home), USER (the masked account), and SHELL ([exec].shell) are
@@ -103,8 +104,10 @@ The selected shell sets both the `passwd` `pw_shell` field and `$SHELL`. It live
 
 ```toml
 [fs.home]
-# Seed the kennel home's dotfiles from this template (compile-time, pinned).
-template = "home/dev-skeleton"
+# ROADMAP (not yet built; rejected by the parser today — 08-as-built §8.1). Would
+# seed the kennel home's dotfiles from this template (compile-time, pinned). Until
+# built, the synthesised built-in dotfile defaults cover the common case.
+template = "home/dev-skeleton"    # ROADMAP — not accepted by the parser yet
 
 # Persistence is OFF by default: the home is reconstructed each spawn. Opt a
 # path (or the whole home) into a persistent writable bind only here. THIS is
@@ -163,7 +166,9 @@ Project Kennel automatically derives `visible` from `fs.read` and `fs.write` lis
 
 **Test plan.** Context sees only listed mounts in `/proc/mounts`. Context attempts `mount()`; expect EPERM (no `CAP_SYS_ADMIN`).
 
-## 7.9.5 Tty and TIOCSTI
+## 7.9.5 Tty and TIOCSTI *(roadmap)*
+
+> **Roadmap — designed, not built.** The `[tty]` section below is not accepted by the parser today (`08-as-built-notes.md` §8.1); a policy declaring it is rejected (`deny_unknown_fields`). The TIOCSTI hardening described is the intended design.
 
 **Why it matters.** The TIOCSTI ioctl ("type into the controlling tty as if I were the user") is a notorious sandbox escape. A confined process running in a terminal can inject keystrokes that appear to come from the user, executing commands in the user's shell after the kennel exits.
 
@@ -262,7 +267,10 @@ The user does not write these; they are properties of Project Kennel's setup.
 
 **For ML workloads.** Templates like `ml-coding` explicitly grant the relevant device files and document the capability. The grant is recorded in the diff and threat-tagged.
 
+> **Roadmap — the `[gpu]` convenience toggle is not built** (`08-as-built-notes.md` §8.1); the parser rejects a `[gpu]` section today. The underlying capability *is* reachable now: grant the GPU device nodes directly via `[[fs.dev.passthrough]]` (§7.2.8) plus the matching `fs.read`/`exec.allow`. The toggle below would derive those grants from a `backend` name.
+
 ```toml
+# ROADMAP — not accepted by the parser yet; use [[fs.dev.passthrough]] today.
 [gpu]
 enabled = true
 backend = "nvidia"           # "nvidia" | "amd" | "intel"
@@ -270,7 +278,7 @@ backend = "nvidia"           # "nvidia" | "amd" | "intel"
 # based on backend.
 ```
 
-Templates that enable GPU access also typically need broader `exec.allow` (CUDA tools, drivers' user-space components) and may need broader `fs.read` (driver caches in `/var/lib/...`).
+A GPU grant (whether via the future toggle or today's passthrough) also typically needs broader `exec.allow` (CUDA tools, drivers' user-space components) and may need broader `fs.read` (driver caches in `/var/lib/...`).
 
 ## 7.9.10 Hardware tokens (FIDO, TPM, smart cards)
 
@@ -280,7 +288,10 @@ Templates that enable GPU access also typically need broader `exec.allow` (CUDA 
 
 **For workflows that need them.** Explicit grants per template, with clear threat-impact annotation:
 
+> **Roadmap — the `[hardware]` convenience toggle is not built** (`08-as-built-notes.md` §8.1); the parser rejects a `[hardware]` section today. The capability is reachable now via `[[fs.dev.passthrough]]` (§7.2.8) for `/dev/tpm*`/`/dev/hidraw*` and `[unix]` for the `pcscd` socket. The toggle below would name the intent and derive those grants.
+
 ```toml
+# ROADMAP — not accepted by the parser yet; use [[fs.dev.passthrough]] / [unix] today.
 [hardware]
 fido_token = true            # grants /dev/hidraw* matching FIDO devices
                              # and the appropriate udev permissions
