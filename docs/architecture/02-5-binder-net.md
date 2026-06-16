@@ -211,18 +211,27 @@ intra-kennel path (always — the load-bearing case):
   other in-kennel process ── connect() 127.43.16.1:8080 ──►  reaches it directly
                   (normal loopback; no proxy, no binder)
 
-host-side mirror (observe / expose at the same IP):
+host-side mirror (observe / expose at the same IP) — BUILT, pull-based:
 
-  allowed bind ──► cgroup bind hook reports it ──► kenneld
-       │  forward to BIND delegate over socketpair
+  bring-up ──► kenneld eagerly registers each policy-mirrored port with host-inetd
        ▼
-  host-side spawn leg  (host net-ns, delegate — no binder)
-       │  bind() the same 127.43.16.1:8080 on the host alias
-       │  retain the mirror socket (lifetime = kennel; host-side attribution)
+  host-inetd  (host net-ns, delegate — no binder; reverse of host-netproxy)
+       │  bind() the same 127.43.16.1:8080 on the host alias, listen, accept
+       │  per accept: mint socketpair, splice accepted⇄host_end LOCALLY,
+       │             push the kennel_end + port to kenneld (SCM_RIGHTS)
        ▼
-  host inbound conn ──► leg ──► relay into the kennel via the shim ──►
-       shim connect()s the native inside listener and splices
+  kenneld  enqueues the kennel_end on pending-inbound[port]  (pure fd router)
+       ▼
+  facade-client (in-kennel; reverse of facade-socks5)
+       │  BIND_INET(port) → kenneld replies the kennel_end fd, or AGAIN (re-arm)
+       │  connect() the native inside listener 127.43.16.1:8080 and splice
+       ▼  bytes: external → accepted → host_end⇄kennel_end → facade-client → listener
 ```
+
+> **Pull-based (built), not the earlier push/callback sketch.** kenneld makes no inbound policy
+> decision (the `bind4`/`6` ACL already gated the bind) and the `BIND_INET` handler never parks a
+> looper — the unbounded accept wait is in a per-port reader thread, off the binder pool. See
+> [`07-5-network.md`](../design/07-5-network.md) §7.5.7.
 
 ---
 

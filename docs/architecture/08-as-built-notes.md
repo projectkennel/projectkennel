@@ -45,14 +45,6 @@ narration is kept here; the chapter named is the source of truth.
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
   tests, not mechanism.
-- **Inbound host-side BIND mirror** (`07-5-network.md` §7.5.6/§7.5.7) — the four network modes, the
-  `[net.proxy]`/`[net.bpf]` split, and BOTH the `[net.bpf].connect` AND `[net.bpf].bind` CIDR ACLs
-  are built (see below): the bind ACL is wired into the cgroup `bind4`/`6` BPF (deny-first over
-  dedicated `bind_{allow,deny}_v{4,6}` tries) and proven on hardware. What remains roadmap is only
-  the host-side *mirror*: the INet `BIND` verb that exposes a kennel-bound port host-side at the
-  kennel's own loopback address, so an operator's `ss`/`lsof` maps it back. Until then a bound port
-  is reachable only inside the kennel's net-ns (the gate decides whether the bind is permitted; the
-  mirror would decide whether it is reachable from the host).
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
@@ -121,9 +113,18 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   by-name allow + `deny.invariant`/`deny.policy` the proxy enforces, proxied modes only — a
   by-name rule under `host` is a compile error) and `[net.bpf]` (the kernel CIDR+port ACL, no
   names, present in every mode, author-narrows-only against the framework lock). The
-  `[net.bpf].connect` ACL is enforced (cgroup `connect4`/`6` BPF + Landlock `CONNECT_TCP`,
-  deny-first); all layers intersect and evaluate deny-first: `07-5-network.md`,
-  `02-5-binder-net.md`.
+  `[net.bpf].connect` AND `[net.bpf].bind` ACLs are enforced (cgroup `connect4`/`6` + `bind4`/`6`
+  BPF + Landlock `CONNECT_TCP`/`BIND_TCP`, deny-first over dedicated allow/deny LPM tries); all
+  layers intersect and evaluate deny-first: `07-5-network.md`, `02-5-binder-net.md`.
+- **Inbound host-side BIND mirror (§7.5.7)** — a port the workload binds inside the kennel is
+  exposed back on the host at the kennel's own loopback alias, the pull-based reverse of egress:
+  `host-inetd` (the inbound delegate, reverse of `host-netproxy`) binds each policy-mirrored
+  `ip:port` on host `lo`, accepts, splices locally, and pushes the conduit's kennel end to kenneld;
+  `facade-client` (in-kennel, reverse of `facade-socks5`) pulls each conduit with the `BIND_INET`
+  node-0 verb and connects the workload's native listener. kenneld is a stateless fd router with NO
+  inbound policy decision (the `bind4`/`6` ACL already gated the bind) and the `BIND_INET` handler
+  never parks a binder looper (`AGAIN` re-arm; the wait lives in a per-port reader thread).
+  Hardware-proven by the `net-bind-mirror` e2e.
 - **Run-environment synthesis** — `env_clear` + synthesised `envp`, `[exec].shell`, system
   rc, user dotfiles, `[fs.home].persist`: design `07-9-other.md` §7.9.2a.
 - **Unified audit writer + four sinks** — file/stdout/syslog/journald, per-class filtering,
