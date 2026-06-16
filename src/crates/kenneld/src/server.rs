@@ -584,7 +584,7 @@ where
 
 /// Validate and dispatch one decoded control request on `conn` (with its passed `fds`).
 ///
-/// The body of [`handle_connection`] after decode — split out so the e2e tests can drive
+/// The body of `handle_connection` after decode — split out so the e2e tests can drive
 /// the *real* dispatch (e.g. `Attach`) without a shim that could diverge from production.
 ///
 /// Trust boundary 6 (§04 trust boundaries): the kennel name arrives from the user's CLI

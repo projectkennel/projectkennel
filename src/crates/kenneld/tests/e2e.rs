@@ -696,6 +696,10 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
 /// 4. write the sentinel through the second client → the workload echoes it and exits.
 ///
 /// If detach killed the workload, step 4's echo never arrives and the run never exits.
+// allow(too_many_lines): one cohesive end-to-end scenario (start → read → detach →
+// assert-survives → reattach → replay → sentinel → exit); splitting it would hide the
+// sequencing the test exists to prove.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
     use kenneld::control::{recv_response, Request, Response, StartRequest};
