@@ -60,17 +60,11 @@ write = [
     "~/.local/share/kennel/<kennel>/state/**",
 ]
 
-# Create access: paths where the kennel may create new files/directories.
-# By default, inherits from write. Override to allow writing existing files
-# but not creating new ones.
-create = []                            # default: same as write
-
-# Execute access: paths from which binaries may be executed.
-# Interacts with exec.* policy in §7.3.
-exec_allowed_from = [
-    "/usr/**",
-    "/lib/**",
-]
+# (There is no separate `create` or `exec_allowed_from` field. Creating files is
+# part of `write` — a `write` grant covers create/modify/delete. Execution is gated
+# by `exec.allow` (the execve allowlist, §7.3) and a path needs `fs.read` to be a
+# legal execve target; Landlock FS_EXECUTE gates the binary + its loader, see
+# 02-7 / the exec model in §7.3.)
 
 # Categorical denials. Evaluated before any allow.
 # These are typical defaults in templates; users rarely override.
@@ -204,6 +198,8 @@ The kennel's environment has `HOME=/home/<user>`. Inside the kennel, `ls ~/` sho
 This solves the problem that motivated Project Kennel: the kennel cannot enumerate, cannot discover, cannot accidentally reach the credentials and state in the user's real `$HOME`.
 
 ### Template-level constructs built on the constructed-`$HOME` mechanism
+
+> **Roadmap — designed, not built.** `fs.home.sanitise` and `fs.scrub` are not accepted by the parser today (their config surfaces are rejected at parse; `08-as-built-notes.md` §8.1). The constructed-`$HOME` view they build on *is* built — credential paths are absent from the view rather than scrubbed in place — so the casual-reconnaissance threat (T1.1) is already closed without them. The two features below are the designed extensions.
 
 Two template-level features extend the constructed-`$HOME` pattern. They are not separate policy primitives — both compose the underlying mount-namespace + bind-mount machinery — but they are common enough that templates declare them with dedicated syntax. The semantics live here in §7.4; the template-author-facing description lives in §5.9.
 

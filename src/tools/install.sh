@@ -70,7 +70,7 @@ run() {
 }
 
 # The unprivileged binaries kenneld locates via the config (all under libexec).
-USER_BINS="kenneld kennel host-netproxy host-inetd facade-socks5 facade-client facade-ssh kennel-akc"
+USER_BINS="kenneld kennel host-netproxy host-inetd facade-socks5 facade-client facade-afunix facade-ssh kennel-akc"
 
 build_binaries() {
 	[ "$do_build" -eq 1 ] || { echo "install.sh: --no-build, using target/release"; return 0; }
@@ -78,7 +78,7 @@ build_binaries() {
 	# -p kenneld builds the kenneld, kennel, and kennel-akc bins.
 	run cargo build --release --offline --frozen --locked \
 		-p kenneld -p host-netproxy -p host-inetd -p facade-socks5 \
-		-p facade-client -p facade-ssh -p kennel-bin-init
+		-p facade-client -p facade-afunix -p facade-ssh -p kennel-bin-init
 	# The privhelper needs its BPF feature; build it separately.
 	run cargo build --release --offline --frozen --locked \
 		-p kennel-privhelper --features bpf-egress

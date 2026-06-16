@@ -33,11 +33,15 @@ sshd = "/usr/sbin/sshd"
 # makes kennel-bin-init look silent when it is not.
 # log_level = "debug"
 
-# Explicit per-binary overrides (absolute paths; no ~ expansion). Uncomment to
-# relocate a single binary away from <libexec_dir>:
-# privhelper    = "/usr/libexec/kennel/kennel-privhelper"
-# netproxy      = "/usr/libexec/kennel/host-netproxy"
-# socks5        = "/usr/libexec/kennel/facade-socks5"
-# inetd         = "/usr/libexec/kennel/host-inetd"
-# facade_client = "/usr/libexec/kennel/facade-client"
-# akc           = "/usr/libexec/kennel/kennel-akc"
+# Explicit per-binary overrides (absolute paths; no ~ expansion). The key is on the
+# left, the default filename under <libexec_dir> on the right. Uncomment to relocate
+# a single binary; every helper kenneld resolves at runtime is listed here:
+# privhelper    = "/usr/libexec/kennel/kennel-privhelper"   # the suid privilege boundary
+# netproxy      = "/usr/libexec/kennel/host-netproxy"       # egress CONNECT delegate
+# socks5        = "/usr/libexec/kennel/facade-socks5"       # in-kennel SOCKS5/HTTP front-end
+# inetd         = "/usr/libexec/kennel/host-inetd"          # inbound BIND mirror delegate (§7.5.7)
+# facade_client = "/usr/libexec/kennel/facade-client"       # in-kennel inbound BIND pull end
+# afunix        = "/usr/libexec/kennel/facade-afunix"       # AF_UNIX socket-shim facade (§7.6)
+# ssh           = "/usr/libexec/kennel/facade-ssh"          # in-kennel SSH egress connector
+# akc           = "/usr/libexec/kennel/kennel-akc"          # sshd AuthorizedKeysCommand helper
+# init          = "/usr/libexec/kennel/kennel-bin-init"     # trusted uid-0 PID 1 (root-owned)
