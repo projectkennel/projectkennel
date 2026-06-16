@@ -1,29 +1,36 @@
-//! In-kennel SOCKS5 egress shim: present a SOCKS5 endpoint on the kennel's loopback and broker each
-//! `CONNECT` to the `org.projectkennel.INet/default` binder facade.
+//! In-kennel egress shim: present a SOCKS5 **and** HTTP-proxy endpoint on the kennel's loopback and
+//! broker each `CONNECT` to the `org.projectkennel.INet/default` binder facade.
 //!
 //! # Purpose
 //!
-//! The egress facade (`docs/design/07-5-network.md` §7.5.2/§7.5.6): the workload speaks SOCKS5 to
-//! this shim at the kennel's loopback `:1080` (the `socks5h://` form, so the *name* — never a
-//! resolved address — rides the request). On each `CONNECT` the shim transacts a
+//! The egress facade (`docs/design/07-5-network.md` §7.5.2/§7.5.6): the workload speaks SOCKS5 or
+//! HTTP-proxy to this shim at the kennel's loopback `:1080`. One listener serves both — the first
+//! byte routes ([`protocol::detect`]: `0x05` → SOCKS5, an uppercase method letter → HTTP). Either
+//! way the *name* (never a resolved address) rides the request: SOCKS5 via `socks5h://`, HTTP via a
+//! `CONNECT host:port` / absolute-form `GET http://...`. On each request the shim transacts a
 //! [`verb::CONNECT_INET`] to node 0; kenneld decides under `[net.proxy]`, resolves the name, pins
 //! the vetted address, drives its host-side `host-netproxy` delegate to dial it, and returns one
-//! end of a socketpair conduit. The shim completes the SOCKS5 handshake and splices the workload to
-//! that conduit. It is the TCP analogue of `facade-afunix`.
+//! end of a socketpair conduit. The shim completes the handshake (SOCKS5 reply, or HTTP
+//! `200 Connection Established` / origin-form-rewritten forward) and splices. The TCP analogue of
+//! `facade-afunix`. Serving HTTP too lets `http://`-only clients (Go net/http, Node fetch, the JVM,
+//! Python requests) egress — they ignore a `socks5h://` `HTTP_PROXY`.
 //!
 //! # Invocation
 //!
 //! `facade-socks5 <binder-device> <listen-addr>`, spawned by kenneld into the kennel's view.
-//! `<binder-device>` is `/dev/binder`; `<listen-addr>` is the kennel loopback SOCKS endpoint.
+//! `<binder-device>` is `/dev/binder`; `<listen-addr>` is the kennel loopback proxy endpoint.
 //!
 //! # Non-goals
 //!
 //! No policy, no resolver, no host socket: kenneld decides, resolves, and pins. This process only
-//! speaks SOCKS5 and splices bytes.
+//! speaks the two proxy protocols and splices bytes.
 //!
 //! [`verb::CONNECT_INET`]: kennel_lib_binder::service::verb::CONNECT_INET
 
 #![forbid(unsafe_code)]
+
+mod http;
+mod protocol;
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -61,8 +68,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Bind the SOCKS endpoint and broker each accepted connection. One thread per connection; a failed
-/// connection logs and is dropped (the application sees a refused SOCKS request), the others serve.
+/// Bind the endpoint and broker each accepted connection. One listener serves BOTH SOCKS5 and
+/// HTTP-proxy clients: the first byte routes (`protocol::detect`). One thread per connection; a
+/// failed connection logs and is dropped (the application sees a refused request), the others serve.
 fn serve(device: &str, listen: &str) -> io::Result<()> {
     let listener = TcpListener::bind(listen)?;
     for incoming in listener.incoming() {
@@ -77,8 +85,23 @@ fn serve(device: &str, listen: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Peek the first byte to classify the protocol, then dispatch to the SOCKS5 or HTTP handler.
+fn handle(device: &str, client: TcpStream) -> io::Result<()> {
+    // MSG_PEEK one byte, leaving the stream intact for the chosen handler. A 0-byte peek = the
+    // client opened and closed without sending (a TCP readiness probe) — a clean disconnect.
+    let mut head = [0u8; 1];
+    let n = client.peek(&mut head)?;
+    match protocol::detect(head.get(..n).unwrap_or(&[])) {
+        Ok(protocol::Protocol::Socks5) => handle_socks5(device, client),
+        Ok(protocol::Protocol::Http) => handle_http(device, client),
+        // SOCKS4, an empty connect/close probe, or an unknown lead byte: drop silently (a probe is
+        // not an error; an unknown byte we fail closed on without engaging a handler).
+        Err(_) => Ok(()),
+    }
+}
+
 /// Handle one SOCKS5 connection: negotiate, broker the `CONNECT` to the facade, and splice.
-fn handle(device: &str, mut client: TcpStream) -> io::Result<()> {
+fn handle_socks5(device: &str, mut client: TcpStream) -> io::Result<()> {
     let Some((host, port)) = socks5_accept(&mut client)? else {
         // The client opened the SOCKS port and closed without sending anything (a TCP
         // readiness/health probe). Not an error — drop it silently.
@@ -94,6 +117,61 @@ fn handle(device: &str, mut client: TcpStream) -> io::Result<()> {
             // Granted-but-unreachable or denied: the facade refused. Tell the client and drop.
             let _ = socks5_reply(&mut client, REP_GENERAL_FAILURE);
             Err(e)
+        }
+    }
+}
+
+/// Handle one HTTP-proxy connection: read the request head, broker the `CONNECT` to the facade,
+/// then either tunnel (`CONNECT`, reply `200`) or forward (absolute-form, write the rewritten head
+/// upstream first), and splice.
+fn handle_http(device: &str, mut client: TcpStream) -> io::Result<()> {
+    let req = read_http_request(&mut client)?;
+    match broker(device, &req.host, req.port) {
+        Ok(conduit) => {
+            match req.kind {
+                http::Kind::Connect => {
+                    // Raw tunnel: tell the client the tunnel is up, then splice blind.
+                    client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+                }
+                http::Kind::Forward => {
+                    // Plaintext forward proxy: send the origin-form-rewritten head upstream, then
+                    // splice the rest of the exchange (response + any request body).
+                    (&conduit).write_all(&req.upstream_head)?;
+                }
+            }
+            splice(client, conduit);
+            Ok(())
+        }
+        Err(e) => {
+            // Denied or unreachable: an HTTP status line the client understands, then drop.
+            let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n");
+            Err(e)
+        }
+    }
+}
+
+/// Read an HTTP-proxy request head from `client`, accumulating until [`http::parse_request`] has a
+/// complete head (or the bound is hit). Mirrors `socks5_accept`'s read discipline.
+fn read_http_request(client: &mut TcpStream) -> io::Result<http::HttpRequest> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        match http::parse_request(&buf) {
+            Ok(req) => return Ok(req),
+            Err(http::HttpError::Incomplete) => {
+                let n = client.read(&mut chunk)?;
+                if n == 0 {
+                    return Err(invalid(
+                        "HTTP request head truncated (EOF before CRLF CRLF)",
+                    ));
+                }
+                buf.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
+            }
+            Err(e) => {
+                return Err(invalid_owned(format!(
+                    "malformed HTTP-proxy request: {e:?}"
+                )))
+            }
         }
     }
 }
@@ -180,6 +258,10 @@ fn read_array<const N: usize, S: Read>(client: &mut S) -> io::Result<[u8; N]> {
 }
 
 fn invalid(msg: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+fn invalid_owned(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 

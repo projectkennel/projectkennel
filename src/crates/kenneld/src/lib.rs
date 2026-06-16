@@ -1331,17 +1331,20 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
         path: socks5_bin.to_path_buf(),
         args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), listen.to_string()],
     });
-    // The workload's egress goes through facade-socks5. socks5h ⇒ the proxy resolves names.
-    let url = format!("socks5h://{listen}");
-    for var in [
-        "ALL_PROXY",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "all_proxy",
-        "http_proxy",
-        "https_proxy",
-    ] {
-        command.env(var, &url);
+    // The workload's egress goes through facade-socks5, which serves BOTH SOCKS5 and HTTP-proxy on
+    // the one listener. Point the HTTP(S)_PROXY vars at the `http://` form: many runtimes (Go
+    // net/http, Node fetch/undici, the JVM, Python requests without the socks extra) accept ONLY an
+    // http:// proxy in HTTP_PROXY and ignore/reject a socks5h:// scheme — the http front-end is what
+    // makes them egress. ALL_PROXY stays socks5h:// for SOCKS-native clients (and so the name, not a
+    // resolved address, crosses to kenneld). Both schemes hit the same endpoint and the same
+    // CONNECT_INET decision path.
+    let http_url = format!("http://{listen}");
+    let socks_url = format!("socks5h://{listen}");
+    for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        command.env(var, &http_url);
+    }
+    for var in ["ALL_PROXY", "all_proxy"] {
+        command.env(var, &socks_url);
     }
 }
 
