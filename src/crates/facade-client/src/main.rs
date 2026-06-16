@@ -87,8 +87,12 @@ fn service_port(device: &str, kennel_ip: IpAddr, port: u16) {
                 // re-arms immediately for the next inbound connection.
                 thread::spawn(move || deliver(conduit, kennel_ip, port));
             }
-            // AGAIN (nothing pending) or a transient binder error: back off, then re-arm.
-            Ok(None) | Err(_) => thread::sleep(REARM_BACKOFF),
+            Ok(None) => thread::sleep(REARM_BACKOFF),
+            // A transient binder/transport error: back off and re-arm.
+            Err(e) => {
+                eprintln!("facade-client: BIND_INET :{port} error: {e}");
+                thread::sleep(REARM_BACKOFF);
+            }
         }
     }
 }
@@ -113,8 +117,15 @@ fn pull_inbound(device: &str, port: u16) -> io::Result<Option<UnixStream>> {
 /// to it. A connect failure (the workload isn't listening yet) drops the conduit — the external
 /// client sees the connection close, the same as connecting to a down service.
 fn deliver(conduit: UnixStream, kennel_ip: IpAddr, port: u16) {
-    let Ok(upstream) = TcpStream::connect((kennel_ip, port)) else {
-        return;
+    let upstream = match TcpStream::connect((kennel_ip, port)) {
+        Ok(u) => u,
+        Err(e) => {
+            // The workload isn't listening (yet, or at all) — drop the conduit; the external client
+            // sees the connection close, the same as connecting to a down service. Logged because a
+            // silent drop here looks like the mirror "not working".
+            eprintln!("facade-client: workload {kennel_ip}:{port} not reachable: {e}");
+            return;
+        }
     };
     splice(conduit, upstream);
 }

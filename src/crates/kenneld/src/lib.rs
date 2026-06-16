@@ -1373,6 +1373,14 @@ fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, po
             AccessFs::READ_FILE | AccessFs::EXECUTE,
         ));
     }
+    // facade-client connects the workload's listener at <kennel-ip>:<port>; Landlock gates connect
+    // per port, so each mirrored port needs a CONNECT_TCP grant (the BPF connect ACL is seeded with
+    // the loopback /28 separately in stamp_proxy). Without this Landlock denies the in-kennel
+    // delivery connect (EPERM) even though the BPF ACL permits it.
+    for &port in ports {
+        plan.landlock_net
+            .push((port, kennel_lib_syscall::landlock::AccessNet::CONNECT_TCP));
+    }
     // `facade-client <binder-device> <kennel-ip> <port>...`, run inside the sealed view.
     let mut args = vec![IN_VIEW_BINDER_DEVICE.to_owned(), kennel_ip.to_string()];
     args.extend(ports.iter().map(u16::to_string));

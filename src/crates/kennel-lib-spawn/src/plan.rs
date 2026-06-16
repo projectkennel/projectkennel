@@ -1008,25 +1008,25 @@ impl Plan {
     pub fn stamp_proxy(&mut self, endpoint: &ProxyEndpoint) {
         stamp_proxy_meta(&mut self.bpf_meta, endpoint);
 
-        // The proxy speaks TCP (SOCKS5 / HTTP CONNECT). Host-order port on a
-        // single-port range; the `KENNEL_ALLOW_FLAG_PROXY` flag marks it as the
-        // proxy entry for the audit and for any program that distinguishes it.
-        let value = allow_entry(
-            endpoint.port,
-            endpoint.port,
-            Protocol::Tcp,
-            KENNEL_ALLOW_FLAG_PROXY,
-        );
+        // The kennel's own loopback is one trust domain in one net-ns: the proxy listener, the
+        // workload's mirrored listeners (§7.5.7), and any intra-kennel loopback service all live on
+        // it. Grant a SINGLE `/32` CONNECT entry on that exact address with ANY port and the
+        // FLAG_PROXY marker. A /32 is the longest prefix, so it wins LPM cleanly — a coarser /28
+        // seed would lose to this /32 and re-introduce the proxy entry's port restriction, which is
+        // exactly the bug that blocked facade-client → workload (it dials a non-proxy port).
+        let own_loopback = allow_entry(0, u16::MAX, Protocol::Any, KENNEL_ALLOW_FLAG_PROXY);
         if let Some(v4) = endpoint.v4 {
             self.bpf_allow_v4
-                .push((lpm_v4_key(v4.octets(), HOST_PREFIX_V4), value));
+                .push((lpm_v4_key(v4.octets(), HOST_PREFIX_V4), own_loopback));
         }
-        self.bpf_allow_v6
-            .push((lpm_v6_key(endpoint.v6.octets(), HOST_PREFIX_V6), value));
+        self.bpf_allow_v6.push((
+            lpm_v6_key(endpoint.v6.octets(), HOST_PREFIX_V6),
+            own_loopback,
+        ));
 
-        // Landlock always handles net (the ruleset restricts TCP connect to the listed ports). The
-        // workload reaches its egress endpoint (facade-socks5's SOCKS5 listener) at the proxy port,
-        // so it must carry a CONNECT_TCP grant — else Landlock denies the connect BPF allowed.
+        // Landlock always handles net; the workload reaches its proxy endpoint at the proxy port,
+        // so grant CONNECT_TCP there (the per-mirror-port CONNECT_TCP grants are added by
+        // apply_facade_client). Without it Landlock denies the connect the BPF ACL permits.
         if !self.landlock_net.iter().any(|(p, _)| *p == endpoint.port) {
             self.landlock_net
                 .push((endpoint.port, AccessNet::CONNECT_TCP));
@@ -1034,9 +1034,8 @@ impl Plan {
 
         // Seed the kennel's own loopback subnet (§7.5.6) into the inbound BIND ACL: a proxied
         // kennel rewrites a wildcard bind to this loopback and allows in-subnet binds, so the
-        // subnet must pass the (default-deny) bind ACL without the author writing a rule. A full
-        // port range over the /28 (v4) / /64 (v6); the bind ACL is deny-first, so an author
-        // bind-deny inside the subnet still wins.
+        // subnet must pass the (default-deny) bind ACL without an author rule. A full port range
+        // over the /28 (v4) / /64 (v6); the bind ACL is deny-first, so an author deny still wins.
         let any_port = allow_entry(0, u16::MAX, Protocol::Any, 0);
         if let Some(v4) = endpoint.v4 {
             self.bpf_bind_allow_v4

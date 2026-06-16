@@ -102,10 +102,18 @@ fn handle_registration(stream: &UnixStream) {
         return; // a registration carries no fd
     }
     let Some((addr, port)) = decode_bind(buf.get(..n).unwrap_or_default()) else {
+        eprintln!("host-inetd: malformed bind registration");
         return;
     };
-    let Ok(listener) = TcpListener::bind((addr, port)) else {
-        return; // the host-side bind failed; kenneld sees `stream` close
+    let listener = match TcpListener::bind((addr, port)) {
+        Ok(l) => l,
+        Err(e) => {
+            // The host-side bind failed (e.g. the kennel's loopback alias is not on host `lo`, or
+            // the port is taken). kenneld sees `stream` close. Log it — a silent failure here is
+            // the mirror simply not appearing, which is undebuggable.
+            eprintln!("host-inetd: bind {addr}:{port} failed: {e}");
+            return;
+        }
     };
     for conn in listener.incoming() {
         let Ok(accepted) = conn else { continue };
