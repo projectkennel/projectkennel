@@ -22,23 +22,32 @@ little of it as possible.
 
 ## Status
 
-`kennel-lib-syscall` carries `#![allow(unsafe_code)]` for exactly one deliberate
-reason: the hand-rolled **Landlock** bindings (`src/landlock.rs`). The
-`landlock` crate would pull `syn` and the first proc-macros into the privileged
-dependency tree, while the Landlock ABI is three syscalls and a few packed
-structs — small enough to own. Everything else in the crate is safe: the
-credential wrappers go through `nix::unistd`, and seccomp will go through
-`seccompiler` (hand-rolling BPF bytecode is the genuinely dangerous case).
-The `unsafe` is confined to `landlock.rs`'s raw syscall wrappers. `kennel-lib-bpf`
-is now also active (the `bpf(2)` FFI). Every other crate is
-`#![forbid(unsafe_code)]`.
+**Five** crates carry `#![allow(unsafe_code)]`; every other crate in the workspace is
+`#![forbid(unsafe_code)]`. The five are split by concern so each owns a small, single-
+purpose `unsafe` surface rather than one crate accreting all of it:
+
+- `kennel-lib-syscall` — namespaces, mounts, seccomp, credentials, the spawn `pre_exec`
+  hook (delegates most `unsafe` to `nix`/`seccompiler`).
+- `kennel-lib-landlock` — the hand-rolled Landlock syscall bindings (split out of
+  `kennel-lib-syscall` so that crate's surface stays smaller).
+- `kennel-lib-bpf` — the `bpf(2)` FFI and the audit-ringbuf reader.
+- `kennel-lib-binder` — the `binder(7)` ioctl / `mmap` / binderfs ABI.
+- `kennel-lib-scm` — one site: adopting `SCM_RIGHTS`-received raw fds into `OwnedFd`.
+
+The split is deliberate: a consumer that only needs (say) fd-passing pulls in
+`kennel-lib-scm` (one `unsafe` line) rather than the whole syscall surface. Each block
+carries the §4 `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment template, and
+every PR touching `unsafe` needs two maintainer approvals.
 
 ## Permitted crates
 
-| Crate | Why it may need `unsafe` | Size ceiling |
+| Crate | Why it may need `unsafe` | Surface |
 |---|---|---|
-| `kennel-lib-syscall` *(allow; owns the Landlock bindings, the spawn hook, the netlink calls)* | The single point for namespaces, mounts, Landlock/seccomp, capabilities, credentials, child spawning, and interface-address management. Delegates `unsafe` to vetted crates (nix, seccompiler). Owns three `unsafe` sites, each §4-commented: the Landlock syscall wrappers (`src/landlock.rs`), a deliberate exception to keep `syn`/proc-macros out of the privileged TCB; one `CommandExt::pre_exec` call (`src/spawn.rs`) registering the post-`fork`/pre-`execve` seal hook, wrapped here so `kennel-lib-spawn` stays `#![forbid(unsafe_code)]`; and the three `NETLINK_ROUTE` socket syscalls (`src/netlink.rs`, `socket`/`sendto`/`recv`) for adding/removing the per-kennel loopback addresses — the message is a plain byte buffer (no `transmute`), and `rtnetlink`/`ioctl`/`ip` were all rejected (see the module docs). | ~1500 lines (reviewable in one sitting) |
-| `kennel-lib-bpf` *(active)* | The `bpf(2)` FFI for loading/attaching the cgroup BPF programs, plus the audit-ringbuf reader. ELF parsing is delegated to `object`; the `unsafe` is confined to `src/sys.rs` (the `bpf()` syscalls — map create/update, prog load, cgroup attach/detach, object pin/get — plus the `OwnedFd` wrap) and `src/ringbuf.rs` (the two `mmap`/`munmap` calls and the lock-free single-consumer drain, which reads the kernel's ringbuf positions and record headers via aligned atomics). Each block is §4-commented. We do **not** use libbpf-rs/libbpf-sys (which would vendor zlib+libelf+libbpf C, ~1435 files); `object` (one crate) does the generic ELF parsing and we hand-roll the narrow, security-bearing loader and reader. | — |
+| `kennel-lib-syscall` | The single point for namespaces, mounts, seccomp, capabilities, credentials, and child spawning. Delegates most `unsafe` to vetted crates (`nix`, `seccompiler`). The hand-rolled exception is the `CommandExt::pre_exec` call (`src/spawn.rs`) registering the post-`fork`/pre-`execve` seal hook, wrapped here so `kennel-lib-spawn` stays `#![forbid(unsafe_code)]`. | small; reviewable in one sitting |
+| `kennel-lib-landlock` | The hand-rolled **Landlock** bindings — `landlock_create_ruleset` / `landlock_restrict_self` / `prctl(NO_NEW_PRIVS)`, a few packed UAPI structs (`src/lib.rs`). The `landlock` crate would pull `syn` + the first proc-macros into the privileged TCB; the ABI is three syscalls, small enough to own. Non-test `unsafe` is the three syscall wrappers; the bulk of the file's `unsafe` is `#[cfg(test)]` harness (fork/socket/ioctl to prove the rules bite). | a handful of wrappers |
+| `kennel-lib-bpf` | The `bpf(2)` FFI for loading/attaching the cgroup BPF programs, plus the audit-ringbuf reader. ELF parsing is delegated to `object`; the `unsafe` is confined to `src/sys.rs` (the `bpf()` syscalls — map create/update, prog load, cgroup attach/detach, object pin/get — plus the `OwnedFd` wrap) and `src/ringbuf.rs` (the `mmap`/`munmap` calls and the lock-free single-consumer drain over aligned atomics). We do **not** use libbpf-rs/libbpf-sys (which would vendor zlib+libelf+libbpf C, ~1435 files); `object` does the generic ELF parsing and we hand-roll the narrow, security-bearing loader and reader. | `sys.rs` + `ringbuf.rs` |
+| `kennel-lib-binder` | The `binder(7)` ioctl / `mmap` / binderfs-mount ABI (`<linux/android/binder.h>`), with **no** libbinder/libbinder-ndk. The `unsafe` is confined to `src/sys.rs` (the `BINDER_*` ioctls, the shared-buffer `mmap`, the `Send`/`Sync` for the mapping) plus a few `OwnedFd`/`fcntl` wraps in `src/client.rs`. The decoder (`proto.rs`) and the context-manager state machine hold no `unsafe`. | `sys.rs` (+ a few `client.rs` wraps) |
+| `kennel-lib-scm` | **One** `unsafe` site: adopting each `SCM_RIGHTS`-received raw fd into an `OwnedFd` (`src/lib.rs`). `nix` owns the `sendmsg`/`recvmsg` control-message marshalling; only the kernel-installed fd needs the raw-to-owned wrap. Split out so a connector end can pass fds without pulling the whole syscall surface. | one line |
 
 The C in `bpf/` is governed separately by §4.1 (BPF C code) — C is `unsafe` by construction and reviewed under matching rules, but it is not Rust `unsafe` and is not listed here.
 
