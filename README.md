@@ -66,7 +66,9 @@ The other ten crates carry `#![forbid(unsafe_code)]`: the entire `unsafe` surfac
 
 ## Reading order
 
-New readers: [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) → [THREATS.md](docs/design/THREATS.md) → [docs/](docs/) (start at §1) → [TEMPLATE-ai-coding-strict.md](docs/design/TEMPLATE-ai-coding-strict.md). Implementers and auditors then read [architecture/](docs/architecture/) and [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md).
+Using it: [INSTALL.md](INSTALL.md) to deploy → [HOWTO.md](HOWTO.md) to run and author policies → [HOWTO-admin.md](HOWTO-admin.md) to operate a host. The installed man pages are the reference (`man kennel`, `man policy.toml`, `man kenneld`).
+
+New readers (design): [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) → [THREATS.md](docs/design/THREATS.md) → [docs/](docs/) (start at §1) → [TEMPLATE-ai-coding-strict.md](docs/design/TEMPLATE-ai-coding-strict.md). Implementers and auditors then read [architecture/](docs/architecture/) and [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md).
 
 ## Reporting a vulnerability
 
