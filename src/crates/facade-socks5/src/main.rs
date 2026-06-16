@@ -34,7 +34,7 @@ mod protocol;
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::thread;
@@ -266,18 +266,9 @@ fn invalid_owned(msg: String) -> io::Error {
 }
 
 /// Splice the workload's TCP connection against the conduit bidirectionally until either closes.
+/// The bidirectional relay is shared (`kennel_lib_scm::splice`) across the facades and delegates.
 fn splice(client: TcpStream, conduit: UnixStream) {
-    let (Ok(client_r), Ok(conduit_r)) = (client.try_clone(), conduit.try_clone()) else {
-        return;
-    };
-    let up = thread::spawn(move || {
-        let _ = io::copy(&mut &client_r, &mut &conduit);
-        let _ = conduit.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut &conduit_r, &mut &client);
-    let _ = client.shutdown(Shutdown::Write);
-    let _ = up.join();
-    drop(client); // own the connection to its close (the splice's end of life)
+    kennel_lib_scm::splice::splice(client, conduit);
 }
 
 #[cfg(test)]
@@ -296,7 +287,8 @@ mod tests {
         let driver = thread::spawn(move || {
             let mut w = workload;
             w.write_all(&req).expect("send socks5");
-            w.shutdown(Shutdown::Write).expect("half-close write");
+            w.shutdown(std::net::Shutdown::Write)
+                .expect("half-close write");
             let _ = io::copy(&mut &w, &mut io::sink()); // drain replies until the shim closes
         });
         let result = socks5_accept(&mut shim);

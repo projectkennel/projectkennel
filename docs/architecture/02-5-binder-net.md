@@ -7,15 +7,18 @@ processes participate on the kennel's binderfs instance, the transaction wire co
 for `org.projectkennel.INet/default`, the spawn sequencing changes, the thread model, and
 the relationship to the existing `host-netproxy` crate.
 
-> **Status: not yet built (roadmap).** This chapter is a forward contract, following
-> the same convention as `02-4-binder.md`. Every "kenneld does X" reads as
-> "kenneld is designed to do X". As pieces land, as-built detail graduates into this
-> chapter and the roadmap banner narrows.
+> **Status: largely built.** The core network subsystem is as-built: the four modes
+> (`none`/`constrained`/`unconstrained`/`host`), the per-kennel net-ns + loopback alias, the
+> socketpair conduit, the `CONNECT_INET` egress path (`facade-socks5` → node 0 → kenneld
+> resolve/pin → `host-netproxy` dumb dialer), and the `BIND_INET` inbound host-side mirror
+> (`host-inetd` + `facade-client`, pull-based — see §The host-side mirror and `BIND`). What remains
+> roadmap is the **cross-instance / inter-kennel relay** (one kennel reaching another kennel's
+> services through kenneld) and `SpawnKennel`; those legs still read "kenneld is designed to do X".
 
 > The design — the four modes, the socketpair conduit, the `CONNECT`/`BIND` verbs, the
 > kenneld-side policy/resolve/pin, and the dumb `host-netproxy` dialer — is
 > [`07-5-network.md`](../design/07-5-network.md) (§7.5). This chapter is the wire-level contract
-> for that design; it carries as-built detail as the subsystem is built.
+> for that design.
 
 ## Stability commitment
 
