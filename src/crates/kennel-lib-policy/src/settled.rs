@@ -42,7 +42,8 @@ pub enum NetMode {
     /// **Host** net namespace, **direct** egress (no SOCKS proxy, no `HTTPS_PROXY`); the
     /// `net.allow` allowlist is still enforced via BPF + Landlock. Shares the host network
     /// stack, so it reinstates the host-recon residual (T1.6) — it requires a non-empty
-    /// `net.reason` and the compiler records `threats.reinstated` (`07-5-network.md` §7.5.1).
+    /// `net.reason`; the T1.6 exposure is derived from the mode (surfaced by
+    /// `kennel policy risks`), not stored on a `threats.reinstated` field (`07-5-network.md` §7.5.1).
     Host,
 }
 

@@ -399,8 +399,9 @@ pub struct NetSection {
     pub mode: Option<String>,
     /// Required (non-empty) only when `mode = "host"`: the documented justification for
     /// sharing the host network stack, which reinstates the host-recon residual (T1.6).
-    /// The compiler refuses `mode = host` without it and records `threats.reinstated`
-    /// (`07-5-network.md` §7.5.1).
+    /// The compiler refuses `mode = host` without it; the T1.6 exposure is *derived*
+    /// from the mode (surfaced by `kennel policy risks` / the `risks` engine), not
+    /// stored on a `threats.reinstated` field (`07-5-network.md` §7.5.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Whether the per-kennel proxy listens on IPv4.

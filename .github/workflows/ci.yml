@@ -194,6 +194,7 @@ jobs:
           src/tools/tests/audit-helper.sh
           src/tools/tests/audit-source.sh
           src/tools/tests/install-ci-tools.sh
+          src/tools/tests/threats-catalogue.sh
 
   man:
     name: man (regen check + groff lint)

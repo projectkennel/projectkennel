@@ -117,6 +117,24 @@ Add a directory to the template/fragment search path (repeatable). Overrides the
 \fB\-\-trust\-dir D\fR
 Add a directory to the signing\-key trust store used while authoring (repeatable).
 .RE
+.TP
+\fBkennel policy risks <policy> [\-\-template\-dir D]... [\-\-trust\-dir D]... [\-\-json]\fR
+evaluate a policy against the threat catalogue (exposures, residuals)
+.RS
+.TP
+\fB\-\-json\fR
+Emit the structured report (for CI/tooling) instead of the human view.
+.RE
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Add a directory to the signing\-key trust store used while authoring (repeatable).
+.RE
 .SH EXIT STATUS
 .TP
 \fB0\fR

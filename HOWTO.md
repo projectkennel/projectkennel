@@ -200,6 +200,22 @@ threats = { exposed = ["T-device"] }
 After editing, re-run `kennel policy validate` (and `kennel policy lint` if you
 maintain templates) before compiling.
 
+**Review what you exposed.** Each grant moves the threat needle; to see the whole
+picture for a policy — what it exposes, what it mitigates, and the documented
+residual for each — evaluate it against the threat catalogue:
+
+```sh
+kennel policy risks myproject
+```
+
+It lists every threat the policy's grants expose (with the granting line and your
+`reason`) and the catalogue's residual for each — including exposures *derived*
+from a grant's shape (e.g. `mode = host` reinstates host-network reconnaissance,
+T1.6). A `reason` you wrote on a grant is the answer to "why is this risk
+acceptable?", and `risks` is where you confirm the open risks are the ones you
+meant to accept. `--json` emits the report for CI. Full threat definitions live in
+[docs/design/THREATS.md](docs/design/THREATS.md).
+
 ---
 
 ## 6. Reading the audit log

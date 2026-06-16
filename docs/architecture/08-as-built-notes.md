@@ -78,8 +78,9 @@ chapter (and the design § for the mechanism). No build notes are kept here.
 - **Four network modes + the `[net.proxy]`/`[net.bpf]` split** — the mode enum is the four-tier
   taxonomy `none`/`constrained`/`unconstrained`/`host`: `none` is an own empty net-ns,
   `constrained`/`unconstrained` an own net-ns + SOCKS proxy (default-deny vs. default-allow-minus-
-  invariant), `host` shares the host net-ns for direct egress with no proxy (`reason`-gated, auto
-  `threats.reinstated = ["T1.6"]`). Policy is split by enforcer: `[net.proxy]` (the user-space
+  invariant), `host` shares the host net-ns for direct egress with no proxy (`reason`-gated; its
+  T1.6 exposure is derived from the mode and surfaced by `kennel policy risks`, not stored on a
+  field). Policy is split by enforcer: `[net.proxy]` (the user-space
   by-name allow + `deny.invariant`/`deny.policy` the proxy enforces, proxied modes only — a
   by-name rule under `host` is a compile error) and `[net.bpf]` (the kernel CIDR+port ACL, no
   names, present in every mode, author-narrows-only against the framework lock). The
@@ -189,6 +190,18 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   `[unix]` `path`/`access` phantom fields, the `[env]` "no `pass`" claim, the `[fs]`
   `create`/`exec_allowed_from` phantoms, and the `ttl_action` enum — are reconciled in the
   design chapters and the `source.rs` doc-comments too.
+- **Threat catalogue + `kennel policy risks`** — the threat framework is now evaluated, not just
+  parsed. `THREATS.md` (canonical prose) gains a machine form `dist/threats/catalogue.toml`
+  (id/family/scope/title/one-line-residual), kept in sync by a CI check
+  (`src/tools/tests/threats-catalogue.sh`) and loaded by `kennel-lib-policy::threats` (with an
+  embedded fallback). `kennel-lib-policy::risks` evaluates a resolved source policy into an
+  exposed/mitigated/residual report — authored `threats` tags plus the compiler-derived exposures
+  (`mode=host`→T1.6, passthrough→T2.1, `allow_headless`→T1.6) — and `kennel policy risks <policy>`
+  surfaces it (`02-1-cli.md`). The stale "compiler records `threats.reinstated`" claim is corrected
+  everywhere to "derived" (no such field exists; the settled artefact carries no threat tags by
+  design). **Still roadmap:** `kennel diff`'s interpreted *delta* between two policies (the `+/~/-`
+  threat-impact view) — `risks` + the catalogue are its foundation. Tag-correctness as a hard lint
+  (invalid/missing-required → non-zero) is a noted `--strict` follow-up.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

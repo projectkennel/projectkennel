@@ -92,8 +92,9 @@ Per-destination policy beyond allow/deny (rate limits, byte caps, time windows) 
 ```toml
 [net]
 mode = "constrained"        # "none" | "constrained" | "unconstrained" | "host"
-reason = ""                 # required (non-empty) only when mode = "host";
-                            #   the compiler auto-sets threats.reinstated = ["T1.6:host-recon"]
+reason = ""                 # required (non-empty) only when mode = "host"; the T1.6
+                            #   host-recon exposure is derived from the mode (see
+                            #   `kennel policy risks`), not stored on a field
 
 # ── [net.proxy]: the user-space egress policy (the CONNECT delegate enforces it) ──
 [net.proxy]
@@ -271,7 +272,7 @@ Inside the net-ns there is no `CAP_NET_ADMIN` requirement for IPv6: bringing up 
 - Other users on the system can see the alias addresses on host `lo` but cannot reach the kennel's listeners except through a host-side mirror the `BIND` verb raises, which binds only the kennel's own addresses.
 - Same-uid processes outside the kennel reach the kennel only through the host-side mirror, not by sharing its stack — the kennel's native listeners live in its own namespace. The honest residual is at the mirror: a host-side listener at the kennel's IP is reachable by anything that can route to host `lo`.
 
-**Network-state visibility — closed by the net-ns (T1.6).** The kennel's own network namespace means `/proc/net/*` and `AF_NETLINK` answer only about the kennel's own stack: in `none` mode an empty stack, in `constrained`/`unconstrained` mode only the kennel's loopback aliases. The host's interfaces, routes, listening-socket table, and neighbour (ARP) table are not visible from inside — the host-network-reconnaissance surface that was T1.6 is structurally closed for these three modes. `mode = host` is the deliberate exception: it shares the host network stack and therefore reinstates T1.6 in full (the compiler records `threats.reinstated = ["T1.6:host-recon"]` and requires the `reason`).
+**Network-state visibility — closed by the net-ns (T1.6).** The kennel's own network namespace means `/proc/net/*` and `AF_NETLINK` answer only about the kennel's own stack: in `none` mode an empty stack, in `constrained`/`unconstrained` mode only the kennel's loopback aliases. The host's interfaces, routes, listening-socket table, and neighbour (ARP) table are not visible from inside — the host-network-reconnaissance surface that was T1.6 is structurally closed for these three modes. `mode = host` is the deliberate exception: it shares the host network stack and therefore reinstates T1.6 in full (the compiler requires the `reason`; the T1.6 exposure is derived from the mode and surfaced by `kennel policy risks`, not stored on a `threats.reinstated` field).
 
 ## 7.5.7 Bind semantics
 
@@ -376,6 +377,6 @@ For each invariant, a regression test in `tests/net/`:
 16. Context exceeds `bytes_per_second` rate limit; expect proxy throttles.
 17. Context attempts to bind privileged port (`80`); expect the `[[net.bpf.bind]]` gate denies (min_port).
 18. DNS rebinding test: an allowlisted name resolves to a denied address (the cloud-metadata invariant, or an RFC1918 range the policy chose to deny); expect the proxy refuses at dial time (answer-vetting).
-19. `mode=host` kennel reads host interfaces/routes via `/proc/net` and netlink; expect success and `threats.reinstated` recorded (the explicit T1.6 tradeoff).
+19. `mode=host` kennel reads host interfaces/routes via `/proc/net` and netlink; expect success and the T1.6 exposure surfaced by `kennel policy risks` (the explicit, mode-derived tradeoff).
 
 The full network test corpus is approximately 50 cases. The list above is the core invariants.
