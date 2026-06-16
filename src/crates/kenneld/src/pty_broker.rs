@@ -125,8 +125,12 @@ impl PtyBroker {
             inner.generation = inner.generation.wrapping_add(1);
             let generation = inner.generation;
             let input_sock = borrow_for_io(&sock); // a dup for the input thread
-            inner.client = Some(Client { sock }); // takeover: drops prior client
-                                                  // Spawn the client→master input thread for this generation.
+                                                   // Take-over: shut the prior client down (peer EOF + unblock its input
+                                                   // thread) before replacing it, so its dup is released.
+            if let Some(prior) = inner.client.replace(Client { sock }) {
+                shutdown_client(&prior);
+            }
+            // Spawn the client→master input thread for this generation.
             if let Ok(master) = inner.master.try_clone() {
                 self.spawn_input(input_sock, master, generation);
             }
@@ -191,7 +195,13 @@ impl PtyBroker {
     pub fn shutdown(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.done = true;
-            inner.client = None;
+            if let Some(client) = inner.client.take() {
+                // SHUT_RDWR so the peer (the CLI) sees EOF *and* this client's input
+                // thread — blocked in `read` on a dup of this socket — unblocks and
+                // exits, releasing its dup. Without it the dup keeps the socketpair
+                // alive and the CLI's read never returns (deadlock).
+                shutdown_client(&client);
+            }
         }
         self.changed.notify_all();
     }
@@ -266,8 +276,11 @@ impl PtyBroker {
                     if let Some(client) = &g.client {
                         let mut w = borrow_for_io(&client.sock);
                         if w.write_all(&out).is_err() {
-                            // Client went away mid-write: detach it, keep pumping.
-                            g.client = None;
+                            // Client went away mid-write: shut it down (unblock its
+                            // input thread, release the dup) and detach, keep pumping.
+                            if let Some(gone) = g.client.take() {
+                                shutdown_client(&gone);
+                            }
                         }
                     }
                 }
@@ -283,6 +296,22 @@ fn append_ring(ring: &mut Vec<u8>, data: &[u8]) {
         if drop > 0 {
             ring.drain(..drop);
         }
+    }
+}
+
+/// Shut a client socket down both ways (`SHUT_RDWR`): the peer (the CLI) sees EOF and
+/// any thread blocked reading a *dup* of this socket (the input thread) unblocks. We
+/// `shutdown` rather than only `drop`, because dropping `Client.sock` does not close the
+/// dups the input/pump threads hold — those keep the socketpair alive until they exit,
+/// and they only exit once the read returns, which `shutdown` is what forces.
+///
+/// No `unsafe`: a dup of the fd as a `UnixStream` shares the same underlying socket, so
+/// `shutdown` on the dup shuts the socket; the dup is closed when this `UnixStream` drops.
+fn shutdown_client(client: &Client) {
+    use std::os::unix::net::UnixStream;
+    if let Ok(dup) = client.sock.try_clone() {
+        let stream = UnixStream::from(dup);
+        let _ = stream.shutdown(std::net::Shutdown::Both);
     }
 }
 

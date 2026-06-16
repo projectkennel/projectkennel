@@ -536,7 +536,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
     use kenneld::policy::TrustStoreLoader;
     use kenneld::server::{run_kennel, Identity, Shared};
     use std::io::Read as _;
-    use std::os::fd::{AsFd, OwnedFd};
+    use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixStream;
 
     let uid = kennel_lib_syscall::unistd::real_uid();
