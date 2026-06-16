@@ -615,9 +615,10 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         TrustStoreLoader::from_keys(keys),
     );
 
-    // The CLI's return socket: the kennel sends the workload's pty master back over `child`;
-    // the test reads it from `ours`.
-    let (ours, child) = UnixStream::pair().expect("return socketpair");
+    // The CLI's proxied-terminal socket: kenneld's PtyBroker fans the workload's
+    // filtered pty output to `child` and we read it from `ours`. (The master stays in
+    // kenneld now — the client gets bytes, not the fd.)
+    let (ours, child) = UnixStream::pair().expect("client terminal socketpair");
     let req = StartRequest {
         policy: policy_file,
         kennel: "pty".to_owned(),
@@ -634,22 +635,14 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
     };
 
     let (mut control, mut server) = UnixStream::pair().expect("control socketpair");
-    // A real controller holds the pty master open for the workload's whole life — an unheld
-    // master hangs up the session (SIGHUP). So receive + hold + drain the master on a thread
-    // while `run_kennel` (which blocks until the workload exits) runs on this one.
+    // We are the broker's client: drain `ours` (the proxied-terminal end) until the
+    // broker shuts down on workload exit and closes our socket (EOF). `run_kennel`
+    // blocks until the workload exits, so the broker pump runs on its own thread.
     let output = std::thread::scope(|s| {
         let reader = s.spawn(|| -> Vec<u8> {
-            let mut byte = [0u8; 1];
-            let Ok((_n, fds)) = kennel_lib_syscall::scm::recv_with_fds(ours.as_fd(), &mut byte)
-            else {
-                return Vec::new();
-            };
-            let Some(master) = fds.into_iter().next() else {
-                return Vec::new();
-            };
-            // Holds the master for the workload's run; read_to_end drains until the slave's EIO.
             let mut out = Vec::new();
-            let _ = std::fs::File::from(master).read_to_end(&mut out);
+            let mut sock = ours.try_clone().expect("dup client socket");
+            let _ = sock.read_to_end(&mut out);
             out
         });
         run_kennel(&shared, &req, vec![OwnedFd::from(child)], &mut server);

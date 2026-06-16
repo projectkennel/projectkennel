@@ -323,4 +323,92 @@ mod tests {
         append_ring(&mut ring, b"world");
         assert_eq!(ring, b"hello world");
     }
+
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    /// Read up to `n` bytes from `sock` with a short read timeout (tests must not hang
+    /// if the pump misbehaves). Returns whatever arrived before the deadline.
+    fn read_some(sock: &UnixStream, n: usize) -> Vec<u8> {
+        let mut s = sock.try_clone().expect("dup");
+        s.set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("timeout");
+        let mut buf = vec![0u8; n];
+        match std::io::Read::read(&mut s, &mut buf) {
+            Ok(got) => buf.get(..got).unwrap_or_default().to_vec(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// A broker whose "master" is one end of a socketpair: the test writes the other
+    /// end (`master_peer`) to simulate workload output, and the pump fans it to clients.
+    fn broker_with_socketpair_master(policy: FilterPolicy) -> (PtyBroker, UnixStream) {
+        let (master, master_peer) = UnixStream::pair().expect("master pair");
+        let broker = PtyBroker::start(OwnedFd::from(master), policy, None);
+        (broker, master_peer)
+    }
+
+    #[test]
+    fn output_reaches_the_attached_client_and_is_filtered() {
+        let (broker, mut master_peer) = broker_with_socketpair_master(FilterPolicy::default());
+        let (client, client_peer) = UnixStream::pair().expect("client pair");
+        assert!(broker.attach(OwnedFd::from(client_peer)).is_some());
+        assert!(broker.is_attached());
+        // A benign title plus a dangerous OSC-52 clipboard write: only the former passes.
+        std::io::Write::write_all(
+            &mut master_peer,
+            b"\x1b]0;title\x07hello\x1b]52;c;cGF5bG9hZA==\x07world",
+        )
+        .expect("write master");
+        let got = read_some(&client, 256);
+        let text = String::from_utf8_lossy(&got);
+        assert!(text.contains("hello") && text.contains("world"), "{text:?}");
+        assert!(
+            !text.contains("52;"),
+            "clipboard escape must be dropped: {text:?}"
+        );
+        broker.shutdown();
+    }
+
+    #[test]
+    fn a_second_attach_takes_over_and_supersedes_the_first() {
+        let (broker, _master_peer) = broker_with_socketpair_master(FilterPolicy::passthrough());
+        let (_c1, c1_peer) = UnixStream::pair().expect("c1");
+        let gen1 = broker.attach(OwnedFd::from(c1_peer)).expect("first attach");
+        let (_c2, c2_peer) = UnixStream::pair().expect("c2");
+        let gen2 = broker
+            .attach(OwnedFd::from(c2_peer))
+            .expect("second attach");
+        assert_ne!(gen1, gen2, "take-over bumps the generation");
+        // The superseded first client's wait resolves as a take-over, not an exit.
+        assert_eq!(broker.wait_for_outcome(gen1), AttachOutcome::TakenOver);
+        broker.shutdown();
+    }
+
+    #[test]
+    fn shutdown_resolves_a_waiter_as_workload_exited() {
+        let (broker, _master_peer) = broker_with_socketpair_master(FilterPolicy::passthrough());
+        let (_c, c_peer) = UnixStream::pair().expect("client");
+        let gen = broker.attach(OwnedFd::from(c_peer)).expect("attach");
+        let waiter = {
+            let b = broker.clone();
+            std::thread::spawn(move || b.wait_for_outcome(gen))
+        };
+        broker.shutdown();
+        assert_eq!(
+            waiter.join().expect("waiter"),
+            AttachOutcome::WorkloadExited
+        );
+    }
+
+    #[test]
+    fn attach_after_exit_is_refused() {
+        let (broker, _master_peer) = broker_with_socketpair_master(FilterPolicy::passthrough());
+        broker.shutdown();
+        let (_c, c_peer) = UnixStream::pair().expect("client");
+        assert!(
+            broker.attach(OwnedFd::from(c_peer)).is_none(),
+            "no attach to an exited kennel"
+        );
+    }
 }
