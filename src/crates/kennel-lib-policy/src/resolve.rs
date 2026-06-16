@@ -45,10 +45,10 @@
 
 use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
-    CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
-    LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny,
-    NetSection, ProcSection, PtraceSection, SeccompSection, SignalSection, SourcePolicy,
-    SshSection, UnixSection, WorkloadSection,
+    BoundaryAcl, CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp,
+    IdentitySection, LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy,
+    NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection, UnixSection, UnsafeSection,
+    WorkloadSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -223,9 +223,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
         identity: merge(&parent.identity, &child.identity, fold_identity),
         binder: merge(&parent.binder, &child.binder, fold_binder),
-        proc: merge(&parent.proc, &child.proc, fold_proc),
-        ptrace: merge(&parent.ptrace, &child.ptrace, fold_ptrace),
-        signal: merge(&parent.signal, &child.signal, fold_signal),
+        unsafe_section: merge(&parent.unsafe_section, &child.unsafe_section, fold_unsafe),
         env: merge(&parent.env, &child.env, fold_env),
         seccomp: merge(&parent.seccomp, &child.seccomp, fold_seccomp),
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
@@ -364,8 +362,6 @@ fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
     NetSection {
         mode: or(&c.mode, &p.mode),
         reason: or(&c.reason, &p.reason),
-        proxy_listen_v4: or(&c.proxy_listen_v4, &p.proxy_listen_v4),
-        proxy_listen_v6: or(&c.proxy_listen_v6, &p.proxy_listen_v6),
         proxy_listen_v4_address: or(&c.proxy_listen_v4_address, &p.proxy_listen_v4_address),
         proxy_listen_v6_address: or(&c.proxy_listen_v6_address, &p.proxy_listen_v6_address),
         proxy: merge(&p.proxy, &c.proxy, fold_net_proxy),
@@ -552,22 +548,15 @@ fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
     }
 }
 
-fn fold_proc(p: &ProcSection, c: &ProcSection) -> ProcSection {
-    ProcSection {
-        visibility: or(&c.visibility, &p.visibility),
-        hidepid: or(&c.hidepid, &p.hidepid),
+fn fold_unsafe(p: &UnsafeSection, c: &UnsafeSection) -> UnsafeSection {
+    UnsafeSection {
+        ptrace: merge(&p.ptrace, &c.ptrace, fold_boundary_acl),
+        signal: merge(&p.signal, &c.signal, fold_boundary_acl),
     }
 }
 
-fn fold_ptrace(p: &PtraceSection, c: &PtraceSection) -> PtraceSection {
-    PtraceSection {
-        allow_targets: or(&c.allow_targets, &p.allow_targets),
-        allow_from: or(&c.allow_from, &p.allow_from),
-    }
-}
-
-fn fold_signal(p: &SignalSection, c: &SignalSection) -> SignalSection {
-    SignalSection {
+fn fold_boundary_acl(p: &BoundaryAcl, c: &BoundaryAcl) -> BoundaryAcl {
+    BoundaryAcl {
         allow_targets: or(&c.allow_targets, &p.allow_targets),
         allow_from: or(&c.allow_from, &p.allow_from),
     }

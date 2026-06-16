@@ -36,11 +36,11 @@ scaffold a new leaf policy
 Scaffold the leaf from this template (default base\-confined).
 .RE
 .TP
-\fBkennel policy compile <policy> [\-\-output\-path P] [\-\-key K | \-\-unsigned] [\-\-require\-signed] [\-\-no\-lock] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
+\fBkennel policy compile <policy> [\-\-output P] [\-\-key K | \-\-unsigned] [\-\-require\-signed] [\-\-no\-lock] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
 compile a source policy into a signed settled artefact
 .RS
 .TP
-\fB\-\-output\-path P\fR
+\fB\-\-output P\fR
 Write the settled artefact to P.
 .RE
 .RS
@@ -134,6 +134,24 @@ Add a directory to the template/fragment search path (repeatable). Overrides the
 .TP
 \fB\-\-trust\-dir D\fR
 Add a directory to the signing\-key trust store used while authoring (repeatable).
+.RE
+.TP
+\fBkennel policy upgrade <name> [\-\-yes] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
+re\-pin a policy's template to a newer version (with review)
+.RS
+.TP
+\fB\-\-yes\fR
+Migrate without the interactive confirmation (for scripts/CI).
+.RE
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template search path (repeatable).
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Trust store the new version's signature verifies against (forwarded to the recompile).
 .RE
 .SH EXIT STATUS
 .TP

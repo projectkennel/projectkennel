@@ -68,9 +68,7 @@ The full section list:
 | `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.4 |
 | `[cap]` | Capabilities and `no_new_privs` | §7.9 |
 | `[seccomp]` | Seccomp filter | §7.9 |
-| `[proc]` | Procfs visibility and hidepid | §7.9 |
-| `[ptrace]` | Ptrace allow/deny across kennel boundary | §7.9 |
-| `[signal]` | Signal allow/deny across kennel boundary | §7.9 |
+| `[unsafe]` and `[unsafe.*]` | Advisory footgun umbrella: `[unsafe.ptrace]` / `[unsafe.signal]` cross-boundary allowlists whose scoping is real but enforced by the PID namespace + seccomp (not the section) — declaring them warns. | §7.9 |
 | `[lifecycle]` | TTL and TTL-action | §9 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
@@ -150,7 +148,7 @@ content_sha256 = "91af...<full hex>"
 signing_key_id = "corp-policy-2026"
 ```
 
-On load, the resolver recomputes each artefact's `content_sha256` and compares against the lockfile. A mismatch — same `(name, version)`, different bytes — is `PolicyError::LockMismatch`, naming the reference. The only sanctioned way to change a locked entry is `kennel upgrade`, which surfaces the content change for review before rewriting the lockfile.
+On load, the resolver recomputes each artefact's `content_sha256` and compares against the lockfile. A mismatch — same `(name, version)`, different bytes — is `PolicyError::LockMismatch`, naming the reference. The only sanctioned way to change a locked entry is `kennel policy upgrade`, which surfaces the content change for review before rewriting the lockfile.
 
 A policy committed to source control alongside its `kennel.lock` is a reproducible specification: resolving it against the same trust store yields byte-identical effective policy or a hard failure. A missing lockfile triggers first-resolution recording (trust-on-first-use); production deployments may require a present, matching lockfile via system configuration.
 
@@ -338,10 +336,10 @@ from the canonical form when empty (so a policy that does not use one signs
 unchanged): `ssh` (`SshRuntime`), `unix` (`UnixRuntime`), `identity`
 (`IdentityRuntime` — the masked `user`/`group` and supplementary `groups`),
 `audit` (`AuditRuntime`), `env` (`EnvRuntime` — the synthesised environment), and
-`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The informational sections
-`ptrace`/`signal` (their scoping comes from the PID namespace + seccomp, not the
-section) are dropped at translate and absent from the settled form; they compile
-with a warning. (`[container]`, `[dbus]`, `[x11]`, `[fs.scrub]`, and
+`ulimits` (`UlimitsRuntime` — the `setrlimit` caps). The advisory `[unsafe.ptrace]`/
+`[unsafe.signal]` sub-sections (their scoping comes from the PID namespace + seccomp,
+not the section) are dropped at translate and absent from the settled form; declaring
+them compiles with a warning. (`[container]`, `[dbus]`, `[x11]`, `[fs.scrub]`, and
 `[[fs.home.sanitise]]` are not in the schema — an unknown-section error at parse.)
 The settled net section (`NetPolicy`) carries `mode`; the proxy egress policy
 as `allow` (by-CIDR), `allow_names` (by-name), `deny_invariant` (the
@@ -467,8 +465,7 @@ structure a policy author writes.
 |---|---|---|
 | `mode` | string | `"none"` (own empty net-ns, no interfaces), `"constrained"` (own net-ns + proxy, default-deny — the default), `"unconstrained"` (own net-ns + proxy, default-allow minus the invariant + `[net.proxy.deny.policy]` carve-outs), or `"host"` (shares the host net-ns, direct egress, **no proxy** — `[net.bpf]` is the gate). |
 | `reason` | string | **required** (non-empty) only when `mode = "host"`: the documented justification for sharing the host network stack. The compiler refuses `mode = host` without it; the T1.6 exposure is derived from the mode (surfaced by `kennel policy risks`), not stored on a field. |
-| `proxy_listen_v4` / `proxy_listen_v6` | bool | whether the per-kennel egress endpoint listens on that family (proxied modes). |
-| `proxy_listen_v4_address` / `proxy_listen_v6_address` | string `"offset:port"` | the listen offset+port within the kennel's `/28` (v4) / `/64` (v6); absent → `1:1080`. |
+| `proxy_listen_v4_address` / `proxy_listen_v6_address` | string `"offset:port"` | the listen offset+port within the kennel's `/28` (v4) / `/64` (v6); absent → `1:1080`. A family's listener is on in the proxied modes iff its address resolves (there is no separate on/off flag). |
 
 In the proxied modes the workload-facing endpoint is `facade-socks5` on the kennel loopback;
 `proxy_listen_*` set where it binds. The kennel has no other route off its loopback (§7.5), so egress
@@ -667,7 +664,7 @@ Execution is **deny-by-default**: an empty or absent `allow` denies all execve. 
 | `size` | string | Size cap, human form (`"512M"`, `"1G"`); resolved to MiB in the settled policy. |
 | `mode` | string | Mount mode, octal digits (`"0700"`). |
 
-`[fs.proc]` — procfs (mirrors `[proc]`):
+`[fs.proc]` — procfs (the sole home for procfs settings; `/proc` is part of the constructed view):
 
 | Field | Type | Notes |
 |---|---|---|
@@ -725,16 +722,14 @@ The source carries a deny list; the resolver produces the settled allow list + d
 | `deny` | array of strings | Syscalls denied on top of the profile. |
 | `allow` | array of strings | Syscalls explicitly allowed. |
 
-### `[proc]`, `[ptrace]`, `[signal]` — boundary controls (§7.9)
+### `[unsafe]` — advisory footgun sub-sections (§7.9)
 
-`[proc]` (procfs visibility; mirrors `[fs.proc]`):
+`[unsafe]` groups controls whose **scoping is real but enforced elsewhere** (the PID
+namespace + seccomp), not by the section itself — declaring one compiles with a
+warning. They let an author *express* intent; they do not impose the control. (Procfs
+visibility is **not** here — it lives in `[fs.proc]`, part of the constructed view.)
 
-| Field | Type | Notes |
-|---|---|---|
-| `visibility` | string | `"self"` only, once resolved. |
-| `hidepid` | bool | Mount `/proc` with `hidepid=2`. |
-
-`[ptrace]` and `[signal]` share the same shape (across the kennel boundary):
+`[unsafe.ptrace]` and `[unsafe.signal]` share the same shape (across the kennel boundary):
 
 | Field | Type | Notes |
 |---|---|---|
@@ -823,7 +818,7 @@ The schema below is the shape; the full sink-parameter and per-class-level seman
 - The canonical-form serialisation procedure: `02-8-internal-api.md` (`kennel-lib-policy::canonical`).
 - The signing-key store and lockfile locations on disk: `07-paths.md`.
 - The mechanism by which template and fragment signatures are verified at runtime, and how the lockfile is checked: `04-trust-boundaries.md`.
-- How `kennel upgrade` reviews a newer template version and rewrites the lockfile: `02-1-cli.md`. (`kennel diff`'s semantic threat-impact delta is roadmap — `08-as-built-notes.md` §8.1.)
+- How `kennel policy upgrade` reviews a newer template version and rewrites the lockfile: `02-1-cli.md`. (`kennel diff`'s semantic threat-impact delta is roadmap — `08-as-built-notes.md` §8.1.)
 - The `[audit]` schema in detail — sink selection, per-class levels, sink-specific parameters: `02-3-audit-schema.md`.
 - The design-level rationale for compilation and the settled policy: design doc §9.10.
 - How `kennel compile` is invoked and its flags: `02-1-cli.md`.

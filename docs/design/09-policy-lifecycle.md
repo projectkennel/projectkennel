@@ -73,7 +73,7 @@ Caveat: `derive` should be used on workflows the user already trusts to be safe.
 
 ## 9.4 Template updates
 
-When the upstream template advances (new version published), Project Kennel warns the user. The user runs `kennel upgrade <kennel>` to review changes (§5.11).
+When the upstream template advances (new version published), Project Kennel warns the user. The user runs `kennel policy upgrade <kennel>` to review changes (§5.11).
 
 Three outcomes:
 

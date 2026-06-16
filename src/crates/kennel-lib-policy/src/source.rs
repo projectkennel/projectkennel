@@ -97,15 +97,12 @@ pub struct SourcePolicy {
     /// never declared here (`07-1-binder.md` §7.1.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binder: Option<BinderSection>,
-    /// Procfs section (`[proc]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proc: Option<ProcSection>,
-    /// Ptrace section (`[ptrace]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ptrace: Option<PtraceSection>,
-    /// Signal section (`[signal]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signal: Option<SignalSection>,
+    /// `[unsafe]` — advisory footgun sub-sections whose scoping is real but enforced
+    /// elsewhere (the PID namespace + seccomp), not by the section. Grouped under one
+    /// `[unsafe]` umbrella so an author sees they are in footgun territory; each
+    /// present sub-section is warned at compile (`footgun-warn-dont-forbid`).
+    #[serde(default, rename = "unsafe", skip_serializing_if = "Option::is_none")]
+    pub unsafe_section: Option<UnsafeSection>,
     /// Environment section (`[env]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<EnvSection>,
@@ -404,13 +401,8 @@ pub struct NetSection {
     /// stored on a `threats.reinstated` field (`07-5-network.md` §7.5.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Whether the per-kennel proxy listens on IPv4.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_listen_v4: Option<bool>,
-    /// Whether the per-kennel proxy listens on IPv6.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_listen_v6: Option<bool>,
-    /// IPv4 proxy listen address as `"offset:port"` within the kennel's subnet.
+    /// IPv4 proxy listen address as `"offset:port"` within the kennel's subnet. A
+    /// family is enabled iff its address is set (there is no separate on/off flag).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_listen_v4_address: Option<String>,
     /// IPv6 proxy listen address as `"offset:port"`.
@@ -803,18 +795,6 @@ pub struct SshDestination {
     pub threats: Option<Threats>,
 }
 
-/// `[proc]` — procfs visibility (mirrors `[fs.proc]`; both appear in the corpus).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProcSection {
-    /// Visibility (`"self"` only, once resolved).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visibility: Option<String>,
-    /// Mount `/proc` with `hidepid=2`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hidepid: Option<bool>,
-}
-
 /// `[workload]` — the command the kennel runs, optionally pinned.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -835,26 +815,32 @@ pub struct WorkloadSection {
     pub sha256: Option<Vec<String>>,
 }
 
-/// `[ptrace]` — ptrace across the kennel boundary.
+/// `[unsafe]` — the advisory footgun umbrella.
+///
+/// Its sub-sections describe controls whose *scoping is real* but is enforced by the
+/// PID namespace + seccomp, not by the section itself. Grouping them under `[unsafe]`
+/// makes the footgun visible; each present sub-section is warned at compile
+/// (`footgun-warn-dont-forbid`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PtraceSection {
-    /// Permitted ptrace targets (`"self"` etc.).
+pub struct UnsafeSection {
+    /// `[unsafe.ptrace]` — ptrace across the kennel boundary (scoping from PID-ns + seccomp).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_targets: Option<Vec<String>>,
-    /// Permitted ptrace sources.
+    pub ptrace: Option<BoundaryAcl>,
+    /// `[unsafe.signal]` — signalling across the kennel boundary (scoping from PID-ns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_from: Option<Vec<String>>,
+    pub signal: Option<BoundaryAcl>,
 }
 
-/// `[signal]` — signalling across the kennel boundary.
+/// A cross-boundary allowlist (`allow_targets`/`allow_from`), shared by the
+/// `[unsafe.ptrace]` and `[unsafe.signal]` sub-sections.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignalSection {
-    /// Permitted signal targets.
+pub struct BoundaryAcl {
+    /// Permitted targets (`"self"`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_targets: Option<Vec<String>>,
-    /// Permitted signal sources.
+    /// Permitted sources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_from: Option<Vec<String>>,
 }

@@ -188,15 +188,16 @@ pub fn compile_leaf(
 /// another mechanism (the PID namespace + seccomp), not by the section. One message per present
 /// section (warn, don't refuse — `footgun-warn-dont-forbid`).
 fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
+    let u = effective.unsafe_section.as_ref();
     [
         (
-            effective.ptrace.is_some(),
-            "[ptrace]",
+            u.is_some_and(|u| u.ptrace.is_some()),
+            "[unsafe.ptrace]",
             "ptrace scoping comes from the PID namespace + seccomp, not this section",
         ),
         (
-            effective.signal.is_some(),
-            "[signal]",
+            u.is_some_and(|u| u.signal.is_some()),
+            "[unsafe.signal]",
             "signal scoping comes from the PID namespace, not this section",
         ),
     ]
@@ -409,21 +410,23 @@ mod tests {
 
     #[test]
     fn informational_sections_warn_as_unenforced() {
-        use crate::source::{PtraceSection, SignalSection, SourcePolicy};
+        use crate::source::{BoundaryAcl, SourcePolicy, UnsafeSection};
         // The unbuilt *features* ([dbus]/[x11]/[container]/[fs.scrub]/[[fs.home.sanitise]]) are
-        // gone from the schema (rejected at parse), so what warns here are the informational
-        // sections whose scoping is enforced elsewhere (PID namespace + seccomp).
+        // gone from the schema (rejected at parse). What warns here are the `[unsafe.*]`
+        // sub-sections whose scoping is enforced elsewhere (PID namespace + seccomp).
         let sp = SourcePolicy {
-            ptrace: Some(PtraceSection::default()),
-            signal: Some(SignalSection::default()),
+            unsafe_section: Some(UnsafeSection {
+                ptrace: Some(BoundaryAcl::default()),
+                signal: Some(BoundaryAcl::default()),
+            }),
             ..SourcePolicy::default()
         };
         let w = unenforced_section_warnings(&sp);
-        assert_eq!(w.len(), 2, "one warning per informational section: {w:?}");
+        assert_eq!(w.len(), 2, "one warning per [unsafe.*] sub-section: {w:?}");
         assert!(w
             .iter()
-            .any(|s| s.contains("[ptrace]") && s.contains("NOT enforced")));
-        assert!(w.iter().any(|s| s.contains("[signal]")));
+            .any(|s| s.contains("[unsafe.ptrace]") && s.contains("NOT enforced")));
+        assert!(w.iter().any(|s| s.contains("[unsafe.signal]")));
         // A clean policy warns about none of this.
         assert!(unenforced_section_warnings(&SourcePolicy::default()).is_empty());
     }

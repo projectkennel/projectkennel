@@ -44,7 +44,7 @@ Errors detected at policy load:
 | Framework invariant violated | Refuse; report which invariant and why it exists |
 | Template invariant violated by user delta | Refuse; report template, invariant, user delta location |
 | `reason` missing on a delta | Refuse; require reasons on all deltas |
-| Template version mismatch | Warn (not refuse); suggest `kennel upgrade` |
+| Template version mismatch | Warn (not refuse); suggest `kennel policy upgrade` |
 | DNS resolution failure for a `net.allow` name | Refuse if `dns.required = true`; otherwise warn and disable that rule |
 
 The pattern: anything that would result in a kennel running under a different policy than the user authored is an error.

@@ -132,8 +132,8 @@ allow = [
 # invariant denies (rebinding defence) — there is no configurable [net.dns].
 [net]
 mode = "constrained"
-proxy_listen_v4 = true
-proxy_listen_v6 = true
+# Both families' proxy listeners are on by default in the proxied modes; a family
+# is enabled iff its address resolves (no separate on/off flag).
 # Listener address is computed from the kennel's <tag>/<ctx> (§7.3.2); override the
 # host offset/port within the kennel's own subnet with proxy_listen_v4_address =
 # "offset:port" (offset 1..=14, default "1:1080"). Project Kennel injects
@@ -193,11 +193,10 @@ abstract = "deny"
 # --- Process introspection --------------------------------------------------
 # The PID namespace hides every process outside the kennel; hidepid backstops it.
 # (Cross-boundary ptrace and signalling are already prevented by the PID/user
-# namespace — there is no separate [ptrace]/[signal] policy the runtime enforces,
-# so none is declared here. T1.6, T1.1.)
-[proc]
-visibility = "self"
-hidepid = true
+# namespace — there is no separate control the runtime enforces, so none is declared.
+# The advisory [unsafe.ptrace]/[unsafe.signal] sub-sections exist to *express* intent
+# but warn that scoping comes from PID-ns/seccomp; this template needs neither. T1.6.)
+# Procfs visibility is set once in [fs.proc] above (it is part of the constructed view).
 
 
 # --- Environment ------------------------------------------------------------
@@ -237,8 +236,7 @@ deny = [
 #   nproc  = "512"
 #   core   = "0"
 
-
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "ilkpMX9AgAWzViZgPjBQ8Fd+/AZ1mW2Fh2OBDfnQmSfaBtgcx5hEiZuZReYCj58k07jplN48RW09edMRNjw0DQ=="
+signature = "c/hxn+WRwFGpq9a6cFQNhgofG+oOLoluPTHvhv4a96McYTiibHss317TG6M8vYs8TlJjdKLT0Cbo0xycSeJnBg=="
