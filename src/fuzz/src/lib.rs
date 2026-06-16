@@ -54,6 +54,12 @@ pub fn fuzz_parsers(data: &[u8]) {
     // first, which is the surface we are fuzzing.
     let keys = kennel_lib_policy::KeySet::new();
     let _ = kennel_lib_policy::verify_settled(data, &keys);
+
+    // The terminal-escape filter: `data` stands in for workload PTY output (fully
+    // attacker-controlled). The filter runs the vte ANSI state machine over it; the
+    // robustness property is "no panic / hang on any bytes". The *security* invariant
+    // (no OSC-52 introducer survives) is asserted in the dedicated test below.
+    let _ = kennel_lib_term::filter(data, kennel_lib_term::FilterPolicy::default());
 }
 
 /// Drive the parsers from one fuzzer `seed`: feed the whole seed once, then use
@@ -117,6 +123,55 @@ mod tests {
                 buf.push((rng.next() & 0xff) as u8);
             }
             run(&buf);
+        }
+    }
+
+    /// The terminal-escape filter's **security invariant**: for ANY input, the
+    /// default-policy filtered output contains no OSC-52 (clipboard) introducer.
+    /// This is stronger than no-panic — it asserts the dangerous sequence cannot
+    /// survive, including across the adversarial corpus and OSC-52 payloads with
+    /// junk spliced in (the desync attempts).
+    #[test]
+    fn osc52_never_survives_the_filter() {
+        use kennel_lib_term::{filter, FilterPolicy};
+        let contains_osc52 = |out: &[u8]| {
+            // The introducer the filter must never emit: ESC ] 5 2 ;
+            out.windows(4).any(|w| w == b"]52;")
+        };
+
+        // Seeded payloads: a clean OSC-52, and OSC-52 with adversarial splices that
+        // try to confuse a naive matcher into passing the sequence through.
+        let seeds: &[&[u8]] = &[
+            b"\x1b]52;c;cHduCg==\x07",
+            b"\x1b]52;c;cHduCg==\x1b\\",                 // ST-terminated
+            b"text\x1b]52;c;AAAA\x07more",
+            b"\x1b]\x1b]52;c;AAAA\x07",                  // nested introducer
+            b"\x1b]52;\x1b]0;title\x07c;AAAA\x07",       // title spliced mid-OSC52
+            b"\x1b]052;c;AAAA\x07",                       // leading-zero param
+        ];
+        for s in seeds {
+            assert!(
+                !contains_osc52(&filter(s, FilterPolicy::default())),
+                "OSC52 survived for seed {s:?}"
+            );
+        }
+
+        // The adversarial corpus: random bytes with an OSC-52 head prepended, so the
+        // parser frequently enters the OSC-52 state then sees junk. The filtered
+        // output must never carry the introducer.
+        let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+        let mut buf = Vec::with_capacity(640);
+        for _ in 0..20_000 {
+            buf.clear();
+            buf.extend_from_slice(b"\x1b]52;c;");
+            let len = (rng.next() % 600) as usize;
+            for _ in 0..len {
+                buf.push((rng.next() & 0xff) as u8);
+            }
+            assert!(
+                !contains_osc52(&filter(&buf, FilterPolicy::default())),
+                "OSC52 introducer survived filtering"
+            );
         }
     }
 }

@@ -48,6 +48,11 @@ The short list of things we use a dependency for rather than writing ourselves (
   is fiddly to hand-roll and security-irrelevant; `lexopt` is the minimal choice — one
   `#![forbid(unsafe_code)]` file, zero transitive deps, no build.rs/proc-macro — over `clap`
   (multiple unvendored transitives). Added 2026-06-15 (maintainer decision, this entry).
+- Parsing **untrusted terminal escape sequences** for the PTY filter (`vte`). A correct ANSI
+  escape parser (the Paul Williams state machine; OSC/CSI/DCS/APC/PM/SOS framing, split-sequence
+  resumption) is precisely the hostile-input parser the no-hand-roll rule targets — delegated to
+  the vetted alacritty crate, default-features-off (core deps `arrayvec` + `memchr` only).
+  Maintainer decision, this entry.
 
 Anything outside this list requires a maintainer decision recorded in the PR.
 
@@ -123,4 +128,22 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
 - **Reviewer:** remco (2026-06-01). Provenance verified via `tools/audit-helper.sh` + `tools/audit-source.sh`: `.crate` sha256 matches an independent re-download and the crates.io index `cksum`; 60 source files byte-identical to `github.com/rust-fuzz/arbitrary` @ the published commit `690db067`, `Cargo.toml.orig == upstream`. `audit-source.sh` tag note (explained): the `v1.4.1` tag is one commit ahead of the published commit and that commit only bumps the sibling `derive_arbitrary` crate's version (`derive/Cargo.toml` 1.4.0→1.4.1) — it does not touch the `arbitrary` crate's source.
 - **Transitive deps added:** none (with `default-features = false`; the optional `derive_arbitrary` and the dev-only `exhaustigen` are not pulled).
+- **Proc-macros / build.rs:** none.
+
+### vte
+
+- **Version:** =0.15.0 (exact pin), `default-features = false` (the `std` feature only).
+- **Justification:** The alacritty terminal-escape parser — Paul Williams' ANSI state machine. `kennel-lib-term` uses it to recognise and neutralise the dangerous escape sequences a confined workload can write toward the operator's real terminal (OSC 52 clipboard, OSC 9/777 notifications, DCS/APC/PM/SOS bands), passing benign ones through (the PTY filter; closes the terminal-escape half of T2.6). This is the **reuse-not-hand-roll** call for an untrusted-input parser (§5.1, and the project's no-hand-rolled-parsers rule): a terminal escape parser is exactly the category to delegate to a vetted crate — hand-rolling is what desync attacks exploit. The optional `ansi` feature (which would pull `log`/`cursor-icon`/`bitflags`) and `serde` are **not** enabled.
+- **Licence:** Apache-2.0 OR MIT (we take Apache-2.0).
+- **Reviewer:** PENDING (§5.5 human verification owed — `tools/audit-source.sh vte 0.15.0` against `github.com/alacritty/vte` tag, then fill `audited-by`/`verified-against` in CHECKSUMS.toml). `.crate` sha256 already matches an independent re-download (`audit-helper.sh confirm`) and the crates.io index `cksum`.
+- **Transitive deps added:** `arrayvec` (new, below) and `memchr` (already vendored). Nothing else with the chosen features.
+- **Proc-macros / build.rs:** none.
+
+### arrayvec
+
+- **Version:** =0.7.6 (exact pin), `default-features = false` (the `std` path vte needs).
+- **Justification:** A fixed-capacity stack vector; pulled in **transitively by `vte`** (its only non-optional dep besides `memchr`). Not used directly by any first-party crate. Recorded here because it is a new vendored crate in the shipped graph.
+- **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
+- **Reviewer:** PENDING (§5.5 — `tools/audit-source.sh arrayvec 0.7.6` against `github.com/bluss/arrayvec` tag). `.crate` sha256 matches the independent re-download and index `cksum`.
+- **Transitive deps added:** none (with `default-features = false`; the optional `borsh`/`serde`/`zeroize` are not enabled, and `bencher`/`matches`/`serde_test` are dev-only).
 - **Proc-macros / build.rs:** none.

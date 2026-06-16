@@ -362,3 +362,27 @@ verified-against = [
     "github.com/rust-fuzz/arbitrary @ 690db067c94e0644eb9da556caef3df8692a91b6 (the .crate's published commit) — 60 source files byte-identical, Cargo.toml.orig == upstream, via tools/audit-source.sh",
 ]
 notes = "Fuzz-only: a dependency of the non-shipped, separate-workspace fuzz/ crate (kennel-fuzz); in NO shipped crate's Cargo.lock and no release artefact. Used with default-features = false (no `derive`), so ZERO transitive deps — the optional derive_arbitrary and the dev-only exhaustigen are not pulled (confirmed against the index line and the crate's Cargo.toml). No build.rs, not a proc-macro; licence MIT OR Apache-2.0; MSRV 1.63. audit-source.sh flagged a tag/commit mismatch, EXPLAINED: the v1.4.1 git tag (c22d7c85) is one commit ahead of the published commit (690db067), and that single commit only bumps derive/Cargo.toml (the sibling derive_arbitrary crate) 1.4.0->1.4.1 — it does NOT touch the arbitrary crate's source; the vendored .crate is byte-identical to the real published upstream commit 690db067. Approved; the fuzz harness compiles and its 20k-iteration no-panic corpus passes across every parser."
+
+[crate."arrayvec"]
+version = "=0.7.6"
+crate-sha256 = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+audited-by = "remco"
+audited-on = "2026-06-16"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
+    "crates.io sparse index line for 0.7.6 — cksum equals the .crate sha256",
+    "github.com/bluss/arrayvec @ e07652bb19173dd67b5c1a94f008f114a70df641 (tag v0.7.6) — 28 source files byte-identical via tools/audit-source.sh",
+]
+notes = "A fixed-capacity stack vector; vte's only non-optional dep besides memchr. Used with default-features = false (only the `std` feature path vte needs), so ZERO transitive deps — borsh/serde/zeroize are optional and not enabled, bencher/matches/serde_test are dev-only. No build.rs, not a proc-macro; licence MIT OR Apache-2.0. Shipped: links into kennel-lib-term (the PTY escape filter) → the kennel CLI + kenneld."
+
+[crate."vte"]
+version = "=0.15.0"
+crate-sha256 = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
+audited-by = "remco"
+audited-on = "2026-06-16"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
+    "crates.io sparse index line for 0.15.0 — cksum equals the .crate sha256",
+    "github.com/alacritty/vte @ 70514e90d5998e97e3fbb8c4f3e8663fc3d5af7d (tag 0.15.0) — 135 source files byte-identical via tools/audit-source.sh",
+]
+notes = "The alacritty terminal-escape parser (Paul Williams' ANSI state machine). Used with default-features = false (the `std` feature only): the optional `ansi` feature (log + cursor-icon + bitflags) and `serde` are NOT enabled, so the only non-optional deps are arrayvec + memchr (both vendored, memchr pre-existing). It is the deliberate reuse-not-hand-roll choice for an untrusted-input parser (§5.1 + no-hand-rolled-parsers): a terminal escape parser is exactly the category the standards say to delegate to a vetted crate. No build.rs, not a proc-macro; licence Apache-2.0 OR MIT. Shipped: kennel-lib-term → CLI + kenneld PTY filter."

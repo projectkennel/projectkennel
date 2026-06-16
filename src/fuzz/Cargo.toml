@@ -31,3 +31,4 @@ kenneld = { path = "../crates/kenneld" }
 kennel-privhelper = { path = "../crates/kennel-privhelper" }
 kennel-lib-policy = { path = "../crates/kennel-lib-policy" }
 kennel-lib-binder = { path = "../crates/kennel-lib-binder" }
+kennel-lib-term = { path = "../crates/kennel-lib-term" }
