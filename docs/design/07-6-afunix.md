@@ -136,62 +136,48 @@ behalf — the workload requests it by `name`, never by host path.
 
 ```toml
 [unix]
-default = "deny"                # "deny" | "allow" (rarely)
-abstract = "deny"               # "deny" | "allow"
+default = "deny"                # "deny" | "allow" (rarely); the resolved default may not be "allow"
+abstract = "deny"               # "deny" | "allow" — abstract-namespace socket disposition
 
-# Explicit grants: a policy name → the host socket the facade may connect to.
-# The workload asks IAfUnix for `name`; kenneld validates and connects host-side,
-# returning the connected fd. No path is placed in the kennel's view.
+# Explicit grants. Each [[unix.allow]] maps a logical `name` to the host socket the facade
+# connects to (`real`) and the path the socket is bound at inside the kennel view (`shim`); an
+# optional `env` var is set to the shim path. The workload asks IAfUnix for `name` (and finds the
+# socket at `shim`/`$env`); the host `real` path is never disclosed to the workload.
 #
-# NB: SSH is NOT granted here. ssh-agent over the facade is a destination-blind
-# signing oracle; per-kennel SSH goes through the re-origination bastion and the
-# [ssh] section instead (§7.10). [[unix.allow]] is for the other agent-shaped
-# services (gpg-agent, keyring) and display/audio sockets.
+# NB: SSH is NOT granted here. ssh-agent over the facade is a destination-blind signing oracle;
+# per-kennel SSH goes through the re-origination bastion and the [ssh] section instead (§7.10).
+# [[unix.allow]] is for the other agent-shaped services (gpg-agent, keyring) and display/audio
+# sockets.
 
 [[unix.allow]]
 name = "wayland"
-path = "$XDG_RUNTIME_DIR/wayland-0"
-access = "rw"
+real = "$XDG_RUNTIME_DIR/wayland-0"     # the host socket the facade connects to
+shim = "~/.kennel/wayland-0"            # where it appears inside the kennel view
+env  = "WAYLAND_DISPLAY"                # optional: set this env var to the shim path
 reason = "compositor"
-# WARNING: granting Wayland gives clipboard access, screen-capture portal
-# access (compositor-dependent), input synthesis (compositor-dependent).
-# Document loudly.
+# WARNING: granting Wayland gives clipboard access, screen-capture portal access
+# (compositor-dependent), input synthesis (compositor-dependent). Document loudly.
 
 [[unix.allow]]
 name = "pipewire"
-path = "$XDG_RUNTIME_DIR/pipewire-0"
-access = "rw"
+real = "$XDG_RUNTIME_DIR/pipewire-0"
+shim = "~/.kennel/pipewire-0"
 reason = "audio via PipeWire"
 # WARNING: grants audio+video device access via portal.
 
 # Per-kennel service instances
 [[unix.allow]]
-name = "kennel-local-gpg"
-path = "~/.gnupg/kennels/<kennel>/S.gpg-agent"
-access = "rw"
+name = "gpg-agent"
+real = "~/.gnupg/kennels/<kennel>/S.gpg-agent"   # a separately-managed per-kennel gpg-agent
+shim = "~/.gnupg/S.gpg-agent"                     # the path gpg looks for inside the kennel
 reason = "per-kennel gpg-agent"
-# Pairs with a separately-managed per-kennel gpg-agent.
-# Granting access to the user's real ~/.gnupg/ is virtually never correct.
-
-# Explicit denials (belt and braces over category defaults)
-[[unix.deny]]
-path = "$XDG_RUNTIME_DIR/bus"           # never grant session D-Bus directly
-[[unix.deny]]
-path = "/var/run/docker.sock"
-[[unix.deny]]
-path = "/run/containerd/containerd.sock"
-[[unix.deny]]
-path = "/run/user/$UID/systemd/private"
-[[unix.deny]]
-path = "/tmp/.X11-unix/X*"              # X11 is screen+input+clipboard
-
-# Abstract-namespace exceptions (rarely correct)
-[[unix.allow_abstract]]
-name = "\\0org.freedesktop.systemd1"
-note = "Required for systemctl --user; opens significant attack surface"
+# Pairs with a separately-managed per-kennel gpg-agent. Granting access to the user's real
+# ~/.gnupg/ is virtually never correct.
 ```
 
-The `name` field is the handle the workload requests and the one that appears in audit logs and `--dry-run` output; `path` is the host socket kenneld connects to and is never disclosed to the workload.
+There is no `[[unix.deny]]` table and no `[[unix.allow_abstract]]` table: a socket not named in `[[unix.allow]]` is denied by the `default = "deny"` floor, and abstract-namespace access is the single `abstract = "deny" | "allow"` toggle on `[unix]` (it is not per-socket). Sockets you would "explicitly deny" — session D-Bus (`$XDG_RUNTIME_DIR/bus`), `docker.sock`, `containerd.sock`, the systemd private socket, the X11 sockets — are simply never added to `[[unix.allow]]`; the deny is the default, not a list.
+
+The `name` field is the handle the workload requests and the one that appears in audit logs and `--dry-run` output; `real` is the host socket kenneld connects to and is never disclosed to the workload; `shim` (and the optional `env`) is what the workload sees in its view.
 
 ## 7.6.5 The dry-run output
 
@@ -262,7 +248,7 @@ facade transactions, `tests/facades/`):
 5. Context requests a name not in `[[unix.allow]]`: the facade refuses with `BR_FAILED_REPLY`; the attempt is audited.
 6. Two kennels with different `gpg-agent` grants each reach only their own instance through their own facade node; neither can request the other's name.
 7. Context attempts to read `~/.gnupg/private-keys-v1.d/`; expect ENOENT (no host path in the view).
-8. Context requests `/var/run/docker.sock` (a `[[unix.deny]]` / un-granted name): the facade refuses; no path is present to connect to directly.
+8. Context requests `/var/run/docker.sock` (an un-granted name — not in `[[unix.allow]]`, so denied by the `default = "deny"` floor): the facade refuses; no path is present to connect to directly.
 9. Context attempts to connect to abstract ` /var/run/docker.sock`; expect EPERM from the Landlock abstract-unix scope.
 10. Kennel's `--dry-run`/`inspect --unix` output enumerates the granted name → host-socket mappings; verify against policy.
 
