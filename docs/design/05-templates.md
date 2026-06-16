@@ -344,7 +344,7 @@ template_base = "ai-coding-strict@v4"
 
 The `@v4` is part of the reference, not a separate field. A reference without a version is rejected by the validator (production mode) or resolved to the highest locally-installed version with a warning (development mode). The earlier two-field form (`template = "ai-coding-strict"` with a separate `template_version = "4"`, §5.2) remains accepted for backward compatibility, but the combined form is canonical and is what `kennel` emits when it writes policies.
 
-Versions are semver-shaped: `v4`, `v4.2`, `v2.33.2`. The leading `v` is required. Ordering follows semver; `kennel upgrade` (§5.11) uses it to detect newer versions.
+Versions are semver-shaped: `v4`, `v4.2`, `v2.33.2`. The leading `v` is required. Ordering follows semver; `kennel policy upgrade` (§5.11) uses it to detect newer versions.
 
 ### The signature covers the content
 
@@ -370,7 +370,7 @@ Project Kennel maintains a lockfile, `kennel.lock`, recording for each resolved 
 
 The signature *is* the content commitment. An ed25519 signature is deterministic (RFC 8032) and bound to the exact canonical bytes it covers, so a version re-tagged to different bytes — even re-signed by another trusted key — produces a different signature. There is no separate content hash: pinning the signature already pins the bytes, and the project takes no `sha2` dependency for a second commitment it does not need.
 
-On every subsequent load, the resolver re-verifies each reference and checks its recorded signature against the lockfile. A mismatch — same version, different signature — is a hard error, not a warning. The lockfile is the transition from trust-on-first-use (the first time a reference is resolved and recorded) to trust-pinned (every load thereafter). `kennel upgrade` is the only sanctioned way to change a locked entry, and it surfaces the change for review.
+On every subsequent load, the resolver re-verifies each reference and checks its recorded signature against the lockfile. A mismatch — same version, different signature — is a hard error, not a warning. The lockfile is the transition from trust-on-first-use (the first time a reference is resolved and recorded) to trust-pinned (every load thereafter). `kennel policy upgrade` is the only sanctioned way to change a locked entry, and it surfaces the change for review.
 
 The lockfile lives beside the leaf policy and is committed to source control by teams who keep their kennel policies in a repository. A policy plus its lockfile is a reproducible specification: anyone resolving the same policy against the same trust store gets byte-identical effective policy, or a hard failure.
 
@@ -429,7 +429,7 @@ When a user runs `kennel` with a policy referencing an old template version:
 $ kennel run my-ai-coding bash
 
 WARNING: template ai-coding-strict has a newer version (v5; you have v4).
-Run `kennel upgrade my-ai-coding` to review changes and upgrade.
+Run `kennel policy upgrade my-ai-coding` to review changes and upgrade.
 
 [kennel starts with the user's pinned v4 baseline]
 ```
@@ -437,7 +437,7 @@ Run `kennel upgrade my-ai-coding` to review changes and upgrade.
 Project Kennel does not silently auto-upgrade. The user reviews changes and consents:
 
 ```
-$ kennel upgrade my-ai-coding
+$ kennel policy upgrade my-ai-coding
 
 ai-coding-strict v4 → v5 changes:
 

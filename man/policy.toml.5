@@ -112,7 +112,7 @@ Allow a non\-interactive kennel to drive a key with no touch (loud; threat\-tagg
 .TP
 \fB[[ssh.destinations]]\fR \(em array of tables
 dest, options (host\-side ssh argv), reason (required), threats.
-.SS [lifecycle], [cap], [seccomp], [proc], [ptrace], [signal], [ulimits], [workload], [audit]
+.SS [lifecycle], [cap], [seccomp], [unsafe], [ulimits], [workload], [audit]
 The remaining controls.
 .TP
 \fBlifecycle.ttl / .ttl_action\fR \(em string
@@ -124,8 +124,8 @@ no_new_privs (true) and the capability bounding set (empty drops all).
 \fBseccomp.profile / .deny / .allow\fR \(em string / array / array
 Baseline profile plus syscall deny/allow.
 .TP
-\fBptrace / signal .allow_targets / .allow_from\fR \(em array
-Cross\-boundary ptrace/signal allowlists.
+\fB[unsafe.ptrace] / [unsafe.signal]\fR \(em tables
+Advisory cross\-boundary allowlists (allow_targets/allow_from); scoping is from PID\-ns/seccomp \(em these warn, they do not impose the control.
 .TP
 \fB[ulimits]\fR \(em table
 setrlimit pairs (nofile, nproc, as, cpu, ...).

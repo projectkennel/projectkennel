@@ -21,26 +21,21 @@ The remaining resource classes, grouped because each is smaller than the major c
 **Policy primitives.**
 
 ```toml
-[proc]
-visibility = "self"         # "self" | "ancestors" | "all"
-                            # "self": only own process tree visible
-                            # "ancestors": own + parents (rare)
-                            # "all": full /proc (almost never correct)
+# Procfs visibility lives in [fs.proc] (part of the constructed view, §7.4).
+[fs.proc]
+visibility = "self"         # "self" only, once resolved
 hidepid = true              # mount /proc with hidepid=2
 
-[ptrace]
-allow_targets = []          # kennels/processes this kennel may ptrace
-                            # default: empty (cannot ptrace anything outside)
-allow_from = []             # kennels that may ptrace this kennel
-                            # default: empty (cannot be ptraced from outside)
+# [unsafe] groups ADVISORY sub-sections: their scoping is real but enforced by the
+# PID namespace + seccomp, not by these tables. Declaring one compiles with a warning
+# (footgun-warn-dont-forbid) — they express intent; they do not impose the control.
+[unsafe.ptrace]
+allow_targets = []          # processes this kennel may ptrace (default: none outside)
+allow_from = []             # who may ptrace this kennel (default: none outside)
 
-[signal]
-allow_targets = ["self"]    # whom we may signal
-                            # "self" = own process tree
-                            # specific cgroup paths possible but rarely useful
-allow_from = []             # who may signal us
-                            # parent default kennel can always signal children;
-                            # this rule covers cross-kennel signalling
+[unsafe.signal]
+allow_targets = ["self"]    # whom we may signal ("self" = own process tree)
+allow_from = []             # who may signal us (cross-kennel)
 ```
 
 **Test plan.** A kennel attempts `ptrace(PTRACE_ATTACH, <host shell pid>)`; expect EPERM. A kennel reads `/proc/<other-pid>/environ`; expect ENOENT (PID ns) or EACCES (hidepid). A kennel attempts `kill(<host pid>, SIGTERM)`; expect ESRCH (PID ns) or EPERM (AppArmor).

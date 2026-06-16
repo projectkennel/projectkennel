@@ -260,7 +260,7 @@ today.
 **A signature or lock error (exit code 6).** A referenced template/fragment is
 unsigned, signed by an untrusted key, or its bytes changed since the lock was
 recorded. Check the key is in your trust store. If the template published a new
-version, `kennel upgrade <name>` is the sanctioned path: it shows the source diff,
+version, `kennel policy upgrade <name>` is the sanctioned path: it shows the source diff,
 asks for consent, and re-pins the lock (§8). A mismatch you did not expect is a
 supply-chain signal, not a nuisance — review before accepting. See `man kennel`.
 
@@ -283,7 +283,7 @@ warns you but keeps running your pinned version — it never auto-upgrades. To m
 to the new version deliberately:
 
 ```sh
-kennel upgrade myproject
+kennel policy upgrade myproject
 ```
 
 This finds the newest available version of your `template_base`, shows the **source

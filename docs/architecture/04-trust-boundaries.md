@@ -121,7 +121,7 @@ The validator rejects out-of-scope requests with a stable numeric refusal code c
 
 An artefact that fails signature verification, or whose content hash does not match a present lockfile entry, is rejected; its content is not composed, regardless of which fields the unverified portion contains.
 
-**Failure mode.** `PolicyError::SignatureFailure` (with `key_id` if recognised) or `PolicyError::LockMismatch` (naming the reference and both hashes). The artefact is not loaded; any policy that depends on it cannot be resolved. The only sanctioned way to change a locked entry is `kennel upgrade`, which surfaces the content change for review.
+**Failure mode.** `PolicyError::SignatureFailure` (with `key_id` if recognised) or `PolicyError::LockMismatch` (naming the reference and both hashes). The artefact is not loaded; any policy that depends on it cannot be resolved. The only sanctioned way to change a locked entry is `kennel policy upgrade`, which surfaces the content change for review.
 
 **Threat IDs addressed.** T2.5 (template tampering: a re-signed or re-tagged artefact under the same version is caught by the lockfile byte-pin; an artefact signed by an untrusted key is refused), and the supply-chain class generally — a versioned reference is a pin to signed bytes, not a name lookup against whatever sits at that name today.
 

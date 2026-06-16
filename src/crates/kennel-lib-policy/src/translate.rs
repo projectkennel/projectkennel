@@ -1063,31 +1063,19 @@ fn translate_exec(
 // ---- proc / lifecycle ----------------------------------------------------------
 
 fn translate_proc(src: &SourcePolicy) -> Result<ProcPolicy, PolicyError> {
-    // Visibility comes from [proc] or, failing that, [fs.proc]; only "self" is valid.
-    let visibility = src
-        .proc
-        .as_ref()
-        .and_then(|p| p.visibility.as_deref())
-        .or_else(|| {
-            src.fs
-                .as_ref()
-                .and_then(|f| f.proc.as_ref())
-                .and_then(|p| p.visibility.as_deref())
-        });
+    // Procfs visibility/hidepid come from [fs.proc] (procfs is part of the constructed
+    // view, beside [fs.home]/[fs.tmp]/[fs.dev]); only "self" is valid.
+    let fs_proc = src.fs.as_ref().and_then(|f| f.proc.as_ref());
+    let visibility = fs_proc.and_then(|p| p.visibility.as_deref());
     match visibility {
         Some("self") | None => {}
         Some(other) => {
             return Err(translation(format!(
-                "proc.visibility `{other}` is not `self`"
+                "fs.proc.visibility `{other}` is not `self`"
             )))
         }
     }
-    let hidepid = src.proc.as_ref().and_then(|p| p.hidepid).or_else(|| {
-        src.fs
-            .as_ref()
-            .and_then(|f| f.proc.as_ref())
-            .and_then(|p| p.hidepid)
-    });
+    let hidepid = fs_proc.and_then(|p| p.hidepid);
     Ok(ProcPolicy {
         visibility: ProcVisibility::SelfOnly,
         hidepid: hidepid.unwrap_or(false),

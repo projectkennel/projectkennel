@@ -91,8 +91,8 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     ("list", "list running kennels", "list"),
     (
         "policy",
-        "author, inspect, and compile policies (see `kennel policy --help`)",
-        "policy <list|show|edit|generate|compile|validate|sign|lint> [...]",
+        "author, inspect, sign, and check policies",
+        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|upgrade> [...]",
     ),
     (
         "keygen",
@@ -108,11 +108,6 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "audit",
         "show a kennel's audit log",
         "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
-    ),
-    (
-        "upgrade",
-        "re-pin a policy's template to a newer version (with review)",
-        "upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     ),
 ];
 
@@ -137,7 +132,7 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
     (
         "compile",
         "compile a source policy into a signed settled artefact",
-        "policy compile <policy> [--output-path P] [--key K | --unsigned] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
+        "policy compile <policy> [--output P] [--key K | --unsigned] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
     ),
     (
         "validate",
@@ -158,6 +153,11 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
         "risks",
         "evaluate a policy against the threat catalogue (exposures, residuals)",
         "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    ),
+    (
+        "upgrade",
+        "re-pin a policy's template to a newer version (with review)",
+        "policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     ),
 ];
 
@@ -271,15 +271,6 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
                     ("--print-journalctl-command", "Print the equivalent journalctl invocation and exit."),
                 ],
             },
-            Command {
-                usage: SYNC_COMMANDS[7].2,
-                summary: SYNC_COMMANDS[7].1,
-                options: &[
-                    ("--yes", "Migrate without the interactive confirmation (for scripts/CI)."),
-                    ("--template-dir D", "Add a directory to the template search path (repeatable)."),
-                    ("--trust-dir D", "Trust store the new version's signature verifies against (forwarded to the recompile)."),
-                ],
-            },
         ],
         fields: &[],
         exit_status: EXIT_CODES,
@@ -327,7 +318,7 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
             Command {
                 usage: SYNC_POLICY[4].2, summary: SYNC_POLICY[4].1,
                 options: &[
-                    ("--output-path P", "Write the settled artefact to P."),
+                    ("--output P", "Write the settled artefact to P."),
                     ("--key K", "Sign the settled artefact with key K."),
                     ("--unsigned", "Emit an unsigned artefact (mutually exclusive with --key)."),
                     ("--require-signed", "Fail unless every referenced artefact is signed."),
@@ -361,6 +352,14 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
                     ("--json", "Emit the structured report (for CI/tooling) instead of the human view."),
                     (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
                     (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
+                ],
+            },
+            Command {
+                usage: SYNC_POLICY[9].2, summary: SYNC_POLICY[9].1,
+                options: &[
+                    ("--yes", "Migrate without the interactive confirmation (for scripts/CI)."),
+                    ("--template-dir D", "Add a directory to the template search path (repeatable)."),
+                    ("--trust-dir D", "Trust store the new version's signature verifies against (forwarded to the recompile)."),
                 ],
             },
         ],
@@ -513,13 +512,13 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 ],
             },
             FieldGroup {
-                heading: "[lifecycle], [cap], [seccomp], [proc], [ptrace], [signal], [ulimits], [workload], [audit]",
+                heading: "[lifecycle], [cap], [seccomp], [unsafe], [ulimits], [workload], [audit]",
                 intro: "The remaining controls.",
                 fields: &[
                     Field { name: "lifecycle.ttl / .ttl_action", kind: "string", desc: "TTL (\"8h\") and action: exit (alias stop, default) / warn / renew." },
                     Field { name: "cap.no_new_privs / .bounding_set", kind: "bool / array", desc: "no_new_privs (true) and the capability bounding set (empty drops all)." },
                     Field { name: "seccomp.profile / .deny / .allow", kind: "string / array / array", desc: "Baseline profile plus syscall deny/allow." },
-                    Field { name: "ptrace / signal .allow_targets / .allow_from", kind: "array", desc: "Cross-boundary ptrace/signal allowlists." },
+                    Field { name: "[unsafe.ptrace] / [unsafe.signal]", kind: "tables", desc: "Advisory cross-boundary allowlists (allow_targets/allow_from); scoping is from PID-ns/seccomp \\(em these warn, they do not impose the control." },
                     Field { name: "[ulimits]", kind: "table", desc: "setrlimit pairs (nofile, nproc, as, cpu, ...)." },
                     Field { name: "[workload] argv / cwd / pinned / sha256", kind: "mixed", desc: "The command, working dir, pin against CLI override, and binary digest pin." },
                     Field { name: "[audit] sinks + [audit.*]", kind: "tables", desc: "Sink selection and per-class levels; see system.toml(5) and 02-3-audit-schema.md." },

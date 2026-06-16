@@ -188,7 +188,7 @@ wins over the vendor copy. Every override key is documented inline in the shippe
    systemctl --user restart kenneld.socket kenneld.service
    ```
 3. If you published a new template version, users move to it deliberately with
-   `kennel upgrade <name>` (it shows the source diff, asks for consent, and re-pins
+   `kennel policy upgrade <name>` (it shows the source diff, asks for consent, and re-pins
    the lock — the sanctioned way to change a locked entry). If you re-signed a
    template *in place* (same version, new bytes), existing locks will mismatch
    (exit code 6) — that is the supply-chain tripwire working; prefer a version bump

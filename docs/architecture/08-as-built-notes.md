@@ -43,7 +43,7 @@ narration is kept here; the chapter named is the source of truth.
   validate `magic`/`abi_version`.
 - **`kennel diff`** (`05-templates.md` §5.11/§5.13, `02-1-cli.md`) — the semantic,
   threat-impact-annotated delta view (the `+`/`~`/`-` per-grant output with impact lines and
-  conflict detection) is designed, not built. What exists today: `kennel upgrade` shows the
+  conflict detection) is designed, not built. What exists today: `kennel policy upgrade` shows the
   honest *source* diff between template versions and re-pins the lock (built), and
   `kennel policy show` prints the full effective policy. `kennel diff`'s value over those is the
   *interpreted* delta (which grants widened/narrowed, with threat tags); that needs an
@@ -202,6 +202,16 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   design). **Still roadmap:** `kennel diff`'s interpreted *delta* between two policies (the `+/~/-`
   threat-impact view) — `risks` + the catalogue are its foundation. Tag-correctness as a hard lint
   (invalid/missing-required → non-zero) is a noted `--strict` follow-up.
+- **Pre-release schema + CLI consistency sweep** — removed surface clutter (no compat shims, per
+  the pre-release policy): the dead `[net].proxy_listen_v4`/`v6` booleans (only `proxy_listen_*_address`
+  was ever consumed — a family is on iff its address resolves); the duplicate top-level `[proc]`
+  (procfs settings now live only in `[fs.proc]`, beside the other constructed-view sub-tables); and
+  the scattered advisory `[ptrace]`/`[signal]` sections folded under one `[unsafe]` umbrella
+  (`[unsafe.ptrace]`/`[unsafe.signal]`) so the footgun is visible — their scoping is real but
+  PID-ns/seccomp-enforced, so declaring one still warns. CLI: `upgrade` moved under `policy`
+  (`kennel policy upgrade`, beside the other policy verbs); `compile --output-path` renamed to
+  `--output` to match `sign`; the `policy` usage string + summary corrected. The `man`/help drift
+  guards (the `kennel.rs` sync-test + the gen-man regen-check) kept these honest.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

@@ -499,8 +499,8 @@ mode = "constrained"
 # subnets. The user's normal shell can reach the kennel's address
 # (default context has no cgroup BPF connect restrictions), but sibling
 # contexts cannot reach each other.
-proxy_listen_v4 = true          # enable the v4 SOCKS5 listener (default false)
-proxy_listen_v6 = true          # enable the v6 listener (default false)
+# Both families' listeners are on by default in the proxied modes; a family is
+# enabled iff its address resolves (no separate on/off flag).
 # Listener addresses are computed from the kennel's tag and ctx. To override the
 # host offset or port within the kennel's own subnet, set the optional
 # proxy_listen_v4_address / proxy_listen_v6_address as "offset:port"
@@ -1124,7 +1124,7 @@ It is worth being explicit about what `ai-coding-strict` does not cover, so that
 
 ## Section 7 — Versioning and review
 
-The template is at v4. Earlier versions exist for backward compatibility; user policies that pin to v3 continue to work, and Project Kennel warns the user when an upgrade is available. The `kennel upgrade <kennel>` command shows the diff between the user's pinned version and the latest, with threat-impact annotations on each change.
+The template is at v4. Earlier versions exist for backward compatibility; user policies that pin to v3 continue to work, and Project Kennel warns the user when an upgrade is available. The `kennel policy upgrade <kennel>` command shows the diff between the user's pinned version and the latest, with threat-impact annotations on each change.
 
 A new version of the template is published when:
 - A new threat is added to the catalogue and this template's defaults should defend against it. The template's version bumps to track.

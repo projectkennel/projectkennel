@@ -68,8 +68,8 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "policy",
-        summary: "author, inspect, and compile policies (see `kennel policy --help`)",
-        usage: "policy <list|show|edit|generate|compile|validate|sign|lint> [...]",
+        summary: "author, inspect, sign, and check policies",
+        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|upgrade> [...]",
     },
     CommandSpec {
         name: "keygen",
@@ -85,11 +85,6 @@ const COMMANDS: &[CommandSpec] = &[
         name: "audit",
         summary: "show a kennel's audit log",
         usage: "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
-    },
-    CommandSpec {
-        name: "upgrade",
-        summary: "re-pin a policy's template to a newer version (with review)",
-        usage: "upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     },
 ];
 
@@ -118,7 +113,7 @@ const POLICY_VERBS: &[CommandSpec] = &[
     CommandSpec {
         name: "compile",
         summary: "compile a source policy into a signed settled artefact",
-        usage: "policy compile <policy> [--output-path P] [--key K | --unsigned] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
+        usage: "policy compile <policy> [--output P] [--key K | --unsigned] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
     },
     CommandSpec {
         name: "validate",
@@ -139,6 +134,11 @@ const POLICY_VERBS: &[CommandSpec] = &[
         name: "risks",
         summary: "evaluate a policy against the threat catalogue (exposures, residuals)",
         usage: "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    },
+    CommandSpec {
+        name: "upgrade",
+        summary: "re-pin a policy's template to a newer version (with review)",
+        usage: "policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     },
 ];
 
@@ -196,7 +196,6 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "keygen" => keygen(rest),
         "subkennel" => subkennel(rest),
         "audit" => audit(rest),
-        "upgrade" => upgrade(rest),
         other => Err(format!("unknown command `{other}` — run `kennel --help`")),
     }
 }
@@ -225,6 +224,7 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "sign" => sign(rest),
         "lint" => policy_lint(rest),
         "risks" => policy_risks(rest),
+        "upgrade" => upgrade(rest),
         other => Err(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
         )),
@@ -835,7 +835,7 @@ impl TemplateSource for FsTemplateSource {
     }
 }
 
-/// `kennel compile <policy> [--output-path P] [--key K] [--unsigned] [--template-dir D]...`
+/// `kennel compile <policy> [--output P] [--key K] [--unsigned] [--template-dir D]...`
 ///
 /// Resolves a source policy fully and writes a settled policy. Stateless: it never
 /// contacts the daemon. Exit codes follow `02-1-cli.md` (3 = validation/resolution,
@@ -855,8 +855,8 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--output-path" => {
-                output_path = Some(it.next().ok_or("--output-path needs a value")?.into());
+            "--output" => {
+                output_path = Some(it.next().ok_or("--output needs a value")?.into());
             }
             "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
             "--unsigned" => unsigned = true,
@@ -879,7 +879,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let policy_arg = policy_path.ok_or(
-        "usage: kennel compile <policy> [--output-path P] [--key K | --unsigned] [--template-dir D]...",
+        "usage: kennel compile <policy> [--output P] [--key K | --unsigned] [--template-dir D]...",
     )?;
     // `<policy>` is a path or a name resolved from the `policies/` cascade,
     // preferring the source `policy.toml` (the artefact we are about to compile).
@@ -2298,8 +2298,8 @@ fn add_default_template_dirs(dirs: &mut Vec<PathBuf>) {
 /// order — `kennel run` prefers the settled artefact (the production path), while
 /// `kennel compile` prefers the source it is about to compile. The returned name
 /// doubles as the default kennel instance name (`07-paths`, resolve-by-name).
-/// `kennel upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...` — re-pin a policy's
-/// template to a newer published version, with review and consent.
+/// `kennel policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...` — re-pin a
+/// policy's template to a newer published version, with review and consent.
 ///
 /// Detects whether the policy's `template_base` has a newer version available in
 /// the template search path, shows the source diff between the pinned and the new
@@ -2341,8 +2341,9 @@ fn upgrade(args: &[String]) -> Result<ExitCode, String> {
             }
         }
     }
-    let name = name
-        .ok_or("usage: kennel upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...")?;
+    let name = name.ok_or(
+        "usage: kennel policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
+    )?;
     add_default_template_dirs(&mut template_dirs);
 
     // The leaf policy source (never the settled artefact — we rewrite the source).
