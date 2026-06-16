@@ -417,9 +417,11 @@ fn is_safe_dev_path(path: &Path) -> bool {
 /// The kernel enforcement objects derived from a settled policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// Namespaces the spawn unshares. The network namespace is deliberately
-    /// *not* unshared: egress is confined by cgroup BPF on the host stack plus
-    /// the loopback proxy, not by net-ns isolation.
+    /// Namespaces the spawn unshares. The network namespace is unshared for
+    /// every mode except `host`: a proxied (`constrained`/`unconstrained`) or
+    /// `none` kennel gets its own net-ns (the only egress path is the binder
+    /// gateway), while `host` shares the host stack and is confined by cgroup
+    /// BPF + Landlock instead. See the comment on the unshare set below.
     pub namespaces: Namespaces,
     /// The per-kennel cgroup the workload joins and the BPF programs attach to.
     pub cgroup: PathBuf,
@@ -653,8 +655,10 @@ pub struct ConstructionHalf {
     /// The granted supplementary gids to identity-map (after the `0 0 1` and operator
     /// lines); each re-checked against the caller's membership before the `gid_map` write.
     pub granted_gids: Vec<u32>,
-    /// Whether to bring up the in-namespace loopback (`lo`) — the per-kennel net-ns path
-    /// (`07-11`); `false` while the kennel shares the host net namespace.
+    /// Whether to bring up the in-namespace loopback (`lo`) — set for a proxied
+    /// (`constrained`/`unconstrained`) kennel, which has its own net-ns *and* loopback
+    /// addresses. `false` for `none` (own net-ns but no addresses) and `host` (shares the
+    /// host net-ns, so there is no in-namespace `lo` to bring up).
     pub lo: bool,
     /// The kennel's context number — re-supplied so the factory can re-validate each
     /// [`loopback`](Self::loopback) address against the caller's reserved per-kennel subnet.
@@ -721,9 +725,9 @@ impl Plan {
         // namespace (granting CAP_SYS_ADMIN within it) so MOUNT/IPC/PID and the
         // mount/pivot_root need no real privilege; `kennel-bin-init` is the kennel's PID 1
         // (it mounts the fresh /proc and forks the workload). NET is unshared for every mode
-        // EXCEPT `open`: a proxied kennel (`constrained`/`unconstrained`) gets its own net-ns
+        // EXCEPT `host`: a proxied kennel (`constrained`/`unconstrained`) gets its own net-ns
         // with an in-ns `lo` carrying the proxy's loopback alias (the only path out is the
-        // binder gateway); `none` gets an own EMPTY net-ns (no interfaces). `open` deliberately
+        // binder gateway); `none` gets an own EMPTY net-ns (no interfaces). `host` deliberately
         // shares the HOST net-ns for direct egress, gated by cgroup BPF + Landlock.
         let mut namespaces =
             Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;

@@ -354,7 +354,7 @@ where `init_host_pid` is a **bootstrap fact from the privhelper** over the const
 
 ## 16. Cross-kennel transaction → kenneld relay *(roadmap)*
 
-*Roadmap: the cross-instance / inter-kennel relay is designed, not built (`02-4-binder.md` §Inter-kennel IPC). The kennel still shares the host network namespace today; this boundary describes the intended contract.*
+*Roadmap: the cross-instance / inter-kennel relay is designed, not built (`02-4-binder.md` §Inter-kennel IPC). This boundary describes the intended contract.*
 
 **What crosses.** A binder transaction routed from a consuming kennel's instance to a providing kennel's instance via kenneld's cross-instance registry — only when **both** sides declare it (`[[binder.consume]]` and `[[binder.provide]]` with matching `accept_from`); a unilateral declaration denies.
 
@@ -364,17 +364,17 @@ where `init_host_pid` is a **bootstrap fact from the privhelper** over the const
 
 ---
 
-## 17. Kennel net-ns ↔ host net-ns *(roadmap)*
+## 17. Kennel net-ns ↔ host net-ns
 
-*Roadmap: the per-kennel network namespace, the four network modes, and the loopback mirror are designed, not built — the kennel still shares the host network namespace (`02-5-binder-net.md`; `08-as-built-notes.md` §8.1). This boundary describes the intended contract.*
+The per-kennel network namespace, the four network modes, and the loopback mirror are built: `kennel-lib-spawn::plan` unshares `Namespaces::NET` for every mode but `host` (`02-5-binder-net.md`). Only `mode = host` shares the host network namespace, reinstating the host-recon residual (T1.6) by design.
 
-**What crosses.** The only controlled crossing of the kennel net-ns boundary is binder: the `org.projectkennel.INet/default` node carries egress `CONNECT` (shim → kenneld → `host-netproxy` delegate) and the kenneld→shim `INBOUND` ingress hand-off. The two loopback stacks (the kennel's `/28` + `/64` inside its net-ns, the same addresses mirrored on the host `lo` alias) are otherwise **independent — no routing, no NAT** — so a `connect()` inside the kennel to its loopback stays inside it.
+**What crosses.** The only controlled crossing of the kennel net-ns boundary is binder: the `org.projectkennel.INet/default` node carries egress `CONNECT_INET` (shim → kenneld → `host-netproxy` delegate) and the inbound `BIND_INET` ingress hand-off (`host-inetd` accept → kenneld → `facade-client`, §7.5.7). The two loopback stacks (the kennel's `/28` + `/64` inside its net-ns, the same addresses mirrored on the host `lo` alias) are otherwise **independent — no routing, no NAT** — so a `connect()` inside the kennel to its loopback stays inside it.
 
-**Trusted side.** Not the shim's request. kenneld is the policy decision point; the delegates (`host-netproxy` for `CONNECT`, the host-side spawn leg for the `BIND` mirror) hold **no binder access** and do their blocking I/O off the binder path, returning fds to kenneld by `SCM_RIGHTS`. `BINDER_TYPE_FD` is permitted on the `INet` node because shim↔kenneld is intra-instance; the general cross-instance fd prohibition (boundary 16) is not implicated. The shim never `connect()`s or `bind()`s a received fd — it is already in the desired state.
+**Trusted side.** Not the shim's request. kenneld is the policy decision point; the delegates (`host-netproxy` for `CONNECT`, `host-inetd` for the `BIND` mirror) hold **no binder access** and do their blocking I/O off the binder path, returning fds to kenneld by `SCM_RIGHTS`. `BINDER_TYPE_FD` is permitted on the `INet` node because shim↔kenneld is intra-instance; the general cross-instance fd prohibition (boundary 16) is not implicated. The shim never `connect()`s or `bind()`s a received fd — it is already in the desired state.
 
 **Host-side mirror.** A native `bind()` inside the kennel is gated by `[[net.bpf.bind]]` at the cgroup `bind` hook; an allowed bind is reported to kenneld, which raises the host-side leg's mirror of the same `ip:port` on the host alias — so every listener that exists is both intra-kennel-reachable and observable host-side at the kennel's own IP, and the allow/deny decision is policy's alone (no workload-initiated `BIND` transaction). `mode = host` kennels share the host stack directly, use no mirror, and reinstate the host-network recon threat (T1.6) by design.
 
-**Failure mode.** A disallowed `CONNECT` destination or denied `bind()` returns `BR_FAILED_REPLY` / fails at the syscall (`EACCES`); audited as `net.bpf.deny` / `net.bind` (allowed binds carry `mirrored: true`) and `net.egress` (unchanged). Egress resolution stays proxy-side (`socks5h://` semantics; the kennel has no DNS path of its own).
+**Failure mode.** A disallowed `CONNECT_INET` destination returns `BR_FAILED_REPLY` and is audited `net.connect-deny` (and `net.egress`); a denied `bind()` fails at the syscall (`EACCES`) and is audited `net.bind-deny` (an allowed bind, `net.bind-rewrite`). Egress resolution stays proxy-side (`socks5h://` semantics; the kennel has no DNS path of its own).
 
 ---
 
