@@ -42,29 +42,62 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rust:
-    name: rust (fmt, clippy, test, build, doc)
+  # The Rust gate is split into four parallel jobs (was one serial `rust` job). With no
+  # Rust build cache in CI, each cold-compiles the workspace, so splitting trades runner-
+  # minutes for wall-clock: the four heavy steps (clippy, the two test profiles, the
+  # build) now run concurrently instead of back to back. The `--all-features` jobs link
+  # libsystemd (the `audit-journald` sink's sd_journal_sendv FFI); clang/libbpf cover the
+  # BPF object the spawn crates embed via build.rs. fmt is trivial, so it rides the
+  # build+doc job rather than spending a fifth runner.
+  rust-clippy:
+    name: rust (clippy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # clang/libbpf for the BPF compile; libsystemd-dev for the `audit-journald`
-      # feature, which the --all-features clippy/test steps link (kennel-syscall's
-      # sd_journal_sendv FFI behind kennel-audit's journald sink). The default
-      # build needs neither.
       - name: Install clang + headers
         run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev libsystemd-dev
-      # rustup honours rust-toolchain.toml (1.95.0 + rustfmt + clippy); the
-      # first cargo invocation installs the pinned toolchain and components.
+      - name: Toolchain
+        run: rustup show && cargo --version && rustc --version
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  rust-test:
+    name: rust (test, all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang + headers
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev libsystemd-dev
+      - name: Toolchain
+        run: rustup show && cargo --version && rustc --version
+      - name: Test (all features)
+        run: cargo test --all-features
+
+  rust-test-nodefault:
+    name: rust (test, no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The no-default build does not link libsystemd, but the BPF object the spawn
+      # crates embed (build.rs) still needs clang/libbpf.
+      - name: Install clang + headers
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev
+      - name: Toolchain
+        run: rustup show && cargo --version && rustc --version
+      - name: Test (no default features)
+        run: cargo test --no-default-features
+
+  rust-build-doc:
+    name: rust (fmt, build, doc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang + headers
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev libsystemd-dev
       - name: Toolchain
         run: rustup show && cargo --version && rustc --version
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Test (all features)
-        run: cargo test --all-features
-      - name: Test (no default features)
-        run: cargo test --no-default-features
       - name: Build (offline, frozen, locked)
         run: cargo build --offline --frozen --locked
       - name: Doc
