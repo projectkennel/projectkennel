@@ -243,10 +243,10 @@ today.
 
 **A signature or lock error (exit code 6).** A referenced template/fragment is
 unsigned, signed by an untrusted key, or its bytes changed since the lock was
-recorded. Check the key is in your trust store. If a referenced artefact changed
-legitimately, recompile so the lock re-records the new bytes (review the change
-first — a mismatch you did not expect is a supply-chain signal, not a nuisance).
-See `man kennel-policy`.
+recorded. Check the key is in your trust store. If the template published a new
+version, `kennel upgrade <name>` is the sanctioned path: it shows the source diff,
+asks for consent, and re-pins the lock (§8). A mismatch you did not expect is a
+supply-chain signal, not a nuisance — review before accepting. See `man kennel`.
 
 **A kennel won't start at all.** Spawn failures are an admin/host concern (userns
 support, the privhelper, an `/etc/kennel/subkennel` allocation). Capture detail
@@ -257,6 +257,30 @@ user journal (`journalctl --user -u kenneld.service`) and the system journal
 
 **Pin what runs.** To stop a `kennel run -- <cmd>` from overriding the policy's
 command, set `[workload].pinned = true`; an override then needs `--force`.
+
+---
+
+## 8. Upgrading a policy's template
+
+When the template your policy inherits publishes a newer version, `kennel run`
+warns you but keeps running your pinned version — it never auto-upgrades. To move
+to the new version deliberately:
+
+```sh
+kennel upgrade myproject
+```
+
+This finds the newest available version of your `template_base`, shows the **source
+diff** between your pinned version and the new one, and asks for consent. On `y` it
+re-points `template_base` and recompiles so `kennel.lock` re-pins to the new bytes.
+This is the only sanctioned way to change a locked entry — the lock is otherwise
+immutable, and a mismatch is a hard error (exit 6).
+
+Review the diff before accepting; a template change can widen or narrow what your
+workload may do. (The richer semantic threat-impact view is `kennel diff`, which is
+roadmap; today `upgrade` shows the honest source diff, and `kennel policy show`
+prints the full effective policy after upgrading.) For scripts, `--yes` skips the
+prompt. See `man kennel`.
 
 ---
 
