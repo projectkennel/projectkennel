@@ -33,6 +33,7 @@ pub mod etc;
 pub mod inbound;
 pub mod inet;
 pub mod policy;
+pub mod pty_broker;
 pub mod proxy;
 pub mod server;
 pub mod socket;
