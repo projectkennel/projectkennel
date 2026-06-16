@@ -1,0 +1,58 @@
+# ============================================================================
+# Suite case: net-bind-mirror — the §7.5.7 inbound host-side BIND mirror.
+#
+# Proves the reverse of egress: a port the workload bind()s inside the kennel is exposed back
+# on the HOST (host-inetd binds <kennel-ip>:port on host lo), and a connection from the host
+# reaches the in-kennel listener through the conduit (host-inetd → kenneld → facade-client →
+# workload), bytes spliced both ways.
+#
+# The workload IS the verifier: it binds the mirrored port, accepts ONE connection, and exits 0
+# iff it receives the expected marker (echoing it back so the host side also sees the splice).
+# The case's setup.sh backgrounds a host-side connector that polls for the mirrored listener
+# (ss) and connects+sends the marker — concurrently with this workload. Exit 0 ⇒ host → kennel
+# inbound works end to end.
+#
+# mode = constrained: the kennel has its own net-ns + loopback alias + the proxy/mirror delegates.
+# The bind is permitted by [net.bpf.bind].allow (default-deny otherwise); the mirror set is
+# derived from the single-port bind-allow rule.
+# ============================================================================
+
+template_name = "net-bind-mirror"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "constrained"
+
+[net.bpf.bind]
+allow = [{ cidr = "*", ports = [3000], reason = "the mirrored dev-server port" }]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    python3 -c "
+import socket
+# Bind the mirrored port (0.0.0.0 is rewritten to the kennel loopback by bind4) and accept one
+# connection delivered through the host-side mirror. Exit 0 iff the marker arrives.
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('0.0.0.0', 3000)); s.listen(4); s.settimeout(20)
+try:
+    c,_=s.accept()
+    data=c.recv(32)
+    c.sendall(b'echo:'+data)   # echo so the host side also confirms the splice
+    c.close()
+except OSError as e:
+    raise SystemExit('no inbound connection reached the workload: %s' % e)
+if data != b'MIRROR_OK':
+    raise SystemExit('wrong marker through the mirror: %r' % data)
+"
+    """,
+]

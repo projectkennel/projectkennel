@@ -49,6 +49,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "facade-client"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-binder",
+]
+
+[[package]]
 name = "facade-socks5"
 version = "0.1.0"
 dependencies = [
@@ -60,6 +67,13 @@ name = "facade-ssh"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-binder",
+]
+
+[[package]]
+name = "host-inetd"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-scm",
 ]
 
 [[package]]
@@ -186,6 +200,7 @@ name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "host-inetd",
  "host-netproxy",
  "kennel-lib-audit",
  "kennel-lib-binder",

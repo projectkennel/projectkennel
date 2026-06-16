@@ -185,6 +185,7 @@ impl Manager {
 ///
 /// Returns the OS error if becoming context manager (open/`mmap`/`SET_CONTEXT_MGR`/
 /// looper) fails, or the worker thread cannot be spawned.
+#[allow(clippy::too_many_arguments)] // the node-0 serve inputs; each is one subsystem's state
 pub fn spawn(
     device_fd: OwnedFd,
     ctx: u16,
@@ -192,6 +193,7 @@ pub fn spawn(
     unix: UnixRuntime,
     lifecycle: Lifecycle,
     net: crate::inet::NetRuntime,
+    inbound: Arc<crate::inbound::InboundRuntime>,
     writer: Arc<Writer>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
@@ -205,7 +207,9 @@ pub fn spawn(
     let net = Arc::new(net);
     let lifecycle = Arc::new(lifecycle);
     let handler: Handler = Arc::new(move |incoming: &Incoming| {
-        handle(&registry, &unix, &net, &lifecycle, incoming, ctx, &writer)
+        handle(
+            &registry, &unix, &net, &inbound, &lifecycle, incoming, ctx, &writer,
+        )
     });
 
     let loopers = cm.serve_pool(POOL_MAX_THREADS, POLL_MS, &stop, &handler)?;
@@ -219,10 +223,12 @@ pub fn spawn(
 // audit emit; that scope is intentional (each arm calls a registry method), so the nursery
 // "tighten the guard further" lint does not apply.
 #[allow(clippy::significant_drop_tightening)]
+#[allow(clippy::too_many_arguments)] // the handler's shared state; each piece is one concern
 fn handle(
     registry: &Mutex<Registry>,
     unix: &UnixRuntime,
     net: &crate::inet::NetRuntime,
+    inbound: &crate::inbound::InboundRuntime,
     lifecycle: &Lifecycle,
     incoming: &Incoming,
     ctx: u16,
@@ -241,6 +247,9 @@ fn handle(
     }
     if incoming.code == verb::CONNECT_INET {
         return inet_connect(net, incoming, ctx, writer);
+    }
+    if incoming.code == verb::BIND_INET {
+        return inet_bind(inbound, incoming, ctx, writer);
     }
     let name = decode_name(&incoming.data);
     // The registry verbs are O(1) in-memory; take the lock only for them.
@@ -492,6 +501,36 @@ fn inet_connect(
     };
     writer.emit(&inet_event(incoming, ctx, &label, port, outcome));
     reply
+}
+
+/// Serve a `BIND_INET` request: hand `facade-client` the next pending inbound conduit for the
+/// requested mirrored port, or `AGAIN` if none is waiting (§7.5.7).
+///
+/// **No policy decision** — the `[net.bpf].bind` cgroup ACL already gated the bind, and `host-inetd`
+/// only ever binds a port kenneld registered. **Looper-safe** — this only pops a ready fd or returns
+/// promptly; the unbounded wait for an external connection lives in the inbound reader thread, off
+/// the binder pool. A handoff replies `[OK]` + the conduit fd; an empty queue replies `[AGAIN]`.
+fn inet_bind(
+    inbound: &crate::inbound::InboundRuntime,
+    incoming: &Incoming,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
+    let Some((_transport, port)) =
+        kennel_lib_binder::service::inet::decode_bind_request(&incoming.data)
+    else {
+        writer.emit(&inet_event(incoming, ctx, "bind", 0, Outcome::Error));
+        return Reply::DataAndFd(one(status::BAD_REQUEST), None);
+    };
+    inbound.take_pending(port).map_or_else(
+        // No connection pending — tell the facade to re-arm. Not audited: an idle poll is not an
+        // event, and auditing every re-arm would drown the log.
+        || Reply::DataAndFd(one(status::AGAIN), None),
+        |conduit| {
+            writer.emit(&inet_event(incoming, ctx, "bind", port, Outcome::Allow));
+            Reply::DataAndFd(one(status::OK), Some(conduit))
+        },
+    )
 }
 
 /// The audit event for an `INet` CONNECT decision.

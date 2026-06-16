@@ -25,6 +25,16 @@ pub mod verb {
     /// `[net.proxy]`, resolves the name, pins the vetted address, and (with the conduit
     /// built) returns the connection fd.
     pub const CONNECT_INET: u32 = 6;
+    /// Collect a pending inbound connection for a policy-mirrored bind port (§7.5.7).
+    ///
+    /// The reverse of [`CONNECT_INET`]: `facade-client` transacts the request `[transport: u8 |
+    /// port: u16 big-endian]` (see [`crate::service::inet::encode_bind_request`]) to kenneld; if a
+    /// host-side connection to that mirrored port is waiting, the reply carries the conduit fd
+    /// ([`crate::ctxmgr::Reply::Fd`]); otherwise the reply is the [`crate::service::status::AGAIN`]
+    /// status byte and `facade-client` re-arms. kenneld makes NO policy decision here — the
+    /// `[net.bpf].bind` cgroup ACL already gated the bind; this is a pure socketpair handoff. The
+    /// handler never parks a looper (it bounded-polls then returns).
+    pub const BIND_INET: u32 = 7;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
@@ -66,9 +76,31 @@ pub mod inet {
         Some((*transport, u16::from_be_bytes([*hi, *lo]), host))
     }
 
+    /// Encode a [`crate::service::verb::BIND_INET`] request: `[transport: u8 | port: u16 big-endian]`.
+    ///
+    /// No host: the in-kennel target is the kennel's own loopback at `port`, which kenneld already
+    /// knows. The reverse of [`encode_request`].
+    #[must_use]
+    pub fn encode_bind_request(transport: u8, port: u16) -> Vec<u8> {
+        let mut out = Vec::with_capacity(3);
+        out.push(transport);
+        out.extend_from_slice(&port.to_be_bytes());
+        out
+    }
+
+    /// Decode a `BIND_INET` request into `(transport byte, port)`. `None` for a payload that is not
+    /// exactly 3 bytes (untrusted input; the transport byte's validity is the caller's concern).
+    #[must_use]
+    pub fn decode_bind_request(data: &[u8]) -> Option<(u8, u16)> {
+        let [transport, hi, lo] = data else {
+            return None;
+        };
+        Some((*transport, u16::from_be_bytes([*hi, *lo])))
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{decode_request, encode_request};
+        use super::{decode_bind_request, decode_request, encode_bind_request, encode_request};
 
         #[test]
         fn round_trips() {
@@ -86,6 +118,20 @@ pub mod inet {
             assert!(decode_request(&[0, 0x01, 0xBB, b'a', b'b'], 1).is_none()); // oversized
             assert!(decode_request(&[0, 0x01, 0xBB, 0xFF, 0xFE], 255).is_none());
             // !utf8
+        }
+
+        #[test]
+        fn bind_request_round_trips() {
+            let bytes = encode_bind_request(0, 3000);
+            assert_eq!(bytes, vec![0, 0x0B, 0xB8]); // transport=0, 3000 = 0x0BB8 big-endian
+            assert_eq!(decode_bind_request(&bytes), Some((0, 3000)));
+        }
+
+        #[test]
+        fn bind_request_rejects_wrong_length() {
+            assert!(decode_bind_request(&[0, 0x0B]).is_none()); // short (2 bytes)
+            assert!(decode_bind_request(&[0, 0x0B, 0xB8, 0x00]).is_none()); // long (4 bytes)
+            assert!(decode_bind_request(&[]).is_none()); // empty
         }
     }
 }
@@ -146,4 +192,10 @@ pub mod status {
     pub const REFUSED_RESERVED: u8 = 3;
     /// The request was malformed (bad verb, oversized/!UTF-8 name).
     pub const BAD_REQUEST: u8 = 4;
+    /// No work is ready yet — retry.
+    ///
+    /// The reply to a [`crate::service::verb::BIND_INET`] when no host-side connection is pending
+    /// for the port; `facade-client` re-arms after a short backoff. Lets the inbound handler return
+    /// promptly instead of parking a binder looper (§7.5.7).
+    pub const AGAIN: u8 = 5;
 }

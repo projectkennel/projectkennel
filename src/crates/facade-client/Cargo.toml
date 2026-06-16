@@ -1,0 +1,20 @@
+[package]
+name = "facade-client"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel in-kennel inbound BIND facade: the reverse of facade-socks5. For each policy-mirrored port it pulls inbound connections from the org.projectkennel.INet/default binder facade (BIND_INET, docs/design/07-5-network.md §7.5.7), connects to the workload's native in-kennel listener at that port, and splices. No policy, no listener of its own — kenneld brokers the host-side accept and mints the conduit."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "facade-client"
+path = "src/main.rs"

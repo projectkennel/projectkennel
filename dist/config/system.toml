@@ -37,5 +37,7 @@ sshd = "/usr/sbin/sshd"
 # relocate a single binary away from <libexec_dir>:
 # privhelper    = "/usr/libexec/kennel/kennel-privhelper"
 # netproxy      = "/usr/libexec/kennel/host-netproxy"
-# socks_connect = "/usr/libexec/kennel/kennel-socks-connect"
+# socks5        = "/usr/libexec/kennel/facade-socks5"
+# inetd         = "/usr/libexec/kennel/host-inetd"
+# facade_client = "/usr/libexec/kennel/facade-client"
 # akc           = "/usr/libexec/kennel/kennel-akc"

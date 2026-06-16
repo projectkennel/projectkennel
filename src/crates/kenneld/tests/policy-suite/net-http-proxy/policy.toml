@@ -1,0 +1,39 @@
+# ============================================================================
+# Suite case: net-http-proxy — facade-socks5's HTTP-proxy front-end (one listener, two protocols).
+#
+# facade-socks5 serves SOCKS5 AND HTTP-proxy on the one loopback listener (first-byte detection).
+# This proves the HTTP path: a workload pointed at HTTP_PROXY=http://<listen> speaks HTTP CONNECT
+# to the shim, which parses it, brokers it to node 0 as CONNECT_INET, kenneld resolves+pins the
+# allowlisted destination and dials it via the host-side delegate, and the shim replies
+# "HTTP/1.1 200 Connection Established". This is the egress path for http://-only clients (Go
+# net/http, Node fetch, the JVM, Python requests) that ignore a socks5h:// HTTP_PROXY.
+#
+# The workload exits 0 iff the proxy returns a 200 to a CONNECT for the allowlisted name. example.org
+# is in [net.proxy].allow — kenneld resolves it (real DNS), pins, and the delegate dials :443; a 200
+# proves the tunnel opened end to end. (A self-checking case that needs outbound DNS+TCP, like the
+# real egress path; the constrained net cases already depend on the host's network.)
+# ============================================================================
+
+template_name = "net-http-proxy"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[net]
+mode = "constrained"
+
+[net.proxy]
+allow = [{ name = "example.org", ports = [443], reason = "e2e: HTTP-proxy CONNECT target" }]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/usr/bin/python3",
+    "-c",
+    "import os,socket,urllib.parse as u\np=u.urlparse(os.environ['HTTP_PROXY'])\nassert p.scheme=='http', 'HTTP_PROXY must be http://, got %s' % os.environ['HTTP_PROXY']\ns=socket.socket(); s.settimeout(10); s.connect((p.hostname,p.port))\ns.sendall(b'CONNECT example.org:443 HTTP/1.1\\r\\nHost: example.org:443\\r\\n\\r\\n')\nline=s.recv(64).split(b'\\r\\n')[0].decode('latin1')\ns.close()\nassert line.startswith('HTTP/1.1 200'), 'expected 200 from the HTTP proxy, got %r' % line\n",
+]

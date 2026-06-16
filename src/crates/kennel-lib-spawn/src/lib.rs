@@ -1541,11 +1541,28 @@ mod tests {
             before + 1,
             "stamp_proxy adds one /28 bind-allow seed"
         );
-        let seeded = plan.bpf_bind_allow_v4.iter().any(|(k, _)| {
+        let is_loopback_28 = |(k, _): &([u8; 8], [u8; 8])| {
             let prefix = u32::from_ne_bytes([k[0], k[1], k[2], k[3]]);
             prefix == 28 && k.get(4..8) == Some(&v4.octets()[..])
+        };
+        assert!(
+            plan.bpf_bind_allow_v4.iter().any(is_loopback_28),
+            "the proxy endpoint's /28 is seeded into bind-allow"
+        );
+        // Intra-kennel loopback connects (facade-client → the workload's mirrored listener, §7.5.7)
+        // pass the connect ACL via a single any-port /32 on the kennel's own loopback (not a /28 —
+        // a /32 wins LPM cleanly without a port-restricted entry shadowing the mirror ports).
+        let connect_has_own_loopback = plan.bpf_allow_v4.iter().any(|(k, val)| {
+            let prefix = u32::from_ne_bytes([k[0], k[1], k[2], k[3]]);
+            // any-port: port_max (bytes 2..4 of the value) is u16::MAX.
+            prefix == 32
+                && k.get(4..8) == Some(&v4.octets()[..])
+                && val.get(2..4) == Some(&[0xff, 0xff][..])
         });
-        assert!(seeded, "the proxy endpoint's /28 is seeded into bind-allow");
+        assert!(
+            connect_has_own_loopback,
+            "the kennel's own loopback /32 (any port) is in connect-allow"
+        );
     }
 
     /// A plan with two v4 allow rules and one deny, from the shared fixture.
@@ -1590,24 +1607,34 @@ mod tests {
             port: 1080,
         });
 
-        // Exactly one entry appended to each trie; the policy rules are preserved.
+        // One entry appended to each connect trie: a single /32 (v4) / /128 (v6) on the kennel's
+        // own loopback with ANY port and the FLAG_PROXY marker. It covers both the workload's
+        // connect to the proxy port AND facade-client's connect to the mirrored ports (§7.5.7) —
+        // one /32 wins LPM cleanly, no port-restricted entry to shadow the mirror.
         assert_eq!(plan.bpf_allow_v4.len(), before_v4 + 1);
         assert_eq!(plan.bpf_allow_v6.len(), before_v6 + 1);
 
-        // v4 proxy entry: /32 host key + the flagged TCP allow_entry on the port.
+        // v4 entry: /32 host key + the any-port FLAG_PROXY allow_entry.
         let want_key_v4 = {
             let [p0, p1, p2, p3] = 32u32.to_ne_bytes();
             let [o0, o1, o2, o3] = v4.octets();
             [p0, p1, p2, p3, o0, o1, o2, o3]
         };
         let want_val = {
-            let [a, b] = 1080u16.to_ne_bytes();
-            [a, b, a, b, 6, 0x01, 0, 0] // port twice (host order), TCP, FLAG_PROXY
+            let [lo, hi] = u16::MAX.to_ne_bytes();
+            [0, 0, lo, hi, 0, 0x01, 0, 0] // port_min 0, port_max 65535, proto ANY, FLAG_PROXY
         };
-        assert_eq!(plan.bpf_allow_v4.last(), Some(&(want_key_v4, want_val)));
+        assert!(
+            plan.bpf_allow_v4.contains(&(want_key_v4, want_val)),
+            "the any-port /32 own-loopback connect entry is present"
+        );
 
-        // v6 proxy entry: /128 host key + the same flagged value.
-        let (key_v6, val_v6) = plan.bpf_allow_v6.last().expect("v6 proxy entry");
+        // v6 entry: /128 host key + the same any-port flagged value.
+        let (key_v6, val_v6) = plan
+            .bpf_allow_v6
+            .iter()
+            .find(|(_, v)| v == &want_val)
+            .expect("v6 own-loopback entry");
         assert_eq!(key_v6.get(0..4), Some(&128u32.to_ne_bytes()[..]));
         assert_eq!(key_v6.get(4..20), Some(&v6.octets()[..]));
         assert_eq!(val_v6, &want_val);
