@@ -1,0 +1,9 @@
+.TH "KENNEL-BIN-INIT" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+kennel\-bin\-init \- trusted uid\-0 PID 1 inside a kennel
+.SH SYNOPSIS
+(internal \(em forked by kenneld(8), not invoked directly)
+.SH DESCRIPTION
+kennel\-bin\-init is the kennel's PID 1: a trusted, root\-owned binary the privhelper factory fexecves after pivot_root. It makes no policy decisions \(em it pulls a supervision plan from kenneld over binder and executes it verbatim, forking the facades and the workload and reaping them.
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBkennel\fR(1)

@@ -72,6 +72,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gen-man"
+version = "0.1.0"
+
+[[package]]
 name = "host-inetd"
 version = "0.1.0"
 dependencies = [
@@ -202,6 +206,7 @@ name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "gen-man",
  "host-inetd",
  "host-netproxy",
  "kennel-lib-audit",

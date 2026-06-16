@@ -1,0 +1,28 @@
+[package]
+name = "gen-man"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel build-time manpage generator (not shipped). Emits groff man pages for the shipped binaries and user-touchable config files from an in-repo data table, so `man kennel` and friends stay in sync with the CLI by construction. Std-only: no third-party dependencies."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Std-only by design (CODING-STANDARDS §5.5 / the project's no-third-party-deps
+# rule). The page data lives in `pages.rs` as plain Rust, so there is no TOML
+# parser to vendor and the data is type-checked at compile time.
+[dependencies]
+
+[lints]
+workspace = true
+
+# A library half so the kenneld crate can dev-depend on `gen_man::pages::SYNC_*`
+# for its CLI-sync test (dev-only; never linked into the shipped daemon).
+[lib]
+name = "gen_man"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gen-man"
+path = "src/main.rs"

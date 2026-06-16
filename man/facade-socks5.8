@@ -1,0 +1,9 @@
+.TH "FACADE-SOCKS5" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+facade\-socks5 \- in\-kennel SOCKS5/HTTP egress front\-end
+.SH SYNOPSIS
+(internal \(em forked by kenneld(8), not invoked directly)
+.SH DESCRIPTION
+facade\-socks5 runs inside the kennel network namespace as the workload\-facing egress endpoint. It speaks SOCKS5 and HTTP\-proxy on one port, forwards each request across the binder gateway (CONNECT_INET) to kenneld, and splices. It carries no policy.
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBkennel\fR(1)

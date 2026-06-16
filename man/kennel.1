@@ -1,0 +1,169 @@
+.TH "KENNEL" "1" "" "Project Kennel" "User Commands"
+.SH NAME
+kennel \- run and manage confined workloads (kennels)
+.SH SYNOPSIS
+\fBkennel\fR \fIcommand\fR [\fIargs\fR...]
+.SH DESCRIPTION
+kennel is the command\-line front\-end to Project Kennel, a security sandbox that runs a workload (an AI coding agent, a build, a service) under a signed policy. Each invocation of \fBkennel run\fR is one kennel: its own context, cgroup, constructed filesystem view, masked identity, per\-kennel network namespace, and egress proxy, all torn down when the workload exits.
+.PP
+The CLI talks to the per\-user \fBkenneld\fR(8) daemon over a control socket; kenneld constructs and supervises the kennel. Policy authoring (compile, sign, validate, lint) is done locally by the CLI and needs no daemon.
+.PP
+Run \fBkennel \fIcommand\fB \-\-help\fR for a command's usage. The policy sub\-verbs have their own page, \fBkennel\-policy\fR(1).
+.SH COMMANDS
+.TP
+\fBkennel run <policy> [<name>] [\-\-key K] [\-\-force] [\-\-template\-dir D]... [\-\-trust\-dir D]... [\-\- <cmd...>]\fR
+run a workload confined by a policy, in the foreground
+.RS
+.TP
+\fB\-\-key K\fR
+Sign the in\-memory compiled policy with key K for the local\-dev run loop (auto\-compile).
+.RE
+.RS
+.TP
+\fB\-\-force\fR
+Override a [workload] pinned argv with a CLI \-\- command.
+.RE
+.RS
+.TP
+\fB\-\- <cmd...>\fR
+The command to run inside the kennel (overrides [workload].argv unless pinned).
+.RE
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Add a directory to the signing\-key trust store used while authoring (repeatable).
+.RE
+.TP
+\fBkennel stop <name>\fR
+stop a running kennel
+.TP
+\fBkennel list\fR
+list running kennels
+.TP
+\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint> [...]\fR
+author, inspect, and compile policies (see `kennel policy \-\-help`)
+.RS
+.TP
+\fB(sub\-verbs)\fR
+See kennel\-policy(1) for list, show, edit, generate, compile, validate, sign, lint.
+.RE
+.TP
+\fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR
+generate a policy\-signing key
+.RS
+.TP
+\fB\-\-dir DIR\fR
+Write the key pair to DIR instead of the default key store.
+.RE
+.RS
+.TP
+\fB\-\-force\fR
+Overwrite an existing key of the same id.
+.RE
+.TP
+\fBkennel subkennel <add|check> [\-\-uid N] [\-\-namespace NS] [\-\-tag N] [\-\-file PATH]\fR
+manage /etc/kennel/subkennel allocations
+.RS
+.TP
+\fBadd\fR
+Append a provably\-valid allocation line for a uid (collision\-free tag/gid).
+.RE
+.RS
+.TP
+\fBcheck\fR
+Validate the allocation file and report malformed lines.
+.RE
+.RS
+.TP
+\fB\-\-uid N\fR
+The target uid (defaults to the caller).
+.RE
+.RS
+.TP
+\fB\-\-namespace NS\fR
+The allocation namespace.
+.RE
+.RS
+.TP
+\fB\-\-tag N\fR
+A specific 12\-bit tag (otherwise allocated).
+.RE
+.RS
+.TP
+\fB\-\-file PATH\fR
+Operate on PATH instead of /etc/kennel/subkennel.
+.RE
+.TP
+\fBkennel audit <name> [\-\-resource CLASS] [\-\-since DUR] [\-\-novel\-only] [\-\-follow] [\-\-print\-journalctl\-command]\fR
+show a kennel's audit log
+.RS
+.TP
+\fB\-\-resource CLASS\fR
+Filter to one class (network, filesystem, exec, ...).
+.RE
+.RS
+.TP
+\fB\-\-since DUR\fR
+Only events newer than DUR (e.g. 1h, 30m).
+.RE
+.RS
+.TP
+\fB\-\-novel\-only\fR
+Suppress events seen in a prior run (new events only).
+.RE
+.RS
+.TP
+\fB\-\-follow\fR
+Stream new events as they arrive.
+.RE
+.RS
+.TP
+\fB\-\-print\-journalctl\-command\fR
+Print the equivalent journalctl invocation and exit.
+.RE
+.SH EXIT STATUS
+.TP
+\fB0\fR
+Success. For kennel run, the workload's own exit code is passed through (clamped to a byte).
+.TP
+\fB1\fR
+Generic failure: the CLI could not reach kenneld, a file could not be read, or kenneld returned an error.
+.TP
+\fB3\fR
+Policy validation or resolution failure: schema, invariants, template inheritance, or include conflict.
+.TP
+\fB6\fR
+Signature or lockfile\-pin failure during resolution.
+.TP
+\fB7\fR
+kennel policy lint found at least one coherence finding across the template corpus.
+.SH FILES
+.TP
+\fI/usr/libexec/kennel/\fR
+The helper binaries kenneld resolves (see kennel\-helpers via the .8 pages).
+.TP
+\fI~/.config/kennel/config.toml\fR
+User CLI conveniences (search paths). See config.toml(5).
+.TP
+\fI/etc/kennel/subkennel\fR
+Per\-user kennel allocations. See subkennel(5).
+.SH EXAMPLES
+.TP
+\fBkennel run ai\-coding\-strict \-\- claude\fR
+Run Claude Code confined by the ai\-coding\-strict template.
+.TP
+\fBkennel run ./policy.toml myjob\fR
+Auto\-compile and run a local source policy as kennel 'myjob'.
+.TP
+\fBkennel list\fR
+Show running kennels.
+.TP
+\fBkennel audit myjob \-\-follow\fR
+Stream myjob's audit log.
+.SH SEE ALSO
+\fBkennel\-policy\fR(1), \fBkenneld\fR(8), \fBpolicy.toml\fR(5), \fBconfig.toml\fR(5), \fBsystem.toml\fR(5), \fBsubkennel\fR(5)

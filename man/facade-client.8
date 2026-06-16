@@ -1,0 +1,9 @@
+.TH "FACADE-CLIENT" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+facade\-client \- in\-kennel inbound BIND pull end
+.SH SYNOPSIS
+(internal \(em forked by kenneld(8), not invoked directly)
+.SH DESCRIPTION
+facade\-client runs inside the kennel as the in\-kennel end of the inbound BIND mirror (the reverse of facade\-socks5). For each mirrored port it pulls inbound connections from kenneld over binder (BIND_INET), connects the workload's native listener, and splices. It carries no policy.
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBkennel\fR(1)

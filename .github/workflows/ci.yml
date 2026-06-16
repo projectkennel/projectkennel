@@ -194,3 +194,27 @@ jobs:
           src/tools/tests/audit-helper.sh
           src/tools/tests/audit-source.sh
           src/tools/tests/install-ci-tools.sh
+
+  man:
+    name: man (regen check + groff lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain + groff
+        run: |
+          rustup show && cargo --version
+          sudo apt-get update && sudo apt-get install -y groff
+      # Regenerate the committed pages; a non-empty diff means man/ is stale
+      # relative to the page data (or the CLI tables the sync-test guards).
+      - name: Regenerate man pages
+        run: cargo run --offline --locked -p gen-man -- --out man
+      - name: No drift (man/ matches the generator)
+        run: git diff --exit-code man/
+      - name: groff lint (no warnings)
+        run: |
+          set -euo pipefail
+          for f in man/*.[1-9]; do
+            out="$(groff -ww -man -z "$f" 2>&1)"
+            if [ -n "$out" ]; then echo "::error file=$f::$out"; exit 1; fi
+          done
+          echo "all man pages lint clean"

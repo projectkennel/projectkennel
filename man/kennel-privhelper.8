@@ -1,0 +1,9 @@
+.TH "KENNEL-PRIVHELPER" "8" "" "Project Kennel" "System Administration"
+.SH NAME
+kennel\-privhelper \- the suid privilege boundary and kennel factory
+.SH SYNOPSIS
+(internal \(em forked by kenneld(8), not invoked directly)
+.SH DESCRIPTION
+kennel\-privhelper is the one privileged component: a setuid\-root helper (file caps, never sudo) that performs the address add/delete, egress setup, and the ConstructKennel factory operation (namespaces, identity maps, the constructed view, binderfs). It validates every request and drops privilege; everything else runs as the user.
+.SH SEE ALSO
+\fBkenneld\fR(8), \fBkennel\fR(1)

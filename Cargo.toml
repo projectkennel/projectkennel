@@ -42,6 +42,8 @@ members = [
     "src/crates/facade-socks5",
     "src/crates/facade-client",
     "src/crates/facade-ssh",
+    # Build-time tooling (not shipped): the manpage generator (std-only).
+    "src/tools/gen-man",
 ]
 
 [workspace.package]

@@ -1,0 +1,36 @@
+.TH "SUBKENNEL" "5" "" "Project Kennel" "File Formats"
+.SH NAME
+subkennel \- Project Kennel per\-user allocation file
+.SH SYNOPSIS
+/etc/kennel/subkennel
+.SH DESCRIPTION
+/etc/kennel/subkennel records, one line per user, the per\-user resources a kennel draws on \(em analogous to /etc/subuid and /etc/subgid. A user with no valid line cannot start \fBkenneld\fR(8). Use \fBkennel subkennel add\fR to append a provably\-valid line and \fBkennel subkennel check\fR to validate the file.
+.PP
+Each line is colon\-separated: \fIuid\fB:\fItag\fB:\fIgid\fB:\fInamespace\fR. Fields after the fourth are ignored. Blank lines and lines beginning with # are comments.
+.SS fields
+uid:tag:gid:namespace
+.TP
+\fBuid\fR \(em decimal
+The owning user's uid.
+.TP
+\fBtag\fR \(em decimal
+A per\-user 12\-bit tag (0..4095), unique per uid; partitions the kennel's reserved ranges.
+.TP
+\fBgid\fR \(em 10 hex digits
+The reserved gid base, exactly ten lowercase hex digits.
+.TP
+\fBnamespace\fR \(em string
+The allocation namespace (non\-empty).
+.SH FILES
+.TP
+\fI/etc/kennel/subkennel\fR
+The allocation file itself.
+.SH EXAMPLES
+.TP
+\fBkennel subkennel add \-\-uid 1000\fR
+Append a collision\-free allocation for uid 1000.
+.TP
+\fBkennel subkennel check\fR
+Validate every line and report malformed ones.
+.SH SEE ALSO
+\fBkennel\fR(1), \fBkenneld\fR(8)
