@@ -154,6 +154,11 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
         "check the shipped template corpus for incoherences",
         "policy lint [--template-dir D]... [--trust-dir D]...",
     ),
+    (
+        "risks",
+        "evaluate a policy against the threat catalogue (exposures, residuals)",
+        "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -349,6 +354,14 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
             Command {
                 usage: SYNC_POLICY[7].2, summary: SYNC_POLICY[7].1,
                 options: &[(COMMON_OPTS[0].0, COMMON_OPTS[0].1), (COMMON_OPTS[1].0, COMMON_OPTS[1].1)],
+            },
+            Command {
+                usage: SYNC_POLICY[8].2, summary: SYNC_POLICY[8].1,
+                options: &[
+                    ("--json", "Emit the structured report (for CI/tooling) instead of the human view."),
+                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
+                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
+                ],
             },
         ],
         fields: &[],

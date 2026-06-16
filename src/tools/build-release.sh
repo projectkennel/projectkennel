@@ -84,7 +84,7 @@ build_arch() {
 
 	for b in $BINS; do install -m 0755 "$rel/$b" "$dest/target/release/$b"; done
 	install -m 0755 "$ROOT/src/tools/install.sh" "$dest/src/tools/install.sh"
-	cp -a "$ROOT/dist/config" "$ROOT/dist/systemd" "$ROOT/dist/apparmor" "$dest/dist/"
+	cp -a "$ROOT/dist/config" "$ROOT/dist/systemd" "$ROOT/dist/apparmor" "$ROOT/dist/threats" "$dest/dist/"
 	for p in "$ROOT"/keys/*.pub; do install -m 0644 "$p" "$dest/keys/$(basename "$p")"; done
 	for d in "$ROOT"/templates/*/; do
 		[ -f "${d}policy.toml" ] || continue

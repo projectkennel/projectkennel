@@ -126,6 +126,10 @@ install_config() {
 	run install -d -m 0755 "$vendor_dir/keys" "$vendor_dir/templates" "$vendor_dir/policies"
 	run install -m 0644 "$repo_root/dist/config/system.toml" "$vendor_dir/system.toml"
 	run install -m 0644 "$repo_root/dist/config/config.toml" "$vendor_dir/config.toml"
+	# The machine-readable threat catalogue `kennel policy risks` reads (the CLI
+	# falls back to its embedded copy if absent; this lets an org ship an extended one).
+	run install -d -m 0755 "$vendor_dir/threats"
+	run install -m 0644 "$repo_root/dist/threats/catalogue.toml" "$vendor_dir/threats/catalogue.toml"
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then
 		run sed -i "s#^libexec_dir = .*#libexec_dir = \"$libexec\"#" "$vendor_dir/system.toml"
 	fi

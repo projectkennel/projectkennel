@@ -135,6 +135,11 @@ const POLICY_VERBS: &[CommandSpec] = &[
         summary: "check the shipped template corpus for incoherences",
         usage: "policy lint [--template-dir D]... [--trust-dir D]...",
     },
+    CommandSpec {
+        name: "risks",
+        summary: "evaluate a policy against the threat catalogue (exposures, residuals)",
+        usage: "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    },
 ];
 
 /// Render the top-level help (the command list) to stdout.
@@ -219,6 +224,7 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "validate" => validate(rest),
         "sign" => sign(rest),
         "lint" => policy_lint(rest),
+        "risks" => policy_risks(rest),
         other => Err(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
         )),
@@ -1167,6 +1173,162 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::from(policy_error_code(&e)))
         }
     }
+}
+
+/// `kennel policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]`
+///
+/// Evaluate a policy against the threat catalogue and report what its grants
+/// **expose** and **mitigate**, each with the granting site, its documented reason,
+/// and the catalogue residual. Source-driven (threat tags live only in the source +
+/// compile-time derivation, never the settled artefact). Read-only; no daemon.
+fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
+    let mut policy_path: Option<&str> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut json = false;
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            value if policy_path.is_none() => policy_path = Some(value),
+            _ => return Err("only one <policy> may be given".to_owned()),
+        }
+    }
+    let policy_path = policy_path.ok_or(
+        "usage: kennel policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    )?;
+    add_default_template_dirs(&mut template_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
+
+    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let entry = kennel_lib_policy::parse_source(&bytes)
+        .map_err(|e| format!("parsing {policy_path}: {e}"))?;
+    let source = FsTemplateSource {
+        dirs: template_dirs,
+    };
+    let keys = load_trust_store(&trust_dirs)?;
+    let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
+
+    // The risk engine reads the resolved *source* (threats survive only there).
+    let resolved = kennel_lib_policy::resolve_verified(&entry, &source, &trust)
+        .map_err(|e| format!("resolving {policy_path}: {e}"))?;
+    let catalogue = kennel_lib_policy::threats::Catalogue::load(catalogue_path().as_deref())
+        .map_err(|e| format!("threat catalogue: {e}"))?;
+    let report = kennel_lib_policy::risks::evaluate(&resolved.effective, &catalogue);
+
+    let name = resolved.effective.name.as_deref().unwrap_or(policy_path);
+    if json {
+        print_risks_json(name, &report);
+    } else {
+        print_risks_human(name, &report);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The on-disk threat catalogue path, if a cascade copy exists (`/etc/kennel` wins
+/// over the vendor `/usr/lib/kennel`). `None` ⇒ the CLI uses the embedded copy.
+fn catalogue_path() -> Option<PathBuf> {
+    for dir in ["/etc/kennel", "/usr/lib/kennel"] {
+        let p = Path::new(dir).join("threats").join("catalogue.toml");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Human-readable risk report.
+fn print_risks_human(name: &str, report: &kennel_lib_policy::risks::RiskReport) {
+    use kennel_lib_policy::risks::Origin;
+    println!(
+        "Risk overview for `{name}`  (threat catalogue v{})",
+        report.catalogue_version
+    );
+    if let Some(pv) = &report.policy_catalogue_version {
+        if pv != &report.catalogue_version {
+            println!(
+                "  note: policy authored against threat catalogue v{pv} (now v{})",
+                report.catalogue_version
+            );
+        }
+    }
+
+    let print_findings = |heading: &str, findings: &[kennel_lib_policy::risks::Finding]| {
+        println!("\n{heading} ({}):", findings.len());
+        for f in findings {
+            let title = f.title.as_deref().unwrap_or("(uncatalogued)");
+            let derived = if f.origin == Origin::Derived {
+                "  (derived)"
+            } else {
+                ""
+            };
+            println!("  {:<6} {title}{derived}", f.threat_id);
+            println!("         via {}", f.carrier);
+            if let Some(r) = &f.reason {
+                println!("         reason: {r}");
+            }
+            if !f.residual.is_empty() {
+                println!("         residual: {}", f.residual);
+            }
+        }
+        if findings.is_empty() {
+            println!("  (none)");
+        }
+    };
+
+    print_findings("EXPOSES", &report.exposures);
+    print_findings("MITIGATES", &report.mitigations);
+
+    if !report.unknown_tags.is_empty() {
+        println!(
+            "\n\u{26a0} {} threat tag(s) not in catalogue v{} (typo?):",
+            report.unknown_tags.len(),
+            report.catalogue_version
+        );
+        for (tag, carrier) in &report.unknown_tags {
+            println!("  {tag}  via {carrier}");
+        }
+    }
+    println!("\nFull threat definitions and residuals: docs/design/THREATS.md");
+}
+
+/// JSON risk report (stable-ish shape for CI/tooling). Hand-rolled (no `serde_json`
+/// dep): the structure is small and fixed.
+fn print_risks_json(name: &str, report: &kennel_lib_policy::risks::RiskReport) {
+    use kennel_lib_policy::risks::{Finding, Origin};
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let finding_json = |f: &Finding| {
+        format!(
+            "{{\"id\":\"{}\",\"title\":\"{}\",\"carrier\":\"{}\",\"reason\":{},\"residual\":\"{}\",\"derived\":{}}}",
+            esc(&f.threat_id),
+            esc(f.title.as_deref().unwrap_or_default()),
+            esc(&f.carrier),
+            f.reason.as_ref().map_or_else(|| "null".to_owned(), |r| format!("\"{}\"", esc(r))),
+            esc(&f.residual),
+            f.origin == Origin::Derived,
+        )
+    };
+    let arr = |fs: &[Finding]| fs.iter().map(finding_json).collect::<Vec<_>>().join(",");
+    let unknown = report
+        .unknown_tags
+        .iter()
+        .map(|(t, c)| format!("{{\"tag\":\"{}\",\"carrier\":\"{}\"}}", esc(t), esc(c)))
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "{{\"policy\":\"{}\",\"catalogue_version\":\"{}\",\"exposures\":[{}],\"mitigations\":[{}],\"unknown_tags\":[{}]}}",
+        esc(name),
+        esc(&report.catalogue_version),
+        arr(&report.exposures),
+        arr(&report.mitigations),
+        unknown,
+    );
 }
 
 /// `kennel policy list` — enumerate policies and templates in the search path.

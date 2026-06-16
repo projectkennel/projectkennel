@@ -1,0 +1,306 @@
+# Project Kennel — machine-readable threat catalogue.
+#
+# The canonical catalogue is docs/design/THREATS.md (prose: definitions, observed
+# instances, mitigations, residuals, MITRE mappings). THIS file is the machine
+# form `kennel policy risks` maps a policy's `threats` tags against: id, family,
+# title, scope, and a ONE-LINE distilled residual. The full residual prose stays
+# in THREATS.md — `residual` here is a pointer-grade summary, not a replacement.
+#
+# A CI check (src/tools/tests/threats-catalogue.sh) asserts this file's id set and
+# `catalogue_version` match THREATS.md, so the two cannot silently drift. Edit
+# THREATS.md first (canonical), then mirror the change here.
+#
+# scope = "in"  : a threat Project Kennel addresses (Families 1/2/3/5).
+# scope = "out" : deliberately out of scope (the X-series, THREATS.md "Family 4").
+
+catalogue_version = "0.3"
+
+# ── Family 1 — Reconnaissance and exfiltration ──────────────────────────────
+
+[[threat]]
+id = "T1.1"
+family = 1
+scope = "in"
+title = "Credential, history, and configuration reconnaissance"
+residual = "Within the granted project tree, in-band secrets (.env, tfstate, fixtures) remain; fs.scrub is best-effort against direct reads only."
+
+[[threat]]
+id = "T1.2"
+family = 1
+scope = "in"
+title = "Malicious post-install scripts"
+residual = "A correctly-signed-but-malicious package is out of scope; the framework reduces blast radius, not package trustworthiness."
+
+[[threat]]
+id = "T1.3"
+family = 1
+scope = "in"
+title = "Compromised IDE extensions, language servers, MCP servers, or agent plugins"
+residual = "Extensions in the IDE's own process are outside the confinement scope; the framework confines the agent CLI, not the IDE."
+
+[[threat]]
+id = "T1.4"
+family = 1
+scope = "in"
+title = "`curl ... | sh` installer of an untrusted source"
+residual = "A URL the user authorises is trusted; the framework constrains the script's blast radius, not its contents."
+
+[[threat]]
+id = "T1.5"
+family = 1
+scope = "in"
+title = "Build script in a freshly cloned, unvetted repository"
+residual = "If the user explicitly invokes the build after inspection, the T1.2 post-install threat applies."
+
+[[threat]]
+id = "T1.6"
+family = 1
+scope = "in"
+title = "Lateral movement to local services"
+residual = "Explicit grants can re-expose specific services; mode = host reinstates host-network reconnaissance in full (and CAP_NET_RAW in a root context)."
+
+[[threat]]
+id = "T1.7"
+family = 1
+scope = "in"
+title = "DNS-based exfiltration to an authorised resolver"
+residual = "Small amounts of data can be encoded into legitimate-looking subdomain queries to an allowlisted name — the same in-band problem as T1.8."
+
+[[threat]]
+id = "T1.8"
+family = 1
+scope = "in"
+title = "Exfiltration via TLS to an allowlisted destination"
+residual = "Content can ride legitimate traffic to an allowed API (the AI-API in-band case); unblockable at the proxy without breaking function. Catalogued X9/X11."
+
+[[threat]]
+id = "T1.9"
+family = 1
+scope = "in"
+title = "Supply-chain compromise of an allowed dependency"
+residual = "A dependency acting within its granted capabilities is undetectable; the dependency-trust problem is outside any runtime confinement framework."
+
+[[threat]]
+id = "T1.10"
+family = 1
+scope = "in"
+title = "Long-lived workload capability creep"
+residual = "Users may set TTL to never; the framework warns but does not refuse — it makes the convenience/capability trade legible, not forbidden."
+
+[[threat]]
+id = "T1.11"
+family = 1
+scope = "in"
+title = "Compromised browser, lateral movement"
+residual = "A browser the policy grants is trusted with its own profile; the framework confines what the kennel reaches, not the browser's own sessions."
+
+# ── Family 2 — Posture degradation ──────────────────────────────────────────
+
+[[threat]]
+id = "T2.1"
+family = 2
+scope = "in"
+title = "Host security control deactivation"
+residual = "A passthrough or write grant the policy declares can reach a host control; the grant is threat-tagged and surfaced, not silently allowed."
+
+[[threat]]
+id = "T2.2"
+family = 2
+scope = "in"
+title = "Security-degrading changes in workload-produced code"
+residual = "Pattern matching covers known anti-patterns; semantic regressions (logic flaws, novel injection) need human review (X11)."
+
+[[threat]]
+id = "T2.3"
+family = 2
+scope = "in"
+title = "Introduction or preservation of secrets in unintended locations"
+residual = "Best-effort masking of credential-shaped files; determined recovery via indirect paths (e.g. git object store) is not prevented."
+
+[[threat]]
+id = "T2.4"
+family = 2
+scope = "in"
+title = "Over-privileged resource provisioning"
+residual = "The framework surfaces and threat-tags broad grants; it does not decide an organisation's provisioning policy."
+
+[[threat]]
+id = "T2.5"
+family = 2
+scope = "in"
+title = "Suppression of failing security checks"
+residual = "The framework constrains where a workload can write; it cannot judge whether a disabled check was a legitimate change."
+
+[[threat]]
+id = "T2.6"
+family = 2
+scope = "in"
+title = "Clipboard exfiltration"
+residual = "Clipboard access via the display server is governed by the (roadmap) X11/Wayland isolation; outside that, terminal OSC 52 is a residual."
+
+[[threat]]
+id = "T2.7"
+family = 2
+scope = "in"
+title = "Screen capture and input synthesis"
+residual = "Display-server isolation (roadmap) is the structural fix; TIOCSTI input synthesis is gated by the [tty] hardening (roadmap) / sysctl."
+
+[[threat]]
+id = "T2.8"
+family = 2
+scope = "in"
+title = "Cross-context persistence via workspace triggers"
+residual = "Reconstructed-each-spawn home + persist opt-in limit persistence; a path the policy persists writably can still carry a trigger."
+
+# ── Family 3 — Workload-class-specific threats ──────────────────────────────
+
+[[threat]]
+id = "T3.1"
+family = 3
+scope = "in"
+title = "Setuid privilege escalation"
+residual = "exec deny_setuid/setgid/setcap are framework invariants; a workload cannot gain privilege via a setuid binary it executes."
+
+[[threat]]
+id = "T3.2"
+family = 3
+scope = "in"
+title = "Container escape"
+residual = "The kennel is the container; there is no nested runtime to escape. A [container] runtime integration is not built."
+
+[[threat]]
+id = "T3.3"
+family = 3
+scope = "in"
+title = "Container port exposure to LAN"
+residual = "A bound port is mirrored only on the host loopback alias by default; LAN exposure requires an explicit, threat-tagged grant."
+
+[[threat]]
+id = "T3.4"
+family = 3
+scope = "in"
+title = "Container volume over-mounting"
+residual = "The constructed view binds only granted paths; a broad fs grant is the author's explicit, surfaced choice."
+
+[[threat]]
+id = "T3.5"
+family = 3
+scope = "in"
+title = "Container running as root with host UID mapping"
+residual = "The workload is always dropped to the operator uid; only kennel-bin-init holds the kennel's uid 0, trapped post-pivot with no host caps."
+
+[[threat]]
+id = "T3.6"
+family = 3
+scope = "in"
+title = "MCP server capability creep"
+residual = "Each MCP server is confined by its own policy; cross-kennel reach needs an explicit bilateral binder grant (relay roadmap)."
+
+[[threat]]
+id = "T3.7"
+family = 3
+scope = "in"
+title = "AI agent prompt injection from project content"
+residual = "Confinement limits what an injected instruction can DO (reach, write); it cannot prevent the injection itself — a model-alignment concern."
+
+# ── Family 5 — Framework attack surface ─────────────────────────────────────
+
+[[threat]]
+id = "T5.1"
+family = 5
+scope = "in"
+title = "Binder gateway transaction surface"
+residual = "The BC/BR decoder is fuzzed, not proven; a novel parser bug is reachable from every kennel. Kernel binder driver compromise is X7."
+
+[[threat]]
+id = "T5.2"
+family = 5
+scope = "in"
+title = "Cross-kennel binder relay abuse"
+residual = "The cross-instance relay is bilateral-declared and bounded; it is roadmap (not built), and grows kenneld's TCB when it lands (T5.3)."
+
+[[threat]]
+id = "T5.3"
+family = 5
+scope = "in"
+title = "`kenneld`-as-relay trusted-computing-base growth"
+residual = "Centralisation is intrinsic to the single-chokepoint design; mitigated by keeping kenneld's parsing small/memory-safe/fuzzed and privilege out of it."
+
+[[threat]]
+id = "T5.4"
+family = 5
+scope = "in"
+title = "Host uid 0 mapped into the kennel user namespace"
+residual = "The factory child is the only transient uid-0 actor and never runs with the host root visible; a construction-half decoder bug is a host-root bug (X7 for the kernel)."
+
+# ── Family 4 — Out of scope (X-series) ──────────────────────────────────────
+
+[[threat]]
+id = "X1"
+family = 4
+scope = "out"
+title = "Process running as a different real uid"
+residual = "Handled by existing Unix permissions."
+
+[[threat]]
+id = "X2"
+family = 4
+scope = "out"
+title = "Process running as root"
+residual = "Handled by root permissions and root-targeted MAC."
+
+[[threat]]
+id = "X3"
+family = 4
+scope = "out"
+title = "Hardware-level attacks (cold boot, DMA, side channels, Spectre-class)"
+residual = "Out of any user-space framework's reach."
+
+[[threat]]
+id = "X4"
+family = 4
+scope = "out"
+title = "Physical access"
+residual = "Out of any user-space framework's reach."
+
+[[threat]]
+id = "X5"
+family = 4
+scope = "out"
+title = "The user actively cooperating with the workload"
+residual = "The user can grant any capability; the framework cannot override informed consent."
+
+[[threat]]
+id = "X6"
+family = 4
+scope = "out"
+title = "Network-level attacks against the host's exposed services"
+residual = "A different threat model; the framework defends outbound, not inbound."
+
+[[threat]]
+id = "X7"
+family = 4
+scope = "out"
+title = "Compromise of the framework's own kernel dependencies (Landlock, BPF, etc.)"
+residual = "Beyond the framework's boundary."
+
+[[threat]]
+id = "X8"
+family = 4
+scope = "out"
+title = "Compromise of vetted system tools the framework depends on"
+residual = "Beyond the framework's boundary."
+
+[[threat]]
+id = "X9"
+family = 4
+scope = "out"
+title = "A confined kennel using its legitimate API access to exfiltrate data"
+residual = "Within-channel exfiltration via authorised destinations; documented as the T1.8 residual."
+
+[[threat]]
+id = "X11"
+family = 4
+scope = "out"
+title = "Semantic security regressions in workload-produced code that pattern matching cannot detect"
+residual = "Requires human review; the framework flags known anti-patterns but cannot evaluate code for novel flaws."
