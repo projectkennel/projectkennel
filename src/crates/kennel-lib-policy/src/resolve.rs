@@ -47,8 +47,8 @@ use crate::source::{
     self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
     BoundaryAcl, CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp,
     IdentitySection, LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy,
-    NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection, TtySection, UnixSection,
-    UnsafeSection, WorkloadSection,
+    NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection, TrustSection, TtySection,
+    UnixSection, UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
@@ -231,6 +231,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
         workload: merge(&parent.workload, &child.workload, fold_workload),
         tty: merge(&parent.tty, &child.tty, fold_tty),
+        trust: merge(&parent.trust, &child.trust, fold_trust),
     }
 }
 
@@ -238,6 +239,13 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
 fn fold_tty(p: &TtySection, c: &TtySection) -> TtySection {
     TtySection {
         filter_terminal_escapes: or(&c.filter_terminal_escapes, &p.filter_terminal_escapes),
+    }
+}
+
+/// Fold `[trust]` scalar-wins (child overrides), like `[tty]`.
+fn fold_trust(p: &TrustSection, c: &TrustSection) -> TrustSection {
+    TrustSection {
+        manifest: or(&c.manifest, &p.manifest),
     }
 }
 

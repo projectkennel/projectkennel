@@ -425,6 +425,13 @@ pub fn build_view_and_pivot(
     // 6. Ensure the shim $HOME exists even if no ~ path was granted, so HOME resolves.
     std::fs::create_dir_all(under(&view.shim_root))?;
 
+    // 6b. Mask the workspace trust manifests (§7.4 / T2.8). Each lives inside a writable
+    //     bind, so the host inode is reachable through that mount; overmount an empty,
+    //     read-only file so the workload sees an empty file it cannot read pins from or
+    //     forge, while the host IDE reads the untouched real inode. The mask source is a
+    //     fresh empty file in the root tmpfs scaffold (never the host manifest).
+    materialize_masks(&view.mask_paths, new_root, &under)?;
+
     // 7. pivot_root into the new root, then detach the old one.
     let put_old = under(Path::new("/.kennel-oldroot"));
     std::fs::create_dir_all(&put_old)?;
@@ -478,6 +485,54 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
                 io::Error::new(e.kind(), format!("remount_ro {}: {e}", dest.display()))
             })?;
         }
+    }
+    Ok(())
+}
+
+/// Over-mount each workspace trust-manifest path with an empty, read-only file so the
+/// confined workload cannot read or forge the integrity pins (§7.4 / T2.8).
+///
+/// The manifest lives inside a writable bind, so its host inode is otherwise visible to
+/// the workload. The mask source is a single empty file created in the root-tmpfs scaffold
+/// (`/.kennel-mask`, outside any bind, gone after `pivot_root` detaches the construction
+/// view); it is bind-mounted over each in-view manifest path and remounted read-only. A
+/// mask whose target directory is absent is skipped (no writable bind materialised there).
+///
+/// # Errors
+/// Returns the OS error if creating the scaffold file, a mountpoint, the bind, or the
+/// read-only remount fails.
+fn materialize_masks(
+    mask_paths: &[PathBuf],
+    new_root: &Path,
+    under: &impl Fn(&Path) -> PathBuf,
+) -> io::Result<()> {
+    use kennel_lib_syscall::mount;
+    if mask_paths.is_empty() {
+        return Ok(());
+    }
+    // One shared empty source file in the scaffold tmpfs.
+    let mask_src = new_root.join(".kennel-mask");
+    std::fs::File::create(&mask_src)?;
+    for path in mask_paths {
+        let dest = under(path);
+        // The parent (the writable bind) must exist; if not, the bind was not materialised
+        // (source absent), so there is nothing to mask.
+        let Some(parent) = dest.parent() else {
+            continue;
+        };
+        if !parent.exists() {
+            continue;
+        }
+        // Ensure the target file exists to mount over (the host may or may not have written
+        // a manifest there; either way we overmount an empty file).
+        if dest.symlink_metadata().is_err() {
+            std::fs::File::create(&dest)?;
+        }
+        mount::bind(&mask_src, &dest, false)
+            .map_err(|e| io::Error::new(e.kind(), format!("mask bind {}: {e}", dest.display())))?;
+        mount::remount_readonly(&dest).map_err(|e| {
+            io::Error::new(e.kind(), format!("mask remount_ro {}: {e}", dest.display()))
+        })?;
     }
     Ok(())
 }
@@ -691,6 +746,7 @@ mod tests {
                     ttl_action: TtlAction::Warn,
                 },
                 tty: kennel_lib_policy::TtyPolicy::default(),
+                trust: kennel_lib_policy::TrustPolicy::default(),
             },
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),

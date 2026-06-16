@@ -380,6 +380,13 @@ pub struct ShimView {
     /// `binder` device + `/dev/binder` symlink (`07-1`/`02-4`). Set when the settled
     /// `[binder]` policy is non-empty; kenneld takes node 0 via `/proc` at spawn.
     pub binder: bool,
+    /// In-view absolute paths to **mask** with an empty over-mount: the workspace trust
+    /// manifests (`<writable-bind>/.trust-manifest.json`, §7.4 / T2.8). The host inode is
+    /// reachable through the writable bind, so the factory overmounts an empty read-only
+    /// file at each, making `open()/stat()/read()` see an empty file the workload cannot
+    /// use — the agent can neither read the integrity pins nor forge them. Empty when
+    /// `[trust].manifest = false` or there are no writable binds.
+    pub mask_paths: Vec<PathBuf>,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -912,6 +919,22 @@ impl Plan {
             AccessFs::READ_DIR | AccessFs::READ_FILE,
         ));
 
+        // Mask the workspace trust manifest (§7.4 / T2.8): at each writable bind's root the
+        // host `.trust-manifest.json` is reachable through the bind, so the factory
+        // overmounts an empty file there — the workload can neither read the integrity pins
+        // nor forge them, while the host IDE reads the untouched real inode. Gated by
+        // `[trust].manifest` (default on); only writable binds carry a manifest. The mask
+        // target keys on the bind *target* (the in-kennel path).
+        let mask_paths: Vec<PathBuf> = if ep.trust.manifest {
+            binds
+                .iter()
+                .filter(|b| b.writable)
+                .map(|b| b.target.join(".trust-manifest.json"))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let view = Some(ShimView {
             shim_root,
             binds,
@@ -920,6 +943,7 @@ impl Plan {
             tmp_mode: ep.fs.tmp.mode.clone(),
             proc_hidepid: ep.proc.hidepid,
             binder: true,
+            mask_paths,
         });
 
         // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the

@@ -167,6 +167,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 ttl_action: TtlAction::Warn,
             },
             tty: kennel_lib_policy::TtyPolicy::default(),
+            trust: kennel_lib_policy::TrustPolicy::default(),
         },
         provenance: Provenance {
             compiler_version: "0.0.0".to_owned(),
@@ -360,6 +361,149 @@ fn no_ipc_kennel_runs_through_the_factory() {
         "the no-IPC kennel ran through the factory (binderfs present + masked /etc/passwd)"
     );
 
+    let _ = std::fs::remove_dir_all(&etc_base);
+    let _ = std::fs::remove_dir_all(&view_root);
+    let _ = std::fs::remove_dir_all(&audit_base);
+}
+
+/// **The masked workspace manifest is invisible inside the kennel (T2.8), end to end.**
+/// A kennel with `fs.write` to a project containing a real `.trust-manifest.json` runs a
+/// workload that inspects the manifest from *inside*: the §7.4 view mask over-mounts an
+/// empty file at the manifest path (inside the writable bind), so the workload sees a
+/// zero-byte file it cannot read the integrity pins from — yet the host inode underneath
+/// is untouched. This is the diode proof, and specifically proves the over-mount of a
+/// child path *inside* a writable bind survives the construction (the plan's hardware
+/// risk).
+// allow(too_many_lines): one cohesive scenario (set up a writable project + host manifest,
+// run a workload that inspects the masked file, assert the host inode is untouched).
+#[allow(clippy::too_many_lines)]
+#[test]
+fn trust_manifest_is_masked_inside_the_kennel() {
+    use kenneld::control::{recv_response, Response, StartRequest};
+    use kenneld::policy::TrustStoreLoader;
+    use kenneld::server::{run_kennel, Identity, Shared};
+    use std::os::unix::net::UnixStream;
+
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    let gid = kennel_lib_syscall::unistd::real_gid();
+    let _ = kennel_lib_syscall::process::set_child_subreaper();
+    if uid == 0 {
+        eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    if !subkennel_has_line(uid) {
+        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
+        return;
+    }
+    let Some(base) = own_cgroup_base() else {
+        eprintln!("SKIP: cannot read a delegated cgroup base");
+        return;
+    };
+    if std::fs::create_dir_all(&base).is_err() {
+        eprintln!("SKIP: cgroup base not writable — run under the e2e runner");
+        return;
+    }
+
+    // A writable project under the operator's home, with a real (non-empty) manifest the
+    // kennel must mask, plus a Makefile (a trigger). `~/kennel-e2e/manifest` remaps beneath
+    // the shim $HOME inside the kennel.
+    let proj = home.join("kennel-e2e/manifest");
+    std::fs::create_dir_all(&proj).expect("mkdir project");
+    let host_manifest = proj.join(".trust-manifest.json");
+    let manifest_body =
+        b"{\n  \"version\": \"1.0\",\n  \"generator\": \"test\",\n  \"execution\": {\n    \"triggers\": {\"Makefile\": \"sha256:deadbeef\"},\n    \"boundaries\": {\"untrusted_paths\": []}\n  }\n}\n";
+    std::fs::write(&host_manifest, manifest_body).expect("write host manifest");
+    std::fs::write(proj.join("Makefile"), b"all:\n\techo hi\n").expect("write makefile");
+
+    let mut policy = no_ipc_policy(&home);
+    policy
+        .effective_policy
+        .fs
+        .write
+        .push("~/kennel-e2e/manifest".to_owned());
+
+    let key = SigningKey::from_seed("trust-key", &[9u8; 32]).expect("key");
+    let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
+    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_lib_policy::KeySet::new();
+    keys.insert(key.key_id(), &key.public_key_bytes())
+        .expect("trust key");
+
+    let run = runtime_dir();
+    let tag = std::process::id();
+    let policy_file = run.join(format!("kenneld-trust-policy-{tag}.bin"));
+    std::fs::write(&policy_file, &bytes).expect("write policy");
+    let etc_base = run.join(format!("kenneld-trust-etc-{tag}"));
+    let view_root = run.join(format!("kenneld-trust-root-{tag}"));
+    let audit_base = run.join(format!("kenneld-trust-audit-{tag}"));
+    for p in [&etc_base, &view_root, &audit_base] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    let identity = Identity {
+        uid,
+        gid,
+        username: "dev".to_owned(),
+        home,
+        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        cgroup_base: base,
+        proxy: None,
+        etc_base: Some(etc_base.clone()),
+        view_base: Some(view_root.clone()),
+        audit_base: Some(audit_base.clone()),
+        bastion: None,
+        afunix_bin: Some(sibling_binary("facade-afunix")),
+        init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
+    };
+    let shared = Shared::new(
+        identity,
+        HelperClient::new(privhelper_path()),
+        TrustStoreLoader::from_keys(keys),
+    );
+
+    // The workload runs in the remapped project ($HOME/kennel-e2e/manifest → the persona
+    // home). It asserts: the manifest path EXISTS but is EMPTY (the empty over-mount) and
+    // does NOT contain the host body's "deadbeef" pin. Exit 0 iff masked correctly.
+    let req = StartRequest {
+        policy: policy_file,
+        kennel: "trust".to_owned(),
+        argv: vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "test -e .trust-manifest.json && test ! -s .trust-manifest.json && ! grep -q deadbeef .trust-manifest.json".to_owned(),
+        ],
+        cwd: PathBuf::from("/home/kennel/kennel-e2e/manifest"),
+        term: String::new(),
+        interactive: false,
+        force: false,
+    };
+
+    let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+    run_kennel(&shared, &req, Vec::new(), &mut server);
+
+    if bring_up_skipped(&recv_response(&mut client).expect("a first response")) {
+        let _ = std::fs::remove_dir_all(&proj);
+        return;
+    }
+    assert_eq!(
+        recv_response(&mut client).expect("an exit response"),
+        Response::Exited { code: 0 },
+        "inside the kennel the manifest is present-but-empty and carries none of the host pins (masked)"
+    );
+
+    // The host inode is untouched: the real manifest still has its original body + pin.
+    let after = std::fs::read(&host_manifest).expect("read host manifest after");
+    assert_eq!(
+        after, manifest_body,
+        "the host-side manifest is unchanged by the masking over-mount"
+    );
+
+    let _ = std::fs::remove_dir_all(&proj);
     let _ = std::fs::remove_dir_all(&etc_base);
     let _ = std::fs::remove_dir_all(&view_root);
     let _ = std::fs::remove_dir_all(&audit_base);

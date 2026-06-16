@@ -240,6 +240,7 @@ dependencies = [
  "kennel-lib-binder",
  "kennel-lib-bpf",
  "kennel-lib-config",
+ "kennel-lib-manifest",
  "kennel-lib-policy",
  "kennel-lib-spawn",
  "kennel-lib-syscall",

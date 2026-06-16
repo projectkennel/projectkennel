@@ -17,6 +17,11 @@ kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The terminal-escape filter (§7.9.5): the PTY broker runs the workload's output
 # through it (gated by [tty].filter_terminal_escapes) before fanning to a client.
 kennel-lib-term = { path = "../kennel-lib-term" }
+# The masked workspace manifest (§7.4, T2.8): used ONLY by the `kennel` CLI binary
+# (pre-flight generation + `kennel review`), never by the `kenneld` daemon binary — it
+# pulls serde_json, which must stay out of the enforcement TCB. `bin/kenneld.rs` does
+# not reference it, so it is not linked into the daemon.
+kennel-lib-manifest = { path = "../kennel-lib-manifest" }
 # The layered deployment config (07-paths.md): resolves the helper-binary
 # locations and the trust store from root-owned TOML, so no install path is
 # baked into this binary.

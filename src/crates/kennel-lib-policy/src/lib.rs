@@ -64,8 +64,9 @@ pub use settled::{
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
     ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
-    SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction,
-    TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, ULIMIT_RESOURCES,
+    SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy,
+    TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use source::{
@@ -104,6 +105,28 @@ pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, Poli
     let canonical = canonical::canonical_bytes(&doc.policy)?;
     verify_signature(&canonical, &doc.signature, keys)?;
     validate(&doc.policy).map_err(PolicyError::InvariantViolations)?;
+    Ok(doc.policy)
+}
+
+/// Parse a settled artefact **without** verifying its signature or invariants.
+///
+/// For host-side tooling that needs to *read* a settled policy it already holds — e.g. the
+/// CLI's pre-flight manifest generation reading `fs.write` — where the daemon, not the CLI,
+/// is the trust boundary (it re-verifies the signature before honouring the policy). Do
+/// **not** use this where the policy is untrusted input; use [`verify_settled`] there.
+///
+/// # Errors
+/// [`PolicyError::Parse`] if the bytes are not a well-formed settled artefact, or
+/// [`PolicyError::UnsupportedSchemaVersion`] if its schema is too new.
+pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyError> {
+    let doc: SignedSettledPolicy =
+        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    if doc.policy.settled_schema_version > SETTLED_SCHEMA_VERSION {
+        return Err(PolicyError::UnsupportedSchemaVersion {
+            found: doc.policy.settled_schema_version,
+            max: SETTLED_SCHEMA_VERSION,
+        });
+    }
     Ok(doc.policy)
 }
 
@@ -234,6 +257,7 @@ mod tests {
                     ttl_action: TtlAction::Exit,
                 },
                 tty: TtyPolicy::default(),
+                trust: TrustPolicy::default(),
             },
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),
