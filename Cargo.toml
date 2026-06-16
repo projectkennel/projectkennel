@@ -31,6 +31,7 @@ members = [
     "src/crates/kennel-lib-scm",
     "src/crates/kennel-lib-spawn",
     "src/crates/kennel-lib-syscall",
+    "src/crates/kennel-lib-term",
     "src/crates/kennel-lib-text",
     # Binaries that are not a binder-connector end.
     "src/crates/kennel-bin-init",

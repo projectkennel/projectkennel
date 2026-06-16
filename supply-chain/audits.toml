@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.arrayvec]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.7.6"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-16): byte-identical to github.com/bluss/arrayvec @ 0aede877fe0bfb1ba5e3c2024df8c0958d503a83 (tag 0.7.6), 18 source files + Cargo.toml.orig, via tools/audit-source.sh. Transitive via vte (its fixed-capacity stack vector); used default-features=false (std only — no borsh/serde/zeroize). No build.rs, no proc-macro, no FFI/asm, no std::process/net/fs/env (red-flag scan clean). unsafe is the crate's purpose: MaybeUninit-backed fixed-capacity storage with manual length/ptr bookkeeping (ArrayVec/ArrayString). Source review performed by the assistant and accepted by the maintainer on review of those findings."
+
 [[audits.autocfg]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
@@ -84,3 +90,9 @@ who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"
 version = "1.0.24"
 notes = "Full source read 2026-06-03. XID_Start/XID_Continue lookup over static trie tables; the only unsafe is two get_unchecked table indexes whose offset is bounded by the trie structure. No I/O, no build.rs, no dependencies."
+
+[[audits.vte]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.15.0"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-16): byte-identical to github.com/alacritty/vte @ 3b3da71c34cc1256c7e20981cf03f8eb95e08ffc (tag v0.15.0), 13 source files + Cargo.toml.orig, via tools/audit-source.sh. The ANSI escape parser (Paul Williams state machine) on the PTY-filter path; used default-features=false (std only — no ansi/log/cursor-icon/bitflags/serde). No build.rs, no proc-macro, no FFI/asm, no std::process/net/fs/env (red-flag scan clean). 5 unsafe sites, all idiomatic: a MaybeUninit OSC-params array cast over its initialised prefix, and str::from_utf8_unchecked / unwrap_unchecked guarded by prior valid_up_to()/valid_bytes checks. Source review performed by the assistant and accepted by the maintainer on review of those findings."

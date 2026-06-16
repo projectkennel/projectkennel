@@ -1,0 +1,20 @@
+[package]
+name = "kennel-lib-term"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel terminal-escape filter: a vte-based recogniser that neutralises the dangerous escape sequences a confined workload could write toward the operator's real terminal (OSC 52 clipboard, OSC 9/777 notifications, DCS/APC/PM/SOS bands), passing benign sequences (titles, hyperlinks, CSI, print) through. Runs in the CLI/kenneld PTY proxy; closes the terminal-escape half of T2.6."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The alacritty ANSI state machine (Paul Williams' parser). default-features = false
+# keeps it to `std` only: no `ansi` (log/cursor-icon/bitflags) and no serde. Vendored
+# + §5.5-pending. It is the deliberate reuse-not-hand-roll choice for an untrusted-input
+# parser (a terminal-escape parser is exactly what the standards say to delegate).
+vte = { version = "=0.15.0", default-features = false }
+
+[lints]
+workspace = true
