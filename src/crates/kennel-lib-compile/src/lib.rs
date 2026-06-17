@@ -38,6 +38,7 @@
 pub mod binder;
 pub mod compile;
 pub mod dev;
+pub mod diff;
 pub mod identity;
 pub mod leaf;
 pub mod lint;
