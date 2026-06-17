@@ -38,13 +38,13 @@
 //! stays architecture-independent and no syscall-number table lives in this pure crate.
 
 use crate::settled::{
-    AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
-    BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
-    IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
-    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshRuntime,
-    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy, DevPolicy,
+    EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule,
+    NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
+    SeccompPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime,
+    UnixSocket, WorkloadRuntime,
 };
-use crate::source::{AuditSection, SourcePolicy};
+use crate::source::SourcePolicy;
 use crate::PolicyError;
 use std::collections::BTreeSet;
 
@@ -317,140 +317,22 @@ fn translate_env(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> EnvRunt
     EnvRuntime { vars }
 }
 
-/// The valid per-class audit levels and the valid syslog facilities.
-const AUDIT_LEVELS: [&str; 4] = ["off", "denies-only", "summary", "full"];
-const SYSLOG_FACILITIES: [&str; 20] = [
-    "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv",
-    "ftp", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7",
-];
-
 /// Flatten the source `[audit]` section into the settled [`AuditRuntime`],
 /// validating sink names, per-class levels, sizes, and the syslog facility.
 /// Only deviations from the `02-3` defaults are carried; an absent or all-default
 /// section yields the empty runtime (omitted from the canonical form).
+///
+/// The translation itself lives in [`crate::audit`] (the single source of truth
+/// shared with the runtime `audit.toml` defaults parser); here we supply the
+/// deferred-placeholder substitution for a file-sink `dir`.
 fn translate_audit(
     src: &SourcePolicy,
     deferred: &mut BTreeSet<String>,
 ) -> Result<AuditRuntime, PolicyError> {
     src.audit.as_ref().map_or_else(
         || Ok(AuditRuntime::default()),
-        |audit| translate_audit_section(audit, deferred),
+        |audit| crate::audit::translate_audit_section(audit, |d| subst(d, deferred)),
     )
-}
-
-/// Translate one `[audit]` section — a policy's, or a standalone `audit.toml`
-/// defaults file — into the settled [`AuditRuntime`].
-fn translate_audit_section(
-    audit: &AuditSection,
-    deferred: &mut BTreeSet<String>,
-) -> Result<AuditRuntime, PolicyError> {
-    let mut sinks = Vec::new();
-    for name in &audit.sinks {
-        let kind = match name.as_str() {
-            "file" => AuditSinkKind::File,
-            "journald" => AuditSinkKind::Journald,
-            "syslog" => AuditSinkKind::Syslog,
-            "stdout" => AuditSinkKind::Stdout,
-            other => {
-                return Err(translation(format!(
-                    "unknown audit sink `{other}` (expected file/journald/syslog/stdout)"
-                )))
-            }
-        };
-        if !sinks.contains(&kind) {
-            sinks.push(kind);
-        }
-    }
-
-    let level =
-        |class: &Option<crate::source::AuditClassSection>| -> Result<Option<String>, PolicyError> {
-            match class.as_ref().and_then(|c| c.level.as_ref()) {
-                None => Ok(None),
-                Some(l) if AUDIT_LEVELS.contains(&l.as_str()) => Ok(Some(l.clone())),
-                Some(l) => Err(translation(format!(
-                    "unknown audit level `{l}` (expected off/denies-only/summary/full)"
-                ))),
-            }
-        };
-
-    let syslog_facility = match audit.syslog.as_ref().and_then(|s| s.facility.as_ref()) {
-        None => None,
-        Some(f) if SYSLOG_FACILITIES.contains(&f.as_str()) => Some(f.clone()),
-        Some(f) => {
-            return Err(translation(format!(
-                "unknown syslog facility `{f}` (expected user/daemon/auth/local0-7/…)"
-            )))
-        }
-    };
-
-    let file = match &audit.file {
-        None => AuditFileConfig::default(),
-        Some(f) => AuditFileConfig {
-            dir: f.dir.as_ref().map(|d| subst(d, deferred)),
-            rotate_at_bytes: match &f.rotate_at_bytes {
-                None => None,
-                Some(s) => Some(parse_size_bytes(s)?),
-            },
-            compress_after_seconds: f.compress_after_seconds,
-            retain_count: f.retain_count,
-        },
-    };
-
-    Ok(AuditRuntime {
-        sinks,
-        network_level: level(&audit.network)?,
-        filesystem_level: level(&audit.filesystem)?,
-        exec_level: level(&audit.exec)?,
-        unix_level: level(&audit.unix)?,
-        dbus_level: level(&audit.dbus)?,
-        syslog_facility,
-        file,
-    })
-}
-
-/// Parse a standalone `audit.toml` defaults file into an [`AuditRuntime`].
-///
-/// The file body is the `[audit]` section content at top level (`sinks`,
-/// `[file]`, `[network]`/`[filesystem]`/…), validated exactly as a policy's
-/// `[audit]` section is. For the installation-wide `/etc/kennel/audit.toml` and
-/// the per-user override (`08` §8.1). `dir` placeholders are left literal —
-/// kenneld roots the file sink at the per-kennel state dir regardless.
-///
-/// # Errors
-/// [`PolicyError::Parse`] if the TOML is malformed, or a translation error for an
-/// unknown sink/level/facility or a malformed size.
-pub fn parse_audit_defaults(toml: &str) -> Result<AuditRuntime, PolicyError> {
-    let section: AuditSection =
-        basic_toml::from_str(toml).map_err(|e| PolicyError::Parse(e.to_string()))?;
-    let mut deferred = BTreeSet::new();
-    translate_audit_section(&section, &mut deferred)
-}
-
-/// Parse a human byte size (`"64M"`, `"1G"`, `"512K"`, bare = bytes) into bytes.
-fn parse_size_bytes(s: &str) -> Result<u64, PolicyError> {
-    let bad = || {
-        translation(format!(
-            "size `{s}` is not a number with an optional K/M/G suffix"
-        ))
-    };
-    let trimmed = s.trim();
-    // (suffix-pair, multiplier), largest first; bare number is bytes.
-    let units: [([char; 2], u64); 3] = [
-        (['G', 'g'], 1024 * 1024 * 1024),
-        (['M', 'm'], 1024 * 1024),
-        (['K', 'k'], 1024),
-    ];
-    let mut num = trimmed;
-    let mut mult = 1_u64;
-    for (suffix, factor) in units {
-        if let Some(stripped) = trimmed.strip_suffix(suffix) {
-            num = stripped;
-            mult = factor;
-            break;
-        }
-    }
-    let value = num.trim().parse::<u64>().map_err(|_| bad())?;
-    value.checked_mul(mult).ok_or_else(bad)
 }
 
 /// Gather the workload's retained supplementary groups (§7.4): the explicit
@@ -1219,7 +1101,7 @@ const fn translation(msg: String) -> PolicyError {
 mod tests {
     use super::*;
     use crate::resolve::{resolve, TemplateSource};
-    use crate::settled::{Provenance, ResolvedArtifact, SettledPolicy};
+    use crate::settled::{AuditSinkKind, Provenance, ResolvedArtifact, SettledPolicy};
     use crate::source::parse;
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
@@ -1509,60 +1391,6 @@ mod tests {
             translate_audit_str("name=\"k\"\n[audit.file]\nrotate_at_bytes=\"big\"").is_err(),
             "bad size rejected"
         );
-    }
-
-    #[test]
-    fn audit_defaults_file_parses_the_section_body_at_top_level() {
-        // A standalone audit.toml: the [audit] body without the [audit] wrapper.
-        let rt = parse_audit_defaults(
-            r#"
-            sinks = ["journald"]
-            [network]
-            level = "full"
-            [file]
-            rotate_at_bytes = "128M"
-            compress_after_seconds = 3600
-            "#,
-        )
-        .expect("parse defaults");
-        assert_eq!(rt.sinks, vec![AuditSinkKind::Journald]);
-        assert_eq!(rt.network_level.as_deref(), Some("full"));
-        assert_eq!(rt.file.rotate_at_bytes, Some(128 * 1024 * 1024));
-        assert_eq!(rt.file.compress_after_seconds, Some(3600));
-    }
-
-    #[test]
-    fn audit_defaults_file_rejects_bad_values() {
-        assert!(parse_audit_defaults("sinks = [\"smtp\"]").is_err());
-        assert!(parse_audit_defaults("[file]\nrotate_at_bytes = \"big\"").is_err());
-        assert!(parse_audit_defaults("not = valid = toml").is_err());
-    }
-
-    #[test]
-    fn overlay_lets_the_higher_layer_win_per_field() {
-        // The defaults file uses the source `[audit]`-section shape: the facility
-        // is `[syslog] facility`, not the settled flat `syslog_facility`.
-        let base = parse_audit_defaults(
-            "sinks = [\"journald\"]\n[syslog]\nfacility = \"local0\"\n[file]\nretain_count = 8",
-        )
-        .expect("base");
-        let over = AuditRuntime {
-            network_level: Some("full".to_owned()),
-            file: AuditFileConfig {
-                retain_count: Some(2),
-                ..AuditFileConfig::default()
-            },
-            ..AuditRuntime::default()
-        };
-        let merged = base.overlay(&over);
-        // over wins where set:
-        assert_eq!(merged.network_level.as_deref(), Some("full"));
-        assert_eq!(merged.file.retain_count, Some(2));
-        // base survives where over is unset:
-        assert_eq!(merged.sinks, vec![AuditSinkKind::Journald]);
-        assert_eq!(merged.syslog_facility.as_deref(), Some("local0"));
-        // an empty `over.sinks` does not clobber the base sinks:
-        assert!(!merged.sinks.is_empty());
     }
 
     #[test]

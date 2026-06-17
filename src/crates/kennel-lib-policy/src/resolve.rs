@@ -43,12 +43,12 @@
 //! in-memory map). Signature verification, lockfile byte-pinning, includes, and
 //! the `+=`/`-=` delta operators land in later increments.
 
+use crate::audit::{AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection};
 use crate::source::{
-    self, AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection, BinderSection,
-    BoundaryAcl, CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp,
-    IdentitySection, LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy,
-    NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection, TrustSection, TtySection,
-    UnixSection, UnsafeSection, WorkloadSection,
+    self, BinderSection, BoundaryAcl, CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
+    FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl,
+    NetIpv6, NetProxy, NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection,
+    TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use crate::PolicyError;
