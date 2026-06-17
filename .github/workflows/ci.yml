@@ -204,7 +204,11 @@ jobs:
       - name: Toolchain + groff
         run: |
           rustup show && cargo --version
-          sudo apt-get update && sudo apt-get install -y groff
+          # --no-install-recommends: bare groff is a few MB; its Recommends pull
+          # ghostscript + imagemagick + the urw-base35 font set (~37 MB / 107 MB on
+          # disk) we never use for `-z` lint, which is what made this step slow
+          # enough to be cancelled.
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends groff
       # Regenerate the committed pages; a non-empty diff means man/ is stale
       # relative to the page data (or the CLI tables the sync-test guards).
       - name: Regenerate man pages
