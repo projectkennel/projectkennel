@@ -7,7 +7,7 @@
 //! fd over `SCM_RIGHTS`, it dials the pinned address from the host stack and splices the conduit to
 //! it. No TCP listener, no SOCKS5/HTTP server, no resolver, no policy, no config file.
 //!
-//! All the logic is in the library (`host_netproxy::conduit`); `main` binds the socket and serves.
+//! All the logic is in the library (`kennel_host_delegate::netproxy::conduit`); `main` binds the socket and serves.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -35,6 +35,6 @@ fn run(sock: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(sock); // clear a stale socket from a prior run
     let listener = UnixListener::bind(sock)?;
     std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
-    host_netproxy::conduit::serve_conduit(&listener);
+    kennel_host_delegate::netproxy::conduit::serve_conduit(&listener);
     Ok(())
 }

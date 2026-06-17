@@ -22,6 +22,4 @@
 //! are all `kenneld`'s, enforced before a command ever reaches this process. The net-ns boundary is
 //! the egress gate; this delegate is the only path across it.
 
-#![forbid(unsafe_code)]
-
 pub mod conduit;

@@ -7,7 +7,7 @@
 //! `accept()`s, and pushes each accepted connection's fd back to `kenneld` over the same socket. No
 //! TCP dialer, no resolver, no policy, no config file.
 //!
-//! All the logic is in the library (`host_inetd::listen`); `main` binds the socket and serves.
+//! All the logic is in the library (`kennel_host_delegate::inetd::listen`); `main` binds the socket and serves.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -35,6 +35,6 @@ fn run(sock: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(sock); // clear a stale socket from a prior run
     let listener = UnixListener::bind(sock)?;
     std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
-    host_inetd::listen::serve(&listener);
+    kennel_host_delegate::inetd::listen::serve(&listener);
     Ok(())
 }

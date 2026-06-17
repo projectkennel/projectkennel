@@ -39,13 +39,12 @@ kennel-lib-binder = { path = "../kennel-lib-binder" }
 # reads). Both already vendored (kennel-lib-policy/host-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
-# The INet egress decision: kenneld is the decision point (§7.5.2), reusing the netproxy's
-# allow ruleset + resolver seam so the two never drift (crate::inet). Also round-trips the
-# proxy config we write back through the netproxy's own parser (the writer can't drift).
-host-netproxy = { path = "../host-netproxy" }
-# The inbound BIND delegate's wire (encode_bind/encode_notify): kenneld registers mirror ports and
-# decodes the delegate's accept notifications through the delegate's own codec (no drift). §7.5.7.
-host-inetd = { path = "../host-inetd" }
+# The host-side conduit delegates' shared wire (the `netproxy` + `inetd` library modules):
+# kenneld reuses the netproxy conduit codec for the INet egress decision (§7.5.2, crate::inet),
+# round-trips the proxy config through the netproxy parser (writer can't drift), and uses the
+# inetd encode_bind/encode_notify codec to register mirror ports + decode accept notifications
+# (§7.5.7). It links the library only; the two delegate binaries run as separate processes.
+kennel-host-delegate = { path = "../kennel-host-delegate" }
 
 [dev-dependencies]
 # The BPF-drain root test forks a child into a cgroup and attempts a connect to

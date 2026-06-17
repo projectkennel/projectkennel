@@ -29,7 +29,11 @@
 
 #![forbid(unsafe_code)]
 
+// Bin-private submodules; in a multi-bin crate a bin-root's modules are siblings
+// in `src/bin/`, so point at the per-bin subdirectory explicitly.
+#[path = "facade-socks5/http.rs"]
 mod http;
+#[path = "facade-socks5/protocol.rs"]
 mod protocol;
 
 use std::fs::OpenOptions;

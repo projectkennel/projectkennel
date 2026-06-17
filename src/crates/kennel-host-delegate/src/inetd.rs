@@ -29,6 +29,4 @@
 //! `bind4`/`bind6` cgroup ACL, enforced before any registration reaches this process. No resolver,
 //! no allowlist, no config file — the command-socket path is the binary's sole argument.
 
-#![forbid(unsafe_code)]
-
 pub mod listen;

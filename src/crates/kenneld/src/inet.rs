@@ -284,7 +284,7 @@ pub fn dial_via_delegate(
 ) -> io::Result<UnixStream> {
     let (delegate_end, kennel_end) = UnixStream::pair()?;
     let command = UnixStream::connect(command_socket)?;
-    let payload = host_netproxy::conduit::encode_command(port, pinned);
+    let payload = kennel_host_delegate::netproxy::conduit::encode_command(port, pinned);
     kennel_lib_syscall::scm::send_with_fds(command.as_fd(), &payload, &[delegate_end.as_fd()])?;
     // `delegate_end` drops here; the delegate holds its received copy via SCM_RIGHTS.
     Ok(kennel_end)
@@ -557,7 +557,9 @@ mod tests {
             std::env::temp_dir().join(format!("kennel-inet-dial-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).expect("bind cmd socket");
-        std::thread::spawn(move || host_netproxy::conduit::serve_conduit(&listener));
+        std::thread::spawn(move || {
+            kennel_host_delegate::netproxy::conduit::serve_conduit(&listener)
+        });
 
         // kenneld's side: dial via the delegate, get the kennel-facing conduit end back.
         let mut end = dial_via_delegate(&sock, echo_addr.port(), &[echo_addr.ip()]).expect("dial");
