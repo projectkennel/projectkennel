@@ -82,7 +82,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "policy",
         summary: "author, inspect, sign, and check policies",
-        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|upgrade> [...]",
+        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]",
     },
     CommandSpec {
         name: "keygen",
@@ -147,6 +147,11 @@ const POLICY_VERBS: &[CommandSpec] = &[
         name: "risks",
         summary: "evaluate a policy against the threat catalogue (exposures, residuals)",
         usage: "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    },
+    CommandSpec {
+        name: "diff",
+        summary: "interpreted grant delta between a policy and its baseline (or another policy)",
+        usage: "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
     },
     CommandSpec {
         name: "upgrade",
@@ -239,6 +244,7 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "sign" => sign(rest),
         "lint" => policy_lint(rest),
         "risks" => policy_risks(rest),
+        "diff" => policy_diff(rest),
         "upgrade" => upgrade(rest),
         other => Err(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
@@ -1579,8 +1585,6 @@ fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     add_system_trust_dirs(&mut trust_dirs);
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
-    let entry = kennel_lib_compile::parse_source(&bytes)
-        .map_err(|e| format!("parsing {policy_path}: {e}"))?;
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
@@ -1588,19 +1592,250 @@ fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
 
     // The risk engine reads the resolved *source* (threats survive only there).
-    let resolved = kennel_lib_compile::resolve_verified(&entry, &source, &trust)
+    // `effective_source` folds either form — a template/source document or a
+    // delta-leaf (`[[fs.read.add]]`, …) — so the report works on a leaf policy too.
+    let effective = kennel_lib_compile::effective_source(&bytes, &source, &trust)
         .map_err(|e| format!("resolving {policy_path}: {e}"))?;
     let catalogue = kennel_lib_compile::threats::Catalogue::load(catalogue_path().as_deref())
         .map_err(|e| format!("threat catalogue: {e}"))?;
-    let report = kennel_lib_compile::risks::evaluate(&resolved.effective, &catalogue);
+    let report = kennel_lib_compile::risks::evaluate(&effective, &catalogue);
 
-    let name = resolved.effective.name.as_deref().unwrap_or(policy_path);
+    let name = effective.name.as_deref().unwrap_or(policy_path);
     if json {
         print_risks_json(name, &report);
     } else {
         print_risks_human(name, &report);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel policy diff <policy> [<other>]` — the interpreted grant delta.
+///
+/// With one argument, diffs the policy against its **template baseline** (the
+/// template it inherits, resolved with none of the leaf's own deltas) — the "what
+/// does my policy add over the template" view (§5.13). With two, diffs `<policy>`
+/// → `<other>`: an org baseline against a user policy, or before/after a version
+/// bump. Each grant change is annotated with the threats it exposes/mitigates plus
+/// a net threat-posture delta — the semantic counterpart of `policy upgrade`'s raw
+/// source line diff (`05-templates.md` §5.11).
+fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut json = false;
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            value if positionals.len() < 2 => positionals.push(value),
+            _ => return Err("at most two policies may be given".to_owned()),
+        }
+    }
+    let primary = *positionals.first().ok_or(
+        "usage: kennel policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
+    )?;
+    add_default_template_dirs(&mut template_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
+    let keys = load_trust_store(&trust_dirs)?;
+
+    // The primary's *declared* identity (its own `name`/`template_base`, before the
+    // fold loses them) drives the label and the one-arg baseline.
+    let (primary_name, primary_base) = declared_meta(primary)?;
+    let primary_eff = resolve_effective(primary, &template_dirs, &keys)?;
+    let primary_label = primary_name.unwrap_or_else(|| primary.to_owned());
+
+    // One arg: baseline → policy (what the leaf adds over its template). Two args:
+    // <primary> → <other> (primary is the "before", other the "after").
+    let (old_eff, old_label, new_eff, new_label) = if let Some(other) = positionals.get(1) {
+        let (other_name, _) = declared_meta(other)?;
+        let other_eff = resolve_effective(other, &template_dirs, &keys)?;
+        let other_label = other_name.unwrap_or_else(|| (*other).to_owned());
+        (primary_eff, primary_label, other_eff, other_label)
+    } else {
+        let reference = primary_base.ok_or_else(|| {
+            format!(
+                "`{primary_label}` has no `template_base` to diff against; \
+                 pass a second policy to compare two"
+            )
+        })?;
+        let baseline = resolve_template_baseline(&reference, &template_dirs, &keys)?;
+        (
+            baseline,
+            format!("{reference} (baseline)"),
+            primary_eff,
+            primary_label,
+        )
+    };
+
+    let catalogue = kennel_lib_compile::threats::Catalogue::load(catalogue_path().as_deref())
+        .map_err(|e| format!("threat catalogue: {e}"))?;
+    let d = kennel_lib_compile::diff::diff(&old_eff, &new_eff, &catalogue);
+
+    if json {
+        print_diff_json(&old_label, &new_label, &d);
+    } else {
+        print_diff_human(&old_label, &new_label, &d);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The policy's *declared* `(name, template_base)` from its raw source, before the
+/// fold drops them. Works for both the template/source and the delta-leaf forms.
+fn declared_meta(arg: &str) -> Result<(Option<String>, Option<String>), String> {
+    let (path, _) = resolve_policy(arg, false)?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    if let Ok(src) = kennel_lib_compile::parse_source(&bytes) {
+        return Ok((src.name.or(src.template_name), src.template_base));
+    }
+    if let Ok(leaf) = kennel_lib_compile::parse_leaf(&bytes) {
+        return Ok((leaf.name, leaf.template_base));
+    }
+    Ok((None, None))
+}
+
+/// Resolve a policy argument (a name in the search path or a literal path) to its
+/// folded effective *source* policy — the honest input for the diff/risk engines
+/// (threat tags survive only in source). Handles both the template/source and the
+/// delta-leaf forms.
+fn resolve_effective(
+    arg: &str,
+    template_dirs: &[PathBuf],
+    keys: &kennel_lib_policy::KeySet,
+) -> Result<kennel_lib_compile::SourcePolicy, String> {
+    let (path, _) = resolve_policy(arg, false)?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let source = FsTemplateSource {
+        dirs: template_dirs.to_vec(),
+    };
+    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(keys));
+    kennel_lib_compile::effective_source(&bytes, &source, &trust)
+        .map_err(|e| format!("resolving {}: {e}", path.display()))
+}
+
+/// Resolve a template reference (`<name>@v<n>`) as a standalone effective policy —
+/// the baseline a leaf's own deltas are measured against.
+fn resolve_template_baseline(
+    reference: &str,
+    template_dirs: &[PathBuf],
+    keys: &kennel_lib_policy::KeySet,
+) -> Result<kennel_lib_compile::SourcePolicy, String> {
+    let (name, version) = kennel_lib_compile::parse_reference(reference)
+        .map_err(|e| format!("`template_base`: {e}"))?;
+    let source = FsTemplateSource {
+        dirs: template_dirs.to_vec(),
+    };
+    let bytes = source.fetch(&name, &version).ok_or_else(|| {
+        format!("cannot read `{reference}` to diff against (pass --template-dir)")
+    })?;
+    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(keys));
+    kennel_lib_compile::effective_source(&bytes, &source, &trust)
+        .map_err(|e| format!("resolving `{reference}`: {e}"))
+}
+
+/// Human-readable interpreted diff. Policy-sourced strings (carrier, detail,
+/// reason, threat ids, the labels) are adversarial (§10) and pass through
+/// `sanitise_for_log` before reaching the terminal; the catalogue title/residual
+/// and our own note text are trusted.
+fn print_diff_human(old_label: &str, new_label: &str, d: &kennel_lib_compile::diff::PolicyDiff) {
+    use kennel_lib_compile::diff::ChangeKind;
+    use kennel_lib_text::sanitise_for_log as s;
+    println!(
+        "diff {} \u{2192} {}  (threat catalogue v{})",
+        s(old_label),
+        s(new_label),
+        d.catalogue_version
+    );
+
+    if d.is_empty() {
+        println!("\nNo capability changes.");
+    } else {
+        println!("\nGrant changes ({}):", d.changes.len());
+        for c in &d.changes {
+            let sign = match c.kind {
+                ChangeKind::Added => '+',
+                ChangeKind::Removed => '-',
+                ChangeKind::Modified => '~',
+            };
+            let widen = if c.widening { "  (widens reach)" } else { "" };
+            println!("  {sign} {}{widen}", s(&c.carrier));
+            if !c.detail.is_empty() {
+                println!("      {}", s(&c.detail));
+            }
+            if let Some(r) = &c.reason {
+                println!("      reason: {}", s(r));
+            }
+            for t in &c.exposed {
+                println!("      exposes {}", threat_oneline(t));
+            }
+            for t in &c.mitigated {
+                println!("      mitigates {}", threat_oneline(t));
+            }
+            if let Some(n) = &c.note {
+                println!("      \u{26a0} {n}");
+            }
+        }
+    }
+
+    let sum = &d.summary;
+    if sum.is_empty() {
+        println!("\nThreat posture: unchanged.");
+    } else {
+        println!("\nThreat posture delta:");
+        for t in &sum.newly_exposed {
+            println!("  \u{26a0} now exposes {}", threat_oneline(t));
+        }
+        for t in &sum.no_longer_exposed {
+            println!("  \u{2713} no longer exposes {}", threat_oneline(t));
+        }
+        for t in &sum.newly_mitigated {
+            println!("  \u{2713} now mitigates {}", threat_oneline(t));
+        }
+        for t in &sum.no_longer_mitigated {
+            println!("  \u{26a0} no longer mitigates {}", threat_oneline(t));
+        }
+    }
+    println!("\nFull threat definitions and residuals: docs/design/THREATS.md");
+}
+
+/// `T1.6 — <title> (<residual>)` for the terminal. The `id` is policy-sourced
+/// (untrusted for an uncatalogued tag) and sanitised; `title`/`residual` are the
+/// trusted catalogue.
+fn threat_oneline(t: &kennel_lib_compile::diff::ThreatRef) -> String {
+    let id = kennel_lib_text::sanitise_for_log(&t.id);
+    match (&t.title, t.residual.is_empty()) {
+        (Some(title), false) => format!("{id} \u{2014} {title} ({})", t.residual),
+        (Some(title), true) => format!("{id} \u{2014} {title}"),
+        (None, _) => format!("{id} (uncatalogued)"),
+    }
+}
+
+/// JSON interpreted diff, via `serde_json` (a real serialiser — §10.3 — so control
+/// characters in any policy-sourced field are escaped, not emitted raw). The diff
+/// types derive `Serialize`; this wraps them with the two labels.
+fn print_diff_json(old_label: &str, new_label: &str, d: &kennel_lib_compile::diff::PolicyDiff) {
+    #[derive(serde::Serialize)]
+    struct DiffJson<'a> {
+        old: &'a str,
+        new: &'a str,
+        #[serde(flatten)]
+        diff: &'a kennel_lib_compile::diff::PolicyDiff,
+    }
+    let out = DiffJson {
+        old: old_label,
+        new: new_label,
+        diff: d,
+    };
+    // Serialising a fixed in-memory structure of strings/vecs cannot fail.
+    match serde_json::to_string(&out) {
+        Ok(j) => println!("{j}"),
+        Err(e) => eprintln!("kennel: emitting json: {e}"),
+    }
 }
 
 /// The on-disk threat catalogue path, if a cascade copy exists (`/etc/kennel` wins

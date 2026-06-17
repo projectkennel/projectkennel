@@ -136,6 +136,24 @@ Add a directory to the template/fragment search path (repeatable). Overrides the
 Add a directory to the signing\-key trust store used while authoring (repeatable).
 .RE
 .TP
+\fBkennel policy diff <policy> [<other>] [\-\-template\-dir D]... [\-\-trust\-dir D]... [\-\-json]\fR
+interpreted grant delta between a policy and its baseline (or another policy)
+.RS
+.TP
+\fB\-\-json\fR
+Emit the structured delta (for CI/tooling) instead of the human view.
+.RE
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Add a directory to the signing\-key trust store used while authoring (repeatable).
+.RE
+.TP
 \fBkennel policy upgrade <name> [\-\-yes] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
 re\-pin a policy's template to a newer version (with review)
 .RS

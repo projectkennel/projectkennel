@@ -6,6 +6,20 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### CLI changes
+
+- `kennel policy diff <policy> [<other>]` — the interpreted grant delta between two
+  effective policies (the semantic counterpart of `policy upgrade`'s source line diff,
+  `05-templates.md` §5.11/§5.13). One argument diffs a policy against its template
+  baseline (what the leaf's deltas add over the template it inherits); two diff any
+  pair. Each change is classified `+`/`~`/`-`, marked when it widens the workload's
+  reach, and annotated with the threats it exposes/mitigates plus a net threat-posture
+  delta. Terminal output is sanitised (`sanitise_for_log`); `--json` emits the delta via
+  `serde_json`. Read-only; never contacts the daemon.
+- `kennel policy risks` now evaluates a **delta-leaf** policy (`[[fs.read.add]]`, …), not
+  only a template/source document — both verbs share the `effective_source` fold that
+  folds either form to its threat-bearing effective source.
+
 ### Internal / supply chain
 
 - **The `kennel` CLI is now its own crate (`kennel-cli`), split out of `kenneld`.** The

@@ -102,7 +102,7 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     (
         "policy",
         "author, inspect, sign, and check policies",
-        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|upgrade> [...]",
+        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]",
     ),
     (
         "keygen",
@@ -163,6 +163,11 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
         "risks",
         "evaluate a policy against the threat catalogue (exposures, residuals)",
         "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    ),
+    (
+        "diff",
+        "interpreted grant delta between a policy and its baseline (or another policy)",
+        "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
     ),
     (
         "upgrade",
@@ -366,6 +371,14 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
             },
             Command {
                 usage: SYNC_POLICY[9].2, summary: SYNC_POLICY[9].1,
+                options: &[
+                    ("--json", "Emit the structured delta (for CI/tooling) instead of the human view."),
+                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
+                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
+                ],
+            },
+            Command {
+                usage: SYNC_POLICY[10].2, summary: SYNC_POLICY[10].1,
                 options: &[
                     ("--yes", "Migrate without the interactive confirmation (for scripts/CI)."),
                     ("--template-dir D", "Add a directory to the template search path (repeatable)."),
