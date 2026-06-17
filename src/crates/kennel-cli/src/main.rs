@@ -26,9 +26,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use kennel_lib_control::control::{self, Request, Response, StartRequest};
+use kennel_lib_control::socket;
 use kennel_lib_policy::TemplateSource;
-use kenneld::control::{self, Request, Response, StartRequest};
-use kenneld::socket;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -3038,8 +3038,7 @@ fn default_signing_key() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    const BASE_CONFINED: &[u8] =
-        include_bytes!("../../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &[u8] = include_bytes!("../../../../templates/base-confined/policy.toml");
 
     #[test]
     fn rewrite_template_base_replaces_only_the_reference() {

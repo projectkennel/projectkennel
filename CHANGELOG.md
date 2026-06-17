@@ -6,7 +6,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
-Nothing yet.
+### Internal / supply chain
+
+- **The `kennel` CLI is now its own crate (`kennel-cli`), split out of `kenneld`.** The
+  control-socket wire protocol moves to a shared `kennel-lib-control` crate (re-exported
+  as `kenneld::{control, socket}`, so the daemon side is unchanged). This removes the
+  CLI's dependencies — `serde_json` (≈ 16.5k SLOC, via the trust-manifest reader) and
+  `lexopt` — from the privileged daemon's dependency closure entirely: a hard crate
+  boundary in place of the previous "the daemon binary happens not to reference them".
+  No change to the `kennel` or `kenneld` binaries' behaviour or surface.
 
 ## [0.1.0] — 2026-06-16
 

@@ -6,12 +6,12 @@
 //! into groff `man(7)` source.
 //!
 //! The `kennel` and `kennel-policy` command synopses are kept verbatim from the
-//! `CommandSpec` tables in `kenneld/src/bin/kennel.rs`; a test in that crate
+//! `CommandSpec` tables in `kennel-cli/src/main.rs`; a test in that crate
 //! asserts the two stay in sync (`SYNC_COMMANDS` / `SYNC_POLICY` below are the
 //! checked-against copies).
 
 // Constant-index reads into the `SYNC_*` tables (`SYNC_COMMANDS[0].2`) are
-// in-bounds by construction and verified by the sync-test in `kennel.rs`; the
+// in-bounds by construction and verified by the sync-test in `kennel-cli`; the
 // workspace `indexing_slicing` deny targets runtime input, not literal indexing of
 // a local const, so it is allowed here in this build-only tool.
 #![allow(clippy::indexing_slicing)]
@@ -75,7 +75,7 @@ pub struct Page {
 }
 
 // ---------------------------------------------------------------------------
-// Sync copies of the CommandSpec tables (kenneld/src/bin/kennel.rs). The test
+// Sync copies of the CommandSpec tables (kennel-cli/src/main.rs). The test
 // `man_meta_in_sync` in that crate asserts these match the live tables, so a CLI
 // change that is not reflected here fails CI. Kept as (name, summary, usage).
 // ---------------------------------------------------------------------------

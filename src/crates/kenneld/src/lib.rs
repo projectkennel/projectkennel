@@ -27,7 +27,6 @@ pub mod bastion;
 pub mod binder;
 pub mod bpf_audit;
 pub mod cgroup;
-pub mod control;
 pub mod ctx;
 pub mod etc;
 pub mod inbound;
@@ -36,9 +35,14 @@ pub mod policy;
 pub mod proxy;
 pub mod pty_broker;
 pub mod server;
-pub mod socket;
 pub mod ssh;
 pub mod sshd;
+
+// The control-socket wire protocol now lives in its own crate so the unprivileged
+// `kennel` CLI can link it without the daemon's enforcement code. Re-exported here
+// so the daemon's `crate::control` / `crate::socket` (and `kenneld::*` from the
+// `kenneld`/`kennel-akc` binaries) keep resolving unchanged.
+pub use kennel_lib_control::{control, socket};
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};

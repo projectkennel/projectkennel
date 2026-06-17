@@ -1,0 +1,18 @@
+[package]
+name = "kennel-lib-control"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel control-plane wire protocol: the framed Request/Response types the `kennel` CLI and the `kenneld` daemon exchange over the per-user control socket, plus the socket-path resolver. Shared so the unprivileged CLI links it without the daemon's enforcement code."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# socket.rs resolves the per-user runtime dir (real uid) and adopts an inherited
+# listener fd; both are thin wrappers over kennel-lib-syscall.
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+
+[lints]
+workspace = true

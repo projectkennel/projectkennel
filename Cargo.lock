@@ -112,6 +112,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-cli"
+version = "0.1.0"
+dependencies = [
+ "gen-man",
+ "kennel-lib-audit",
+ "kennel-lib-config",
+ "kennel-lib-control",
+ "kennel-lib-manifest",
+ "kennel-lib-policy",
+ "kennel-lib-syscall",
+ "lexopt",
+]
+
+[[package]]
 name = "kennel-lib-audit"
 version = "0.1.0"
 dependencies = [
@@ -140,6 +154,13 @@ version = "0.1.0"
 dependencies = [
  "basic-toml",
  "serde",
+]
+
+[[package]]
+name = "kennel-lib-control"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-syscall",
 ]
 
 [[package]]
@@ -233,20 +254,18 @@ name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
- "gen-man",
  "host-inetd",
  "host-netproxy",
  "kennel-lib-audit",
  "kennel-lib-binder",
  "kennel-lib-bpf",
  "kennel-lib-config",
- "kennel-lib-manifest",
+ "kennel-lib-control",
  "kennel-lib-policy",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
  "kennel-lib-term",
  "kennel-privhelper",
- "lexopt",
  "libc",
  "serde",
 ]
