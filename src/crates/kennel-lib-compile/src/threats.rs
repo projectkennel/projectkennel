@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 
 /// The catalogue committed in-tree, compiled into the binary as the fallback when
 /// no on-disk catalogue is found. Path is relative to this source file.

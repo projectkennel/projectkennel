@@ -26,7 +26,7 @@ use crate::source::{
     BpfRule, DevPassthrough, LifecycleSection, NetAllow, NetAudit, NetDenyRule, SourcePolicy,
     SshDestination, UnixAllow,
 };
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 use serde::{Deserialize, Serialize};
 
 /// A parsed leaf policy: identity plus add/remove deltas.
@@ -48,7 +48,7 @@ pub struct LeafPolicy {
     pub threat_catalogue_version: Option<String>,
     /// Optional signature envelope (leaves may be unsigned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<crate::signature::SignatureEnvelope>,
+    pub signature: Option<kennel_lib_policy::signature::SignatureEnvelope>,
 
     /// `[fs.*.add]` / `[fs.*.remove]` deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]

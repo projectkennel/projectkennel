@@ -8,7 +8,7 @@
 //! `EffectivePolicy`, and [`compile`] assembles the [`SettledPolicy`] — name,
 //! deferred substitutions, the asserted-invariant list, and the [`Provenance`]
 //! block — then re-asserts the framework invariants the runtime will check again.
-//! [`crate::sign_settled`] signs the result; the CLI writes it to disk.
+//! [`kennel_lib_policy::sign_settled`] signs the result; the CLI writes it to disk.
 //!
 //! # Integrity model
 //!
@@ -28,15 +28,17 @@
 use crate::leaf::LeafPolicy;
 use crate::lock::Lockfile;
 use crate::resolve::{resolve_verified, ChainLink, TemplateSource};
-use crate::settled::{Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy};
-use crate::signature::SignatureEnvelope;
 use crate::source::SourcePolicy;
 use crate::source_sig::Trust;
 use crate::translate::{translate, Translated};
-use crate::{PolicyError, SETTLED_SCHEMA_VERSION};
+use kennel_lib_policy::settled::{
+    Provenance, ResolvedArtifact, SettledPolicy, SignedSettledPolicy,
+};
+use kennel_lib_policy::signature::SignatureEnvelope;
+use kennel_lib_policy::{PolicyError, SETTLED_SCHEMA_VERSION};
 
 /// The framework-invariant IDs the compiler asserts, mirroring
-/// [`crate::invariant::validate`]. Recorded in the settled policy for audit; the
+/// [`kennel_lib_policy::invariant::validate`]. Recorded in the settled policy for audit; the
 /// runtime re-asserts them regardless of this list.
 pub const ASSERTED_INVARIANTS: &[&str] = &[
     "cap.no_new_privs",
@@ -348,7 +350,7 @@ fn assemble(
     };
 
     // Defence in depth: assert now what the runtime will re-assert at spawn.
-    crate::invariant::validate(&policy).map_err(PolicyError::InvariantViolations)?;
+    kennel_lib_policy::invariant::validate(&policy).map_err(PolicyError::InvariantViolations)?;
     Ok(Compiled {
         policy,
         lock: Lockfile::from_chain(chain),
@@ -377,9 +379,9 @@ pub fn seal_unsigned(policy: &SettledPolicy) -> SignedSettledPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::{KeySet, SigningKey};
     use crate::source::parse;
-    use crate::{sign_settled, to_bytes, verify_settled};
+    use kennel_lib_policy::keys::{KeySet, SigningKey};
+    use kennel_lib_policy::{sign_settled, to_bytes, verify_settled};
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =

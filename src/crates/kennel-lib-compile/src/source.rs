@@ -8,7 +8,7 @@
 //! `ssh`, `binder`, `env`, `cap`, `seccomp`, `proc`, `ptrace`, `signal`,
 //! `lifecycle`), identity and inheritance (`template_base`, `template_name`, `name`,
 //! `include`), and signing metadata. The compiler resolves a chain of these into the
-//! flat [`crate::settled::SettledPolicy`] the runtime enforces.
+//! flat [`kennel_lib_policy::settled::SettledPolicy`] the runtime enforces.
 //!
 //! # Invariants
 //!
@@ -37,9 +37,9 @@
 //! a delta is inert without a folder to apply it — and are added there alongside the
 //! composition logic, not here.
 
-use crate::audit::AuditSection;
-use crate::signature::SignatureEnvelope;
-use crate::PolicyError;
+use kennel_lib_policy::audit::AuditSection;
+use kennel_lib_policy::signature::SignatureEnvelope;
+use kennel_lib_policy::PolicyError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -524,7 +524,7 @@ pub struct NetBind {
     /// Explicit allowlist of bindable ports (§7.5.7). When non-empty, the workload may
     /// `bind()` only these ports (in addition to passing [`min_port`](Self::min_port));
     /// empty/absent means any port at or above `min_port`. At most
-    /// [`MAX_BIND_PORTS`](crate::settled::MAX_BIND_PORTS) entries survive translation.
+    /// [`MAX_BIND_PORTS`](kennel_lib_policy::settled::MAX_BIND_PORTS) entries survive translation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_ports: Option<Vec<u16>>,
 }

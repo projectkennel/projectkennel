@@ -26,9 +26,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use kennel_lib_compile::TemplateSource;
 use kennel_lib_control::control::{self, Request, Response, StartRequest};
 use kennel_lib_control::socket;
-use kennel_lib_policy::TemplateSource;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -327,7 +327,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             dirs: template_dirs,
         };
         let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
+        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
@@ -1290,9 +1290,9 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     add_system_trust_dirs(&mut trust_dirs);
     let keys = load_trust_store(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_lib_policy::Trust::require(&keys)
+        kennel_lib_compile::Trust::require(&keys)
     } else {
-        kennel_lib_policy::Trust::allow_unsigned(Some(&keys))
+        kennel_lib_compile::Trust::allow_unsigned(Some(&keys))
     };
 
     let mut compiled = match build_settled(&bytes, &source, &trust, version) {
@@ -1326,7 +1326,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
     if !no_lock {
         let lock_path = lock_path_for(&out, &policy.name);
         if let Ok(prev_bytes) = std::fs::read(&lock_path) {
-            let previous = kennel_lib_policy::Lockfile::parse(&prev_bytes)
+            let previous = kennel_lib_compile::Lockfile::parse(&prev_bytes)
                 .map_err(|e| format!("reading {}: {e}", lock_path.display()))?;
             if let Err(e) = compiled.lock.verify_against(&previous) {
                 eprintln!("kennel: {e}");
@@ -1345,7 +1345,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         let key = load_signing_key(key_path)?;
         kennel_lib_policy::sign_settled(policy, &key).map_err(|e| format!("signing: {e}"))?
     } else {
-        kennel_lib_policy::seal_unsigned(policy)
+        kennel_lib_compile::seal_unsigned(policy)
     };
     let out_bytes = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
@@ -1365,7 +1365,7 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
 /// `[signature]`, …) those `deny_unknown_fields` schemas reject, so the two parses
 /// are mutually exclusive. Used by `kennel run` to decide whether to compile.
 fn is_source_policy(bytes: &[u8]) -> bool {
-    kennel_lib_policy::parse_source(bytes).is_ok() || kennel_lib_policy::parse_leaf(bytes).is_ok()
+    kennel_lib_compile::parse_source(bytes).is_ok() || kennel_lib_compile::parse_leaf(bytes).is_ok()
 }
 
 /// A short-lived on-disk settled policy produced by `kennel run`'s in-memory
@@ -1478,13 +1478,13 @@ fn lock_path_for(output: &Path, name: &str) -> PathBuf {
 fn build_settled(
     bytes: &[u8],
     source: &FsTemplateSource,
-    trust: &kennel_lib_policy::Trust<'_>,
+    trust: &kennel_lib_compile::Trust<'_>,
     version: &str,
-) -> Result<kennel_lib_policy::Compiled, kennel_lib_policy::PolicyError> {
-    match kennel_lib_policy::parse_source(bytes) {
-        Ok(entry) => kennel_lib_policy::compile(&entry, source, trust, version),
-        Err(source_err) => kennel_lib_policy::parse_leaf(bytes).map_or(Err(source_err), |leaf| {
-            kennel_lib_policy::compile_leaf(&leaf, source, trust, version)
+) -> Result<kennel_lib_compile::Compiled, kennel_lib_policy::PolicyError> {
+    match kennel_lib_compile::parse_source(bytes) {
+        Ok(entry) => kennel_lib_compile::compile(&entry, source, trust, version),
+        Err(source_err) => kennel_lib_compile::parse_leaf(bytes).map_or(Err(source_err), |leaf| {
+            kennel_lib_compile::compile_leaf(&leaf, source, trust, version)
         }),
     }
 }
@@ -1524,9 +1524,9 @@ fn validate(args: &[String]) -> Result<ExitCode, String> {
     };
     let keys = load_trust_store(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_lib_policy::Trust::require(&keys)
+        kennel_lib_compile::Trust::require(&keys)
     } else {
-        kennel_lib_policy::Trust::allow_unsigned(Some(&keys))
+        kennel_lib_compile::Trust::allow_unsigned(Some(&keys))
     };
 
     match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
@@ -1579,20 +1579,20 @@ fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     add_system_trust_dirs(&mut trust_dirs);
 
     let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
-    let entry = kennel_lib_policy::parse_source(&bytes)
+    let entry = kennel_lib_compile::parse_source(&bytes)
         .map_err(|e| format!("parsing {policy_path}: {e}"))?;
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
     let keys = load_trust_store(&trust_dirs)?;
-    let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
+    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
 
     // The risk engine reads the resolved *source* (threats survive only there).
-    let resolved = kennel_lib_policy::resolve_verified(&entry, &source, &trust)
+    let resolved = kennel_lib_compile::resolve_verified(&entry, &source, &trust)
         .map_err(|e| format!("resolving {policy_path}: {e}"))?;
-    let catalogue = kennel_lib_policy::threats::Catalogue::load(catalogue_path().as_deref())
+    let catalogue = kennel_lib_compile::threats::Catalogue::load(catalogue_path().as_deref())
         .map_err(|e| format!("threat catalogue: {e}"))?;
-    let report = kennel_lib_policy::risks::evaluate(&resolved.effective, &catalogue);
+    let report = kennel_lib_compile::risks::evaluate(&resolved.effective, &catalogue);
 
     let name = resolved.effective.name.as_deref().unwrap_or(policy_path);
     if json {
@@ -1616,8 +1616,8 @@ fn catalogue_path() -> Option<PathBuf> {
 }
 
 /// Human-readable risk report.
-fn print_risks_human(name: &str, report: &kennel_lib_policy::risks::RiskReport) {
-    use kennel_lib_policy::risks::Origin;
+fn print_risks_human(name: &str, report: &kennel_lib_compile::risks::RiskReport) {
+    use kennel_lib_compile::risks::Origin;
     println!(
         "Risk overview for `{name}`  (threat catalogue v{})",
         report.catalogue_version
@@ -1631,7 +1631,7 @@ fn print_risks_human(name: &str, report: &kennel_lib_policy::risks::RiskReport) 
         }
     }
 
-    let print_findings = |heading: &str, findings: &[kennel_lib_policy::risks::Finding]| {
+    let print_findings = |heading: &str, findings: &[kennel_lib_compile::risks::Finding]| {
         println!("\n{heading} ({}):", findings.len());
         for f in findings {
             let title = f.title.as_deref().unwrap_or("(uncatalogued)");
@@ -1672,8 +1672,8 @@ fn print_risks_human(name: &str, report: &kennel_lib_policy::risks::RiskReport) 
 
 /// JSON risk report (stable-ish shape for CI/tooling). Hand-rolled (no `serde_json`
 /// dep): the structure is small and fixed.
-fn print_risks_json(name: &str, report: &kennel_lib_policy::risks::RiskReport) {
-    use kennel_lib_policy::risks::{Finding, Origin};
+fn print_risks_json(name: &str, report: &kennel_lib_compile::risks::RiskReport) {
+    use kennel_lib_compile::risks::{Finding, Origin};
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let finding_json = |f: &Finding| {
         format!(
@@ -1763,7 +1763,7 @@ fn policy_kind(path: &Path) -> &'static str {
     let Ok(bytes) = std::fs::read(path) else {
         return "source";
     };
-    kennel_lib_policy::parse_source(&bytes).map_or("source", |p| {
+    kennel_lib_compile::parse_source(&bytes).map_or("source", |p| {
         if p.template_name.is_some() {
             "template"
         } else if p.name.is_some() {
@@ -1812,7 +1812,7 @@ fn policy_show(args: &[String]) -> Result<ExitCode, String> {
             dirs: template_dirs,
         };
         let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
+        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
@@ -2091,7 +2091,7 @@ fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
     let keys = load_trust_store(&trust_dirs)?;
-    let trust = kennel_lib_policy::Trust::allow_unsigned(Some(&keys));
+    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
     let source = FsTemplateSource {
         dirs: template_dirs.clone(),
     };
@@ -2133,7 +2133,7 @@ fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
         print_warnings(&kennel_lib_policy::resolve_settled_loaders(
             &mut compiled.policy,
         ));
-        let findings = kennel_lib_policy::lint_settled(&compiled.policy);
+        let findings = kennel_lib_compile::lint_settled(&compiled.policy);
         linted = linted.saturating_add(1);
         for f in &findings {
             println!("{name}: {f}");
@@ -2190,7 +2190,7 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
     let key_path = key_path.ok_or("sign needs --key <path>")?;
 
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let policy = kennel_lib_policy::parse_source(&bytes).map_err(|e| {
+    let policy = kennel_lib_compile::parse_source(&bytes).map_err(|e| {
         format!("{path} is not a signable source template/fragment ({e}); leaf policies may stay unsigned")
     })?;
     if policy.signature.is_some() {
@@ -2201,7 +2201,7 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
 
     let key = load_signing_key(Path::new(key_path))?;
     let signed =
-        kennel_lib_policy::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
+        kennel_lib_compile::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
     let env = signed.signature.ok_or("internal: signature not produced")?;
     // Append the signature as a new top-level table, preserving the original text.
     let block = format!(
@@ -2722,12 +2722,12 @@ fn upgrade(args: &[String]) -> Result<ExitCode, String> {
     let (policy_path, _) = resolve_policy(name, false)?;
     let bytes = std::fs::read(&policy_path)
         .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
-    let source = kennel_lib_policy::source::parse(&bytes)
+    let source = kennel_lib_compile::source::parse(&bytes)
         .map_err(|e| format!("parsing {}: {e}", policy_path.display()))?;
     let reference = source
         .template_base
         .ok_or_else(|| format!("`{name}` has no `template_base` to upgrade"))?;
-    let (tmpl, current) = kennel_lib_policy::parse_reference(&reference)
+    let (tmpl, current) = kennel_lib_compile::parse_reference(&reference)
         .map_err(|e| format!("`template_base`: {e}"))?;
 
     // Find the newest version of `tmpl` available in the search path.
@@ -2739,7 +2739,7 @@ fn upgrade(args: &[String]) -> Result<ExitCode, String> {
             "template `{tmpl}` not found in the search path (pass --template-dir)"
         ));
     };
-    if !kennel_lib_policy::version_is_newer(&newest, &current) {
+    if !kennel_lib_compile::version_is_newer(&newest, &current) {
         println!("`{name}` is already on the latest `{tmpl}` ({current}).");
         return Ok(ExitCode::SUCCESS);
     }
@@ -2799,7 +2799,7 @@ fn newest_template_version(dirs: &[PathBuf], name: &str) -> Option<String> {
     let mut consider = |candidate: String| {
         if newest
             .as_deref()
-            .is_none_or(|cur| kennel_lib_policy::version_is_newer(&candidate, cur))
+            .is_none_or(|cur| kennel_lib_compile::version_is_newer(&candidate, cur))
         {
             newest = Some(candidate);
         }
@@ -2825,7 +2825,7 @@ fn newest_template_version(dirs: &[PathBuf], name: &str) -> Option<String> {
         // Nested: <name>/policy.toml carrying template_version = "N".
         let nested = dir.join(name).join("policy.toml");
         if let Ok(b) = std::fs::read(&nested) {
-            if let Ok(p) = kennel_lib_policy::source::parse(&b) {
+            if let Ok(p) = kennel_lib_compile::source::parse(&b) {
                 if let Some(v) = p.template_version {
                     consider(format!("v{v}"));
                 }

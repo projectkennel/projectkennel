@@ -11,7 +11,7 @@
 //! Each finding is a human-readable line. The shipped template corpus must lint clean
 //! (a test asserts it); a non-empty result from `kennel policy lint` is a non-zero exit.
 
-use crate::settled::{NetMode, SettledPolicy};
+use kennel_lib_policy::settled::{NetMode, SettledPolicy};
 
 /// Lint a settled policy for incoherences, returning one line per finding (empty ⇒ clean).
 #[must_use]
@@ -151,7 +151,7 @@ mod tests {
         // the linter would catch a regression.
         let mut p = settle("interactive");
         assert_eq!(p.effective_policy.net.mode, NetMode::Host);
-        p.effective_policy.net.proxy = crate::settled::ProxyListen::default(); // a real listener
+        p.effective_policy.net.proxy = kennel_lib_policy::settled::ProxyListen::default(); // a real listener
         let findings = lint_settled(&p);
         assert!(
             findings

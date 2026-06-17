@@ -18,7 +18,7 @@
 //!   arbitrary group entries / memberships), so it is refused here.
 
 use crate::source::SourcePolicy;
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 
 /// Validate the `[identity].groups` of a resolved source policy.
 ///

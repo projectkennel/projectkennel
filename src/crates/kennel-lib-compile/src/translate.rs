@@ -4,7 +4,7 @@
 //!
 //! The compiler stage after [`crate::resolve`](mod@crate::resolve): take the effective [`SourcePolicy`]
 //! (rich, human-facing, every section) and produce the flat
-//! [`crate::settled::EffectivePolicy`] the runtime enforces, plus the list of
+//! [`kennel_lib_policy::settled::EffectivePolicy`] the runtime enforces, plus the list of
 //! per-instance placeholders the runtime must still fill
 //! (`deferred_substitutions`). This is where the human forms become machine forms:
 //! `"169.254.169.254/32"` → `NetRule { cidr, prefix_len }`, `"512M"` → `size_mib`,
@@ -37,15 +37,15 @@
 //! `kennel_lib_syscall::seccomp::syscall_number` (`libc::SYS_*`) — so the signed policy
 //! stays architecture-independent and no syscall-number table lives in this pure crate.
 
-use crate::settled::{
+use crate::source::SourcePolicy;
+use kennel_lib_policy::settled::{
     AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy, DevPolicy,
     EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule,
     NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
     SeccompPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime,
     UnixSocket, WorkloadRuntime,
 };
-use crate::source::SourcePolicy;
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 use std::collections::BTreeSet;
 
 /// The product of translation: the settled effective policy plus the per-instance
@@ -109,7 +109,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     };
     let lifecycle = translate_lifecycle(effective)?;
     // [tty]: the PTY escape filter, default on. Folds scalar-wins; absent ⇒ default.
-    let tty = crate::settled::TtyPolicy {
+    let tty = kennel_lib_policy::settled::TtyPolicy {
         filter_terminal_escapes: effective
             .tty
             .as_ref()
@@ -117,7 +117,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
             .unwrap_or(true),
     };
     // [trust]: the masked workspace manifest, default on. Absent ⇒ default.
-    let trust = crate::settled::TrustPolicy {
+    let trust = kennel_lib_policy::settled::TrustPolicy {
         manifest: effective
             .trust
             .as_ref()
@@ -234,7 +234,7 @@ fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
 }
 
 /// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.4). Each entry is a
-/// `setrlimit` resource name (validated against [`crate::settled::ULIMIT_RESOURCES`]) and a value of
+/// `setrlimit` resource name (validated against [`kennel_lib_policy::settled::ULIMIT_RESOURCES`]) and a value of
 /// the form `soft` or `soft:hard`, every token a number (optional `K`/`M`/`G`, 1024-
 /// based) or `unlimited`. The value is normalised to the settled form `soft` (when
 /// `soft == hard`) or `"soft hard"`, each token a decimal or the literal `unlimited`.
@@ -249,10 +249,10 @@ fn translate_ulimits(src: &SourcePolicy) -> Result<UlimitsRuntime, PolicyError> 
         return Ok(UlimitsRuntime::default());
     };
     for (name, value) in src_limits {
-        if !crate::settled::ULIMIT_RESOURCES.contains(&name.as_str()) {
+        if !kennel_lib_policy::settled::ULIMIT_RESOURCES.contains(&name.as_str()) {
             return Err(translation(format!(
                 "unknown ulimit resource `{name}` (expected one of {})",
-                crate::settled::ULIMIT_RESOURCES.join(", ")
+                kennel_lib_policy::settled::ULIMIT_RESOURCES.join(", ")
             )));
         }
         let (soft, hard) = if let Some((s, h)) = value.split_once(':') {
@@ -322,7 +322,7 @@ fn translate_env(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> EnvRunt
 /// Only deviations from the `02-3` defaults are carried; an absent or all-default
 /// section yields the empty runtime (omitted from the canonical form).
 ///
-/// The translation itself lives in [`crate::audit`] (the single source of truth
+/// The translation itself lives in [`kennel_lib_policy::audit`] (the single source of truth
 /// shared with the runtime `audit.toml` defaults parser); here we supply the
 /// deferred-placeholder substitution for a file-sink `dir`.
 fn translate_audit(
@@ -331,7 +331,7 @@ fn translate_audit(
 ) -> Result<AuditRuntime, PolicyError> {
     src.audit.as_ref().map_or_else(
         || Ok(AuditRuntime::default()),
-        |audit| crate::audit::translate_audit_section(audit, |d| subst(d, deferred)),
+        |audit| kennel_lib_policy::audit::translate_audit_section(audit, |d| subst(d, deferred)),
     )
 }
 
@@ -361,11 +361,11 @@ fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError
     let id = src.identity.as_ref();
     let user = id
         .and_then(|i| i.user.clone())
-        .unwrap_or_else(|| crate::settled::DEFAULT_USER.to_owned());
+        .unwrap_or_else(|| kennel_lib_policy::settled::DEFAULT_USER.to_owned());
     validate_name("identity.user", &user)?;
     let group = id
         .and_then(|i| i.group.clone())
-        .unwrap_or_else(|| crate::settled::DEFAULT_GROUP.to_owned());
+        .unwrap_or_else(|| kennel_lib_policy::settled::DEFAULT_GROUP.to_owned());
     validate_name("identity.group", &group)?;
     Ok(IdentityRuntime {
         user,
@@ -548,11 +548,11 @@ fn translate_net(
         .as_ref()
         .and_then(|b| b.allowed_ports.clone())
         .unwrap_or_default();
-    if bind_allowed_ports.len() > crate::settled::MAX_BIND_PORTS {
+    if bind_allowed_ports.len() > kennel_lib_policy::settled::MAX_BIND_PORTS {
         return Err(translation(format!(
             "[net.bind].allowed_ports has {} entries; the maximum is {}",
             bind_allowed_ports.len(),
-            crate::settled::MAX_BIND_PORTS
+            kennel_lib_policy::settled::MAX_BIND_PORTS
         )));
     }
 
@@ -567,22 +567,22 @@ fn translate_net(
             .iter()
             .chain(&bpf_connect_deny)
             .chain(&deny_author),
-        crate::settled::MAX_BPF_DENY_PER_FAMILY,
+        kennel_lib_policy::settled::MAX_BPF_DENY_PER_FAMILY,
     )?;
     check_bpf_map_cap(
         "allow",
         bpf_connect_allow.iter(),
-        crate::settled::MAX_BPF_ALLOW_PER_FAMILY,
+        kennel_lib_policy::settled::MAX_BPF_ALLOW_PER_FAMILY,
     )?;
     check_bpf_map_cap(
         "bind allow",
         bpf_bind_allow.iter(),
-        crate::settled::MAX_BPF_ALLOW_PER_FAMILY,
+        kennel_lib_policy::settled::MAX_BPF_ALLOW_PER_FAMILY,
     )?;
     check_bpf_map_cap(
         "bind deny",
         bpf_bind_deny.iter(),
-        crate::settled::MAX_BPF_DENY_PER_FAMILY,
+        kennel_lib_policy::settled::MAX_BPF_DENY_PER_FAMILY,
     )?;
 
     Ok(NetPolicy {
@@ -937,7 +937,9 @@ fn translate_exec(
     // denying your own shell is caught as the same contradiction).
     let shell = exec
         .and_then(|e| e.shell.clone())
-        .map_or_else(crate::settled::default_shell, |s| subst(&s, deferred));
+        .map_or_else(kennel_lib_policy::settled::default_shell, |s| {
+            subst(&s, deferred)
+        });
     let permits_everything = allow.iter().any(|e| matches!(e.trim(), "**" | "/**"));
     if !allow.is_empty() && !permits_everything && !allow.contains(&shell) {
         return Err(translation(format!(
@@ -1101,8 +1103,8 @@ const fn translation(msg: String) -> PolicyError {
 mod tests {
     use super::*;
     use crate::resolve::{resolve, TemplateSource};
-    use crate::settled::{AuditSinkKind, Provenance, ResolvedArtifact, SettledPolicy};
     use crate::source::parse;
+    use kennel_lib_policy::settled::{AuditSinkKind, Provenance, ResolvedArtifact, SettledPolicy};
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
@@ -1780,7 +1782,7 @@ mod tests {
             ulimits: t.ulimits,
             workload: t.workload,
         };
-        crate::invariant::validate(&policy).expect("framework invariants must hold");
+        kennel_lib_policy::invariant::validate(&policy).expect("framework invariants must hold");
     }
 
     #[test]
@@ -1928,7 +1930,7 @@ mod tests {
     fn bpf_deny_at_capacity_is_accepted() {
         // 256 v4 connect denies = the deny_v4 map's exact capacity (src/bpf/maps.h). At the cap
         // (not over it) translation succeeds and all 256 land in the settled deny set.
-        let cap = crate::settled::MAX_BPF_DENY_PER_FAMILY;
+        let cap = kennel_lib_policy::settled::MAX_BPF_DENY_PER_FAMILY;
         let src = parse(&host_policy_with_n_connect_denies(cap)).expect("parse");
         let net = translate_net(&src, &mut BTreeSet::new()).expect("v4 deny set at cap");
         let v4 = net
@@ -1943,7 +1945,7 @@ mod tests {
     fn bpf_deny_over_capacity_is_rejected_naming_the_limit() {
         // One past the deny_v4 cap must be a compile error that names the limit, rather than the
         // (cap+1)th map update failing opaquely with ENOSPC at spawn.
-        let cap = crate::settled::MAX_BPF_DENY_PER_FAMILY;
+        let cap = kennel_lib_policy::settled::MAX_BPF_DENY_PER_FAMILY;
         let src = parse(&host_policy_with_n_connect_denies(cap + 1)).expect("parse");
         let err = translate_net(&src, &mut BTreeSet::new()).expect_err("over the deny_v4 cap");
         assert!(matches!(err, PolicyError::Translation(_)), "got {err:?}");

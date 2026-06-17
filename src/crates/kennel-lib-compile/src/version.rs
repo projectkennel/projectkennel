@@ -6,7 +6,7 @@
 //! < `v4.1`). `kennel upgrade` uses this to detect a newer published template.
 
 use crate::resolve::split_reference;
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 
 /// Parse a `<name>@<version>` reference into its parts (public wrapper over the
 /// resolver's validated split, for callers outside the crate such as the CLI's

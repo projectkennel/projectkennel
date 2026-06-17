@@ -73,6 +73,7 @@ version = "0.1.0"
 dependencies = [
  "gen-man",
  "kennel-lib-audit",
+ "kennel-lib-compile",
  "kennel-lib-config",
  "kennel-lib-control",
  "kennel-lib-manifest",
@@ -117,6 +118,15 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "object",
+]
+
+[[package]]
+name = "kennel-lib-compile"
+version = "0.1.0"
+dependencies = [
+ "basic-toml",
+ "kennel-lib-policy",
+ "serde",
 ]
 
 [[package]]

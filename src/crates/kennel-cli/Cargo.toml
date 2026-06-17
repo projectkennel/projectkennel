@@ -17,8 +17,11 @@ path = "src/main.rs"
 # The control-socket wire protocol shared with the daemon (the only thing the CLI
 # needs from the daemon side — never the daemon's enforcement code).
 kennel-lib-control = { path = "../kennel-lib-control" }
-# Policy authoring/inspection: parse, resolve, compile, sign, the risk/diff engines.
+# The runtime policy crate: settled-artefact types, verify_settled, sign_settled, keys.
 kennel-lib-policy = { path = "../kennel-lib-policy" }
+# The policy compiler (authoring: parse/resolve/compile/sign/lint/risks). CLI-only —
+# this is what keeps the compiler out of the daemon's TCB.
+kennel-lib-compile = { path = "../kennel-lib-compile" }
 # The layered deployment config (search paths, trust store).
 kennel-lib-config = { path = "../kennel-lib-config" }
 # The masked workspace trust manifest (T2.8): pre-flight generation + `kennel review`.

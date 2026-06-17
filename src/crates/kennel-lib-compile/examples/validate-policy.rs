@@ -27,10 +27,10 @@ fn main() -> ExitCode {
         }
     };
     let result: Result<(), String> = match kind.as_str() {
-        "leaf" => kennel_lib_policy::parse_leaf(&bytes)
+        "leaf" => kennel_lib_compile::parse_leaf(&bytes)
             .map_err(|e| e.to_string())
             .and_then(|leaf| leaf.validate().map_err(|e| e.to_string())),
-        "source" => kennel_lib_policy::parse_source(&bytes)
+        "source" => kennel_lib_compile::parse_source(&bytes)
             .map(|_| ())
             .map_err(|e| e.to_string()),
         other => {

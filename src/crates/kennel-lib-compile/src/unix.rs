@@ -41,7 +41,7 @@
 //! caller (the `kennel compile` CLI prints them; `kenneld` re-derives and logs them).
 
 use crate::source::SourcePolicy;
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 
 /// Validate the `[unix]` section of a resolved source policy.
 ///

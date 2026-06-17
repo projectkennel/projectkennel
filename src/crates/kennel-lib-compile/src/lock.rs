@@ -24,7 +24,7 @@
 //! `kennel.lock` on disk.
 
 use crate::resolve::ChainLink;
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 use serde::{Deserialize, Serialize};
 
 /// One locked reference: a `name@version` pinned to its signer and signature.

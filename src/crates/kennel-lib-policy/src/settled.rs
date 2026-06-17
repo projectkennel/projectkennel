@@ -22,6 +22,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// The reserved binder service namespace `kenneld` owns (`07-1-binder.md` §Naming).
+///
+/// User-defined services may not begin with it. It lives in the runtime crate
+/// because `kenneld` gates `addService`/`getService` against it at runtime; the
+/// policy compiler's binder validator rejects user services that claim it.
+pub const RESERVED_PREFIX: &str = "org.projectkennel.";
+
 /// Network enforcement mode — four tiers (`07-5-network.md` §7.5).
 ///
 /// The proxy/own-netns pair (`constrained`/`unconstrained`) differ only in the proxy's

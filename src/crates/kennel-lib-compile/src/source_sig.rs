@@ -13,7 +13,7 @@
 //! # Canonical form
 //!
 //! The signature covers the artefact's canonical serialisation with the
-//! `[signature]` table itself excluded — exactly the [`crate::canonical`] approach
+//! `[signature]` table itself excluded — exactly the [`kennel_lib_policy::canonical`] approach
 //! for settled policies, applied to a [`SourcePolicy`]. Because the same
 //! implementation produces and checks these bytes, a fixed-field-order TOML
 //! serialisation is reproducible without a canonicaliser.
@@ -26,11 +26,11 @@
 //! usable while authoring. A *present* signature is always checked when a trust
 //! store is supplied, in either mode.
 
-use crate::keys::{KeySet, SigningKey};
 use crate::leaf::LeafPolicy;
-use crate::signature::{verify_signature, SignatureEnvelope, SignatureError};
 use crate::source::SourcePolicy;
-use crate::PolicyError;
+use kennel_lib_policy::keys::{KeySet, SigningKey};
+use kennel_lib_policy::signature::{verify_signature, SignatureEnvelope, SignatureError};
+use kennel_lib_policy::PolicyError;
 
 /// A signable artefact: an optional signature envelope plus the canonical bytes it
 /// covers.
@@ -187,7 +187,7 @@ pub fn sign_leaf(leaf: &LeafPolicy, key: &SigningKey) -> Result<LeafPolicy, Poli
     signed.signature = Some(SignatureEnvelope {
         algorithm: "ed25519".to_owned(),
         key_id: key.key_id().to_owned(),
-        signature: crate::b64::encode(&sig),
+        signature: kennel_lib_policy::b64::encode(&sig),
         signed_fields: Vec::new(),
     });
     Ok(signed)
@@ -223,7 +223,7 @@ pub fn sign_source(policy: &SourcePolicy, key: &SigningKey) -> Result<SourcePoli
     signed.signature = Some(SignatureEnvelope {
         algorithm: "ed25519".to_owned(),
         key_id: key.key_id().to_owned(),
-        signature: crate::b64::encode(&sig),
+        signature: kennel_lib_policy::b64::encode(&sig),
         signed_fields: Vec::new(),
     });
     Ok(signed)

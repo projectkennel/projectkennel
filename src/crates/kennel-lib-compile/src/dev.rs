@@ -23,7 +23,7 @@
 //! (with the other resource sections). Validation runs on the *resolved* policy.
 
 use crate::source::{DevPassthrough, SourcePolicy};
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 
 /// Validate the `[[fs.dev.passthrough]]` entries of a resolved source policy.
 ///

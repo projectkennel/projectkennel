@@ -7,7 +7,7 @@
 //! root-first, into a single *effective* [`SourcePolicy`] with no `template_base`
 //! left to resolve (`docs/architecture/02-2-config-schema.md` §Template inheritance).
 //! The effective policy is what the later stages substitute, translate to a
-//! [`crate::settled::SettledPolicy`], and sign.
+//! [`kennel_lib_policy::settled::SettledPolicy`], and sign.
 //!
 //! # Composition model (the SSH `Ciphers` model)
 //!
@@ -43,7 +43,6 @@
 //! in-memory map). Signature verification, lockfile byte-pinning, includes, and
 //! the `+=`/`-=` delta operators land in later increments.
 
-use crate::audit::{AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection};
 use crate::source::{
     self, BinderSection, BoundaryAcl, CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
     FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl,
@@ -51,7 +50,10 @@ use crate::source::{
     TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
-use crate::PolicyError;
+use kennel_lib_policy::audit::{
+    AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection,
+};
+use kennel_lib_policy::PolicyError;
 
 /// Maximum inheritance-chain depth (number of `template_base` hops), per
 /// `02-2-config-schema.md` §Resolution order.

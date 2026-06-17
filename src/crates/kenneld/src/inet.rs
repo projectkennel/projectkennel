@@ -558,7 +558,7 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).expect("bind cmd socket");
         std::thread::spawn(move || {
-            kennel_host_delegate::netproxy::conduit::serve_conduit(&listener)
+            kennel_host_delegate::netproxy::conduit::serve_conduit(&listener);
         });
 
         // kenneld's side: dial via the delegate, get the kennel-facing conduit end back.

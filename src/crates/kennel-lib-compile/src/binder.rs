@@ -23,14 +23,11 @@
 //! warning list, kept `Vec<String>` for a uniform caller signature with the other
 //! source-section validators.
 //!
-//! [`BinderRuntime`]: crate::settled::BinderRuntime
+//! [`BinderRuntime`]: kennel_lib_policy::settled::BinderRuntime
 
 use crate::source::SourcePolicy;
-use crate::PolicyError;
-
-/// The reserved service namespace kenneld owns (`07-1-binder.md` §Naming): user-defined
-/// services may not begin with it.
-pub const RESERVED_PREFIX: &str = "org.projectkennel.";
+use kennel_lib_policy::settled::RESERVED_PREFIX;
+use kennel_lib_policy::PolicyError;
 
 /// Validate the `[binder]` section of a resolved source policy.
 ///

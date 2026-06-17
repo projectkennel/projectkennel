@@ -27,7 +27,7 @@
 //! applied, and a leaf's deltas merged).
 
 use crate::source::{SourcePolicy, SshSection};
-use crate::PolicyError;
+use kennel_lib_policy::PolicyError;
 
 /// Validate the `[ssh]` section of a resolved source policy.
 ///

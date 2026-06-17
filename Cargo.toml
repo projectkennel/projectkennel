@@ -30,6 +30,9 @@ members = [
     "src/crates/kennel-lib-config",
     # The CLI/daemon control-socket wire protocol (shared, no enforcement code).
     "src/crates/kennel-lib-control",
+    # The policy compiler (authoring front end), split from kennel-lib-policy so
+    # the daemon's TCB links only the runtime verify-and-load half.
+    "src/crates/kennel-lib-compile",
     "src/crates/kennel-lib-landlock",
     "src/crates/kennel-lib-manifest",
     "src/crates/kennel-lib-os",
