@@ -111,7 +111,7 @@ pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyErr
 ///
 /// Fills [`settled::ExecPolicy::loaders`] with each allowlisted dynamic binary's `PT_INTERP`
 /// (`ld.so`), reading the binaries from disk ([`libresolve`]). Call this at compile time —
-/// after [`compile()`] / [`compile_leaf`] and **before** signing — so the loader set is part
+/// after the compiler's `compile` / `compile_leaf` and **before** signing — so the loader set is part
 /// of the signed artefact and the runtime never re-resolves. Returns the resolver's
 /// advisories (binaries it could not read). Idempotent. Libraries are deliberately *not*
 /// resolved or granted: they load via `READ` and Landlock cannot gate their `mmap`

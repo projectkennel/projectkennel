@@ -3,7 +3,7 @@
 //! This is the **single source of truth** for audit configuration: the source
 //! `[audit]` section shape, the validation (sink names, per-class levels, sizes,
 //! the syslog facility), and the defaults. Both the policy compiler (a policy's
-//! `[audit]` section, via [`crate::translate`]) and the runtime (a standalone
+//! `[audit]` section, via the `kennel-lib-compile` translate stage) and the runtime (a standalone
 //! `audit.toml` defaults file, which `kenneld` reads to resolve sinks) flow
 //! through [`translate_audit_section`] here — they differ only in how a file
 //! `dir` placeholder is substituted, which the caller supplies as a closure.

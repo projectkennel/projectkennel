@@ -47,7 +47,7 @@ A rough sense of scale — far more specification than code, and the code that e
 |---|---|
 | Design docs ([`docs/design/`](docs/design/), 27 files) | ≈ 67,500 words |
 | Architecture docs ([`docs/architecture/`](docs/architecture/), 15 files) | ≈ 36,700 words |
-| Implementation — Rust (20 crates, tests included) | ≈ 26,600 SLOC |
+| Implementation — Rust (21 crates, tests included) | ≈ 26,600 SLOC |
 | Implementation — BPF (C: 8 programs + 3 shared headers) | ≈ 545 SLOC |
 | `unsafe` Rust — confined to `kennel-lib-syscall` + `kennel-lib-bpf` | ≈ 3,400 SLOC, ~80 `unsafe` blocks |
 

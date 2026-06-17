@@ -2,7 +2,113 @@
 
 This chapter describes the Cargo workspace layout: which crates exist, what each owns, how they depend on each other, and what build-time choices they expose. The *public APIs* of each crate are in `02-8-internal-api.md`; this chapter is the structural view — how the code is cut up, not what each piece exposes.
 
-The workspace has **20 crates**: `kennel-lib-policy`, `kennel-lib-syscall`, `kennel-lib-os`, `kennel-lib-landlock`, `kennel-lib-scm`, `kennel-lib-bpf`, `kennel-lib-binder`, `kennel-lib-audit`, `kennel-lib-config`, `kennel-lib-control`, `kennel-lib-spawn`, `kennel-lib-text`, `kennel-host-delegate`, `kennel-privhelper`, `kennel-bin-init`, `kenneld`, `kennel-cli`, and `kennel-facade`. `kennel-lib-os` holds the **safe** OS primitives — path canonicalisation, uid/gid identity, per-kennel netlink address management, and the userns-map pipe handshake — split out of `kennel-lib-syscall` so that crate carries *only* genuinely-unsafe code and stays reviewable in one sitting (CODING-STANDARDS §4). `kennel-lib-landlock` is the hand-rolled Landlock ABI, the largest single unsafe module, likewise split out of `kennel-lib-syscall`. `kennel-lib-scm` is the small `SCM_RIGHTS` fd-passing helper, also split out so a dumb delegate like `host-netproxy` can receive a conduit fd without pulling the whole unsafe crate. `kennel-lib-syscall` depends on these and re-exports them, so callers reach them as `kennel_lib_syscall::{path, unistd, netlink, handshake, landlock, scm}` unchanged. `facade-afunix`, `facade-socks5`, `facade-client`, and `facade-ssh` are the in-kennel ends of the binder connectors: small proxies `kennel-bin-init` launches inside the view. `facade-afunix` / `facade-socks5` / `facade-ssh` push the workload's outbound AF_UNIX / SOCKS5-or-HTTP / `ssh` traffic across the binder gateway to kenneld (`07-6-afunix.md`, `07-5-network.md` §7.5.2, `07-10-ssh.md`); `facade-socks5` serves both SOCKS5 and HTTP-proxy on one listener (first-byte detection). `facade-client` is the *inbound* mirror's in-kennel end: it pulls each host-side connection to a policy-mirrored bind port (the `BIND_INET` verb) and connects the workload's native listener (`07-5-network.md` §7.5.7). `host-netproxy` and `host-inetd` are the matching *host-side* delegates — the dumb outbound dialer and the dumb inbound binder/accepter respectively — each a glorified netcat that receives a conduit fd over an owner-only `AF_UNIX` socket while kenneld holds all the policy. `kennel-lib-binder` is the hand-rolled binder ioctl ABI (the per-kennel inter-namespace gateway, `02-4-binder.md`), parallel in every structural respect to `kennel-lib-bpf`; binder is load-bearing, so every kennel links it through kenneld, `kennel-bin-init`, and the facades. `kennel-bin-init` is the root-owned PID-1 binary the privhelper `fexecve`s to construct and supervise each kennel (`07-2-kennel-bin-init.md`). `kennel-lib-audit` is a first-class crate — the unified audit writer (the canonical event, one sanitisation pass, per-class level filtering, and the `Sink` fan-out). `kennel-lib-config` is a first-class crate too — the layered deployment/user configuration (`system.toml` / `config.toml` cascades) that keeps install paths out of the binaries. The operator CLI and the control protocol are their own crates so the unprivileged CLI is **outside the daemon's TCB**: `kennel-cli` is the `kennel` binary, and `kennel-lib-control` holds the CLI↔daemon wire protocol (`Request`/`Response` + framing + the socket-path resolver), re-exported as `kenneld::{control, socket}` so the daemon side is unchanged. The split keeps the CLI's dependencies — `serde_json` (via the `kennel-lib-manifest` trust-manifest reader) and the `lexopt` arg parser — out of `kenneld`'s dependency closure entirely, a hard crate boundary in place of the earlier "the daemon binary happens not to reference them". The protocol cannot drift because both sides depend on the one `kennel-lib-control` crate. The privhelper wire stays in `kennel-privhelper::wire` (it is privhelper↔daemon, both in the TCB). The whole workspace is blocking, thread-per-connection; no async runtime is linked.
+The workspace has **21 crates**, ~22,500 SLOC excluding tests. The table below is
+the authoritative inventory — size, `unsafe`, TCB membership, and dependency edges;
+the structural decisions and per-crate notes follow it.
+
+## Crate inventory and TCB
+
+SLOC excludes `#[cfg(test)]` modules. The **TCB** column marks the runtime trusted
+computing base: the crates linked into the privileged/enforcement binaries (`kenneld`
+the daemon, `kennel-privhelper` the suid/caps helper, `kennel-bin-init` the root PID-1),
+the code whose compromise would break confinement.
+
+| Crate | SLOC | unsafe | TCB | Consumers | External deps |
+|---|--:|:--:|:--:|---|---|
+| `kenneld` | 4623 | — | yes | *(binary)* | basic-toml, libc, serde |
+| `kennel-lib-compile` | 3524 | — | — | kennel-cli | basic-toml, serde |
+| `kennel-cli` | 2402 | — | — | *(binary)* | lexopt |
+| `kennel-lib-spawn` | 1652 | — | yes | bin-init, privhelper, kenneld | — |
+| `kennel-privhelper` | 1430 | — | yes | kenneld | — |
+| `kennel-lib-audit` | 1287 | — | yes | kennel-cli, kenneld | — |
+| `kennel-lib-bpf` | 1244 | **yes** | yes | spawn, privhelper, kenneld | libc, object |
+| `kennel-lib-policy` | 1196 | — | yes | cli, compile, spawn, kenneld | basic-toml, ed25519-compact, object, serde |
+| `kennel-lib-binder` | 1171 | **yes** | yes | bin-init, facade, spawn, kenneld | libc |
+| `kennel-lib-syscall` | 917 | **yes** | yes | 7 crates (broad) | bitflags, libc, nix, seccompiler |
+| `kennel-facade` | 558 | — | — | *(4 in-kennel bins)* | — |
+| `kennel-lib-os` | 396 | — | yes | kennel-lib-syscall | libc, nix |
+| `kennel-lib-control` | 371 | — | yes | kennel-cli, kenneld | — |
+| `kennel-lib-config` | 356 | — | yes | bin-init, cli, privhelper, kenneld | basic-toml, serde |
+| `kennel-bin-init` | 326 | — | yes | *(binary)* | — |
+| `kennel-lib-landlock` | 249 | **yes** | yes | kennel-lib-syscall | bitflags, libc, nix |
+| `kennel-lib-manifest` | 249 | — | — | kennel-cli | serde, serde_json |
+| `kennel-host-delegate` | 232 | — | yes | kenneld | — |
+| `kennel-lib-term` | 157 | — | yes | kenneld | vte |
+| `kennel-lib-scm` | 115 | **yes** | yes | facade, host-delegate, syscall | nix |
+| `kennel-lib-text` | 73 | — | yes | kennel-lib-audit | — |
+
+**Internal dependency edges (who pulls what):**
+
+- `kenneld` → spawn, privhelper, policy, syscall, term, control, config, audit, bpf, binder, host-delegate
+- `kennel-cli` → control, policy, compile, config, manifest, audit, syscall *(+ gen-man dev-dep)*
+- `kennel-lib-compile` → policy · `kennel-lib-spawn` → bpf, binder, policy, syscall
+- `kennel-privhelper` → syscall, spawn, config, bpf · `kennel-bin-init` → binder, config, spawn, syscall
+- `kennel-lib-syscall` → os, landlock, scm *(re-exports them)* · `kennel-lib-audit` → text, syscall
+- `kennel-lib-control` → syscall · `kennel-facade` → binder, scm · `kennel-host-delegate` → scm
+
+**Totals & TCB.** 21 crates, **22,528 SLOC** (excluding tests). The runtime **TCB
+closure** is 17 crates, **15,795 SLOC**. The 6,733 SLOC **outside** it: `kennel-cli`
+(the unprivileged operator tool) and its CLI-only deps `kennel-lib-compile` (the policy
+compiler) and `kennel-lib-manifest` (the trust-manifest reader that pulls `serde_json`),
+plus `kennel-facade` (the four in-kennel facade binaries, which run *confined*).
+
+**Reading it.**
+
+- The five `unsafe` crates are exactly the §4 quarantine set (`kennel-lib-syscall`,
+  `-bpf`, `-binder`, `-landlock`, `-scm`), all leaves or near-leaves — ~3.7k SLOC total.
+- `serde_json` appears in **one** crate only — `kennel-lib-manifest` → `kennel-cli` —
+  and is absent from every TCB crate's edges; same for `lexopt` and the compiler. The
+  TCB-minimisation is a crate boundary, not "the daemon happens not to call it".
+- `kennel-lib-policy` is the runtime verify-and-load half (1.2k SLOC); the ~3.5k-SLOC
+  compiler is `kennel-lib-compile`, linked only by the CLI. `kennel-lib-policy` itself
+  pulls no Project Kennel crate — it is purely functional.
+
+*Snapshot — SLOC drifts. Regenerate by stripping `#[cfg(test)]` modules from a per-crate
+line count and taking TCB membership from `cargo tree -p {kenneld, kennel-privhelper,
+kennel-bin-init}`.*
+
+## Structural decisions
+
+- **`unsafe` is quarantined (§4).** Exactly five crates carry `unsafe`:
+  `kennel-lib-syscall` (raw syscalls/namespaces/seccomp FFI), `kennel-lib-landlock`
+  (the hand-rolled Landlock ABI, the largest single unsafe module), `kennel-lib-bpf`
+  (the `bpf(2)` loader), `kennel-lib-binder` (the binder ioctl ABI), and
+  `kennel-lib-scm` (the one-line `SCM_RIGHTS` fd adoption). `kennel-lib-os` holds the
+  **safe** OS primitives (path canonicalisation, uid/gid, netlink, the userns-map
+  handshake) split *out* of `kennel-lib-syscall` so the unsafe crate stays small and
+  reviewable in one sitting; `kennel-lib-syscall` re-exports os/landlock/scm so callers
+  reach them as `kennel_lib_syscall::{path, unistd, netlink, handshake, landlock, scm}`.
+- **The TCB is minimised by crate boundary, not vigilance.** The operator CLI
+  (`kennel-cli`), the CLI↔daemon control protocol (`kennel-lib-control`, re-exported as
+  `kenneld::{control, socket}`), and the policy **compiler** (`kennel-lib-compile`) are
+  their own crates, so the daemon links only what it needs to *verify-and-load*. This
+  keeps `serde_json` (via the `kennel-lib-manifest` trust-manifest reader), `lexopt`, and
+  the ~3.5k-SLOC compiler out of `kenneld`'s dependency closure entirely —
+  `cargo tree -p kenneld` shows none of them.
+- **The runtime/compiler split.** `kennel-lib-policy` is the **runtime** half: the
+  settled-artefact types, `verify_settled`/`sign_settled` (the artefact crypto),
+  `parse_audit_defaults`, the invariant re-assertion, and the loader resolver — what the
+  spawn hot path needs. `kennel-lib-compile` is the **authoring** half: source schema,
+  template resolution, leaf deltas, translation, source signing, the lockfile, lint, and
+  risk evaluation. Authoring depends on runtime, never the reverse; only the CLI links
+  the compiler.
+- **Leaf binaries are grouped, not one-per-crate.** `kennel-facade` is one crate with
+  four binaries — the in-kennel binder-connector ends `facade-afunix`/`facade-socks5`/
+  `facade-client`/`facade-ssh` (push the workload's AF_UNIX / SOCKS5-or-HTTP / `ssh` /
+  inbound-BIND traffic across the binder gateway). `kennel-host-delegate` is one crate
+  with two binaries (`host-netproxy`/`host-inetd`) plus the conduit-wire library half
+  kenneld links — the dumb host-side outbound dialer and inbound accepter, each a
+  glorified netcat over an owner-only `AF_UNIX` socket while kenneld holds all policy.
+- **binder, audit, config.** `kennel-lib-binder` is the hand-rolled binder ioctl ABI
+  (the per-kennel inter-namespace gateway, `02-4-binder.md`), parallel to
+  `kennel-lib-bpf`; it is load-bearing, linked by kenneld, `kennel-bin-init`, and the
+  facades. `kennel-lib-audit` is the unified audit writer (one canonical event, one
+  sanitisation pass via `kennel-lib-text`, per-class levels, the `Sink` fan-out).
+  `kennel-lib-config` is the layered `system.toml`/`config.toml` cascade that keeps
+  install paths out of the binaries. The privhelper wire stays in
+  `kennel-privhelper::wire` (privhelper↔daemon, both in the TCB).
+
+The whole workspace is blocking, thread-per-connection; no async runtime is linked.
 
 ---
 
@@ -89,14 +195,14 @@ The workspace is acyclic and layered. Lower-level crates do not depend on higher
           ^                   kenneld re-exports it as kenneld::{control, socket}.
           |
         kenneld (lib + bin kenneld + bin kennel-akc)
-          |  serves kennel-lib-control + owns proxy.rs config writer
-          |  deps: control, spawn, privhelper, policy, netproxy, inetd, audit, config, syscall, binder
+          |  serves kennel-lib-control + owns the egress decision (crate::inet)
+          |  deps: control, spawn, privhelper, policy, host-delegate, audit, config, syscall, binder
           +----------------+----------------+----------------+--------------+
           |                |                |                |              |
-   host-netproxy   kennel-lib-spawn   kennel-privhelper   kennel-lib-audit  kennel-lib-config
+ kennel-host-delegate kennel-lib-spawn kennel-privhelper  kennel-lib-audit  kennel-lib-config
           |          (deps: bpf,    (lib+bin; wire.rs;       |          (leaf)
           | (deps:    policy,        deps: syscall,          | (deps:
-          |  audit)   syscall)       bpf [opt])              |  text,
+          |  scm)     syscall)       bpf [opt])              |  text,
           |                |                |                |  syscall [opt])
           |          +-----+-------+--------+                |
           |          |     |       |                         |
@@ -119,11 +225,15 @@ The workspace is acyclic and layered. Lower-level crates do not depend on higher
     depend on no kennel crate except, for kennel-lib-binder, optionally kennel-lib-syscall for
     shared raw-fd helpers).
 
-  facade-afunix / facade-socks5 / facade-client / facade-ssh (bins)  ← the in-kennel ends of the
+  kennel-facade (4 bins: facade-afunix/socks5/client/ssh)  ← the in-kennel ends of the
                                 binder connectors. deps: kennel-lib-binder (the client
-                                transaction surface); launched inside the view by
-                                kennel-bin-init, they push the workload's AF_UNIX / SOCKS5 /
-                                ssh traffic across the binder gateway to kenneld (§7.6, §7.5, §7.10).
+                                transaction surface) + kennel-lib-scm (splice); launched inside
+                                the view by kennel-bin-init, they push the workload's AF_UNIX /
+                                SOCKS5 / ssh / inbound-BIND traffic across the binder gateway to
+                                kenneld (§7.6, §7.5, §7.10).
+
+  kennel-cli (bin `kennel`) and kennel-lib-compile (the policy compiler) sit ABOVE
+  this graph: unprivileged, linked by no other crate, OUTSIDE the daemon TCB.
 ```
 
 Rules:
@@ -131,7 +241,7 @@ Rules:
 - **No cycles.** Enforced by Cargo (a cycle is a build error).
 - **No depth skipping in spirit.** A crate may depend on any layer below it, but a binary depending directly on `kennel-lib-syscall` to bypass the safe wrappers in `kennel-lib-spawn` is a smell that warrants a review note.
 - **`kennel-lib-syscall` is the primary `unsafe`-bearing crate**, alongside `kennel-lib-bpf` (hand-rolled `bpf(2)` FFI), `kennel-lib-binder` (hand-rolled binder `ioctl(2)` FFI), `kennel-lib-landlock` (the hand-rolled Landlock ABI), and `kennel-lib-scm` (the `SCM_RIGHTS` fd adoption). Every other crate carries `#![forbid(unsafe_code)]` per CODING-STANDARDS.md §4.
-- **Binder linkers are a closed set.** `kennel-lib-binder` (the binder ABI) is linked only by `kenneld` (node 0 / context manager), `kennel-bin-init` (PID-1 lifecycle consumer pulling its plan over node 0), and the in-kennel facades `facade-afunix` / `facade-socks5` / `facade-client` / `facade-ssh` (the connector clients that transact to node 0). No other crate links it; the workload never links `kennel-lib-binder`.
+- **Binder linkers are a closed set.** `kennel-lib-binder` (the binder ABI) is linked only by `kenneld` (node 0 / context manager), `kennel-bin-init` (PID-1 lifecycle consumer pulling its plan over node 0), and `kennel-facade` (its four binaries, the connector clients that transact to node 0). No other crate links it; the workload never links `kennel-lib-binder`.
 - **`kennel-lib-text` is a leaf-side utility crate** (no Project Kennel deps; stdlib only). Its single direct consumer is `kennel-lib-audit`, which runs the one sanitisation pass on every event; other crates' untrusted text reaches that pass by emitting through the audit writer rather than by linking `kennel-lib-text` themselves.
 - **`kennel-lib-policy`** does not depend on `kennel-lib-spawn`, `kennel-lib-bpf`, or any binary crate. The policy module is purely functional: same input, same output, no runtime side-effects.
 
@@ -153,11 +263,12 @@ The full public-API description for each crate lives in `02-8-internal-api.md`. 
 - Tiny crate, ~200 lines target.
 - Has its own fuzz target under `fuzz/text/`.
 
-### `kennel-lib-policy`
+### `kennel-lib-policy` (runtime) + `kennel-lib-compile` (compiler)
 
-- Largest non-binary crate. Owns the schema types and the resolver.
-- Builds with no I/O (file reading is the caller's responsibility); takes `&[u8]` for parsing.
-- Has fuzz targets for the parser and the resolver.
+- `kennel-lib-policy` is the **runtime** half: the settled-artefact types, `verify_settled` / `sign_settled` (the artefact crypto), the invariant re-assertion, `parse_audit_defaults`, and the loader resolver. ~1.2k SLOC, in the TCB; the spawn hot path. Builds with no I/O (callers pass `&[u8]`); no Project Kennel deps.
+- `kennel-lib-compile` is the **authoring** half, split out so the daemon never links it: the `source` schema, template `resolve`ution, `leaf` deltas, `translate`ion, source signing, the `lock`file, `lint`, and `risks`. ~3.5k SLOC, linked only by `kennel-cli`. Depends on `kennel-lib-policy` (the settled types it produces) — one-directional.
+- The `audit` module (the `[audit]` schema + translation) lives in `kennel-lib-policy` so `kenneld` can read `audit.toml` defaults at runtime, and is the single source of truth the compiler shares.
+- Both have fuzz targets (the parser, the resolver) under `fuzz/`.
 
 ### `kennel-lib-config`
 
@@ -167,7 +278,7 @@ The full public-API description for each crate lives in `02-8-internal-api.md`. 
 
 ### Audit (`kennel-lib-audit`)
 
-`kennel-lib-audit` (`#![forbid(unsafe_code)]`) is the unified writer: the canonical `Event`, one `kennel-lib-text` sanitisation pass, per-class level filtering, and a `Sink` trait fanning each event out to the file, stdout, syslog, and (feature `audit-journald`) journald sinks. The journald sink and the UUIDv7's randomness are the only parts needing FFI/`unsafe`; they live in `kennel-lib-syscall` (`journal`, `random`). kenneld builds the writer from the settled `AuditRuntime` and emits lifecycle events through it; the egress proxy builds its own writer from the per-kennel proxy config and emits each `net.egress` record through it (`host-netproxy::audit` → `kennel_lib_audit::Writer`). See `02-3-audit-schema.md` for the schema. The BPF events route through the same writer: `kennel-lib-bpf::ringbuf` provides the kernel-ringbuf reader (drops on full), and `kenneld::bpf_audit` reopens the privhelper-pinned per-kennel buffer with `BPF_OBJ_GET` and drains it into the writer with `source: bpf` (proven end to end by `kenneld/tests/bpf_drain.rs`).
+`kennel-lib-audit` (`#![forbid(unsafe_code)]`) is the unified writer: the canonical `Event`, one `kennel-lib-text` sanitisation pass, per-class level filtering, and a `Sink` trait fanning each event out to the file, stdout, syslog, and (feature `audit-journald`) journald sinks. The journald sink and the UUIDv7's randomness are the only parts needing FFI/`unsafe`; they live in `kennel-lib-syscall` (`journal`, `random`). kenneld builds the writer from the settled `AuditRuntime` and emits both the lifecycle events and the per-request `net.egress` records from its egress decision (`kenneld::inet`); the `kennel-host-delegate` dialers are dumb and emit no audit. See `02-3-audit-schema.md` for the schema. The BPF events route through the same writer: `kennel-lib-bpf::ringbuf` provides the kernel-ringbuf reader (drops on full), and `kenneld::bpf_audit` reopens the privhelper-pinned per-kennel buffer with `BPF_OBJ_GET` and drains it into the writer with `source: bpf` (proven end to end by `kenneld/tests/bpf_drain.rs`).
 
 ### `kennel-lib-bpf`
 
@@ -192,23 +303,19 @@ The control protocol (CLI ↔ kenneld) lives in its own crate `kennel-lib-contro
 - The namespace and mount phases are built in-crate over `kennel-lib-syscall` (bubblewrap-style, identity-mapped user namespace); there is no subprocess delegation to an external composer.
 - Has integration tests that require root, gated behind `#[cfg(feature = "e2e")]` (which also pulls the embedded BPF programs via `kennel-lib-bpf/embed-programs`).
 
-### `host-netproxy`
+### `kennel-host-delegate` (binaries `host-netproxy`, `host-inetd`)
 
-- Binary crate with a library half. **Sync, blocking — one thread per connection. No async runtime.**
-- The host-side **egress dial delegate** (`07-5-network.md` §7.5.2): a glorified `netcat`. kenneld owns the entire egress decision (allow/deny, DNS resolve, address pin — `kenneld::inet`); this delegate binds one owner-only `AF_UNIX` command socket and, per command kenneld sends `(port, pinned IPs)` + a conduit fd over `SCM_RIGHTS`, dials the pinned address from the host stack and splices. No TCP listener, no SOCKS5/HTTP server, no resolver, no policy, no config — the conduit relay logic is in `src/conduit.rs`. (The SOCKS5/HTTP *server* role lives in `facade-socks5`, inside the kennel.)
+- One crate, a library half + two binaries. **Sync, blocking — one thread per connection. No async runtime.** Links only `kennel-lib-scm` (the `SCM_RIGHTS` fd-passing); no policy, no `kennel-lib-binder`. kenneld links the library (the conduit codecs, `netproxy`/`inetd` modules) so the wire cannot drift, and resolves the binaries by name.
+- **`host-netproxy`** — the host-side egress dial delegate (`07-5-network.md` §7.5.2): a glorified `netcat`. kenneld owns the entire egress decision (`kenneld::inet`); per command kenneld sends `(port, pinned IPs)` + a conduit fd over `SCM_RIGHTS`, and the delegate dials the pinned address and splices (`netproxy::conduit`). No listener, no resolver, no policy, no config.
+- **`host-inetd`** — the host-side inbound BIND delegate (§7.5.7), the reverse: it binds each policy-mirrored `ip:port` on host loopback, accepts, splices the host end locally, and pushes the kennel end (+ port) back to kenneld (`inetd::listen`). It makes no policy decision (the `bind4`/`6` cgroup ACL already gated the bind).
 
-### `host-inetd`
+### `kennel-facade` (binaries `facade-afunix`, `facade-socks5`, `facade-client`, `facade-ssh`)
 
-- Binary crate with a library half. **Sync, blocking — one thread per connection.**
-- The host-side **inbound BIND delegate** (`07-5-network.md` §7.5.7), the reverse of `host-netproxy`: it binds each policy-mirrored `ip:port` on the host loopback alias, accepts, mints the conduit socketpair, splices the accepted connection to the host end locally, and pushes the kennel end (+ port) back to kenneld over the owner-only command socket. kenneld registers the ports and routes the conduit; it makes no inbound policy decision (the `bind4`/`6` cgroup ACL already gated the bind). The bind/accept/notify logic is in `src/listen.rs`.
-
-### `facade-socks5`
-
-- In-kennel binary (`07-5-network.md` §7.5.2/§7.5.6): the workload's egress endpoint. One loopback listener serves **both SOCKS5 and HTTP-proxy** (first-byte detection — `src/protocol.rs`); the HTTP-proxy parser (CONNECT tunnel + absolute-form forward) is `src/http.rs`. Each request transacts `CONNECT_INET` to binder node 0; kenneld decides under `[net.proxy]`, resolves+pins, drives the `host-netproxy` delegate, and returns the conduit fd, which the shim splices. No policy, no resolver, no host socket — the name (never a resolved address) crosses to kenneld. A binder participant alongside kenneld, `kennel-bin-init`, and the other facades.
-
-### `facade-client`
-
-- In-kennel binary (`07-5-network.md` §7.5.7): the inbound mirror's in-kennel end, the reverse of `facade-socks5`. For each policy-mirrored bind port it transacts `BIND_INET` to node 0 (pull-based — re-arming on `AGAIN`), and on a delivered conduit connects the workload's native listener at `<kennel-ip>:<port>` and splices. No policy; kenneld brokers the host-side accept.
+- One crate, four `kennel-bin-init`-launched in-kennel binaries (`#![forbid(unsafe_code)]`), the binder-connector ends. Each opens the in-view binderfs device and transacts to node 0; any failure exits non-zero so the workload's client fails closed. They link `kennel-lib-binder` (the client transaction surface) and `kennel-lib-scm` (the splice); no policy. They run *confined* inside the kennel, so they are outside the host TCB.
+- **`facade-socks5`** — the egress endpoint (§7.5.2/§7.5.6): one loopback listener serving **both SOCKS5 and HTTP-proxy** (first-byte detection — `protocol.rs`/`http.rs`). Each request → `CONNECT_INET` to node 0; kenneld decides, resolves+pins, drives the `host-netproxy` delegate, and returns the conduit fd it splices.
+- **`facade-client`** — the inbound BIND mirror (§7.5.7), the reverse: per policy-mirrored port a `BIND_INET` to node 0 (pull-based, re-arming on `AGAIN`), then `connect()`s the workload's native listener and splices.
+- **`facade-ssh`** — the `ssh` `ProxyCommand`: a confined kennel has no path off its loopback, so `ssh` reaches the bastion via a `CONNECT_INET` to kenneld (which has `host-netproxy` dial it), splicing the returned fd to stdio. The bastion's `kennel-akc` vends the forced command `ssh <options> -- <dest>` run as the operator; the workload's `~/.ssh` carries only a compile-minted synthetic key.
+- **`facade-afunix`** — brokers the workload's `AF_UNIX` connect through the `org.projectkennel.IAfUnix/default` facade (`07-6-afunix.md`).
 
 ### `kennel-privhelper`
 
@@ -221,14 +328,6 @@ The control protocol (CLI ↔ kenneld) lives in its own crate `kennel-lib-contro
 - Binary crate, no library half. The **root-owned PID 1** of every kennel: the privhelper factory `fexecve`s it (with empty argv/envp) as the trusted uid-0 process *after* `pivot_root`, so it is trapped in the sealed view from its first instruction (`07-2-kennel-bin-init.md`). It does no policy decisions, no mount/netlink/device/fs-lookup/env code, and holds no ambient host caps — deliberately tiny and auditable, the same binary for every kennel.
 - **Links `kennel-lib-binder`** as a lifecycle consumer: it `open`s the per-kennel binderfs device and pulls its supervision-half plan from kenneld (node 0) via `GET_SANDBOX_PLAN`, then rides node 0 for the `NOTIFY_*` lifecycle verbs. This makes it the second binder participant alongside kenneld.
 - **Reuses the `kennel-lib-spawn` seal** — `no_new_privs` + seccomp + Landlock + ulimits + identity drop (`set_gid`/`set_uid`) — applied to the **workload child** it forks and drops to the operator, *not* to itself or the facades (which must remain free to fork, `waitpid`, and reach the bus). Only `kennel-bin-init` stays uid 0 — a different uid from the operator-uid workload/facades, so they cannot signal or `ptrace` PID 1.
-
-### `facade-afunix` / `facade-socks5` / `facade-ssh`
-
-- The in-kennel ends of the binder connectors (`#![forbid(unsafe_code)]`): small `kennel-bin-init`-launched proxies that push the workload's AF_UNIX (`07-6-afunix.md`), SOCKS5 (§7.5), and `ssh` (`07-10-ssh.md`) traffic across the binder gateway to kenneld. Each opens the in-view binderfs device and transacts to node 0; any failure exits non-zero so the workload's client sees a dead connector and fails closed.
-- **`facade-ssh`** is the `ssh` `ProxyCommand` (`ProxyCommand facade-ssh %h %p`): a confined kennel has no network path off its loopback, so `ssh` reaches the bastion by issuing an `INet` `CONNECT_INET` to kenneld, which has `host-netproxy` dial the bastion on the kennel's behalf, and splicing the returned fd to stdio. There is no re-origination binary, no agent, and no fingerprint selection — the bastion's `kennel-akc` bakes the forced command `ssh <options> -- <dest>` straight into the `authorized_keys` line, run as the operator. The workload's `~/.ssh` carries only a compile-minted synthetic key whose public half is pinned into the signed grant.
-- **`facade-socks5`** is the SOCKS5 front-end (§7.5): it accepts the workload's SOCKS5 CONNECT and translates each to an `INet` `CONNECT_INET` over the binder bus.
-- **`facade-afunix`** brokers the workload's AF_UNIX connect through the `org.projectkennel.IAfUnix/default` facade (`07-6-afunix.md`).
-- Each links only `kennel-lib-binder` (the client transaction surface); none links any other Project Kennel crate.
 
 ### `kenneld`
 

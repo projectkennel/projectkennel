@@ -4,9 +4,10 @@
 //!
 //! Turn a **source** policy — a template, or a leaf with `+=`/`-=` deltas — into
 //! the signed **settled** artefact the runtime enforces. The stages: parse and
-//! validate the [`source`] schema, walk and fold the template chain
-//! ([`resolve`]), apply [`leaf`] deltas, [`translate`] + substitute to the settled
-//! form, and sign. [`compile`]/[`compile_leaf`] orchestrate them; [`lint`] and
+//! validate the [`source`](mod@source) schema, walk and fold the template chain
+//! ([`resolve`](mod@resolve)), apply [`leaf`] deltas, then
+//! [`translate`](mod@translate)-and-substitute to the settled form and sign.
+//! [`compile`](mod@compile) and [`compile_leaf`] orchestrate them; [`lint`] and
 //! [`risks`] are the inspection tools; [`lock`] pins each resolved reference;
 //! [`source_sig`] signs/verifies templates and fragments.
 //!
