@@ -182,6 +182,56 @@ pub fn compile_leaf(
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
+/// Resolve a policy's folded **effective source**, stopping *before* translation
+/// so the threat tags survive.
+///
+/// The fold is the inheritance chain, its included fragments, and (for a leaf) its
+/// `+=`/`-=` deltas applied.
+///
+/// This is the honest input for the [risk](crate::risks) and [diff](crate::diff)
+/// engines: threat tags live only in source, never the settled artefact. It
+/// accepts either policy form — a template/source document or a delta-leaf —
+/// mirroring [`compile`]/[`compile_leaf`] exactly up to the translate step, so
+/// the engines see the same folded grants the compiler enforces.
+///
+/// # Errors
+///
+/// Propagates [`PolicyError`] from parsing, signature verification, chain
+/// resolution, include composition, or leaf validation.
+pub fn effective_source(
+    bytes: &[u8],
+    source: &dyn TemplateSource,
+    trust: &Trust<'_>,
+) -> Result<SourcePolicy, PolicyError> {
+    match crate::source::parse(bytes) {
+        Ok(entry) => {
+            let mut effective = resolve_verified(&entry, source, trust)?.effective;
+            let include_refs = effective.include.clone();
+            apply_includes(&mut effective, &include_refs, source, trust)?;
+            Ok(effective)
+        }
+        // Not a source document — try the delta-leaf form (mirrors `build_settled`).
+        Err(source_err) => {
+            let leaf = crate::leaf::parse(bytes).map_err(|_| source_err)?;
+            leaf.validate()?;
+            let base = leaf.template_base.clone().ok_or_else(|| {
+                PolicyError::Resolution("leaf policy has no `template_base`".to_owned())
+            })?;
+            let stub = SourcePolicy {
+                template_base: Some(base),
+                template_name: Some("<leaf>".to_owned()),
+                ..SourcePolicy::default()
+            };
+            let mut effective = resolve_verified(&stub, source, trust)?.effective;
+            let mut include_refs = effective.include.clone();
+            include_refs.extend(leaf.include.iter().cloned());
+            apply_includes(&mut effective, &include_refs, source, trust)?;
+            leaf.apply(&mut effective);
+            Ok(effective)
+        }
+    }
+}
+
 /// Warn about policy sections that parse but whose effect comes from elsewhere, so an author
 /// does not believe the section itself imposes a control. Unbuilt *features* (`[container]`,
 /// `[dbus]`, `[x11]`, `[fs.scrub]`, `[[fs.home.sanitise]]`) are no longer accepted at all — they

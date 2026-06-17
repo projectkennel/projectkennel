@@ -53,7 +53,7 @@ pub mod translate;
 pub mod unix;
 pub mod version;
 
-pub use compile::{compile, compile_leaf, seal_unsigned, Compiled};
+pub use compile::{compile, compile_leaf, effective_source, seal_unsigned, Compiled};
 pub use leaf::{parse as parse_leaf, LeafPolicy};
 pub use lint::lint_settled;
 pub use lock::{LockEntry, Lockfile};

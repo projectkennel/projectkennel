@@ -27,10 +27,48 @@
 //! The public types derive [`serde::Serialize`] so the CLI can emit a structured
 //! `--json` delta through a real serialiser (no hand-rolled JSON).
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
-use crate::source::SourcePolicy;
+use crate::risks;
+use crate::source::{SourcePolicy, Threats};
 use crate::threats::Catalogue;
+
+/// Whether a grant grants capability (`Allow`), removes it (`Deny`), or is a
+/// scalar knob (`Scalar`). Polarity decides which direction of a change *widens*
+/// the workload's reach: adding an allow or removing a deny widens; adding a deny
+/// or removing an allow narrows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Polarity {
+    Allow,
+    Deny,
+    Scalar,
+}
+
+/// One comparable capability atom extracted from a folded policy.
+#[derive(Debug, Clone)]
+struct Grant {
+    /// Stable identity for matching the same grant across the two sides
+    /// (`net.proxy.allow:api.x.com`). Two grants with the same key are "the same
+    /// grant"; a differing [`value`](Self::value) makes it a *modification*.
+    key: String,
+    /// Display label for the carrier (`[[net.proxy.allow]] api.x.com`).
+    carrier: String,
+    /// Section bucket for grouping/ordering the output (see [`rank`]).
+    section: &'static str,
+    /// The comparable value beyond identity (ports, flags, the scalar's value).
+    /// Equal keys with differing values are reported as `~` modifications.
+    value: String,
+    /// The grant's documented `reason`, if any.
+    reason: Option<String>,
+    /// Threat ids this grant exposes (authored tags + compiler-derived exposures).
+    exposed: Vec<String>,
+    /// Threat ids this grant mitigates (authored tags).
+    mitigated: Vec<String>,
+    /// Allow / deny / scalar — drives the widening determination.
+    polarity: Polarity,
+}
 
 /// A threat resolved against the catalogue for display.
 #[derive(Debug, Clone, Serialize)]
@@ -131,8 +169,513 @@ impl PolicyDiff {
 /// `new`, removed grants were in `old`.
 #[must_use]
 pub fn diff(old: &SourcePolicy, new: &SourcePolicy, catalogue: &Catalogue) -> PolicyDiff {
-    let _ = (old, new, catalogue);
-    todo!("diff engine implemented in the feat: phase")
+    let old_grants = index(grants(old));
+    let new_grants = index(grants(new));
+
+    let mut keys: Vec<&String> = old_grants.keys().chain(new_grants.keys()).collect();
+    keys.sort();
+    keys.dedup();
+
+    // Pair each change with its section rank so the output groups by subsystem.
+    let mut ranked: Vec<(u8, GrantChange)> = Vec::new();
+    for key in keys {
+        match (old_grants.get(key), new_grants.get(key)) {
+            (None, Some(n)) => {
+                ranked.push((rank(n.section), change(ChangeKind::Added, n, n.value.clone(), catalogue)));
+            }
+            (Some(o), None) => {
+                ranked.push((rank(o.section), change(ChangeKind::Removed, o, o.value.clone(), catalogue)));
+            }
+            (Some(o), Some(n)) if o.value != n.value => {
+                let detail = format!("{} \u{2192} {}", o.value, n.value);
+                ranked.push((rank(n.section), change(ChangeKind::Modified, n, detail, catalogue)));
+            }
+            _ => {} // present on both, unchanged
+        }
+    }
+
+    // Stable, readable ordering: by section, then by carrier within a section.
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.carrier.cmp(&b.1.carrier)));
+    let changes = ranked.into_iter().map(|(_, c)| c).collect();
+
+    PolicyDiff {
+        catalogue_version: catalogue.version.clone(),
+        changes,
+        summary: threat_delta(old, new, catalogue),
+    }
+}
+
+/// Build a [`GrantChange`] from a matched grant and a precomputed `detail` string.
+fn change(kind: ChangeKind, g: &Grant, detail: String, catalogue: &Catalogue) -> GrantChange {
+    let widening = match g.polarity {
+        Polarity::Allow => kind == ChangeKind::Added,
+        Polarity::Deny => kind == ChangeKind::Removed,
+        // A scalar modification is louder when it adds exposure; otherwise it is
+        // merely a change the reader judges from the old → new value.
+        Polarity::Scalar => kind != ChangeKind::Removed && !g.exposed.is_empty(),
+    };
+    GrantChange {
+        kind,
+        carrier: g.carrier.clone(),
+        reason: g.reason.clone(),
+        // Suppress the detail line when the carrier label already shows it (a
+        // simple path/identity grant); keep it for ports and `old → new` changes.
+        detail: if g.carrier.contains(&detail) {
+            String::new()
+        } else {
+            detail
+        },
+        exposed: g.exposed.iter().map(|id| resolve_ref(id, catalogue)).collect(),
+        mitigated: g
+            .mitigated
+            .iter()
+            .map(|id| resolve_ref(id, catalogue))
+            .collect(),
+        widening,
+        note: note(kind, g),
+    }
+}
+
+/// The unambiguous impact note for a change, or `None` when the carrier + threats
+/// already say everything (no invented risk — `footgun-warn-dont-forbid`).
+fn note(kind: ChangeKind, g: &Grant) -> Option<String> {
+    match (kind, g.polarity) {
+        (ChangeKind::Removed, Polarity::Deny) => {
+            Some("weakens: a deny was removed — the floor is lower".to_owned())
+        }
+        (ChangeKind::Removed, Polarity::Allow) => {
+            Some("no longer granted — a workload relying on it fails".to_owned())
+        }
+        (ChangeKind::Added, Polarity::Allow) if is_permissive_exec(&g.value) => {
+            Some("permissive: this runs any executable in the view".to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// Whether an `exec.allow` value is the permissive `**`/`/**` opt-out.
+fn is_permissive_exec(value: &str) -> bool {
+    matches!(value.trim(), "**" | "/**")
+}
+
+/// Resolve a threat id against the catalogue (uncatalogued ⇒ bare id, no title).
+fn resolve_ref(id: &str, catalogue: &Catalogue) -> ThreatRef {
+    catalogue.lookup(id).map_or_else(
+        || ThreatRef {
+            id: id.to_owned(),
+            title: None,
+            residual: String::new(),
+        },
+        |e| ThreatRef {
+            id: id.to_owned(),
+            title: Some(e.title.clone()),
+            residual: e.residual.clone(),
+        },
+    )
+}
+
+/// Index grants by key; the first wins on a (rare, folded) duplicate key.
+fn index(grants: Vec<Grant>) -> BTreeMap<String, Grant> {
+    let mut map = BTreeMap::new();
+    for g in grants {
+        map.entry(g.key.clone()).or_insert(g);
+    }
+    map
+}
+
+/// The net threat-posture delta: run the risk engine on each side and difference
+/// the exposed / mitigated id sets.
+fn threat_delta(old: &SourcePolicy, new: &SourcePolicy, catalogue: &Catalogue) -> ThreatDelta {
+    let o = risks::evaluate(old, catalogue);
+    let n = risks::evaluate(new, catalogue);
+    let exposed = |r: &risks::RiskReport| ids(&r.exposures);
+    let mitig = |r: &risks::RiskReport| ids(&r.mitigations);
+    let (oe, ne) = (exposed(&o), exposed(&n));
+    let (om, nm) = (mitig(&o), mitig(&n));
+    ThreatDelta {
+        newly_exposed: diff_ids(&ne, &oe, catalogue),
+        no_longer_exposed: diff_ids(&oe, &ne, catalogue),
+        newly_mitigated: diff_ids(&nm, &om, catalogue),
+        no_longer_mitigated: diff_ids(&om, &nm, catalogue),
+    }
+}
+
+/// The distinct threat ids in a finding list, sorted.
+fn ids(findings: &[risks::Finding]) -> Vec<String> {
+    let mut v: Vec<String> = findings.iter().map(|f| f.threat_id.clone()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The ids in `a` not in `b`, resolved against the catalogue.
+fn diff_ids(a: &[String], b: &[String], catalogue: &Catalogue) -> Vec<ThreatRef> {
+    a.iter()
+        .filter(|id| !b.contains(id))
+        .map(|id| resolve_ref(id, catalogue))
+        .collect()
+}
+
+/// A coarse rank for grouping the changes by subsystem in the output.
+fn rank(section: &str) -> u8 {
+    match section {
+        "exec" => 0,
+        "fs" => 1,
+        "net" => 2,
+        "unix" => 3,
+        "ssh" => 4,
+        "binder" => 5,
+        "identity" => 6,
+        "workload" => 7,
+        _ => 8, // lifecycle / tty / trust and other posture toggles
+    }
+}
+
+/// One carrier label, distinguishing a per-entry grant by its identity.
+fn label(section: &str, ident: Option<&str>) -> String {
+    ident.map_or_else(|| section.to_owned(), |id| format!("{section} {id}"))
+}
+
+/// Enumerate a folded policy's capability surface into comparable grant atoms.
+/// The surface covered is the one that shapes confinement and threat exposure —
+/// the same carriers the risk engine reads, plus the core capability lists
+/// (`exec`/`fs`) and the scalar posture knobs. Audit-tuning and env-curation
+/// knobs that do not change what the workload can reach are intentionally omitted.
+#[allow(clippy::too_many_lines)] // a flat, cohesive enumeration of every carrier.
+fn grants(p: &SourcePolicy) -> Vec<Grant> {
+    let mut out: Vec<Grant> = Vec::new();
+
+    // [exec] — the execve allowlist.
+    if let Some(exec) = &p.exec {
+        for path in exec.allow.iter().flatten() {
+            out.push(Grant {
+                key: format!("exec.allow:{path}"),
+                carrier: format!("[[exec.allow]] {path}"),
+                section: "exec",
+                value: path.clone(),
+                reason: None,
+                exposed: Vec::new(),
+                mitigated: Vec::new(),
+                polarity: Polarity::Allow,
+            });
+        }
+    }
+
+    // [fs] — read/write grants and host-device passthrough.
+    if let Some(fs) = &p.fs {
+        for path in fs.read.iter().flatten() {
+            out.push(simple_allow("fs.read", "fs", "[[fs.read]]", path));
+        }
+        for path in fs.write.iter().flatten() {
+            out.push(simple_allow("fs.write", "fs", "[[fs.write]]", path));
+        }
+        if let Some(dev) = &fs.dev {
+            for pt in &dev.passthrough {
+                let path = pt.path.as_deref().unwrap_or("(device)");
+                out.push(Grant {
+                    key: format!("fs.dev.passthrough:{path}"),
+                    carrier: label("[[fs.dev.passthrough]]", pt.path.as_deref()),
+                    section: "fs",
+                    value: path.to_owned(),
+                    reason: pt.reason.clone(),
+                    // Authored tags plus the compiler-derived T2.1 (mirrors `risks`).
+                    exposed: exposed_with(pt.threats.as_ref(), &["T2.1"]),
+                    mitigated: mitigated_of(pt.threats.as_ref()),
+                    polarity: Polarity::Allow,
+                });
+            }
+        }
+    }
+
+    if let Some(net) = &p.net {
+        // [net] mode — the posture scalar; host mode derives T1.6 (mirrors `risks`).
+        if let Some(mode) = &net.mode {
+            out.push(Grant {
+                key: "net.mode".to_owned(),
+                carrier: "[net] mode".to_owned(),
+                section: "net",
+                value: mode.clone(),
+                reason: net.reason.clone(),
+                exposed: if mode == "host" {
+                    vec!["T1.6".to_owned()]
+                } else {
+                    Vec::new()
+                },
+                mitigated: Vec::new(),
+                polarity: Polarity::Scalar,
+            });
+        }
+        if let Some(proxy) = &net.proxy {
+            for a in &proxy.allow {
+                let ident = a.name.as_deref().or(a.cidr.as_deref());
+                out.push(Grant {
+                    key: format!("net.proxy.allow:{}", ident.unwrap_or("?")),
+                    carrier: label("[[net.proxy.allow]]", ident),
+                    section: "net",
+                    value: ports_value(&a.ports),
+                    reason: a.reason.clone(),
+                    exposed: exposed_of(a.threats.as_ref()),
+                    mitigated: mitigated_of(a.threats.as_ref()),
+                    polarity: Polarity::Allow,
+                });
+            }
+            if let Some(deny) = &proxy.deny {
+                for (kind, rule) in deny
+                    .invariant
+                    .iter()
+                    .map(|r| ("invariant", r))
+                    .chain(deny.policy.iter().map(|r| ("policy", r)))
+                {
+                    out.push(Grant {
+                        key: format!("net.proxy.deny.{kind}:{}", rule.cidr),
+                        carrier: label(&format!("[[net.proxy.deny.{kind}]]"), Some(&rule.cidr)),
+                        section: "net",
+                        value: rule.cidr.clone(),
+                        reason: rule.reason.clone(),
+                        exposed: exposed_of(rule.threats.as_ref()),
+                        mitigated: mitigated_of(rule.threats.as_ref()),
+                        polarity: Polarity::Deny,
+                    });
+                }
+            }
+        }
+        if let Some(bpf) = &net.bpf {
+            for (sect, acl) in [("connect", &bpf.connect), ("bind", &bpf.bind)] {
+                let Some(acl) = acl else { continue };
+                for (pol, rule) in acl
+                    .allow
+                    .iter()
+                    .map(|r| (Polarity::Allow, r))
+                    .chain(acl.deny.iter().map(|r| (Polarity::Deny, r)))
+                {
+                    let dir = if pol == Polarity::Allow { "allow" } else { "deny" };
+                    let cidr = rule.cidr.as_deref().unwrap_or("*");
+                    out.push(Grant {
+                        key: format!("net.bpf.{sect}.{dir}:{cidr}:{}", ports_value(&rule.ports)),
+                        carrier: label(&format!("[[net.bpf.{sect}.{dir}]]"), Some(cidr)),
+                        section: "net",
+                        value: ports_value(&rule.ports),
+                        reason: rule.reason.clone(),
+                        exposed: exposed_of(rule.threats.as_ref()),
+                        mitigated: mitigated_of(rule.threats.as_ref()),
+                        polarity: pol,
+                    });
+                }
+            }
+        }
+    }
+
+    // [unix] — granted AF_UNIX sockets.
+    if let Some(unix) = &p.unix {
+        for a in &unix.allow {
+            let ident = a.name.as_deref().or(a.real.as_deref());
+            out.push(Grant {
+                key: format!("unix.allow:{}", ident.unwrap_or("?")),
+                carrier: label("[[unix.allow]]", ident),
+                section: "unix",
+                value: a.real.clone().unwrap_or_default(),
+                reason: a.reason.clone(),
+                exposed: exposed_of(a.threats.as_ref()),
+                mitigated: mitigated_of(a.threats.as_ref()),
+                polarity: Polarity::Allow,
+            });
+        }
+    }
+
+    // [ssh] — the headless scalar and the egress destinations.
+    if let Some(ssh) = &p.ssh {
+        if let Some(headless) = ssh.allow_headless {
+            out.push(Grant {
+                key: "ssh.allow_headless".to_owned(),
+                carrier: "[ssh] allow_headless".to_owned(),
+                section: "ssh",
+                value: headless.to_string(),
+                reason: None,
+                exposed: if headless {
+                    exposed_with(ssh.threats.as_ref(), &["T1.6"])
+                } else {
+                    exposed_of(ssh.threats.as_ref())
+                },
+                mitigated: mitigated_of(ssh.threats.as_ref()),
+                polarity: Polarity::Scalar,
+            });
+        }
+        for d in &ssh.destinations {
+            let dest = d.dest.as_deref().unwrap_or("(dest)");
+            out.push(Grant {
+                key: format!("ssh.destination:{dest}"),
+                carrier: label("[[ssh.destinations]]", d.dest.as_deref()),
+                section: "ssh",
+                value: if d.options.is_empty() {
+                    dest.to_owned()
+                } else {
+                    format!("{dest} ({})", d.options.join(" "))
+                },
+                reason: d.reason.clone(),
+                exposed: exposed_of(d.threats.as_ref()),
+                mitigated: mitigated_of(d.threats.as_ref()),
+                polarity: Polarity::Allow,
+            });
+        }
+    }
+
+    // [binder] — provided and consumed user services.
+    if let Some(binder) = &p.binder {
+        for prov in &binder.provide {
+            out.push(Grant {
+                key: format!("binder.provide:{}", prov.name.as_deref().unwrap_or("?")),
+                carrier: label("[[binder.provide]]", prov.name.as_deref()),
+                section: "binder",
+                value: prov.accept_from.join(","),
+                reason: prov.reason.clone(),
+                exposed: exposed_of(prov.threats.as_ref()),
+                mitigated: mitigated_of(prov.threats.as_ref()),
+                polarity: Polarity::Allow,
+            });
+        }
+        for cons in &binder.consume {
+            out.push(Grant {
+                key: format!("binder.consume:{}", cons.name.as_deref().unwrap_or("?")),
+                carrier: label("[[binder.consume]]", cons.name.as_deref()),
+                section: "binder",
+                value: cons.from.clone().unwrap_or_default(),
+                reason: cons.reason.clone(),
+                exposed: exposed_of(cons.threats.as_ref()),
+                mitigated: mitigated_of(cons.threats.as_ref()),
+                polarity: Polarity::Allow,
+            });
+        }
+    }
+
+    // [identity] — retained supplementary groups.
+    if let Some(identity) = &p.identity {
+        for group in &identity.groups {
+            out.push(simple_allow("identity.group", "identity", "[identity] groups", group));
+        }
+    }
+
+    // [workload] — argv and the binary pins (scalar posture).
+    if let Some(w) = &p.workload {
+        if let Some(argv) = &w.argv {
+            out.push(scalar("workload.argv", "workload", "[workload] argv", argv.join(" ")));
+        }
+        if let Some(pinned) = w.pinned {
+            out.push(scalar(
+                "workload.pinned",
+                "workload",
+                "[workload] pinned",
+                pinned.to_string(),
+            ));
+        }
+        if let Some(sha) = &w.sha256 {
+            if !sha.is_empty() {
+                out.push(scalar(
+                    "workload.sha256",
+                    "workload",
+                    "[workload] sha256",
+                    format!("{} pin(s)", sha.len()),
+                ));
+            }
+        }
+    }
+
+    // [lifecycle] / [tty] / [trust] — the remaining posture toggles.
+    if let Some(lc) = &p.lifecycle {
+        if let Some(ttl) = &lc.ttl {
+            out.push(scalar("lifecycle.ttl", "misc", "[lifecycle] ttl", ttl.clone()));
+        }
+        if let Some(action) = &lc.ttl_action {
+            out.push(scalar(
+                "lifecycle.ttl_action",
+                "misc",
+                "[lifecycle] ttl_action",
+                action.clone(),
+            ));
+        }
+    }
+    if let Some(tty) = &p.tty {
+        if let Some(f) = tty.filter_terminal_escapes {
+            out.push(scalar(
+                "tty.filter_terminal_escapes",
+                "misc",
+                "[tty] filter_terminal_escapes",
+                f.to_string(),
+            ));
+        }
+    }
+    if let Some(trust) = &p.trust {
+        if let Some(m) = trust.manifest {
+            out.push(scalar("trust.manifest", "misc", "[trust] manifest", m.to_string()));
+        }
+    }
+
+    out
+}
+
+/// A capability-list allow atom carrying no threat tags (its identity *is* its value).
+fn simple_allow(prefix: &'static str, section: &'static str, carrier_section: &str, path: &str) -> Grant {
+    Grant {
+        key: format!("{prefix}:{path}"),
+        carrier: format!("{carrier_section} {path}"),
+        section,
+        value: path.to_owned(),
+        reason: None,
+        exposed: Vec::new(),
+        mitigated: Vec::new(),
+        polarity: Polarity::Allow,
+    }
+}
+
+/// A scalar posture atom (its value is the comparable; a change is a modification).
+fn scalar(key: &str, section: &'static str, carrier: &str, value: String) -> Grant {
+    Grant {
+        key: key.to_owned(),
+        carrier: carrier.to_owned(),
+        section,
+        value,
+        reason: None,
+        exposed: Vec::new(),
+        mitigated: Vec::new(),
+        polarity: Polarity::Scalar,
+    }
+}
+
+/// The exposed tags of an optional `threats`, or empty.
+fn exposed_of(t: Option<&Threats>) -> Vec<String> {
+    t.map(|t| t.exposed.clone()).unwrap_or_default()
+}
+
+/// The mitigated tags of an optional `threats`, or empty.
+fn mitigated_of(t: Option<&Threats>) -> Vec<String> {
+    t.map(|t| t.mitigated.clone()).unwrap_or_default()
+}
+
+/// Authored exposed tags plus the compiler-derived ones, de-duplicated.
+fn exposed_with(t: Option<&Threats>, derived: &[&str]) -> Vec<String> {
+    let mut v = exposed_of(t);
+    for d in derived {
+        if !v.iter().any(|x| x == d) {
+            v.push((*d).to_owned());
+        }
+    }
+    v
+}
+
+/// Render a port list as a stable comparable value.
+fn ports_value(ports: &[u16]) -> String {
+    if ports.is_empty() {
+        "ports=any".to_owned()
+    } else {
+        let mut p: Vec<u16> = ports.to_vec();
+        p.sort_unstable();
+        format!(
+            "ports=[{}]",
+            p.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
 }
 
 #[cfg(test)]
