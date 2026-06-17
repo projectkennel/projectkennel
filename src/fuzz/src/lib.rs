@@ -3,12 +3,13 @@
 //! # Purpose
 //!
 //! CODING-STANDARDS.md §10.6: every parser of untrusted input carries a fuzz
-//! target. The boundaries (§10.1) covered here are the egress front-door
-//! (the `CONNECT_INET` request wire the in-kennel facade frames), the binder
-//! driver-return command stream, the two IPC wire formats (the kenneld control
-//! protocol and the privhelper packed-struct request), and the signed-policy
-//! reader. Each must, for *any* input, return `Ok`/`Err`/`None` — never panic,
-//! never hang, never read out of bounds.
+//! target. The boundaries (§10.1) covered here are the egress front-door — both
+//! the workload-facing SOCKS5/HTTP-proxy parse (the facade's protocol classifier
+//! and HTTP request head) and the `CONNECT_INET` request wire the facade frames on
+//! to kenneld — the binder driver-return command stream, the two IPC wire formats
+//! (the kenneld control protocol and the privhelper packed-struct request), and the
+//! signed-policy reader. Each must, for *any* input, return `Ok`/`Err`/`None` —
+//! never panic, never hang, never read out of bounds.
 //!
 //! # Approach (Path C)
 //!
@@ -32,9 +33,13 @@ use arbitrary::Unstructured;
 /// intentionally discarded: the property under test is "does not panic / hang /
 /// misbehave", and a returned `Err` is a *correct* outcome for junk input.
 pub fn fuzz_parsers(data: &[u8]) {
-    // The egress front-door: the in-kennel facade (facade-socks5) frames each workload connect as a
-    // CONNECT_INET request `[transport | port | host]` and transacts it to kenneld over binder. The
-    // host (a DNS name) is fully workload-controlled, so the decoder is the untrusted parse (07-5).
+    // The egress front-door has two untrusted hops. (1) The workload speaks SOCKS5/HTTP-proxy to the
+    // in-kennel facade (facade-socks5): the leading byte classifies the protocol, and an HTTP client
+    // sends a `CONNECT host:port` / absolute-form request head — both fully workload-controlled bytes.
+    let _ = kennel_facade::socks5::protocol::detect(data);
+    let _ = kennel_facade::socks5::http::parse_request(data);
+    // (2) The facade then frames the connect as a CONNECT_INET request `[transport | port | host]`
+    // and transacts it to kenneld over binder; the host (a DNS name) is workload-controlled (07-5).
     let _ = kennel_lib_binder::service::inet::decode_request(data, 255);
 
     // IPC wire formats: the kenneld control protocol and the privhelper request.

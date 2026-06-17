@@ -1,6 +1,6 @@
 //! HTTP-proxy request parsing, server side.
 //!
-//! The second protocol the one listener serves ([`crate::protocol`] routes here on a leading
+//! The second protocol the one listener serves ([`super::protocol`] routes here on a leading
 //! uppercase method letter). Two request forms reach an HTTP proxy:
 //!
 //! - **`CONNECT host:port HTTP/1.1`** (authority-form) — the client wants a raw tunnel, used for

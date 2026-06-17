@@ -54,10 +54,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
+name = "kennel-facade"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-binder",
+ "kennel-lib-scm",
+]
+
+[[package]]
 name = "kennel-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "kennel-facade",
  "kennel-lib-binder",
  "kennel-lib-policy",
  "kennel-lib-term",

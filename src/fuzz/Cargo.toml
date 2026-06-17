@@ -32,3 +32,7 @@ kennel-privhelper = { path = "../crates/kennel-privhelper" }
 kennel-lib-policy = { path = "../crates/kennel-lib-policy" }
 kennel-lib-binder = { path = "../crates/kennel-lib-binder" }
 kennel-lib-term = { path = "../crates/kennel-lib-term" }
+# The egress front-door parsers (facade-socks5): the workload speaks SOCKS5/HTTP to
+# the in-kennel shim, so its protocol classifier and HTTP request-head parser read
+# fully workload-controlled bytes (07-5 §7.5.2). Library target only — the bins do not link.
+kennel-facade = { path = "../crates/kennel-facade" }

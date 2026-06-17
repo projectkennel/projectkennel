@@ -29,12 +29,9 @@
 
 #![forbid(unsafe_code)]
 
-// Bin-private submodules; in a multi-bin crate a bin-root's modules are siblings
-// in `src/bin/`, so point at the per-bin subdirectory explicitly.
-#[path = "facade-socks5/http.rs"]
-mod http;
-#[path = "facade-socks5/protocol.rs"]
-mod protocol;
+// The two untrusted-input parsers live in the crate library (`src/socks5/`) so the
+// fuzz harness can reach them (CODING-STANDARDS §10.6); this bin consumes them.
+use kennel_facade::socks5::{http, protocol};
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};

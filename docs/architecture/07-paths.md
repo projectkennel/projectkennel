@@ -123,14 +123,17 @@ is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
 *future work* (`08-as-built-notes.md`); when built, their sockets stage under this
 same per-user tree, never a shared one.
 
-**Roadmap — the host loopback alias.** The per-kennel network-namespace redesign
-(`02-5-binder-net.md`, design `07-5-network.md`) adds a *host-side* alias:
-the kennel's own `/28` (IPv4) and `/64` (IPv6) are added to the host's `lo`
-interface (the privhelper's `AddLoopbackAlias`/`RemoveLoopbackAlias` ops), so an
-allowed in-kennel bind can be mirrored to the same `ip:port` host-side for host
-observability and ingress. This is **not built**: the kennel still shares the host
-network namespace, and the kennel's `/28`+`/64` is used today only as the egress
-proxy's loopback listen address (above), not as a host `lo` alias.
+**The host loopback alias.** Each kennel gets its own network namespace
+(`CLONE_NEWNET` in the construction child, for every mode but `host`;
+`02-5-binder-net.md`, design `07-5-network.md`), and its own `/28` (IPv4) and `/64`
+(IPv6) are added to the **host's** `lo` interface by the privhelper
+(`AddLoopbackAlias`/`RemoveLoopbackAlias`). That host-side alias is what the
+**inbound BIND mirror** (`host-inetd`, §7.5.7) binds: an allowed in-kennel `bind()`
+is exposed back on the host at the same `ip:port` for host observability and
+ingress. The same `/28`+`/64` is also the egress proxy's loopback listen address
+inside the kennel's net-ns (above). The remaining roadmap piece is the per-kennel
+ssh-agent and D-Bus proxy sockets (future work, `08-as-built-notes.md`), which
+would stage under this same per-user tree.
 
 ---
 
