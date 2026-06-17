@@ -31,6 +31,13 @@ kennel-lib-manifest = { path = "../kennel-lib-manifest" }
 kennel-lib-audit = { path = "../kennel-lib-audit" }
 # Thin syscall wrappers the CLI needs (uid, terminal probing) — no unsafe here.
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+# Untrusted-string sanitisation (§10.3/§10.4): policy-sourced fields (reason, paths,
+# hostnames) pass through `sanitise_for_log` before reaching the operator's terminal.
+kennel-lib-text = { path = "../kennel-lib-text" }
+# Structured `--json` output (e.g. `policy diff --json`). Lives in the CLI, OUT of the
+# daemon TCB. serde for the output-wrapper derive; serde_json for the serialiser.
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.150", default-features = false, features = ["std"] }
 # Argument parser (DEPENDENCIES.md §5.1 — vendored, audited; one forbid-unsafe file,
 # zero transitive deps).
 lexopt = "=0.3.2"

@@ -79,7 +79,10 @@ dependencies = [
  "kennel-lib-manifest",
  "kennel-lib-policy",
  "kennel-lib-syscall",
+ "kennel-lib-text",
  "lexopt",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

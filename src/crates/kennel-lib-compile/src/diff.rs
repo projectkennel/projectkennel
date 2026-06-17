@@ -181,14 +181,23 @@ pub fn diff(old: &SourcePolicy, new: &SourcePolicy, catalogue: &Catalogue) -> Po
     for key in keys {
         match (old_grants.get(key), new_grants.get(key)) {
             (None, Some(n)) => {
-                ranked.push((rank(n.section), change(ChangeKind::Added, n, n.value.clone(), catalogue)));
+                ranked.push((
+                    rank(n.section),
+                    change(ChangeKind::Added, n, n.value.clone(), catalogue),
+                ));
             }
             (Some(o), None) => {
-                ranked.push((rank(o.section), change(ChangeKind::Removed, o, o.value.clone(), catalogue)));
+                ranked.push((
+                    rank(o.section),
+                    change(ChangeKind::Removed, o, o.value.clone(), catalogue),
+                ));
             }
             (Some(o), Some(n)) if o.value != n.value => {
                 let detail = format!("{} \u{2192} {}", o.value, n.value);
-                ranked.push((rank(n.section), change(ChangeKind::Modified, n, detail, catalogue)));
+                ranked.push((
+                    rank(n.section),
+                    change(ChangeKind::Modified, n, detail, catalogue),
+                ));
             }
             _ => {} // present on both, unchanged
         }
@@ -225,7 +234,11 @@ fn change(kind: ChangeKind, g: &Grant, detail: String, catalogue: &Catalogue) ->
         } else {
             detail
         },
-        exposed: g.exposed.iter().map(|id| resolve_ref(id, catalogue)).collect(),
+        exposed: g
+            .exposed
+            .iter()
+            .map(|id| resolve_ref(id, catalogue))
+            .collect(),
         mitigated: g
             .mitigated
             .iter()
@@ -448,7 +461,11 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
                     .map(|r| (Polarity::Allow, r))
                     .chain(acl.deny.iter().map(|r| (Polarity::Deny, r)))
                 {
-                    let dir = if pol == Polarity::Allow { "allow" } else { "deny" };
+                    let dir = if pol == Polarity::Allow {
+                        "allow"
+                    } else {
+                        "deny"
+                    };
                     let cidr = rule.cidr.as_deref().unwrap_or("*");
                     out.push(Grant {
                         key: format!("net.bpf.{sect}.{dir}:{cidr}:{}", ports_value(&rule.ports)),
@@ -550,14 +567,24 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
     // [identity] — retained supplementary groups.
     if let Some(identity) = &p.identity {
         for group in &identity.groups {
-            out.push(simple_allow("identity.group", "identity", "[identity] groups", group));
+            out.push(simple_allow(
+                "identity.group",
+                "identity",
+                "[identity] groups",
+                group,
+            ));
         }
     }
 
     // [workload] — argv and the binary pins (scalar posture).
     if let Some(w) = &p.workload {
         if let Some(argv) = &w.argv {
-            out.push(scalar("workload.argv", "workload", "[workload] argv", argv.join(" ")));
+            out.push(scalar(
+                "workload.argv",
+                "workload",
+                "[workload] argv",
+                argv.join(" "),
+            ));
         }
         if let Some(pinned) = w.pinned {
             out.push(scalar(
@@ -582,7 +609,12 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
     // [lifecycle] / [tty] / [trust] — the remaining posture toggles.
     if let Some(lc) = &p.lifecycle {
         if let Some(ttl) = &lc.ttl {
-            out.push(scalar("lifecycle.ttl", "misc", "[lifecycle] ttl", ttl.clone()));
+            out.push(scalar(
+                "lifecycle.ttl",
+                "misc",
+                "[lifecycle] ttl",
+                ttl.clone(),
+            ));
         }
         if let Some(action) = &lc.ttl_action {
             out.push(scalar(
@@ -605,7 +637,12 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
     }
     if let Some(trust) = &p.trust {
         if let Some(m) = trust.manifest {
-            out.push(scalar("trust.manifest", "misc", "[trust] manifest", m.to_string()));
+            out.push(scalar(
+                "trust.manifest",
+                "misc",
+                "[trust] manifest",
+                m.to_string(),
+            ));
         }
     }
 
@@ -613,7 +650,12 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
 }
 
 /// A capability-list allow atom carrying no threat tags (its identity *is* its value).
-fn simple_allow(prefix: &'static str, section: &'static str, carrier_section: &str, path: &str) -> Grant {
+fn simple_allow(
+    prefix: &'static str,
+    section: &'static str,
+    carrier_section: &str,
+    path: &str,
+) -> Grant {
     Grant {
         key: format!("{prefix}:{path}"),
         carrier: format!("{carrier_section} {path}"),
@@ -707,7 +749,10 @@ mod tests {
         assert_eq!(c.kind, ChangeKind::Added);
         assert!(c.widening);
         assert_eq!(c.reason.as_deref(), Some("api"));
-        assert!(c.exposed.iter().any(|t| t.id == "T1.8" && t.title.is_some()));
+        assert!(c
+            .exposed
+            .iter()
+            .any(|t| t.id == "T1.8" && t.title.is_some()));
         // The summary reflects the newly-exposed threat too.
         assert!(d.summary.newly_exposed.iter().any(|t| t.id == "T1.8"));
     }
@@ -724,7 +769,11 @@ mod tests {
             .expect("the removed read shows up");
         assert_eq!(c.kind, ChangeKind::Removed);
         assert!(!c.widening);
-        assert!(c.note.as_deref().unwrap_or("").contains("no longer granted"));
+        assert!(c
+            .note
+            .as_deref()
+            .unwrap_or("")
+            .contains("no longer granted"));
     }
 
     #[test]

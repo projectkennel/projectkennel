@@ -41,13 +41,6 @@ narration is kept here; the chapter named is the source of truth.
 - **`kennel_meta` read-only sealing + readback verification** (`02-7-bpf-abi.md`) — the map
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
-- **`kennel diff`** (`05-templates.md` §5.11/§5.13, `02-1-cli.md`) — the semantic,
-  threat-impact-annotated delta view (the `+`/`~`/`-` per-grant output with impact lines and
-  conflict detection) is designed, not built. What exists today: `kennel policy upgrade` shows the
-  honest *source* diff between template versions and re-pins the lock (built), and
-  `kennel policy show` prints the full effective policy. `kennel diff`'s value over those is the
-  *interpreted* delta (which grants widened/narrowed, with threat tags); that needs an
-  effective-policy differ, which is the owed work.
 - **Composable fragment catalogue** (`05-templates.md` §5.10) — the `include` mechanism is
   built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
   `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
@@ -69,6 +62,14 @@ narration is kept here; the chapter named is the source of truth.
 Each graduated from this roadmap; its as-built detail lives in the named architecture
 chapter (and the design § for the mechanism). No build notes are kept here.
 
+- **`kennel policy diff`** (`05-templates.md` §5.11/§5.13, `02-1-cli.md`) — the interpreted,
+  threat-impact-annotated effective-policy delta (`+`/`~`/`-` per grant, each with the threats it
+  exposes/mitigates, a widening marker, and a net threat-posture summary). One argument diffs a
+  policy against its template baseline (the §5.13 *your-deltas* view); two diff any pair. Built on
+  the shared `kennel-lib-compile::effective_source` fold (the same threat-bearing folded source the
+  `risks` engine reads — which now folds delta-leaves too). The engine lives in `kennel-lib-compile`
+  (out of the daemon TCB); the CLI renders the terminal view through `sanitise_for_log` and `--json`
+  through `serde_json`. `02-1-cli.md` (`kennel policy diff`).
 - **Per-kennel network namespace + INet egress** — egress kennels unshare `CLONE_NEWNET` in the
   construction child, bring up in-ns `lo` + the loopback mirror, and reach egress only across the
   binder gateway (`facade-socks5` → `CONNECT_INET` → kenneld → `host-netproxy` dumb dialer); the
@@ -199,9 +200,9 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   (`mode=host`→T1.6, passthrough→T2.1, `allow_headless`→T1.6) — and `kennel policy risks <policy>`
   surfaces it (`02-1-cli.md`). The stale "compiler records `threats.reinstated`" claim is corrected
   everywhere to "derived" (no such field exists; the settled artefact carries no threat tags by
-  design). **Still roadmap:** `kennel diff`'s interpreted *delta* between two policies (the `+/~/-`
-  threat-impact view) — `risks` + the catalogue are its foundation. Tag-correctness as a hard lint
-  (invalid/missing-required → non-zero) is a noted `--strict` follow-up.
+  design). `kennel policy diff` (above) builds the interpreted *delta* between two policies (the
+  `+/~/-` threat-impact view) on this same `risks` + catalogue foundation. Tag-correctness as a hard
+  lint (invalid/missing-required → non-zero) is a noted `--strict` follow-up.
 - **Pre-release schema + CLI consistency sweep** — removed surface clutter (no compat shims, per
   the pre-release policy): the dead `[net].proxy_listen_v4`/`v6` booleans (only `proxy_listen_*_address`
   was ever consumed — a family is on iff its address resolves); the duplicate top-level `[proc]`
