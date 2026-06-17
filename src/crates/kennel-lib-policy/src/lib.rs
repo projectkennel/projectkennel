@@ -3,62 +3,48 @@
 //! # Purpose
 //!
 //! This crate owns the **settled policy** — the flat, signed, runtime artefact a
-//! kennel is spawned from — and its trust surface: the canonical-form
-//! serialisation, Ed25519 signature verification against a trust store, and
-//! framework-invariant re-assertion. [`verify_settled`] is the single entry
-//! point `kennel-lib-spawn` calls on the hot path: one signature check, a schema
-//! version gate, and an invariant re-assertion.
+//! kennel is spawned from — and its trust surface.
+//!
+//! That trust surface is the canonical-form serialisation, Ed25519 signature
+//! verification against a trust store, and framework-invariant re-assertion.
+//! [`verify_settled`] is the single entry point `kennel-lib-spawn` calls on the
+//! hot path: one signature check, a schema version gate, and an invariant
+//! re-assertion.
 //!
 //! The crate is pure and I/O-free (`docs/architecture/03-crate-decomposition.md`):
 //! callers read bytes from disk and pass them in; key material is supplied to a
 //! [`KeySet`] in memory.
 //!
-//! # Scope of this build
+//! # Scope of this crate
 //!
-//! Both halves are implemented. The runtime verification core ([`verify_settled`])
-//! is the spawn hot path. The compile-time front end is the rest: the [`source`]
-//! schema and validation, template-chain [`resolve`](mod@crate::resolve)ution and
-//! folding, [`leaf`] `+=`/`-=` deltas, [`translate`](mod@crate::translate)ion +
-//! substitution to the settled form, ed25519 [`source_sig`]nature verification, the
-//! [`lock`]file, and the [`compile`](mod@crate::compile)
-//! orchestrator that ties them together. The CLI (`kennel compile`/`validate`/`sign`)
-//! drives this crate.
+//! This is the **runtime** half only: parse a settled artefact, verify its
+//! signature against a trust store, re-assert the framework invariants, and hand
+//! the [`SettledPolicy`] to the spawn. It also owns [`sign_settled`]/[`to_bytes`]
+//! (the settled-artefact crypto/serialisation, symmetric with verification) and
+//! [`parse_audit_defaults`] (the `audit.toml` reader `kenneld` needs at runtime).
+//!
+//! The **compiler** — the `source` schema, template `resolve`ution, `leaf` deltas,
+//! `translate`ion, source signing, the `lock`file, `lint`/`risks` — lives in the
+//! separate `kennel-lib-compile` crate, which depends on this one and is linked
+//! only by the CLI. Splitting it keeps the compiler (and its heavier parsing) out
+//! of the daemon's TCB (CODING-STANDARDS.md §3/§5).
 
 #![forbid(unsafe_code)]
 
+pub mod audit;
 pub mod b64;
-pub mod binder;
 pub mod canonical;
-pub mod compile;
-pub mod dev;
 pub mod error;
-pub mod identity;
 pub mod invariant;
 pub mod keys;
-pub mod leaf;
 pub mod libresolve;
-pub mod lint;
-pub mod lock;
-pub mod resolve;
-pub mod risks;
 pub mod settled;
 pub mod signature;
-pub mod source;
-pub mod source_sig;
-pub mod ssh;
-pub mod threats;
-pub mod translate;
-pub mod unix;
-pub mod version;
 
-pub use compile::{compile, compile_leaf, seal_unsigned, Compiled};
+pub use audit::parse_audit_defaults;
 pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
-pub use leaf::{parse as parse_leaf, LeafPolicy};
-pub use lint::lint_settled;
-pub use lock::{LockEntry, Lockfile};
-pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
@@ -66,18 +52,9 @@ pub use settled::{
     ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
     SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy,
     TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
-    ULIMIT_RESOURCES,
+    RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
-pub use source::{
-    parse as parse_source, BpfRule, NetAllow, NetBpf, NetBpfAcl, NetDenyRule, NetProxy,
-    NetProxyDeny, NetSection, SourcePolicy,
-};
-pub use source_sig::{
-    sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
-};
-pub use translate::{parse_audit_defaults, translate, Translated};
-pub use version::{is_newer as version_is_newer, parse_reference};
 
 /// The newest `settled_schema_version` this build accepts.
 pub const SETTLED_SCHEMA_VERSION: u32 = 1;
@@ -134,7 +111,7 @@ pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyErr
 ///
 /// Fills [`settled::ExecPolicy::loaders`] with each allowlisted dynamic binary's `PT_INTERP`
 /// (`ld.so`), reading the binaries from disk ([`libresolve`]). Call this at compile time —
-/// after [`compile()`] / [`compile_leaf`] and **before** signing — so the loader set is part
+/// after the compiler's `compile` / `compile_leaf` and **before** signing — so the loader set is part
 /// of the signed artefact and the runtime never re-resolves. Returns the resolver's
 /// advisories (binaries it could not read). Idempotent. Libraries are deliberately *not*
 /// resolved or granted: they load via `READ` and Landlock cannot gate their `mmap`

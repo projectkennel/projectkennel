@@ -1,0 +1,39 @@
+[package]
+name = "kennel-facade"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel in-kennel binder-connector facades: the small proxies kennel-bin-init launches inside the constructed view. Each pushes one class of the workload's traffic across the binder gateway to kenneld — facade-socks5 (SOCKS5/HTTP egress), facade-afunix (AF_UNIX sockets), facade-ssh (ssh ProxyCommand), facade-client (inbound BIND mirror). No policy, no host socket: kenneld decides, resolves, and pins."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# One crate, four binaries (names preserved — kennel-bin-init resolves them by name).
+autobins = false
+
+[[bin]]
+name = "facade-afunix"
+path = "src/bin/facade-afunix.rs"
+
+[[bin]]
+name = "facade-socks5"
+path = "src/bin/facade-socks5.rs"
+
+[[bin]]
+name = "facade-client"
+path = "src/bin/facade-client.rs"
+
+[[bin]]
+name = "facade-ssh"
+path = "src/bin/facade-ssh.rs"
+
+[dependencies]
+# The binder client transaction surface every facade uses to reach node 0.
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+# The shared bidirectional splice (conduit relay) — used by facade-socks5 and
+# facade-client after brokering a conduit fd; harmless for the two that do not.
+kennel-lib-scm = { path = "../kennel-lib-scm" }
+
+[lints]
+workspace = true

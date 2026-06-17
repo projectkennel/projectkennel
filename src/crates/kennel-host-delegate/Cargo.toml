@@ -1,0 +1,31 @@
+[package]
+name = "kennel-host-delegate"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel host-side conduit delegates: the two glorified-netcat binaries that move a connected socket across a kennel's net-ns boundary — host-netproxy (egress dial, §7.5.2) and host-inetd (inbound BIND mirror, §7.5.7). kenneld owns every policy decision; these only put a vetted fd where it needs to go. The library half (netproxy/inetd modules) is the conduit wire kenneld shares."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# One crate: a library half (the conduit/registration wire kenneld links) plus the
+# two delegate binaries (names preserved — kenneld resolves them by name).
+autobins = false
+
+[[bin]]
+name = "host-netproxy"
+path = "src/bin/host-netproxy.rs"
+
+[[bin]]
+name = "host-inetd"
+path = "src/bin/host-inetd.rs"
+
+[dependencies]
+# SCM_RIGHTS fd-passing: both delegates receive/hand off conduit fds over the
+# owner-only kenneld<->delegate AF_UNIX socket. A small focused crate, so each
+# delegate's TCB stays minimal (not the whole kennel-lib-syscall unsafe surface).
+kennel-lib-scm = { path = "../kennel-lib-scm" }
+
+[lints]
+workspace = true

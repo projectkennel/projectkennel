@@ -1,0 +1,22 @@
+[package]
+name = "kennel-lib-compile"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel policy compiler: the authoring front end that resolves a source policy (template chain, includes, leaf deltas) and translates it into the signed settled artefact the runtime enforces. Parsing, validation, template resolution, source signing, the lockfile, lint, and risk evaluation. Linked only by the `kennel` CLI — kept out of the daemon's TCB (the runtime `kennel-lib-policy` crate is what kenneld/spawn link)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The runtime policy crate: the settled-artefact types this compiler produces, the
+# signature/canonical/keys crypto it signs through, the invariant validator, and the
+# audit schema (single source of truth, shared).
+kennel-lib-policy = { path = "../kennel-lib-policy" }
+# Source and settled policies are TOML (no JSON); serde derives the schema types.
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+basic-toml = "=0.1.10"
+
+[lints]
+workspace = true

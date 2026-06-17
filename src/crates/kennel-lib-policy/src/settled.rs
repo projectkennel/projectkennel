@@ -5,7 +5,7 @@
 //! `include`, no delta operators — only the final effective rules, plus
 //! provenance and a single signature. The template/resolution machinery that
 //! *produces* a settled policy (chain-walking, includes, deltas, the lockfile)
-//! lives alongside this module ([`crate::compile`](mod@crate::compile) and friends) but is a separate,
+//! lives in the separate `kennel-lib-compile` crate but is a separate,
 //! compile-time concern off the spawn hot path.
 //!
 //! ## Serialisation format
@@ -21,6 +21,13 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+/// The reserved binder service namespace `kenneld` owns (`07-1-binder.md` §Naming).
+///
+/// User-defined services may not begin with it. It lives in the runtime crate
+/// because `kenneld` gates `addService`/`getService` against it at runtime; the
+/// policy compiler's binder validator rejects user services that claim it.
+pub const RESERVED_PREFIX: &str = "org.projectkennel.";
 
 /// Network enforcement mode — four tiers (`07-5-network.md` §7.5).
 ///

@@ -97,7 +97,7 @@ pub fn bind_via_delegate(command_socket: &Path, addr: IpAddr, port: u16) -> io::
         }
     }
     let conn = conn.ok_or(last_err)?;
-    let payload = host_inetd::listen::encode_bind(addr, port);
+    let payload = kennel_host_delegate::inetd::listen::encode_bind(addr, port);
     kennel_lib_syscall::scm::send_with_fds(conn.as_fd(), &payload, &[])?;
     Ok(conn)
 }
@@ -129,7 +129,7 @@ pub fn run_reader(runtime: &InboundRuntime, conn: &UnixStream) {
 }
 
 /// Decode the `host-inetd` notification framing `[port: u16 big-endian]` (the inverse of
-/// `host_inetd::listen::encode_notify`).
+/// `kennel_host_delegate::inetd::listen::encode_notify`).
 fn decode_notify(data: &[u8]) -> Option<u16> {
     let [hi, lo] = data else { return None };
     Some(u16::from_be_bytes([*hi, *lo]))
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn notify_framing_round_trips() {
-        let bytes = host_inetd::listen::encode_notify(3000);
+        let bytes = kennel_host_delegate::inetd::listen::encode_notify(3000);
         assert_eq!(decode_notify(&bytes), Some(3000));
         assert!(decode_notify(&[0x0B]).is_none()); // short
         assert!(decode_notify(&[0x0B, 0xB8, 0x00]).is_none()); // long
@@ -180,7 +180,7 @@ mod tests {
         let (_conduit_host, conduit_kennel) = UnixStream::pair().expect("conduit pair");
         kennel_lib_syscall::scm::send_with_fds(
             delegate_side.as_fd(),
-            &host_inetd::listen::encode_notify(3000),
+            &kennel_host_delegate::inetd::listen::encode_notify(3000),
             &[conduit_kennel.as_fd()],
         )
         .expect("push notification");

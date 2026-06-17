@@ -259,6 +259,22 @@ chapter (and the design § for the mechanism). No build notes are kept here.
 - **Landlock denial errnos differ by class.** Filesystem/network rules deny with
   `EACCES`; scoping (`SCOPE_*`) denies with `EPERM`. Accept both when asserting "the
   scope bit fired".
+- **The daemon's TCB is bounded by crate boundary, not vigilance — and it only
+  shrinks.** The runtime trusted computing base is the dependency closure of the
+  privileged binaries (`kenneld`, `kennel-privhelper`, `kennel-bin-init`); a compromise
+  of anything in it breaks confinement. The structural rule is that anything the daemon
+  does **not** need to *verify-and-load and supervise* lives in its own crate, outside
+  that closure: the operator CLI is `kennel-cli` (its `serde_json`/`lexopt` deps stay
+  there), the policy **compiler** is `kennel-lib-compile` (the daemon links only the
+  verify-and-load `kennel-lib-policy` half), the control wire is `kennel-lib-control`,
+  and the trust-manifest reader is `kennel-lib-manifest`. `cargo tree -p kenneld` must
+  show **none** of those. The inventory and the TCB-closure total live in
+  `03-crate-decomposition.md` § "Crate inventory and TCB". When adding a dependency or a
+  feature, ask first whether it lands in the TCB closure; if the daemon does not strictly
+  need it, put it behind a crate boundary the daemon does not cross. The TCB is a budget
+  that goes down, not up — a heavyweight dep (a JSON/serialisation stack, an async
+  runtime, a parser the daemon does not run) reaching `kenneld`'s closure is a regression
+  to be refused, not absorbed.
 
 ## 8.3 Build and test gotchas
 
@@ -281,3 +297,11 @@ chapter (and the design § for the mechanism). No build notes are kept here.
 - **A required new settled-schema field touches every fixture.** Adding a
   non-defaulted field to a policy struct forces every `FsPolicy`/`Plan` literal
   across crates into the same commit.
+- **`src/fuzz` is a separate workspace with its own `Cargo.lock`; CI runs it
+  `--offline --locked`.** Any change to the *transitive* dep graph of its path-deps
+  (it links `kenneld`, so a change to kenneld's deps counts) staleness the fuzz lock,
+  and the `fuzz` CI job fails to resolve even though the shipped build is fine — the
+  main `--frozen --locked` gate never reaches it. After a crate restructuring,
+  regenerate it: `cd src/fuzz && cargo update --offline` (it inherits the repo-root
+  `.cargo` vendor config), then commit `src/fuzz/Cargo.lock`. It does not enter the
+  main Cargo.lock or `CHECKSUMS.toml`, so its only failure mode is the stale lock.

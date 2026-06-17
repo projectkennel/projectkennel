@@ -48,52 +48,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
-name = "facade-afunix"
-version = "0.1.0"
-dependencies = [
- "kennel-lib-binder",
-]
-
-[[package]]
-name = "facade-client"
-version = "0.1.0"
-dependencies = [
- "kennel-lib-binder",
- "kennel-lib-scm",
-]
-
-[[package]]
-name = "facade-socks5"
-version = "0.1.0"
-dependencies = [
- "kennel-lib-binder",
- "kennel-lib-scm",
-]
-
-[[package]]
-name = "facade-ssh"
-version = "0.1.0"
-dependencies = [
- "kennel-lib-binder",
-]
-
-[[package]]
 name = "gen-man"
 version = "0.1.0"
-
-[[package]]
-name = "host-inetd"
-version = "0.1.0"
-dependencies = [
- "kennel-lib-scm",
-]
-
-[[package]]
-name = "host-netproxy"
-version = "0.1.0"
-dependencies = [
- "kennel-lib-scm",
-]
 
 [[package]]
 name = "itoa"
@@ -109,6 +65,36 @@ dependencies = [
  "kennel-lib-config",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
+]
+
+[[package]]
+name = "kennel-cli"
+version = "0.1.0"
+dependencies = [
+ "gen-man",
+ "kennel-lib-audit",
+ "kennel-lib-compile",
+ "kennel-lib-config",
+ "kennel-lib-control",
+ "kennel-lib-manifest",
+ "kennel-lib-policy",
+ "kennel-lib-syscall",
+ "lexopt",
+]
+
+[[package]]
+name = "kennel-facade"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-binder",
+ "kennel-lib-scm",
+]
+
+[[package]]
+name = "kennel-host-delegate"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-scm",
 ]
 
 [[package]]
@@ -135,11 +121,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-lib-compile"
+version = "0.1.0"
+dependencies = [
+ "basic-toml",
+ "kennel-lib-policy",
+ "serde",
+]
+
+[[package]]
 name = "kennel-lib-config"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
  "serde",
+]
+
+[[package]]
+name = "kennel-lib-control"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-syscall",
 ]
 
 [[package]]
@@ -233,20 +235,17 @@ name = "kenneld"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
- "gen-man",
- "host-inetd",
- "host-netproxy",
+ "kennel-host-delegate",
  "kennel-lib-audit",
  "kennel-lib-binder",
  "kennel-lib-bpf",
  "kennel-lib-config",
- "kennel-lib-manifest",
+ "kennel-lib-control",
  "kennel-lib-policy",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
  "kennel-lib-term",
  "kennel-privhelper",
- "lexopt",
  "libc",
  "serde",
 ]

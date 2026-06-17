@@ -17,11 +17,10 @@ kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The terminal-escape filter (§7.9.5): the PTY broker runs the workload's output
 # through it (gated by [tty].filter_terminal_escapes) before fanning to a client.
 kennel-lib-term = { path = "../kennel-lib-term" }
-# The masked workspace manifest (§7.4, T2.8): used ONLY by the `kennel` CLI binary
-# (pre-flight generation + `kennel review`), never by the `kenneld` daemon binary — it
-# pulls serde_json, which must stay out of the enforcement TCB. `bin/kenneld.rs` does
-# not reference it, so it is not linked into the daemon.
-kennel-lib-manifest = { path = "../kennel-lib-manifest" }
+# The control-socket wire protocol (Request/Response framing + socket path),
+# shared with the `kennel` CLI. Re-exported as `kenneld::{control, socket}`; the
+# daemon serves it, the CLI dials it. No serde, no enforcement code.
+kennel-lib-control = { path = "../kennel-lib-control" }
 # The layered deployment config (07-paths.md): resolves the helper-binary
 # locations and the trust store from root-owned TOML, so no install path is
 # baked into this binary.
@@ -40,25 +39,17 @@ kennel-lib-binder = { path = "../kennel-lib-binder" }
 # reads). Both already vendored (kennel-lib-policy/host-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
-# The INet egress decision: kenneld is the decision point (§7.5.2), reusing the netproxy's
-# allow ruleset + resolver seam so the two never drift (crate::inet). Also round-trips the
-# proxy config we write back through the netproxy's own parser (the writer can't drift).
-host-netproxy = { path = "../host-netproxy" }
-# The inbound BIND delegate's wire (encode_bind/encode_notify): kenneld registers mirror ports and
-# decodes the delegate's accept notifications through the delegate's own codec (no drift). §7.5.7.
-host-inetd = { path = "../host-inetd" }
-# The `kennel` CLI argument parser (DEPENDENCIES.md §5.1 — vendored, audited). One
-# forbid-unsafe file, zero transitive deps; replaces the hand-rolled per-subcommand loops.
-lexopt = "=0.3.2"
+# The host-side conduit delegates' shared wire (the `netproxy` + `inetd` library modules):
+# kenneld reuses the netproxy conduit codec for the INet egress decision (§7.5.2, crate::inet),
+# round-trips the proxy config through the netproxy parser (writer can't drift), and uses the
+# inetd encode_bind/encode_notify codec to register mirror ports + decode accept notifications
+# (§7.5.7). It links the library only; the two delegate binaries run as separate processes.
+kennel-host-delegate = { path = "../kennel-host-delegate" }
 
 [dev-dependencies]
 # The BPF-drain root test forks a child into a cgroup and attempts a connect to
 # produce a real denied-connect audit event; libc gives it fork/connect/_exit.
 libc = "=0.2.186"
-# Test-only: the manpage generator's `SYNC_*` copies of the CLI command tables.
-# A unit test asserts they match `COMMANDS`/`POLICY_VERBS`, so `man kennel` cannot
-# drift from the CLI. Dev-only — never linked into the shipped daemon.
-gen-man = { path = "../../tools/gen-man" }
 
 [features]
 # End-to-end orchestration test that drives the real setuid privhelper and

@@ -68,7 +68,7 @@ impl Registry {
 
     /// Whether `name` is in the reserved kenneld-owned namespace.
     fn is_reserved(name: &str) -> bool {
-        name.starts_with(kennel_lib_policy::binder::RESERVED_PREFIX)
+        name.starts_with(kennel_lib_policy::settled::RESERVED_PREFIX)
     }
 
     /// Whether policy lets this kennel *provide* (register) `name`.

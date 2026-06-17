@@ -6,7 +6,28 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
-Nothing yet.
+### Internal / supply chain
+
+- **The `kennel` CLI is now its own crate (`kennel-cli`), split out of `kenneld`.** The
+  control-socket wire protocol moves to a shared `kennel-lib-control` crate (re-exported
+  as `kenneld::{control, socket}`, so the daemon side is unchanged). This removes the
+  CLI's dependencies — `serde_json` (≈ 16.5k SLOC, via the trust-manifest reader) and
+  `lexopt` — from the privileged daemon's dependency closure entirely: a hard crate
+  boundary in place of the previous "the daemon binary happens not to reference them".
+  No change to the `kennel` or `kenneld` binaries' behaviour or surface.
+- **The policy compiler is split out of the runtime crate.** `kennel-lib-policy` keeps the
+  runtime verify-and-load half (settled types, `verify_settled`/`sign_settled`,
+  `parse_audit_defaults`, invariant re-assertion — ~1.7k SLOC); the new
+  `kennel-lib-compile` crate holds the authoring front end (source schema, template
+  resolution, leaf deltas, translation, source signing, lockfile, lint, risks) and is
+  linked only by `kennel-cli`. `cargo tree -p kenneld` shows zero `kennel-lib-compile` —
+  the ~3.5k-SLOC compiler is now a hard crate boundary out of the daemon's TCB. The
+  `[audit]` schema + translation are centralised in one module (single source of truth,
+  shared by the compiler and the runtime `audit.toml` reader).
+- **Leaf-binary crates consolidated** (24 → 21 workspace crates, no behaviour change): the
+  four in-kennel facades become one `kennel-facade` crate (four binaries), and the two
+  host-side delegates become one `kennel-host-delegate` crate (two binaries + the shared
+  conduit-wire library). Binary names are unchanged.
 
 ## [0.1.0] — 2026-06-16
 
