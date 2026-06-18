@@ -1148,4 +1148,4 @@ Readers who want to know "what does this not cover" should focus on Section 6 (w
 
 ---
 
-*This worked template accompanies the design document and the threat catalogue. Specific syntax elements (the `[[net.deny.invariant]]` array-of-tables form, the `~/` expansion semantics, the `<kennel>` and `<tag>` substitution patterns) are documented authoritatively in `schema/policy.toml.schema`.*
+*This worked template accompanies the design document and the threat catalogue. The structural shape — every table, field, and type — is the generated machine schema [`schema/policy.toml.schema`](../../schema/policy.toml.schema); the syntax semantics (the `[[net.proxy.deny.invariant]]` array-of-tables form, the `~/` expansion, the `<kennel>` and `<tag>` substitution patterns) are documented authoritatively in [02-2-config-schema.md](../architecture/02-2-config-schema.md).*
