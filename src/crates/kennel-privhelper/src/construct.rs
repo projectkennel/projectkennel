@@ -243,6 +243,12 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // 2. The maps-written handshake pipe (child blocks until the parent writes the maps).
     let (ready_r, ready_w) = pipe_cloexec()?;
 
+    // The view-built handshake pipe (§2.7): the child signals after `build_kennel` (the source
+    // binds are done and it has `pivot_root`ed away from the source), so the parent can over-mount
+    // the exclusive sources operator-side *after* the kennel captured the real inode — the shadow
+    // then cannot reach the kennel's view. Only used when there are exclusive binds.
+    let (built_r, built_w) = pipe_cloexec()?;
+
     // The boot-sync socket (07-2 §7.2.1a) that makes startup deterministic. `kennel-bin-init` cannot
     // take node 0 before it `fexecve`s (kenneld opens the binderfs via `/proc/<init>/root`, which
     // only resolves post-exec), yet must not pull before node 0 is up — so the factory gates the
@@ -268,19 +274,15 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    kennel's uid 0 for the root-owned construction (below).
     let granted = half.granted_gids.clone();
     let namespaces = half.namespaces; // captured before `half` moves into the child
-    // The host sources of the exclusive binds (§2.7), captured before `half` moves into the
-    // child: the *parent* over-mounts them in the operator's session namespace (the child's
-    // namespace is cloned below, so its view keeps the real inode).
-    let exclusive_sources: Vec<std::path::PathBuf> = half.view.as_ref().map_or_else(
-        Vec::new,
-        |v| {
-            v.binds
-                .iter()
-                .filter(|b| b.exclusive)
-                .map(|b| b.source.clone())
-                .collect()
-        },
-    );
+    // The host sources of the exclusive binds (§2.7), captured before `half` moves into the child;
+    // the parent over-mounts them once the child signals its view is built (below).
+    let exclusive_sources: Vec<std::path::PathBuf> = half.view.as_ref().map_or_else(Vec::new, |v| {
+        v.binds
+            .iter()
+            .filter(|b| b.exclusive)
+            .map(|b| b.source.clone())
+            .collect()
+    });
     let child = move || {
         // Each early return trips clone_pid1's `_exit(127)` backstop. Name the failing step on
         // stderr first (inherited from the factory, so it reaches kenneld's journal): a silent
@@ -310,6 +312,10 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             eprintln!("kennel-privhelper: construction child: build_kennel: {e}");
             return;
         }
+        // Signal the parent that the view is built and `pivot_root`ed: the source path is now
+        // detached from this view, so the parent may over-mount it operator-side (§2.7). Sent
+        // before the `fexecve` (which would CLOEXEC `built_w`); best-effort.
+        let _ = send_ack(built_w.as_fd(), ACK_PROCEED);
         tracer.step("construct: view built; placing handoff fds + fexecve kennel-bin-init");
         // Place the descriptors `kennel-bin-init` inherits at fixed numbers (`BOOT_SYNC_FD`,
         // `PTY_RETURN_FD` for an interactive run, and `WORKLOAD_FD` for a sha256-pinned
@@ -365,36 +371,39 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         .map_err(|e| io::Error::new(e.kind(), format!("factory setuid(0): {e}")))?;
     write_identity_maps(init_pid, op_uid, op_gid, &granted)?;
 
-    // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7) while we still
-    // hold the privilege (euid 0, before the drop below clears the capability sets). The shadow
-    // lands in the operator's session mount namespace only — the construction child's namespace
-    // was cloned above, so its view keeps the real inode; the operator and the workload no longer
-    // share the path. Verified against `op_uid`: the helper never blind-mounts a path the operator
-    // does not own (overreach). Best-effort per path — a failure (refusal or mount error) is
-    // logged, never fatal: the kennel still runs, the path simply degrades to a plain writable
-    // bind (which is always permitted), exclusivity not in force.
-    for src in &exclusive_sources {
-        if let Err(e) = crate::exclusive::mount_exclusive(src, op_uid) {
-            eprintln!("kennel-privhelper: exclusive bind not enforced: {e}");
+    // "build": maps are written, so the child may become uid 0, construct the binderfs, build its
+    // view, and `fexecve` `kennel-bin-init`. We still hold root — the exclusive over-mount below
+    // needs it — so the drop to the operator happens *after*, not here.
+    tracer.step("construct: identity maps written; releasing child to build + fexecve");
+    send_ack(ready_w.as_fd(), ACK_PROCEED)?;
+    drop(ready_w);
+
+    // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7), AFTER the child
+    // signals its view is built and `pivot_root`ed away from the source: the kennel's bind is then
+    // a snapshot independent of this shadow, so only the operator side is shadowed. Done while we
+    // still hold root; verified against `op_uid` (the helper never over-mounts a path the operator
+    // does not own — overreach). Best-effort per path: a failure degrades that path to a plain
+    // writable bind (always permitted), logged, never fatal.
+    if !exclusive_sources.is_empty() {
+        let _ = recv_ack(built_r.as_fd()); // proceed even if the child died (the mount then refuses)
+        for src in &exclusive_sources {
+            if let Err(e) = crate::exclusive::mount_exclusive(src, op_uid) {
+                eprintln!("kennel-privhelper: exclusive bind not enforced: {e}");
+            }
         }
     }
+    drop(built_r);
 
-    // Drop straight back to the operator now that the maps are written: the parent escalated
-    // ONLY to write them. setgid before setuid (the uid drop to a non-zero value is what
-    // clears the capability sets — capabilities(7)); for its brief remaining life (report the
-    // pid, then exit) the factory parent is the unprivileged operator, never a long-lived
-    // host-root process (sec review: minimise the privileged window). A no-op when the operator
-    // is root (the root-test case, op_uid == 0).
+    // Drop straight back to the operator now that the maps are written and any over-mount is up:
+    // the parent escalated ONLY for those. setgid before setuid (the uid drop to a non-zero value
+    // is what clears the capability sets — capabilities(7)); for its brief remaining life (report
+    // the pid, then exit) the factory parent is the unprivileged operator, never a long-lived
+    // host-root process (sec review: minimise the privileged window). A no-op when the operator is
+    // root (the root-test case, op_uid == 0).
     kennel_lib_syscall::unistd::set_gid(op_gid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setgid({op_gid}): {e}")))?;
     kennel_lib_syscall::unistd::set_uid(op_uid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setuid({op_uid}): {e}")))?;
-
-    // "build": maps are written, so the child may become uid 0, construct the binderfs, and
-    // `fexecve` `kennel-bin-init` (which then blocks on the boot-sync socket before pulling).
-    tracer.step("construct: identity maps written; releasing child to build + fexecve");
-    send_ack(ready_w.as_fd(), ACK_PROCEED)?;
-    drop(ready_w);
 
     // Report the init pid AND hand kenneld the boot-sync socket as the sole SCM fd: kenneld waits
     // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (now reachable via

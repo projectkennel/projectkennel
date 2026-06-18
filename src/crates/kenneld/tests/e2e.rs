@@ -512,6 +512,162 @@ fn trust_manifest_is_masked_inside_the_kennel() {
     let _ = std::fs::remove_dir_all(&audit_base);
 }
 
+/// **`[fs.write].exclusive`, end to end (§2.7).** A writable+exclusive project: while the
+/// kennel runs, the factory over-mounts an opaque sentinel on the host path (the operator's
+/// side), so the operator sees the sentinel and *not* the real file; the kennel keeps the real
+/// inode through its own view; at teardown the over-mount is released. The shadow is observed
+/// from the test thread — synchronised via `Started`/`Exited`, so no arbitrary sleeps.
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive end-to-end scenario (setup + threaded observe)
+fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
+    use kenneld::control::{recv_response, Response, StartRequest};
+    use kenneld::policy::TrustStoreLoader;
+    use kenneld::server::{run_kennel, Identity, Shared};
+    use std::os::unix::net::UnixStream;
+
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    let gid = kennel_lib_syscall::unistd::real_gid();
+    let _ = kennel_lib_syscall::process::set_child_subreaper();
+    if uid == 0 {
+        eprintln!("SKIP: the unprivileged vertical runs as the operator, not root");
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    if !subkennel_has_line(uid) {
+        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
+        return;
+    }
+    let Some(base) = own_cgroup_base() else {
+        return;
+    };
+    if std::fs::create_dir_all(&base).is_err() {
+        eprintln!("SKIP: cgroup base not writable — run under the e2e runner");
+        return;
+    }
+
+    // An operator-owned writable project, marked exclusive. The real marker file is shadowed
+    // operator-side while the kennel runs.
+    let proj = home.join("kennel-e2e/exclusive");
+    let _ = std::fs::remove_dir_all(&proj);
+    std::fs::create_dir_all(&proj).expect("mkdir project");
+    std::fs::write(proj.join("real-marker"), b"real").expect("write marker");
+
+    let mut policy = no_ipc_policy(&home);
+    policy
+        .effective_policy
+        .fs
+        .write
+        .push("~/kennel-e2e/exclusive".to_owned());
+    policy
+        .effective_policy
+        .fs
+        .exclusive
+        .push("~/kennel-e2e/exclusive".to_owned());
+
+    let key = SigningKey::from_seed("excl-key", &[11u8; 32]).expect("key");
+    let signed = kennel_lib_policy::sign_settled(&policy, &key).expect("sign");
+    let bytes = kennel_lib_policy::to_bytes(&signed).expect("serialise");
+    let mut keys = kennel_lib_policy::KeySet::new();
+    keys.insert(key.key_id(), &key.public_key_bytes())
+        .expect("trust key");
+
+    let run = runtime_dir();
+    let tag = std::process::id();
+    let policy_file = run.join(format!("kenneld-excl-policy-{tag}.bin"));
+    std::fs::write(&policy_file, &bytes).expect("write policy");
+    let etc_base = run.join(format!("kenneld-excl-etc-{tag}"));
+    let view_root = run.join(format!("kenneld-excl-root-{tag}"));
+    let audit_base = run.join(format!("kenneld-excl-audit-{tag}"));
+    for p in [&etc_base, &view_root, &audit_base] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    let identity = Identity {
+        uid,
+        gid,
+        username: "dev".to_owned(),
+        home,
+        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        cgroup_base: base,
+        proxy: None,
+        etc_base: Some(etc_base.clone()),
+        view_base: Some(view_root.clone()),
+        audit_base: Some(audit_base.clone()),
+        bastion: None,
+        afunix_bin: Some(sibling_binary("facade-afunix")),
+        init_bin: Some(sibling_binary("kennel-bin-init")),
+        tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
+    };
+    let shared = Shared::new(
+        identity,
+        HelperClient::new(privhelper_path()),
+        TrustStoreLoader::from_keys(keys),
+    );
+
+    let req = StartRequest {
+        policy: policy_file,
+        kennel: "excl".to_owned(),
+        // The workload just confirms it (the kennel) still sees the real inode, then exits.
+        argv: vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "test \"$(cat real-marker)\" = real".to_owned(),
+        ],
+        cwd: PathBuf::from("/home/kennel/kennel-e2e/exclusive"),
+        term: String::new(),
+        interactive: false,
+        force: false,
+        watch_paths: Vec::new(),
+    };
+
+    let sentinel = proj.join("KENNEL-EXCLUSIVE-LOCK");
+    let marker = proj.join("real-marker");
+    let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+    let mut shadow_seen = false;
+    let mut workload_code = None;
+    std::thread::scope(|s| {
+        let handle = s.spawn(|| run_kennel(&shared, &req, Vec::new(), &mut server));
+        let first = recv_response(&mut client).expect("a first response");
+        if bring_up_skipped(&first) {
+            handle.join().expect("join");
+            return;
+        }
+        // `Started` ⇒ construction is done, so the factory's over-mount is up: operator-side the
+        // sentinel is present and the real marker is shadowed (the tmpfs hides it).
+        shadow_seen = sentinel.is_file() && !marker.exists();
+        if let Response::Exited { code } = recv_response(&mut client).expect("exit") {
+            workload_code = Some(code);
+        }
+        handle.join().expect("join");
+    });
+
+    // Skipped (under-privileged) ⇒ neither marker nor exit was observed; treat as a skip.
+    let Some(code) = workload_code else {
+        eprintln!("SKIP: bring-up did not complete (under-privileged runner)");
+        let _ = std::fs::remove_dir_all(&proj);
+        return;
+    };
+    assert_eq!(code, 0, "the kennel kept the real inode through its own view");
+    assert!(
+        shadow_seen,
+        "during the run the host path was shadowed by the exclusive sentinel"
+    );
+    // Teardown released the over-mount: operator-side the real marker is back, sentinel gone.
+    assert!(!sentinel.exists(), "the sentinel over-mount was released at teardown");
+    assert_eq!(
+        std::fs::read(&marker).expect("read marker after"),
+        b"real",
+        "the operator sees the real inode again after release"
+    );
+
+    let _ = std::fs::remove_dir_all(&proj);
+    let _ = std::fs::remove_dir_all(&etc_base);
+    let _ = std::fs::remove_dir_all(&view_root);
+    let _ = std::fs::remove_dir_all(&audit_base);
+}
+
 /// Bring up a kennel with a **1-second TTL** and `action`, running `argv`, and return
 /// `(elapsed, exit_code)` — or `None` to skip on an under-privileged runner. Proves the §9.7
 /// path end to end: `kennel-bin-init`'s timer → the blocking `NOTIFY_TTL_EXPIRED` call → kenneld

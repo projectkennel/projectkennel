@@ -25,11 +25,13 @@ const SENTINEL_BODY: &[u8] = b"This directory is held by a Project Kennel exclus
 concurrently. It is released (unmounted) at teardown. If a kennel crashed and left this behind, \
 run `kennel release <name>` or restart kenneld to clear the leaked lock.\n";
 
-/// Over-mount an opaque sentinel on `host` (an owned writable-bind path), for the `construct`
+/// Over-mount an opaque sentinel on `host` (an owned writable-bind path), in the `construct`
 /// factory (§2.7).
 ///
-/// Refuses a path `owner_uid` does not own (the authoritative overreach gate); the factory passes
-/// the **operator** uid, since at the point it can mount, its own real uid is transiently 0.
+/// Done *after* the construction child has built its view and `pivot_root`ed away from the source,
+/// so the kennel keeps the real inode and only the operator side is shadowed. Refuses a path
+/// `owner_uid` does not own (the authoritative overreach gate); the factory passes the **operator**
+/// uid, since at that point its own real uid is transiently 0.
 ///
 /// # Errors
 /// A human-readable reason if `host` is not a directory owned by `owner_uid`, or the over-mount
@@ -37,7 +39,7 @@ run `kennel release <name>` or restart kenneld to clear the leaked lock.\n";
 pub fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), String> {
     check_owned_dir(host, owner_uid)?;
     // A small, nosuid+nodev tmpfs shadows the real dir; mode 0755 so the operator can see the
-    // sentinel (the real inode stays reachable through the kennel's own view).
+    // sentinel (the kennel keeps the real inode through its own already-built view).
     mount::mount_tmpfs(host, Some(1), Some("0755"), false)
         .map_err(|e| format!("exclusive over-mount of {} failed: {e}", host.display()))?;
     // Drop the sentinel, then seal the over-mount read-only (best-effort — the shadow itself is

@@ -214,6 +214,13 @@ pub fn substitute(
         *path = substitute_path(path, subst, &user, &group);
         reject_leftover("fs.write", path)?;
     }
+    // Exclusive paths (§2.7) are a subset of write — substitute them identically so the plan
+    // builder's source match holds (an unsubstituted `~` would never equal a substituted bind
+    // source, silently dropping the over-mount).
+    for path in &mut fs.exclusive {
+        *path = substitute_path(path, subst, &user, &group);
+        reject_leftover("fs.exclusive", path)?;
+    }
     for bin in &mut p.effective_policy.exec.allow {
         *bin = substitute_path(bin, subst, &user, &group);
         reject_leftover("exec.allow", bin)?;
