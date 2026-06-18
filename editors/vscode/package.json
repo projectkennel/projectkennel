@@ -1,0 +1,37 @@
+{
+  "name": "kennel-policy",
+  "displayName": "Project Kennel policy",
+  "description": "Completion, hover documentation, and inline validation for Project Kennel policy.toml files, against the generated JSON Schema. Backed by Even Better TOML (taplo).",
+  "version": "0.1.0",
+  "publisher": "projectkennel",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/projectkennel/projectkennel"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "kennel",
+    "sandbox",
+    "policy",
+    "toml",
+    "json-schema"
+  ],
+  "extensionDependencies": [
+    "tamasfe.even-better-toml"
+  ],
+  "contributes": {
+    "configurationDefaults": {
+      "evenBetterToml.schema.associations": {
+        ".*(^|/)policy\\.toml$": "https://projectkennel.org/schema/policy.toml.schema.json",
+        ".*\\.policy\\.toml$": "https://projectkennel.org/schema/policy.toml.schema.json"
+      }
+    }
+  }
+}

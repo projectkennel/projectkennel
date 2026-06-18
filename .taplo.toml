@@ -1,0 +1,16 @@
+# Taplo / "Even Better TOML" configuration for this repository.
+#
+# Associates Project Kennel policy files (`policy.toml`) with the generated JSON Schema
+# (`schema/policy.toml.schema`), so editing a policy in VS Code (with the "Even Better
+# TOML" extension) or any taplo-backed editor gives completion, hover docs, and inline
+# validation against the same schema the compiler enforces. No extension of our own is
+# required for in-repo editing — taplo reads this file automatically.
+#
+# The schema is generated (see schema/README.md); regenerate with
+#   cargo run -p gen-schema -- --out schema/policy.toml.schema
+
+[[rule]]
+name = "kennel-policy"
+include = ["**/policy.toml", "**/*.policy.toml", "templates/**/policy.toml"]
+[rule.schema]
+path = "schema/policy.toml.schema"

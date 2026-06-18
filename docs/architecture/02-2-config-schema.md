@@ -11,7 +11,9 @@
 
 The schema does not carry a top-level version field. The project's CHANGELOG records when the schema changed and what migration (if any) is needed. Templates carry their own `template_version`; that field is independent of the schema's version.
 
-This chapter describes the *schema*. The canonical worked example is [TEMPLATE-ai-coding-strict.md](../design/TEMPLATE-ai-coding-strict.md), which exhibits every section type in a real policy. Read that file first if the structure is unfamiliar.
+This chapter describes the *schema* in prose. The **machine-readable** form is [`schema/policy.toml.schema`](../../schema/policy.toml.schema) — a JSON Schema (draft-07) host editors read for completion and inline validation (see [editors/vscode](../../editors/vscode)). It is **generated**, not hand-maintained: `gen-schema` emits it from an in-repo data table mirroring the `kennel-lib-compile` source structs, and a cross-check test (`kennel-lib-compile/tests/schema_parser_crosscheck.rs`) pins that table to the real parser so the published schema cannot drift from what the compiler accepts. Regenerate with `cargo run -p gen-schema -- --out schema/policy.toml.schema`; CI fails on drift.
+
+The canonical worked example is [TEMPLATE-ai-coding-strict.md](../design/TEMPLATE-ai-coding-strict.md), which exhibits every section type in a real policy. Read that file first if the structure is unfamiliar.
 
 ---
 

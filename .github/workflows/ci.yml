@@ -239,3 +239,21 @@ jobs:
             if [ -n "$out" ]; then echo "::error file=$f::$out"; exit 1; fi
           done
           echo "all man pages lint clean"
+
+  schema:
+    name: schema (policy JSON Schema regen check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show && cargo --version
+      # Regenerate the committed policy schema; a non-empty diff means
+      # schema/policy.toml.schema is stale relative to gen_schema::model. The
+      # schema↔parser agreement itself is enforced by the cross-check test
+      # (kennel-lib-compile/tests/schema_parser_crosscheck.rs) in the rust-test job.
+      - name: Regenerate the policy schema
+        run: cargo run --offline --locked -p gen-schema -- --out schema/policy.toml.schema
+      - name: No drift (schema/ matches the generator)
+        run: git diff --exit-code schema/
+      - name: Schema is valid JSON
+        run: python3 -c "import json,sys; json.load(open('schema/policy.toml.schema'))"

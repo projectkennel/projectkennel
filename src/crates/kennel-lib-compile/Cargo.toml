@@ -18,5 +18,11 @@ kennel-lib-policy = { path = "../kennel-lib-policy" }
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
 
+[dev-dependencies]
+# The policy-schema generator's data model, for the schema↔parser cross-check test
+# (tests/schema_parser_crosscheck.rs): proves the emitted JSON Schema agrees with this
+# parser by construction. Dev-only — never linked into any shipped binary.
+gen-schema = { path = "../../tools/gen-schema" }
+
 [lints]
 workspace = true
