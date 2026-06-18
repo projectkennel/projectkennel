@@ -2398,13 +2398,27 @@ fn policy_kind(path: &Path) -> &'static str {
     let Ok(bytes) = std::fs::read(path) else {
         return "source";
     };
-    kennel_lib_compile::parse_source(&bytes).map_or("source", |p| {
-        if p.template_name.is_some() {
+    // A base/template is SourcePolicy syntax; a fragment or leaf is leaf-delta syntax.
+    if let Ok(p) = kennel_lib_compile::parse_source(&bytes) {
+        return if p.template_name.is_some() {
             "template"
         } else if p.name.is_some() {
             "leaf"
         } else {
             "source"
+        };
+    }
+    // Leaf-delta syntax: a composable fragment (additive-only, included by reference,
+    // not anchored to a non-base parent) or an ordinary leaf kennel.
+    kennel_lib_compile::parse_leaf(&bytes).map_or("source", |leaf| {
+        let anchored_to_chain = leaf
+            .template_base
+            .as_deref()
+            .is_some_and(|b| !b.starts_with("base-confined@"));
+        if leaf.is_additive_only() && !anchored_to_chain {
+            "fragment"
+        } else {
+            "leaf"
         }
     })
 }
@@ -2825,19 +2839,38 @@ fn sign(args: &[String]) -> Result<ExitCode, String> {
     let key_path = key_path.ok_or("sign needs --key <path>")?;
 
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let policy = kennel_lib_compile::parse_source(&bytes).map_err(|e| {
-        format!("{path} is not a signable source template/fragment ({e}); leaf policies may stay unsigned")
-    })?;
-    if policy.signature.is_some() {
-        return Err(format!(
-            "{path} already carries a [signature]; remove it before re-signing"
-        ));
-    }
-
     let key = load_signing_key(Path::new(key_path))?;
-    let signed =
-        kennel_lib_compile::sign_source(&policy, &key).map_err(|e| format!("signing: {e}"))?;
-    let env = signed.signature.ok_or("internal: signature not produced")?;
+    // A base/template is SourcePolicy syntax (`[fs] read = [...]`); a composable
+    // fragment is leaf-delta syntax (`[[fs.read.add]]`) and signs through the leaf
+    // path. Try the source form first; fall back to the leaf form so `policy sign`
+    // covers both templates and fragments (05-templates §5.10).
+    let env = match kennel_lib_compile::parse_source(&bytes) {
+        Ok(policy) => {
+            if policy.signature.is_some() {
+                return Err(format!(
+                    "{path} already carries a [signature]; remove it before re-signing"
+                ));
+            }
+            kennel_lib_compile::sign_source(&policy, &key)
+                .map_err(|e| format!("signing: {e}"))?
+                .signature
+                .ok_or("internal: signature not produced")?
+        }
+        Err(source_err) => {
+            let leaf = kennel_lib_compile::parse_leaf(&bytes).map_err(|_| {
+                format!("{path} is not a signable source template/fragment ({source_err})")
+            })?;
+            if leaf.signature.is_some() {
+                return Err(format!(
+                    "{path} already carries a [signature]; remove it before re-signing"
+                ));
+            }
+            kennel_lib_compile::sign_leaf(&leaf, &key)
+                .map_err(|e| format!("signing: {e}"))?
+                .signature
+                .ok_or("internal: signature not produced")?
+        }
+    };
     // Append the signature as a new top-level table, preserving the original text.
     let block = format!(
         "\n[signature]\nalgorithm = \"{}\"\nkey_id = \"{}\"\nsignature = \"{}\"\n",
@@ -3834,6 +3867,35 @@ signed_fields = []
             "demo"
         );
         assert_eq!(policy_name_from_path(Path::new("/tmp/demo.toml")), "demo");
+    }
+
+    #[test]
+    fn policy_kind_distinguishes_template_leaf_and_fragment() {
+        let dir = std::env::temp_dir().join(format!("kennel-kind-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let write = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).expect("write");
+            p
+        };
+        // A SourcePolicy with template_name is a template; with name, a leaf.
+        let tmpl = write("t.toml", "template_name = \"x\"\n[exec]\nallow = []\n");
+        assert_eq!(policy_kind(&tmpl), "template");
+        let leaf_src = write("l.toml", "name = \"k\"\n[exec]\nallow = []\n");
+        assert_eq!(policy_kind(&leaf_src), "leaf");
+        // Leaf-delta syntax, additive-only, not anchored to a non-base parent: a fragment.
+        let frag = write(
+            "f.toml",
+            "name = \"lang-x\"\n[[exec.allow.add]]\npath = \"/usr/bin/x\"\nreason = \"r\"\n",
+        );
+        assert_eq!(policy_kind(&frag), "fragment");
+        // Leaf-delta syntax anchored to a real template chain: an ordinary leaf kennel.
+        let chained = write(
+            "c.toml",
+            "name = \"k\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[fs.read.add]]\npath = \"~/p/**\"\nreason = \"r\"\n",
+        );
+        assert_eq!(policy_kind(&chained), "leaf");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
