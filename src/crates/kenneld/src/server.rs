@@ -641,6 +641,10 @@ pub fn dispatch_request<P, L>(
             }
             Err(e) => Response::Error(e),
         },
+        // A `PromptReply` is only meaningful mid-run, read by the `PromptPort` on the
+        // already-running connection (§9.7) — never a fresh request to the dispatcher. An
+        // unsolicited one is a protocol error.
+        Request::PromptReply { .. } => Response::Error("unexpected PromptReply".to_owned()),
     };
     let _ = control::send_response(conn, &response);
 }

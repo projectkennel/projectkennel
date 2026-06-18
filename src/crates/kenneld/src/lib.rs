@@ -32,6 +32,7 @@ pub mod etc;
 pub mod inbound;
 pub mod inet;
 pub mod policy;
+pub mod prompt;
 pub mod proxy;
 pub mod pty_broker;
 pub mod server;
