@@ -456,6 +456,18 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
         eprintln!("kennel: skipping workspace manifests (HOME is not set)");
         return;
     };
+    // No compiled-in default (§2.6): the trigger set lives entirely in the config cascade. An
+    // empty catalogue with `[trust].manifest = on` is almost always a missing vendor file, not a
+    // deliberate choice — warn loudly rather than silently watch nothing (T2.8).
+    let catalogue = kennel_lib_manifest::Catalogue::load();
+    if catalogue.is_empty() {
+        eprintln!(
+            "kennel: warning: the trust-trigger catalogue is empty — no `triggers.catalog` found \
+             under /usr/lib/kennel, /etc/kennel, or ~/.config/kennel. Execution triggers will not \
+             be pinned or watched (T2.8). Install the package default or set `[trust].manifest = \
+             false` to opt out explicitly."
+        );
+    }
     let generator = format!("kennel {}", env!("CARGO_PKG_VERSION"));
     for entry in &policy.effective_policy.fs.write {
         let Some(root) = writable_root(entry, &home) else {
@@ -468,8 +480,7 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
         if path.exists() {
             continue; // leave it — refresh is `kennel review`, not `run`
         }
-        let (manifest, errors) =
-            kennel_lib_manifest::generate(&root, &generator, &kennel_lib_manifest::Catalogue::load());
+        let (manifest, errors) = kennel_lib_manifest::generate(&root, &generator, &catalogue);
         for e in &errors {
             eprintln!(
                 "kennel: manifest trigger skipped under {}: {e}",

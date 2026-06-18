@@ -1,38 +1,43 @@
 # Project Kennel — trust-manifest trigger catalogue (§2.6)
 #
-# Which workspace paths are *execution triggers*: files a confined workload can edit that
-# host tooling later runs, so they are pinned in the .trust-manifest.json and watched at
-# runtime (T2.8). This file is a DEPLOYMENT OVERLAY on an ADDITIVE cascade:
+# THE DEFAULT (vendor) LAYER. Installed to /usr/lib/kennel/triggers.catalog by the package;
+# this file *is* the default trigger set — there is no compiled-in default. Edit the higher
+# layers, not this one:
 #
-#     effective set = compiled default  ∪  /etc/kennel/triggers.catalog  ∪  ~/.config/kennel/triggers.catalog
+#     effective set = /usr/lib/kennel/triggers.catalog   (this file — package default)
+#                   ∪ /etc/kennel/triggers.catalog        (system / admin)
+#                   ∪ ~/.config/kennel/triggers.catalog   (per-user)
 #
-# Each layer ADDS patterns; an upper layer ADDS more, or PRUNES one with a leading `-`
-# (the only subtractive op). There is no "empty file = off" — an empty layer changes
-# nothing; to switch the control off entirely, set `[trust].manifest = false` in policy.
+# Each higher layer ADDS patterns, or PRUNES one a lower layer set with a leading `-` (the
+# only subtractive op). There is no "empty file = off"; to switch the control off entirely,
+# set `[trust].manifest = false` in policy.
+#
+# Which workspace paths are *execution triggers*: files a confined workload can edit that host
+# tooling later runs, so they are pinned in .trust-manifest.json and watched at runtime (T2.8).
 #
 # Grammar (one pattern per line; `#` starts a comment):
-#   <path>      a file trigger     — a trigger when that file exists      (e.g. Makefile)
+#   <path>      a file trigger      — a trigger when that file exists      (e.g. Makefile)
 #   <path>/     a directory trigger — every immediate file beneath is one (e.g. .git/hooks/)
 #   -<pattern>  prune a pattern a lower layer added
-#
-# Install this file at /etc/kennel/triggers.catalog (system-wide) or
-# ~/.config/kennel/triggers.catalog (per-user) to override. The COMPILED DEFAULT below is
-# already built in — these lines document it; you do not need to repeat them.
 
-# --- compiled default (conservative; already built in) -----------------------------------
-# Makefile
-# makefile
-# GNUmakefile
-# Justfile
-# justfile
-# Taskfile.yml
-# Taskfile.yaml
-# package.json
-# .vscode/tasks.json
-# .vscode/launch.json
-# .git/hooks/
+# --- build / task runners ----------------------------------------------------------------
+Makefile
+makefile
+GNUmakefile
+Justfile
+justfile
+Taskfile.yml
+Taskfile.yaml
 
-# --- common widenings (uncomment to add) -------------------------------------------------
+# --- package / editor task definitions ---------------------------------------------------
+package.json
+.vscode/tasks.json
+.vscode/launch.json
+
+# --- git hook directory (every script beneath fires on the matching git action) ----------
+.git/hooks/
+
+# --- common widenings (uncomment in /etc or ~/.config to add) ----------------------------
 # Auto-run shell/env hooks and language-runtime auto-imports fire in the host context too:
 # .envrc                 # direnv: runs on cd into the directory
 # .npmrc                 # npm: can set a pre-install script source

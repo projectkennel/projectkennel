@@ -51,39 +51,20 @@ pub const MANIFEST_FILENAME: &str = ".trust-manifest.json";
 /// `revert` copies the blob back.
 pub const STORE_DIRNAME: &str = ".trust-manifest.d";
 
-/// The standard execution triggers [`generate`] enumerates and pins.
-///
-/// A host tool refuses to execute one of these whose on-disk hash diverges from its pin.
-/// The list is deliberately fixed and documented (extensible later) — a baseline, not
-/// exhaustive.
-pub const KNOWN_TRIGGERS: &[&str] = &[
-    "Makefile",
-    "makefile",
-    "GNUmakefile",
-    "Justfile",
-    "justfile",
-    "Taskfile.yml",
-    "Taskfile.yaml",
-    "package.json",
-    ".vscode/tasks.json",
-    ".vscode/launch.json",
-];
-
-/// The directory prefixes whose immediate entries are treated as triggers (each file
-/// beneath is hashed) — e.g. every script in `.git/hooks/`.
-pub const KNOWN_TRIGGER_DIRS: &[&str] = &[".git/hooks"];
-
 /// The per-layer catalogue filename on the deployment cascade (§2.6).
 pub const CATALOGUE_FILENAME: &str = "triggers.catalog";
 
 /// The effective trigger catalogue (§2.6): which paths are execution triggers.
 ///
-/// Composed **additively** across the compiled default ([`KNOWN_TRIGGERS`]/[`KNOWN_TRIGGER_DIRS`])
-/// and the deployment layers `/etc/kennel/triggers.catalog` then `~/.config/kennel/triggers.catalog`
-/// — each layer adds patterns, or prunes one with a leading `-` (the only subtractive op). There
-/// is no "empty file = off": additive composition means an empty layer changes nothing; a hard
-/// disable is the `[trust].manifest` policy toggle, not the catalogue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// There is **no compiled-in default** — a baked-in trigger list is a footgun, since the
+/// operator cannot see or fully control the watched set by reading the config. The default
+/// ships as the package's **vendor** file (`/usr/lib/kennel/triggers.catalog`), and the set is
+/// composed **additively** up the standard config cascade — vendor, then `/etc/kennel`
+/// (admin), then `~/.config/kennel` (user). Each layer adds patterns, or prunes one with a
+/// leading `-` (the only subtractive op). The effective set is exactly what those files say;
+/// the hard disable is the `[trust].manifest` policy toggle. An empty catalogue (no layer
+/// installed) watches nothing — callers warn when that coincides with `[trust].manifest = on`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalogue {
     /// File triggers: a relative path that is a trigger when it exists (`Makefile`).
     pub files: Vec<String>,
@@ -91,33 +72,25 @@ pub struct Catalogue {
     pub dirs: Vec<String>,
 }
 
-impl Default for Catalogue {
-    fn default() -> Self {
-        Self::compiled_default()
-    }
-}
-
 impl Catalogue {
-    /// The compiled-in baseline (the conservative default set).
-    #[must_use]
-    pub fn compiled_default() -> Self {
-        Self {
-            files: KNOWN_TRIGGERS.iter().map(|s| (*s).to_owned()).collect(),
-            dirs: KNOWN_TRIGGER_DIRS.iter().map(|s| (*s).to_owned()).collect(),
-        }
-    }
-
-    /// Load the effective catalogue: the compiled default, then each deployment layer applied
-    /// in cascade order. A missing layer file is skipped (the lower layers stand).
+    /// Load the effective catalogue from the config cascade only (vendor → system → user).
+    /// A missing layer file is skipped; with no layer installed the catalogue is empty.
     #[must_use]
     pub fn load() -> Self {
-        let mut cat = Self::compiled_default();
+        let mut cat = Self::default();
         for path in catalogue_layer_paths() {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 cat.apply_layer(&text);
             }
         }
         cat
+    }
+
+    /// Whether the catalogue is empty — nothing to watch. Used to warn when this coincides
+    /// with `[trust].manifest = on` (a missing vendor file, not a deliberate disable).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.dirs.is_empty()
     }
 
     /// Apply one line-oriented layer: a `pattern` adds, a `-pattern` prunes, a trailing `/`
@@ -147,11 +120,15 @@ impl Catalogue {
     }
 }
 
-/// The catalogue cascade paths: `$KENNEL_ETC_DIR` (default `/etc/kennel`) then the per-user
-/// config dir (`$XDG_CONFIG_HOME`, else `$HOME/.config`) — the same cascade as `audit.toml`
-/// ([[no-hardcoded-paths-config-cascade]]).
+/// The catalogue cascade paths, lowest priority first: the vendor dir (`$KENNEL_VENDOR_DIR`,
+/// default `/usr/lib/kennel` — where the package ships the default), then the system dir
+/// (`$KENNEL_ETC_DIR`, default `/etc/kennel`), then the per-user config dir (`$XDG_CONFIG_HOME`,
+/// else `$HOME/.config`) — the project's standard config cascade ([[no-hardcoded-paths-config-cascade]]).
 fn catalogue_layer_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let vendor = std::env::var_os("KENNEL_VENDOR_DIR")
+        .map_or_else(|| PathBuf::from("/usr/lib/kennel"), PathBuf::from);
+    paths.push(vendor.join(CATALOGUE_FILENAME));
     let etc = std::env::var_os("KENNEL_ETC_DIR")
         .map_or_else(|| PathBuf::from("/etc/kennel"), PathBuf::from);
     paths.push(etc.join(CATALOGUE_FILENAME));
@@ -837,6 +814,13 @@ pub fn manifest_path(root: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A self-contained trigger set for the tests (no dependency on the shipped default).
+    fn sample_catalogue() -> Catalogue {
+        let mut cat = Catalogue::default();
+        cat.apply_layer("Makefile\nJustfile\npackage.json\n.git/hooks/\n");
+        cat
+    }
+
     fn content_entry(fill: char) -> TriggerEntry {
         TriggerEntry {
             kind: TriggerKind::Content,
@@ -904,7 +888,7 @@ mod tests {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"all:\n\techo hi\n").expect("write");
         std::fs::write(dir.join("README.md"), b"not a trigger\n").expect("write");
-        let (m, errors) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
+        let (m, errors) = generate(&dir, "kennel-test", &sample_catalogue());
         assert!(errors.is_empty(), "hashing should succeed: {errors:?}");
         assert!(
             m.execution.triggers.contains_key("Makefile"),
@@ -940,13 +924,13 @@ mod tests {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"original\n").expect("write");
         std::fs::write(dir.join("Justfile"), b"recipe\n").expect("write");
-        let (mut m, _) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
+        let (mut m, _) = generate(&dir, "kennel-test", &sample_catalogue());
         // Modify the Makefile, remove the Justfile, add a package.json (a new trigger).
         std::fs::write(dir.join("Makefile"), b"TAMPERED\n").expect("write");
         std::fs::remove_file(dir.join("Justfile")).expect("rm");
         std::fs::write(dir.join("package.json"), b"{}\n").expect("write");
 
-        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
+        let changes = review(&m, &dir, &sample_catalogue()).expect("review");
         assert!(
             changes
                 .iter()
@@ -969,7 +953,7 @@ mod tests {
         // Operator sign-off: re-pin everything; a fresh review is then all-clean.
         let errs = apply_review(&mut m, &dir, &changes, "kennel-review");
         assert!(errs.is_empty(), "re-pin should succeed: {errs:?}");
-        let after = review(&m, &dir, &Catalogue::compiled_default()).expect("review again");
+        let after = review(&m, &dir, &sample_catalogue()).expect("review again");
         assert!(
             after.iter().all(|c| !c.is_divergence()),
             "after sign-off every trigger is Unchanged: {after:?}"
@@ -982,14 +966,14 @@ mod tests {
     fn revert_restores_a_tampered_trigger_and_removes_a_planted_one() {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"all:\n\techo trusted\n").expect("write");
-        let (m, errors) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
+        let (m, errors) = generate(&dir, "kennel-test", &sample_catalogue());
         assert!(errors.is_empty(), "{errors:?}");
 
         // The "workload" tampers the Makefile and plants a new package.json.
         std::fs::write(dir.join("Makefile"), b"all:\n\techo PWNED\n").expect("tamper");
         std::fs::write(dir.join("package.json"), b"{\"evil\":true}\n").expect("plant");
 
-        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
+        let changes = review(&m, &dir, &sample_catalogue()).expect("review");
         for change in &changes {
             revert(&dir, change).expect("revert");
         }
@@ -1015,12 +999,12 @@ mod tests {
         let hook = hooks.join("post-commit");
         std::fs::write(&hook, b"#!/bin/sh\necho ok\n").expect("write hook");
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let (m, errors) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
+        let (m, errors) = generate(&dir, "kennel-test", &sample_catalogue());
         assert!(errors.is_empty(), "{errors:?}");
 
         // Delete the pinned hook; revert must recreate it with its 0755 mode.
         std::fs::remove_file(&hook).expect("rm hook");
-        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
+        let changes = review(&m, &dir, &sample_catalogue()).expect("review");
         for change in &changes {
             revert(&dir, change).expect("revert");
         }
@@ -1033,10 +1017,10 @@ mod tests {
     fn prune_store_drops_unreferenced_blobs() {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"v1\n").expect("write");
-        let (mut m, _) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
+        let (mut m, _) = generate(&dir, "kennel-test", &sample_catalogue());
         // A new content version leaves the old blob behind until pruned.
         std::fs::write(dir.join("Makefile"), b"v2\n").expect("rewrite");
-        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
+        let changes = review(&m, &dir, &sample_catalogue()).expect("review");
         apply_review(&mut m, &dir, &changes, "kennel-review");
         let blobs = || std::fs::read_dir(store_dir(&dir)).expect("ls").count();
         assert_eq!(blobs(), 2, "both the v1 and v2 blobs exist before pruning");
@@ -1060,7 +1044,7 @@ mod tests {
         assert!(!escaping.iter().any(|p| p == "inside.lnk"), "in-tree link not flagged");
 
         // generate pins the escaping links as symlink-kind entries.
-        let (m, _) = generate(&dir, "t", &Catalogue::compiled_default());
+        let (m, _) = generate(&dir, "t", &sample_catalogue());
         assert!(
             m.execution
                 .triggers
@@ -1071,7 +1055,7 @@ mod tests {
 
         // A NEW escaping link planted after generation shows as New; revert removes it.
         std::os::unix::fs::symlink("/root/.bashrc", dir.join("planted.lnk")).expect("plant");
-        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
+        let changes = review(&m, &dir, &sample_catalogue()).expect("review");
         let planted = changes
             .iter()
             .find(|c| matches!(c, TriggerChange::New { path, .. } if path == "planted.lnk"))
@@ -1082,7 +1066,7 @@ mod tests {
             "the planted escaping link is removed"
         );
         // The pinned escaping link survives a clean review (Unchanged).
-        let after = review(&m, &dir, &Catalogue::compiled_default()).expect("review2");
+        let after = review(&m, &dir, &sample_catalogue()).expect("review2");
         assert!(
             after
                 .iter()
@@ -1094,7 +1078,7 @@ mod tests {
 
     #[test]
     fn catalogue_layers_are_additive_with_prune() {
-        let mut cat = Catalogue::compiled_default();
+        let mut cat = sample_catalogue();
         assert!(cat.files.iter().any(|f| f == "Makefile"));
         // A system layer widens the set (a file + a dir trigger); a comment is ignored.
         cat.apply_layer("# widen\n.envrc\nbuild/hooks/\n");

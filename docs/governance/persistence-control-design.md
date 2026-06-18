@@ -114,26 +114,32 @@ on top of built primitives, not the deliverable).
   TTL `renew` prompt, pulled into this release (ROADMAP W13) — the kenneld→attached-CLI prompt path
   the daemon lacks today. One channel serves both the TTL renew prompt and `interactive` teardown.
 
-### 2.6 The catalogue — an **additive** layered config (steer 3, clarified)
-A **deployment config** on the same path cascade as `audit.toml` ([[no-hardcoded-paths-config-cascade]]),
-but composed **additively** (union, not replace — like the SSH `+=`/`-=` model
+### 2.6 The catalogue — an **additive** layered config, no compiled default (steer 3, revised)
+A **deployment config** on the project's standard config cascade ([[no-hardcoded-paths-config-cascade]]),
+composed **additively** (union, not replace — like the SSH `+=`/`-=` model
 [[compiler-list-composition-ssh-model]]):
 
-> effective catalogue = compiled default **∪** `/etc/kennel/triggers.catalog` **∪** `~/.config/kennel/triggers.catalog`
+> effective catalogue = `/usr/lib/kennel/triggers.catalog` (vendor, the package default)
+> **∪** `/etc/kennel/triggers.catalog` (admin) **∪** `~/.config/kennel/triggers.catalog` (user)
 
-Line-oriented: one trigger pattern per line (`#` comments). Each lower layer **adds** patterns; an
-upper layer adds more — **or removes an individual entry with a leading `-`** (the only subtractive
-op). The kind (file / dir / content-marker — e.g. `core.hooksPath` is a *field* in `.git/config`, not
-the whole file) is encoded in the pattern syntax (exact grammar is a build detail). Loaded by
-`kennel-lib-manifest`; the current `KNOWN_TRIGGERS`/`_DIRS` consts become the compiled default.
-- **Compiled default is conservative** (steer 3): today's set + `core.hooksPath`, `.git/config`
-  aliases, `.gitattributes` filters, escaping symlinks. `/etc/kennel` widens system-wide; `~/.config`
-  widens or prunes (`-pattern`) per-user. The noisier patterns (`.envrc`, `.npmrc`, `.pth`/
-  `sitecustomize`, `.desktop`, user systemd units) ship as commented lines to add, not defaults.
+**There is no compiled-in default.** A baked-in trigger list is a footgun: the operator cannot see
+or fully control what is watched by reading the config, and can only *subtract* the invisible default
+with `-pattern`. So the default trigger set ships as the **vendor** layer file (the lowest-priority,
+package-shipped, read-only layer — the same place every other shipped default lives), and the effective
+set is exactly what the cascade files say. Line-oriented: one trigger pattern per line (`#` comments);
+each higher layer **adds** patterns, or **removes** one a lower layer set with a leading `-` (the only
+subtractive op). A trailing `/` marks a directory trigger. Loaded by `kennel-lib-manifest` (the daemon
+links none of this — it receives a resolved path list, §2.4).
+- **The shipped vendor default is conservative**: `Makefile`/`makefile`/`GNUmakefile`, the `Just`/`Task`
+  runners, `package.json`, the `.vscode` task/launch defs, and the `.git/hooks/` directory. `/etc/kennel`
+  widens system-wide; `~/.config` widens or prunes per-user. Noisier patterns (`.envrc`, `.npmrc`,
+  `.pth`/`sitecustomize`, `.desktop`) ship as commented lines in the vendor file, to add, not defaults.
 - **Weakening is explicit, via `-pattern` only** (no "empty file = off"; additive means an empty user
   file changes nothing). The operator is the trust root (§11.2), so pruning is fine — and a *workload*
-  cannot reach these host files. A **hard disable** is the existing `[trust].manifest = false` toggle,
-  not the catalogue.
+  cannot reach these host files. A **hard disable** is the existing `[trust].manifest = false` toggle.
+- **An empty catalogue watches nothing** — and because there is no hidden default, a missing vendor
+  file would silently disable T2.8. So the CLI **warns loudly** when `[trust].manifest = on` resolves an
+  empty catalogue (a deployment fault), rather than failing closed or pretending coverage.
 - Documented as **"detects this configured set, never *clean*"** — the boundary is stated, not implied.
 
 ### 2.7 Exclusive host bind (`[fs.write].exclusive`) — severing the live confused-deputy channel (opt-in)
