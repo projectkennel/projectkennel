@@ -5,7 +5,7 @@
 #
 # Strict confinement for an AI coding agent on a single project tree. Adds, on
 # top of base-confined: the interpreters/tools an agent needs, the common package
-# registries + git hosts, a per-kennel gpg-agent, and an
+# registries + git hosts, and an
 # 8-hour TTL. The PROJECT PATH and the LLM API endpoint are deliberately NOT here
 # — the user's leaf policy adds them (see README.md / TEMPLATE-ai-coding-strict.md
 # at the repo root for the full annotated reference and a sample leaf policy).
@@ -34,7 +34,7 @@ allow = [
     # Package managers
     "/usr/bin/npm", "/usr/bin/npx", "/usr/bin/pip", "/usr/bin/pip3",
     "/usr/bin/yarn", "/usr/bin/pnpm",
-    # Source control + SSH (for git-over-SSH via the per-kennel agent)
+    # Source control + the SSH client (git-over-SSH transport to allowlisted hosts)
     "/usr/bin/git", "/usr/lib/git-core/**", "/usr/bin/ssh", "/usr/bin/ssh-add",
     # Standard userland the agent reaches for
     "/usr/bin/cat", "/usr/bin/ls", "/usr/bin/find", "/usr/bin/grep",
@@ -104,30 +104,13 @@ reason = "git LFS / large-file storage"
 threats.exposed = ["T1.9"]
 
 
-# --- AF_UNIX: a per-kennel gpg-agent ----------------------------------------
-# SSH is NOT shimmed as an agent socket — an exposed ssh-agent is a
-# destination-blind signing oracle (§7.8.1). Per-kennel SSH egress goes through
-# the re-origination bastion (the [ssh] section, §7.8), never AF_UNIX.
-#
-# The shim is for the other agent-shaped services. Here: a per-kennel gpg-agent,
-# bound at the path gpg expects. The user's REAL ~/.gnupg keyring is never
-# exposed (T1.6). The per-kennel gpg-agent instance is launched separately
-# (§7.4.7); until then the shim binds whatever is at `real` (skip-missing).
-[[unix.allow]]
-name = "gpg-agent"
-real = "~/.gnupg/kennels/<kennel>/S.gpg-agent"
-shim = "~/.gnupg/S.gpg-agent"
-reason = "sign git commits/tags via a per-kennel gpg-agent, not the user's"
-
-
 # --- Lifecycle --------------------------------------------------------------
 # A coding session may run a full workday; warn at the TTL rather than kill.
 [lifecycle]
 ttl = "8h"
 ttl_action = "warn"
 
-
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "Yx64NI5e4AV/VGNBcrKskFnmpclTe47QLRBFgo+IwJFzmxghPvwBLHcGXqegG0KZXMQWulc/iJpQ/qgQHvyiAQ=="
+signature = "Nkiiem0UZznGkfwrEbcZLptm7HnwmZOSxeFhvIZtzDAW8SKOsa6gUIQDk3O2vlFaPvBWSuOmp45mhphEs1NHAg=="

@@ -703,11 +703,14 @@ mod tests {
             .allow
             .iter()
             .any(|a| a.name.as_deref() == Some("github.com")));
-        let unix = eff.unix.as_ref().expect("unix");
-        assert!(unix
-            .allow
-            .iter()
-            .any(|u| u.name.as_deref() == Some("gpg-agent")));
+        // ai-coding-strict grants no agent socket — no gpg-agent (GPG signing can't be
+        // made safe in a kennel, §11.2) and no ssh-agent (SSH goes via the bastion).
+        let has_agent = eff.unix.as_ref().is_some_and(|u| {
+            u.allow.iter().any(|a| {
+                a.name.as_deref() == Some("gpg-agent") || a.name.as_deref() == Some("ssh-agent")
+            })
+        });
+        assert!(!has_agent, "no agent shim in the folded template");
 
         // Provenance records the folded parent.
         assert_eq!(resolved.chain.len(), 1);

@@ -1548,10 +1548,10 @@ mod tests {
                 default: Some("deny".to_owned()),
                 abstract_ns: Some("deny".to_owned()),
                 allow: vec![UnixAllow {
-                    name: Some("gpg-agent".to_owned()),
-                    real: Some("~/.gnupg/kennels/<kennel>/S.gpg-agent".to_owned()),
-                    shim: Some("~/.gnupg/S.gpg-agent".to_owned()),
-                    reason: Some("sign commits".to_owned()),
+                    name: Some("tool-daemon".to_owned()),
+                    real: Some("~/.cache/kennel/<kennel>/tool.sock".to_owned()),
+                    shim: Some("/run/tool.sock".to_owned()),
+                    reason: Some("a project-scoped helper daemon, per kennel".to_owned()),
                     ..UnixAllow::default()
                 }],
             }),
@@ -1561,8 +1561,8 @@ mod tests {
         let unix = translate_unix(&src, &mut deferred);
         assert_eq!(unix.sockets.len(), 1);
         let s = unix.sockets.first().expect("socket");
-        assert_eq!(s.name, "gpg-agent");
-        assert_eq!(s.shim, "~/.gnupg/S.gpg-agent");
+        assert_eq!(s.name, "tool-daemon");
+        assert_eq!(s.shim, "/run/tool.sock");
         assert!(s.env.is_none());
         // The per-instance placeholder in `real` is recorded for runtime substitution.
         assert!(
@@ -1715,25 +1715,17 @@ mod tests {
     }
 
     #[test]
-    fn ai_coding_strict_translates_its_unix_shim() {
+    fn ai_coding_strict_grants_no_agent_unix_shim() {
         let t = translate_template(AI_CODING_STRICT);
-        assert!(!t.unix.is_empty(), "the template grants a gpg-agent shim");
-        let gpg = t
-            .unix
-            .sockets
-            .iter()
-            .find(|s| s.name == "gpg-agent")
-            .expect("gpg-agent socket");
-        assert_eq!(gpg.shim, "~/.gnupg/S.gpg-agent");
-        // <kennel> in the real path is deferred to the runtime.
-        assert!(gpg.real.contains("<kennel>"));
-        assert!(t.deferred_substitutions.iter().any(|p| p == "<kennel>"));
-        // SSH is never a unix shim.
-        assert!(!t
-            .unix
-            .sockets
-            .iter()
-            .any(|s| s.env.as_deref() == Some("SSH_AUTH_SOCK")));
+        // No agent shim at all: GPG signing cannot be made safe in a kennel (a signing
+        // oracle, §11.2), and an exposed ssh-agent is a destination-blind oracle (SSH
+        // egress goes through the §7.10 bastion, never a shim).
+        assert!(
+            t.unix.sockets.iter().all(|s| s.name != "gpg-agent"
+                && s.name != "ssh-agent"
+                && s.env.as_deref() != Some("SSH_AUTH_SOCK")),
+            "ai-coding-strict ships no gpg-agent or ssh-agent shim"
+        );
     }
 
     #[test]
@@ -1781,9 +1773,6 @@ mod tests {
         // 8h TTL, warn.
         assert_eq!(ep.lifecycle.ttl_seconds, Some(28_800));
         assert_eq!(ep.lifecycle.ttl_action, TtlAction::Warn);
-
-        // Per-instance placeholders are deferred to spawn (the daemon fills them).
-        assert!(t.deferred_substitutions.iter().any(|p| p == "<kennel>"));
     }
 
     #[test]

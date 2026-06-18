@@ -12,7 +12,7 @@
 //! # What this checks (§7.1.4)
 //!
 //! - **No reserved name.** The `org.projectkennel.*` namespace is owned by kenneld
-//!   (the af-unix/dbus/gpg/wayland facades are enabled by their own sections, never
+//!   (the af-unix/dbus/wayland facades are enabled by their own sections, never
 //!   declared here). A `provide`/`consume` name in that namespace is a categorical
 //!   error — declaring it would shadow a kenneld-owned node.
 //! - **Every entry has a `name` and a `reason`.** A service grant is a capability;

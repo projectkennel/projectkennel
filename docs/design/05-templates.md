@@ -312,19 +312,17 @@ The default is `"empty"` for compatibility; templates that prioritise strictness
 
 ### Per-kennel service instances
 
-Some services are inappropriate to share with the user's main session but are needed by the agent. The canonical example is gpg-agent: the agent needs to sign commits, but it should sign with a per-kennel instance, not reach the user's main agent and every key it holds.
-
-Templates declare per-kennel service instances through `[[unix.allow]]`:
+Some services are inappropriate to share with the user's main session but are useful to the agent as a *per-kennel* instance scoped to that one kennel. Templates declare per-kennel service instances through `[[unix.allow]]`, binding a per-kennel socket rather than the user's shared one — for example a project-scoped tool daemon:
 
 ```toml
 [[unix.allow]]
-name = "gpg-agent"
-real = "~/.gnupg/kennels/<kennel>/S.gpg-agent"
-shim = "~/.gnupg/S.gpg-agent"
-reason = "sign commits via a per-kennel gpg-agent"
+name = "tool-daemon"
+real = "~/.cache/kennel/<kennel>/tool.sock"
+shim = "/run/tool.sock"
+reason = "a project-scoped helper daemon, per kennel"
 ```
 
-Project Kennel binds the granted host socket into the kennel's constructed view at the `shim` path (and, where given, sets the named `env` var to that path); the socket at the `real` path is the per-kennel instance. The same pattern applies to per-kennel keyring daemons and similar.
+Project Kennel binds the granted host socket into the kennel's constructed view at the `shim` path (and, where given, sets the named `env` var to that path); the socket at the `real` path is the per-kennel instance.
 
 **ssh-agent is special: prefer the bastion, not a raw shim.** An exposed ssh-agent socket is a destination-blind signing oracle: anything that can reach the socket can sign with every key the agent holds, against any host (T1.6, §7.10.1). The intended path for SSH egress is therefore the dedicated `[ssh]` section and the §7.10 re-origination bastion, which binds each synthetic key to a forced command for one fixed destination, so a kennel can never use a key against a host it was not granted and never holds the real key.
 

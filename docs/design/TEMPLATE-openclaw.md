@@ -37,7 +37,7 @@ reason = "the model API openclaw calls"
 threats.exposed = ["T1.8"]
 ```
 
-That is the entire user-authored policy. Everything else — the constructed `$HOME`, the credential locations *absent* from the view, the per-kennel network namespace, the exec allowlist, the seccomp filter, the registry/git-host egress, the per-kennel gpg-agent, the 8-hour TTL — is inherited from `ai-coding-strict@v1` and, beneath it, `base-confined@v1`.
+That is the entire user-authored policy. Everything else — the constructed `$HOME`, the credential locations *absent* from the view, the per-kennel network namespace, the exec allowlist, the seccomp filter, the registry/git-host egress, the 8-hour TTL — is inherited from `ai-coding-strict@v1` and, beneath it, `base-confined@v1`.
 
 ---
 
@@ -75,7 +75,7 @@ So a leaf that grants `api.anthropic.com` cannot be turned, by DNS trickery or a
 The leaf is short because the template is strict. openclaw, running under this policy, **cannot**:
 
 - **Spawn off-allowlist binaries** (`sudo`, a downloaded payload, a shell openclaw wrote to disk): the exec allowlist is the closure of the template's named interpreters and tools, enforced by Landlock `FS_EXECUTE` on `execve` (§7.3). A `postinstall` script that drops a binary and runs it (**T1.2**) gets `EACCES` on the exec.
-- **Reach the user's ssh-agent or gpg keyring** (**T1.6**): SSH egress goes through the re-origination bastion, never an exposed agent socket (an exposed agent is a destination-blind signing oracle). Git signing uses a *per-kennel* gpg-agent, not the user's `~/.gnupg`.
+- **Reach the user's ssh-agent or gpg keyring** (**T1.6**): SSH egress goes through the re-origination bastion, bound to specific destinations, never an exposed agent socket. `~/.gnupg` is absent from the view; commit signing is host-side (the human signs on review before push, §11.2).
 - **See the user's other processes** (**T1.1**): a private PID namespace and a fresh `/proc`.
 - **Degrade host security config** or escalate: `no_new_privs`, an empty capability bounding set, a seccomp filter, and an unprivileged user namespace mean there is no root to become and no privileged syscall to call.
 - **Outlast its session unbounded**: an 8-hour TTL (warn, not kill — a workday-length coding session) bounds a quietly-persistent agent.

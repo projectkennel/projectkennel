@@ -498,7 +498,6 @@ mod tests {
             .framework_invariants_asserted
             .iter()
             .any(|i| i == "cap.no_new_privs"));
-        assert!(p.deferred_substitutions.iter().any(|d| d == "<kennel>"));
     }
 
     #[test]
