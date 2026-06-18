@@ -25,8 +25,8 @@
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::control::{self, Request, Response};
@@ -92,7 +92,10 @@ impl PromptPort {
         // Read until the reply matching this prompt's id; ignore any stray frame.
         loop {
             match control::recv_request(&mut *conn) {
-                Ok(Request::PromptReply { id: reply_id, answer }) if reply_id == id => {
+                Ok(Request::PromptReply {
+                    id: reply_id,
+                    answer,
+                }) if reply_id == id => {
                     return Some(affirmative(&answer));
                 }
                 Ok(_) => {} // a stale/unrelated frame — keep waiting for our id
@@ -156,7 +159,10 @@ mod tests {
             )
             .expect("send reply");
         });
-        assert_eq!(port.ask("kennel 'x' reached its TTL — renew? [y/N]"), Some(true));
+        assert_eq!(
+            port.ask("kennel 'x' reached its TTL — renew? [y/N]"),
+            Some(true)
+        );
         cli.join().expect("cli thread");
     }
 

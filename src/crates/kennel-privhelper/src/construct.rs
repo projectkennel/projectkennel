@@ -274,15 +274,16 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    kennel's uid 0 for the root-owned construction (below).
     let granted = half.granted_gids.clone();
     let namespaces = half.namespaces; // captured before `half` moves into the child
-    // The host sources of the exclusive binds (§2.7), captured before `half` moves into the child;
-    // the parent over-mounts them once the child signals its view is built (below).
-    let exclusive_sources: Vec<std::path::PathBuf> = half.view.as_ref().map_or_else(Vec::new, |v| {
-        v.binds
-            .iter()
-            .filter(|b| b.exclusive)
-            .map(|b| b.source.clone())
-            .collect()
-    });
+                                      // The host sources of the exclusive binds (§2.7), captured before `half` moves into the child;
+                                      // the parent over-mounts them once the child signals its view is built (below).
+    let exclusive_sources: Vec<std::path::PathBuf> =
+        half.view.as_ref().map_or_else(Vec::new, |v| {
+            v.binds
+                .iter()
+                .filter(|b| b.exclusive)
+                .map(|b| b.source.clone())
+                .collect()
+        });
     let child = move || {
         // Each early return trips clone_pid1's `_exit(127)` backstop. Name the failing step on
         // stderr first (inherited from the factory, so it reaches kenneld's journal): a silent

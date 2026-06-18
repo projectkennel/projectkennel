@@ -51,7 +51,8 @@ impl Watcher {
     /// # Errors
     /// The OS error if `inotify_init1` fails.
     pub fn new() -> io::Result<Self> {
-        let inner = Inotify::init(InitFlags::IN_CLOEXEC | InitFlags::IN_NONBLOCK).map_err(into_io)?;
+        let inner =
+            Inotify::init(InitFlags::IN_CLOEXEC | InitFlags::IN_NONBLOCK).map_err(into_io)?;
         Ok(Self { inner })
     }
 

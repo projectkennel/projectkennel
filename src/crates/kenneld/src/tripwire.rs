@@ -149,7 +149,10 @@ mod tests {
         std::fs::create_dir_all(&cgroup).expect("mkdir cgroup");
         std::fs::write(cgroup.join("cgroup.freeze"), "0").expect("seed freeze");
 
-        let writer = Arc::new(crate::audit::noop_writer("tripwire-test", "uuid".to_owned()));
+        let writer = Arc::new(crate::audit::noop_writer(
+            "tripwire-test",
+            "uuid".to_owned(),
+        ));
         let tripwire = Tripwire::start(
             std::slice::from_ref(&watch),
             OnChangeAction::Freeze,
@@ -162,8 +165,7 @@ mod tests {
         std::fs::write(watch.join("post-commit"), b"#!/bin/sh\n").expect("plant");
         let mut frozen = false;
         for _ in 0..100 {
-            if std::fs::read_to_string(cgroup.join("cgroup.freeze"))
-                .is_ok_and(|s| s.trim() == "1")
+            if std::fs::read_to_string(cgroup.join("cgroup.freeze")).is_ok_and(|s| s.trim() == "1")
             {
                 frozen = true;
                 break;
@@ -175,4 +177,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
-

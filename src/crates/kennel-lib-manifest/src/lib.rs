@@ -110,7 +110,11 @@ impl Catalogue {
             if name.is_empty() {
                 continue;
             }
-            let set = if is_dir { &mut self.dirs } else { &mut self.files };
+            let set = if is_dir {
+                &mut self.dirs
+            } else {
+                &mut self.files
+            };
             if remove {
                 set.retain(|p| p != name);
             } else if !set.iter().any(|p| p == name) {
@@ -521,7 +525,12 @@ fn file_mode(path: &Path) -> Result<String, Error> {
 /// Pin one trigger `rel` under `root` into a [`TriggerEntry`]: a symlink records its target;
 /// a regular file is hashed and its bytes stored as a blob. `pattern` is the matching
 /// catalogue id (provenance), `pinned_by` is `"compile"` or `"review"`.
-fn pin_entry(root: &Path, rel: &str, pattern: &str, pinned_by: &str) -> Result<TriggerEntry, Error> {
+fn pin_entry(
+    root: &Path,
+    rel: &str,
+    pattern: &str,
+    pinned_by: &str,
+) -> Result<TriggerEntry, Error> {
     let abs = root.join(rel);
     let mode = file_mode(&abs)?;
     if std::fs::symlink_metadata(&abs)?.file_type().is_symlink() {
@@ -798,8 +807,8 @@ fn restore_entry(root: &Path, path: &str, entry: &TriggerEntry) -> Result<(), Er
 /// Apply an octal mode string (`"0755"`) to `path`.
 fn set_mode(path: &Path, mode: &str) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;
-    let bits = u32::from_str_radix(mode, 8)
-        .map_err(|e| Error::Hash(format!("bad mode `{mode}`: {e}")))?;
+    let bits =
+        u32::from_str_radix(mode, 8).map_err(|e| Error::Hash(format!("bad mode `{mode}`: {e}")))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))?;
     Ok(())
 }
@@ -1009,7 +1018,10 @@ mod tests {
             revert(&dir, change).expect("revert");
         }
         let mode = std::fs::metadata(&hook).expect("stat").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "the executable bit survives the revert (got {mode:o})");
+        assert_eq!(
+            mode, 0o755,
+            "the executable bit survives the revert (got {mode:o})"
+        );
         cleanup(&dir);
     }
 
@@ -1039,9 +1051,18 @@ mod tests {
         std::os::unix::fs::symlink("../../../etc/hosts", dir.join("climb.lnk")).expect("climb");
 
         let escaping = enumerate_escaping_symlinks(&dir);
-        assert!(escaping.iter().any(|p| p == "escape.lnk"), "abs escape: {escaping:?}");
-        assert!(escaping.iter().any(|p| p == "climb.lnk"), "climb escape: {escaping:?}");
-        assert!(!escaping.iter().any(|p| p == "inside.lnk"), "in-tree link not flagged");
+        assert!(
+            escaping.iter().any(|p| p == "escape.lnk"),
+            "abs escape: {escaping:?}"
+        );
+        assert!(
+            escaping.iter().any(|p| p == "climb.lnk"),
+            "climb escape: {escaping:?}"
+        );
+        assert!(
+            !escaping.iter().any(|p| p == "inside.lnk"),
+            "in-tree link not flagged"
+        );
 
         // generate pins the escaping links as symlink-kind entries.
         let (m, _) = generate(&dir, "t", &sample_catalogue());
@@ -1049,7 +1070,8 @@ mod tests {
             m.execution
                 .triggers
                 .get("escape.lnk")
-                .is_some_and(|e| e.kind == TriggerKind::Symlink && e.target.as_deref() == Some("/etc/passwd")),
+                .is_some_and(|e| e.kind == TriggerKind::Symlink
+                    && e.target.as_deref() == Some("/etc/passwd")),
             "the escaping link is pinned as a symlink with its target"
         );
 
@@ -1082,16 +1104,28 @@ mod tests {
         assert!(cat.files.iter().any(|f| f == "Makefile"));
         // A system layer widens the set (a file + a dir trigger); a comment is ignored.
         cat.apply_layer("# widen\n.envrc\nbuild/hooks/\n");
-        assert!(cat.files.iter().any(|f| f == ".envrc"), "added a file trigger");
-        assert!(cat.dirs.iter().any(|d| d == "build/hooks"), "added a dir trigger");
+        assert!(
+            cat.files.iter().any(|f| f == ".envrc"),
+            "added a file trigger"
+        );
+        assert!(
+            cat.dirs.iter().any(|d| d == "build/hooks"),
+            "added a dir trigger"
+        );
         let files_before = cat.files.len();
         // Re-adding an existing pattern is a no-op (additive union, not duplication).
         cat.apply_layer("Makefile\n");
         assert_eq!(cat.files.len(), files_before, "no duplicate on re-add");
         // A per-user layer prunes one entry with a leading `-`.
         cat.apply_layer("-Makefile\n-build/hooks/\n");
-        assert!(!cat.files.iter().any(|f| f == "Makefile"), "pruned the file");
-        assert!(!cat.dirs.iter().any(|d| d == "build/hooks"), "pruned the dir");
+        assert!(
+            !cat.files.iter().any(|f| f == "Makefile"),
+            "pruned the file"
+        );
+        assert!(
+            !cat.dirs.iter().any(|d| d == "build/hooks"),
+            "pruned the dir"
+        );
         // An empty layer changes nothing (no "empty = off").
         let snapshot = cat.clone();
         cat.apply_layer("\n  \n# only comments\n");

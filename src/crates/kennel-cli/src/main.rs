@@ -638,8 +638,9 @@ fn review_one_root(
         .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
     let mut manifest = kennel_lib_manifest::Manifest::from_json(&raw)
         .map_err(|e| format!("parsing {}: {e}", manifest_path.display()))?;
-    let changes = kennel_lib_manifest::review(&manifest, root, &kennel_lib_manifest::Catalogue::load())
-        .map_err(|e| format!("reviewing {}: {e}", root.display()))?;
+    let changes =
+        kennel_lib_manifest::review(&manifest, root, &kennel_lib_manifest::Catalogue::load())
+            .map_err(|e| format!("reviewing {}: {e}", root.display()))?;
     let divergences: Vec<_> = changes.iter().filter(|c| c.is_divergence()).collect();
     if divergences.is_empty() {
         println!("{}: no changes", root.display());
@@ -651,7 +652,12 @@ fn review_one_root(
         show_trigger_diff(root, change);
     }
     if do_revert {
-        if assume_yes || prompt_yes(&format!("revert {} trigger(s) to baseline?", divergences.len()))? {
+        if assume_yes
+            || prompt_yes(&format!(
+                "revert {} trigger(s) to baseline?",
+                divergences.len()
+            ))?
+        {
             for change in &divergences {
                 match kennel_lib_manifest::revert(root, change) {
                     Ok(()) => println!("  reverted {}", change_path_of(change)),
@@ -720,7 +726,11 @@ fn show_trigger_diff(root: &Path, change: &kennel_lib_manifest::TriggerChange) {
         return;
     };
     // Stage the pinned bytes in a temp file and diff the live file against it.
-    let tmp = std::env::temp_dir().join(format!("kennel-pin-{}-{}", std::process::id(), entry.sha256.replace(':', "_")));
+    let tmp = std::env::temp_dir().join(format!(
+        "kennel-pin-{}-{}",
+        std::process::id(),
+        entry.sha256.replace(':', "_")
+    ));
     if std::fs::write(&tmp, &pinned).is_err() {
         return;
     }
@@ -856,7 +866,9 @@ fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
     let uid = kennel_lib_syscall::unistd::real_uid();
     for ex in exclusive {
         let Some(host) = writable_root(ex, &home) else {
-            return Err(format!("fs.exclusive `{ex}`: cannot resolve to a host path"));
+            return Err(format!(
+                "fs.exclusive `{ex}`: cannot resolve to a host path"
+            ));
         };
         match std::fs::symlink_metadata(&host) {
             Ok(meta) if meta.uid() == uid => {}

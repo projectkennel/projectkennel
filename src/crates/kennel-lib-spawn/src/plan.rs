@@ -946,10 +946,14 @@ impl Plan {
         let (mask_paths, mask_dir_paths): (Vec<PathBuf>, Vec<PathBuf>) = if ep.trust.manifest {
             let writable = || binds.iter().filter(|b| b.writable);
             (
-                writable().map(|b| b.target.join(".trust-manifest.json")).collect(),
+                writable()
+                    .map(|b| b.target.join(".trust-manifest.json"))
+                    .collect(),
                 // The blob store beside the manifest (kennel-lib-manifest STORE_DIRNAME);
                 // hardcoded here like the manifest filename to keep it off the spawn crate's deps.
-                writable().map(|b| b.target.join(".trust-manifest.d")).collect(),
+                writable()
+                    .map(|b| b.target.join(".trust-manifest.d"))
+                    .collect(),
             )
         } else {
             (Vec::new(), Vec::new())

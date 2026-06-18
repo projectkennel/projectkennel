@@ -587,7 +587,10 @@ fn materialize_dir_masks(
             io::Error::new(e.kind(), format!("store mask bind {}: {e}", dest.display()))
         })?;
         mount::remount_readonly(&dest).map_err(|e| {
-            io::Error::new(e.kind(), format!("store mask remount_ro {}: {e}", dest.display()))
+            io::Error::new(
+                e.kind(),
+                format!("store mask remount_ro {}: {e}", dest.display()),
+            )
         })?;
     }
     Ok(())
@@ -769,7 +772,11 @@ mod tests {
                     exclusive: Vec::new(),
                     home_persist: Vec::new(),
                     home_readonly: false,
-                    tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
+                    tmp: TmpPolicy {
+                        private: true,
+                        size_mib: 512,
+                        mode: "0700".to_owned(),
+                    },
                     dev: DevPolicy {
                         allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
                     },

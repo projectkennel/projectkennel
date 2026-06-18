@@ -305,7 +305,10 @@ impl Request {
                 put_str(&mut b, &req.term);
                 put_u8(&mut b, u8::from(req.interactive));
                 put_u8(&mut b, u8::from(req.force));
-                put_u32(&mut b, u32::try_from(req.watch_paths.len()).unwrap_or(u32::MAX));
+                put_u32(
+                    &mut b,
+                    u32::try_from(req.watch_paths.len()).unwrap_or(u32::MAX),
+                );
                 for p in &req.watch_paths {
                     put_str(&mut b, &p.to_string_lossy());
                 }

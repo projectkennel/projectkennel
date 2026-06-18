@@ -115,9 +115,15 @@ mod tests {
         // A regular file is not a valid exclusive target.
         let file = dir.join("f");
         std::fs::write(&file, b"x").expect("write");
-        assert!(check_owned_dir(&file, me).is_err(), "a file is not a directory");
+        assert!(
+            check_owned_dir(&file, me).is_err(),
+            "a file is not a directory"
+        );
         // A missing path is refused (cannot own what is not there).
-        assert!(check_owned_dir(&dir.join("nope"), me).is_err(), "absent path refused");
+        assert!(
+            check_owned_dir(&dir.join("nope"), me).is_err(),
+            "absent path refused"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

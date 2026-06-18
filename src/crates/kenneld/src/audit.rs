@@ -218,7 +218,11 @@ pub fn workload_exit(pid: u32, exit_code: i32) -> Event {
 /// workload was acted on (freeze/kill), making it a `Deny`; a `warn` is informational.
 #[must_use]
 pub fn fs_mutation(path: &str, action: &'static str, enforced: bool) -> Event {
-    let outcome = if enforced { Outcome::Deny } else { Outcome::Info };
+    let outcome = if enforced {
+        Outcome::Deny
+    } else {
+        Outcome::Info
+    };
     Event::new("fs.mutation", Resource::Fs, outcome, Source::Kenneld)
         .field("path", Value::untrusted(path))
         .field("action", Value::untrusted(action))
