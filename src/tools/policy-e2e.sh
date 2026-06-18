@@ -186,10 +186,11 @@ if [ "${#CASES[@]}" -eq 0 ]; then
     for d in "$SUITE_DIR"/*/; do CASES+=("$(basename "$d")"); done
 fi
 
-# Point the CLI's trust-trigger catalogue (§2.6) at the repo's vendored default, since the
-# package's /usr/lib/kennel/triggers.catalog is not installed in the build tree. There is no
-# compiled-in default, so without this `kennel run` would warn about an empty catalogue.
-export KENNEL_VENDOR_DIR="$REPO_ROOT/dist/triggers"
+# Point the CLI's vendor catalogues (§2.6: the trust-trigger set) at the repo's defaults, so a
+# `--no-install` run still resolves them. The daemon's etc-binds catalogue (W14) is read by the
+# installed kenneld.service from /usr/lib/kennel, where install.sh places it — the service does
+# not inherit this env, so that one rides the install, not this override.
+export KENNEL_VENDOR_DIR="$REPO_ROOT/dist/vendor"
 export REPO_ROOT SUITE_DIR
 echo "== running ${#CASES[@]} case(s) against the installed service =="
 pass=0; fail=0; results=""

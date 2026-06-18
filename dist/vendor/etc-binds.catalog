@@ -1,0 +1,35 @@
+# Project Kennel — essential /etc subtrees catalogue (§7.4, W14)
+#
+# THE DEFAULT (vendor) LAYER. Installed to /usr/lib/kennel/etc-binds.catalog by the package;
+# this file *is* the default set — there is no compiled-in list. kenneld binds each of these
+# host /etc subtrees READ-ONLY into every constructed view (the package-managed distro content
+# a confined workload needs for TLS and dynamic linking — never host-specific secrets, which
+# the synthetic /etc covers separately).
+#
+# Composed up an ADDITIVE cascade — VENDOR + SYSTEM only:
+#
+#     effective set = /usr/lib/kennel/etc-binds.catalog   (this file — package default)
+#                   ∪ /etc/kennel/etc-binds.catalog        (system / admin)
+#
+# There is NO per-user layer: widening this binds host paths into kennels (a capability), so it
+# is integrity-sensitive — like the trust store, it is vendor+system only. A higher layer ADDS
+# a subtree, or PRUNES one a lower layer set with a leading `-`. `#` starts a comment.
+#
+# A subtree appears in a kennel only if it is *also* granted via the policy's `fs.read` (the bind
+# exposes it; Landlock still gates the read). Only existing paths are bound (cross-distro).
+
+# --- CA-certificate bundles (TLS) --------------------------------------------------------
+/etc/ssl/certs        # Debian/Ubuntu/Arch CA bundle + hash symlinks
+/etc/ca-certificates  # Debian CA store
+/etc/pki              # Red Hat/Fedora CA store + crypto policies
+
+# --- dynamic-linker configuration --------------------------------------------------------
+/etc/ld.so.conf
+/etc/ld.so.conf.d
+/etc/ld.so.cache      # references /usr,/lib (bound at the same paths)
+
+# --- update-alternatives symlink farm ----------------------------------------------------
+# /usr/bin/<tool> -> /etc/alternatives/<tool> -> real binary (awk->gawk, vi, editor, java, …).
+# Without it the symlink dangles in the view and the tool is "command not found". Symlinks only
+# (no secrets); the targets live under /usr (bound).
+/etc/alternatives

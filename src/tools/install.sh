@@ -145,6 +145,11 @@ install_config() {
 	# falls back to its embedded copy if absent; this lets an org ship an extended one).
 	run install -d -m 0755 "$vendor_dir/threats"
 	run install -m 0644 "$repo_root/dist/threats/catalogue.toml" "$vendor_dir/threats/catalogue.toml"
+	# The vendor-default catalogues (§2.6 / §7.4): the trust-trigger set the CLI pins/watches
+	# (T2.8) and the essential /etc subtrees the daemon binds read-only into every view (W14).
+	# Both are additive cascades; /etc/kennel overrides this vendor layer.
+	run install -m 0644 "$repo_root/dist/vendor/triggers.catalog" "$vendor_dir/triggers.catalog"
+	run install -m 0644 "$repo_root/dist/vendor/etc-binds.catalog" "$vendor_dir/etc-binds.catalog"
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then
 		run sed -i "s#^libexec_dir = .*#libexec_dir = \"$libexec\"#" "$vendor_dir/system.toml"
 	fi

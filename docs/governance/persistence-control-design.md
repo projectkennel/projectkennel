@@ -45,7 +45,7 @@ stored content, no restore, and `kenneld` does nothing at runtime.
 4. **Escaping-symlink pins (W2)** — a symlink inside a writable bind pointing outside the delegation
    boundary is a trigger class: pin its target, flag/revert a planted one.
 5. **A versioned trigger catalogue** — promote the hardcoded `KNOWN_TRIGGERS`/`_DIRS` consts to
-   `dist/triggers/catalogue.toml` (like `dist/threats/catalogue.toml`), versioned + CI-checked, and
+   `dist/vendor/triggers.catalog` (like `dist/threats/catalogue.toml`), versioned + CI-checked, and
    widen the set.
 6. **Per-workload-class dispositions** — `on_change` + teardown disposition as policy enums.
 7. **Scope to persistent writable binds** — the ephemeral tmpfs home can't carry a trigger to the
@@ -259,7 +259,7 @@ signed policy is:
 
 ## 5. Build shape (once steered — tests-first, §7.3)
 
-- **kennel-lib-manifest** (out of TCB): catalogue loader (`dist/triggers/catalogue.toml`); schema v2
+- **kennel-lib-manifest** (out of TCB): catalogue loader (`dist/vendor/triggers.catalog`); schema v2
   types; `.d` store read/write; `generate` → pin blobs; `review` → diff-against-blob; `revert`.
 - **kennel-lib-spawn**: extend the mask to the `.d` dir; the `Plan` gains the watch-set +
   `on_change` disposition fields.

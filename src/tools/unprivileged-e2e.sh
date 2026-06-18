@@ -177,6 +177,12 @@ else
 fi
 
 echo "== running the unprivileged e2e under a delegated cgroup =="
+# The in-process kenneld (run_kennel, called in the test) reads the etc-binds catalogue (W14)
+# from $KENNEL_VENDOR_DIR; point it at the repo's vendored default since these tests do not run
+# install.sh (a transient scope inherits this env). Without it the constructed view would bind no
+# host /etc subtrees (the daemon warns), which only matters for a workload needing TLS/awk.
+export KENNEL_VENDOR_DIR="$REPO_ROOT/dist/vendor"
+
 # systemd-run --user --scope -p Delegate=yes runs the test in a transient scope
 # under user@<uid>.service whose cgroup subtree the operator may write — so kenneld
 # can create the kennel's cgroup. --test-threads=1: each test is a cohesive scenario
