@@ -132,3 +132,47 @@ const fn action_name(action: OnChangeAction) -> &'static str {
         OnChangeAction::Kill => "kill",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// End to end through the real watcher: a write to a watched directory drives the
+    /// `freeze` disposition, which writes `1` to the (stand-in) cgroup's `cgroup.freeze` —
+    /// proving inotify → apply → cgroup, the integration unit tests cannot reach individually.
+    #[test]
+    fn a_watched_mutation_drives_the_freeze_disposition() {
+        let base = std::env::temp_dir().join(format!("kennel-tripwire-{}", std::process::id()));
+        let watch = base.join("hooks");
+        let cgroup = base.join("cg");
+        std::fs::create_dir_all(&watch).expect("mkdir watch");
+        std::fs::create_dir_all(&cgroup).expect("mkdir cgroup");
+        std::fs::write(cgroup.join("cgroup.freeze"), "0").expect("seed freeze");
+
+        let writer = Arc::new(crate::audit::noop_writer("tripwire-test", "uuid".to_owned()));
+        let tripwire = Tripwire::start(
+            std::slice::from_ref(&watch),
+            OnChangeAction::Freeze,
+            cgroup.clone(),
+            writer,
+        )
+        .expect("tripwire starts");
+
+        // Plant a hook in the watched directory; the freeze should land within a few polls.
+        std::fs::write(watch.join("post-commit"), b"#!/bin/sh\n").expect("plant");
+        let mut frozen = false;
+        for _ in 0..100 {
+            if std::fs::read_to_string(cgroup.join("cgroup.freeze"))
+                .is_ok_and(|s| s.trim() == "1")
+            {
+                frozen = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        tripwire.stop();
+        assert!(frozen, "the watched mutation should have frozen the cgroup");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
