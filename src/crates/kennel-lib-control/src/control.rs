@@ -65,6 +65,17 @@ pub enum Request {
         /// New terminal width in columns.
         cols: u16,
     },
+    /// The operator's answer to a daemon [`Response::Prompt`] (the CLI→daemon half of the
+    /// operator-prompt channel, §9.7). Sent on the same `Start`/`Attach` connection the
+    /// prompt arrived on; `id` echoes the prompt's id so the daemon matches it to the
+    /// pending question (the TTL `renew` prompt, later an `interactive` teardown). `answer`
+    /// is the operator's free text — the daemon interprets it (an affirmative for renew).
+    PromptReply {
+        /// The id of the [`Response::Prompt`] being answered.
+        id: u32,
+        /// The operator's answer (free text; the daemon decides what counts as yes).
+        answer: String,
+    },
 }
 
 /// The payload of a [`Request::Start`].
@@ -139,6 +150,18 @@ pub enum Response {
     Detached {
         /// Why the client detached.
         reason: String,
+    },
+    /// The daemon is asking the attached operator a question (the daemon→CLI half of the
+    /// operator-prompt channel, §9.7): the TTL `renew` prompt at a deadline, later an
+    /// `interactive` teardown disposition. Sent unsolicited on the live `Start`/`Attach`
+    /// connection mid-run; the CLI surfaces `prompt`, reads a line, and replies with a
+    /// [`Request::PromptReply`] carrying the same `id`. The kennel stays frozen until the
+    /// answer arrives (or the daemon's own fallback fires).
+    Prompt {
+        /// A correlator the operator's [`Request::PromptReply`] must echo.
+        id: u32,
+        /// The question to show the operator (`"kennel 'ai-coding' hit its TTL — renew? [y/N]"`).
+        prompt: String,
     },
     /// The request failed; the string is a human-readable reason.
     Error(String),
@@ -296,6 +319,11 @@ impl Request {
                 put_u16(&mut b, *rows);
                 put_u16(&mut b, *cols);
             }
+            Self::PromptReply { id, answer } => {
+                put_u8(&mut b, 7);
+                put_u32(&mut b, *id);
+                put_str(&mut b, answer);
+            }
         }
         b
     }
@@ -328,6 +356,10 @@ impl Request {
                 kennel: r.string()?,
                 rows: r.u16()?,
                 cols: r.u16()?,
+            }),
+            7 => Ok(Self::PromptReply {
+                id: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+                answer: r.string()?,
             }),
             _ => Err(WireError::BadTag),
         }
@@ -378,6 +410,11 @@ impl Response {
                 put_u8(&mut b, 7);
                 put_str(&mut b, reason);
             }
+            Self::Prompt { id, prompt } => {
+                put_u8(&mut b, 8);
+                put_u32(&mut b, *id);
+                put_str(&mut b, prompt);
+            }
         }
         b
     }
@@ -422,6 +459,10 @@ impl Response {
             }),
             7 => Ok(Self::Detached {
                 reason: r.string()?,
+            }),
+            8 => Ok(Self::Prompt {
+                id: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+                prompt: r.string()?,
             }),
             _ => Err(WireError::BadTag),
         }
@@ -600,6 +641,27 @@ mod tests {
                 attached: false,
             },
         ]));
+    }
+
+    #[test]
+    fn operator_prompt_channel_round_trips() {
+        // The daemon→CLI question and the CLI→daemon answer, correlated by id.
+        round_trip_response(&Response::Prompt {
+            id: 1,
+            prompt: "kennel 'ai-coding' hit its TTL — renew for another 30m? [y/N]".to_owned(),
+        });
+        round_trip_response(&Response::Prompt {
+            id: u32::MAX,
+            prompt: String::new(),
+        });
+        round_trip_request(&Request::PromptReply {
+            id: 1,
+            answer: "y".to_owned(),
+        });
+        round_trip_request(&Request::PromptReply {
+            id: 0,
+            answer: String::new(),
+        });
     }
 
     #[test]
