@@ -270,6 +270,9 @@ pub struct BinderPrep {
     /// (real uid 0, binderfs chowned to the operator); when `None`, it falls back to the
     /// legacy in-process unprivileged spawn (no real uid 0 — the binderfs `EACCES` path).
     pub init_bin: Option<PathBuf>,
+    /// The operator-prompt channel (§9.7): a clone of the control connection the TTL `renew`
+    /// action prompts over. `None` for a non-interactive run (no operator to ask).
+    pub prompt: Option<crate::prompt::PromptPort>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -991,6 +994,9 @@ fn bring_up<P: Privileged + Sync>(
             // node-0 handler freezes/thaws/kills this cgroup per the action (§9.7).
             cgroup: plan.cgroup.clone(),
             ttl_action: plan.ttl_action,
+            name: id.to_owned(),
+            // The operator-prompt channel for the TTL `renew` action; `None` ⇒ fall back to warn.
+            prompt: prep.prompt.clone(),
         };
         tracer.step(&format!(
             "bring-up: acquiring binder node 0 via /proc/{init_pid_u32}/root"

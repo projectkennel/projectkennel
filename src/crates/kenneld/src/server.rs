@@ -1006,11 +1006,20 @@ pub fn run_kennel<P, L>(
         let writer = audit.clone().unwrap_or_else(|| {
             Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone()))
         });
+        // The operator-prompt channel for the TTL `renew` action (§9.7): a clone of this
+        // control connection. Installed only for an interactive run — a non-interactive caller
+        // has no terminal to surface the prompt on, so `renew` there falls back to a warn.
+        let prompt = if req.interactive {
+            crate::prompt::from_conn(&*conn).ok()
+        } else {
+            None
+        };
         spec.binder = Some(crate::BinderPrep {
             policy: loaded.binder,
             unix: facade_unix,
             writer,
             init_bin: shared.identity.init_bin.clone(),
+            prompt,
         });
     }
 
