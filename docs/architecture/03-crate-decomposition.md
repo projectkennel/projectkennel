@@ -116,9 +116,9 @@ changes.*
 
 - **`unsafe` is quarantined (§4).** Exactly five crates carry `unsafe`:
   `kennel-lib-syscall` (raw syscalls/namespaces/seccomp FFI), `kennel-lib-landlock`
-  (the hand-rolled Landlock ABI, the largest single unsafe module), `kennel-lib-bpf`
-  (the `bpf(2)` loader), `kennel-lib-binder` (the binder ioctl ABI), and
-  `kennel-lib-scm` (the one-line `SCM_RIGHTS` fd adoption). `kennel-lib-os` holds the
+  (the hand-rolled Landlock ABI), `kennel-lib-bpf` (the `bpf(2)` loader — the largest of
+  the five at ~1.2k SLOC), `kennel-lib-binder` (the binder ioctl ABI), and
+  `kennel-lib-scm` (the `SCM_RIGHTS` fd adoption — the smallest at ~115 SLOC). `kennel-lib-os` holds the
   **safe** OS primitives (path canonicalisation, uid/gid, netlink, the userns-map
   handshake) split *out* of `kennel-lib-syscall` so the unsafe crate stays small and
   reviewable in one sitting; `kennel-lib-syscall` re-exports os/landlock/scm so callers
@@ -299,13 +299,13 @@ The full public-API description for each crate lives in `02-8-internal-api.md`. 
 ### `kennel-lib-syscall`
 
 - **Size ceiling: 1500 lines of Rust.** Reviewable in one sitting per CODING-STANDARDS.md §4.
-- Carries `#![allow(unsafe_code)]` (the only library crate that does, alongside `kennel-lib-bpf`).
+- Carries `#![allow(unsafe_code)]` — one of the five unsafe crates (§4); the rest of the workspace stays `#![forbid(unsafe_code)]`.
 - Listed in `UNSAFE-CRATES.md` at the workspace root.
 - Per-feature `cfg`s for kernel-version conditional code paths; documented as the only crate where this is acceptable.
 
 ### `kennel-lib-text`
 
-- Tiny crate, ~200 lines target.
+- The smallest crate in the workspace (~75 SLOC).
 - Has its own fuzz target under `fuzz/text/`.
 
 ### `kennel-lib-policy` (runtime) + `kennel-lib-compile` (compiler)
@@ -344,7 +344,7 @@ The control protocol (CLI ↔ kenneld) lives in its own crate `kennel-lib-contro
 
 ### `kennel-lib-spawn`
 
-- The largest crate by line count. Coordinates everything: policy validation, BPF map population, namespace setup, mount construction, Landlock sealing, seccomp installation, capability drop, environment construction, execve.
+- Coordinates the whole sandbox-construction seal: policy validation, BPF map population, namespace setup, mount construction, Landlock sealing, seccomp installation, capability drop, environment construction, execve. At ~1.65k SLOC it is mid-sized — the orchestration is broad, but each phase delegates to a focused lower crate (`kennel-lib-{syscall,landlock,bpf,binder}`).
 - The namespace and mount phases are built in-crate over `kennel-lib-syscall` (bubblewrap-style, identity-mapped user namespace); there is no subprocess delegation to an external composer.
 - Has integration tests that require root, gated behind `#[cfg(feature = "e2e")]` (which also pulls the embedded BPF programs via `kennel-lib-bpf/embed-programs`).
 
@@ -376,7 +376,7 @@ The control protocol (CLI ↔ kenneld) lives in its own crate `kennel-lib-contro
 
 ### `kenneld`
 
-- Library + binaries. **Sync, blocking — `serve()` accepts and spawns one thread per connection. No async runtime.**
+- Library + binaries. The largest crate by line count (~4.6k SLOC), reflecting the breadth of its supervisor role. **Sync, blocking — `serve()` accepts and spawns one thread per connection. No async runtime.**
 - Owns the in-memory kennel registry, the per-kennel orchestration (`lib.rs`), the control protocol (`control.rs`), and the synthetic `/etc` (`etc.rs`) and synthetic `~/.ssh` (`ssh.rs`) generators. It drains each kennel's pinned BPF audit ringbuf into the unified writer (`bpf_audit.rs`, `source: bpf`) — `kennel-lib-bpf::ringbuf` provides the reader, `bpf_audit` drives it per kennel.
 
 ### `kennel-cli` (the `kennel` operator CLI)
