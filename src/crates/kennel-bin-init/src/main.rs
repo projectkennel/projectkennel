@@ -44,7 +44,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
-use kennel_lib_binder::service::lifecycle;
+use kennel_lib_binder::service::{lifecycle, ttl};
 use kennel_lib_spawn::wire::decode_supervision;
 use kennel_lib_spawn::{AuxProcess, Supervision};
 use kennel_lib_syscall::process::{set_no_new_privs, set_rlimit, wait_any_interruptible, Reaped};
@@ -364,7 +364,22 @@ fn supervise(
         // compromised PID 1 must not be able to evade its deadline). The freezer can also EINTR
         // the blocked binder ioctl — that, too, just means "resume".
         if kennel_lib_syscall::process::ttl_alarm_fired() {
-            let _ = conn.transact(CONTEXT_MANAGER_HANDLE, lifecycle::NOTIFY_TTL_EXPIRED, &[]);
+            // Make the blocking call; kenneld freezes us, decides, and replies. On `ttl::RENEW`
+            // the operator approved another lifetime — re-arm the one-shot alarm for a further
+            // period. (`warn` just resumes with no re-arm; `exit`/decline is kenneld's atomic
+            // kill, so we never return here.) The re-arm is the single cooperative step and is
+            // benign: it only sets a *new future* deadline, never evades the current one, so a
+            // failure to re-arm forfeits our own extension and nothing more.
+            let reply = conn.transact(CONTEXT_MANAGER_HANDLE, lifecycle::NOTIFY_TTL_EXPIRED, &[]);
+            if matches!(reply.as_deref(), Ok([ttl::RENEW, ..])) {
+                if let Some(secs) = sup.ttl_seconds {
+                    if let Ok(secs) = u32::try_from(secs) {
+                        if let Err(e) = kennel_lib_syscall::process::arm_ttl_alarm(secs) {
+                            eprintln!("kennel-bin-init: could not re-arm the TTL alarm: {e}");
+                        }
+                    }
+                }
+            }
             continue;
         }
         // `None` ⇒ EINTR (e.g. the TTL alarm) — loop back and re-check the alarm flag.
