@@ -70,6 +70,11 @@ const COMMANDS: &[CommandSpec] = &[
         usage: "review <policy> [--yes] [--revert]",
     },
     CommandSpec {
+        name: "release",
+        summary: "release a leaked exclusive over-mount (fs.exclusive crash recovery)",
+        usage: "release <policy>",
+    },
+    CommandSpec {
         name: "stop",
         summary: "stop a running kennel",
         usage: "stop <name>",
@@ -210,6 +215,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "run" => run(rest),
         "attach" => attach(rest),
         "review" => review(rest),
+        "release" => release(rest),
         "stop" => stop(rest),
         "list" => list(),
         "policy" => dispatch_policy(rest),
@@ -756,6 +762,73 @@ fn prompt_yes(question: &str) -> Result<bool, String> {
 /// `~`/`$HOME` to the operator's real `home`, strip a trailing `/**` or `/*` glob. Returns
 /// `None` for an entry that does not name a home-relative or absolute path (nothing the
 /// host can place a manifest under).
+/// `kennel release <policy>` — release leaked exclusive over-mounts (§2.7 recovery).
+///
+/// The teardown release is automatic, but a crashed kennel can leave an `fs.exclusive` path
+/// shadowed (the operator locked out of their own directory). This resolves the policy's
+/// exclusive host paths and invokes the privhelper to unmount each — **directly**, not through
+/// `kenneld`, so it works even when the daemon is down. Idempotent: a path that is not (or no
+/// longer) shadowed is skipped.
+fn release(args: &[String]) -> Result<ExitCode, String> {
+    let policy_arg = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .ok_or("usage: kennel release <policy>")?;
+    let (policy_file, name) = resolve_policy(policy_arg, true)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    if is_source_policy(&bytes) {
+        return Err(format!(
+            "`{}` is a source policy — compile it first, then release the settled artefact",
+            policy_file.display()
+        ));
+    }
+    let policy = kennel_lib_policy::parse_settled_unverified(&bytes)
+        .map_err(|e| format!("reading settled policy {}: {e}", policy_file.display()))?;
+    if policy.effective_policy.fs.exclusive.is_empty() {
+        eprintln!("kennel: `{name}` declares no exclusive binds — nothing to release");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set (needed to resolve fs.exclusive host paths)")?;
+    let privhelper = kennel_lib_config::Deployment::load()
+        .map_err(|e| format!("loading deployment config: {e}"))?
+        .privhelper();
+    let mut released = 0usize;
+    let mut failed = 0usize;
+    for ex in &policy.effective_policy.fs.exclusive {
+        let Some(host) = writable_root(ex, &home) else {
+            continue;
+        };
+        let status = std::process::Command::new(&privhelper)
+            .arg("exclusive-unmount")
+            .arg(&host)
+            .status()
+            .map_err(|e| format!("spawning {}: {e}", privhelper.display()))?;
+        match status.code() {
+            Some(0) => {
+                println!("released {}", host.display());
+                released = released.saturating_add(1);
+            }
+            // 1 = refused: not (or no longer) a kennel exclusive over-mount — nothing to do.
+            Some(1) => {}
+            other => {
+                eprintln!(
+                    "kennel: could not release {} (privhelper exit {other:?})",
+                    host.display()
+                );
+                failed = failed.saturating_add(1);
+            }
+        }
+    }
+    if failed > 0 {
+        return Ok(ExitCode::FAILURE);
+    }
+    eprintln!("kennel: released {released} exclusive over-mount(s) for `{name}`");
+    Ok(ExitCode::SUCCESS)
+}
+
 /// Verify the operator owns the host path behind each `fs.exclusive` grant (§2.7).
 ///
 /// An exclusive bind blind-mounts the host side with the privhelper's privilege; doing that

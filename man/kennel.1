@@ -45,16 +45,16 @@ reattach a terminal to a running kennel (Ctrl\-\ d to detach)
 \fBkennel review <policy> [\-\-yes] [\-\-revert]\fR
 review a workspace's trust manifest: re\-pin legitimate edits, or \-\-revert tampering
 .TP
-\fBkennel stop <name>\fR
-stop a running kennel
+\fBkennel release <policy>\fR
+release a leaked exclusive over\-mount (fs.exclusive crash recovery)
 .RS
 .TP
 \fB(sub\-verbs)\fR
 See kennel\-policy(1) for list, show, edit, generate, compile, validate, sign, lint.
 .RE
 .TP
-\fBkennel list\fR
-list running kennels
+\fBkennel stop <name>\fR
+stop a running kennel
 .RS
 .TP
 \fB\-\-dir DIR\fR
@@ -66,8 +66,8 @@ Write the key pair to DIR instead of the default key store.
 Overwrite an existing key of the same id.
 .RE
 .TP
-\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]\fR
-author, inspect, sign, and check policies
+\fBkennel list\fR
+list running kennels
 .RS
 .TP
 \fBadd\fR
@@ -99,8 +99,8 @@ A specific 12\-bit tag (otherwise allocated).
 Operate on PATH instead of /etc/kennel/subkennel.
 .RE
 .TP
-\fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR
-generate a policy\-signing key
+\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]\fR
+author, inspect, sign, and check policies
 .RS
 .TP
 \fB\-\-resource CLASS\fR

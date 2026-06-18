@@ -97,6 +97,11 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "review a workspace's trust manifest: re-pin legitimate edits, or --revert tampering",
         "review <policy> [--yes] [--revert]",
     ),
+    (
+        "release",
+        "release a leaked exclusive over-mount (fs.exclusive crash recovery)",
+        "release <policy>",
+    ),
     ("stop", "stop a running kennel", "stop <name>"),
     ("list", "list running kennels", "list"),
     (
