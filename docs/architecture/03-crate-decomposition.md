@@ -33,23 +33,25 @@ the code whose compromise would break confinement.
 | `kennel-lib-landlock` | 249 | **yes** | yes | kennel-lib-syscall | bitflags, libc, nix |
 | `kennel-lib-manifest` | 249 | — | — | kennel-cli | serde, serde_json |
 | `kennel-host-delegate` | 232 | — | yes | kenneld | — |
-| `kennel-lib-term` | 157 | — | yes | kenneld | vte |
+| `kennel-lib-term` | 157 | — | — | kennel-cli | vte |
 | `kennel-lib-scm` | 115 | **yes** | yes | facade, host-delegate, syscall | nix |
 | `kennel-lib-text` | 73 | — | yes | kennel-lib-audit | — |
 
 **Internal dependency edges (who pulls what):**
 
-- `kenneld` → spawn, privhelper, policy, syscall, term, control, config, audit, bpf, binder, host-delegate
-- `kennel-cli` → control, policy, compile, config, manifest, audit, syscall *(+ gen-man dev-dep)*
+- `kenneld` → spawn, privhelper, policy, syscall, control, config, audit, bpf, binder, host-delegate
+- `kennel-cli` → control, policy, compile, config, manifest, audit, syscall, term *(+ gen-man dev-dep)*
 - `kennel-lib-compile` → policy · `kennel-lib-spawn` → bpf, binder, policy, syscall
 - `kennel-privhelper` → syscall, spawn, config, bpf · `kennel-bin-init` → binder, config, spawn, syscall
 - `kennel-lib-syscall` → os, landlock, scm *(re-exports them)* · `kennel-lib-audit` → text, syscall
 - `kennel-lib-control` → syscall · `kennel-facade` → binder, scm · `kennel-host-delegate` → scm
 
 **Totals & TCB.** 21 crates, **22,528 SLOC** (excluding tests). The runtime **TCB
-closure** is 17 crates, **15,795 SLOC**. The 6,733 SLOC **outside** it: `kennel-cli`
+closure** is 16 crates, **15,638 SLOC**. The 6,890 SLOC **outside** it: `kennel-cli`
 (the unprivileged operator tool) and its CLI-only deps `kennel-lib-compile` (the policy
-compiler) and `kennel-lib-manifest` (the trust-manifest reader that pulls `serde_json`),
+compiler), `kennel-lib-manifest` (the trust-manifest reader that pulls `serde_json`), and
+`kennel-lib-term` (the terminal-escape filter — moved out of the daemon by W11, §4.8: the
+broker is a raw router and the CLI owns the `vte` parser of workload-controlled bytes),
 plus `kennel-facade` (the four in-kennel facade binaries, which run *confined*).
 
 **Reading it.**
@@ -67,13 +69,56 @@ plus `kennel-facade` (the four in-kennel facade binaries, which run *confined*).
 line count and taking TCB membership from `cargo tree -p {kenneld, kennel-privhelper,
 kennel-bin-init}`.*
 
+### The vendored dimension — the real TCB is mostly not first-party
+
+The table above counts **first-party** SLOC. The trusted base a compromise actually runs
+through is dominated by the **vendored** dependencies the TCB crates pull in — ~214k
+vendored against ~16k first-party in-TCB, roughly 13×. Counting only first-party
+understates the audit surface by an order of magnitude, so the honest inventory carries
+the vendored crates too, split on two axes: **logic vs bindings** (what runs in our
+process) and **adversarial vs trusted input** (what an attacker can actually reach).
+
+**Logic — runs in-process, the real attack surface (~64k vendored):**
+
+| Vendored crate | ~SLOC | Daemon input | Adversarial? |
+|---|--:|---|---|
+| `object` | 35,805 | first-party ELF only — the SSH dialer + facade binaries (`libresolve`) and the first-party BPF object; the **workload's** ELF is resolved CLI-side at compile (`resolve_settled_loaders`), never re-resolved at runtime | **trusted** |
+| `serde` + `serde_core` | 18,866 | our own typed binder/wire structs | trusted-ish |
+| `ed25519-compact` | 3,715 | signature verification over the signed policy artefact — operates on attacker-supplyable bytes, but verification *is* the defence | guard |
+| `seccompiler` | 2,806 | compiles our own seccomp filter program | trusted |
+| `basic-toml` | 2,678 | the **signed** policy artefact | trusted |
+
+**Bindings / glue — declarations resolving to the platform `libc.so`/kernel, ≈0 per-line
+logic risk (~150k vendored):** `libc` (112,666 — almost all `extern` decls + constants),
+`nix` (34,817 — typed wrappers over those), `bitflags`, `memoffset`, `cfg-if`. These are
+cfg-gated platform surface, not algorithms running on input. (`serde_derive`/`syn`/
+`quote`/`proc-macro2`/`unicode-ident` are **build-time** proc-macro deps — they run in the
+compiler, not the daemon process, so they are not in-process attack surface at all.)
+
+**The danger axis is the point.** Logic-vs-bindings says what executes in-process;
+adversarial-vs-trusted says what an attacker can steer. The intersection that matters —
+**vendored logic on adversarial input inside the daemon** — is now **empty**. Until W11
+it was `vte` (2,943 SLOC) + its sole dep `arrayvec` (1,314): a `vte` ANSI state machine
+parsing **workload-controlled** PTY output at the daemon's master-read point, the §4.8
+anti-pattern. W11 moved that parser client-side into `kennel-cli`, removing **4,257 SLOC
+of adversarial-input parsing logic** from the daemon TCB; the broker is now a raw-byte
+router. The vendored logic that remains all reads *trusted* input — first-party ELF, our
+own typed wire, our own filter program, a signed artefact — or is itself a verification
+guard (`ed25519-compact`). The one first-party parser of adversarial bytes left in the
+daemon is `kennel-lib-binder`'s `BC_*`/`BR_*` decoder, which is `unsafe`-quarantined and
+fuzzed (§4 / CODING-STANDARDS §10.6).
+
+*Vendored SLOC measured from the registry sources (`*.rs`, excluding `tests`/`benches`/
+`examples`); regenerate alongside the first-party snapshot whenever a TCB dependency edge
+changes.*
+
 ## Structural decisions
 
 - **`unsafe` is quarantined (§4).** Exactly five crates carry `unsafe`:
   `kennel-lib-syscall` (raw syscalls/namespaces/seccomp FFI), `kennel-lib-landlock`
-  (the hand-rolled Landlock ABI, the largest single unsafe module), `kennel-lib-bpf`
-  (the `bpf(2)` loader), `kennel-lib-binder` (the binder ioctl ABI), and
-  `kennel-lib-scm` (the one-line `SCM_RIGHTS` fd adoption). `kennel-lib-os` holds the
+  (the hand-rolled Landlock ABI), `kennel-lib-bpf` (the `bpf(2)` loader — the largest of
+  the five at ~1.2k SLOC), `kennel-lib-binder` (the binder ioctl ABI), and
+  `kennel-lib-scm` (the `SCM_RIGHTS` fd adoption — the smallest at ~115 SLOC). `kennel-lib-os` holds the
   **safe** OS primitives (path canonicalisation, uid/gid, netlink, the userns-map
   handshake) split *out* of `kennel-lib-syscall` so the unsafe crate stays small and
   reviewable in one sitting; `kennel-lib-syscall` re-exports os/landlock/scm so callers
@@ -254,13 +299,13 @@ The full public-API description for each crate lives in `02-8-internal-api.md`. 
 ### `kennel-lib-syscall`
 
 - **Size ceiling: 1500 lines of Rust.** Reviewable in one sitting per CODING-STANDARDS.md §4.
-- Carries `#![allow(unsafe_code)]` (the only library crate that does, alongside `kennel-lib-bpf`).
+- Carries `#![allow(unsafe_code)]` — one of the five unsafe crates (§4); the rest of the workspace stays `#![forbid(unsafe_code)]`.
 - Listed in `UNSAFE-CRATES.md` at the workspace root.
 - Per-feature `cfg`s for kernel-version conditional code paths; documented as the only crate where this is acceptable.
 
 ### `kennel-lib-text`
 
-- Tiny crate, ~200 lines target.
+- The smallest crate in the workspace (~75 SLOC).
 - Has its own fuzz target under `fuzz/text/`.
 
 ### `kennel-lib-policy` (runtime) + `kennel-lib-compile` (compiler)
@@ -299,7 +344,7 @@ The control protocol (CLI ↔ kenneld) lives in its own crate `kennel-lib-contro
 
 ### `kennel-lib-spawn`
 
-- The largest crate by line count. Coordinates everything: policy validation, BPF map population, namespace setup, mount construction, Landlock sealing, seccomp installation, capability drop, environment construction, execve.
+- Coordinates the whole sandbox-construction seal: policy validation, BPF map population, namespace setup, mount construction, Landlock sealing, seccomp installation, capability drop, environment construction, execve. At ~1.65k SLOC it is mid-sized — the orchestration is broad, but each phase delegates to a focused lower crate (`kennel-lib-{syscall,landlock,bpf,binder}`).
 - The namespace and mount phases are built in-crate over `kennel-lib-syscall` (bubblewrap-style, identity-mapped user namespace); there is no subprocess delegation to an external composer.
 - Has integration tests that require root, gated behind `#[cfg(feature = "e2e")]` (which also pulls the embedded BPF programs via `kennel-lib-bpf/embed-programs`).
 
@@ -331,12 +376,13 @@ The control protocol (CLI ↔ kenneld) lives in its own crate `kennel-lib-contro
 
 ### `kenneld`
 
-- Library + binaries. **Sync, blocking — `serve()` accepts and spawns one thread per connection. No async runtime.**
+- Library + binaries. The largest crate by line count (~4.6k SLOC), reflecting the breadth of its supervisor role. **Sync, blocking — `serve()` accepts and spawns one thread per connection. No async runtime.**
 - Owns the in-memory kennel registry, the per-kennel orchestration (`lib.rs`), the control protocol (`control.rs`), and the synthetic `/etc` (`etc.rs`) and synthetic `~/.ssh` (`ssh.rs`) generators. It drains each kennel's pinned BPF audit ringbuf into the unified writer (`bpf_audit.rs`, `source: bpf`) — `kennel-lib-bpf::ringbuf` provides the reader, `bpf_audit` drives it per kennel.
 
 ### `kennel-cli` (the `kennel` operator CLI)
 
-- Its own crate (`src/main.rs`), **outside the daemon TCB**: the unprivileged CLI links the control wire types via `kennel-lib-control` but none of the daemon's enforcement code, so its `serde_json` (trust-manifest reader) and `lexopt` (arg parser) deps stay out of `kenneld`'s dependency closure. The protocol cannot drift because both sides depend on the one `kennel-lib-control` crate.
+- Its own crate (`src/main.rs`), **outside the daemon TCB**: the unprivileged CLI links the control wire types via `kennel-lib-control` but none of the daemon's enforcement code, so its `serde_json` (trust-manifest reader), `lexopt` (arg parser), and `kennel-lib-term`/`vte` (the terminal-escape filter, moved here by W11) deps stay out of `kenneld`'s dependency closure. The protocol cannot drift because both sides depend on the one `kennel-lib-control` crate.
+- Owns the **client-side terminal-escape filter** (§4.8): on an interactive run/attach the daemon's PTY broker routes the workload's output raw and conveys the `[tty]` filter decision in its `Started`/`Attached` response; the CLI runs `kennel-lib-term` over the broker→terminal stream so the `vte` parser of workload-controlled bytes never executes in the daemon.
 - A thin sync Unix-socket client of the control protocol. Argument parsing is `lexopt` over `std::env::args` (dispatch on the first argument, each subcommand parsing its own flags); no `clap` and no proc-macro arg-parser is linked.
 
 ### Checksum verification (shell witness; no Rust crate)

@@ -31,6 +31,10 @@ kennel-lib-manifest = { path = "../kennel-lib-manifest" }
 kennel-lib-audit = { path = "../kennel-lib-audit" }
 # Thin syscall wrappers the CLI needs (uid, terminal probing) — no unsafe here.
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+# The terminal-escape filter (§7.9.5 / §4.8): the CLI runs the workload's PTY output
+# through it on its way to the real terminal — client-side, so the `vte` parser of
+# workload-controlled bytes stays out of the daemon TCB (the daemon is a raw router).
+kennel-lib-term = { path = "../kennel-lib-term" }
 # Untrusted-string sanitisation (§10.3/§10.4): policy-sourced fields (reason, paths,
 # hostnames) pass through `sanitise_for_log` before reaching the operator's terminal.
 kennel-lib-text = { path = "../kennel-lib-text" }

@@ -121,6 +121,12 @@ pub enum Response {
         ctx: u16,
         /// The workload's process id.
         pid: u32,
+        /// Whether the attached client must filter dangerous terminal escapes from the
+        /// workload's PTY output (`[tty].filter_terminal_escapes`, §7.9.5 / §4.8). The
+        /// daemon's broker is a raw-byte router; the client owns the `kennel-lib-term`
+        /// filter, so the daemon conveys the policy decision here. False for a
+        /// non-interactive (piped) launch, which has no proxied terminal.
+        filter_escapes: bool,
     },
     /// The kennel was stopped.
     Stopped,
@@ -149,6 +155,12 @@ pub enum Response {
         ctx: u16,
         /// The workload's process id.
         pid: u32,
+        /// Whether this client must filter dangerous terminal escapes from the
+        /// workload's PTY output (see [`Started::filter_escapes`]) — the broker is a
+        /// raw-byte router, so a reattaching client learns the policy here.
+        ///
+        /// [`Started::filter_escapes`]: Self::Started::filter_escapes
+        filter_escapes: bool,
     },
     /// The client detached (or was detached by a takeover) without ending the
     /// workload — the kennel keeps running, reattachable by name. `reason` is a short
@@ -386,10 +398,15 @@ impl Response {
     pub fn encode(&self) -> Vec<u8> {
         let mut b = Vec::new();
         match self {
-            Self::Started { ctx, pid } => {
+            Self::Started {
+                ctx,
+                pid,
+                filter_escapes,
+            } => {
                 put_u8(&mut b, 0);
                 put_u16(&mut b, *ctx);
                 put_u32(&mut b, *pid);
+                put_u8(&mut b, u8::from(*filter_escapes));
             }
             Self::Stopped => put_u8(&mut b, 1),
             Self::Listing(kennels) => {
@@ -415,10 +432,15 @@ impl Response {
                 put_u8(&mut b, 4);
                 put_str(&mut b, message);
             }
-            Self::Attached { ctx, pid } => {
+            Self::Attached {
+                ctx,
+                pid,
+                filter_escapes,
+            } => {
                 put_u8(&mut b, 6);
                 put_u16(&mut b, *ctx);
                 put_u32(&mut b, *pid);
+                put_u8(&mut b, u8::from(*filter_escapes));
             }
             Self::Detached { reason } => {
                 put_u8(&mut b, 7);
@@ -443,6 +465,7 @@ impl Response {
             0 => Ok(Self::Started {
                 ctx: r.u16()?,
                 pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+                filter_escapes: r.u8()? != 0,
             }),
             1 => Ok(Self::Stopped),
             2 => {
@@ -470,6 +493,7 @@ impl Response {
             6 => Ok(Self::Attached {
                 ctx: r.u16()?,
                 pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+                filter_escapes: r.u8()? != 0,
             }),
             7 => Ok(Self::Detached {
                 reason: r.string()?,
@@ -617,7 +641,16 @@ mod tests {
         round_trip_request(&Request::Attach {
             kennel: "ai-coding".to_owned(),
         });
-        round_trip_response(&Response::Attached { ctx: 7, pid: 4242 });
+        round_trip_response(&Response::Attached {
+            ctx: 7,
+            pid: 4242,
+            filter_escapes: true,
+        });
+        round_trip_response(&Response::Attached {
+            ctx: 1,
+            pid: 9,
+            filter_escapes: false,
+        });
         round_trip_response(&Response::Detached {
             reason: "another client attached".to_owned(),
         });
@@ -638,7 +671,16 @@ mod tests {
 
     #[test]
     fn responses_round_trip() {
-        round_trip_response(&Response::Started { ctx: 7, pid: 4242 });
+        round_trip_response(&Response::Started {
+            ctx: 7,
+            pid: 4242,
+            filter_escapes: true,
+        });
+        round_trip_response(&Response::Started {
+            ctx: 0,
+            pid: 1,
+            filter_escapes: false,
+        });
         round_trip_response(&Response::Stopped);
         round_trip_response(&Response::Exited { code: 137 });
         round_trip_response(&Response::Exited { code: 0 });

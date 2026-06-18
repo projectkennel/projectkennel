@@ -84,8 +84,9 @@ pub struct Loaded {
     /// the TTL reaper in `run_kennel`. `ttl_seconds = None` ⇒ no reaper armed.
     pub lifecycle: kennel_lib_policy::LifecyclePolicy,
     /// Whether to filter dangerous terminal escapes from the workload's PTY output
-    /// (`[tty].filter_terminal_escapes`, §7.9.5). The `PtyBroker` reads this to pick the
-    /// `kennel-lib-term` filter policy.
+    /// (`[tty].filter_terminal_escapes`, §7.9.5). The daemon conveys this decision to the
+    /// attached CLI (in `Response::Started`/`Attached`), which owns the `kennel-lib-term`
+    /// filter and applies it client-side (§4.8); the `PtyBroker` only carries the bool.
     pub tty_filter: bool,
     /// The live trigger-tripwire disposition (`[trust].on_change`, §2.5): what `kenneld` does
     /// when a watched trigger is mutated during the run.
@@ -1114,12 +1115,14 @@ pub fn run_kennel<P, L>(
                     None
                 },
                 |master| {
-                    let policy = if loaded_tty_filter {
-                        kennel_lib_term::FilterPolicy::default()
-                    } else {
-                        kennel_lib_term::FilterPolicy::passthrough()
-                    };
-                    let b = crate::pty_broker::PtyBroker::start(master, policy, client_sock.take());
+                    // The broker is a raw-byte router; it carries the [tty] filter
+                    // decision for the client (which owns the filter, §4.8) but does not
+                    // apply it.
+                    let b = crate::pty_broker::PtyBroker::start(
+                        master,
+                        loaded_tty_filter,
+                        client_sock.take(),
+                    );
                     shared.set_broker(&req.kennel, b.clone());
                     Some(b)
                 },
@@ -1127,7 +1130,16 @@ pub fn run_kennel<P, L>(
     } else {
         None
     };
-    let _ = control::send_response(conn, &Response::Started { ctx, pid });
+    // Convey the [tty] escape-filter decision so the attached CLI filters client-side
+    // (§4.8). False for a non-interactive launch — it has no proxied terminal.
+    let _ = control::send_response(
+        conn,
+        &Response::Started {
+            ctx,
+            pid,
+            filter_escapes: req.interactive && loaded_tty_filter,
+        },
+    );
 
     // Start the live trigger tripwire (§2.5, T2.8): watch the CLI-resolved trigger paths under
     // the writable binds and apply `[trust].on_change` on a mutation. Best-effort — `None` when
@@ -1232,7 +1244,14 @@ where
         );
         return;
     };
-    let _ = control::send_response(conn, &Response::Attached { ctx, pid });
+    let _ = control::send_response(
+        conn,
+        &Response::Attached {
+            ctx,
+            pid,
+            filter_escapes: broker.filter_escapes(),
+        },
+    );
     // Block until this client's session ends; report why.
     let response = match broker.wait_for_outcome(generation) {
         crate::pty_broker::AttachOutcome::WorkloadExited => Response::Exited { code: 0 },
