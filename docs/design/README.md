@@ -23,13 +23,25 @@ implementation-independent. The as-built *how* lives under
 
 ## Start here
 
-- **[The case for Kennel](00-frontmatter.md)** — the executive summary, the audiences, and how
-  the corpus is organised. Read this first.
-- **[The thesis](01-thesis.md)** — why the existing mechanisms fail, why self-sandboxing misses
-  the point, and where an organisation's own policy attaches.
+- **[The thesis](01-thesis.md)** — the full case: why the user level needs its own enforcement
+  layer, why the existing mechanisms fail, why self-sandboxing misses the point, and where an
+  organisation's own policy attaches. Start here.
 - **[The threat catalogue](THREATS.md)** — the adversary model as a numbered, tagged catalogue
   (T1.x exfiltration/lateral, T2.x posture degradation, T3.x workload-class, …). The settled
   reference for what Kennel does and does not defend.
+- **[Front matter](00-frontmatter.md)** — the terminology, the threat-ID scheme, and the
+  notation the chapters assume. Skim once; refer back as needed.
+- The two-page version for circulation is **[EXEC-SUMMARY.md](EXEC-SUMMARY.md)**.
+
+## Reading guide by audience
+
+- **Security buyers (CISO, security architect, compliance):** §1 (the case), §2 (adversary
+  model), §4 (trust boundaries), §5 (templates), §6 (worked examples), §11 (open questions) —
+  the security argument, the operational layer, the honest limitations. The §7 mechanism
+  reference and §8 enforcement architecture can be skipped unless you want to audit the claims.
+- **Developers using Kennel:** §1 skim, §6 (worked examples), §5 (templates); §2 once.
+- **Template authors and framework contributors:** everything, in order. §7 and §8 are
+  reference material organised by resource class.
 
 ## The chapters
 
