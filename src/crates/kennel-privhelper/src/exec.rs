@@ -83,7 +83,7 @@ pub fn perform(req: &Request, scope: Option<&ReservedScope>) -> Response {
 /// `BPF_PROG_ATTACH` outlives this process, so the programs stay attached after
 /// the helper exits even though the program/map fds close on drop. Pinning the
 /// maps under `/run/user/<uid>/kennel/bpf/<id>/` keeps them alive (and reachable)
-/// for the unprivileged kenneld to drain — see [`pin_kennel_maps`].
+/// for the unprivileged kenneld to drain — see `pin_kennel_maps`.
 ///
 /// The caller must own the cgroup directory (the delegation boundary): the fd is
 /// opened once and `fstat`ed, so the ownership check and the attach use the same
