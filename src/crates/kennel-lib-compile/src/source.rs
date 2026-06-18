@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_coding_strict_carries_its_net_allow_and_unix_agent() {
+    fn ai_coding_strict_grants_net_allow_and_no_agent_sockets() {
         let pol = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
         let net = pol.net.expect("net");
         let proxy = net.proxy.expect("net.proxy");
@@ -1168,22 +1168,19 @@ mod tests {
             proxy.allow.iter().all(|a| !is_blank(a.reason.as_deref())),
             "every allow has a reason"
         );
-        let unix = pol.unix.expect("unix");
-        // The shim grants a per-kennel gpg-agent (a non-SSH agent socket). SSH is
-        // NOT shimmed — it goes through the §7.10 bastion via the [ssh] section.
-        let agent = unix
-            .allow
-            .iter()
-            .find(|a| a.name.as_deref() == Some("gpg-agent"))
-            .expect("gpg-agent");
-        assert_eq!(agent.shim.as_deref(), Some("~/.gnupg/S.gpg-agent"));
+        // No agent sockets at all. GPG/commit signing cannot be made safe in a kennel
+        // (a signing oracle, §11.2) — there is no gpg-agent shim; and an exposed ssh-agent
+        // is a destination-blind oracle, so SSH is routed via the §7.10 bastion, not a shim.
+        let has_agent = pol.unix.as_ref().is_some_and(|u| {
+            u.allow.iter().any(|a| {
+                a.name.as_deref() == Some("gpg-agent")
+                    || a.name.as_deref() == Some("ssh-agent")
+                    || a.env.as_deref() == Some("SSH_AUTH_SOCK")
+            })
+        });
         assert!(
-            !unix
-                .allow
-                .iter()
-                .any(|a| a.name.as_deref() == Some("ssh-agent")
-                    || a.env.as_deref() == Some("SSH_AUTH_SOCK")),
-            "no ssh-agent shim — SSH is a destination-blind oracle, routed via the bastion"
+            !has_agent,
+            "ai-coding-strict ships no gpg-agent or ssh-agent shim"
         );
     }
 

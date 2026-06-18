@@ -42,7 +42,8 @@ and will be folded into the `02-6` control-protocol table when the surfaces are 
 The AF_UNIX shim (§7.6, [`02-6`](02-6-ipc.md) for its IPC, built) gates at *connect
 time*: a granted socket is bind-mounted into the constructed view and audited when the
 workload connects. That cannot express authority that lives *inside* the protocol — a
-gpg-agent socket signs anything, a Wayland socket reads the clipboard. The double-blind
+D-Bus method call can spawn a session process or read stored secrets, a Wayland socket reads
+the clipboard. The double-blind
 SSH bastion (§7.10, built) was the first subsystem to reject the connection-level grant
 outright and move enforcement to the *operation*: the credential stays host-side and is
 unaimable by the workload. Binder generalises that move. kenneld becomes the policy
@@ -328,8 +329,7 @@ absence of the node is proof the capability was not granted. The reserved set:
 | Service | In scope for this chapter | Notes |
 |---|---|---|
 | `org.projectkennel.IAfUnix/default` | **Yes** | Brokered AF_UNIX connect; kenneld connects host-side and returns the fd. |
-| `org.projectkennel.IDBus/default` | Deferred | D-Bus facade service process; own chapter. |
-| `org.projectkennel.IGpgAgent/default` | Deferred | gpg-agent facade; key grip + purpose; closes T1.6. |
+| `org.projectkennel.IDBus/default` | Deferred | D-Bus facade/delegate pair; own chapter (§7.7). |
 | `org.projectkennel.IWayland/default` | Deferred | Wayland facade; clipboard/screencopy gate; closes T2.6. |
 
 Two things that were sketched as reserved services are **not** binder services: kennel
@@ -345,7 +345,7 @@ verbs, not a dedicated node.
 under it. User-defined services (§Policy surface) take their own names and may not begin
 with `org.projectkennel.`.
 
-The three protocol-facade services (`dbus`, `gpg`, `wayland`) are kenneld-owned nodes
+The protocol-facade services (`dbus`, `wayland`) are kenneld-owned nodes
 backed by spawned service processes that parse foreign, untrusted wire protocols and
 translate to binder. Each is a new binary crate, each an untrusted-input parser requiring
 its own fuzz target, and the D-Bus one displaces an external dependency
@@ -552,7 +552,7 @@ validation is a categorical policy-compile error, not a runtime check (design §
 - The `[binder]` / `[[binder.provide]]` / `[[binder.consume]]` / `[ipc.spawn]` schema:
   [`02-2-config-schema.md`](02-2-config-schema.md).
 - The JSONL field layouts for the new audit events: [`02-3-audit-schema.md`](02-3-audit-schema.md).
-- The dbus/gpg/wayland protocol-facade service processes (deferred to their own chapter).
+- The dbus/wayland protocol-facade service processes (deferred to their own chapter).
 - The CLI/privhelper/daemon non-binder wire formats: [`02-6-ipc.md`](02-6-ipc.md).
 - The spawn pipeline this mounts into: design §8.7 and [`01-process-model.md`](01-process-model.md).
 - Per-crate public APIs (`kennel-lib-binder`, `kenneld::binder`): [`02-8-internal-api.md`](02-8-internal-api.md).

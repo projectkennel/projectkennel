@@ -602,7 +602,7 @@ pub struct Supervision {
     pub seccomp_deny_action: Action,
     /// The workload's resource limits (`setrlimit`), applied last before `execve`.
     pub ulimits: Vec<(Resource, u64, u64)>,
-    /// The facades to launch (af-unix proxy, future socks5/dbus/gpg), each forked and
+    /// The facades to launch (af-unix proxy, future socks5/dbus), each forked and
     /// dropped to the operator but **not** confined.
     pub aux: Vec<AuxProcess>,
     /// Whether a controlling-pty fd accompanies the reply (a `BINDER_TYPE_FD` object);

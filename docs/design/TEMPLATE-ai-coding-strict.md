@@ -16,7 +16,7 @@ The `ai-coding-strict` template confines an AI coding agent operating against a 
 - The agent to reach a specific set of LLM API endpoints (whichever agent vendor's API the user is paying for).
 - The agent to reach the user's package registries (npmjs.org, pypi.org, crates.io, ghcr.io, or whichever ones the project uses).
 - The agent to use git for source control operations.
-- The agent to use a per-kennel ssh-agent for git-over-SSH (no access to the user's main ssh-agent or keys).
+- The agent to use git-over-SSH through the re-origination bastion (§7.10), bound to specific destinations — no ssh-agent socket and no real key in the kennel.
 - The agent to NOT read or modify anything else under `$HOME`.
 - The agent to NOT reach local services (the user's local Postgres, dockerd, the user's other dev servers).
 - The agent to NOT degrade host security configuration.
@@ -723,19 +723,15 @@ abstract = "deny"                # abstract-namespace sockets denied
                                  # categorically — none of the agent's
                                  # legitimate workflows need them
 
-# Per-kennel ssh-agent. The template requires a per-kennel agent
-# instance; the user's leaf policy or the agent's own initialisation
-# can add keys to it. The user's real ~/.ssh/ is never bind-mounted in.
-[[unix.allow]]
-name = "ssh-agent"
-real = "/run/kennel/<kennel>/ssh-agent.sock"
-shim = "~/.ssh/agent.sock"
-env = "SSH_AUTH_SOCK"            # Project Kennel sets SSH_AUTH_SOCK to shim path
-reason = "git-over-SSH operations via per-kennel agent"
-# Implementation: Project Kennel spawns a ssh-agent process per kennel
-# at kennel start; the agent listens on /run/kennel/<kennel>/ssh-agent.sock;
-# the shim bind-mounts this socket into the kennel's $HOME/.ssh/agent.sock.
-# When the kennel exits, the agent is reaped and any in-memory keys are lost.
+# No agent socket is shimmed. git-over-SSH egress goes through the §7.10
+# bastion (the [ssh] section below), which binds each synthetic key to one
+# fixed destination via a forced command — the kennel never holds a real key.
+# Commit signing is host-side (the human signs on review before push, §11.2).
+
+[ssh]
+[[ssh.destinations]]
+dest = "git@github.com"
+reason = "git-over-SSH to the project's GitHub remote, via the bastion"
 
 
 # ============================================================================
@@ -748,10 +744,11 @@ reason = "git-over-SSH operations via per-kennel agent"
 # they can enable dbus.session.enabled and allow the Notifications
 # service only. This is the smallest legitimate D-Bus grant.
 #
-# Implementation when enabled: an xdg-dbus-proxy instance per kennel,
-# filtering every method call against the configured allowlist. The
-# kennel's /run/user/<uid>/bus is a shim pointing at the proxy's
-# socket, not the host's session bus.
+# Implementation when enabled (§7.7): the org.projectkennel.IDBus facade on
+# the binder gateway — an in-kennel facade-dbus parses the wire to typed
+# messages, the operator-context host-dbus delegate filters each against the
+# compiled allowlist and reconstructs the call to the real bus. No external
+# proxy daemon and no bus-socket artefact in the kennel's view.
 # ============================================================================
 
 [dbus]
@@ -848,7 +845,8 @@ set = {
     HOME = "/run/kennel/<kennel>/home",
     TMPDIR = "/tmp",
     XDG_RUNTIME_DIR = "/run/user/<uid>",  # real path; contents shimmed
-    SSH_AUTH_SOCK = "/run/kennel/<kennel>/home/.ssh/agent.sock",
+    # No SSH_AUTH_SOCK: there is no ssh-agent in the kennel. git-over-SSH goes
+    # through the §7.10 bastion, configured via the synthetic ~/.ssh/config.
     # Point tools at the per-kennel proxy. `localhost` resolves (via the
     # synthetic /etc/hosts) to the kennel's primary loopback, where the proxy
     # listens; the daemon also exports the same address as $KENNEL_SOCKS_PROXY.
@@ -866,7 +864,7 @@ set = {
 #
 # Defends against T1.1 (credentials in env vars) and T2.1 (config leakage).
 deny = [
-    "SSH_AUTH_SOCK",             # use per-kennel agent, not user's
+    "SSH_AUTH_SOCK",             # no agent in the kennel; SSH egress is the bastion
     "GPG_AGENT_INFO",
     "AWS_*",
     "AZURE_*",
@@ -1066,7 +1064,7 @@ If the user wants the agent to reach Postgres legitimately (the `dev-server` tem
 
 The agent has no path to do this. Project Kennel's enforcement is at the kernel layer: Landlock rules are sealed after spawn, cgroup BPF programs are attached to a cgroup the agent cannot move out of, the mount namespace cannot be re-entered. There is no "sandbox process" the agent could kill; there is no "configuration file" the agent could modify (the policy is not bind-mounted into the agent's view). The Ona-style "let me try disabling the sandbox" reasoning has no actionable next step.
 
-Project Kennel's daemons (the SOCKS5 proxy, the per-kennel ssh-agent) run in a separate PID namespace; the agent cannot ptrace them, cannot signal them, cannot read their `/proc/<pid>/mem`. If the daemons crash, Project Kennel's supervisor restarts them; during the crash window, the cgroup BPF rules continue to deny direct connect() to anything other than the (now-restarting) proxy.
+Project Kennel's host-side delegates (the SOCKS5 egress dialer, and the SSH bastion that re-originates git-over-SSH) run outside the kennel, in the operator's context; the agent cannot ptrace them, cannot signal them, cannot read their `/proc/<pid>/mem`. If the daemons crash, Project Kennel's supervisor restarts them; during the crash window, the cgroup BPF rules continue to deny direct connect() to anything other than the (now-restarting) proxy.
 
 ---
 

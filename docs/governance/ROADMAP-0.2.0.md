@@ -162,8 +162,8 @@ layer on top:
     separately.
   - **D-Bus is a credential vector.** It reaches `org.freedesktop.secrets` (gnome-keyring/KWallet
     Secret Service), notifications, portals. The Secret Service is a read-stored-credentials oracle and
-    gets the **gpg-agent treatment — refuse to broker, named explicitly** (§11.2 axiom-adjacent), not
-    "default-deny in a small option space." The option space stops being small the moment keyring/
+    gets the **signing-oracle treatment — refuse to broker, named explicitly** (§11.2 axiom-adjacent;
+    the same reason GPG signing is not brokered at all), not "default-deny in a small option space." The option space stops being small the moment keyring/
     portals/notifications are in scope.
   Re-add the `[dbus]` config surface (removed from the schema in 0.1) as a *built* surface this time.
   Proven by a policy-suite case.
@@ -252,6 +252,18 @@ layer on top:
   Ship the current set as the vendor default; keep the `.exists()` cross-distro filtering. Mirrors the
   W1 catalogue loader shape (additive, `-` to prune) minus the user layer. Sequenced after W12/W13.
 
+- **W15 · As-built prose pass — strip history/apology and never-built mechanisms.** *(→
+  [[docs-as-built-no-prerelease-history]], [[comments-no-history-no-apology]])* **S–M.** Two coupled
+  cleanups across `docs/` and code comments: **(1)** the "this is *not* X" / "replaced by" / "the old
+  X" / "no longer" apology-history prose — state the design in present-tense as-built, never narrate
+  what was removed or what we don't do; and **(2)** purge the mechanisms that were *designed-on-paper
+  but never built and never will be* — `xdg-dbus-proxy` (the D-Bus carrier is the `IDBus` facade,
+  §7.7), the per-kennel `ssh-agent` socket shim (SSH egress is the §7.10 bastion), and any residual
+  `gpg-agent`/`IGpgAgent` facade (GPG signing is not brokered; §11.2). These were never written and
+  never used, so they are deleted outright — **no tombstone, no "we don't do X" marker**, which is
+  itself the apology pattern. A grep gate (`xdg-dbus-proxy`, `IGpgAgent`, `per-kennel ssh-agent`) keeps
+  them out once removed. Touches ~15 corpus files; do it as one pass, not per-edit drive-bys.
+
 ## Dropped / deferred (with reasons)
 
 - **W3 · `kennel_meta` RO-seal + readback — DROPPED.** The meta map lives in the owner-only
@@ -338,5 +350,7 @@ stable-surface change (CLI / policy schema / IPC / BPF ABI) per CODING-STANDARDS
 - **W1: how far up the watch layer in 0.2.0?** Authoritative-store-only, or store + inotify
   live-audit/diff-scoping + the `on_change` tripwire (all unprivileged, additive). fanotify
   write-prevention is **out of scope entirely** ([[no-standing-host-privilege]]).
-- **W8: Secret Service / portals / notifications** — confirm the refuse-to-broker list (Secret
-  Service named explicitly, gpg-agent treatment) and the inbound-vs-outbound split before build.
+- **W8: Secret Service / portals / notifications** — *(decided)* refuse-to-broker list = Secret
+  Service + session/process control (systemd1/login1/session managers), named explicitly
+  (signing-oracle treatment, §11.2); inbound = replies + match-rule'd signals; the per-method
+  check runs in the `host-dbus` delegate, not kenneld. See `docs/design/07-7-dbus.md`.

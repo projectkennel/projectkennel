@@ -22,16 +22,9 @@
 Several resource classes Kennel must police share an architectural problem: the
 underlying protocol grants too much ambient authority to be safely forwarded raw,
 but the application expects to find a conforming socket or device at a well-known
-path. The current mitigations are a patchwork:
+path. Each is mediated at the protocol level rather than by forwarding a raw socket:
 
-- **D-Bus** is filtered by `xdg-dbus-proxy` (§7.7), an external dependency with
-  its own socket lifecycle, shimmed into the kennel view as a visible policy
-  artefact. Enforcement is at method-call granularity but the mechanism is
-  external to Kennel's trust model.
-- **gpg-agent** carries an unresolved residual (T1.6): the per-kennel agent
-  instance narrows the keyring but does not restrict signing purpose. The same
-  key can sign a git commit or an email; the agent protocol has no concept of
-  purpose.
+- **D-Bus** is mediated at method-call granularity by the `IDBus` facade (§7.7).
 - **Wayland** carries an unresolved residual for clipboard access (§7.6.8, §11.1)
   with no structural enforcement path.
 - **X11** is categorically denied (§7.8) because the protocol has no confinement
@@ -198,7 +191,6 @@ The reserved services and their roles:
 |---|---|
 | `org.projectkennel.IAfUnix/default` | Brokered AF_UNIX connections — kenneld connects on the workload's behalf and returns the fd (§7.1.5) |
 | `org.projectkennel.IDBus/default` | Mediated D-Bus access; method allowlist enforced per-call |
-| `org.projectkennel.IGpgAgent/default` | Mediated gpg-agent; key grip + purpose policy per transaction; closes T1.6 |
 | `org.projectkennel.IWayland/default` | Mediated Wayland; clipboard and screencopy gated; closes T2.6 |
 
 Kennel spawning is **not** a reserved service — it is a control-socket operation (§7.1.7),
@@ -228,9 +220,9 @@ The `[binder]` policy section gates what services a kennel may register and
 what services it may look up. Service names fall into two categories:
 
 **Reserved (`org.projectkennel.*`)** — provided by kenneld itself. These are enabled by
-their corresponding policy sections (`[dbus]`, `[gpg]`, `[wayland]`, `[unix]`),
-not by `[[binder.provide]]`. A workload does not declare that it provides
-`org.projectkennel.IGpgAgent/default`; it declares `[gpg]` capabilities and kenneld registers the
+their corresponding policy sections (`[dbus]`, `[wayland]`, `[unix]`), not by
+`[[binder.provide]]`. A workload does not declare that it provides
+`org.projectkennel.IDBus/default`; it declares `[dbus]` capabilities and kenneld registers the
 service on the workload's binderfs instance automatically.
 
 **User-defined** — provided by service processes the policy author declares.
@@ -238,14 +230,6 @@ These use arbitrary names that must not begin with `org.projectkennel.`.
 
 ```toml
 # kenneld-provided services — enabled by their own policy sections
-[gpg]
-[[gpg.allow_sign]]
-key_grip = "<grip>"
-purposes = ["commit"]
-reason   = "sign git commits"
-threats.mitigated = ["T1.6"]
-# → kenneld registers org.projectkennel.IGpgAgent/default on this kennel's binderfs instance
-
 [dbus]
 [[dbus.allow]]
 destination = "org.freedesktop.Notifications"
@@ -318,20 +302,18 @@ This closes the gap where a workload could detect socket paths that appeared in
 its constructed view even when it was not supposed to use them — with
 `org.projectkennel.IAfUnix/default`, paths do not appear in the view at all.
 
-**`org.projectkennel.IDBus/default`**, **`org.projectkennel.IGpgAgent/default`**, and **`org.projectkennel.IWayland/default`** are
-kenneld-provided but implemented via protocol-specific service processes that
-kenneld spawns and supervises. The binder node is owned by kenneld; the service
-process handles the foreign protocol translation on kenneld's behalf. From the
-workload's perspective, the node is kenneld. From the implementation's
-perspective, kenneld delegates protocol handling to the service process and
-enforces policy on every transaction before forwarding.
+**`org.projectkennel.IDBus/default`** and **`org.projectkennel.IWayland/default`** are
+kenneld-provided but implemented via protocol-specific processes that kenneld spawns and
+supervises (an in-kennel facade that parses the adversarial wire and an operator-context
+delegate that holds the host connection — §7.7.2 for D-Bus). The binder node is owned by
+kenneld; the facade/delegate pair handles the foreign protocol on kenneld's behalf. From the
+workload's perspective, the node is kenneld.
 
 The protocol facades are:
 
 | Service | Replaces | Translation |
 |---|---|---|
-| `org.projectkennel.IDBus/default` | xdg-dbus-proxy shim + §7.7 | Speaks D-Bus wire protocol inbound; translates to binder transactions; kenneld applies method allowlist before forwarding to real session bus |
-| `org.projectkennel.IGpgAgent/default` | per-kennel gpg-agent + §7.6.7 | Speaks assuan protocol inbound; translates `PKSIGN`/`PKDECRYPT` to typed transactions; kenneld enforces key grip + purpose; closes T1.6 |
+| `org.projectkennel.IDBus/default` | a raw bus-socket grant + §7.7 | `facade-dbus` parses the D-Bus wire into typed messages; the `host-dbus` delegate filters them through the compiled `[dbus]` table and reconstructs the call to the real bus; kenneld builds the facade/delegate pair + conduit at construction only (§7.7.2 — the per-message check runs in the delegate, not the daemon) |
 | `org.projectkennel.IWayland/default` | raw Wayland socket grant + §7.6.8 | Speaks Wayland wire protocol inbound; forwards core rendering directly; gates `wl_data_device` and screencopy via kenneld; closes T2.6 |
 
 ### Service process lifetime
@@ -452,8 +434,7 @@ requires an explicit `[ipc.spawn]` declaration in the spawned kennel's template.
 
 | Section | Status after §7.1 |
 |---|---|
-| §7.7 D-Bus (xdg-dbus-proxy) | Policy surface unchanged. xdg-dbus-proxy is replaced by the `dbus` service process registered on the kennel's binderfs instance. |
-| §7.6.7 gpg-agent per-kennel | Raw shim replaced by the `gpg` service process. T1.6 residual closed by key grip + purpose policy enforced per transaction. |
+| §7.7 D-Bus | Mediated by the `facade-dbus`/`host-dbus` pair on the kennel's binderfs instance (§7.7.2). |
 | §7.6.8 Wayland clipboard residual | Closed structurally by the `wayland` service process gating `wl_data_device`. |
 | §11.1 Wayland clipboard open question | Resolved. |
 | §8.8 Inter-kennel isolation | Default unchanged. Cross-instance IPC requires explicit `[[binder.consume]]` + `[[binder.provide]]` declarations on both sides. Kennels without `[binder]` sections have no IPC surface at all. |
@@ -509,11 +490,6 @@ rendering requests without inspection. Compositor-side robustness against
 malformed requests is not Kennel's responsibility. The confinement claim covers
 clipboard and screencopy isolation only.
 
-**gpg purpose inference.** Purpose inference for `PKSIGN` is heuristic for the
-common cases (git commit, package signing). The security boundary is key grip
-restriction, which is exact. Workloads requiring unrestricted signing with a
-key declare `purposes = ["any"]` explicitly.
-
 **Cross-instance payload opacity.** kenneld validates transaction object types
 (rejecting fd and pointer objects cross-instance) but does not inspect payload
 content. Application-layer protocol correctness between kennels is the
@@ -558,10 +534,7 @@ Tests in `tests/binder/` and `tests/facades/`:
 10. Kennel exit: all binder nodes destroyed; cross-instance callers receive
     death notifications; pending cross-instance transactions receive
     `BR_DEAD_REPLY`.
-11. `gpg` service: `PKSIGN` with allowed key grip and matching purpose: succeeds.
-12. `gpg` service: `PKSIGN` with disallowed purpose: assuan error returned,
-    audit event records `outcome = deny`.
-13. `dbus` service: allowed method call returns real bus response; denied method
+11. `dbus` service: allowed method call returns real bus response; denied method
     call returns `org.freedesktop.DBus.Error.AccessDenied`.
 14. `wayland` service: `wl_data_device` creation blocked when
     `clipboard.read = false` and `clipboard.write = false`.
