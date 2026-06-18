@@ -236,6 +236,22 @@ install_templates() {
 	done
 }
 
+install_fragments() {
+	# Ship the signed composable fragments (05-templates.md §5.10) into the SAME
+	# template search dir, so a leaf's `include = ["lang-python@v1", ...]` resolves and
+	# verifies out of the box. Fragments and templates are both signed includes; sharing
+	# the dir means no extra search-path config, and `kennel policy list` labels each one
+	# `(fragment)`. Org fragments are added alongside.
+	[ -d "$repo_root/fragments" ] || return 0
+	local d n
+	for d in "$repo_root"/fragments/*/; do
+		[ -f "${d}policy.toml" ] || continue
+		n="$(basename "$d")"
+		run install -d -m 0755 "/etc/kennel/templates/$n"
+		run install -m 0644 "${d}policy.toml" "/etc/kennel/templates/$n/policy.toml"
+	done
+}
+
 provision_subkennel_users() {
 	# For every member of $provision_group, append a /etc/kennel/subkennel allocation
 	# (one per uid that lacks one). We drive `kennel subkennel add --uid N`, which owns
@@ -390,5 +406,6 @@ install_apparmor
 install_etc_skeleton
 install_keys
 install_templates
+install_fragments
 provision_subkennel_users
 [ "$dry_run" -eq 1 ] || print_next_steps

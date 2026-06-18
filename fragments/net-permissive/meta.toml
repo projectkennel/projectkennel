@@ -1,0 +1,7 @@
+name = "net-permissive"
+version = "1"
+kind = "fragment"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.3"
+last_reviewed = "2026-06-19"
+description = "Broad egress to the common public package ecosystems and code forges."

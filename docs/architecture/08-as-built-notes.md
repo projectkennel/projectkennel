@@ -41,10 +41,15 @@ narration is kept here; the chapter named is the source of truth.
 - **`kennel_meta` read-only sealing + readback verification** (`02-7-bpf-abi.md`) — the map
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
-- **Composable fragment catalogue** (`05-templates.md` §5.10) — the `include` mechanism is
-  built; the curated set of à-la-carte fragments (`lang-python`, `lang-node`, `toolchain-c`,
-  `net-permissive`, `vcs-git`) is not yet authored/signed. Work owed is content + per-fragment
-  tests, not mechanism.
+- **Composable fragment catalogue** (`05-templates.md` §5.10) — **built.** The `include`
+  mechanism and the curated set of signed à-la-carte fragments (`lang-python`, `lang-node`,
+  `toolchain-c`, `vcs-git`, `net-permissive`) ship under `fragments/`, signed by the
+  maintainer key, installed into the runtime template search dir, surfaced by `kennel policy
+  list` as `(fragment)`, and gated in CI (`kennel-lib-compile/tests/fragments_catalogue.rs`:
+  signature + additive-only + compile-and-assert per fragment). `kennel policy sign` gained
+  the leaf-syntax (fragment) signing path. `net-permissive` is a curated broad-egress
+  allowlist, not a `net.mode` flip (a mode override belongs in the inheritance chain, not an
+  additive fragment).
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
