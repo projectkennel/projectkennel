@@ -50,8 +50,9 @@ members = [
     # The in-kennel ends of binder connectors (push workload traffic into binder, or pull it back):
     # one crate, four binaries (facade-afunix/socks5/client/ssh).
     "src/crates/kennel-facade",
-    # Build-time tooling (not shipped): the manpage generator (std-only).
+    # Build-time tooling (not shipped): the manpage + policy-schema generators (std-only).
     "src/tools/gen-man",
+    "src/tools/gen-schema",
 ]
 
 [workspace.package]

@@ -52,6 +52,10 @@ name = "gen-man"
 version = "0.1.0"
 
 [[package]]
+name = "gen-schema"
+version = "0.1.0"
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -129,6 +133,7 @@ name = "kennel-lib-compile"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "gen-schema",
  "kennel-lib-policy",
  "serde",
 ]
