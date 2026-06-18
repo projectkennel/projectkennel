@@ -1,6 +1,6 @@
 # Project Kennel — 0.2.0 plan
 
-Status: **proposal** (mix in revision) · Drafted: 2026-06-18 · Targets: 0.2.0
+Status: **reviewed** — mix settled; W1 is the design-open critical path · Drafted: 2026-06-18 · Targets: 0.2.0
 Baseline: 0.1.0 (first versioned cut, 2026-06-18)
 
 > This is a planning artefact, not a design or as-built document. The design corpus
@@ -42,17 +42,28 @@ design ⇒ unpinnable by design; and **(2)** it fires in the *unconfined shell*,
 run, so the sha256 re-exec gate never sees it. Pinning is the integrity floor for read-only
 content; W1/W2 is the layer for the writable-tree → unconfined-shell vector.
 
-**Framing — look hard at how git does this.** Every compile and every teardown is
-essentially a *commit* of the files inside the trust manifest. The design pass should
-evaluate modelling the persistent writable tree as a git-like content-addressed snapshot:
-**compile commits the baseline** (the known-good state + the manifested escaping symlinks),
-**teardown commits/diffs against it** (what the workload added/changed), and **revert is
-just `reset --hard` to the baseline**. If that model holds, the trust manifest, the
-teardown diff (W1), the escaping-symlink removal (W2), and COW/revert all fall out of one
-mechanism instead of three hand-rolled ones — and a reviewer reads the change as a diff
-they already understand. The open question is whether to *use* git (a real repo/object
-store per writable bind) or borrow the model (content-addressed snapshot, no git
-dependency); the design pass decides.
+**Scope the control to the trust-manifest surface, not the whole writable tree (decided in review).**
+The control's domain is *exactly the manifest's declared trigger set* — not "we scanned the tree for
+all triggers," which is unwinnable. This makes *complete* a property you can actually hold: complete
+coverage **of the declared surface**. The arms race relocates to "is the manifest's pattern set
+current," a versioned-catalogue problem (run it like THREATS), not a guarantee you can't keep. A
+trigger at a path no manifest entry covers is invisible *by construction* — the correct trade, but
+one `review` must **state plainly** ("checked the declared surface"), never imply a clean tree; an
+unstated boundary is the theatre [[no-security-theatre]] rejects.
+
+**Borrow git's diff/revert *model*, not git itself (decided in review).** Real git is lossy exactly
+where this control can't be — it drops setuid/setgid/sticky bits, xattrs, ACLs, special files, and
+sub-second mtime, applies ignore semantics, and treats `.git/hooks` as both the trigger class *and*
+bulk objects. So no git dependency; borrow the mental model (a content-addressed baseline you diff
+and restore against).
+
+**Backend: a content-addressed masked side store.** `.trust-manifest.d/<sha256sum>` adjacent to
+`.trust-manifest.json` at each writable root, masked the same way (empty over-mount, invisible to the
+workload). The store *is* the baseline: `review` diffs the live trigger-path against its pinned blob;
+revert is copy-the-blob-back. One mechanism — **pin, diff-against-pin, restore-from-pin** — replaces
+snapshot + detect + COW-revert, and collapses W1/W2 into a smaller, more honest **L**. The host trusts
+the store **by content address, never by the workload-visible listing**; store writes happen *only*
+host-side (compile + `review`), never from anything reachable inside a kennel.
 
 **The watch layer — inotify/fanotify, complementary not authoritative.** A live filesystem
 watch is tempting as *the* mechanism but cannot be: inotify is lossy where a security control
@@ -86,44 +97,66 @@ layer on top:
   attack surface §4.6 set out not to add. So 0.2.0 (and beyond) **reacts-and-cleans** — inotify
   tripwire + teardown snapshot, both unprivileged — and never pre-blocks.
 
-- **W1 · Post-run inspection of persistent writes (T2.8).** *(→ design §11.1)* **L.**
-  At teardown, diff everything the workload wrote to persistent writable binds against the
-  pre-run state and flag newly-introduced **execution triggers** — git hooks, `core.hooksPath`
-  redirects, `Makefile`/`package.json` script entries, `.vscode`/`.idea` tasks — for operator
-  review before the user next acts on the tree. Folded into one coherent `kennel review`
-  surface with the commit-time review (T2.2), not a second tool.
-  **Open questions to settle first (§11.1):** the canonical trigger-pattern set and how it
-  stays current; cheap diff scoping over large trees; and — the decision that sizes the whole
-  workstream — **block-at-teardown vs. acknowledge-able report** (see open decisions).
+- **W1 · Post-run inspection of persistent writes (T2.8).** *(→ design §11.1)* **L** *(critical
+  path — only design-open item, intrinsic completeness gap; bound its claims before its mechanism).*
+  At **compile**, enumerate the declared writable binds and pin every existing **trigger-class** path
+  — git hooks, `core.hooksPath` redirects, `Makefile`/`package.json` scripts, `.vscode`/`.idea` tasks
+  — into the manifest + the `.d` store. At **`review`** (host-side, the same sign-off as T2.2), diff
+  each live trigger-path against its pinned blob and surface the divergences for the operator to
+  inspect and **re-pin**. One coherent `kennel review` surface with the commit-time review, not a
+  second tool. Key bounds from the review:
+  - **Two-tier cost.** Always content-**hash** the trigger class (mtime-games-proof — never trust
+    `stat` for the security path); reserve full snapshot/restore cost for when `revert` is actually
+    selected.
+  - **The trigger catalogue is versioned and necessarily incomplete.** Even scoped, the pattern set
+    misses things (`.gitattributes` clean/smudge, git `alias = !sh`, `.pth`/`sitecustomize`, `.envrc`,
+    `.npmrc` `NODE_OPTIONS`, `.desktop` autostart, user systemd units). Version it like THREATS;
+    document W1 as *"detects this enumerated, versioned set,"* never *"clean."*
+  - **Default disposition is per workload class, not global** (see Decisions). `revert` is complete
+    and right for `inspect-only`/`untrusted-build`; for **ai-coding** (the flagship) you *keep* the
+    agent's diff, so `revert` is unusable and the control is on the incomplete-detection story — state
+    that plainly rather than letting "revert is stronger and free" imply it covers the case that
+    matters most.
 
-- **W2 · Boundary-escape symlinks — fold into W1's compile + teardown machinery.**
-  *(→ [[vfs-bind-source-nofollow-owed]], reframed)* **M.** Not a standalone `openat2` runtime
-  guard. A symlink inside a delegated writable subtree that points *outside* the delegation
-  boundary is both a read-escape and a persistence vector, and it belongs to the same trust-
-  manifest pipeline as W1:
-  - **At compile:** enumerate the escaping symlinks that already exist in a delegated source,
-    record them in the **trust manifest** (the known-good set), and **warn loudly** — an
-    escaping symlink in a delegated tree is a footgun the operator should see.
-  - **At teardown:** any escaping symlink *not* in the manifest was planted during the run —
-    **remove it**.
-  - **Revert falls out of the git model.** Under the snapshot framing above, reverting the whole
-    writable tree at teardown (throwing away everything the workload did, planted symlinks
-    included) is `reset --hard` to the compile-time baseline — a stronger control than per-trigger
-    removal, and *free* if the git model is adopted rather than a separate COW overlay to build.
+- **W2 · Boundary-escape symlinks — same pin/diff/restore pipeline as W1.**
+  *(→ [[vfs-bind-source-nofollow-owed]], reframed)* **M.** Not a standalone `openat2` runtime guard.
+  A symlink inside a delegated writable subtree that points *outside* the delegation boundary is both
+  a read-escape and a persistence vector — it's a trigger class, pinned and restored by the same
+  content-addressed store:
+  - **At compile:** enumerate the escaping symlinks that already exist in a delegated source, pin them
+    into the manifest + `.d` store (the known-good set), and **warn loudly** — an escaping symlink in
+    a delegated tree is a footgun the operator should see.
+  - **At `review` / teardown:** an escaping symlink not in the pinned set was planted during the run —
+    flag it (and, under `revert`, restore-from-pin removes it for free).
+  - **`.d`-store masking is the design wrinkle.** Masking a *populated directory* is harder than one
+    file: the `.d` store must be invisible to `readdir`, and a workload `mkdir .trust-manifest.d` or a
+    colliding `<sha256sum>` write must not shadow or corrupt it. Mask the file *and* the `.d` dir under
+    **every** writable bind (not just project root); the host trusts blobs by content address, never
+    by the workload-visible listing.
 
 ### Thrust 2 — A new mediated surface
 
 - **W8 · D-Bus mediation — facade / host split.** *(→ design §7.7, `07-1-binder.md`, §8.1)* **L.**
-  The binder successor to the never-built `xdg-dbus-proxy` design, built to the egress pattern:
-  an **in-kennel facade** speaks the D-Bus protocol (untrusted parse, out of TCB) and brokers
-  each method call across the binder gateway; **kenneld decides**; a **host-side delegate**
-  performs the call. The host-side delegate **subscribes to D-Bus on the host and filters both
-  inbound and outbound** with a small set of simple rules fed from kenneld — *much like the pty
-  terminal-escape filter* (`kennel-lib-term`): a thin bidirectional content filter, not a complex
-  per-method ACL engine. The configurable option space is small, so the policy is **fed from
-  kenneld into the host side** rather than parsed in the daemon — TCB growth is a decision point,
-  not a parser. Re-add the `[dbus]` config surface (removed from the schema in 0.1) as a *built*
-  surface this time. Proven by a policy-suite case.
+  The binder successor to the never-built `xdg-dbus-proxy` design, built to the egress convert/decide/
+  act line — and the review's correction is load-bearing: **drop the pty-filter analogy, it builds the
+  wrong thing.** The pty filter pattern-strips bytes without understanding a protocol; D-Bus filtering
+  is *message-level* (it must read destination / path / interface / member). "Thin bidirectional
+  content filter" would smuggle an adversarial-wire parser into the host delegate. Hold the line:
+  - the **in-kennel facade is the sole parser of adversarial D-Bus wire** (out of TCB), and emits a
+    **typed** call to kenneld;
+  - **kenneld decides on the typed form** (vetted fields, no wire);
+  - the **host-side delegate constructs a well-formed call from those vetted fields** — it does *not*
+    re-filter adversarial bytes. Only then is "TCB growth is a decision point, not a parser" true.
+  - **Inbound ≠ outbound.** Host-origin signals are *trusted-origin* data, so the delegate parsing
+    them is acceptable — but the bidirectional framing hid that asymmetry. Design the two directions
+    separately.
+  - **D-Bus is a credential vector.** It reaches `org.freedesktop.secrets` (gnome-keyring/KWallet
+    Secret Service), notifications, portals. The Secret Service is a read-stored-credentials oracle and
+    gets the **gpg-agent treatment — refuse to broker, named explicitly** (§11.2 axiom-adjacent), not
+    "default-deny in a small option space." The option space stops being small the moment keyring/
+    portals/notifications are in scope.
+  Re-add the `[dbus]` config surface (removed from the schema in 0.1) as a *built* surface this time.
+  Proven by a policy-suite case.
 
 ### Thrust 3 — Authoring experience
 
@@ -135,11 +168,13 @@ layer on top:
   `vcs-git`) + per-fragment tests.
 
 - **W10 · IDE policy intellisense (VSCode extension).** *(new)* **M.** A VSCode/editor extension
-  that gives policy-TOML authors completion, hover docs, and inline validation — derived from the
-  **existing parser/enforcer schemas** (the `kennel-lib-compile` source structs / the
-  `02-2-config-schema.md` reference), emitted as a machine schema the editor consumes. Lowers the
-  authoring floor and pairs naturally with W9. Lives as a separate deliverable (an extension), not
-  in the runtime crates.
+  giving policy-TOML authors completion, hover docs, and inline validation. **The real prerequisite is
+  *generating* the schema, not consuming one** (review): the corpus cites `schema/policy.toml.schema`
+  as canonical (00, 05, the worked template) but **the file isn't in the tree** (confirmed). W10 must
+  **emit** the machine schema from the `kennel-lib-compile` source structs as the single source of
+  truth, **CI-checked against the parser** — which also kills the dangling references and prevents
+  doc/code drift. Generation, not hand-maintenance, or W10 becomes a new drift surface. The extension
+  consumes the generated schema; it lives as a separate deliverable, not in the runtime crates.
 
 ### Thrust 4 — TCB hygiene
 
@@ -163,6 +198,11 @@ layer on top:
   continuity holds client-side (filter the full received stream; a truncated escape at the ring head
   is incomplete ⇒ harmless). `kennel-lib-term`'s fuzz target is unaffected (the fuzz crate deps it
   directly).
+  **State the input/output asymmetry (review):** only the *output* path becomes a raw router — that's
+  the win. Detach-key detection scans the *input* path, which is **operator-controlled** bytes, not
+  workload-controlled, so keeping it daemon-side is fine. Say so explicitly, so the "no parser of
+  workload-controlled bytes in the daemon" claim is airtight rather than apparently contradicted by
+  detach handling.
 
 - **W12 · Honest TCB accounting in the inventory.** *(→ `03-crate-decomposition.md`)* **S.** The
   crate inventory counts *first-party* SLOC only, which understates the real TCB ~13× — the trusted
@@ -173,10 +213,19 @@ layer on top:
     W11 removes it* — ~65k vendored logic.
   - **bindings / glue** (declarations resolving to the platform `libc.so`/kernel, ≈0 per-line risk;
     cfg-gated): `libc`, most of `nix`, `bitflags`, `memoffset`, `cfg-if`.
-  Why it matters: it makes the TCB-reduction argument legible — the serde_json/lexopt/compiler splits
-  kept *subtrees* out, W11 keeps `vte`'s parser out, and it documents why `libc`/`nix`/`seccompiler`
-  (~base) and `object` (vetted ELF+relocation parser, load-bearing via the BPF loader) are **not**
-  reduction targets despite their size. Regenerated whenever a TCB edge changes (W11 included).
+  Plus the axis that ranks *danger* (review): **adversarial-input vs trusted-input**, on top of
+  logic-vs-bindings. Logic-vs-bindings says what runs in-process; it doesn't say what an attacker can
+  reach. `vte` eats workload output (**adversarial** — which is why W11 is the highest-value cut);
+  `basic-toml` eats *signed* policy (trusted); serde-over-binder eats our own *typed* wire
+  (trusted-ish).
+  **`object` re-checked and exempt — confirmed (2026-06-18).** In the daemon, `object` parses only
+  *first-party* ELF: the SSH dialer + the facade binaries (`lib.rs` libresolve sites are `ssh_bin`/
+  `shim_bin`/`socks5_bin`/`client_bin`) and the first-party BPF object (privhelper). The *workload's*
+  (adversarial) ELF is resolved at **compile time in the CLI** (`resolve_settled_loaders` — "the
+  runtime never re-resolves"), out of the TCB. So `object`'s daemon input is trusted — it sits with
+  `basic-toml`, not `vte` — and the adversarial ELF parse being CLI-only is another point for
+  compiler-out-of-TCB. `libc`/`nix`/`seccompiler` are base (bindings/glue). Regenerated whenever a TCB
+  edge changes (W11 included).
 
 ## Dropped / deferred (with reasons)
 
@@ -205,9 +254,11 @@ layer on top:
 
 ## Sequencing
 
-1. **Design pass on W1 + W2 together** — they share the trust manifest and the teardown diff;
-   settle the §11.1 open questions and the block-vs-report and COW/revert decisions as one design.
-   This is the only unresolved *design* in the release.
+1. **Design pass on W1 + W2 together** — one mechanism (the content-addressed `.d` store) over both;
+   settle the remaining design questions: the `ai-coding` default disposition, `.d`-store GC, the
+   versioned trigger catalogue, and the `.d`-dir masking under every writable bind. This is the only
+   unresolved *design* in the release — bound the claims (scope, boundary statement, catalogue
+   versioning) before the mechanism, per the review.
 2. **W1 + W2 build** — the flagship, after the design pass.
 3. **W8 (D-Bus)** — in parallel; independent of the persistence work.
 4. **W10 (IDE extension)** and **W9 (fragments)** — the authoring thrust; W10's schema emission
@@ -227,10 +278,15 @@ stable-surface change (CLI / policy schema / IPC / BPF ABI) per CODING-STANDARDS
 
 ## Decisions taken (2026-06-18)
 
-1. **W1/W2 mechanism: the git model.** Persistence inspection is built as commit/diff against a
-   compile-time baseline (see Thrust 1 framing). The trust manifest, the teardown diff, the
-   escaping-symlink removal, and revert are one mechanism, not three. The design pass decides
-   *use-git vs. borrow-the-model*; either way per-trigger removal is no longer the frame.
+1. **W1/W2 mechanism: content-addressed masked side store, scoped to the manifest surface.**
+   Persistence inspection is pin / diff-against-pin / restore-from-pin over the declared trigger set
+   (see Thrust 1 framing) — the manifest, the diff, the escaping-symlink handling, and revert are one
+   mechanism. **git is out as the store** (lossy on setuid/xattrs/ACLs/special-files/sub-second
+   mtime/ignore semantics); borrowed only as the diff/revert *model*. The control is scoped to the
+   declared surface, and `review` states that boundary explicitly.
+4. **Default disposition is per workload class, not global.** `revert` for `inspect-only`/
+   `untrusted-build`; `ai-coding` keeps the agent's diff, so it runs on the incomplete-detection story,
+   stated plainly — not the "revert is free and stronger" framing.
 2. **Two configurable dispositions, both policy enums parallel to `ttl_action`.**
    - **`on_change` (live, during the run):** **`warn`** / **`freeze`** / **`kill`** — kenneld's
      reaction when inotify reports a trigger-class mutation. Unprivileged; reuses the TTL cgroup
@@ -243,11 +299,14 @@ stable-surface change (CLI / policy schema / IPC / BPF ABI) per CODING-STANDARDS
 
 ## Open decisions for the maintainer
 
-- **W1: default teardown disposition** (`revert` / `interactive` / `warn`) — to settle in the
-  design pass.
-- **W1/W2: use git, or borrow the model?** A real per-bind object store vs. a content-addressed
-  snapshot with no git dependency. Design pass decides.
-- **W1: how far up the watch layer in 0.2.0?** Authoritative-snapshot-only, or snapshot +
-  inotify live-audit/diff-scoping + the `on_change` tripwire (all unprivileged, additive). fanotify
-  write-prevention is **out of scope entirely** — it needs a standing privileged watcher
-  ([[no-standing-host-privilege]]).
+- **W1: default disposition *per class*** — `revert` for `inspect-only`/`untrusted-build` is settled;
+  the `ai-coding` default (`warn` vs `interactive`, since `revert` is unusable there) is for the design
+  pass.
+- **W1: `.d`-store lifecycle / GC** — GC unreferenced blobs, or keep them as tamper-evident trigger
+  history (revert-to-any-prior-pinned-state, arguably a feature)? A decision, not a default to back
+  into.
+- **W1: how far up the watch layer in 0.2.0?** Authoritative-store-only, or store + inotify
+  live-audit/diff-scoping + the `on_change` tripwire (all unprivileged, additive). fanotify
+  write-prevention is **out of scope entirely** ([[no-standing-host-privilege]]).
+- **W8: Secret Service / portals / notifications** — confirm the refuse-to-broker list (Secret
+  Service named explicitly, gpg-agent treatment) and the inbound-vs-outbound split before build.
