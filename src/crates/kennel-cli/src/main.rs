@@ -714,14 +714,65 @@ fn attach(args: &[String]) -> Result<ExitCode, String> {
 const DETACH_LEAD: u8 = 0x1c;
 const DETACH_KEY: u8 = b'd';
 
-/// How a proxied terminal session ended: a local detach (`Ctrl-\ d`) versus the remote
-/// end closing (workload exit or a take-over by another client).
+/// How a proxied terminal session ended.
 enum SessionEnd {
-    /// The operator pressed the detach key — the workload keeps running.
+    /// The operator pressed the detach key (`Ctrl-\ d`) — the workload keeps running.
     Detached,
-    /// The broker closed our socket: the workload exited or another client took over.
-    /// The final outcome is read from the control connection.
-    Remote,
+    /// The control-connection reader received the daemon's final word and resolved the
+    /// session to an exit code (or an error).
+    Outcome(Result<ExitCode, String>),
+}
+
+/// Read the control connection for the whole session (§9.7): handle an operator-prompt
+/// [`Response::Prompt`] inline — surface it on the now-quiet terminal (the workload is
+/// frozen while a prompt is outstanding), capture the operator's single-key answer from the
+/// stdin pump, and reply — then deliver the daemon's final `Exited`/`Detached`/`Error` as a
+/// [`SessionEnd::Outcome`]. The sole reader and writer of `conn`, so prompt replies never
+/// race the main thread.
+// Runs as a `'static` thread body, so it must own its channel ends and the flag — the
+// `Receiver` in particular cannot be borrowed across the thread boundary.
+#[allow(clippy::needless_pass_by_value)]
+fn control_reader(
+    mut conn: UnixStream,
+    mut term: std::fs::File,
+    prompt_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    answer_rx: std::sync::mpsc::Receiver<u8>,
+    tx: std::sync::mpsc::Sender<SessionEnd>,
+) {
+    use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+    let outcome = loop {
+        match control::recv_response(&mut conn) {
+            Ok(Response::Prompt { id, prompt }) => {
+                let _ = write!(term, "\r\n{prompt} ");
+                let _ = term.flush();
+                prompt_active.store(true, Ordering::SeqCst);
+                // The stdin pump diverts the next keypress here; a closed channel (pump
+                // gone) reads as a decline.
+                let key = answer_rx.recv().unwrap_or(b'n');
+                let affirmative = key == b'y' || key == b'Y';
+                let answer = if affirmative { "y" } else { "n" };
+                let _ = write!(term, "{answer}\r\n");
+                let _ = term.flush();
+                let _ = control::send_request(
+                    &mut conn,
+                    &Request::PromptReply {
+                        id,
+                        answer: answer.to_owned(),
+                    },
+                );
+            }
+            Ok(Response::Exited { code }) => break Ok(exit_code(code)),
+            Ok(Response::Detached { reason }) => {
+                let _ = write!(term, "\r\ndetached: {reason}\r\n");
+                break Ok(ExitCode::SUCCESS);
+            }
+            Ok(Response::Error(message)) => break Err(message),
+            Ok(other) => break Err(format!("unexpected response: {other:?}")),
+            Err(e) => break Err(format!("daemon: {e}")),
+        }
+    };
+    let _ = tx.send(SessionEnd::Outcome(outcome));
 }
 
 /// Proxy this terminal to the kennel over the broker socket `ours` until detach or the
@@ -730,20 +781,27 @@ enum SessionEnd {
 /// holds the master, so we relay the size rather than `ioctl` it). On a local detach we
 /// restore the terminal and exit 0; on a remote end we read the daemon's final
 /// `Exited`/`Detached` over `conn`.
-fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitCode, String> {
-    use std::sync::mpsc;
+fn proxy_session(conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitCode, String> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{mpsc, Arc};
     // Tell the broker our initial size, then relay every later SIGWINCH.
     send_resize(name);
     let (tx, rx) = mpsc::channel::<SessionEnd>();
+    // Set by the control reader while an operator prompt (§9.7) is outstanding; the stdin
+    // pump then diverts the next keypress to `answer_tx` as the answer instead of the broker.
+    let prompt_active = Arc::new(AtomicBool::new(false));
+    let (answer_tx, answer_rx) = mpsc::channel::<u8>();
 
-    // stdin → broker, watching for the `Ctrl-\ d` detach sequence.
+    // stdin → broker, watching for the `Ctrl-\ d` detach sequence and renew answers.
     let in_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
     let stdin_dup = io::stdin()
         .as_fd()
         .try_clone_to_owned()
         .map_err(|e| format!("stdin dup: {e}"))?;
     let tx_in = tx.clone();
+    let pa_in = Arc::clone(&prompt_active);
     std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
         let mut r = std::fs::File::from(stdin_dup);
         let mut w = in_sock;
         let mut buf = [0u8; 4096];
@@ -760,7 +818,11 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
             let mut out: Vec<u8> = Vec::with_capacity(n.saturating_add(1));
             let mut detached = false;
             for &b in buf.get(..n).unwrap_or(&[]) {
-                if armed {
+                if pa_in.swap(false, Ordering::SeqCst) {
+                    // A prompt is outstanding: this keypress is the answer, not workload
+                    // input. Divert it and do not forward it.
+                    let _ = answer_tx.send(b);
+                } else if armed {
                     armed = false;
                     if b == DETACH_KEY {
                         detached = true;
@@ -782,7 +844,6 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
                 return;
             }
         }
-        let _ = tx_in.send(SessionEnd::Remote);
     });
 
     // broker → stdout. Write to a `File` over the raw stdout fd, NOT `io::stdout()`: the
@@ -798,14 +859,28 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
     std::thread::spawn(move || {
         let mut w = std::fs::File::from(stdout_dup);
         let _ = std::io::copy(&mut out_sock, &mut w);
-        let _ = tx.send(SessionEnd::Remote);
+    });
+
+    // Control connection reader: handles operator prompts inline and resolves the outcome.
+    let term_dup = io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("stdout dup: {e}"))?;
+    std::thread::spawn(move || {
+        control_reader(
+            conn,
+            std::fs::File::from(term_dup),
+            prompt_active,
+            answer_rx,
+            tx,
+        );
     });
 
     // SIGWINCH → Resize relay.
     let resize_name = name.to_owned();
     std::thread::spawn(move || winch_resize_relay(&resize_name));
 
-    // Whichever pump ends first decides the session outcome.
+    // Whichever of the detach pump or the control reader resolves first ends the session.
     match rx.recv() {
         Ok(SessionEnd::Detached) => {
             // Close our end so the broker drops us; the workload keeps running.
@@ -813,18 +888,13 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
             eprintln!("\r\ndetached from `{name}` (workload still running; `kennel attach {name}` to reconnect)");
             Ok(ExitCode::SUCCESS)
         }
-        Ok(SessionEnd::Remote) | Err(_) => {
+        Ok(SessionEnd::Outcome(res)) => {
             drop(ours);
-            // The broker closed us: read the daemon's final word over the control conn.
-            match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-                Response::Exited { code } => Ok(exit_code(code)),
-                Response::Detached { reason } => {
-                    eprintln!("\r\ndetached from `{name}`: {reason}");
-                    Ok(ExitCode::SUCCESS)
-                }
-                Response::Error(message) => Err(message),
-                other => Err(format!("unexpected response: {other:?}")),
-            }
+            res
+        }
+        Err(_) => {
+            drop(ours);
+            Err("session ended without an outcome".to_owned())
         }
     }
 }
