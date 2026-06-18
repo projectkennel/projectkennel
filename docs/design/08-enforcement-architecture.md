@@ -1,5 +1,13 @@
 # §8 Enforcement architecture
 
+§4 set out what Project Kennel is: a reference monitor for the user level, built in user space — a mediator every access passes through, that the workload it confines cannot bypass or tamper with, and that is small enough to audit. This chapter is how the kernel mechanisms realise that monitor, and the three reference-monitor properties organise it.
+
+- Complete mediation is the mechanism map (§8.1) and the spawn flow (§8.3): each kennel is assembled so that every resource is either absent from its view or reachable only through a transaction the monitor authorises, and §8.8 holds that line between kennels as well as around them.
+- Tamperproof is §8.5: which components hold privilege, for how long, and why nothing the workload runs can reach them.
+- Verifiable is the discipline the rest of the chapter answers to — the performance characteristics (§8.9), which follow from mediating control rather than data, and the refuse-to-start checks (§8.11) that decline to run when a required mechanism is missing rather than degrade silently.
+
+The two limbs of §4 — construction, where a resource is simply absent from the kennel's view, and interposition, where it is reachable only through a transaction the monitor authorises — are what these mechanisms implement, resource class by resource class. The map below shows which mechanism carries which limb for each class.
+
 ## 8.1 Mechanism map
 
 Each resource class maps to one or more kernel mechanisms. Project Kennel uses these in combination; no single mechanism is sufficient.
