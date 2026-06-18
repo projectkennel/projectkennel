@@ -365,6 +365,100 @@ pub fn enumerate_triggers(root: &Path, catalogue: &Catalogue) -> Vec<String> {
     found
 }
 
+/// Bounds on the escaping-symlink walk so a hostile/huge tree cannot make enumeration
+/// unbounded — best-effort beyond these (the teardown review re-walks each run).
+const MAX_WALK_DEPTH: u32 = 64;
+const MAX_WALK_ENTRIES: u32 = 100_000;
+
+/// Lexically normalise a path (fold `.` and `..` without touching the filesystem), so an
+/// escape check does not depend on the target existing.
+fn lexical_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                if !matches!(out.last(), Some(Component::RootDir) | None) {
+                    out.pop();
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out.iter().collect()
+}
+
+/// Whether the symlink at `link` points outside `root` — an absolute target elsewhere, or a
+/// relative one that climbs above `root`. Lexical (no target follow); `link` and `root` share
+/// the same (walk-root) base, so the comparison needs no canonicalisation.
+fn symlink_escapes(link: &Path, root: &Path) -> bool {
+    let Ok(target) = std::fs::read_link(link) else {
+        return false;
+    };
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        link.parent().unwrap_or(root).join(&target)
+    };
+    !lexical_normalize(&resolved).starts_with(lexical_normalize(root))
+}
+
+/// Find symlinks beneath `root` whose target escapes the writable boundary (§2.1, T2.8).
+///
+/// A planted escaping link is a persistence / exfiltration trigger: the host later follows it
+/// out of the project. Returns relative paths (forward-slash), sorted, deduplicated.
+///
+/// A **bounded** walk (depth + entry caps); a tree larger than the caps is covered
+/// best-effort, like the rest of the live watch, with the teardown review as the backstop.
+/// The blob store (`.trust-manifest.d`) is skipped.
+#[must_use]
+pub fn enumerate_escaping_symlinks(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0u32)];
+    let mut budget = MAX_WALK_ENTRIES;
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_WALK_DEPTH {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if budget == 0 {
+                break;
+            }
+            budget = budget.saturating_sub(1);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_symlink() {
+                if symlink_escapes(&path, root) {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        found.push(rel.to_string_lossy().replace('\\', "/"));
+                    }
+                }
+            } else if file_type.is_dir() && entry.file_name() != STORE_DIRNAME {
+                stack.push((path, depth.saturating_add(1)));
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The full on-disk trigger set: catalogue triggers plus escaping symlinks (§2.1).
+#[must_use]
+pub fn enumerate_all_triggers(root: &Path, catalogue: &Catalogue) -> Vec<String> {
+    let mut all = enumerate_triggers(root, catalogue);
+    all.extend(enumerate_escaping_symlinks(root));
+    all.sort();
+    all.dedup();
+    all
+}
+
 /// The blob store directory for a workspace `root` (`<root>/.trust-manifest.d`).
 #[must_use]
 pub fn store_dir(root: &Path) -> PathBuf {
@@ -503,7 +597,7 @@ fn pin_triggers(
 /// (the manifest is still usable without them).
 #[must_use]
 pub fn generate(root: &Path, generator: &str, catalogue: &Catalogue) -> (Manifest, Vec<Error>) {
-    let triggers = enumerate_triggers(root, catalogue);
+    let triggers = enumerate_all_triggers(root, catalogue);
     // The baseline is the compile-time pin (the operator's `kennel compile`/`generate` step).
     let (pinned, errors) = pin_triggers(root, &triggers, "compile");
     let manifest = Manifest {
@@ -580,36 +674,58 @@ pub fn review(
     catalogue: &Catalogue,
 ) -> Result<Vec<TriggerChange>, Error> {
     let mut changes = Vec::new();
-    // Pinned triggers: matched, modified, or removed.
+    // Pinned triggers: matched, modified, or removed. A content trigger compares its content
+    // hash; a symlink trigger compares its link target.
     for (path, entry) in &manifest.execution.triggers {
-        let abs = root.join(path);
-        if abs.is_file() || abs.symlink_metadata().is_ok() {
-            let current = hash_file(&abs)?;
-            if current == entry.sha256 {
-                changes.push(TriggerChange::Unchanged { path: path.clone() });
-            } else {
-                changes.push(TriggerChange::Modified {
-                    path: path.clone(),
-                    entry: entry.clone(),
-                    current,
-                });
-            }
-        } else {
-            changes.push(TriggerChange::Removed {
+        match disk_signature(&root.join(path))? {
+            None => changes.push(TriggerChange::Removed {
                 path: path.clone(),
                 entry: entry.clone(),
-            });
+            }),
+            Some(current) => {
+                let pinned = match entry.kind {
+                    TriggerKind::Content => entry.sha256.clone(),
+                    TriggerKind::Symlink => entry.target.clone().unwrap_or_default(),
+                };
+                if current == pinned {
+                    changes.push(TriggerChange::Unchanged { path: path.clone() });
+                } else {
+                    changes.push(TriggerChange::Modified {
+                        path: path.clone(),
+                        entry: entry.clone(),
+                        current,
+                    });
+                }
+            }
         }
     }
     // Triggers on disk that the manifest never pinned (created after generation).
-    for rel in enumerate_triggers(root, catalogue) {
+    for rel in enumerate_all_triggers(root, catalogue) {
         if !manifest.execution.triggers.contains_key(&rel) {
-            let current = hash_file(&root.join(rel.clone()))?;
-            changes.push(TriggerChange::New { path: rel, current });
+            if let Some(current) = disk_signature(&root.join(&rel))? {
+                changes.push(TriggerChange::New { path: rel, current });
+            }
         }
     }
     changes.sort_by(|a, b| change_path(a).cmp(change_path(b)));
     Ok(changes)
+}
+
+/// The on-disk signature of a trigger at `abs`: a regular file's content hash, or a symlink's
+/// link target. `None` if it is absent (or a directory where a trigger was).
+fn disk_signature(abs: &Path) -> Result<Option<String>, Error> {
+    let Ok(meta) = abs.symlink_metadata() else {
+        return Ok(None);
+    };
+    if meta.file_type().is_symlink() {
+        Ok(Some(
+            std::fs::read_link(abs)?.to_string_lossy().into_owned(),
+        ))
+    } else if meta.is_file() {
+        Ok(Some(hash_file(abs)?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// The relative path a [`TriggerChange`] concerns (for stable ordering).
@@ -926,6 +1042,53 @@ mod tests {
         assert_eq!(blobs(), 2, "both the v1 and v2 blobs exist before pruning");
         prune_store(&dir, &m);
         assert_eq!(blobs(), 1, "only the referenced (v2) blob survives");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn escaping_symlinks_are_detected_pinned_and_reverted() {
+        let dir = tmpdir();
+        std::fs::write(dir.join("real.txt"), b"x").expect("write");
+        // An in-tree link does not escape; an absolute and a climbing link do.
+        std::os::unix::fs::symlink("real.txt", dir.join("inside.lnk")).expect("inside");
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("escape.lnk")).expect("abs escape");
+        std::os::unix::fs::symlink("../../../etc/hosts", dir.join("climb.lnk")).expect("climb");
+
+        let escaping = enumerate_escaping_symlinks(&dir);
+        assert!(escaping.iter().any(|p| p == "escape.lnk"), "abs escape: {escaping:?}");
+        assert!(escaping.iter().any(|p| p == "climb.lnk"), "climb escape: {escaping:?}");
+        assert!(!escaping.iter().any(|p| p == "inside.lnk"), "in-tree link not flagged");
+
+        // generate pins the escaping links as symlink-kind entries.
+        let (m, _) = generate(&dir, "t", &Catalogue::compiled_default());
+        assert!(
+            m.execution
+                .triggers
+                .get("escape.lnk")
+                .is_some_and(|e| e.kind == TriggerKind::Symlink && e.target.as_deref() == Some("/etc/passwd")),
+            "the escaping link is pinned as a symlink with its target"
+        );
+
+        // A NEW escaping link planted after generation shows as New; revert removes it.
+        std::os::unix::fs::symlink("/root/.bashrc", dir.join("planted.lnk")).expect("plant");
+        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
+        let planted = changes
+            .iter()
+            .find(|c| matches!(c, TriggerChange::New { path, .. } if path == "planted.lnk"))
+            .expect("planted link shows New");
+        revert(&dir, planted).expect("revert");
+        assert!(
+            dir.join("planted.lnk").symlink_metadata().is_err(),
+            "the planted escaping link is removed"
+        );
+        // The pinned escaping link survives a clean review (Unchanged).
+        let after = review(&m, &dir, &Catalogue::compiled_default()).expect("review2");
+        assert!(
+            after
+                .iter()
+                .any(|c| matches!(c, TriggerChange::Unchanged { path } if path == "escape.lnk")),
+            "the pinned escaping link compares Unchanged by target"
+        );
         cleanup(&dir);
     }
 
