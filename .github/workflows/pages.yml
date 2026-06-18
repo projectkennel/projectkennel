@@ -2,7 +2,7 @@
 #
 # The site is a hand-written single-page landing (docs/website/index.html) plus the
 # trust-manifest JSON Schema served at the path shipped code references — the manifest's
-# `$id` is https://projectkennel.org/schemas/trust-manifest-v1.json, so that path is
+# `$id` is https://projectkennel.org/schemas/trust-manifest-v2.json, so that path is
 # load-bearing. A pre-upload gate asserts the served copy is byte-identical to the
 # canonical docs/schemas/ source, so the two can never drift.
 name: pages (deploy projectkennel.org)
@@ -39,8 +39,8 @@ jobs:
       # `$id` resolves to stale bytes. Fail the deploy on any drift.
       - name: Schema endpoint matches the canonical source
         run: |
-          canonical=docs/schemas/trust-manifest-v1.json
-          served=docs/website/schemas/trust-manifest-v1.json
+          canonical=docs/schemas/trust-manifest-v2.json
+          served=docs/website/schemas/trust-manifest-v2.json
           if ! cmp -s "$canonical" "$served"; then
             echo "::error::$served has drifted from $canonical — re-copy it (cp $canonical $served)"
             diff -u "$canonical" "$served" || true

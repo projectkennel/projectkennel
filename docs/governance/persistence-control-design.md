@@ -1,10 +1,14 @@
 # W1/W2 persistence control — design pass
 
-Status: **design pass — fully steered (2026-06-18)** · Feeds ROADMAP-0.2.0 W1+W2
-Graduates into the design corpus (extending §4.6 trust manifest + §9 `kennel review`) once settled and built.
+Status: **BUILT + e2e-verified (2026-06-18)** · Graduated to THREATS T2.8 (mitigation rewritten to
+the three-limb pin / live tripwire / restore form, plus the `[fs.write].exclusive` channel-sever).
+W1 (manifest v2 + content store + catalogue + `review --revert` + `.d` mask), W2 (inotify tripwire +
+`[trust].on_change` + `fs.mutation` audit + escaping-symlink pins), and the exclusive over-mount
+(factory-folded, ownership-gated, `kennel release` recovery) are all shipped. This doc is retained
+as the design rationale + the maintainer steers (§4) behind the corpus entry.
 
-> The critical-path item. This pass does the design that *can* be settled from the code + the
-> review, and ends with a short list of steers (§4) that are genuinely the maintainer's call.
+> The critical-path item. This pass did the design settled from the code + the review, ending with
+> the steers (§4) that were the maintainer's call — all now resolved and built.
 
 ## 0. What already exists (the foundation — bigger than the roadmap implied)
 
@@ -15,7 +19,7 @@ W1/W2 is **not greenfield**; it extends the shipped trust-manifest mechanism.
   `KNOWN_TRIGGER_DIRS` (`.git/hooks`); `enumerate_triggers(root)`; `hash_file` (via system
   `sha256sum`, no in-crate crypto); `generate(root)` → `Manifest`; `review(manifest, root)` →
   `Vec<TriggerChange>`; `apply_review` (re-pin).
-- **The manifest schema** (`docs/schemas/trust-manifest-v1.json`, v1.0): `execution.triggers`
+- **The manifest schema** (`docs/schemas/trust-manifest-v2.json`, v2.0 — W1 bumped it from v1.0): `execution.triggers`
   (relative-path → `sha256:…`) + `execution.boundaries.untrusted_paths` (no-exec globs).
 - **Masking is already per-writable-bind** (`kennel-lib-spawn` `lib.rs:492`, `plan.rs:922`): each
   `<writable-bind>/.trust-manifest.json` is over-mounted with an empty RO file from the tmpfs
@@ -46,6 +50,9 @@ stored content, no restore, and `kenneld` does nothing at runtime.
 6. **Per-workload-class dispositions** — `on_change` + teardown disposition as policy enums.
 7. **Scope to persistent writable binds** — the ephemeral tmpfs home can't carry a trigger to the
    next run, so it's out of scope by construction.
+8. **Exclusive host bind** (opt-in, §2.7) — `[fs.write].exclusive` over-mounts a sentinel on the
+   *host* path for the run, severing the **live confused-deputy channel** (T2.8 residuals 1 + 2) that
+   the enumerated manifest leaves open. Mandatory crash-leak recovery path.
 
 ## 2. Mechanism
 
@@ -111,27 +118,80 @@ on top of built primitives, not the deliverable).
   TTL `renew` prompt, pulled into this release (ROADMAP W13) — the kenneld→attached-CLI prompt path
   the daemon lacks today. One channel serves both the TTL renew prompt and `interactive` teardown.
 
-### 2.6 The catalogue — an **additive** layered config (steer 3, clarified)
-A **deployment config** on the same path cascade as `audit.toml` ([[no-hardcoded-paths-config-cascade]]),
-but composed **additively** (union, not replace — like the SSH `+=`/`-=` model
+### 2.6 The catalogue — an **additive** layered config, no compiled default (steer 3, revised)
+A **deployment config** on the project's standard config cascade ([[no-hardcoded-paths-config-cascade]]),
+composed **additively** (union, not replace — like the SSH `+=`/`-=` model
 [[compiler-list-composition-ssh-model]]):
 
-> effective catalogue = compiled default **∪** `/etc/kennel/triggers.catalog` **∪** `~/.config/kennel/triggers.catalog`
+> effective catalogue = `/usr/lib/kennel/triggers.catalog` (vendor, the package default)
+> **∪** `/etc/kennel/triggers.catalog` (admin) **∪** `~/.config/kennel/triggers.catalog` (user)
 
-Line-oriented: one trigger pattern per line (`#` comments). Each lower layer **adds** patterns; an
-upper layer adds more — **or removes an individual entry with a leading `-`** (the only subtractive
-op). The kind (file / dir / content-marker — e.g. `core.hooksPath` is a *field* in `.git/config`, not
-the whole file) is encoded in the pattern syntax (exact grammar is a build detail). Loaded by
-`kennel-lib-manifest`; the current `KNOWN_TRIGGERS`/`_DIRS` consts become the compiled default.
-- **Compiled default is conservative** (steer 3): today's set + `core.hooksPath`, `.git/config`
-  aliases, `.gitattributes` filters, escaping symlinks. `/etc/kennel` widens system-wide; `~/.config`
-  widens or prunes (`-pattern`) per-user. The noisier patterns (`.envrc`, `.npmrc`, `.pth`/
-  `sitecustomize`, `.desktop`, user systemd units) ship as commented lines to add, not defaults.
+**There is no compiled-in default.** A baked-in trigger list is a footgun: the operator cannot see
+or fully control what is watched by reading the config, and can only *subtract* the invisible default
+with `-pattern`. So the default trigger set ships as the **vendor** layer file (the lowest-priority,
+package-shipped, read-only layer — the same place every other shipped default lives), and the effective
+set is exactly what the cascade files say. Line-oriented: one trigger pattern per line (`#` comments);
+each higher layer **adds** patterns, or **removes** one a lower layer set with a leading `-` (the only
+subtractive op). A trailing `/` marks a directory trigger. Loaded by `kennel-lib-manifest` (the daemon
+links none of this — it receives a resolved path list, §2.4).
+- **The shipped vendor default is conservative**: `Makefile`/`makefile`/`GNUmakefile`, the `Just`/`Task`
+  runners, `package.json`, the `.vscode` task/launch defs, and the `.git/hooks/` directory. `/etc/kennel`
+  widens system-wide; `~/.config` widens or prunes per-user. Noisier patterns (`.envrc`, `.npmrc`,
+  `.pth`/`sitecustomize`, `.desktop`) ship as commented lines in the vendor file, to add, not defaults.
 - **Weakening is explicit, via `-pattern` only** (no "empty file = off"; additive means an empty user
   file changes nothing). The operator is the trust root (§11.2), so pruning is fine — and a *workload*
-  cannot reach these host files. A **hard disable** is the existing `[trust].manifest = false` toggle,
-  not the catalogue.
+  cannot reach these host files. A **hard disable** is the existing `[trust].manifest = false` toggle.
+- **An empty catalogue watches nothing** — and because there is no hidden default, a missing vendor
+  file would silently disable T2.8. So the CLI **warns loudly** when `[trust].manifest = on` resolves an
+  empty catalogue (a deployment fault), rather than failing closed or pretending coverage.
 - Documented as **"detects this configured set, never *clean*"** — the boundary is stated, not implied.
+
+### 2.7 Exclusive host bind (`[fs.write].exclusive`) — severing the live confused-deputy channel (opt-in)
+An **opt-in** per-bind flag (`[fs.write].exclusive`, default **off**, persistent writable binds
+only): for the duration of a run a writable host path is usable by **either** the operator **or** the
+kennel, never both concurrently.
+
+**Mechanism.** After the kennel view is constructed (the real host path already bound into the
+kennel's rec-private mount NS), a **transient privhelper op** over-mounts an opaque sentinel dir on
+the *host* path — not silently empty but a marker (`IN USE by kennel <id> since <ts> — released at
+teardown`). Kennel views are `MS_PRIVATE`/rec-private, so the *later* host over-mount does not
+propagate in: the workload keeps the real inode, the operator sees the sentinel. A second transient
+privhelper op `umount`s it at teardown. No process holds a capability ([[no-standing-host-privilege]]
+intact — both are discrete validated ops that exit); the *mount state* persists for the lifetime,
+which is why recovery (below) is mandatory.
+
+**What it closes — T2.8 residuals (1) and (2), for the run's duration.** The masked manifest (§0) is
+precise but honest about two gaps (THREATS T2.8 *Residuals*): it defends only **enumerated** triggers,
+and it **relies on host tooling / the human honouring** the pin (a user who runs `make` by hand, or
+acts on a planted `install.sh`, is unprotected). Both are the **confused-deputy** shape: the operator
+— full host authority, the trust root (§11.2) — is induced to wield that authority on content the
+*workload* planted in the shared tree. `exclusive` severs the **channel** instead of enumerating its
+contents: while the kennel holds the path the operator has no view of it, so there is nothing to be
+socially induced to run and nothing concurrently-open to be tampered mid-edit. The operator only ever
+sees the **post-teardown, post-review** state (manifest diff + disposition already applied).
+
+**Not theatre** ([[no-security-theatre]]): the adversary is the **workload** (in-model, T2.8 family),
+the asset is the **operator's unconfined host authority**, and the control denies the workload a
+*channel to weaponize the trust root* — it does **not** defend owner-only state *against* the trust
+root (which would be incoherent, the theatre shape). Distinct from the manifest, not redundant:
+manifest = precise / enumerated / post-hoc detection + revert + host-IDE Restricted Mode; `exclusive`
+= coarse / enumeration-free / cooperation-free / **live**. They compose — `exclusive` closes the
+run-window the manifest leaves open; the manifest handles the post-run state `exclusive` then reveals.
+
+**Caveats (the real cost, stated):**
+- **Host mount-NS mutation, session-global.** The over-mount lives in the operator's host mount
+  namespace — it hides the path from the IDE and every host process (the point), but it is a new
+  privhelper op surface.
+- **Crash-leak ⇒ operator lockout.** If kenneld / privhelper dies mid-run the sentinel persists and
+  the operator is locked out of their own path until cleared. **Mandatory recovery path**, part of
+  the same slice: a teardown-sweep on daemon restart **+** an explicit `kennel release <id>` unmount
+  command. Ships *with* the feature or the feature does not ship.
+- **Scope = persistent writable binds only.** The constructed `$HOME` is ephemeral tmpfs, already
+  private to the kennel (no host inode), so `exclusive` is meaningless there — consistent with the
+  rest of W1/W2's scope (§1.7, §3).
+
+**Small decisions left:** sentinel content/format; whether to also offer a read-only "operator may
+look but not write" middle mode (lean **no** — two states only, keep it legible).
 
 ## 3. Decisions taken in this pass (rationale; confirm if you disagree)
 

@@ -376,6 +376,7 @@ fn put_view(w: &mut Writer, v: &ShimView) {
         w.path(&b.source);
         w.path(&b.target);
         w.bool(b.writable);
+        w.bool(b.exclusive);
     }
     w.count(v.dev_allow.len());
     for d in &v.dev_allow {
@@ -387,6 +388,10 @@ fn put_view(w: &mut Writer, v: &ShimView) {
     w.bool(v.binder);
     w.count(v.mask_paths.len());
     for p in &v.mask_paths {
+        w.path(p);
+    }
+    w.count(v.mask_dir_paths.len());
+    for p in &v.mask_dir_paths {
         w.path(p);
     }
 }
@@ -521,10 +526,12 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         let source = r.path()?;
         let target = r.path()?;
         let writable = r.bool()?;
+        let exclusive = r.bool()?;
         binds.push(BindMount {
             source,
             target,
             writable,
+            exclusive,
         });
     }
     let mut dev_allow = Vec::new();
@@ -539,6 +546,10 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
     for _ in 0..r.count()? {
         mask_paths.push(r.path()?);
     }
+    let mut mask_dir_paths = Vec::new();
+    for _ in 0..r.count()? {
+        mask_dir_paths.push(r.path()?);
+    }
     Ok(ShimView {
         shim_root,
         binds,
@@ -548,6 +559,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         proc_hidepid,
         binder,
         mask_paths,
+        mask_dir_paths,
     })
 }
 
@@ -961,11 +973,13 @@ mod tests {
                         source: PathBuf::from("/usr"),
                         target: PathBuf::from("/usr"),
                         writable: false,
+                        exclusive: false,
                     },
                     BindMount {
                         source: PathBuf::from("/home/op/work"),
                         target: PathBuf::from("/home/kennel/work"),
                         writable: true,
+                        exclusive: true,
                     },
                 ],
                 dev_allow: vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/net/tun")],
@@ -974,6 +988,7 @@ mod tests {
                 proc_hidepid: true,
                 binder: true,
                 mask_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.json")],
+                mask_dir_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.d")],
             }),
             new_root: Some(PathBuf::from("/run/user/1000/kennel/root-7")),
             landlock_fs: vec![

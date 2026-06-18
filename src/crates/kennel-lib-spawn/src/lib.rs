@@ -214,6 +214,13 @@ pub fn substitute(
         *path = substitute_path(path, subst, &user, &group);
         reject_leftover("fs.write", path)?;
     }
+    // Exclusive paths (§2.7) are a subset of write — substitute them identically so the plan
+    // builder's source match holds (an unsubstituted `~` would never equal a substituted bind
+    // source, silently dropping the over-mount).
+    for path in &mut fs.exclusive {
+        *path = substitute_path(path, subst, &user, &group);
+        reject_leftover("fs.exclusive", path)?;
+    }
     for bin in &mut p.effective_policy.exec.allow {
         *bin = substitute_path(bin, subst, &user, &group);
         reject_leftover("exec.allow", bin)?;
@@ -431,6 +438,10 @@ pub fn build_view_and_pivot(
     //     forge, while the host IDE reads the untouched real inode. The mask source is a
     //     fresh empty file in the root tmpfs scaffold (never the host manifest).
     materialize_masks(&view.mask_paths, new_root, &under)?;
+    // 6c. Mask the blob store directory (`.trust-manifest.d`, §2.3) the same way, but with an
+    //     empty read-only *directory* over-mount: `readdir` shows nothing, the workload cannot
+    //     read a pinned blob, and a write into — or creation of — the host store is denied.
+    materialize_dir_masks(&view.mask_dir_paths, new_root, &under)?;
 
     // 7. pivot_root into the new root, then detach the old one.
     let put_old = under(Path::new("/.kennel-oldroot"));
@@ -532,6 +543,54 @@ fn materialize_masks(
             .map_err(|e| io::Error::new(e.kind(), format!("mask bind {}: {e}", dest.display())))?;
         mount::remount_readonly(&dest).map_err(|e| {
             io::Error::new(e.kind(), format!("mask remount_ro {}: {e}", dest.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// Over-mount each blob-store path with an empty, read-only *directory* so the confined
+/// workload cannot read the pinned blobs or write into / create the host store (§2.3 / T2.8).
+///
+/// The directory analogue of [`materialize_masks`]: one shared empty scaffold directory in
+/// the root tmpfs is bound over each in-view `.trust-manifest.d` and remounted read-only, so
+/// `readdir` returns nothing and any write is `EROFS`. A path whose parent bind was not
+/// materialised (source absent) is skipped.
+///
+/// # Errors
+/// Returns the OS error if creating the scaffold dir, a mountpoint, the bind, or the
+/// read-only remount fails.
+fn materialize_dir_masks(
+    mask_dir_paths: &[PathBuf],
+    new_root: &Path,
+    under: &impl Fn(&Path) -> PathBuf,
+) -> io::Result<()> {
+    use kennel_lib_syscall::mount;
+    if mask_dir_paths.is_empty() {
+        return Ok(());
+    }
+    let mask_src = new_root.join(".kennel-mask-d");
+    std::fs::create_dir_all(&mask_src)?;
+    for path in mask_dir_paths {
+        let dest = under(path);
+        let Some(parent) = dest.parent() else {
+            continue;
+        };
+        if !parent.exists() {
+            continue;
+        }
+        // Create the mountpoint dir if the host has no store there yet — masking the path
+        // also denies the workload *creating* a host `.trust-manifest.d`.
+        if dest.symlink_metadata().is_err() {
+            std::fs::create_dir_all(&dest)?;
+        }
+        mount::bind(&mask_src, &dest, false).map_err(|e| {
+            io::Error::new(e.kind(), format!("store mask bind {}: {e}", dest.display()))
+        })?;
+        mount::remount_readonly(&dest).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("store mask remount_ro {}: {e}", dest.display()),
+            )
         })?;
     }
     Ok(())
@@ -662,6 +721,7 @@ mod tests {
     use kennel_lib_syscall::seccomp::Action;
     use std::path::Path;
 
+    #[allow(clippy::too_many_lines)] // one cohesive SettledPolicy test fixture literal
     fn policy_with_placeholders() -> SettledPolicy {
         SettledPolicy {
             settled_schema_version: 1,
@@ -710,6 +770,7 @@ mod tests {
                     home_shadow: true,
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
+                    exclusive: Vec::new(),
                     home_persist: Vec::new(),
                     home_readonly: false,
                     tmp: TmpPolicy {

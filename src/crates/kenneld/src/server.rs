@@ -87,6 +87,9 @@ pub struct Loaded {
     /// (`[tty].filter_terminal_escapes`, §7.9.5). The `PtyBroker` reads this to pick the
     /// `kennel-lib-term` filter policy.
     pub tty_filter: bool,
+    /// The live trigger-tripwire disposition (`[trust].on_change`, §2.5): what `kenneld` does
+    /// when a watched trigger is mutated during the run.
+    pub on_change: kennel_lib_policy::OnChangeAction,
     /// The workload the policy embeds (§7.4): `argv`/`cwd`/`pinned`/`sha256`. Empty ⇒ the
     /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
     /// request's argv (the request wins unless `pinned`); see `effective_workload`.
@@ -641,6 +644,10 @@ pub fn dispatch_request<P, L>(
             }
             Err(e) => Response::Error(e),
         },
+        // A `PromptReply` is only meaningful mid-run, read by the `PromptPort` on the
+        // already-running connection (§9.7) — never a fresh request to the dispatcher. An
+        // unsolicited one is a protocol error.
+        Request::PromptReply { .. } => Response::Error("unexpected PromptReply".to_owned()),
     };
     let _ = control::send_response(conn, &response);
 }
@@ -904,6 +911,17 @@ pub fn run_kennel<P, L>(
     let audit_runtime = crate::audit::load_audit_defaults().overlay(&loaded.audit);
     // The PTY escape-filter decision (§7.9.5), captured before `loaded` is consumed.
     let loaded_tty_filter = loaded.tty_filter;
+    // The live trigger-tripwire disposition (§2.5), captured before `loaded` is consumed.
+    let on_change = loaded.on_change;
+    // The host sources of the exclusive binds (§2.7), captured before the plan moves into the
+    // spec: released (unmounted) at teardown so the operator's path is not left shadowed.
+    let exclusive_sources: Vec<PathBuf> = loaded.plan.view.as_ref().map_or_else(Vec::new, |v| {
+        v.binds
+            .iter()
+            .filter(|b| b.exclusive)
+            .map(|b| b.source.clone())
+            .collect()
+    });
     // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
     // egress proxy's writer so their events correlate. The per-kennel state dir is
     // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
@@ -1002,11 +1020,20 @@ pub fn run_kennel<P, L>(
         let writer = audit.clone().unwrap_or_else(|| {
             Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone()))
         });
+        // The operator-prompt channel for the TTL `renew` action (§9.7): a clone of this
+        // control connection. Installed only for an interactive run — a non-interactive caller
+        // has no terminal to surface the prompt on, so `renew` there falls back to a warn.
+        let prompt = if req.interactive {
+            crate::prompt::from_conn(&*conn).ok()
+        } else {
+            None
+        };
         spec.binder = Some(crate::BinderPrep {
             policy: loaded.binder,
             unix: facade_unix,
             writer,
             init_bin: shared.identity.init_bin.clone(),
+            prompt,
         });
     }
 
@@ -1102,12 +1129,45 @@ pub fn run_kennel<P, L>(
     };
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
+    // Start the live trigger tripwire (§2.5, T2.8): watch the CLI-resolved trigger paths under
+    // the writable binds and apply `[trust].on_change` on a mutation. Best-effort — `None` when
+    // there is nothing to watch (no triggers / `[trust].manifest = false` ⇒ empty `watch_paths`)
+    // or inotify is unavailable; the teardown `kennel review` is the authoritative backstop.
+    let tripwire = {
+        let writer = audit.clone().unwrap_or_else(|| {
+            Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone()))
+        });
+        crate::tripwire::Tripwire::start(
+            &req.watch_paths,
+            on_change,
+            cgroup::kennel_cgroup(&shared.identity.cgroup_base, ctx),
+            writer,
+        )
+    };
+
     // Block until the kennel exits, then tear down. TTL is enforced inside the kennel (§9.7):
     // `kennel-bin-init`'s timer makes the blocking `NOTIFY_TTL_EXPIRED` call, which the node-0
     // handler services (freeze + decide; the `ttl-warn`/`ttl-terminate` audit events come from
     // there). So this is a plain wait — on `exit` the handler kills the frozen cgroup, and this
     // wait returns the resulting status. The audited privileged records the teardown too.
     let status = kennel.stop(&audited);
+    // The workload exited: stop the tripwire watcher thread (best-effort join).
+    if let Some(tripwire) = tripwire {
+        tripwire.stop();
+    }
+    // Release each exclusive over-mount (§2.7) so the operator's path is no longer shadowed —
+    // the teardown counterpart to the factory's mount. Best-effort + logged: a failure leaves a
+    // leaked lock that `kennel release` / a daemon-restart sweep clears.
+    for src in &exclusive_sources {
+        if let Err(e) = shared.privileged.release_exclusive(src) {
+            eprintln!(
+                "kenneld: warning: could not release exclusive over-mount {}: {e} \
+                 (run `kennel release {}` to clear it)",
+                src.display(),
+                req.kennel
+            );
+        }
+    }
     // The workload exited: stop the PTY pump and drop any attached client (its CLI
     // then sees EOF and exits). The broker is also dropped from the registry below.
     if let Some(broker) = &broker {
@@ -1431,6 +1491,7 @@ mod tests {
             term: String::new(),
             interactive: false,
             force,
+            watch_paths: Vec::new(),
         }
     }
 
@@ -1648,6 +1709,7 @@ mod tests {
                 },
                 workload: kennel_lib_policy::WorkloadRuntime::default(),
                 tty_filter: true,
+                on_change: kennel_lib_policy::OnChangeAction::Warn,
             })
         }
     }

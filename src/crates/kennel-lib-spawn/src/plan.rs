@@ -347,6 +347,11 @@ pub struct BindMount {
     pub target: PathBuf,
     /// Writable when true; read-only (bind, then RO remount) otherwise.
     pub writable: bool,
+    /// **Exclusive** (`[fs].exclusive`, §2.7, T2.8): the kennel keeps the real inode through
+    /// this bind, but the factory *also* over-mounts an opaque sentinel on `source` in the
+    /// operator's host namespace, so the operator and the workload cannot use the path
+    /// concurrently. Released at teardown (`exclusive-unmount`). Only meaningful with `writable`.
+    pub exclusive: bool,
 }
 
 /// The constructed-`$HOME` view (§7.4.5).
@@ -387,6 +392,12 @@ pub struct ShimView {
     /// use — the agent can neither read the integrity pins nor forge them. Empty when
     /// `[trust].manifest = false` or there are no writable binds.
     pub mask_paths: Vec<PathBuf>,
+    /// In-view absolute paths to mask with an empty over-mounted **directory**: the trust
+    /// manifest's content-addressed blob store (`<writable-bind>/.trust-manifest.d`, §2.3 /
+    /// T2.8). Masked alongside the manifest so the workload can neither read the pinned blobs
+    /// (a `revert` baseline / diff source) nor write into — or create — the host store. Empty
+    /// when `[trust].manifest = false` or there are no writable binds.
+    pub mask_dir_paths: Vec<PathBuf>,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -789,6 +800,11 @@ impl Plan {
                 fs_grants.push((source, writable));
             }
         }
+        // The exclusive sources (§2.7), transformed identically to the bind sources so they
+        // match: `exclusive` is a subset of `write`, so `glob_root` of each yields the same
+        // source path the writable bind carries.
+        let exclusive_sources: std::collections::BTreeSet<PathBuf> =
+            ep.fs.exclusive.iter().map(|p| glob_root(p)).collect();
         // Shortest source path first (parent before child). Stable: equal-length paths keep their
         // first-seen order, so the result is deterministic.
         fs_grants.sort_by_key(|(s, _)| s.as_os_str().len());
@@ -803,10 +819,12 @@ impl Plan {
                 },
             ));
             if !is_special_mount(&source) {
+                let exclusive = writable && exclusive_sources.contains(&source);
                 binds.push(BindMount {
                     source,
                     target,
                     writable,
+                    exclusive,
                 });
             }
         }
@@ -925,14 +943,20 @@ impl Plan {
         // nor forge them, while the host IDE reads the untouched real inode. Gated by
         // `[trust].manifest` (default on); only writable binds carry a manifest. The mask
         // target keys on the bind *target* (the in-kennel path).
-        let mask_paths: Vec<PathBuf> = if ep.trust.manifest {
-            binds
-                .iter()
-                .filter(|b| b.writable)
-                .map(|b| b.target.join(".trust-manifest.json"))
-                .collect()
+        let (mask_paths, mask_dir_paths): (Vec<PathBuf>, Vec<PathBuf>) = if ep.trust.manifest {
+            let writable = || binds.iter().filter(|b| b.writable);
+            (
+                writable()
+                    .map(|b| b.target.join(".trust-manifest.json"))
+                    .collect(),
+                // The blob store beside the manifest (kennel-lib-manifest STORE_DIRNAME);
+                // hardcoded here like the manifest filename to keep it off the spawn crate's deps.
+                writable()
+                    .map(|b| b.target.join(".trust-manifest.d"))
+                    .collect(),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         let view = Some(ShimView {
@@ -944,6 +968,7 @@ impl Plan {
             proc_hidepid: ep.proc.hidepid,
             binder: true,
             mask_paths,
+            mask_dir_paths,
         });
 
         // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the

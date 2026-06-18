@@ -152,6 +152,12 @@ pub struct Lifecycle {
     pub cgroup: std::path::PathBuf,
     /// What to do when the TTL expires (`[lifecycle].on-expiry`), decided kenneld-side.
     pub ttl_action: kennel_lib_policy::TtlAction,
+    /// The kennel's name, for the operator-facing TTL `renew` prompt text.
+    pub name: String,
+    /// The operator-prompt channel (§9.7): a clone of the control connection over which the
+    /// `renew` action asks the attached operator whether to extend the lifetime. `None` when
+    /// no operator can be prompted (a non-interactive run) — `renew` then falls back to a warn.
+    pub prompt: Option<crate::prompt::PromptPort>,
 }
 
 /// A running per-kennel binder context manager: the looper pool plus its stop flag.
@@ -298,6 +304,75 @@ fn handle(
     Reply::Data(reply)
 }
 
+/// Act on a fired TTL (§9.7). `kennel-bin-init` is blocked in the `NOTIFY_TTL_EXPIRED` call,
+/// so freezing the cgroup atomically suspends the whole kennel (no act-past-deadline race);
+/// kenneld's own threads are not in that cgroup, so this stays live to prompt the operator.
+///
+/// `exit` kills the frozen cgroup; `warn` thaws and resumes once (the one-shot alarm is not
+/// re-armed); `renew` asks the attached operator whether to extend — this thread blocks for
+/// the answer while the kennel stays frozen — and re-arms (`RENEW`) on yes, terminates on an
+/// explicit no, or falls back to a warn when no operator could be asked (never destroying a
+/// kennel on a missed prompt). Returns the audit name, outcome, and reply byte.
+fn ttl_expired(lifecycle: &Lifecycle) -> (&'static str, Outcome, Reply) {
+    let _ = crate::cgroup::freeze_cgroup(&lifecycle.cgroup);
+    match lifecycle.ttl_action {
+        kennel_lib_policy::TtlAction::Exit => {
+            // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-bin-init is
+            // killed, so it never reads the reply; the reply byte is moot.
+            let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
+            (
+                "binder.ttl-terminate",
+                Outcome::Allow,
+                Reply::Data(one(ttl::TERMINATE)),
+            )
+        }
+        kennel_lib_policy::TtlAction::Warn => {
+            let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
+            (
+                "binder.ttl-warn",
+                Outcome::Info,
+                Reply::Data(one(ttl::RESUME)),
+            )
+        }
+        kennel_lib_policy::TtlAction::Renew => {
+            let question = format!(
+                "kennel '{}' reached its TTL — renew for another period? [y/N]",
+                lifecycle.name
+            );
+            match lifecycle.prompt.as_ref().and_then(|p| p.ask(&question)) {
+                Some(true) => {
+                    // Approved: thaw and tell kennel-bin-init to re-arm for another period.
+                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
+                    (
+                        "binder.ttl-renew",
+                        Outcome::Info,
+                        Reply::Data(one(ttl::RENEW)),
+                    )
+                }
+                Some(false) => {
+                    // Declined: the deadline stands — terminate like `exit`.
+                    let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
+                    (
+                        "binder.ttl-decline",
+                        Outcome::Allow,
+                        Reply::Data(one(ttl::TERMINATE)),
+                    )
+                }
+                None => {
+                    // No operator could be asked (non-interactive, detached, timed out): fall
+                    // back to a warn (resume, no re-arm).
+                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
+                    (
+                        "binder.ttl-warn-no-operator",
+                        Outcome::Info,
+                        Reply::Data(one(ttl::RESUME)),
+                    )
+                }
+            }
+        }
+    }
+}
+
 /// Serve a node-0 **lifecycle/config verb**, gated on the caller's kernel-stamped
 /// identity: only `kennel-bin-init` (the host pid the privhelper reported, running as
 /// uid 0) may pull the plan or post notifications (`07-2` §7.2.4). A caller that is
@@ -359,37 +434,7 @@ fn lifecycle_handle(
             Outcome::Info,
             Reply::Data(one(status::OK)),
         ),
-        lifecycle::NOTIFY_TTL_EXPIRED => {
-            // The kennel's TTL fired (§9.7). kennel-bin-init is blocked in this very call, so
-            // freezing the cgroup atomically suspends the whole kennel (no act-past-deadline
-            // race) without deadlocking — the BC_TRANSACTION already reached us. Then decide:
-            let _ = crate::cgroup::freeze_cgroup(&lifecycle.cgroup);
-            match lifecycle.ttl_action {
-                kennel_lib_policy::TtlAction::Exit => {
-                    // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-bin-init is
-                    // killed, so it never reads the reply; the reply byte is moot.
-                    let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
-                    (
-                        "binder.ttl-terminate",
-                        Outcome::Allow,
-                        Reply::Data(one(ttl::TERMINATE)),
-                    )
-                }
-                action @ (kennel_lib_policy::TtlAction::Warn
-                | kennel_lib_policy::TtlAction::Renew) => {
-                    // Thaw, then reply RESUME — the *same* blocking call returns and the kennel
-                    // picks up where it left off (a momentary atomic pause + an audit event).
-                    // `renew` behaves as a louder warn until the interactive prompt is wired.
-                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
-                    let name = if matches!(action, kennel_lib_policy::TtlAction::Renew) {
-                        "binder.ttl-renew"
-                    } else {
-                        "binder.ttl-warn"
-                    };
-                    (name, Outcome::Info, Reply::Data(one(ttl::RESUME)))
-                }
-            }
-        }
+        lifecycle::NOTIFY_TTL_EXPIRED => ttl_expired(lifecycle),
         _ => (
             "binder.bad-request",
             Outcome::Error,

@@ -59,6 +59,7 @@
 
 pub mod boot;
 pub mod fd;
+pub mod inotify;
 #[cfg(feature = "audit-journald")]
 pub mod journal;
 pub mod listenfd;

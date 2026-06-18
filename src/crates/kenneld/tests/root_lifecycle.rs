@@ -72,6 +72,8 @@ fn run_manager() {
         supervision: SUPERVISION.to_vec(),
         cgroup: std::path::PathBuf::new(),
         ttl_action: kennel_lib_policy::TtlAction::Exit,
+        name: "e2e".to_owned(),
+        prompt: None,
     };
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");

@@ -321,6 +321,13 @@ pub struct FsPolicy {
     pub read: Vec<String>,
     /// Paths granted write access.
     pub write: Vec<String>,
+    /// Writable paths bound **exclusively** (§2.7, T2.8): while the kennel runs, `kenneld`
+    /// over-mounts an opaque sentinel on the host path (a transient privhelper op) so the
+    /// operator and the workload cannot use it concurrently. Each is also in `write`. Empty ⇒
+    /// none. Compile and the privhelper both verify the operator owns / can write each host
+    /// path before the privileged blind mount.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusive: Vec<String>,
     /// Home-relative paths that persist across runs (§7.9.2a). The synthesised
     /// dotfiles are reconstructed read-only each spawn except for the paths named
     /// here, which the dotfile seeder skips. Empty ⇒ everything is reconstructed.
@@ -522,18 +529,42 @@ impl Default for TtyPolicy {
     }
 }
 
-/// `[trust]` — the masked workspace manifest (§7.4, T2.8).
+/// The live `on_change` disposition (§2.5, T2.8): what `kenneld` does the moment a watched
+/// execution trigger is mutated *during* the run.
+///
+/// Distinct from the host-side teardown disposition. Unprivileged: it acts on the workload
+/// via the cgroup `kenneld` already owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnChangeAction {
+    /// Record an `fs.mutation` audit event and let the workload run on (the live watch is
+    /// best-effort; the authoritative verdict is the teardown review).
+    #[default]
+    Warn,
+    /// Suspend the workload — freeze the cgroup — so the operator can inspect and decide.
+    Freeze,
+    /// Terminate the workload (kill the cgroup).
+    Kill,
+}
+
+/// `[trust]` — the masked workspace manifest + the live tripwire disposition (§7.4, §2.5, T2.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustPolicy {
     /// Maintain a masked `.trust-manifest.json` at each writable root. Default `true`.
     pub manifest: bool,
+    /// What `kenneld` does when a watched trigger is mutated during the run. Default `warn`.
+    #[serde(default)]
+    pub on_change: OnChangeAction,
 }
 
 impl Default for TrustPolicy {
-    /// The secure default: the manifest is maintained.
+    /// The secure default: the manifest is maintained; a live mutation is warned (audited).
     fn default() -> Self {
-        Self { manifest: true }
+        Self {
+            manifest: true,
+            on_change: OnChangeAction::Warn,
+        }
     }
 }
 

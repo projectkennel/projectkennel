@@ -6,10 +6,10 @@
 //! target. The boundaries (§10.1) covered here are the egress front-door — both
 //! the workload-facing SOCKS5/HTTP-proxy parse (the facade's protocol classifier
 //! and HTTP request head) and the `CONNECT_INET` request wire the facade frames on
-//! to kenneld — the binder driver-return command stream, the two IPC wire formats
-//! (the kenneld control protocol and the privhelper packed-struct request), and the
-//! signed-policy reader. Each must, for *any* input, return `Ok`/`Err`/`None` —
-//! never panic, never hang, never read out of bounds.
+//! to kenneld — the binder driver-return command stream, the IPC wire formats (the
+//! kenneld control protocol, the privhelper packed-struct request, and the enforcement-plan
+//! wire a privileged process decodes), and the signed-policy reader. Each must, for *any*
+//! input, return `Ok`/`Err`/`None` — never panic, never hang, never read out of bounds.
 //!
 //! # Approach (Path C)
 //!
@@ -46,6 +46,14 @@ pub fn fuzz_parsers(data: &[u8]) {
     let _ = kenneld::control::Request::decode(data);
     let _ = kenneld::control::Response::decode(data);
     let _ = kennel_privhelper::wire::Request::decode(data);
+
+    // The enforcement-plan wire (07-2): kenneld builds these bytes, but a *privileged* process
+    // decodes them — the privhelper factory the construction-half, root `kennel-bin-init` the
+    // supervision-half. A compromised kenneld supplying a malformed plan must hit a clean
+    // `PlanWireError`, never a panic or over-read in the root decoder.
+    let _ = kennel_lib_spawn::wire::decode_plan(data);
+    let _ = kennel_lib_spawn::wire::decode_construction(data);
+    let _ = kennel_lib_spawn::wire::decode_supervision(data);
 
     // The binder driver-return command stream: the read buffer the kernel fills
     // carries sender-controlled transaction payloads (07-1/02-4). The decoder must

@@ -48,8 +48,8 @@ pub use keys::{KeySet, SigningKey};
 pub use settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
     BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
-    IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
-    ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
+    IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, OnChangeAction,
+    ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
     SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy,
     TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
     RESERVED_PREFIX, ULIMIT_RESOURCES,
@@ -198,6 +198,7 @@ mod tests {
                     home_shadow: true,
                     read: vec!["/usr".to_owned()],
                     write: vec!["/run/kennel/ai-coding/home".to_owned()],
+                    exclusive: Vec::new(),
                     home_persist: Vec::new(),
                     home_readonly: false,
                     tmp: TmpPolicy {

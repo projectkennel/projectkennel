@@ -174,10 +174,18 @@ pub mod lifecycle {
 
 /// The reply byte to a [`lifecycle::NOTIFY_TTL_EXPIRED`] call.
 pub mod ttl {
-    /// Resume: kenneld thawed the cgroup; the workload continues (`warn`/`renew`).
+    /// Resume: kenneld thawed the cgroup; the workload continues (`warn`, or `renew`
+    /// when no operator was available to prompt). The one-shot alarm is *not* re-armed.
     pub const RESUME: u8 = 0;
-    /// Terminate: the kennel should stop (`exit`); kenneld has frozen and will kill it.
+    /// Terminate: the kennel should stop (`exit`, or a `renew` the operator declined);
+    /// kenneld has frozen and will kill the cgroup.
     pub const TERMINATE: u8 = 1;
+    /// Renew: kenneld thawed the cgroup and the operator approved another lifetime.
+    ///
+    /// `kennel-bin-init` re-arms its one-shot TTL alarm for a further period (§9.7). The
+    /// re-arm is the one cooperative step — benign (it only sets a new future deadline, never
+    /// evades one), so a compromised init that ignores it merely forgoes its own extension.
+    pub const RENEW: u8 = 2;
 }
 
 /// Reply status byte (the first byte of a data reply).

@@ -66,8 +66,13 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "review",
-        summary: "review + re-pin a workspace's trust manifest after legitimate edits",
-        usage: "review <policy> [--yes]",
+        summary: "review a workspace's trust manifest: re-pin legitimate edits, or --revert tampering",
+        usage: "review <policy> [--yes] [--revert]",
+    },
+    CommandSpec {
+        name: "release",
+        summary: "release a leaked exclusive over-mount (fs.exclusive crash recovery)",
+        usage: "release <policy>",
     },
     CommandSpec {
         name: "stop",
@@ -210,6 +215,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "run" => run(rest),
         "attach" => attach(rest),
         "review" => review(rest),
+        "release" => release(rest),
         "stop" => stop(rest),
         "list" => list(),
         "policy" => dispatch_policy(rest),
@@ -383,6 +389,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let settled_bytes = std::fs::read(&effective_policy)
         .map_err(|e| format!("reading {} for pre-flight: {e}", effective_policy.display()))?;
     ensure_workspace_manifests(&settled_bytes);
+    // An exclusive bind blind-mounts the host side with the privhelper's privilege (§2.7); refuse
+    // early if the operator does not own a host path it would shadow (the privhelper refuses too).
+    verify_exclusive_ownership(&settled_bytes)?;
+    // Resolve the host paths kenneld's live tripwire should watch (§2.5) — computed here,
+    // CLI-side, because the catalogue lives in this crate; the daemon just watches the list.
+    let watch_paths = workspace_watch_paths(&settled_bytes);
 
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let request = Request::Start(StartRequest {
@@ -398,6 +410,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         interactive: io::stdin().is_terminal(),
         // Force an override of a pinned policy [workload] (only meaningful with a `--` cmd).
         force,
+        watch_paths,
     });
 
     let mut conn = connect()?;
@@ -452,6 +465,18 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
         eprintln!("kennel: skipping workspace manifests (HOME is not set)");
         return;
     };
+    // No compiled-in default (§2.6): the trigger set lives entirely in the config cascade. An
+    // empty catalogue with `[trust].manifest = on` is almost always a missing vendor file, not a
+    // deliberate choice — warn loudly rather than silently watch nothing (T2.8).
+    let catalogue = kennel_lib_manifest::Catalogue::load();
+    if catalogue.is_empty() {
+        eprintln!(
+            "kennel: warning: the trust-trigger catalogue is empty — no `triggers.catalog` found \
+             under /usr/lib/kennel, /etc/kennel, or ~/.config/kennel. Execution triggers will not \
+             be pinned or watched (T2.8). Install the package default or set `[trust].manifest = \
+             false` to opt out explicitly."
+        );
+    }
     let generator = format!("kennel {}", env!("CARGO_PKG_VERSION"));
     for entry in &policy.effective_policy.fs.write {
         let Some(root) = writable_root(entry, &home) else {
@@ -464,7 +489,7 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
         if path.exists() {
             continue; // leave it — refresh is `kennel review`, not `run`
         }
-        let (manifest, errors) = kennel_lib_manifest::generate(&root, &generator);
+        let (manifest, errors) = kennel_lib_manifest::generate(&root, &generator, &catalogue);
         for e in &errors {
             eprintln!(
                 "kennel: manifest trigger skipped under {}: {e}",
@@ -484,6 +509,44 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
     }
 }
 
+/// Resolve the host paths kenneld's live tripwire should watch (§2.5): each writable
+/// workspace root's existing catalogue trigger files plus its existing trigger directories.
+///
+/// Host paths — the writable bind maps them to the same inodes the workload writes, so an
+/// inotify on the host catches the workload's writes; watching the trigger directories
+/// catches a freshly planted hook. Empty when `[trust].manifest = false`.
+fn workspace_watch_paths(settled_bytes: &[u8]) -> Vec<PathBuf> {
+    let Ok(policy) = kennel_lib_policy::parse_settled_unverified(settled_bytes) else {
+        return Vec::new();
+    };
+    if !policy.effective_policy.trust.manifest {
+        return Vec::new();
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let catalogue = kennel_lib_manifest::Catalogue::load();
+    let mut paths = Vec::new();
+    for entry in &policy.effective_policy.fs.write {
+        let Some(root) = writable_root(entry, &home) else {
+            continue;
+        };
+        if !root.is_dir() {
+            continue;
+        }
+        for rel in kennel_lib_manifest::enumerate_triggers(&root, &catalogue) {
+            paths.push(root.join(rel));
+        }
+        for dir in &catalogue.dirs {
+            let abs = root.join(dir);
+            if abs.is_dir() {
+                paths.push(abs);
+            }
+        }
+    }
+    paths
+}
+
 /// `kennel review <policy> [--yes]` — the operator's sign-off on a workspace's trust
 /// manifest after legitimate edits (T2.8). The confined workload cannot update the manifest
 /// (it is masked), so changed/added execution triggers stay flagged until a human re-pins
@@ -491,25 +554,32 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
 ///
 /// Resolves `<policy>` to its settled artefact (like `run`, preferring the compiled
 /// `<name>.settled.toml`), reads each writable root's `.trust-manifest.json`, and shows a
-/// diff of modified / removed / new triggers. With `--yes` (or on a `y` prompt) it
-/// re-pins: adopts the on-disk hashes and overwrites the manifest, so the host IDE unlocks.
+/// unified diff of modified / removed / new triggers. The default sign-off **re-pins**
+/// (adopts the on-disk state, so the host IDE unlocks); `--revert` instead **restores** each
+/// trigger to its pinned baseline and removes planted ones (the §2.5 teardown disposition).
+/// `--yes` skips the per-root confirmation.
 fn review(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_arg: Option<&str> = None;
     let mut assume_yes = false;
+    let mut do_revert = false;
     for a in args {
         match a.as_str() {
             "--yes" | "-y" => assume_yes = true,
+            // Restore each divergent trigger to its pinned baseline instead of re-pinning
+            // (the `revert` teardown disposition, §2.5): a tampered/deleted trigger is rebuilt
+            // from its blob, a planted (unpinned) one is removed.
+            "--revert" => do_revert = true,
             other if other.starts_with('-') => {
                 return Err(format!("kennel review: unknown flag `{other}`"));
             }
             other => {
                 if policy_arg.replace(other).is_some() {
-                    return Err("usage: kennel review <policy> [--yes]".to_owned());
+                    return Err("usage: kennel review <policy> [--yes] [--revert]".to_owned());
                 }
             }
         }
     }
-    let policy_arg = policy_arg.ok_or("usage: kennel review <policy> [--yes]")?;
+    let policy_arg = policy_arg.ok_or("usage: kennel review <policy> [--yes] [--revert]")?;
     let (policy_file, _name) = resolve_policy(policy_arg, true)?;
     let bytes = std::fs::read(&policy_file)
         .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
@@ -536,39 +606,11 @@ fn review(args: &[String]) -> Result<ExitCode, String> {
         let Some(root) = writable_root(entry, &home) else {
             continue;
         };
-        let manifest_path = kennel_lib_manifest::manifest_path(&root);
-        if !manifest_path.is_file() {
-            continue; // no manifest at this root (e.g. not generated yet)
+        let (reviewed, divergences) = review_one_root(&root, &generator, assume_yes, do_revert)?;
+        if reviewed {
+            roots_reviewed = roots_reviewed.saturating_add(1);
         }
-        roots_reviewed = roots_reviewed.saturating_add(1);
-        let raw = std::fs::read(&manifest_path)
-            .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
-        let mut manifest = kennel_lib_manifest::Manifest::from_json(&raw)
-            .map_err(|e| format!("parsing {}: {e}", manifest_path.display()))?;
-        let changes = kennel_lib_manifest::review(&manifest, &root)
-            .map_err(|e| format!("reviewing {}: {e}", root.display()))?;
-        let divergences: Vec<_> = changes.iter().filter(|c| c.is_divergence()).collect();
-        if divergences.is_empty() {
-            println!("{}: no changes", root.display());
-            continue;
-        }
-        total_divergences = total_divergences.saturating_add(divergences.len());
-        println!("{}:", root.display());
-        for change in &divergences {
-            print_trigger_change(change);
-        }
-        let approved = assume_yes || prompt_yes(&format!("re-pin {}?", manifest_path.display()))?;
-        if approved {
-            kennel_lib_manifest::apply_review(&mut manifest, &changes, &generator);
-            let json = manifest
-                .to_json()
-                .map_err(|e| format!("serialising {}: {e}", manifest_path.display()))?;
-            std::fs::write(&manifest_path, json)
-                .map_err(|e| format!("writing {}: {e}", manifest_path.display()))?;
-            println!("  re-pinned {}", manifest_path.display());
-        } else {
-            println!("  left unchanged");
-        }
+        total_divergences = total_divergences.saturating_add(divergences);
     }
 
     if roots_reviewed == 0 {
@@ -579,15 +621,134 @@ fn review(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Review one writable root's manifest: show divergences (with diffs), then revert to
+/// baseline (`--revert`) or re-pin per the flags. Returns `(reviewed, divergences)` —
+/// `reviewed` is false when the root has no manifest yet.
+fn review_one_root(
+    root: &Path,
+    generator: &str,
+    assume_yes: bool,
+    do_revert: bool,
+) -> Result<(bool, usize), String> {
+    let manifest_path = kennel_lib_manifest::manifest_path(root);
+    if !manifest_path.is_file() {
+        return Ok((false, 0)); // no manifest at this root (e.g. not generated yet)
+    }
+    let raw = std::fs::read(&manifest_path)
+        .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
+    let mut manifest = kennel_lib_manifest::Manifest::from_json(&raw)
+        .map_err(|e| format!("parsing {}: {e}", manifest_path.display()))?;
+    let changes =
+        kennel_lib_manifest::review(&manifest, root, &kennel_lib_manifest::Catalogue::load())
+            .map_err(|e| format!("reviewing {}: {e}", root.display()))?;
+    let divergences: Vec<_> = changes.iter().filter(|c| c.is_divergence()).collect();
+    if divergences.is_empty() {
+        println!("{}: no changes", root.display());
+        return Ok((true, 0));
+    }
+    println!("{}:", root.display());
+    for change in &divergences {
+        print_trigger_change(change);
+        show_trigger_diff(root, change);
+    }
+    if do_revert {
+        if assume_yes
+            || prompt_yes(&format!(
+                "revert {} trigger(s) to baseline?",
+                divergences.len()
+            ))?
+        {
+            for change in &divergences {
+                match kennel_lib_manifest::revert(root, change) {
+                    Ok(()) => println!("  reverted {}", change_path_of(change)),
+                    Err(e) => eprintln!("  warning: revert {}: {e}", change_path_of(change)),
+                }
+            }
+        } else {
+            println!("  left unchanged");
+        }
+        return Ok((true, divergences.len()));
+    }
+    if assume_yes || prompt_yes(&format!("re-pin {}?", manifest_path.display()))? {
+        let errs = kennel_lib_manifest::apply_review(&mut manifest, root, &changes, generator);
+        for e in &errs {
+            eprintln!("  warning: {e}");
+        }
+        let json = manifest
+            .to_json()
+            .map_err(|e| format!("serialising {}: {e}", manifest_path.display()))?;
+        std::fs::write(&manifest_path, json)
+            .map_err(|e| format!("writing {}: {e}", manifest_path.display()))?;
+        // GC the blob store down to the freshly re-pinned baseline (§3, steer 6).
+        kennel_lib_manifest::prune_store(root, &manifest);
+        println!("  re-pinned {}", manifest_path.display());
+    } else {
+        println!("  left unchanged");
+    }
+    Ok((true, divergences.len()))
+}
+
 /// Print one `git diff`-style line for a trigger change.
 fn print_trigger_change(change: &kennel_lib_manifest::TriggerChange) {
     use kennel_lib_manifest::TriggerChange;
     match change {
         TriggerChange::Modified { path, .. } => println!("  ~ {path} (modified)"),
-        TriggerChange::Removed { path } => println!("  - {path} (removed)"),
+        TriggerChange::Removed { path, .. } => println!("  - {path} (removed)"),
         TriggerChange::New { path, .. } => println!("  + {path} (new, unpinned)"),
         TriggerChange::Unchanged { .. } => {}
     }
+}
+
+/// The relative path a [`kennel_lib_manifest::TriggerChange`] concerns.
+fn change_path_of(change: &kennel_lib_manifest::TriggerChange) -> &str {
+    use kennel_lib_manifest::TriggerChange;
+    match change {
+        TriggerChange::Unchanged { path }
+        | TriggerChange::Removed { path, .. }
+        | TriggerChange::Modified { path, .. }
+        | TriggerChange::New { path, .. } => path,
+    }
+}
+
+/// Show a unified diff of a `Modified` content trigger — the pinned baseline (from its blob)
+/// against the tampered file on disk — via the system `diff` (as the manifest hashes via the
+/// system `sha256sum`; no in-tree differ). Best-effort: a binary trigger or a missing blob
+/// simply prints nothing extra.
+fn show_trigger_diff(root: &Path, change: &kennel_lib_manifest::TriggerChange) {
+    use kennel_lib_manifest::{TriggerChange, TriggerKind};
+    let TriggerChange::Modified { path, entry, .. } = change else {
+        return;
+    };
+    if entry.kind != TriggerKind::Content {
+        return;
+    }
+    let Ok(pinned) = kennel_lib_manifest::read_blob(root, &entry.sha256) else {
+        return;
+    };
+    // Stage the pinned bytes in a temp file and diff the live file against it.
+    let tmp = std::env::temp_dir().join(format!(
+        "kennel-pin-{}-{}",
+        std::process::id(),
+        entry.sha256.replace(':', "_")
+    ));
+    if std::fs::write(&tmp, &pinned).is_err() {
+        return;
+    }
+    if let Ok(out) = std::process::Command::new("diff")
+        .arg("-u")
+        .arg("--label")
+        .arg(format!("{path} (pinned)"))
+        .arg("--label")
+        .arg(format!("{path} (on disk)"))
+        .arg(&tmp)
+        .arg(root.join(path))
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            println!("    {line}");
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
 }
 
 /// Prompt `question` on stderr and read a `y`/`n` answer from stdin. Non-`y` (incl. EOF) is
@@ -611,6 +772,126 @@ fn prompt_yes(question: &str) -> Result<bool, String> {
 /// `~`/`$HOME` to the operator's real `home`, strip a trailing `/**` or `/*` glob. Returns
 /// `None` for an entry that does not name a home-relative or absolute path (nothing the
 /// host can place a manifest under).
+/// `kennel release <policy>` — release leaked exclusive over-mounts (§2.7 recovery).
+///
+/// The teardown release is automatic, but a crashed kennel can leave an `fs.exclusive` path
+/// shadowed (the operator locked out of their own directory). This resolves the policy's
+/// exclusive host paths and invokes the privhelper to unmount each — **directly**, not through
+/// `kenneld`, so it works even when the daemon is down. Idempotent: a path that is not (or no
+/// longer) shadowed is skipped.
+fn release(args: &[String]) -> Result<ExitCode, String> {
+    let policy_arg = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .ok_or("usage: kennel release <policy>")?;
+    let (policy_file, name) = resolve_policy(policy_arg, true)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    if is_source_policy(&bytes) {
+        return Err(format!(
+            "`{}` is a source policy — compile it first, then release the settled artefact",
+            policy_file.display()
+        ));
+    }
+    let policy = kennel_lib_policy::parse_settled_unverified(&bytes)
+        .map_err(|e| format!("reading settled policy {}: {e}", policy_file.display()))?;
+    if policy.effective_policy.fs.exclusive.is_empty() {
+        eprintln!("kennel: `{name}` declares no exclusive binds — nothing to release");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set (needed to resolve fs.exclusive host paths)")?;
+    let privhelper = kennel_lib_config::Deployment::load()
+        .map_err(|e| format!("loading deployment config: {e}"))?
+        .privhelper();
+    let mut released = 0usize;
+    let mut failed = 0usize;
+    for ex in &policy.effective_policy.fs.exclusive {
+        let Some(host) = writable_root(ex, &home) else {
+            continue;
+        };
+        let status = std::process::Command::new(&privhelper)
+            .arg("exclusive-unmount")
+            .arg(&host)
+            .status()
+            .map_err(|e| format!("spawning {}: {e}", privhelper.display()))?;
+        match status.code() {
+            Some(0) => {
+                println!("released {}", host.display());
+                released = released.saturating_add(1);
+            }
+            // 1 = refused: not (or no longer) a kennel exclusive over-mount — nothing to do.
+            Some(1) => {}
+            other => {
+                eprintln!(
+                    "kennel: could not release {} (privhelper exit {other:?})",
+                    host.display()
+                );
+                failed = failed.saturating_add(1);
+            }
+        }
+    }
+    if failed > 0 {
+        return Ok(ExitCode::FAILURE);
+    }
+    eprintln!("kennel: released {released} exclusive over-mount(s) for `{name}`");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Verify the operator owns the host path behind each `fs.exclusive` grant (§2.7).
+///
+/// An exclusive bind blind-mounts the host side with the privhelper's privilege; doing that
+/// over a path the operator does not **own** would be overreach, so it is refused here (early
+/// feedback at compile/run) and again in the privhelper (the authoritative real-uid check).
+/// Plain `fs.write` on a non-owned path is *fine* — the kernel still gates the workload's
+/// writes by the operator's uid — so only `exclusive` paths are checked, and the test is
+/// ownership, not write-access.
+fn verify_exclusive_ownership(settled_bytes: &[u8]) -> Result<(), String> {
+    let Ok(policy) = kennel_lib_policy::parse_settled_unverified(settled_bytes) else {
+        return Ok(()); // an unparseable artefact is reported by the caller, not here
+    };
+    check_exclusive_ownership(&policy.effective_policy.fs.exclusive)
+}
+
+/// The ownership test behind [`verify_exclusive_ownership`], over the resolved `exclusive` list.
+fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    if exclusive.is_empty() {
+        return Ok(());
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set (needed to resolve fs.exclusive host paths)")?;
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    for ex in exclusive {
+        let Some(host) = writable_root(ex, &home) else {
+            return Err(format!(
+                "fs.exclusive `{ex}`: cannot resolve to a host path"
+            ));
+        };
+        match std::fs::symlink_metadata(&host) {
+            Ok(meta) if meta.uid() == uid => {}
+            Ok(_) => {
+                return Err(format!(
+                    "fs.exclusive `{ex}` ({}) is not owned by you (uid {uid}). An exclusive bind \
+                     blind-mounts the host side with privilege, and the privhelper will not \
+                     over-mount a path you do not own (overreach). Drop `exclusive` for this path \
+                     (`fs.write` alone is fine), or use a path you own.",
+                    host.display()
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "fs.exclusive `{ex}` ({}): {e} — an exclusive path must exist and be owned by you",
+                    host.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn writable_root(entry: &str, home: &Path) -> Option<PathBuf> {
     let trimmed = entry
         .strip_suffix("/**")
@@ -714,14 +995,65 @@ fn attach(args: &[String]) -> Result<ExitCode, String> {
 const DETACH_LEAD: u8 = 0x1c;
 const DETACH_KEY: u8 = b'd';
 
-/// How a proxied terminal session ended: a local detach (`Ctrl-\ d`) versus the remote
-/// end closing (workload exit or a take-over by another client).
+/// How a proxied terminal session ended.
 enum SessionEnd {
-    /// The operator pressed the detach key — the workload keeps running.
+    /// The operator pressed the detach key (`Ctrl-\ d`) — the workload keeps running.
     Detached,
-    /// The broker closed our socket: the workload exited or another client took over.
-    /// The final outcome is read from the control connection.
-    Remote,
+    /// The control-connection reader received the daemon's final word and resolved the
+    /// session to an exit code (or an error).
+    Outcome(Result<ExitCode, String>),
+}
+
+/// Read the control connection for the whole session (§9.7): handle an operator-prompt
+/// [`Response::Prompt`] inline — surface it on the now-quiet terminal (the workload is
+/// frozen while a prompt is outstanding), capture the operator's single-key answer from the
+/// stdin pump, and reply — then deliver the daemon's final `Exited`/`Detached`/`Error` as a
+/// [`SessionEnd::Outcome`]. The sole reader and writer of `conn`, so prompt replies never
+/// race the main thread.
+// Runs as a `'static` thread body, so it must own its channel ends and the flag — the
+// `Receiver` in particular cannot be borrowed across the thread boundary.
+#[allow(clippy::needless_pass_by_value)]
+fn control_reader(
+    mut conn: UnixStream,
+    mut term: std::fs::File,
+    prompt_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    answer_rx: std::sync::mpsc::Receiver<u8>,
+    tx: std::sync::mpsc::Sender<SessionEnd>,
+) {
+    use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+    let outcome = loop {
+        match control::recv_response(&mut conn) {
+            Ok(Response::Prompt { id, prompt }) => {
+                let _ = write!(term, "\r\n{prompt} ");
+                let _ = term.flush();
+                prompt_active.store(true, Ordering::SeqCst);
+                // The stdin pump diverts the next keypress here; a closed channel (pump
+                // gone) reads as a decline.
+                let key = answer_rx.recv().unwrap_or(b'n');
+                let affirmative = key == b'y' || key == b'Y';
+                let answer = if affirmative { "y" } else { "n" };
+                let _ = write!(term, "{answer}\r\n");
+                let _ = term.flush();
+                let _ = control::send_request(
+                    &mut conn,
+                    &Request::PromptReply {
+                        id,
+                        answer: answer.to_owned(),
+                    },
+                );
+            }
+            Ok(Response::Exited { code }) => break Ok(exit_code(code)),
+            Ok(Response::Detached { reason }) => {
+                let _ = write!(term, "\r\ndetached: {reason}\r\n");
+                break Ok(ExitCode::SUCCESS);
+            }
+            Ok(Response::Error(message)) => break Err(message),
+            Ok(other) => break Err(format!("unexpected response: {other:?}")),
+            Err(e) => break Err(format!("daemon: {e}")),
+        }
+    };
+    let _ = tx.send(SessionEnd::Outcome(outcome));
 }
 
 /// Proxy this terminal to the kennel over the broker socket `ours` until detach or the
@@ -730,20 +1062,27 @@ enum SessionEnd {
 /// holds the master, so we relay the size rather than `ioctl` it). On a local detach we
 /// restore the terminal and exit 0; on a remote end we read the daemon's final
 /// `Exited`/`Detached` over `conn`.
-fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitCode, String> {
-    use std::sync::mpsc;
+fn proxy_session(conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitCode, String> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{mpsc, Arc};
     // Tell the broker our initial size, then relay every later SIGWINCH.
     send_resize(name);
     let (tx, rx) = mpsc::channel::<SessionEnd>();
+    // Set by the control reader while an operator prompt (§9.7) is outstanding; the stdin
+    // pump then diverts the next keypress to `answer_tx` as the answer instead of the broker.
+    let prompt_active = Arc::new(AtomicBool::new(false));
+    let (answer_tx, answer_rx) = mpsc::channel::<u8>();
 
-    // stdin → broker, watching for the `Ctrl-\ d` detach sequence.
+    // stdin → broker, watching for the `Ctrl-\ d` detach sequence and renew answers.
     let in_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
     let stdin_dup = io::stdin()
         .as_fd()
         .try_clone_to_owned()
         .map_err(|e| format!("stdin dup: {e}"))?;
     let tx_in = tx.clone();
+    let pa_in = Arc::clone(&prompt_active);
     std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
         let mut r = std::fs::File::from(stdin_dup);
         let mut w = in_sock;
         let mut buf = [0u8; 4096];
@@ -760,7 +1099,11 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
             let mut out: Vec<u8> = Vec::with_capacity(n.saturating_add(1));
             let mut detached = false;
             for &b in buf.get(..n).unwrap_or(&[]) {
-                if armed {
+                if pa_in.swap(false, Ordering::SeqCst) {
+                    // A prompt is outstanding: this keypress is the answer, not workload
+                    // input. Divert it and do not forward it.
+                    let _ = answer_tx.send(b);
+                } else if armed {
                     armed = false;
                     if b == DETACH_KEY {
                         detached = true;
@@ -782,7 +1125,6 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
                 return;
             }
         }
-        let _ = tx_in.send(SessionEnd::Remote);
     });
 
     // broker → stdout. Write to a `File` over the raw stdout fd, NOT `io::stdout()`: the
@@ -798,14 +1140,28 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
     std::thread::spawn(move || {
         let mut w = std::fs::File::from(stdout_dup);
         let _ = std::io::copy(&mut out_sock, &mut w);
-        let _ = tx.send(SessionEnd::Remote);
+    });
+
+    // Control connection reader: handles operator prompts inline and resolves the outcome.
+    let term_dup = io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("stdout dup: {e}"))?;
+    std::thread::spawn(move || {
+        control_reader(
+            conn,
+            std::fs::File::from(term_dup),
+            prompt_active,
+            answer_rx,
+            tx,
+        );
     });
 
     // SIGWINCH → Resize relay.
     let resize_name = name.to_owned();
     std::thread::spawn(move || winch_resize_relay(&resize_name));
 
-    // Whichever pump ends first decides the session outcome.
+    // Whichever of the detach pump or the control reader resolves first ends the session.
     match rx.recv() {
         Ok(SessionEnd::Detached) => {
             // Close our end so the broker drops us; the workload keeps running.
@@ -813,18 +1169,13 @@ fn proxy_session(mut conn: UnixStream, ours: UnixStream, name: &str) -> Result<E
             eprintln!("\r\ndetached from `{name}` (workload still running; `kennel attach {name}` to reconnect)");
             Ok(ExitCode::SUCCESS)
         }
-        Ok(SessionEnd::Remote) | Err(_) => {
+        Ok(SessionEnd::Outcome(res)) => {
             drop(ours);
-            // The broker closed us: read the daemon's final word over the control conn.
-            match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-                Response::Exited { code } => Ok(exit_code(code)),
-                Response::Detached { reason } => {
-                    eprintln!("\r\ndetached from `{name}`: {reason}");
-                    Ok(ExitCode::SUCCESS)
-                }
-                Response::Error(message) => Err(message),
-                other => Err(format!("unexpected response: {other:?}")),
-            }
+            res
+        }
+        Err(_) => {
+            drop(ours);
+            Err("session ended without an outcome".to_owned())
         }
     }
 }
@@ -1309,6 +1660,10 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         }
     };
     print_warnings(&compiled.warnings);
+    // Refuse an exclusive bind on a host path the operator does not own (§2.7) — the privhelper
+    // would otherwise be asked to blind-mount over a path you have no ownership of (overreach).
+    check_exclusive_ownership(&compiled.policy.effective_policy.fs.exclusive)
+        .map_err(|e| format!("kennel: {e}"))?;
     // Resolve the shared-library closure of the allowlist into the settled artefact
     // (reads the binaries from disk; deny-by-default execution, 07-3) before signing.
     print_warnings(&kennel_lib_policy::resolve_settled_loaders(

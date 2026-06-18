@@ -205,6 +205,12 @@ pub struct FsSection {
     /// Paths granted write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write: Option<Vec<String>>,
+    /// Writable paths bound **exclusively** (§2.7, T2.8): while the kennel runs, `kenneld`
+    /// over-mounts an opaque sentinel on the host path (a transient privhelper op) so the
+    /// operator and the workload cannot use it concurrently — severing the live confused-deputy
+    /// channel. Opt-in, per path; each must also appear in `write`. Default: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<Vec<String>>,
     /// Categorical denies (belt-and-braces over the constructed view).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<Vec<String>>,
@@ -846,6 +852,10 @@ pub struct TrustSection {
     /// irrelevant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<bool>,
+    /// What `kenneld` does when a watched trigger is mutated during the run (§2.5):
+    /// `warn` (audit, default), `freeze` (suspend the workload), or `kill` (terminate it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_change: Option<kennel_lib_policy::OnChangeAction>,
 }
 
 /// Parse source-policy TOML bytes into a [`SourcePolicy`].

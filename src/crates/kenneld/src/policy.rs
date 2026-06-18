@@ -184,6 +184,7 @@ impl PolicyLoader for TrustStoreLoader {
         let home_persist = substituted.effective_policy.fs.home_persist.clone();
         let lifecycle = substituted.effective_policy.lifecycle.clone();
         let tty_filter = substituted.effective_policy.tty.filter_terminal_escapes;
+        let on_change = substituted.effective_policy.trust.on_change;
         let net = substituted.effective_policy.net;
         let ssh = substituted.ssh;
         let unix = substituted.unix;
@@ -206,6 +207,7 @@ impl PolicyLoader for TrustStoreLoader {
             home_persist,
             lifecycle,
             tty_filter,
+            on_change,
             workload: substituted.workload,
         })
     }

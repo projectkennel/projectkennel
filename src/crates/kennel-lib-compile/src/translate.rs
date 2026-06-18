@@ -123,6 +123,11 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
             .as_ref()
             .and_then(|t| t.manifest)
             .unwrap_or(true),
+        on_change: effective
+            .trust
+            .as_ref()
+            .and_then(|t| t.on_change)
+            .unwrap_or_default(),
     };
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
@@ -863,11 +868,24 @@ fn translate_fs(
     let dev = DevPolicy { allow: dev_allow };
 
     let home_persist = subst_each(&home.persist, deferred);
+    // Exclusive (§2.7) is a subset of write — a path bound exclusively must be a writable bind.
+    // An exclusive path not in `write` is a policy error (the over-mount would shadow a host path
+    // the kennel never binds). Ownership / write-access of the host path is verified separately
+    // (host-side, at validate and again in the privhelper) — translate is pure.
+    let exclusive = subst_each(fs.exclusive.as_deref().unwrap_or_default(), deferred);
+    for ex in &exclusive {
+        if !write.contains(ex) {
+            return Err(translation(format!(
+                "fs.exclusive path `{ex}` is not in fs.write — a path can only be bound exclusively if it is writable"
+            )));
+        }
+    }
 
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
         read,
         write,
+        exclusive,
         home_persist,
         home_readonly: home.readonly.unwrap_or(false),
         tmp,
@@ -1495,6 +1513,20 @@ mod tests {
             .expect("parse");
         let fs = translate_fs(&src, &mut BTreeSet::new()).expect("translate_fs");
         assert_eq!(fs.home_persist, vec![".bashrc".to_owned()]);
+    }
+
+    #[test]
+    fn fs_exclusive_must_be_a_subset_of_write() {
+        // Exclusive on a writable path carries through.
+        let ok = parse(b"name = \"k\"\n[fs.home]\nshadow = true\n[fs]\nwrite = [\"~/proj\"]\nexclusive = [\"~/proj\"]\n")
+            .expect("parse");
+        let fs = translate_fs(&ok, &mut BTreeSet::new()).expect("translate_fs");
+        assert_eq!(fs.exclusive, vec!["~/proj".to_owned()]);
+        // Exclusive on a path that is not writable is a translation error.
+        let bad = parse(b"name = \"k\"\n[fs.home]\nshadow = true\n[fs]\nwrite = [\"~/proj\"]\nexclusive = [\"~/other\"]\n")
+            .expect("parse");
+        let err = translate_fs(&bad, &mut BTreeSet::new()).expect_err("must reject");
+        assert!(matches!(err, PolicyError::Translation(_)), "got {err:?}");
     }
 
     #[test]

@@ -211,6 +211,23 @@ pub fn workload_exit(pid: u32, exit_code: i32) -> Event {
     .field("exit_code", Value::Int(i64::from(exit_code)))
 }
 
+/// `fs.mutation`: a watched workspace trigger was mutated during the run (§2.5, T2.8).
+///
+/// `path` is the affected entry (a planted `.git/hooks/post-commit`), `action` is the applied
+/// `[trust].on_change` disposition (`warn`/`freeze`/`kill`). `enforced` is true when the
+/// workload was acted on (freeze/kill), making it a `Deny`; a `warn` is informational.
+#[must_use]
+pub fn fs_mutation(path: &str, action: &'static str, enforced: bool) -> Event {
+    let outcome = if enforced {
+        Outcome::Deny
+    } else {
+        Outcome::Info
+    };
+    Event::new("fs.mutation", Resource::Fs, outcome, Source::Kenneld)
+        .field("path", Value::untrusted(path))
+        .field("action", Value::untrusted(action))
+}
+
 /// `lifecycle.kennel-exit`: the kennel was torn down.
 #[must_use]
 pub fn kennel_exit(reason: &'static str) -> Event {

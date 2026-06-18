@@ -248,6 +248,7 @@ fn fold_tty(p: &TtySection, c: &TtySection) -> TtySection {
 fn fold_trust(p: &TrustSection, c: &TrustSection) -> TrustSection {
     TrustSection {
         manifest: or(&c.manifest, &p.manifest),
+        on_change: or(&c.on_change, &p.on_change),
     }
 }
 
@@ -332,6 +333,7 @@ fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
     FsSection {
         read: or(&c.read, &p.read),
         write: or(&c.write, &p.write),
+        exclusive: or(&c.exclusive, &p.exclusive),
         deny: or(&c.deny, &p.deny),
         home: merge(&p.home, &c.home, fold_fs_home),
         tmp: merge(&p.tmp, &c.tmp, fold_fs_tmp),

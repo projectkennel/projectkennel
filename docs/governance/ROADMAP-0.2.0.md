@@ -237,6 +237,21 @@ layer on top:
   compiler-out-of-TCB. `libc`/`nix`/`seccompiler` are base (bindings/glue). Regenerated whenever a TCB
   edge changes (W11 included).
 
+- **W14 · Move `essential_etc_subtrees()` to a vendor+system config cascade.** *(→ §2.6,
+  [[no-hardcoded-paths-config-cascade]], [[deploy-gotchas-etc-binds]])* **S–M.** `kenneld` binds a
+  **hardcoded** list of host `/etc` subtrees read-only into every view (`etc.rs`
+  `essential_etc_subtrees()`: `/etc/ssl/certs`, `/etc/ca-certificates`, `/etc/pki`, `/etc/ld.so.*`,
+  `/etc/alternatives`) — the **same opacity footgun** the trust-trigger catalogue had (W1): the
+  operator can neither see nor tune it, and it interacts confusingly with `fs.read` (a subtree must be
+  in *both* this hidden list *and* `fs.read` to appear, [[deploy-gotchas-etc-binds]]). It is also
+  distro-variant (Debian `/etc/ssl` vs Red Hat `/etc/pki`), so a per-distro **vendor** file is *more*
+  correct than a baked cross-distro union. Move it to an `etc-binds.catalog` cascade on the standard
+  config path — **vendor (`/usr/lib/kennel`) + system (`/etc/kennel`) only, NOT user** (the
+  integrity-sensitive tier): unlike triggers, where user-widening is *safe* (more watching), widening
+  this *binds host paths into kennels* — a capability grant, where a stray entry exposes a secret.
+  Ship the current set as the vendor default; keep the `.exists()` cross-distro filtering. Mirrors the
+  W1 catalogue loader shape (additive, `-` to prune) minus the user layer. Sequenced after W12/W13.
+
 ## Dropped / deferred (with reasons)
 
 - **W3 · `kennel_meta` RO-seal + readback — DROPPED.** The meta map lives in the owner-only
@@ -277,6 +292,8 @@ layer on top:
    pairs with W9's fragment surface, so sequence them together.
 5. **W11 (filter → CLI)** any time — independent, small. **W12 (TCB accounting)** rides the docs
    pass every release touches, regenerated after W11 lands so the inventory reflects the cut.
+6. **W14 (`essential_etc_subtrees` → vendor+system cascade)** after W12/W13 — independent config-hygiene
+   fix, reuses the W1 catalogue-loader shape.
 
 ## Exit criteria
 
