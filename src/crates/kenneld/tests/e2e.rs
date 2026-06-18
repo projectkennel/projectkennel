@@ -667,6 +667,34 @@ fn ttl_warn_suspends_then_resumes_the_workload() {
     );
 }
 
+/// **TTL `renew` with no operator, end to end (the W13 fallback).** A non-interactive run
+/// has no attached terminal to prompt, so the `renew` action cannot ask: at the deadline the
+/// handler takes the no-operator fallback (thaw + RESUME, no re-arm) rather than terminating.
+/// A `sleep 3; exit 0` workload under a 1s renew-TTL therefore survives the TTL and completes
+/// cleanly at ~3s — never destroyed on a prompt it could not deliver.
+#[test]
+fn ttl_renew_without_an_operator_falls_back_to_resume() {
+    let Some((elapsed, code)) = run_ttl_kennel(
+        "ttlrenew",
+        kennel_lib_policy::TtlAction::Renew,
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 3; exit 0".to_owned(),
+        ],
+    ) else {
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "renew with no operator must resume the workload, not kill it (got {code})"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(2),
+        "the workload ran its full ~3s (it was not killed at the 1s TTL) (took {elapsed:?})"
+    );
+}
+
 /// The shared setup for the interactive-pty tests: the operator identity, a signed
 /// policy that grants `/dev/pts` (so the view gets a devpts and `openpty` works), the
 /// `Shared` orchestration handle, and the temp dirs to clean up. `None` ⇒ a precondition

@@ -79,7 +79,10 @@ echo "== building binaries =="
 # Build the test binary and the supporting binaries first; the privhelper with
 # bpf-egress is built LAST so a later workspace build cannot clobber its embedded
 # BPF objects (privhelper-bpf-egress-build-gotcha).
-cargo build -p facade-ssh -p host-netproxy -p facade-socks5 -p facade-afunix -p kennel-bin-init
+# The facades (facade-ssh/-socks5/-afunix/-client) are bin targets of kennel-facade and
+# host-netproxy a bin of kennel-host-delegate since the delegate consolidation; building the
+# packages builds all their bins.
+cargo build -p kennel-facade -p kennel-host-delegate -p kennel-bin-init
 cargo test -p kenneld --features e2e --no-run
 cargo build -p kennel-privhelper --features bpf-egress
 
