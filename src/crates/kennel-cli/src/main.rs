@@ -383,6 +383,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let settled_bytes = std::fs::read(&effective_policy)
         .map_err(|e| format!("reading {} for pre-flight: {e}", effective_policy.display()))?;
     ensure_workspace_manifests(&settled_bytes);
+    // An exclusive bind blind-mounts the host side with the privhelper's privilege (§2.7); refuse
+    // early if the operator does not own a host path it would shadow (the privhelper refuses too).
+    verify_exclusive_ownership(&settled_bytes)?;
     // Resolve the host paths kenneld's live tripwire should watch (§2.5) — computed here,
     // CLI-side, because the catalogue lives in this crate; the daemon just watches the list.
     let watch_paths = workspace_watch_paths(&settled_bytes);
@@ -753,6 +756,57 @@ fn prompt_yes(question: &str) -> Result<bool, String> {
 /// `~`/`$HOME` to the operator's real `home`, strip a trailing `/**` or `/*` glob. Returns
 /// `None` for an entry that does not name a home-relative or absolute path (nothing the
 /// host can place a manifest under).
+/// Verify the operator owns the host path behind each `fs.exclusive` grant (§2.7).
+///
+/// An exclusive bind blind-mounts the host side with the privhelper's privilege; doing that
+/// over a path the operator does not **own** would be overreach, so it is refused here (early
+/// feedback at compile/run) and again in the privhelper (the authoritative real-uid check).
+/// Plain `fs.write` on a non-owned path is *fine* — the kernel still gates the workload's
+/// writes by the operator's uid — so only `exclusive` paths are checked, and the test is
+/// ownership, not write-access.
+fn verify_exclusive_ownership(settled_bytes: &[u8]) -> Result<(), String> {
+    let Ok(policy) = kennel_lib_policy::parse_settled_unverified(settled_bytes) else {
+        return Ok(()); // an unparseable artefact is reported by the caller, not here
+    };
+    check_exclusive_ownership(&policy.effective_policy.fs.exclusive)
+}
+
+/// The ownership test behind [`verify_exclusive_ownership`], over the resolved `exclusive` list.
+fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    if exclusive.is_empty() {
+        return Ok(());
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set (needed to resolve fs.exclusive host paths)")?;
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    for ex in exclusive {
+        let Some(host) = writable_root(ex, &home) else {
+            return Err(format!("fs.exclusive `{ex}`: cannot resolve to a host path"));
+        };
+        match std::fs::symlink_metadata(&host) {
+            Ok(meta) if meta.uid() == uid => {}
+            Ok(_) => {
+                return Err(format!(
+                    "fs.exclusive `{ex}` ({}) is not owned by you (uid {uid}). An exclusive bind \
+                     blind-mounts the host side with privilege, and the privhelper will not \
+                     over-mount a path you do not own (overreach). Drop `exclusive` for this path \
+                     (`fs.write` alone is fine), or use a path you own.",
+                    host.display()
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "fs.exclusive `{ex}` ({}): {e} — an exclusive path must exist and be owned by you",
+                    host.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn writable_root(entry: &str, home: &Path) -> Option<PathBuf> {
     let trimmed = entry
         .strip_suffix("/**")
@@ -1521,6 +1575,10 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
         }
     };
     print_warnings(&compiled.warnings);
+    // Refuse an exclusive bind on a host path the operator does not own (§2.7) — the privhelper
+    // would otherwise be asked to blind-mount over a path you have no ownership of (overreach).
+    check_exclusive_ownership(&compiled.policy.effective_policy.fs.exclusive)
+        .map_err(|e| format!("kennel: {e}"))?;
     // Resolve the shared-library closure of the allowlist into the settled artefact
     // (reads the binaries from disk; deny-by-default execution, 07-3) before signing.
     print_warnings(&kennel_lib_policy::resolve_settled_loaders(

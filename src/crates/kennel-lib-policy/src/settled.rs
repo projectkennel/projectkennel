@@ -321,6 +321,13 @@ pub struct FsPolicy {
     pub read: Vec<String>,
     /// Paths granted write access.
     pub write: Vec<String>,
+    /// Writable paths bound **exclusively** (§2.7, T2.8): while the kennel runs, `kenneld`
+    /// over-mounts an opaque sentinel on the host path (a transient privhelper op) so the
+    /// operator and the workload cannot use it concurrently. Each is also in `write`. Empty ⇒
+    /// none. Compile and the privhelper both verify the operator owns / can write each host
+    /// path before the privileged blind mount.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusive: Vec<String>,
     /// Home-relative paths that persist across runs (§7.9.2a). The synthesised
     /// dotfiles are reconstructed read-only each spawn except for the paths named
     /// here, which the dotfile seeder skips. Empty ⇒ everything is reconstructed.

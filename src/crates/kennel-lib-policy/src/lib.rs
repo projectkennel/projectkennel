@@ -198,6 +198,7 @@ mod tests {
                     home_shadow: true,
                     read: vec!["/usr".to_owned()],
                     write: vec!["/run/kennel/ai-coding/home".to_owned()],
+                    exclusive: Vec::new(),
                     home_persist: Vec::new(),
                     home_readonly: false,
                     tmp: TmpPolicy {

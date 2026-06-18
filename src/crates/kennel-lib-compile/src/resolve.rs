@@ -333,6 +333,7 @@ fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
     FsSection {
         read: or(&c.read, &p.read),
         write: or(&c.write, &p.write),
+        exclusive: or(&c.exclusive, &p.exclusive),
         deny: or(&c.deny, &p.deny),
         home: merge(&p.home, &c.home, fold_fs_home),
         tmp: merge(&p.tmp, &c.tmp, fold_fs_tmp),

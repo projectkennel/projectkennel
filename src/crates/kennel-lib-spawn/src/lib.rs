@@ -759,13 +759,10 @@ mod tests {
                     home_shadow: true,
                     read: vec!["/usr".to_owned(), "<home>/.config".to_owned()],
                     write: vec!["/run/kennel/<kennel>/home".to_owned()],
+                    exclusive: Vec::new(),
                     home_persist: Vec::new(),
                     home_readonly: false,
-                    tmp: TmpPolicy {
-                        private: true,
-                        size_mib: 512,
-                        mode: "0700".to_owned(),
-                    },
+                    tmp: TmpPolicy { private: true, size_mib: 512, mode: "0700".to_owned() },
                     dev: DevPolicy {
                         allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
                     },

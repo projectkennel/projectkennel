@@ -130,6 +130,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                     format!("{}/kennel-e2e/granted", home.display()),
                 ],
                 write: Vec::new(),
+                exclusive: Vec::new(),
                 home_persist: Vec::new(),
                 home_readonly: false,
                 tmp: TmpPolicy {
