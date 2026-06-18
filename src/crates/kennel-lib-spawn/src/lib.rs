@@ -721,6 +721,7 @@ mod tests {
     use kennel_lib_syscall::seccomp::Action;
     use std::path::Path;
 
+    #[allow(clippy::too_many_lines)] // one cohesive SettledPolicy test fixture literal
     fn policy_with_placeholders() -> SettledPolicy {
         SettledPolicy {
             settled_schema_version: 1,

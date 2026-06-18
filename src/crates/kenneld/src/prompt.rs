@@ -19,8 +19,8 @@
 //! exit frozen, so `Exited` cannot be sent until after the prompt transaction completes and
 //! the kennel resumes or is killed. The freeze is the serialisation.
 //!
-//! [`Started`]: kennel_lib_control::Response::Started
-//! [`Exited`]: kennel_lib_control::Response::Exited
+//! [`Started`]: crate::control::Response::Started
+//! [`Exited`]: crate::control::Response::Exited
 
 use std::io;
 use std::os::unix::net::UnixStream;
