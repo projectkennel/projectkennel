@@ -20,9 +20,12 @@
 # The `fuzz/` smoke test (a separate workspace; its `arbitrary` dep is vendored)
 # runs in the `fuzz` job below.
 #
-# Third-party actions are kept to actions/checkout. Pinning it by full commit
-# SHA (rather than the @v4 tag) is the recommended hardening once a maintainer
-# records the audited SHA.
+# Third-party actions are kept to the GitHub-first-party `actions/*` org:
+# actions/checkout, and actions/cache (used by the local composite action
+# .github/actions/setup-build-deps to cache apt .deb archives — the runner apt
+# mirrors are flaky, so build deps install cache-first with retry/backoff).
+# Pinning both by full commit SHA (rather than the @v4 tag) is the recommended
+# hardening once a maintainer records the audited SHAs.
 
 name: CI
 
@@ -55,7 +58,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install clang + headers
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev libsystemd-dev
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: clang libbpf-dev linux-libc-dev libsystemd-dev
       - name: Toolchain
         run: rustup show && cargo --version && rustc --version
       - name: Clippy
@@ -67,7 +72,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install clang + headers
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev libsystemd-dev
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: clang libbpf-dev linux-libc-dev libsystemd-dev
       - name: Toolchain
         run: rustup show && cargo --version && rustc --version
       - name: Test (all features)
@@ -81,7 +88,9 @@ jobs:
       # The no-default build does not link libsystemd, but the BPF object the spawn
       # crates embed (build.rs) still needs clang/libbpf.
       - name: Install clang + headers
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: clang libbpf-dev linux-libc-dev
       - name: Toolchain
         run: rustup show && cargo --version && rustc --version
       - name: Test (no default features)
@@ -93,7 +102,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install clang + headers
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev libsystemd-dev
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: clang libbpf-dev linux-libc-dev libsystemd-dev
       - name: Toolchain
         run: rustup show && cargo --version && rustc --version
       - name: Format
@@ -111,7 +122,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install clang + headers
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: clang libbpf-dev linux-libc-dev
       # Compile every program against the kernel UAPI (<linux/bpf.h>), not a
       # vmlinux.h CO-RE dump: the programs touch only stable hook-context structs
       # and our own maps, so they need no CO-RE. -g keeps BTF (bpftool- and
@@ -201,14 +214,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Toolchain + groff
-        run: |
-          rustup show && cargo --version
-          # --no-install-recommends: bare groff is a few MB; its Recommends pull
-          # ghostscript + imagemagick + the urw-base35 font set (~37 MB / 107 MB on
-          # disk) we never use for `-z` lint, which is what made this step slow
-          # enough to be cancelled.
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends groff
+      - name: Toolchain
+        run: rustup show && cargo --version
+      # --no-install-recommends: bare groff is a few MB; its Recommends pull
+      # ghostscript + imagemagick + the urw-base35 font set (~37 MB / 107 MB on
+      # disk) we never use for `-z` lint, which is what made this step slow
+      # enough to be cancelled.
+      - name: Install groff
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: groff
+          no-install-recommends: "true"
       # Regenerate the committed pages; a non-empty diff means man/ is stale
       # relative to the page data (or the CLI tables the sync-test guards).
       - name: Regenerate man pages

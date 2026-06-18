@@ -1,0 +1,75 @@
+name: setup-build-deps
+description: >
+  Install apt build dependencies reliably on the GitHub-hosted runners, whose apt
+  mirrors (azure.archive.ubuntu.com) are intermittently overloaded and fail
+  `apt-get update`/`install` outright. Two layers, both pure upside:
+
+    1. A cache of the downloaded .deb archives, keyed on the package set. On a hit
+       the packages install from cache without touching the mirror's download path.
+    2. Retry with backoff around update+install, so a transient mirror stall (or a
+       cache miss that still needs the mirror) is ridden out, not turned into a red
+       build.
+
+  The cache is best-effort: every cache copy is non-fatal, and the install always
+  runs through the retry loop, so a cache miss or save failure degrades to exactly
+  the retry-download path — never worse than a plain `apt-get install`.
+
+inputs:
+  packages:
+    description: Space-separated list of apt packages to install.
+    required: true
+  no-install-recommends:
+    description: Pass --no-install-recommends (skip the Recommends set).
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Derive the apt cache key from the package set
+      id: key
+      shell: bash
+      run: |
+        slug="$(echo '${{ inputs.packages }}' | tr ' ' '-' | tr -cd 'a-zA-Z0-9._-')"
+        echo "key=apt-${{ runner.os }}-${slug}" >> "$GITHUB_OUTPUT"
+        echo "dir=$HOME/.cache/apt-debs" >> "$GITHUB_OUTPUT"
+    # A user-owned cache dir (not the root-owned /var/cache/apt/archives) so
+    # actions/cache can save it without a permission fight.
+    - name: Restore cached .debs
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}
+    - name: Install (cache-seeded, retry on mirror stall)
+      shell: bash
+      env:
+        CACHE_DIR: ${{ steps.key.outputs.dir }}
+      run: |
+        set -uo pipefail
+        mkdir -p "$CACHE_DIR"
+        # Seed apt's archive cache from the restored .debs (best-effort).
+        if ls "$CACHE_DIR"/*.deb >/dev/null 2>&1; then
+          sudo cp -n "$CACHE_DIR"/*.deb /var/cache/apt/archives/ || true
+          echo "seeded $(ls "$CACHE_DIR"/*.deb | wc -l) cached .deb(s)"
+        fi
+        recommends=""
+        if [ "${{ inputs.no-install-recommends }}" = "true" ]; then
+          recommends="--no-install-recommends"
+        fi
+        ok=""
+        for attempt in 1 2 3 4 5; do
+          if sudo apt-get update && sudo apt-get install -y $recommends ${{ inputs.packages }}; then
+            ok=1
+            echo "apt: installed on attempt $attempt"
+            break
+          fi
+          backoff=$((attempt * 15))
+          echo "::warning::apt attempt $attempt failed (mirror overloaded?); retrying in ${backoff}s"
+          sleep "$backoff"
+        done
+        if [ -z "$ok" ]; then
+          echo "::error::apt-get failed after 5 attempts — mirror likely down"
+          exit 1
+        fi
+        # Refresh the cache dir with whatever was downloaded this run (best-effort).
+        cp -f /var/cache/apt/archives/*.deb "$CACHE_DIR"/ 2>/dev/null || true
