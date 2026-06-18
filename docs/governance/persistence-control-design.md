@@ -46,6 +46,9 @@ stored content, no restore, and `kenneld` does nothing at runtime.
 6. **Per-workload-class dispositions** — `on_change` + teardown disposition as policy enums.
 7. **Scope to persistent writable binds** — the ephemeral tmpfs home can't carry a trigger to the
    next run, so it's out of scope by construction.
+8. **Exclusive host bind** (opt-in, §2.7) — `[fs.write].exclusive` over-mounts a sentinel on the
+   *host* path for the run, severing the **live confused-deputy channel** (T2.8 residuals 1 + 2) that
+   the enumerated manifest leaves open. Mandatory crash-leak recovery path.
 
 ## 2. Mechanism
 
@@ -132,6 +135,53 @@ the whole file) is encoded in the pattern syntax (exact grammar is a build detai
   cannot reach these host files. A **hard disable** is the existing `[trust].manifest = false` toggle,
   not the catalogue.
 - Documented as **"detects this configured set, never *clean*"** — the boundary is stated, not implied.
+
+### 2.7 Exclusive host bind (`[fs.write].exclusive`) — severing the live confused-deputy channel (opt-in)
+An **opt-in** per-bind flag (`[fs.write].exclusive`, default **off**, persistent writable binds
+only): for the duration of a run a writable host path is usable by **either** the operator **or** the
+kennel, never both concurrently.
+
+**Mechanism.** After the kennel view is constructed (the real host path already bound into the
+kennel's rec-private mount NS), a **transient privhelper op** over-mounts an opaque sentinel dir on
+the *host* path — not silently empty but a marker (`IN USE by kennel <id> since <ts> — released at
+teardown`). Kennel views are `MS_PRIVATE`/rec-private, so the *later* host over-mount does not
+propagate in: the workload keeps the real inode, the operator sees the sentinel. A second transient
+privhelper op `umount`s it at teardown. No process holds a capability ([[no-standing-host-privilege]]
+intact — both are discrete validated ops that exit); the *mount state* persists for the lifetime,
+which is why recovery (below) is mandatory.
+
+**What it closes — T2.8 residuals (1) and (2), for the run's duration.** The masked manifest (§0) is
+precise but honest about two gaps (THREATS T2.8 *Residuals*): it defends only **enumerated** triggers,
+and it **relies on host tooling / the human honouring** the pin (a user who runs `make` by hand, or
+acts on a planted `install.sh`, is unprotected). Both are the **confused-deputy** shape: the operator
+— full host authority, the trust root (§11.2) — is induced to wield that authority on content the
+*workload* planted in the shared tree. `exclusive` severs the **channel** instead of enumerating its
+contents: while the kennel holds the path the operator has no view of it, so there is nothing to be
+socially induced to run and nothing concurrently-open to be tampered mid-edit. The operator only ever
+sees the **post-teardown, post-review** state (manifest diff + disposition already applied).
+
+**Not theatre** ([[no-security-theatre]]): the adversary is the **workload** (in-model, T2.8 family),
+the asset is the **operator's unconfined host authority**, and the control denies the workload a
+*channel to weaponize the trust root* — it does **not** defend owner-only state *against* the trust
+root (which would be incoherent, the theatre shape). Distinct from the manifest, not redundant:
+manifest = precise / enumerated / post-hoc detection + revert + host-IDE Restricted Mode; `exclusive`
+= coarse / enumeration-free / cooperation-free / **live**. They compose — `exclusive` closes the
+run-window the manifest leaves open; the manifest handles the post-run state `exclusive` then reveals.
+
+**Caveats (the real cost, stated):**
+- **Host mount-NS mutation, session-global.** The over-mount lives in the operator's host mount
+  namespace — it hides the path from the IDE and every host process (the point), but it is a new
+  privhelper op surface.
+- **Crash-leak ⇒ operator lockout.** If kenneld / privhelper dies mid-run the sentinel persists and
+  the operator is locked out of their own path until cleared. **Mandatory recovery path**, part of
+  the same slice: a teardown-sweep on daemon restart **+** an explicit `kennel release <id>` unmount
+  command. Ships *with* the feature or the feature does not ship.
+- **Scope = persistent writable binds only.** The constructed `$HOME` is ephemeral tmpfs, already
+  private to the kennel (no host inode), so `exclusive` is meaningless there — consistent with the
+  rest of W1/W2's scope (§1.7, §3).
+
+**Small decisions left:** sentinel content/format; whether to also offer a read-only "operator may
+look but not write" middle mode (lean **no** — two states only, keep it legible).
 
 ## 3. Decisions taken in this pass (rationale; confirm if you disagree)
 
