@@ -99,12 +99,14 @@ layer on top:
 
 - **W1 · Post-run inspection of persistent writes (T2.8).** *(→ design §11.1)* **L** *(critical
   path — only design-open item, intrinsic completeness gap; bound its claims before its mechanism).*
-  At **compile**, enumerate the declared writable binds and pin every existing **trigger-class** path
-  — git hooks, `core.hooksPath` redirects, `Makefile`/`package.json` scripts, `.vscode`/`.idea` tasks
-  — into the manifest + the `.d` store. At **`review`** (host-side, the same sign-off as T2.2), diff
-  each live trigger-path against its pinned blob and surface the divergences for the operator to
-  inspect and **re-pin**. One coherent `kennel review` surface with the commit-time review, not a
-  second tool. Key bounds from the review:
+  Pins are **explicit** (`kennel compile`/`review`, host-side) — enumerate the declared writable binds
+  and pin every existing **trigger-class** path (git hooks, `core.hooksPath`, `Makefile`/`package.json`
+  scripts, `.vscode`/`.idea` tasks) into the manifest + the `.d` store. **`kennel run` never pins; it
+  verifies fail-closed** — an unpinned catalogue-matching file or a divergent pin is a *failed settled
+  config* (refuse, direct to `review`), so a run starts from a verified-complete surface and teardown
+  changes attribute cleanly to the workload. `kennel review` is the inspect-and-re-pin surface, one
+  with the commit-time review. **No TOFU.** Key bounds (design pass settled this — see
+  `persistence-control-design.md`):
   - **Two-tier cost.** Always content-**hash** the trigger class (mtime-games-proof — never trust
     `stat` for the security path); reserve full snapshot/restore cost for when `revert` is actually
     selected.
@@ -133,6 +135,14 @@ layer on top:
     colliding `<sha256sum>` write must not shadow or corrupt it. Mask the file *and* the `.d` dir under
     **every** writable bind (not just project root); the host trusts blobs by content address, never
     by the workload-visible listing.
+
+- **W13 · Operator-prompt channel + TTL `renew` prompt.** *(→ §9.7, pulled from 0.3)* **M.** Today
+  kenneld is a daemon with no session channel, so the TTL `renew` action degrades to an audited
+  `warn`. Build the **kenneld → attached-CLI prompt path** (over the detachable PTY broker's control
+  channel) so kenneld can ask the operator a question and get an answer. It lands the real TTL `renew`
+  prompt *and* unlocks W1's **`interactive`** teardown disposition — one channel, both consumers.
+  Small enough to be worth pulling in now (maintainer call). When detached (no attached client), both
+  fall back to their audited-default behaviour.
 
 ### Thrust 2 — A new mediated surface
 
@@ -248,7 +258,8 @@ layer on top:
 - **The binder cross-instance / MCP relay** (provide/consume, `SpawnKennel`-over-binder) — grows
   the TCB; wait until the facade foundations (incl. W8's D-Bus split) are proven. *(§8.1)*
 - **X11 isolation**, **`[env].template`/`fs.scrub`**, **`[unix]` service-launch /
-  `abstract="allow"` / `--dry-run`**, **accept-unsigned dev mode**, **TTL `renew` prompt**. *(§8.1)*
+  `abstract="allow"` / `--dry-run`**, **accept-unsigned dev mode**. *(§8.1)* *(TTL `renew` prompt
+  pulled into 0.2.0 as W13.)*
 - **§11.1 v2 design forks** — Wayland clipboard, GPU compute-only, TPM/FIDO per-key,
   comprehensive-seccomp template. Tracked, not scheduled.
 
@@ -259,7 +270,8 @@ layer on top:
    versioned trigger catalogue, and the `.d`-dir masking under every writable bind. This is the only
    unresolved *design* in the release — bound the claims (scope, boundary statement, catalogue
    versioning) before the mechanism, per the review.
-2. **W1 + W2 build** — the flagship, after the design pass.
+2. **W13 (operator-prompt channel)** then **W1 + W2 build** — W13 first (W1's `interactive`
+   disposition rides it; it's small and also lands the TTL `renew` prompt).
 3. **W8 (D-Bus)** — in parallel; independent of the persistence work.
 4. **W10 (IDE extension)** and **W9 (fragments)** — the authoring thrust; W10's schema emission
    pairs with W9's fragment surface, so sequence them together.
@@ -269,8 +281,9 @@ layer on top:
 ## Exit criteria
 
 0.2.0 ships when: T2.8 inspection + boundary-escape handling are built and folded into `kennel
-review` (W1 + W2); D-Bus mediation is built to the facade/host split and proven by a policy-suite
-case (W8); the fragment catalogue is authored, signed, framed, and tested (W9); the IDE extension
+review` (W1 + W2), with all disposition primitives built and the operator-prompt channel + TTL
+`renew` prompt landed (W13); D-Bus mediation is built to the facade/host split and proven by a
+policy-suite case (W8); the fragment catalogue is authored, signed, framed, and tested (W9); the IDE extension
 gives working completion + validation against a current schema (W10); the terminal filter runs
 CLI-side with `vte` out of `cargo tree -p kenneld` (W11); and the crate inventory carries the
 vendored logic-vs-bindings accounting, regenerated post-W11 (W12). CHANGELOG records every
