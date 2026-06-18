@@ -407,17 +407,17 @@ Signing keys live in the trust store: `~/.config/kennel/keys/` for user-installe
 
 Project Kennel refuses to load any template or include whose signature is invalid. It warns but does not refuse on *missing* signatures in development mode (local unsigned templates are part of the authoring workflow); production deployments set a settings flag, pushed to managed workstations, that turns missing-signature into a hard refusal. CI verifies that every committed template and fragment version carries a valid signature and that its lockfile entry matches.
 
-### The composable fragment catalogue — roadmap
+### The composable fragment catalogue
 
-The include *mechanism* above is built and exercised (resolution, signature verification, additive `[[*.add]]`/invariant deltas, lockfile byte-pinning). What is **not yet shipped** is a curated *catalogue* of à-la-carte fragments — the reusable capability bundles a leaf or template can `include` instead of hand-listing. The intended first set:
+The include *mechanism* (resolution, signature verification, additive `[[*.add]]`/invariant deltas, lockfile byte-pinning) and a curated *catalogue* of à-la-carte fragments are both built. A fragment is a reusable capability bundle a leaf or template can `include` instead of hand-listing the same grants. The shipped set (`fragments/<name>/policy.toml`, signed; `fragments/README.md` is the catalogue):
 
-- **`lang-python`** — `python3` + the stdlib's runtime libraries on `exec.allow`, `pip`'s cache dir writable, PyPI on the egress allowlist.
-- **`lang-node`** — `node`/`npm` on `exec.allow`, the npm cache writable, the registry on the egress allowlist.
-- **`toolchain-c`** — `cc`/`ld`/`make` and the build-essential set.
-- **`net-permissive`** — flips to `net.mode = "open"` (still under the invariant denies) for a workflow a human drives.
-- **`vcs-git`** — `git` + `git-core` helpers, the common host config bound read-only.
+- **`lang-python`** — `python3`/`pip` on `exec.allow`, `pip`'s cache dir writable, PyPI on the egress allowlist.
+- **`lang-node`** — `node`/`npm`/`npx` on `exec.allow`, the npm cache writable, the registry on the egress allowlist.
+- **`toolchain-c`** — `cc`/`gcc`/`g++`/`as`/`ld`/`ar`/`make` plus gcc's backend binaries.
+- **`vcs-git`** — `git` + `git-core` helpers, the system git config bound read-only.
+- **`net-permissive`** — broad egress to the common public package ecosystems and code forges for a human-driven workflow. *(Divergence from the original sketch: a fragment cannot "flip to `net.mode = open`" — a mode change is a scalar override, which §5.10 reserves for the inheritance chain, not an additive fragment. `net-permissive` is therefore a curated allowlist under the unchanged net-ns + proxy + invariant denies, not an off switch.)*
 
-Each is a signed, version-pinned fragment in the repository, composed additively so unrelated bundles combine without ordering ambiguity (a leaf is then `template_base = "base-confined@v1"` + `include = ["lang-python@v1", "vcs-git@v1"]`). The design constraint is already settled by §5.10: fragments are additive-only — anything that must *remove* or *override* belongs in the inheritance chain, not a fragment. The work owed is authoring, threat-tagging, signing, and per-fragment `tests/allow.sh`/`deny.sh`, not new mechanism. Tracked in `docs/architecture/08-as-built-notes.md` §8.1.
+Each is signed and version-pinned, composed additively so unrelated bundles combine without ordering ambiguity (a leaf is then `template_base = "base-confined@v1"` + `include = ["lang-python@v1", "vcs-git@v1"]`); shared egress destinations are kept byte-identical across fragments so a leaf may include overlapping bundles without a conflict. `kennel policy sign` signs a fragment (the leaf-syntax form) as well as a template; `tools/install.sh` ships fragments into the runtime template search dir; `kennel policy list` labels each `(fragment)`. The catalogue is gated in CI by `kennel-lib-compile/tests/fragments_catalogue.rs` (signature, additive-only, and a real compile-and-assert per fragment).
 
 ## 5.11 Versioning and upgrade
 

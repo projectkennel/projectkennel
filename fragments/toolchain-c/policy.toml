@@ -1,0 +1,60 @@
+# ============================================================================
+# Fragment: toolchain-c
+#
+# A composable capability bundle (05-templates.md §5.10): the C/C++ build
+# toolchain — compiler, assembler, linker, archiver, and make. Include it for a
+# kennel that compiles native code; the project tree itself is granted by the
+# leaf, so this fragment adds only the tools.
+#
+#   include = ["toolchain-c@v1"]
+#
+# Additive-only (§5.10). No network and no extra filesystem write: a build reads
+# the toolchain (already on `fs.read` via base-confined's `/usr/**`) and writes
+# only into the project tree the leaf made writable.
+# ============================================================================
+
+name = "toolchain-c"
+
+[[exec.allow.add]]
+path = "/usr/bin/cc"
+reason = "C compiler driver (the default `cc`)"
+
+[[exec.allow.add]]
+path = "/usr/bin/gcc"
+reason = "GNU C compiler"
+
+[[exec.allow.add]]
+path = "/usr/bin/g++"
+reason = "GNU C++ compiler"
+
+[[exec.allow.add]]
+path = "/usr/bin/cpp"
+reason = "C preprocessor (invoked by the compiler driver)"
+
+[[exec.allow.add]]
+path = "/usr/bin/as"
+reason = "GNU assembler"
+
+[[exec.allow.add]]
+path = "/usr/bin/ld"
+reason = "GNU linker"
+
+[[exec.allow.add]]
+path = "/usr/bin/ar"
+reason = "static-archive tool"
+
+[[exec.allow.add]]
+path = "/usr/bin/make"
+reason = "GNU make"
+
+# The compiler driver re-execs its real backends (cc1, cc1plus, collect2) from
+# the version directory under /usr/lib/gcc; without this they are "command not
+# found" and a compile fails at the first translation unit.
+[[exec.allow.add]]
+path = "/usr/lib/gcc/**"
+reason = "gcc's per-version backend binaries (cc1, cc1plus, collect2), re-exec'd by the driver"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "y229ATbRqLwrKl1UoslLjilJVf8ewdKLXO7PFmxOdraCLZQRYLLDl4OAXfy4fHKyp7hOCNImNHufM//BzS6lCA=="

@@ -1,0 +1,54 @@
+# ============================================================================
+# Fragment: lang-python
+#
+# A composable capability bundle (05-templates.md §5.10): include it to grant a
+# kennel what a Python workflow needs, instead of hand-listing the interpreter,
+# its cache, and the package index in every leaf.
+#
+#   template_base = "base-confined@v1"
+#   include = ["lang-python@v1"]
+#
+# Additive-only: every entry is a `[[*.add]]` delta appended to the effective
+# policy the template chain produced. A fragment can only widen; anything that
+# must remove or override belongs in the inheritance chain (§5.10).
+# ============================================================================
+
+name = "lang-python"
+
+# --- the interpreter and installer ------------------------------------------
+[[exec.allow.add]]
+path = "/usr/bin/python3"
+reason = "Python interpreter"
+
+[[exec.allow.add]]
+path = "/usr/bin/pip3"
+reason = "Python package installer"
+
+[[exec.allow.add]]
+path = "/usr/bin/pip"
+reason = "Python package installer (unversioned alias)"
+
+# --- pip's download / wheel-build cache -------------------------------------
+[[fs.write.add]]
+path = "~/.cache/pip/**"
+reason = "pip's download and wheel-build cache"
+
+# --- the package index ------------------------------------------------------
+# NB: shared with net-permissive — the entry is kept byte-identical there so a leaf
+# may include both without a conflict (identical entries dedup; §5.10).
+[[net.proxy.allow.add]]
+name = "pypi.org"
+ports = [443]
+reason = "PyPI package index"
+threats.exposed = ["T1.2", "T1.9"]
+
+[[net.proxy.allow.add]]
+name = "files.pythonhosted.org"
+ports = [443]
+reason = "PyPI package downloads"
+threats.exposed = ["T1.2", "T1.9"]
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "vrzoyrglhXKwZoVnz8mHi9zpa7N1Hy9xpkJH4zpoWtT7d5cJXDX+fv7NmAAbBy/szsx6zmZKqk6gmiezBQ6XBA=="
