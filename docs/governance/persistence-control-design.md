@@ -15,7 +15,7 @@ W1/W2 is **not greenfield**; it extends the shipped trust-manifest mechanism.
   `KNOWN_TRIGGER_DIRS` (`.git/hooks`); `enumerate_triggers(root)`; `hash_file` (via system
   `sha256sum`, no in-crate crypto); `generate(root)` → `Manifest`; `review(manifest, root)` →
   `Vec<TriggerChange>`; `apply_review` (re-pin).
-- **The manifest schema** (`docs/schemas/trust-manifest-v1.json`, v1.0): `execution.triggers`
+- **The manifest schema** (`docs/schemas/trust-manifest-v2.json`, v2.0 — W1 bumped it from v1.0): `execution.triggers`
   (relative-path → `sha256:…`) + `execution.boundaries.untrusted_paths` (no-exec globs).
 - **Masking is already per-writable-bind** (`kennel-lib-spawn` `lib.rs:492`, `plan.rs:922`): each
   `<writable-bind>/.trust-manifest.json` is over-mounted with an empty RO file from the tmpfs

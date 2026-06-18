@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://projectkennel.org/schemas/trust-manifest-v2.json",
+  "title": "Project Kennel Trust Manifest",
+  "description": "Cryptographic boundaries and execution triggers for host-side tooling. A confined Project Kennel workload cannot see or rewrite this file (it is masked inside the kennel, along with the .trust-manifest.d blob store beside it), so a host IDE can trust its pins to detect workspace-trigger tampering (T2.8). v2 carries a per-trigger record so a review can show a diff against the pinned blob and revert can restore a tampered trigger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "generator",
+    "execution"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "const": "2.0"
+    },
+    "generator": {
+      "type": "string",
+      "description": "The tool that generated or last updated this manifest."
+    },
+    "execution": {
+      "type": "object",
+      "description": "Defines what host tooling is allowed to execute.",
+      "additionalProperties": false,
+      "required": [
+        "triggers",
+        "boundaries"
+      ],
+      "properties": {
+        "triggers": {
+          "type": "object",
+          "description": "Maps each relative trigger path to its pinned record. Host tools must refuse to execute a listed file whose on-disk SHA-256 differs from its record's sha256.",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^.*$": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "sha256",
+                "mode",
+                "pattern",
+                "pinned"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": ["content", "symlink"],
+                  "description": "A regular file whose bytes are pinned (content), or a symlink whose target is pinned (symlink)."
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^(sha256:[a-f0-9]{64})?$",
+                  "description": "For a content trigger, the pinned content hash 'sha256:<64-hex>' (the blob's address in .trust-manifest.d). Empty for a symlink."
+                },
+                "target": {
+                  "type": "string",
+                  "description": "For a symlink trigger, the pinned link target. Absent for a content trigger."
+                },
+                "mode": {
+                  "type": "string",
+                  "pattern": "^[0-7]{4}$",
+                  "description": "The file mode as four octal digits (permission plus setuid/setgid/sticky), preserved across a revert."
+                },
+                "pattern": {
+                  "type": "string",
+                  "description": "The catalogue entry that matched this path (provenance); 'builtin' for the compiled default set."
+                },
+                "pinned": {
+                  "type": "string",
+                  "description": "How the pin was established: 'compile' or 'review'."
+                }
+              }
+            }
+          }
+        },
+        "boundaries": {
+          "type": "object",
+          "description": "Negative trust spaces. Host tools must treat these paths as no-exec.",
+          "additionalProperties": false,
+          "required": [
+            "untrusted_paths"
+          ],
+          "properties": {
+            "untrusted_paths": {
+              "type": "array",
+              "description": "List of relative paths or globs that are strictly untrusted.",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

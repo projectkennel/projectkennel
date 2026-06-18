@@ -559,12 +559,17 @@ fn review(args: &[String]) -> Result<ExitCode, String> {
         }
         let approved = assume_yes || prompt_yes(&format!("re-pin {}?", manifest_path.display()))?;
         if approved {
-            kennel_lib_manifest::apply_review(&mut manifest, &changes, &generator);
+            let errs = kennel_lib_manifest::apply_review(&mut manifest, &root, &changes, &generator);
+            for e in &errs {
+                eprintln!("  warning: {e}");
+            }
             let json = manifest
                 .to_json()
                 .map_err(|e| format!("serialising {}: {e}", manifest_path.display()))?;
             std::fs::write(&manifest_path, json)
                 .map_err(|e| format!("writing {}: {e}", manifest_path.display()))?;
+            // GC the blob store down to the freshly re-pinned baseline (§3, steer 6).
+            kennel_lib_manifest::prune_store(&root, &manifest);
             println!("  re-pinned {}", manifest_path.display());
         } else {
             println!("  left unchanged");
@@ -584,7 +589,7 @@ fn print_trigger_change(change: &kennel_lib_manifest::TriggerChange) {
     use kennel_lib_manifest::TriggerChange;
     match change {
         TriggerChange::Modified { path, .. } => println!("  ~ {path} (modified)"),
-        TriggerChange::Removed { path } => println!("  - {path} (removed)"),
+        TriggerChange::Removed { path, .. } => println!("  - {path} (removed)"),
         TriggerChange::New { path, .. } => println!("  + {path} (new, unpinned)"),
         TriggerChange::Unchanged { .. } => {}
     }

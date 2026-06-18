@@ -14,7 +14,7 @@
 //! on-disk hash diverge from the pin and drops the workspace to Restricted Mode.
 //!
 //! This crate owns the **host-side** half: the serde types (mirroring
-//! `docs/schemas/trust-manifest-v1.json`, `deny_unknown_fields` so a typo can't silently
+//! `docs/schemas/trust-manifest-v2.json`, `deny_unknown_fields` so a typo can't silently
 //! bypass a boundary), baseline [`generate`], trigger [`hash_file`] (via the system
 //! `sha256sum`, like kenneld's workload pin — no in-crate crypto), and the [`review`]
 //! diff the operator signs off. kenneld never links this; generation is CLI pre-flight
@@ -29,14 +29,27 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 /// The schema version this crate emits and accepts.
-pub const SCHEMA_VERSION: &str = "1.0";
+///
+/// v2 carries a per-trigger record (kind + mode + provenance) and a content-addressed blob
+/// store beside the index, so `kennel review` can *show* a diff and `revert` can restore a
+/// tampered trigger — neither possible from the v1 hash alone. Pre-1.0, so no v1 compat shim
+/// ([[no-legacy-compat-prerelease]]): a v1 manifest is re-generated, not migrated.
+pub const SCHEMA_VERSION: &str = "2.0";
 
 /// The published JSON Schema `$id` host IDEs validate against (served from the repo's
 /// `docs/schemas/`).
-pub const SCHEMA_ID: &str = "https://projectkennel.org/schemas/trust-manifest-v1.json";
+pub const SCHEMA_ID: &str = "https://projectkennel.org/schemas/trust-manifest-v2.json";
 
 /// The manifest filename, at the root of every writable/persistent workspace.
 pub const MANIFEST_FILENAME: &str = ".trust-manifest.json";
+
+/// The content-addressed blob store beside the manifest (`<root>/.trust-manifest.d/<hex>`).
+///
+/// Holds the pinned bytes of each `content` trigger — the manifest is the index, this is the
+/// bytes. Content-addressed ⇒ dedup; operator-owned `0700`; masked from the workload beside
+/// the manifest itself (`07-4`). `review` diffs the live file against its pinned blob;
+/// `revert` copies the blob back.
+pub const STORE_DIRNAME: &str = ".trust-manifest.d";
 
 /// The standard execution triggers [`generate`] enumerates and pins.
 ///
@@ -60,12 +73,12 @@ pub const KNOWN_TRIGGERS: &[&str] = &[
 /// beneath is hashed) — e.g. every script in `.git/hooks/`.
 pub const KNOWN_TRIGGER_DIRS: &[&str] = &[".git/hooks"];
 
-/// A top-level `.trust-manifest.json`. Mirrors `docs/schemas/trust-manifest-v1.json`;
+/// A top-level `.trust-manifest.json`. Mirrors `docs/schemas/trust-manifest-v2.json`;
 /// `deny_unknown_fields` so an unknown key is a hard error, never a silent bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Schema version (`"1.0"`).
+    /// Schema version (`"2.0"`).
     pub version: String,
     /// The tool that generated or last updated this manifest.
     pub generator: String,
@@ -77,12 +90,50 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Execution {
-    /// Relative file path → expected hash (`sha256:<64-hex>`). Host tools refuse to
-    /// execute a listed file whose on-disk hash differs. A `BTreeMap` so the serialized
-    /// order is deterministic (stable diffs, reproducible bytes).
-    pub triggers: BTreeMap<String, String>,
+    /// Relative file path → its pinned record ([`TriggerEntry`]). Host tools refuse to
+    /// execute a listed file whose on-disk hash differs from the entry's `sha256`. A
+    /// `BTreeMap` so the serialized order is deterministic (stable diffs, reproducible bytes).
+    pub triggers: BTreeMap<String, TriggerEntry>,
     /// Negative trust spaces — host tools treat these paths/globs as no-exec.
     pub boundaries: Boundaries,
+}
+
+/// What a pinned trigger is — a regular file whose bytes are pinned, or a symlink whose
+/// target is pinned (an escaping link is itself a trigger class, §2.1 / W2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerKind {
+    /// A regular file: `sha256` pins its content (a blob lives in the store).
+    #[default]
+    Content,
+    /// A symlink: `target` pins where it points; `sha256` is unused (no content blob).
+    Symlink,
+}
+
+/// One pinned trigger's record (schema v2).
+///
+/// Carries what diff/restore/symlink need beyond the bare hash: the kind, the file mode (so a
+/// `revert` cannot silently drop a setuid/setgid/sticky bit), the catalogue entry that
+/// matched (provenance), and whether the pin came from a `compile` or a `review`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerEntry {
+    /// Whether this is a content file or an escaping symlink.
+    pub kind: TriggerKind,
+    /// `content`: the pinned content hash `sha256:<64-hex>` (the blob's address in the
+    /// store). `symlink`: the empty string (the link has no content blob).
+    pub sha256: String,
+    /// `symlink`: the pinned link target. Absent for a `content` trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The file mode as octal (`"0644"`, `"0755"`). Preserved across a revert — the
+    /// setuid/setgid/sticky bits are security-relevant and must never be lost.
+    pub mode: String,
+    /// Which catalogue entry matched this path (provenance); `"builtin"` for the compiled
+    /// default set.
+    pub pattern: String,
+    /// How this pin was established: `"compile"` or `"review"`.
+    pub pinned: String,
 }
 
 /// The `boundaries` block.
@@ -223,16 +274,130 @@ pub fn enumerate_triggers(root: &Path) -> Vec<String> {
     found
 }
 
-/// Hash each relative trigger path under `root` into the pinned `(path → sha256:…)` map.
-/// A trigger that cannot be hashed is skipped (it is not pinned rather than aborting the
-/// whole generation) — `errors` collects the per-file failures for the caller to report.
-fn pin_triggers(root: &Path, triggers: &[String]) -> (BTreeMap<String, String>, Vec<Error>) {
+/// The blob store directory for a workspace `root` (`<root>/.trust-manifest.d`).
+#[must_use]
+pub fn store_dir(root: &Path) -> PathBuf {
+    root.join(STORE_DIRNAME)
+}
+
+/// The store filename (hex content-address) of a `sha256:<hex>` pin.
+fn blob_name(sha: &str) -> &str {
+    sha.strip_prefix("sha256:").unwrap_or(sha)
+}
+
+/// Create the blob store dir `0700` (operator-only) if absent.
+fn create_store_dir(dir: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::DirBuilderExt;
+    if dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    Ok(())
+}
+
+/// Store `path`'s bytes as a content-addressed blob, returning the `sha256:<hex>` pin.
+///
+/// Idempotent — an existing blob with the same address is identical bytes, so it is left as
+/// is (content-addressed dedup).
+///
+/// # Errors
+/// [`Error::Hash`] if the file cannot be hashed, [`Error::Io`] if the store write fails.
+pub fn store_blob(root: &Path, path: &Path) -> Result<String, Error> {
+    let sha = hash_file(path)?;
+    let dir = store_dir(root);
+    create_store_dir(&dir)?;
+    let blob = dir.join(blob_name(&sha));
+    if !blob.exists() {
+        std::fs::copy(path, &blob)?;
+    }
+    Ok(sha)
+}
+
+/// Read the pinned blob `sha` from `root`'s store.
+///
+/// # Errors
+/// [`Error::Io`] if the blob is missing or unreadable.
+pub fn read_blob(root: &Path, sha: &str) -> Result<Vec<u8>, Error> {
+    Ok(std::fs::read(store_dir(root).join(blob_name(sha)))?)
+}
+
+/// GC the blob store: remove every blob not referenced by a current `content` trigger.
+///
+/// Called after the index is (re)written (§3, steer 6), so the store holds exactly the
+/// trusted baseline's blobs — bounded, no unreferenced accumulation, no prior history.
+pub fn prune_store(root: &Path, manifest: &Manifest) {
+    let dir = store_dir(root);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let keep: std::collections::BTreeSet<&str> = manifest
+        .execution
+        .triggers
+        .values()
+        .filter(|e| e.kind == TriggerKind::Content)
+        .map(|e| blob_name(&e.sha256))
+        .collect();
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if !keep.contains(name) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// The octal mode (`"0644"`, perm + setuid/setgid/sticky) of `path`, not following a symlink.
+fn file_mode(path: &Path) -> Result<String, Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::symlink_metadata(path)?.permissions().mode() & 0o7777;
+    Ok(format!("{mode:04o}"))
+}
+
+/// Pin one trigger `rel` under `root` into a [`TriggerEntry`]: a symlink records its target;
+/// a regular file is hashed and its bytes stored as a blob. `pattern` is the matching
+/// catalogue id (provenance), `pinned_by` is `"compile"` or `"review"`.
+fn pin_entry(root: &Path, rel: &str, pattern: &str, pinned_by: &str) -> Result<TriggerEntry, Error> {
+    let abs = root.join(rel);
+    let mode = file_mode(&abs)?;
+    if std::fs::symlink_metadata(&abs)?.file_type().is_symlink() {
+        let target = std::fs::read_link(&abs)?.to_string_lossy().into_owned();
+        Ok(TriggerEntry {
+            kind: TriggerKind::Symlink,
+            sha256: String::new(),
+            target: Some(target),
+            mode,
+            pattern: pattern.to_owned(),
+            pinned: pinned_by.to_owned(),
+        })
+    } else {
+        Ok(TriggerEntry {
+            kind: TriggerKind::Content,
+            sha256: store_blob(root, &abs)?,
+            target: None,
+            mode,
+            pattern: pattern.to_owned(),
+            pinned: pinned_by.to_owned(),
+        })
+    }
+}
+
+/// Pin each relative trigger path under `root` into the `(path → entry)` map. A trigger that
+/// cannot be pinned is skipped (rather than aborting the whole generation) — `errors`
+/// collects the per-file failures for the caller to report.
+fn pin_triggers(
+    root: &Path,
+    triggers: &[String],
+    pinned_by: &str,
+) -> (BTreeMap<String, TriggerEntry>, Vec<Error>) {
     let mut pinned = BTreeMap::new();
     let mut errors = Vec::new();
     for rel in triggers {
-        match hash_file(&root.join(rel)) {
-            Ok(hash) => {
-                pinned.insert(rel.clone(), hash);
+        match pin_entry(root, rel, "builtin", pinned_by) {
+            Ok(entry) => {
+                pinned.insert(rel.clone(), entry);
             }
             Err(e) => errors.push(e),
         }
@@ -248,7 +413,8 @@ fn pin_triggers(root: &Path, triggers: &[String]) -> (BTreeMap<String, String>, 
 #[must_use]
 pub fn generate(root: &Path, generator: &str) -> (Manifest, Vec<Error>) {
     let triggers = enumerate_triggers(root);
-    let (pinned, errors) = pin_triggers(root, &triggers);
+    // The baseline is the compile-time pin (the operator's `kennel compile`/`generate` step).
+    let (pinned, errors) = pin_triggers(root, &triggers, "compile");
     let manifest = Manifest {
         version: SCHEMA_VERSION.to_owned(),
         generator: generator.to_owned(),
@@ -268,6 +434,9 @@ pub fn generate(root: &Path, generator: &str) -> (Manifest, Vec<Error>) {
 }
 
 /// One trigger's state when reviewing a workspace against its manifest.
+///
+/// The divergent variants carry the pinned [`TriggerEntry`] so the caller can show a diff
+/// (against the pinned blob) and [`revert`] can restore.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerChange {
     /// A pinned trigger whose on-disk hash still matches.
@@ -279,8 +448,8 @@ pub enum TriggerChange {
     Modified {
         /// Relative path.
         path: String,
-        /// The hash the manifest pins.
-        pinned: String,
+        /// The pinned record (its `sha256` addresses the baseline blob to diff/restore).
+        entry: TriggerEntry,
         /// The hash on disk now.
         current: String,
     },
@@ -288,9 +457,12 @@ pub enum TriggerChange {
     Removed {
         /// Relative path.
         path: String,
+        /// The pinned record — [`revert`] recreates the file from its blob.
+        entry: TriggerEntry,
     },
     /// An execution trigger present on disk but absent from the manifest (created after
-    /// generation — unpinned, the T2.8 residual `kennel review` surfaces).
+    /// generation — unpinned, the T2.8 residual `kennel review` surfaces). A planted one;
+    /// [`revert`] removes it.
     New {
         /// Relative path.
         path: String,
@@ -317,21 +489,24 @@ impl TriggerChange {
 pub fn review(manifest: &Manifest, root: &Path) -> Result<Vec<TriggerChange>, Error> {
     let mut changes = Vec::new();
     // Pinned triggers: matched, modified, or removed.
-    for (path, pinned) in &manifest.execution.triggers {
+    for (path, entry) in &manifest.execution.triggers {
         let abs = root.join(path);
-        if abs.is_file() {
+        if abs.is_file() || abs.symlink_metadata().is_ok() {
             let current = hash_file(&abs)?;
-            if &current == pinned {
+            if current == entry.sha256 {
                 changes.push(TriggerChange::Unchanged { path: path.clone() });
             } else {
                 changes.push(TriggerChange::Modified {
                     path: path.clone(),
-                    pinned: pinned.clone(),
+                    entry: entry.clone(),
                     current,
                 });
             }
         } else {
-            changes.push(TriggerChange::Removed { path: path.clone() });
+            changes.push(TriggerChange::Removed {
+                path: path.clone(),
+                entry: entry.clone(),
+            });
         }
     }
     // Triggers on disk that the manifest never pinned (created after generation).
@@ -349,7 +524,7 @@ pub fn review(manifest: &Manifest, root: &Path) -> Result<Vec<TriggerChange>, Er
 fn change_path(c: &TriggerChange) -> &str {
     match c {
         TriggerChange::Unchanged { path }
-        | TriggerChange::Removed { path }
+        | TriggerChange::Removed { path, .. }
         | TriggerChange::Modified { path, .. }
         | TriggerChange::New { path, .. } => path,
     }
@@ -357,26 +532,91 @@ fn change_path(c: &TriggerChange) -> &str {
 
 /// Fold a reviewed set of changes back into the manifest (the operator's sign-off).
 ///
-/// Adopt every `Modified`/`New` hash, drop every `Removed` pin, leave `Unchanged` and bump
-/// the `generator`. Mutates `manifest` in place; the caller then writes
-/// [`Manifest::to_json`].
-pub fn apply_review(manifest: &mut Manifest, changes: &[TriggerChange], generator: &str) {
+/// Re-pin every `Modified`/`New` trigger (re-hash + store its blob, stamped `"review"`), drop
+/// every `Removed` pin, leave `Unchanged`, and bump the `generator`. Mutates `manifest` in
+/// place.
+///
+/// Returns any per-trigger re-pin errors; the caller then writes [`Manifest::to_json`] and
+/// [`prune_store`]s the now-unreferenced blobs.
+pub fn apply_review(
+    manifest: &mut Manifest,
+    root: &Path,
+    changes: &[TriggerChange],
+    generator: &str,
+) -> Vec<Error> {
+    let mut errors = Vec::new();
     for change in changes {
         match change {
-            TriggerChange::Modified { path, current, .. }
-            | TriggerChange::New { path, current } => {
-                manifest
-                    .execution
-                    .triggers
-                    .insert(path.clone(), current.clone());
+            TriggerChange::Modified { path, .. } | TriggerChange::New { path, .. } => {
+                match pin_entry(root, path, "builtin", "review") {
+                    Ok(entry) => {
+                        manifest.execution.triggers.insert(path.clone(), entry);
+                    }
+                    Err(e) => errors.push(e),
+                }
             }
-            TriggerChange::Removed { path } => {
+            TriggerChange::Removed { path, .. } => {
                 manifest.execution.triggers.remove(path);
             }
             TriggerChange::Unchanged { .. } => {}
         }
     }
     generator.clone_into(&mut manifest.generator);
+    errors
+}
+
+/// Restore a divergent trigger to its pinned baseline (the `revert` teardown disposition, §2.5).
+///
+/// A `Modified`/`Removed` trigger is rewritten from its pinned blob (and a symlink re-pointed
+/// at its pinned target), mode preserved; a `New` (unpinned, planted) trigger is removed.
+/// Scoped to the one path — the rest of the tree is left untouched.
+///
+/// # Errors
+/// [`Error::Io`] if the blob is missing or the filesystem write fails.
+pub fn revert(root: &Path, change: &TriggerChange) -> Result<(), Error> {
+    match change {
+        TriggerChange::Modified { path, entry, .. } | TriggerChange::Removed { path, entry } => {
+            restore_entry(root, path, entry)
+        }
+        TriggerChange::New { path, .. } => {
+            // A catalogue-matching file with no pin is a planted trigger — remove it.
+            std::fs::remove_file(root.join(path))?;
+            Ok(())
+        }
+        TriggerChange::Unchanged { .. } => Ok(()),
+    }
+}
+
+/// Recreate `path` from its pinned [`TriggerEntry`] — blob bytes + mode for a content
+/// trigger, the pinned link target for a symlink.
+fn restore_entry(root: &Path, path: &str, entry: &TriggerEntry) -> Result<(), Error> {
+    let abs = root.join(path);
+    match entry.kind {
+        TriggerKind::Content => {
+            let bytes = read_blob(root, &entry.sha256)?;
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&abs, bytes)?;
+            set_mode(&abs, &entry.mode)?;
+        }
+        TriggerKind::Symlink => {
+            if abs.symlink_metadata().is_ok() {
+                std::fs::remove_file(&abs)?;
+            }
+            std::os::unix::fs::symlink(entry.target.as_deref().unwrap_or(""), &abs)?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply an octal mode string (`"0755"`) to `path`.
+fn set_mode(path: &Path, mode: &str) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let bits = u32::from_str_radix(mode, 8)
+        .map_err(|e| Error::Hash(format!("bad mode `{mode}`: {e}")))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))?;
+    Ok(())
 }
 
 /// The absolute path of the manifest at a workspace `root`.
@@ -389,9 +629,20 @@ pub fn manifest_path(root: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn content_entry(fill: char) -> TriggerEntry {
+        TriggerEntry {
+            kind: TriggerKind::Content,
+            sha256: format!("sha256:{}", String::from(fill).repeat(64)),
+            target: None,
+            mode: "0644".to_owned(),
+            pattern: "builtin".to_owned(),
+            pinned: "compile".to_owned(),
+        }
+    }
+
     fn sample() -> Manifest {
         let mut triggers = BTreeMap::new();
-        triggers.insert("Makefile".to_owned(), format!("sha256:{}", "a".repeat(64)));
+        triggers.insert("Makefile".to_owned(), content_entry('a'));
         Manifest {
             version: SCHEMA_VERSION.to_owned(),
             generator: "kennel-test".to_owned(),
@@ -455,8 +706,13 @@ mod tests {
             m.execution
                 .triggers
                 .get("Makefile")
-                .is_some_and(|h| h.starts_with("sha256:")),
-            "pin is a sha256: hash"
+                .is_some_and(|e| e.sha256.starts_with("sha256:") && e.kind == TriggerKind::Content),
+            "pin is a content sha256: hash"
+        );
+        let makefile = m.execution.triggers.get("Makefile").expect("pinned");
+        assert!(
+            store_dir(&dir).join(blob_name(&makefile.sha256)).is_file(),
+            "the pinned content is stored as a blob"
         );
         assert!(
             !m.execution.triggers.contains_key("README.md"),
@@ -492,7 +748,7 @@ mod tests {
         assert!(
             changes
                 .iter()
-                .any(|c| matches!(c, TriggerChange::Removed { path } if path == "Justfile")),
+                .any(|c| matches!(c, TriggerChange::Removed { path, .. } if path == "Justfile")),
             "the deleted Justfile shows Removed"
         );
         assert!(
@@ -503,13 +759,81 @@ mod tests {
         );
 
         // Operator sign-off: re-pin everything; a fresh review is then all-clean.
-        apply_review(&mut m, &changes, "kennel-review");
+        let errs = apply_review(&mut m, &dir, &changes, "kennel-review");
+        assert!(errs.is_empty(), "re-pin should succeed: {errs:?}");
         let after = review(&m, &dir).expect("review again");
         assert!(
             after.iter().all(|c| !c.is_divergence()),
             "after sign-off every trigger is Unchanged: {after:?}"
         );
         assert_eq!(m.generator, "kennel-review");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn revert_restores_a_tampered_trigger_and_removes_a_planted_one() {
+        let dir = tmpdir();
+        std::fs::write(dir.join("Makefile"), b"all:\n\techo trusted\n").expect("write");
+        let (m, errors) = generate(&dir, "kennel-test");
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // The "workload" tampers the Makefile and plants a new package.json.
+        std::fs::write(dir.join("Makefile"), b"all:\n\techo PWNED\n").expect("tamper");
+        std::fs::write(dir.join("package.json"), b"{\"evil\":true}\n").expect("plant");
+
+        let changes = review(&m, &dir).expect("review");
+        for change in &changes {
+            revert(&dir, change).expect("revert");
+        }
+
+        assert_eq!(
+            std::fs::read(dir.join("Makefile")).expect("read"),
+            b"all:\n\techo trusted\n",
+            "the tampered Makefile is restored to its pinned content"
+        );
+        assert!(
+            !dir.join("package.json").exists(),
+            "the planted (unpinned) trigger is removed"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn revert_preserves_an_executable_hooks_mode_and_recreates_a_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir();
+        let hooks = dir.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).expect("mkdir hooks");
+        let hook = hooks.join("post-commit");
+        std::fs::write(&hook, b"#!/bin/sh\necho ok\n").expect("write hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let (m, errors) = generate(&dir, "kennel-test");
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // Delete the pinned hook; revert must recreate it with its 0755 mode.
+        std::fs::remove_file(&hook).expect("rm hook");
+        let changes = review(&m, &dir).expect("review");
+        for change in &changes {
+            revert(&dir, change).expect("revert");
+        }
+        let mode = std::fs::metadata(&hook).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the executable bit survives the revert (got {mode:o})");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn prune_store_drops_unreferenced_blobs() {
+        let dir = tmpdir();
+        std::fs::write(dir.join("Makefile"), b"v1\n").expect("write");
+        let (mut m, _) = generate(&dir, "kennel-test");
+        // A new content version leaves the old blob behind until pruned.
+        std::fs::write(dir.join("Makefile"), b"v2\n").expect("rewrite");
+        let changes = review(&m, &dir).expect("review");
+        apply_review(&mut m, &dir, &changes, "kennel-review");
+        let blobs = || std::fs::read_dir(store_dir(&dir)).expect("ls").count();
+        assert_eq!(blobs(), 2, "both the v1 and v2 blobs exist before pruning");
+        prune_store(&dir, &m);
+        assert_eq!(blobs(), 1, "only the referenced (v2) blob survives");
         cleanup(&dir);
     }
 
