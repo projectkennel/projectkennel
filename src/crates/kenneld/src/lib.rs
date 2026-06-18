@@ -150,6 +150,17 @@ pub trait Privileged {
             "factory construction not supported by this Privileged impl",
         ))
     }
+
+    /// Release (unmount) an exclusive over-mount at `host` (§2.7) — the teardown / `kennel
+    /// release` counterpart to the factory's exclusive over-mount. The *mount* rides the
+    /// `construct` factory; only the release is a standalone op (it happens at teardown, or on
+    /// crash recovery). Defaults to a no-op-`Ok` for impls without a real helper (tests).
+    ///
+    /// # Errors
+    /// An OS error if the helper cannot be invoked or refuses.
+    fn release_exclusive(&self, _host: &Path) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The production [`Privileged`] implementation: each call invokes the installed
@@ -178,6 +189,10 @@ impl Privileged for HelperClient {
         prefix: u8,
     ) -> io::Result<Response> {
         kennel_privhelper::client::del_address(&self.helper, ctx, interface, addr, prefix)
+    }
+
+    fn release_exclusive(&self, host: &Path) -> io::Result<()> {
+        kennel_privhelper::client::release_exclusive(&self.helper, host)
     }
 
     fn construct_kennel(
@@ -858,6 +873,7 @@ fn bring_up<P: Privileged + Sync>(
                     source: sub.clone(),
                     target: sub,
                     writable: false,
+                    exclusive: false,
                 });
             }
             // Bind the ssh binder-dialer in at its own path (read-only) so the synthetic
@@ -867,6 +883,7 @@ fn bring_up<P: Privileged + Sync>(
                     source: bin.clone(),
                     target: bin.clone(),
                     writable: false,
+                    exclusive: false,
                 });
             }
             command.env("HOME", &view.shim_root);
@@ -1281,6 +1298,7 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
             source: shim_bin.clone(),
             target: shim_bin.clone(),
             writable: false,
+            exclusive: false,
         });
     }
     plan.landlock_fs
@@ -1324,6 +1342,7 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
             source: socks5_bin.to_path_buf(),
             target: socks5_bin.to_path_buf(),
             writable: false,
+            exclusive: false,
         });
     }
     plan.landlock_fs.push((
@@ -1374,6 +1393,7 @@ fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, po
             source: client_bin.to_path_buf(),
             target: client_bin.to_path_buf(),
             writable: false,
+            exclusive: false,
         });
     }
     plan.landlock_fs.push((

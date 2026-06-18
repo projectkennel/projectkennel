@@ -152,6 +152,29 @@ pub fn del_address(
     )
 }
 
+/// Invoke the privhelper to release (unmount) an exclusive over-mount at `host` (§2.7).
+///
+/// The teardown / `kennel release` counterpart to the factory's exclusive over-mount. A
+/// subcommand op (argv), not the fixed-request wire; success is exit 0.
+///
+/// # Errors
+/// An OS error if the helper cannot be spawned, or a non-zero exit (refused / unmount failed).
+pub fn release_exclusive(helper: &Path, host: &Path) -> io::Result<()> {
+    let status = Command::new(helper)
+        .arg("exclusive-unmount")
+        .arg(host)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "kennel-privhelper exclusive-unmount {} exited with {:?}",
+            host.display(),
+            status.code()
+        )))
+    }
+}
+
 fn addr_request(op: Op, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Request {
     Request {
         op,

@@ -268,6 +268,19 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    kennel's uid 0 for the root-owned construction (below).
     let granted = half.granted_gids.clone();
     let namespaces = half.namespaces; // captured before `half` moves into the child
+    // The host sources of the exclusive binds (§2.7), captured before `half` moves into the
+    // child: the *parent* over-mounts them in the operator's session namespace (the child's
+    // namespace is cloned below, so its view keeps the real inode).
+    let exclusive_sources: Vec<std::path::PathBuf> = half.view.as_ref().map_or_else(
+        Vec::new,
+        |v| {
+            v.binds
+                .iter()
+                .filter(|b| b.exclusive)
+                .map(|b| b.source.clone())
+                .collect()
+        },
+    );
     let child = move || {
         // Each early return trips clone_pid1's `_exit(127)` backstop. Name the failing step on
         // stderr first (inherited from the factory, so it reaches kenneld's journal): a silent
@@ -351,6 +364,20 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     kennel_lib_syscall::unistd::set_uid(0)
         .map_err(|e| io::Error::new(e.kind(), format!("factory setuid(0): {e}")))?;
     write_identity_maps(init_pid, op_uid, op_gid, &granted)?;
+
+    // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7) while we still
+    // hold the privilege (euid 0, before the drop below clears the capability sets). The shadow
+    // lands in the operator's session mount namespace only — the construction child's namespace
+    // was cloned above, so its view keeps the real inode; the operator and the workload no longer
+    // share the path. Verified against `op_uid`: the helper never blind-mounts a path the operator
+    // does not own (overreach). Best-effort per path — a failure (refusal or mount error) is
+    // logged, never fatal: the kennel still runs, the path simply degrades to a plain writable
+    // bind (which is always permitted), exclusivity not in force.
+    for src in &exclusive_sources {
+        if let Err(e) = crate::exclusive::mount_exclusive(src, op_uid) {
+            eprintln!("kennel-privhelper: exclusive bind not enforced: {e}");
+        }
+    }
 
     // Drop straight back to the operator now that the maps are written: the parent escalated
     // ONLY to write them. setgid before setuid (the uid drop to a non-zero value is what

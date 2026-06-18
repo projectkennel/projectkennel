@@ -913,6 +913,15 @@ pub fn run_kennel<P, L>(
     let loaded_tty_filter = loaded.tty_filter;
     // The live trigger-tripwire disposition (§2.5), captured before `loaded` is consumed.
     let on_change = loaded.on_change;
+    // The host sources of the exclusive binds (§2.7), captured before the plan moves into the
+    // spec: released (unmounted) at teardown so the operator's path is not left shadowed.
+    let exclusive_sources: Vec<PathBuf> = loaded.plan.view.as_ref().map_or_else(Vec::new, |v| {
+        v.binds
+            .iter()
+            .filter(|b| b.exclusive)
+            .map(|b| b.source.clone())
+            .collect()
+    });
     // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
     // egress proxy's writer so their events correlate. The per-kennel state dir is
     // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
@@ -1145,6 +1154,19 @@ pub fn run_kennel<P, L>(
     // The workload exited: stop the tripwire watcher thread (best-effort join).
     if let Some(tripwire) = tripwire {
         tripwire.stop();
+    }
+    // Release each exclusive over-mount (§2.7) so the operator's path is no longer shadowed —
+    // the teardown counterpart to the factory's mount. Best-effort + logged: a failure leaves a
+    // leaked lock that `kennel release` / a daemon-restart sweep clears.
+    for src in &exclusive_sources {
+        if let Err(e) = shared.privileged.release_exclusive(src) {
+            eprintln!(
+                "kenneld: warning: could not release exclusive over-mount {}: {e} \
+                 (run `kennel release {}` to clear it)",
+                src.display(),
+                req.kennel
+            );
+        }
     }
     // The workload exited: stop the PTY pump and drop any attached client (its CLI
     // then sees EOF and exits). The broker is also dropped from the registry below.

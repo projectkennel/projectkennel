@@ -347,6 +347,11 @@ pub struct BindMount {
     pub target: PathBuf,
     /// Writable when true; read-only (bind, then RO remount) otherwise.
     pub writable: bool,
+    /// **Exclusive** (`[fs].exclusive`, §2.7, T2.8): the kennel keeps the real inode through
+    /// this bind, but the factory *also* over-mounts an opaque sentinel on `source` in the
+    /// operator's host namespace, so the operator and the workload cannot use the path
+    /// concurrently. Released at teardown (`exclusive-unmount`). Only meaningful with `writable`.
+    pub exclusive: bool,
 }
 
 /// The constructed-`$HOME` view (§7.4.5).
@@ -795,6 +800,11 @@ impl Plan {
                 fs_grants.push((source, writable));
             }
         }
+        // The exclusive sources (§2.7), transformed identically to the bind sources so they
+        // match: `exclusive` is a subset of `write`, so `glob_root` of each yields the same
+        // source path the writable bind carries.
+        let exclusive_sources: std::collections::BTreeSet<PathBuf> =
+            ep.fs.exclusive.iter().map(|p| glob_root(p)).collect();
         // Shortest source path first (parent before child). Stable: equal-length paths keep their
         // first-seen order, so the result is deterministic.
         fs_grants.sort_by_key(|(s, _)| s.as_os_str().len());
@@ -809,10 +819,12 @@ impl Plan {
                 },
             ));
             if !is_special_mount(&source) {
+                let exclusive = writable && exclusive_sources.contains(&source);
                 binds.push(BindMount {
                     source,
                     target,
                     writable,
+                    exclusive,
                 });
             }
         }

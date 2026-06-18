@@ -376,6 +376,7 @@ fn put_view(w: &mut Writer, v: &ShimView) {
         w.path(&b.source);
         w.path(&b.target);
         w.bool(b.writable);
+        w.bool(b.exclusive);
     }
     w.count(v.dev_allow.len());
     for d in &v.dev_allow {
@@ -525,10 +526,12 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         let source = r.path()?;
         let target = r.path()?;
         let writable = r.bool()?;
+        let exclusive = r.bool()?;
         binds.push(BindMount {
             source,
             target,
             writable,
+            exclusive,
         });
     }
     let mut dev_allow = Vec::new();
@@ -970,11 +973,13 @@ mod tests {
                         source: PathBuf::from("/usr"),
                         target: PathBuf::from("/usr"),
                         writable: false,
+                        exclusive: false,
                     },
                     BindMount {
                         source: PathBuf::from("/home/op/work"),
                         target: PathBuf::from("/home/kennel/work"),
                         writable: true,
+                        exclusive: true,
                     },
                 ],
                 dev_allow: vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/net/tun")],

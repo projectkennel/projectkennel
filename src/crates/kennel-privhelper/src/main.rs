@@ -19,7 +19,7 @@ use std::os::fd::AsFd as _;
 use std::process::ExitCode;
 
 use kennel_privhelper::wire::{Request, Response, Status, REQUEST_LEN};
-use kennel_privhelper::{alloc, construct, exec};
+use kennel_privhelper::{alloc, construct, exclusive, exec};
 
 fn main() -> ExitCode {
     // Scrub the inherited environment before anything else. The helper runs privileged and
@@ -49,6 +49,27 @@ fn main() -> ExitCode {
         }
         construct::run_construct(std::io::stdin().as_fd());
     }
+
+    // Release an exclusive host-bind over-mount (§2.7): `exclusive-unmount <host>`. The *mount*
+    // is folded into the `construct` factory (it is just another of the mounts it already does,
+    // for a bind flagged exclusive); only the *release* is a standalone op, because it happens at
+    // a different time — teardown, or `kennel release` recovery after a crash. Argv-supplied,
+    // gated on a subkennel allocation like every privileged op.
+    let arg1 = std::env::args().nth(1);
+    if arg1.as_deref() == Some("exclusive-unmount") {
+        if alloc::load(kennel_lib_syscall::unistd::real_uid()).is_none() {
+            eprintln!(
+                "kennel-privhelper: refusing `exclusive-unmount`: caller has no /etc/kennel/subkennel allocation"
+            );
+            return ExitCode::from(1);
+        }
+        let Some(path) = std::env::args().nth(2) else {
+            eprintln!("kennel-privhelper: `exclusive-unmount` needs a host path argument");
+            return ExitCode::from(2);
+        };
+        return exclusive::unmount_exclusive(std::path::Path::new(&path));
+    }
+
     let mut buf = Vec::new();
     if std::io::stdin().read_to_end(&mut buf).is_err() {
         return respond(Response::protocol());
