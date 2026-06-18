@@ -426,7 +426,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
 
     // First the daemon confirms the launch, then (when the workload exits) the code.
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-        Response::Started { ctx, pid } => {
+        // Non-interactive (piped) launch: stdio passes straight through, no proxied
+        // terminal, so `filter_escapes` does not apply here.
+        Response::Started { ctx, pid, .. } => {
             eprintln!("kennel `{name}` started (ctx {ctx}, pid {pid})");
         }
         Response::Error(message) => return Err(message),
@@ -946,13 +948,15 @@ fn run_interactive(
     send(&conn, request, &[theirs.as_fd()])?;
     drop(theirs);
 
-    // The daemon confirms the launch (or reports a bring-up failure).
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-        Response::Started { .. } => {}
-        Response::Error(message) => return Err(message),
-        other => return Err(format!("unexpected response: {other:?}")),
-    }
-    proxy_session(conn, ours, name)
+    // The daemon confirms the launch (or reports a bring-up failure) and tells us whether
+    // to filter the workload's terminal escapes client-side (§4.8 — the broker routes raw).
+    let filter_escapes =
+        match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+            Response::Started { filter_escapes, .. } => filter_escapes,
+            Response::Error(message) => return Err(message),
+            other => return Err(format!("unexpected response: {other:?}")),
+        };
+    proxy_session(conn, ours, name, filter_escapes)
 }
 
 /// `kennel attach <name>`: reconnect a terminal to a still-running kennel's pty. The
@@ -982,12 +986,13 @@ fn attach(args: &[String]) -> Result<ExitCode, String> {
         &[theirs.as_fd()],
     )?;
     drop(theirs);
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-        Response::Attached { .. } => {}
-        Response::Error(message) => return Err(message),
-        other => return Err(format!("unexpected response: {other:?}")),
-    }
-    proxy_session(conn, ours, name)
+    let filter_escapes =
+        match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+            Response::Attached { filter_escapes, .. } => filter_escapes,
+            Response::Error(message) => return Err(message),
+            other => return Err(format!("unexpected response: {other:?}")),
+        };
+    proxy_session(conn, ours, name, filter_escapes)
 }
 
 /// `Ctrl-\` (FS, `0x1c`) then `d`: the detach sequence (rarer in shell use than
@@ -1062,7 +1067,19 @@ fn control_reader(
 /// holds the master, so we relay the size rather than `ioctl` it). On a local detach we
 /// restore the terminal and exit 0; on a remote end we read the daemon's final
 /// `Exited`/`Detached` over `conn`.
-fn proxy_session(conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitCode, String> {
+///
+/// When `filter_escapes` is set (the `[tty]` policy decision the daemon conveyed in
+/// `Response::Started`/`Attached`), the broker → stdout pump runs the workload's output
+/// through the `kennel-lib-term` escape filter **here** — the daemon broker is a raw
+/// router and keeps the `vte` parser of workload-controlled bytes out of its TCB (§4.8).
+/// The detach-key scan stays on the *input* path: those are operator-controlled bytes,
+/// not workload output, so no workload-controlled parser runs CLI-side either way.
+fn proxy_session(
+    conn: UnixStream,
+    ours: UnixStream,
+    name: &str,
+    filter_escapes: bool,
+) -> Result<ExitCode, String> {
     use std::sync::atomic::AtomicBool;
     use std::sync::{mpsc, Arc};
     // Tell the broker our initial size, then relay every later SIGWINCH.
@@ -1136,10 +1153,9 @@ fn proxy_session(conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitC
         .as_fd()
         .try_clone_to_owned()
         .map_err(|e| format!("stdout dup: {e}"))?;
-    let mut out_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
+    let out_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
     std::thread::spawn(move || {
-        let mut w = std::fs::File::from(stdout_dup);
-        let _ = std::io::copy(&mut out_sock, &mut w);
+        output_pump(out_sock, std::fs::File::from(stdout_dup), filter_escapes);
     });
 
     // Control connection reader: handles operator prompts inline and resolves the outcome.
@@ -1176,6 +1192,35 @@ fn proxy_session(conn: UnixStream, ours: UnixStream, name: &str) -> Result<ExitC
         Err(_) => {
             drop(ours);
             Err("session ended without an outcome".to_owned())
+        }
+    }
+}
+
+/// The broker → terminal pump: copy the kennel's output socket to the real terminal
+/// (`out`), filtering dangerous escapes client-side when `filter_escapes` is set.
+///
+/// The daemon's broker is a raw-byte router (§4.8) — it never parses workload output —
+/// so the `kennel-lib-term` `vte` filter runs here, keeping that parser of
+/// workload-controlled bytes out of the daemon TCB. One `Filter` spans the whole received
+/// stream (ring replay + live), so a sequence split across reads, or truncated at the
+/// replayed ring head, is tracked by the parser state machine (an incomplete escape is
+/// dropped). Without filtering it is a plain raw copy.
+fn output_pump<W: std::io::Write>(mut out_sock: UnixStream, mut out: W, filter_escapes: bool) {
+    use std::io::Read as _;
+    if !filter_escapes {
+        let _ = std::io::copy(&mut out_sock, &mut out);
+        return;
+    }
+    let mut filter = kennel_lib_term::Filter::new(kennel_lib_term::FilterPolicy::default());
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match out_sock.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let filtered = filter.feed(buf.get(..n).unwrap_or_default());
+        if !filtered.is_empty() && out.write_all(&filtered).is_err() {
+            break;
         }
     }
 }
@@ -3629,6 +3674,41 @@ mod tests {
     use super::*;
 
     const BASE_CONFINED: &[u8] = include_bytes!("../../../../templates/base-confined/policy.toml");
+
+    /// Drive `output_pump` over a socketpair: buffer `input` on the broker end and close
+    /// it, then run the pump (to EOF) on this thread into a `Vec` writer and return what
+    /// reached the "terminal". `filter_escapes` selects the filtering vs raw-copy path.
+    fn pump_through(input: &[u8], filter_escapes: bool) -> Vec<u8> {
+        let (broker_end, client_end) = UnixStream::pair().expect("socketpair");
+        {
+            use std::io::Write as _;
+            let mut w = broker_end;
+            w.write_all(input).expect("write input");
+            // Drop closes the socket so the pump reads the buffered bytes then sees EOF.
+        }
+        let mut got = Vec::new();
+        output_pump(client_end, &mut got, filter_escapes);
+        got
+    }
+
+    #[test]
+    fn output_pump_filters_escapes_client_side() {
+        // The dangerous OSC-52 clipboard write is dropped on the way to the terminal; the
+        // surrounding benign bytes survive. This is the client-side half of the W11 cut —
+        // the daemon broker routes raw and never runs this parser (§4.8).
+        let got = pump_through(b"hi\x1b]52;c;cGF5bG9hZA==\x07bye", true);
+        let text = String::from_utf8_lossy(&got);
+        assert!(text.contains("hi") && text.contains("bye"), "{text:?}");
+        assert!(!text.contains("52;"), "clipboard escape dropped: {text:?}");
+    }
+
+    #[test]
+    fn output_pump_passes_raw_when_filtering_disabled() {
+        // `[tty].filter_terminal_escapes = false` ⇒ the daemon sends filter_escapes=false
+        // and the pump is a verbatim copy (the operator opted out, footgun-warn-not-forbid).
+        let raw = b"hi\x1b]52;c;cGF5bG9hZA==\x07bye";
+        assert_eq!(pump_through(raw, false).as_slice(), raw);
+    }
 
     #[test]
     fn rewrite_template_base_replaces_only_the_reference() {

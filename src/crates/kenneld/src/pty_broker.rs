@@ -10,25 +10,36 @@
 //! Flow (the `master → client` direction):
 //!
 //! ```text
-//! workload pty master ─▶ [kennel-lib-term filter] ─▶ ring buffer ─▶ attached client (if any)
+//! workload pty master ─▶ raw ring buffer ─▶ attached client (if any) ─▶ [client-side filter]
 //! ```
 //!
-//! The pump **always drains the master** (and filters into the ring) even with no
-//! client attached, so the workload never blocks on a full pty; on reattach the ring
-//! tail is replayed (tmux-style). The reverse direction (client input → master) runs
-//! only while a client is attached.
+//! The broker is a **raw-byte router**: it stores the workload's output verbatim in the
+//! ring and writes it verbatim to the attached client. The terminal-escape filter
+//! (`kennel-lib-term`'s `vte` parser) does **not** run here — it runs *client-side*, in
+//! the `kennel` CLI, on the bytes' way to the real terminal (§4.8; the TCB only shrinks).
+//! That keeps the daemon's only parser of *workload-controlled* bytes out of the
+//! privileged TCB; the daemon conveys the `[tty]` filter decision to each client (in
+//! [`Response::Started`]/[`Response::Attached`]) and the client enforces it. The
+//! workload cannot choose its client, so it cannot opt out of filtering; a raw consumer
+//! of the attach socket only footguns its own terminal (warn, don't forbid).
+//!
+//! The pump **always drains the master** (into the ring) even with no client attached,
+//! so the workload never blocks on a full pty; on reattach the raw ring tail is replayed
+//! (tmux-style) and the client's own filter, fed the full received stream, stays in sync
+//! (a truncated escape at the ring head is an incomplete sequence ⇒ harmlessly dropped).
+//! The reverse direction (client input → master) runs only while a client is attached.
 //!
 //! Single client: a second attach **takes over** (the prior client is dropped with a
-//! `Detached` note) — the "my SSH dropped, reconnect" case. The filter is applied at
-//! this single master-read point, so every attach/reattach is filtered identically
-//! and no client can bypass it. No `setns`, no second process in the kennel — only the
-//! master fd (already in kenneld's TCB) and a benign client socket.
+//! `Detached` note) — the "my SSH dropped, reconnect" case. No `setns`, no second process
+//! in the kennel — only the master fd (already in kenneld's TCB) and a benign client
+//! socket.
+//!
+//! [`Response::Started`]: crate::control::Response::Started
+//! [`Response::Attached`]: crate::control::Response::Attached
 
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::{Arc, Condvar, Mutex};
-
-use kennel_lib_term::{Filter, FilterPolicy};
 
 /// Why a client's session ended (the `kennel run`/`kennel attach` outcome).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,14 +87,20 @@ pub struct PtyBroker {
     /// Notified when `generation` or `done` changes, so a waiting `run_attach` learns
     /// it was taken over or the workload exited.
     changed: Arc<Condvar>,
+    /// The `[tty]` escape-filter decision (§7.9.5) this kennel was started with. The
+    /// broker does **not** apply it (it is a raw-byte router); it carries the bool so an
+    /// attaching client learns whether to filter, conveyed in `Response::Started`/
+    /// `Response::Attached`. The client owns the filter (§4.8).
+    filter_escapes: bool,
 }
 
 impl PtyBroker {
-    /// Create a broker owning `master`, run the workload output through `policy`, and
-    /// spawn the pump thread. `initial_client` is the `kennel run` connection's
-    /// terminal socket (the first attached client), or `None` for a detached start.
+    /// Create a broker owning `master` and spawn the raw-output pump. `filter_escapes` is
+    /// the kennel's `[tty]` filter decision, carried for the client (the broker does not
+    /// filter). `initial_client` is the `kennel run` connection's terminal socket (the
+    /// first attached client), or `None` for a detached start.
     #[must_use]
-    pub fn start(master: OwnedFd, policy: FilterPolicy, initial_client: Option<OwnedFd>) -> Self {
+    pub fn start(master: OwnedFd, filter_escapes: bool, initial_client: Option<OwnedFd>) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             master,
             ring: Vec::with_capacity(RING_CAPACITY),
@@ -94,12 +111,20 @@ impl PtyBroker {
         let broker = Self {
             inner,
             changed: Arc::new(Condvar::new()),
+            filter_escapes,
         };
-        broker.spawn_pump(policy);
+        broker.spawn_pump();
         if let Some(sock) = initial_client {
             let _ = broker.attach(sock);
         }
         broker
+    }
+
+    /// The `[tty]` escape-filter decision this kennel runs under, for the daemon to
+    /// convey to an attaching client (which owns the filter — the broker does not).
+    #[must_use]
+    pub const fn filter_escapes(&self) -> bool {
+        self.filter_escapes
     }
 
     /// Attach a new client terminal, taking over from any current one (the prior
@@ -230,15 +255,15 @@ impl PtyBroker {
         }
     }
 
-    /// The pump: read the master, filter, append to the ring (bounded), and write to
-    /// the attached client if any. Runs until the workload exits (a master read of 0
-    /// or an error). Client input→master is handled by [`Self::spawn_input`] per
-    /// client; here is the output direction only.
-    fn spawn_pump(&self, policy: FilterPolicy) {
+    /// The pump: read the master, append the raw bytes to the ring (bounded), and write
+    /// them verbatim to the attached client if any. The terminal-escape filter runs
+    /// client-side (§4.8), so the pump is a raw router. Runs until the workload exits (a
+    /// master read of 0 or an error). Client input→master is handled by
+    /// [`Self::spawn_input`] per client; here is the output direction only.
+    fn spawn_pump(&self) {
         let inner = Arc::clone(&self.inner);
         let changed = Arc::clone(&self.changed);
         std::thread::spawn(move || {
-            let mut filter = Filter::new(policy);
             let mut buf = [0u8; 4096];
             loop {
                 // Read the master outside the lock (a borrowed fd cloned under the lock).
@@ -267,15 +292,15 @@ impl PtyBroker {
                         Ok(n) => n,
                     }
                 };
-                let out = filter.feed(buf.get(..n).unwrap_or_default());
+                let out = buf.get(..n).unwrap_or_default();
                 if out.is_empty() {
                     continue;
                 }
                 if let Ok(mut g) = inner.lock() {
-                    append_ring(&mut g.ring, &out);
+                    append_ring(&mut g.ring, out);
                     if let Some(client) = &g.client {
                         let mut w = borrow_for_io(&client.sock);
-                        if w.write_all(&out).is_err() {
+                        if w.write_all(out).is_err() {
                             // Client went away mid-write: shut it down (unblock its
                             // input thread, release the dup) and detach, keep pumping.
                             if let Some(gone) = g.client.take() {
@@ -371,37 +396,33 @@ mod tests {
 
     /// A broker whose "master" is one end of a socketpair: the test writes the other
     /// end (`master_peer`) to simulate workload output, and the pump fans it to clients.
-    fn broker_with_socketpair_master(policy: FilterPolicy) -> (PtyBroker, UnixStream) {
+    fn broker_with_socketpair_master(filter_escapes: bool) -> (PtyBroker, UnixStream) {
         let (master, master_peer) = UnixStream::pair().expect("master pair");
-        let broker = PtyBroker::start(OwnedFd::from(master), policy, None);
+        let broker = PtyBroker::start(OwnedFd::from(master), filter_escapes, None);
         (broker, master_peer)
     }
 
     #[test]
-    fn output_reaches_the_attached_client_and_is_filtered() {
-        let (broker, mut master_peer) = broker_with_socketpair_master(FilterPolicy::default());
+    fn output_reaches_the_attached_client_verbatim() {
+        // The broker is a raw-byte router: the dangerous OSC-52 escape passes through it
+        // unchanged — the CLI's client-side filter drops it on the way to the terminal
+        // (§4.8). The broker's job is only to deliver the workload's bytes intact.
+        let (broker, mut master_peer) = broker_with_socketpair_master(true);
         let (client, client_peer) = UnixStream::pair().expect("client pair");
         assert!(broker.attach(OwnedFd::from(client_peer)).is_some());
         assert!(broker.is_attached());
-        // A benign title plus a dangerous OSC-52 clipboard write: only the former passes.
-        std::io::Write::write_all(
-            &mut master_peer,
-            b"\x1b]0;title\x07hello\x1b]52;c;cGF5bG9hZA==\x07world",
-        )
-        .expect("write master");
+        let raw = b"\x1b]0;title\x07hello\x1b]52;c;cGF5bG9hZA==\x07world";
+        std::io::Write::write_all(&mut master_peer, raw).expect("write master");
         let got = read_some(&client, 256);
-        let text = String::from_utf8_lossy(&got);
-        assert!(text.contains("hello") && text.contains("world"), "{text:?}");
-        assert!(
-            !text.contains("52;"),
-            "clipboard escape must be dropped: {text:?}"
-        );
+        assert_eq!(got.as_slice(), raw, "broker routes raw, unfiltered bytes");
+        // The filter decision is carried for the client, not applied here.
+        assert!(broker.filter_escapes());
         broker.shutdown();
     }
 
     #[test]
     fn a_second_attach_takes_over_and_supersedes_the_first() {
-        let (broker, _master_peer) = broker_with_socketpair_master(FilterPolicy::passthrough());
+        let (broker, _master_peer) = broker_with_socketpair_master(false);
         let (_c1, c1_peer) = UnixStream::pair().expect("c1");
         let gen1 = broker.attach(OwnedFd::from(c1_peer)).expect("first attach");
         let (_c2, c2_peer) = UnixStream::pair().expect("c2");
@@ -416,7 +437,7 @@ mod tests {
 
     #[test]
     fn shutdown_resolves_a_waiter_as_workload_exited() {
-        let (broker, _master_peer) = broker_with_socketpair_master(FilterPolicy::passthrough());
+        let (broker, _master_peer) = broker_with_socketpair_master(false);
         let (_c, c_peer) = UnixStream::pair().expect("client");
         let gen = broker.attach(OwnedFd::from(c_peer)).expect("attach");
         let waiter = {
@@ -432,7 +453,7 @@ mod tests {
 
     #[test]
     fn attach_after_exit_is_refused() {
-        let (broker, _master_peer) = broker_with_socketpair_master(FilterPolicy::passthrough());
+        let (broker, _master_peer) = broker_with_socketpair_master(false);
         broker.shutdown();
         let (_c, c_peer) = UnixStream::pair().expect("client");
         assert!(

@@ -969,9 +969,9 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         return;
     };
 
-    // The CLI's proxied-terminal socket: kenneld's PtyBroker fans the workload's
-    // filtered pty output to `child` and we read it from `ours`. (The master stays in
-    // kenneld now — the client gets bytes, not the fd.)
+    // The CLI's proxied-terminal socket: kenneld's PtyBroker fans the workload's raw pty
+    // output to `child` and we read it from `ours`. (The master stays in kenneld now — the
+    // client gets bytes, not the fd; the escape filter runs client-side, §4.8.)
     let (ours, child) = UnixStream::pair().expect("client terminal socketpair");
     let req = StartRequest {
         policy: h.policy_file.clone(),

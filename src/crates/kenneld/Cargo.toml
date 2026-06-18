@@ -14,9 +14,6 @@ kennel-lib-spawn = { path = "../kennel-lib-spawn" }
 kennel-privhelper = { path = "../kennel-privhelper" }
 kennel-lib-policy = { path = "../kennel-lib-policy" }
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
-# The terminal-escape filter (§7.9.5): the PTY broker runs the workload's output
-# through it (gated by [tty].filter_terminal_escapes) before fanning to a client.
-kennel-lib-term = { path = "../kennel-lib-term" }
 # The control-socket wire protocol (Request/Response framing + socket path),
 # shared with the `kennel` CLI. Re-exported as `kenneld::{control, socket}`; the
 # daemon serves it, the CLI dials it. No serde, no enforcement code.
