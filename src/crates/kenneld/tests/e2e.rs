@@ -347,6 +347,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         term: String::new(),
         interactive: false,
         force: false,
+            watch_paths: Vec::new(),
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -481,6 +482,7 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         term: String::new(),
         interactive: false,
         force: false,
+            watch_paths: Vec::new(),
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -598,6 +600,7 @@ fn run_ttl_kennel(
         term: String::new(),
         interactive: false,
         force: false,
+            watch_paths: Vec::new(),
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -820,6 +823,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         term: "xterm".to_owned(),
         interactive: true,
         force: false,
+            watch_paths: Vec::new(),
     };
 
     let (mut control, mut server) = UnixStream::pair().expect("control socketpair");
@@ -901,6 +905,7 @@ fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
         term: "xterm".to_owned(),
         interactive: true,
         force: false,
+            watch_paths: Vec::new(),
     };
 
     // First client = the Start connection. Run `run_kennel` on its own thread: it blocks

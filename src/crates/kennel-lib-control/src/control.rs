@@ -104,6 +104,12 @@ pub struct StartRequest {
     /// Ignored unless the policy's `[workload]` is pinned and `argv` is non-empty; then
     /// the daemon refuses the override without it (§7.4).
     pub force: bool,
+    /// Host paths for `kenneld`'s live trigger tripwire to watch (§2.5, T2.8) — each writable
+    /// bind's pinned trigger files and trigger directories, resolved by the CLI (which owns the
+    /// catalogue). The daemon just watches the list; it links no manifest/catalogue logic.
+    /// Empty when `[trust].manifest = false`, when there are no writable triggers, or for a
+    /// non-CLI caller.
+    pub watch_paths: Vec<PathBuf>,
 }
 
 /// A response from the daemon to the CLI.
@@ -299,6 +305,10 @@ impl Request {
                 put_str(&mut b, &req.term);
                 put_u8(&mut b, u8::from(req.interactive));
                 put_u8(&mut b, u8::from(req.force));
+                put_u32(&mut b, u32::try_from(req.watch_paths.len()).unwrap_or(u32::MAX));
+                for p in &req.watch_paths {
+                    put_str(&mut b, &p.to_string_lossy());
+                }
             }
             Self::Stop { kennel } => {
                 put_u8(&mut b, 2);
@@ -343,6 +353,7 @@ impl Request {
                 term: r.string()?,
                 interactive: r.u8()? != 0,
                 force: r.u8()? != 0,
+                watch_paths: r.strings()?.into_iter().map(PathBuf::from).collect(),
             })),
             2 => Ok(Self::Stop {
                 kennel: r.string()?,
@@ -569,6 +580,10 @@ mod tests {
             term: "xterm-256color".to_owned(),
             interactive: true,
             force: false,
+            watch_paths: vec![
+                PathBuf::from("/home/dev/project/Makefile"),
+                PathBuf::from("/home/dev/project/.git/hooks"),
+            ],
         }));
     }
 

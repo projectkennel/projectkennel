@@ -383,6 +383,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let settled_bytes = std::fs::read(&effective_policy)
         .map_err(|e| format!("reading {} for pre-flight: {e}", effective_policy.display()))?;
     ensure_workspace_manifests(&settled_bytes);
+    // Resolve the host paths kenneld's live tripwire should watch (§2.5) — computed here,
+    // CLI-side, because the catalogue lives in this crate; the daemon just watches the list.
+    let watch_paths = workspace_watch_paths(&settled_bytes);
 
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let request = Request::Start(StartRequest {
@@ -398,6 +401,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         interactive: io::stdin().is_terminal(),
         // Force an override of a pinned policy [workload] (only meaningful with a `--` cmd).
         force,
+        watch_paths,
     });
 
     let mut conn = connect()?;
@@ -483,6 +487,44 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
             Err(e) => eprintln!("kennel: could not serialise {}: {e}", path.display()),
         }
     }
+}
+
+/// Resolve the host paths kenneld's live tripwire should watch (§2.5): each writable
+/// workspace root's existing catalogue trigger files plus its existing trigger directories.
+///
+/// Host paths — the writable bind maps them to the same inodes the workload writes, so an
+/// inotify on the host catches the workload's writes; watching the trigger directories
+/// catches a freshly planted hook. Empty when `[trust].manifest = false`.
+fn workspace_watch_paths(settled_bytes: &[u8]) -> Vec<PathBuf> {
+    let Ok(policy) = kennel_lib_policy::parse_settled_unverified(settled_bytes) else {
+        return Vec::new();
+    };
+    if !policy.effective_policy.trust.manifest {
+        return Vec::new();
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let catalogue = kennel_lib_manifest::Catalogue::load();
+    let mut paths = Vec::new();
+    for entry in &policy.effective_policy.fs.write {
+        let Some(root) = writable_root(entry, &home) else {
+            continue;
+        };
+        if !root.is_dir() {
+            continue;
+        }
+        for rel in kennel_lib_manifest::enumerate_triggers(&root, &catalogue) {
+            paths.push(root.join(rel));
+        }
+        for dir in &catalogue.dirs {
+            let abs = root.join(dir);
+            if abs.is_dir() {
+                paths.push(abs);
+            }
+        }
+    }
+    paths
 }
 
 /// `kennel review <policy> [--yes]` — the operator's sign-off on a workspace's trust

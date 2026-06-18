@@ -38,6 +38,7 @@ pub mod pty_broker;
 pub mod server;
 pub mod ssh;
 pub mod sshd;
+pub mod tripwire;
 
 // The control-socket wire protocol now lives in its own crate so the unprivileged
 // `kennel` CLI can link it without the daemon's enforcement code. Re-exported here

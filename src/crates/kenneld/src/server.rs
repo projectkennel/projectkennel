@@ -87,6 +87,9 @@ pub struct Loaded {
     /// (`[tty].filter_terminal_escapes`, §7.9.5). The `PtyBroker` reads this to pick the
     /// `kennel-lib-term` filter policy.
     pub tty_filter: bool,
+    /// The live trigger-tripwire disposition (`[trust].on_change`, §2.5): what `kenneld` does
+    /// when a watched trigger is mutated during the run.
+    pub on_change: kennel_lib_policy::OnChangeAction,
     /// The workload the policy embeds (§7.4): `argv`/`cwd`/`pinned`/`sha256`. Empty ⇒ the
     /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
     /// request's argv (the request wins unless `pinned`); see `effective_workload`.
@@ -908,6 +911,8 @@ pub fn run_kennel<P, L>(
     let audit_runtime = crate::audit::load_audit_defaults().overlay(&loaded.audit);
     // The PTY escape-filter decision (§7.9.5), captured before `loaded` is consumed.
     let loaded_tty_filter = loaded.tty_filter;
+    // The live trigger-tripwire disposition (§2.5), captured before `loaded` is consumed.
+    let on_change = loaded.on_change;
     // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
     // egress proxy's writer so their events correlate. The per-kennel state dir is
     // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
@@ -1115,12 +1120,32 @@ pub fn run_kennel<P, L>(
     };
     let _ = control::send_response(conn, &Response::Started { ctx, pid });
 
+    // Start the live trigger tripwire (§2.5, T2.8): watch the CLI-resolved trigger paths under
+    // the writable binds and apply `[trust].on_change` on a mutation. Best-effort — `None` when
+    // there is nothing to watch (no triggers / `[trust].manifest = false` ⇒ empty `watch_paths`)
+    // or inotify is unavailable; the teardown `kennel review` is the authoritative backstop.
+    let tripwire = {
+        let writer = audit.clone().unwrap_or_else(|| {
+            Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone()))
+        });
+        crate::tripwire::Tripwire::start(
+            &req.watch_paths,
+            on_change,
+            cgroup::kennel_cgroup(&shared.identity.cgroup_base, ctx),
+            writer,
+        )
+    };
+
     // Block until the kennel exits, then tear down. TTL is enforced inside the kennel (§9.7):
     // `kennel-bin-init`'s timer makes the blocking `NOTIFY_TTL_EXPIRED` call, which the node-0
     // handler services (freeze + decide; the `ttl-warn`/`ttl-terminate` audit events come from
     // there). So this is a plain wait — on `exit` the handler kills the frozen cgroup, and this
     // wait returns the resulting status. The audited privileged records the teardown too.
     let status = kennel.stop(&audited);
+    // The workload exited: stop the tripwire watcher thread (best-effort join).
+    if let Some(tripwire) = tripwire {
+        tripwire.stop();
+    }
     // The workload exited: stop the PTY pump and drop any attached client (its CLI
     // then sees EOF and exits). The broker is also dropped from the registry below.
     if let Some(broker) = &broker {
@@ -1444,6 +1469,7 @@ mod tests {
             term: String::new(),
             interactive: false,
             force,
+            watch_paths: Vec::new(),
         }
     }
 
@@ -1661,6 +1687,7 @@ mod tests {
                 },
                 workload: kennel_lib_policy::WorkloadRuntime::default(),
                 tty_filter: true,
+                on_change: kennel_lib_policy::OnChangeAction::Warn,
             })
         }
     }
