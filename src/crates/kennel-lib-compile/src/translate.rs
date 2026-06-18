@@ -123,6 +123,11 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
             .as_ref()
             .and_then(|t| t.manifest)
             .unwrap_or(true),
+        on_change: effective
+            .trust
+            .as_ref()
+            .and_then(|t| t.on_change)
+            .unwrap_or_default(),
     };
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);

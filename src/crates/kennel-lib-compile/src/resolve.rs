@@ -248,6 +248,7 @@ fn fold_tty(p: &TtySection, c: &TtySection) -> TtySection {
 fn fold_trust(p: &TrustSection, c: &TrustSection) -> TrustSection {
     TrustSection {
         manifest: or(&c.manifest, &p.manifest),
+        on_change: or(&c.on_change, &p.on_change),
     }
 }
 

@@ -846,6 +846,10 @@ pub struct TrustSection {
     /// irrelevant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<bool>,
+    /// What `kenneld` does when a watched trigger is mutated during the run (§2.5):
+    /// `warn` (audit, default), `freeze` (suspend the workload), or `kill` (terminate it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_change: Option<kennel_lib_policy::OnChangeAction>,
 }
 
 /// Parse source-policy TOML bytes into a [`SourcePolicy`].

@@ -522,18 +522,42 @@ impl Default for TtyPolicy {
     }
 }
 
-/// `[trust]` — the masked workspace manifest (§7.4, T2.8).
+/// The live `on_change` disposition (§2.5, T2.8): what `kenneld` does the moment a watched
+/// execution trigger is mutated *during* the run.
+///
+/// Distinct from the host-side teardown disposition. Unprivileged: it acts on the workload
+/// via the cgroup `kenneld` already owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnChangeAction {
+    /// Record an `fs.mutation` audit event and let the workload run on (the live watch is
+    /// best-effort; the authoritative verdict is the teardown review).
+    #[default]
+    Warn,
+    /// Suspend the workload — freeze the cgroup — so the operator can inspect and decide.
+    Freeze,
+    /// Terminate the workload (kill the cgroup).
+    Kill,
+}
+
+/// `[trust]` — the masked workspace manifest + the live tripwire disposition (§7.4, §2.5, T2.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustPolicy {
     /// Maintain a masked `.trust-manifest.json` at each writable root. Default `true`.
     pub manifest: bool,
+    /// What `kenneld` does when a watched trigger is mutated during the run. Default `warn`.
+    #[serde(default)]
+    pub on_change: OnChangeAction,
 }
 
 impl Default for TrustPolicy {
-    /// The secure default: the manifest is maintained.
+    /// The secure default: the manifest is maintained; a live mutation is warned (audited).
     fn default() -> Self {
-        Self { manifest: true }
+        Self {
+            manifest: true,
+            on_change: OnChangeAction::Warn,
+        }
     }
 }
 
