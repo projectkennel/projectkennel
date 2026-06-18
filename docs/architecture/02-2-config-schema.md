@@ -71,7 +71,8 @@ The full section list:
 | `[unsafe]` and `[unsafe.*]` | Advisory footgun umbrella: `[unsafe.ptrace]` / `[unsafe.signal]` cross-boundary allowlists whose scoping is real but enforced by the PID namespace + seccomp (not the section) — declaring them warns. | §7.9 |
 | `[lifecycle]` | TTL and TTL-action | §9 |
 | `[tty]` | Terminal hardening for interactive runs: filter dangerous terminal escapes (clipboard/notification/device-control) from the workload's PTY output | §7.9 |
-| `[trust]` | Masked workspace manifest: maintain a `.trust-manifest.json` at each writable root (host-readable, masked invisible inside the kennel) so host tooling can detect workspace-trigger tampering | §7.4 |
+| `[trust]` | Masked, pinned workspace manifest (`.trust-manifest.json` + `.trust-manifest.d/` blob store) at each writable root, masked invisible inside the kennel (T2.8). `manifest` (default on) maintains it; `on_change` (`warn`/`freeze`/`kill`, default `warn`) is the live tripwire disposition kenneld applies when a watched trigger is mutated during the run | §7.4 |
+| `[fs].exclusive` | Writable paths bound **exclusively**: while the kennel runs, the factory over-mounts an opaque sentinel on the host path so the operator and the workload do not use it concurrently (severs the live confused-deputy channel, T2.8 / §2.7). Subset of `fs.write`; ownership-gated (the privhelper refuses a path the operator does not own); released at teardown, `kennel release` for crash recovery | §7.4 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
 This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for **every** section — `[net]`/`[net.*]` in §The `[net]` section, the rest in §The remaining sections — field reference, both kept exact against the parser. The §7.x design chapters carry the *rationale* for each section; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
@@ -648,6 +649,7 @@ Execution is **deny-by-default**: an empty or absent `allow` denies all execve. 
 |---|---|---|
 | `read` | array of path globs | Paths granted read (and directory traversal / execute). |
 | `write` | array of path globs | Paths granted write (covers create/modify/delete — there is no separate `create` field). |
+| `exclusive` | array of paths | Writable paths bound **exclusively** (§7.4 / §2.7, T2.8): while the kennel runs, the factory over-mounts an opaque sentinel on the host path so the operator and the workload do not use it concurrently. Subset of `write` (a non-`write` entry is a compile error). Ownership-gated — the privhelper refuses a path the operator does not own (overreach), checked early at compile/run too. Released at teardown; `kennel release <policy>` clears a crash-leaked over-mount. |
 | `deny` | array of path globs | Categorical denies, belt-and-braces over the constructed view, evaluated before any allow. |
 
 `[fs.home]` — the constructed `$HOME` shim (mandatory once resolved):
@@ -755,7 +757,10 @@ visibility is **not** here — it lives in `[fs.proc]`, part of the constructed 
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `manifest` | bool | `true` | Maintain a `.trust-manifest.json` at the root of every writable/persistent workspace. The CLI generates/refreshes it host-side pre-flight (pinning the SHA-256 of known execution triggers — `Makefile`, `package.json`, `.vscode/tasks.json`, `.git/hooks/*` — and listing untrusted-path globs); the spawn view **masks** it (an empty over-mount inside each writable bind), so the confined workload can neither read the pins nor forge them, while host IDEs read the untouched real file and refuse to run a trigger whose hash diverged (`T2.8`). Re-pin after legitimate edits with `kennel review`. Set `false` to opt a workload out (no manifest is generated or masked). |
+| `manifest` | bool | `true` | Maintain a `.trust-manifest.json` (+ `.trust-manifest.d/` content-addressed blob store) at the root of every writable/persistent workspace. The CLI generates/refreshes it host-side pre-flight, pinning each catalogued execution trigger by SHA-256 (the trigger set is the additive `triggers.catalog` cascade — vendor → `/etc/kennel` → `~/.config` — plus escaping symlinks). The spawn view **masks** both the manifest and its store (an empty over-mount inside each writable bind), so the confined workload can neither read the pins nor forge them. Host IDEs read the untouched real file; `kennel review` shows a diff and re-pins after legitimate edits, or `--revert` restores a tampered/planted trigger from its blob. Set `false` to opt a workload out (no manifest is generated, masked, or watched). |
+| `on_change` | enum | `warn` | The live tripwire disposition (`warn` \| `freeze` \| `kill`) kenneld applies the moment a watched trigger is mutated *during* the run, acting on the workload via the cgroup (an unprivileged `inotify` watch, notify-only): `warn` audits `fs.mutation`; `freeze` suspends the workload for the operator; `kill` terminates it. Best-effort live; the teardown `kennel review` is the authoritative backstop. |
+
+The exclusive host-bind ([`[fs].exclusive`](#the-fs-section)) is the companion control: it severs the *live* confused-deputy channel the manifest cannot enumerate, by over-mounting a host-side sentinel for the run.
 
 ### `[ssh]` — per-kennel SSH egress via the re-origination bastion (§7.10)
 

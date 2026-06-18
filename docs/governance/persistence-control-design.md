@@ -1,10 +1,14 @@
 # W1/W2 persistence control — design pass
 
-Status: **design pass — fully steered (2026-06-18)** · Feeds ROADMAP-0.2.0 W1+W2
-Graduates into the design corpus (extending §4.6 trust manifest + §9 `kennel review`) once settled and built.
+Status: **BUILT + e2e-verified (2026-06-18)** · Graduated to THREATS T2.8 (mitigation rewritten to
+the three-limb pin / live tripwire / restore form, plus the `[fs.write].exclusive` channel-sever).
+W1 (manifest v2 + content store + catalogue + `review --revert` + `.d` mask), W2 (inotify tripwire +
+`[trust].on_change` + `fs.mutation` audit + escaping-symlink pins), and the exclusive over-mount
+(factory-folded, ownership-gated, `kennel release` recovery) are all shipped. This doc is retained
+as the design rationale + the maintainer steers (§4) behind the corpus entry.
 
-> The critical-path item. This pass does the design that *can* be settled from the code + the
-> review, and ends with a short list of steers (§4) that are genuinely the maintainer's call.
+> The critical-path item. This pass did the design settled from the code + the review, ending with
+> the steers (§4) that were the maintainer's call — all now resolved and built.
 
 ## 0. What already exists (the foundation — bigger than the roadmap implied)
 
