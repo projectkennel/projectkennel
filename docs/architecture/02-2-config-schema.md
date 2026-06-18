@@ -751,7 +751,7 @@ visibility is **not** here — it lives in `[fs.proc]`, part of the constructed 
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `filter_terminal_escapes` | bool | `true` | Filter dangerous terminal escapes from the workload's PTY output at the broker's single master-read point (`05` PTY broker). Drops OSC 52 (clipboard read/write), OSC 9 / 777 (desktop notifications), and the DCS/APC/PM/SOS device-control bands; passes benign sequences (OSC 0/1/2 title, 8 hyperlink, 4/104 palette, CSI cursor/colour, C0). Best-effort, not a proof: it shuts down the low-effort clipboard/notification-injection class (`T2.6`), not a terminal-specific desync. Set `false` only for a workload that legitimately needs raw escape passthrough. Applies to interactive (PTY) runs; non-interactive stdio is unaffected. |
+| `filter_terminal_escapes` | bool | `true` | Filter dangerous terminal escapes from the workload's PTY output. The filter runs **client-side in the `kennel` CLI** (the daemon broker is a raw-byte router; §4.8 keeps the `vte` parser of workload bytes out of the daemon TCB) — the daemon conveys this decision to each attached client. Drops OSC 52 (clipboard read/write), OSC 9 / 777 (desktop notifications), and the DCS/APC/PM/SOS device-control bands; passes benign sequences (OSC 0/1/2 title, 8 hyperlink, 4/104 palette, CSI cursor/colour, C0). Best-effort, not a proof: it shuts down the low-effort clipboard/notification-injection class (`T2.6`), not a terminal-specific desync. Set `false` only for a workload that legitimately needs raw escape passthrough. Applies to interactive (PTY) runs; non-interactive stdio is unaffected. |
 
 ### `[trust]` — masked workspace manifest (§7.4, T2.8)
 
