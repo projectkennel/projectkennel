@@ -387,6 +387,12 @@ pub struct ShimView {
     /// use — the agent can neither read the integrity pins nor forge them. Empty when
     /// `[trust].manifest = false` or there are no writable binds.
     pub mask_paths: Vec<PathBuf>,
+    /// In-view absolute paths to mask with an empty over-mounted **directory**: the trust
+    /// manifest's content-addressed blob store (`<writable-bind>/.trust-manifest.d`, §2.3 /
+    /// T2.8). Masked alongside the manifest so the workload can neither read the pinned blobs
+    /// (a `revert` baseline / diff source) nor write into — or create — the host store. Empty
+    /// when `[trust].manifest = false` or there are no writable binds.
+    pub mask_dir_paths: Vec<PathBuf>,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -925,14 +931,16 @@ impl Plan {
         // nor forge them, while the host IDE reads the untouched real inode. Gated by
         // `[trust].manifest` (default on); only writable binds carry a manifest. The mask
         // target keys on the bind *target* (the in-kennel path).
-        let mask_paths: Vec<PathBuf> = if ep.trust.manifest {
-            binds
-                .iter()
-                .filter(|b| b.writable)
-                .map(|b| b.target.join(".trust-manifest.json"))
-                .collect()
+        let (mask_paths, mask_dir_paths): (Vec<PathBuf>, Vec<PathBuf>) = if ep.trust.manifest {
+            let writable = || binds.iter().filter(|b| b.writable);
+            (
+                writable().map(|b| b.target.join(".trust-manifest.json")).collect(),
+                // The blob store beside the manifest (kennel-lib-manifest STORE_DIRNAME);
+                // hardcoded here like the manifest filename to keep it off the spawn crate's deps.
+                writable().map(|b| b.target.join(".trust-manifest.d")).collect(),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         let view = Some(ShimView {
@@ -944,6 +952,7 @@ impl Plan {
             proc_hidepid: ep.proc.hidepid,
             binder: true,
             mask_paths,
+            mask_dir_paths,
         });
 
         // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the

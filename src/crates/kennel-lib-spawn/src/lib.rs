@@ -431,6 +431,10 @@ pub fn build_view_and_pivot(
     //     forge, while the host IDE reads the untouched real inode. The mask source is a
     //     fresh empty file in the root tmpfs scaffold (never the host manifest).
     materialize_masks(&view.mask_paths, new_root, &under)?;
+    // 6c. Mask the blob store directory (`.trust-manifest.d`, §2.3) the same way, but with an
+    //     empty read-only *directory* over-mount: `readdir` shows nothing, the workload cannot
+    //     read a pinned blob, and a write into — or creation of — the host store is denied.
+    materialize_dir_masks(&view.mask_dir_paths, new_root, &under)?;
 
     // 7. pivot_root into the new root, then detach the old one.
     let put_old = under(Path::new("/.kennel-oldroot"));
@@ -532,6 +536,51 @@ fn materialize_masks(
             .map_err(|e| io::Error::new(e.kind(), format!("mask bind {}: {e}", dest.display())))?;
         mount::remount_readonly(&dest).map_err(|e| {
             io::Error::new(e.kind(), format!("mask remount_ro {}: {e}", dest.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// Over-mount each blob-store path with an empty, read-only *directory* so the confined
+/// workload cannot read the pinned blobs or write into / create the host store (§2.3 / T2.8).
+///
+/// The directory analogue of [`materialize_masks`]: one shared empty scaffold directory in
+/// the root tmpfs is bound over each in-view `.trust-manifest.d` and remounted read-only, so
+/// `readdir` returns nothing and any write is `EROFS`. A path whose parent bind was not
+/// materialised (source absent) is skipped.
+///
+/// # Errors
+/// Returns the OS error if creating the scaffold dir, a mountpoint, the bind, or the
+/// read-only remount fails.
+fn materialize_dir_masks(
+    mask_dir_paths: &[PathBuf],
+    new_root: &Path,
+    under: &impl Fn(&Path) -> PathBuf,
+) -> io::Result<()> {
+    use kennel_lib_syscall::mount;
+    if mask_dir_paths.is_empty() {
+        return Ok(());
+    }
+    let mask_src = new_root.join(".kennel-mask-d");
+    std::fs::create_dir_all(&mask_src)?;
+    for path in mask_dir_paths {
+        let dest = under(path);
+        let Some(parent) = dest.parent() else {
+            continue;
+        };
+        if !parent.exists() {
+            continue;
+        }
+        // Create the mountpoint dir if the host has no store there yet — masking the path
+        // also denies the workload *creating* a host `.trust-manifest.d`.
+        if dest.symlink_metadata().is_err() {
+            std::fs::create_dir_all(&dest)?;
+        }
+        mount::bind(&mask_src, &dest, false).map_err(|e| {
+            io::Error::new(e.kind(), format!("store mask bind {}: {e}", dest.display()))
+        })?;
+        mount::remount_readonly(&dest).map_err(|e| {
+            io::Error::new(e.kind(), format!("store mask remount_ro {}: {e}", dest.display()))
         })?;
     }
     Ok(())

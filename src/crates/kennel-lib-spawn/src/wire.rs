@@ -389,6 +389,10 @@ fn put_view(w: &mut Writer, v: &ShimView) {
     for p in &v.mask_paths {
         w.path(p);
     }
+    w.count(v.mask_dir_paths.len());
+    for p in &v.mask_dir_paths {
+        w.path(p);
+    }
 }
 
 /// Decode a [`Plan`] from its wire bytes (the inverse of [`encode_plan`]).
@@ -539,6 +543,10 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
     for _ in 0..r.count()? {
         mask_paths.push(r.path()?);
     }
+    let mut mask_dir_paths = Vec::new();
+    for _ in 0..r.count()? {
+        mask_dir_paths.push(r.path()?);
+    }
     Ok(ShimView {
         shim_root,
         binds,
@@ -548,6 +556,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         proc_hidepid,
         binder,
         mask_paths,
+        mask_dir_paths,
     })
 }
 
@@ -974,6 +983,7 @@ mod tests {
                 proc_hidepid: true,
                 binder: true,
                 mask_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.json")],
+                mask_dir_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.d")],
             }),
             new_root: Some(PathBuf::from("/run/user/1000/kennel/root-7")),
             landlock_fs: vec![
