@@ -73,6 +73,98 @@ pub const KNOWN_TRIGGERS: &[&str] = &[
 /// beneath is hashed) — e.g. every script in `.git/hooks/`.
 pub const KNOWN_TRIGGER_DIRS: &[&str] = &[".git/hooks"];
 
+/// The per-layer catalogue filename on the deployment cascade (§2.6).
+pub const CATALOGUE_FILENAME: &str = "triggers.catalog";
+
+/// The effective trigger catalogue (§2.6): which paths are execution triggers.
+///
+/// Composed **additively** across the compiled default ([`KNOWN_TRIGGERS`]/[`KNOWN_TRIGGER_DIRS`])
+/// and the deployment layers `/etc/kennel/triggers.catalog` then `~/.config/kennel/triggers.catalog`
+/// — each layer adds patterns, or prunes one with a leading `-` (the only subtractive op). There
+/// is no "empty file = off": additive composition means an empty layer changes nothing; a hard
+/// disable is the `[trust].manifest` policy toggle, not the catalogue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Catalogue {
+    /// File triggers: a relative path that is a trigger when it exists (`Makefile`).
+    pub files: Vec<String>,
+    /// Directory triggers: every immediate file beneath is a trigger (`.git/hooks`).
+    pub dirs: Vec<String>,
+}
+
+impl Default for Catalogue {
+    fn default() -> Self {
+        Self::compiled_default()
+    }
+}
+
+impl Catalogue {
+    /// The compiled-in baseline (the conservative default set).
+    #[must_use]
+    pub fn compiled_default() -> Self {
+        Self {
+            files: KNOWN_TRIGGERS.iter().map(|s| (*s).to_owned()).collect(),
+            dirs: KNOWN_TRIGGER_DIRS.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    /// Load the effective catalogue: the compiled default, then each deployment layer applied
+    /// in cascade order. A missing layer file is skipped (the lower layers stand).
+    #[must_use]
+    pub fn load() -> Self {
+        let mut cat = Self::compiled_default();
+        for path in catalogue_layer_paths() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                cat.apply_layer(&text);
+            }
+        }
+        cat
+    }
+
+    /// Apply one line-oriented layer: a `pattern` adds, a `-pattern` prunes, a trailing `/`
+    /// marks a directory trigger, `#` starts a comment, blank lines are ignored.
+    pub fn apply_layer(&mut self, text: &str) {
+        for raw in text.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (remove, body) = line
+                .strip_prefix('-')
+                .map_or((false, line), |rest| (true, rest.trim()));
+            let (is_dir, name) = body
+                .strip_suffix('/')
+                .map_or((false, body), |dir| (true, dir));
+            if name.is_empty() {
+                continue;
+            }
+            let set = if is_dir { &mut self.dirs } else { &mut self.files };
+            if remove {
+                set.retain(|p| p != name);
+            } else if !set.iter().any(|p| p == name) {
+                set.push(name.to_owned());
+            }
+        }
+    }
+}
+
+/// The catalogue cascade paths: `$KENNEL_ETC_DIR` (default `/etc/kennel`) then the per-user
+/// config dir (`$XDG_CONFIG_HOME`, else `$HOME/.config`) — the same cascade as `audit.toml`
+/// ([[no-hardcoded-paths-config-cascade]]).
+fn catalogue_layer_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let etc = std::env::var_os("KENNEL_ETC_DIR")
+        .map_or_else(|| PathBuf::from("/etc/kennel"), PathBuf::from);
+    paths.push(etc.join(CATALOGUE_FILENAME));
+    let user = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    if let Some(cfg) = user {
+        paths.push(cfg.join("kennel").join(CATALOGUE_FILENAME));
+    }
+    paths
+}
+
 /// A top-level `.trust-manifest.json`. Mirrors `docs/schemas/trust-manifest-v2.json`;
 /// `deny_unknown_fields` so an unknown key is a hard error, never a silent bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,20 +335,19 @@ pub fn hash_file(path: &Path) -> Result<String, Error> {
     Ok(format!("sha256:{hex}"))
 }
 
-/// Enumerate the execution triggers present beneath `root`.
+/// Enumerate the execution triggers present beneath `root`, per the effective `catalogue`.
 ///
-/// Each [`KNOWN_TRIGGERS`] file that exists, plus every immediate file under each
-/// [`KNOWN_TRIGGER_DIRS`] directory. Returns relative paths (forward-slash), sorted,
-/// deduplicated.
+/// Each catalogue file-trigger that exists, plus every immediate file under each catalogue
+/// directory-trigger. Returns relative paths (forward-slash), sorted, deduplicated.
 #[must_use]
-pub fn enumerate_triggers(root: &Path) -> Vec<String> {
+pub fn enumerate_triggers(root: &Path, catalogue: &Catalogue) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
-    for name in KNOWN_TRIGGERS {
+    for name in &catalogue.files {
         if root.join(name).is_file() {
-            found.push((*name).to_owned());
+            found.push(name.clone());
         }
     }
-    for dir in KNOWN_TRIGGER_DIRS {
+    for dir in &catalogue.dirs {
         let abs = root.join(dir);
         let Ok(entries) = std::fs::read_dir(&abs) else {
             continue;
@@ -411,8 +502,8 @@ fn pin_triggers(
 /// boundaries, stamp `generator`. The returned `errors` are per-trigger hash failures
 /// (the manifest is still usable without them).
 #[must_use]
-pub fn generate(root: &Path, generator: &str) -> (Manifest, Vec<Error>) {
-    let triggers = enumerate_triggers(root);
+pub fn generate(root: &Path, generator: &str, catalogue: &Catalogue) -> (Manifest, Vec<Error>) {
+    let triggers = enumerate_triggers(root, catalogue);
     // The baseline is the compile-time pin (the operator's `kennel compile`/`generate` step).
     let (pinned, errors) = pin_triggers(root, &triggers, "compile");
     let manifest = Manifest {
@@ -420,13 +511,10 @@ pub fn generate(root: &Path, generator: &str) -> (Manifest, Vec<Error>) {
         generator: generator.to_owned(),
         execution: Execution {
             triggers: pinned,
-            // The default negative-trust set: the directories whose contents are most
-            // dangerous to auto-execute. The operator can extend this in the file.
+            // The default negative-trust set: the catalogue's directory triggers, whose
+            // contents are most dangerous to auto-execute.
             boundaries: Boundaries {
-                untrusted_paths: KNOWN_TRIGGER_DIRS
-                    .iter()
-                    .map(|d| format!("{d}/**"))
-                    .collect(),
+                untrusted_paths: catalogue.dirs.iter().map(|d| format!("{d}/**")).collect(),
             },
         },
     };
@@ -486,7 +574,11 @@ impl TriggerChange {
 ///
 /// # Errors
 /// [`Error::Hash`] if a present trigger cannot be hashed.
-pub fn review(manifest: &Manifest, root: &Path) -> Result<Vec<TriggerChange>, Error> {
+pub fn review(
+    manifest: &Manifest,
+    root: &Path,
+    catalogue: &Catalogue,
+) -> Result<Vec<TriggerChange>, Error> {
     let mut changes = Vec::new();
     // Pinned triggers: matched, modified, or removed.
     for (path, entry) in &manifest.execution.triggers {
@@ -510,7 +602,7 @@ pub fn review(manifest: &Manifest, root: &Path) -> Result<Vec<TriggerChange>, Er
         }
     }
     // Triggers on disk that the manifest never pinned (created after generation).
-    for rel in enumerate_triggers(root) {
+    for rel in enumerate_triggers(root, catalogue) {
         if !manifest.execution.triggers.contains_key(&rel) {
             let current = hash_file(&root.join(rel.clone()))?;
             changes.push(TriggerChange::New { path: rel, current });
@@ -696,7 +788,7 @@ mod tests {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"all:\n\techo hi\n").expect("write");
         std::fs::write(dir.join("README.md"), b"not a trigger\n").expect("write");
-        let (m, errors) = generate(&dir, "kennel-test");
+        let (m, errors) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
         assert!(errors.is_empty(), "hashing should succeed: {errors:?}");
         assert!(
             m.execution.triggers.contains_key("Makefile"),
@@ -732,13 +824,13 @@ mod tests {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"original\n").expect("write");
         std::fs::write(dir.join("Justfile"), b"recipe\n").expect("write");
-        let (mut m, _) = generate(&dir, "kennel-test");
+        let (mut m, _) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
         // Modify the Makefile, remove the Justfile, add a package.json (a new trigger).
         std::fs::write(dir.join("Makefile"), b"TAMPERED\n").expect("write");
         std::fs::remove_file(dir.join("Justfile")).expect("rm");
         std::fs::write(dir.join("package.json"), b"{}\n").expect("write");
 
-        let changes = review(&m, &dir).expect("review");
+        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
         assert!(
             changes
                 .iter()
@@ -761,7 +853,7 @@ mod tests {
         // Operator sign-off: re-pin everything; a fresh review is then all-clean.
         let errs = apply_review(&mut m, &dir, &changes, "kennel-review");
         assert!(errs.is_empty(), "re-pin should succeed: {errs:?}");
-        let after = review(&m, &dir).expect("review again");
+        let after = review(&m, &dir, &Catalogue::compiled_default()).expect("review again");
         assert!(
             after.iter().all(|c| !c.is_divergence()),
             "after sign-off every trigger is Unchanged: {after:?}"
@@ -774,14 +866,14 @@ mod tests {
     fn revert_restores_a_tampered_trigger_and_removes_a_planted_one() {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"all:\n\techo trusted\n").expect("write");
-        let (m, errors) = generate(&dir, "kennel-test");
+        let (m, errors) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
         assert!(errors.is_empty(), "{errors:?}");
 
         // The "workload" tampers the Makefile and plants a new package.json.
         std::fs::write(dir.join("Makefile"), b"all:\n\techo PWNED\n").expect("tamper");
         std::fs::write(dir.join("package.json"), b"{\"evil\":true}\n").expect("plant");
 
-        let changes = review(&m, &dir).expect("review");
+        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
         for change in &changes {
             revert(&dir, change).expect("revert");
         }
@@ -807,12 +899,12 @@ mod tests {
         let hook = hooks.join("post-commit");
         std::fs::write(&hook, b"#!/bin/sh\necho ok\n").expect("write hook");
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let (m, errors) = generate(&dir, "kennel-test");
+        let (m, errors) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
         assert!(errors.is_empty(), "{errors:?}");
 
         // Delete the pinned hook; revert must recreate it with its 0755 mode.
         std::fs::remove_file(&hook).expect("rm hook");
-        let changes = review(&m, &dir).expect("review");
+        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
         for change in &changes {
             revert(&dir, change).expect("revert");
         }
@@ -825,16 +917,38 @@ mod tests {
     fn prune_store_drops_unreferenced_blobs() {
         let dir = tmpdir();
         std::fs::write(dir.join("Makefile"), b"v1\n").expect("write");
-        let (mut m, _) = generate(&dir, "kennel-test");
+        let (mut m, _) = generate(&dir, "kennel-test", &Catalogue::compiled_default());
         // A new content version leaves the old blob behind until pruned.
         std::fs::write(dir.join("Makefile"), b"v2\n").expect("rewrite");
-        let changes = review(&m, &dir).expect("review");
+        let changes = review(&m, &dir, &Catalogue::compiled_default()).expect("review");
         apply_review(&mut m, &dir, &changes, "kennel-review");
         let blobs = || std::fs::read_dir(store_dir(&dir)).expect("ls").count();
         assert_eq!(blobs(), 2, "both the v1 and v2 blobs exist before pruning");
         prune_store(&dir, &m);
         assert_eq!(blobs(), 1, "only the referenced (v2) blob survives");
         cleanup(&dir);
+    }
+
+    #[test]
+    fn catalogue_layers_are_additive_with_prune() {
+        let mut cat = Catalogue::compiled_default();
+        assert!(cat.files.iter().any(|f| f == "Makefile"));
+        // A system layer widens the set (a file + a dir trigger); a comment is ignored.
+        cat.apply_layer("# widen\n.envrc\nbuild/hooks/\n");
+        assert!(cat.files.iter().any(|f| f == ".envrc"), "added a file trigger");
+        assert!(cat.dirs.iter().any(|d| d == "build/hooks"), "added a dir trigger");
+        let files_before = cat.files.len();
+        // Re-adding an existing pattern is a no-op (additive union, not duplication).
+        cat.apply_layer("Makefile\n");
+        assert_eq!(cat.files.len(), files_before, "no duplicate on re-add");
+        // A per-user layer prunes one entry with a leading `-`.
+        cat.apply_layer("-Makefile\n-build/hooks/\n");
+        assert!(!cat.files.iter().any(|f| f == "Makefile"), "pruned the file");
+        assert!(!cat.dirs.iter().any(|d| d == "build/hooks"), "pruned the dir");
+        // An empty layer changes nothing (no "empty = off").
+        let snapshot = cat.clone();
+        cat.apply_layer("\n  \n# only comments\n");
+        assert_eq!(cat, snapshot, "an empty/comment-only layer is a no-op");
     }
 
     // --- tiny tmpdir helpers (no external dev-dep; std-only) ---

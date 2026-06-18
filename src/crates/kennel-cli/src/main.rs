@@ -464,7 +464,8 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
         if path.exists() {
             continue; // leave it — refresh is `kennel review`, not `run`
         }
-        let (manifest, errors) = kennel_lib_manifest::generate(&root, &generator);
+        let (manifest, errors) =
+            kennel_lib_manifest::generate(&root, &generator, &kennel_lib_manifest::Catalogue::load());
         for e in &errors {
             eprintln!(
                 "kennel: manifest trigger skipped under {}: {e}",
@@ -545,7 +546,7 @@ fn review(args: &[String]) -> Result<ExitCode, String> {
             .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
         let mut manifest = kennel_lib_manifest::Manifest::from_json(&raw)
             .map_err(|e| format!("parsing {}: {e}", manifest_path.display()))?;
-        let changes = kennel_lib_manifest::review(&manifest, &root)
+        let changes = kennel_lib_manifest::review(&manifest, &root, &kennel_lib_manifest::Catalogue::load())
             .map_err(|e| format!("reviewing {}: {e}", root.display()))?;
         let divergences: Vec<_> = changes.iter().filter(|c| c.is_divergence()).collect();
         if divergences.is_empty() {

@@ -1,0 +1,41 @@
+# Project Kennel — trust-manifest trigger catalogue (§2.6)
+#
+# Which workspace paths are *execution triggers*: files a confined workload can edit that
+# host tooling later runs, so they are pinned in the .trust-manifest.json and watched at
+# runtime (T2.8). This file is a DEPLOYMENT OVERLAY on an ADDITIVE cascade:
+#
+#     effective set = compiled default  ∪  /etc/kennel/triggers.catalog  ∪  ~/.config/kennel/triggers.catalog
+#
+# Each layer ADDS patterns; an upper layer ADDS more, or PRUNES one with a leading `-`
+# (the only subtractive op). There is no "empty file = off" — an empty layer changes
+# nothing; to switch the control off entirely, set `[trust].manifest = false` in policy.
+#
+# Grammar (one pattern per line; `#` starts a comment):
+#   <path>      a file trigger     — a trigger when that file exists      (e.g. Makefile)
+#   <path>/     a directory trigger — every immediate file beneath is one (e.g. .git/hooks/)
+#   -<pattern>  prune a pattern a lower layer added
+#
+# Install this file at /etc/kennel/triggers.catalog (system-wide) or
+# ~/.config/kennel/triggers.catalog (per-user) to override. The COMPILED DEFAULT below is
+# already built in — these lines document it; you do not need to repeat them.
+
+# --- compiled default (conservative; already built in) -----------------------------------
+# Makefile
+# makefile
+# GNUmakefile
+# Justfile
+# justfile
+# Taskfile.yml
+# Taskfile.yaml
+# package.json
+# .vscode/tasks.json
+# .vscode/launch.json
+# .git/hooks/
+
+# --- common widenings (uncomment to add) -------------------------------------------------
+# Auto-run shell/env hooks and language-runtime auto-imports fire in the host context too:
+# .envrc                 # direnv: runs on cd into the directory
+# .npmrc                 # npm: can set a pre-install script source
+# sitecustomize.py       # Python: imported automatically at interpreter start
+# .pth                   # Python: a path-configuration file can execute a line
+# *.desktop              # XDG: a desktop entry's Exec runs on activation
