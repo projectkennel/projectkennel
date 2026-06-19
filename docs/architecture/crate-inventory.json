@@ -1,0 +1,238 @@
+{
+  "crate_count": 23,
+  "total_sloc": 27319,
+  "tcb_crate_count": 16,
+  "tcb_sloc": 17313,
+  "crates": [
+    {
+      "name": "kenneld",
+      "sloc": 5480,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": ["kennel-akc", "kenneld"],
+      "consumers": [],
+      "first_party_deps": ["kennel-host-delegate", "kennel-lib-audit", "kennel-lib-binder", "kennel-lib-bpf", "kennel-lib-config", "kennel-lib-control", "kennel-lib-policy", "kennel-lib-spawn", "kennel-lib-syscall", "kennel-privhelper"],
+      "external_deps": ["basic-toml", "serde"]
+    },
+    {
+      "name": "kennel-lib-compile",
+      "sloc": 4304,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": [],
+      "consumers": ["cli"],
+      "first_party_deps": ["kennel-lib-policy"],
+      "external_deps": ["basic-toml", "serde"]
+    },
+    {
+      "name": "kennel-cli",
+      "sloc": 2927,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": ["kennel"],
+      "consumers": [],
+      "first_party_deps": ["kennel-lib-audit", "kennel-lib-compile", "kennel-lib-config", "kennel-lib-control", "kennel-lib-manifest", "kennel-lib-policy", "kennel-lib-syscall", "kennel-lib-term", "kennel-lib-text"],
+      "external_deps": ["lexopt", "serde", "serde_json"]
+    },
+    {
+      "name": "kennel-lib-spawn",
+      "sloc": 1713,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "kenneld", "privhelper"],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-bpf", "kennel-lib-policy", "kennel-lib-syscall"],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-lib-binder",
+      "sloc": 1628,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "dbus", "facade", "kenneld", "spawn"],
+      "first_party_deps": [],
+      "external_deps": ["libc"]
+    },
+    {
+      "name": "kennel-privhelper",
+      "sloc": 1535,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": ["kennel-privhelper"],
+      "consumers": ["kenneld"],
+      "first_party_deps": ["kennel-lib-bpf", "kennel-lib-config", "kennel-lib-spawn", "kennel-lib-syscall"],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-lib-audit",
+      "sloc": 1287,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["cli", "kenneld"],
+      "first_party_deps": ["kennel-lib-syscall", "kennel-lib-text"],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-lib-bpf",
+      "sloc": 1244,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["kenneld", "privhelper", "spawn"],
+      "first_party_deps": [],
+      "external_deps": ["libc", "object"]
+    },
+    {
+      "name": "kennel-lib-policy",
+      "sloc": 1243,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["cli", "compile", "kenneld", "spawn"],
+      "first_party_deps": [],
+      "external_deps": ["basic-toml", "ed25519-compact", "object", "serde"]
+    },
+    {
+      "name": "kennel-lib-syscall",
+      "sloc": 967,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["audit", "bin-init", "cli", "control", "kenneld", "privhelper", "spawn"],
+      "first_party_deps": ["kennel-lib-landlock", "kennel-lib-os", "kennel-lib-scm"],
+      "external_deps": ["bitflags", "libc", "nix", "seccompiler"]
+    },
+    {
+      "name": "kennel-facade",
+      "sloc": 792,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": ["facade-afunix", "facade-client", "facade-dbus", "facade-socks5", "facade-ssh"],
+      "consumers": [],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-dbus", "kennel-lib-scm"],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-lib-dbus",
+      "sloc": 780,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": [],
+      "consumers": ["facade", "host-dbus"],
+      "first_party_deps": ["kennel-lib-binder"],
+      "external_deps": ["mini-sansio-dbus"]
+    },
+    {
+      "name": "kennel-lib-manifest",
+      "sloc": 553,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": [],
+      "consumers": ["cli"],
+      "first_party_deps": [],
+      "external_deps": ["serde", "serde_json"]
+    },
+    {
+      "name": "kennel-host-dbus",
+      "sloc": 493,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": ["host-dbus"],
+      "consumers": [],
+      "first_party_deps": ["kennel-lib-dbus"],
+      "external_deps": ["mini-sansio-dbus", "nix"]
+    },
+    {
+      "name": "kennel-lib-control",
+      "sloc": 420,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["cli", "kenneld"],
+      "first_party_deps": ["kennel-lib-syscall"],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-lib-os",
+      "sloc": 396,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["syscall"],
+      "first_party_deps": [],
+      "external_deps": ["libc", "nix"]
+    },
+    {
+      "name": "kennel-lib-config",
+      "sloc": 372,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "cli", "kenneld", "privhelper"],
+      "first_party_deps": [],
+      "external_deps": ["basic-toml", "serde"]
+    },
+    {
+      "name": "kennel-bin-init",
+      "sloc": 335,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": ["kennel-bin-init"],
+      "consumers": [],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-config", "kennel-lib-spawn", "kennel-lib-syscall"],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-host-delegate",
+      "sloc": 256,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": ["host-inetd", "host-netproxy"],
+      "consumers": ["kenneld"],
+      "first_party_deps": ["kennel-lib-scm"],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-lib-landlock",
+      "sloc": 249,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["syscall"],
+      "first_party_deps": [],
+      "external_deps": ["bitflags", "libc"]
+    },
+    {
+      "name": "kennel-lib-term",
+      "sloc": 157,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": [],
+      "consumers": ["cli"],
+      "first_party_deps": [],
+      "external_deps": ["vte"]
+    },
+    {
+      "name": "kennel-lib-scm",
+      "sloc": 115,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["facade", "host-delegate", "syscall"],
+      "first_party_deps": [],
+      "external_deps": ["nix"]
+    },
+    {
+      "name": "kennel-lib-text",
+      "sloc": 73,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["audit", "cli"],
+      "first_party_deps": [],
+      "external_deps": []
+    }
+  ]
+}
