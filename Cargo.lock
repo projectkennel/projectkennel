@@ -290,7 +290,7 @@ dependencies = [
 name = "mini-sansio-dbus"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba85699922b8c4df5cc522fd1aaa9d8b562dfd2b4b334bc510e5ed021eb288eb"
+checksum = "85521bf0b3dfef923edd60eeaf689160ced020c768ab612c13635a09ae2ab7c9"
 
 [[package]]
 name = "nix"

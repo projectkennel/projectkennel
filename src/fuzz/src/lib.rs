@@ -8,8 +8,10 @@
 //! and HTTP request head) and the `CONNECT_INET` request wire the facade frames on
 //! to kenneld — the binder driver-return command stream, the IPC wire formats (the
 //! kenneld control protocol, the privhelper packed-struct request, and the enforcement-plan
-//! wire a privileged process decodes), and the signed-policy reader. Each must, for *any*
-//! input, return `Ok`/`Err`/`None` — never panic, never hang, never read out of bounds.
+//! wire a privileged process decodes), the D-Bus facade's incoming-message decoder
+//! (the workload's bus client speaks raw D-Bus wire to `facade-dbus`, 07-7 §7.7),
+//! and the signed-policy reader. Each must, for *any* input, return `Ok`/`Err`/`None`
+//! — never panic, never hang, never read out of bounds.
 //!
 //! # Approach (Path C)
 //!
@@ -73,6 +75,136 @@ pub fn fuzz_parsers(data: &[u8]) {
     // robustness property is "no panic / hang on any bytes". The *security* invariant
     // (no OSC-52 introducer survives) is asserted in the dedicated test below.
     let _ = kennel_lib_term::filter(data, kennel_lib_term::FilterPolicy::default());
+
+    // The D-Bus facade's incoming-message decoder (07-7 §7.7). The workload's bus
+    // client speaks raw D-Bus wire to `facade-dbus`; the facade decodes the header
+    // (destination/path/interface/member/signature — the entire allowlist surface)
+    // and walks the body, all from fully workload-controlled bytes.
+    fuzz_dbus_incoming(data);
+}
+
+/// Drive `data` through `mini-sansio-dbus`'s public sans-IO read loop exactly as
+/// `facade-dbus` drives it off the conduit socket: `wants` reports the next slice the
+/// decoder needs, we fill it from `data`, `satisfy_read` reframes and — once a whole
+/// message has arrived — yields an [`IncomingMessage`] we then walk in full. The
+/// `readbuf` is bounded; a header claiming a longer message than fits is a clean
+/// `ReadBufIsTooShort`, the same refusal the facade gives an over-large frame.
+fn fuzz_dbus_incoming(data: &[u8]) {
+    use mini_sansio_dbus::{DBusConnection, OutgoingQueue};
+
+    // The read path never enqueues; `wants` only takes a queue to also report
+    // write-readiness, and `peek() == None` keeps the writer idle.
+    struct NoQueue;
+    impl OutgoingQueue for NoQueue {
+        fn push_raw(&mut self, _buf: &[u8]) -> u32 {
+            0
+        }
+        fn peek(&self) -> Option<&[u8]> {
+            None
+        }
+        fn pop(&mut self) {}
+    }
+
+    let mut conn = DBusConnection::new(0);
+    let queue = NoQueue;
+    let mut readbuf = [0u8; 16 * 1024];
+    let mut pos = 0usize;
+
+    loop {
+        let avail = data.len() - pos;
+        if avail == 0 {
+            return; // no more wire to feed — a truncated message is a non-event
+        }
+        let n;
+        {
+            let Ok((read, _write)) = conn.wants(&queue, &mut readbuf) else {
+                return; // ReadBufIsTooShort etc. — a clean refusal, not a panic
+            };
+            let want = read.buf.len();
+            if want == 0 {
+                return;
+            }
+            n = want.min(avail);
+            read.buf[..n].copy_from_slice(&data[pos..pos + n]);
+        }
+        pos += n;
+        match conn.satisfy_read(n, &readbuf) {
+            Ok(Some(msg)) => walk_dbus_message(&msg),
+            Ok(None) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Touch every header field the facade's allowlist reads, then walk the lazily
+/// parsed body — each value is decoded from the same untrusted wire on demand.
+fn walk_dbus_message(msg: &mini_sansio_dbus::IncomingMessage<'_>) {
+    let _ = (
+        msg.message_type,
+        msg.serial,
+        msg.path,
+        msg.interface,
+        msg.member,
+        msg.error_name,
+        msg.reply_serial,
+        msg.destination,
+        msg.sender,
+        msg.signature,
+        msg.unix_fds,
+    );
+    if let Some(mut body) = msg.body {
+        // Bound the field count: an array of millions of items must not be a hang.
+        for _ in 0..4096 {
+            match body.try_next() {
+                Ok(Some(v)) => walk_dbus_value(&v, 0),
+                Ok(None) | Err(_) => break,
+            }
+        }
+    }
+}
+
+/// Recursively decode a body value. Container types (struct/array/dict/variant)
+/// re-enter the wire decoder for their elements; `depth` caps adversarial nesting
+/// so a deeply nested signature cannot blow the stack.
+fn walk_dbus_value(v: &mini_sansio_dbus::IncomingValue<'_>, depth: u8) {
+    use mini_sansio_dbus::IncomingValue;
+    if depth > 16 {
+        return;
+    }
+    match v {
+        IncomingValue::Struct(s) => {
+            if let Ok(mut it) = s.fields_iter() {
+                for _ in 0..4096 {
+                    match it.try_next() {
+                        Ok(Some(inner)) => walk_dbus_value(&inner, depth + 1),
+                        _ => break,
+                    }
+                }
+            }
+        }
+        IncomingValue::Array(a) => {
+            let mut it = a.items_iter();
+            for _ in 0..4096 {
+                match it.try_next() {
+                    Ok(Some(inner)) => walk_dbus_value(&inner, depth + 1),
+                    _ => break,
+                }
+            }
+        }
+        IncomingValue::DictEntry(d) => {
+            if let Ok((k, val)) = d.key_value() {
+                walk_dbus_value(&k, depth + 1);
+                walk_dbus_value(&val, depth + 1);
+            }
+        }
+        IncomingValue::Variant(var) => {
+            if let Ok(inner) = var.materialize() {
+                walk_dbus_value(&inner, depth + 1);
+            }
+        }
+        // Scalars and borrowed strings: already fully decoded by `cut`.
+        _ => {}
+    }
 }
 
 /// Drive the parsers from one fuzzer `seed`: feed the whole seed once, then use
@@ -136,6 +268,63 @@ mod tests {
                 buf.push((rng.next() & 0xff) as u8);
             }
             run(&buf);
+        }
+    }
+
+    /// Mint one valid D-Bus method-call whose body carries every value kind —
+    /// scalars, string-likes, a struct, an array, a dict entry, and a variant — so
+    /// decoding it drives [`walk_dbus_value`] down every container arm. Returns the
+    /// wire bytes; the encoder lays them out exactly as a real bus peer would.
+    fn valid_dbus_message() -> Result<Vec<u8>, mini_sansio_dbus::EncodeError> {
+        use mini_sansio_dbus::{MessageType, SliceMessageEncoder, dbus_body};
+        let mut buf = [0u8; 512];
+        let mut encoder = SliceMessageEncoder::new(&mut buf, MessageType::MethodCall)?;
+        encoder.set_path("/org/example/Object")?;
+        encoder.set_interface("org.example.Interface")?;
+        encoder.set_member("AllTypes")?;
+        encoder.set_destination("org.example.Service")?;
+        dbus_body!(encoder, {
+            u8(0x2a),
+            bool(true),
+            i32(-123_456),
+            u64(123_456_789),
+            f64(12.5),
+            str("hello"),
+            object_path("/org/example/Value"),
+            signature("su"),
+            struct_ { str("inside-struct"), u32(77), },
+            array<u16> [7, 8],
+            dict_entry { str("dict-key"), u32(99), },
+            variant<i32>(-9),
+        });
+        let len = encoder.finish()?;
+        Ok(buf[..len].to_vec())
+    }
+
+    /// The D-Bus incoming decoder over a **structural** corpus. The random-byte
+    /// sweep in [`parsers_never_panic_on_adversarial_bytes`] almost never forms a
+    /// valid 16-byte header, so it rarely reaches the body. Here we start from a
+    /// real message — proving the full descent runs once — then feed every
+    /// single-byte mutation of it, so the decoder repeatedly enters real
+    /// header/body-parse states and then meets adversarial bytes. None may panic,
+    /// hang, or over-read; an `Err` is the correct outcome.
+    #[test]
+    fn dbus_incoming_never_panics_on_mutated_messages() {
+        let base = valid_dbus_message().expect("encode the seed message");
+        // The pristine message: the body walker descends through every arm.
+        fuzz_dbus_incoming(&base);
+        // Single-byte mutations: each offset XORed against a spread of bit patterns.
+        let mut m = base.clone();
+        for i in 0..base.len() {
+            for pat in [0x01u8, 0x08, 0x40, 0x7f, 0x80, 0xff] {
+                m[i] = base[i] ^ pat;
+                fuzz_dbus_incoming(&m);
+            }
+            m[i] = base[i];
+        }
+        // Every truncation: a short read mid-header and mid-body.
+        for cut in 0..=base.len() {
+            fuzz_dbus_incoming(&base[..cut]);
         }
     }
 

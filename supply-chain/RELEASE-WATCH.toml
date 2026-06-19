@@ -14,9 +14,6 @@
 # Principle: SEEING an upstream release is automated; DECIDING about it is
 # not.
 #
-# STATUS: no direct dependencies yet — the reference runtime is not
-# implemented. This file is structured and empty.
-#
 # Entry format (one per DIRECT dependency):
 #
 # [[watch]]
@@ -63,3 +60,11 @@ release-feed  = "https://github.com/gimli-rs/object/releases.atom"
 last-reviewed = "0.36.7"
 reviewed-by   = "remco"
 note          = "Direct dep of kennel-lib-bpf (ELF parsing). Pinned =0.36.7, features = [read_core, elf]."
+
+[[watch]]
+name          = "mini-sansio-dbus"
+repo          = "https://github.com/iliabylich/mini-sansio-dbus"
+release-feed  = "https://github.com/iliabylich/mini-sansio-dbus/releases.atom"
+last-reviewed = "5.0.1"
+reviewed-by   = "remco"
+note          = "Direct dep of kennel-facade (facade-dbus, §7.7), the D-Bus wire marshalling. Pinned =5.0.1. CARRIES A LOCAL PATCH: src/vendor/patches/mini-sansio-dbus-5.0.1-header-field-panic.patch fixes a network-reachable unreachable!() in the header-field decoder (reported upstream). PRIORITY on the next release: if it carries the fix, drop the patch and restore byte-identical vendoring (§5.5); if not, re-apply and re-verify the patch. Young/single-author upstream — a maintenance-signal crate (§5.7)."

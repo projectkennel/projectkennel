@@ -1,0 +1,15 @@
+--- a/src/incoming/header_fields.rs
++++ b/src/incoming/header_fields.rs
+@@ -28,7 +28,11 @@
+             };
+         }
+         match code {
+-            HeaderFieldCode::Invalid => unreachable!(),
++            // Local hardening (Project Kennel): a header-field code outside 1..=9 maps to
++            // `Invalid`; on adversarial wire that must be a clean error, not a panic. Upstream
++            // v5.0.1 has `unreachable!()` here, reachable from the network. The caller already
++            // handles `Err(MalformedHeaderField)`. Reported upstream; drop on the fixed release.
++            HeaderFieldCode::Invalid => Err(DBusError::MalformedHeaderField),
+ 
+             HeaderFieldCode::Path => {
+                 ensure_header_sig!("o", "Path");

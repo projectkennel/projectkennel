@@ -195,14 +195,21 @@ notes = "Transitive via object (byte search); also used by time."
 
 [crate."mini-sansio-dbus"]
 version = "=5.0.1"
-crate-sha256 = "ba85699922b8c4df5cc522fd1aaa9d8b562dfd2b4b334bc510e5ed021eb288eb"
+crate-sha256 = "85521bf0b3dfef923edd60eeaf689160ced020c768ab612c13635a09ae2ab7c9"
 audited-by = "remco"
 audited-on = "2026-06-19"
 verified-against = [
-    "crates.io static.crates.io .crate download (independent re-download via tools/audit-helper.sh confirm) — sha256 matches",
-    "github.com/iliabylich/mini-sansio-dbus @ b1adcf603bd6705313decd65dece865894d74e3b (tag v5.0.1) — 77 source files byte-identical via tools/audit-source.sh",
+    "github.com/iliabylich/mini-sansio-dbus @ b1adcf603bd6705313decd65dece865894d74e3b (tag v5.0.1) — 77 source files byte-identical via tools/audit-source.sh, EXCEPT one applied hardening hunk (see DIVERGENCE)",
+    "upstream v5.0.1 .crate (sha256 ba85699922b8c4df5cc522fd1aaa9d8b562dfd2b4b334bc510e5ed021eb288eb) independently re-downloaded via tools/audit-helper.sh confirm — matched before the local patch",
 ]
-notes = "Direct dep of kennel-facade (facade-dbus, §7.7) — the D-Bus wire marshalling. Outside the daemon TCB. `#![forbid(unsafe_code)]`, 0 runtime deps (anyhow/rustix are dev-only). Only the marshalling core (encoder/incoming/types) is linked; the app-specific `messages/` tree is dead code. The incoming decoder parses adversarial workload wire and carries a fuzz target."
+# DIVERGENCE: crate-sha256 above is upstream v5.0.1 plus exactly one applied hunk,
+# src/vendor/patches/mini-sansio-dbus-5.0.1-header-field-panic.patch (file list identical;
+# only incoming/header_fields.rs differs). It turns a network-reachable `unreachable!()` in
+# the header-field decoder into the `Err(MalformedHeaderField)` the caller already expects —
+# a panic on adversarial wire is unmaskable under release `panic = "abort"` (§8.5). Reported
+# upstream; drop the patch and restore byte-identical vendoring on the fixed release.
+# `patch -p1` against pristine v5.0.1 reproduces these exact bytes.
+notes = "Direct dep of kennel-facade (facade-dbus, §7.7) — the D-Bus wire marshalling. Outside the daemon TCB. `#![forbid(unsafe_code)]`, 0 runtime deps (anyhow/rustix are dev-only). Only the marshalling core (encoder/incoming/types) is linked; the app-specific `messages/` tree is dead code. The incoming decoder parses adversarial workload wire; the kennel-fuzz harness fuzzes it (and found the panic the local patch fixes)."
 
 [crate."num-conv"]
 version = "=0.2.2"
