@@ -1,30 +1,27 @@
 //! In-kennel D-Bus facade: present a D-Bus server endpoint on the kennel's bus address and
-//! mediate each connection to the `org.projectkennel.IDBus` facade (§7.7.2).
+//! mediate each connection through the binder gateway (§7.7.2).
 //!
 //! # Purpose
 //!
-//! D-Bus is never granted as a direct socket (§7.7.1). Instead the kennel's
-//! `DBUS_SESSION_BUS_ADDRESS` (and/or system bus address) points at this process, which
-//! terminates the workload's bus connection in the kennel, parses the adversarial D-Bus wire
-//! (the sole such parser, [`kennel_lib_dbus::server::Facade`]), and emits **typed**
-//! transactions. On each accepted connection it brokers a conduit to the `host-dbus` delegate
-//! via [`verb::CONNECT_DBUS`] (`transact_fd`) and then relays: workload bytes → the facade
-//! engine → typed frames over the conduit, and frames back → reconstructed messages → the
-//! workload. `Hello` is answered locally and the refuse-to-broker set (§7.7.5) is refused at
-//! the facade; everything else is decided by the delegate against the compiled `[dbus]` table.
-//! The D-Bus analogue of `facade-socks5`, but framed (typed transactions, not a byte splice).
+//! D-Bus is never granted as a direct socket (§7.7.1). The kennel's `DBUS_SESSION_BUS_ADDRESS`
+//! points here; this process terminates the workload's bus connection in the kennel, parses the
+//! adversarial D-Bus wire (the sole such parser, [`kennel_lib_dbus::server::Facade`]), and emits
+//! **typed** transactions. Those transactions ride the binder gateway: kenneld is the membrane
+//! (§7.7.2a), so the facade reaches `host-dbus` only by transacting node 0 — never a raw conduit.
+//! Per accepted connection it `DBUS_OPEN`s a connection id, fires each typed call as a oneway
+//! `DBUS_SEND`, and keeps one `DBUS_RECV` outstanding to receive replies/signals; `DBUS_CLOSE` on
+//! teardown. `Hello` is answered locally and the refuse-to-broker set (§7.7.5) is refused at the
+//! facade; everything else is decided by the delegate against the compiled `[dbus]` table.
 //!
 //! # Invocation
 //!
 //! `facade-dbus <binder-device> <listen-path>=<session|system> [...]`, spawned by `kenneld`
-//! into the kennel's view. Each pair binds a `UnixListener` at `<listen-path>` whose
-//! connections are mediated against the named bus.
+//! into the kennel's view.
 //!
 //! # Non-goals
 //!
-//! No policy, no bus socket: kenneld decides (via the delegate's compiled table) and holds the
-//! real bus connection. This process only terminates the workload's connection and frames
-//! typed transactions across the conduit.
+//! No policy, no bus socket: kenneld relays and the delegate decides. This process only
+//! terminates the workload's connection and frames typed transactions onto binder.
 
 #![forbid(unsafe_code)]
 
@@ -33,18 +30,22 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
-use kennel_lib_binder::service::{dbus, verb};
+use kennel_lib_binder::service::{dbus, status, verb};
 use kennel_lib_dbus::server::{Action, Facade};
-use kennel_lib_dbus::wire::{self, Bus};
+use kennel_lib_dbus::wire::{self, Bus, Frame};
 
 /// The binder buffer mapping size for the facade's client.
 const MAP_SIZE: usize = 128 * 1024;
 /// The read chunk for the workload connection.
 const CHUNK: usize = 16 * 1024;
+
+/// Per-process connection-id allocator (the facade serves one kennel; ids are unique within it).
+static NEXT_CONN_ID: AtomicU32 = AtomicU32::new(1);
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -58,7 +59,6 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // One listener thread per bus address; the process lives for the kennel's lifetime.
     let mut handles = Vec::new();
     for (path, bus) in listeners {
         let device = device.clone();
@@ -90,91 +90,77 @@ fn split_pair(arg: &str) -> Option<(String, Bus)> {
 
 /// Bind a D-Bus server endpoint at `path` and mediate each accepted connection against `bus`.
 fn serve(device: &str, path: &str, bus: Bus) -> io::Result<()> {
-    let _ = std::fs::remove_file(path); // a stale socket from a prior run
+    let _ = std::fs::remove_file(path);
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent)?;
     }
     let listener = UnixListener::bind(path)?;
-
     for incoming in listener.incoming() {
         let workload = incoming?;
-        // Broker a fresh conduit to the delegate per accepted connection (no multiplexing —
-        // each workload bus connection gets its own conduit, as CONNECT_INET does per dial).
-        match broker(device, bus) {
-            Ok(conduit) => {
-                thread::spawn(move || mediate(workload, conduit, bus));
+        let device = device.to_owned();
+        thread::spawn(move || {
+            if let Err(e) = mediate(&device, workload, bus) {
+                eprintln!("facade-dbus: connection: {e}");
             }
-            Err(e) => {
-                eprintln!("facade-dbus: facade refused the conduit: {e}");
-                // Dropping `workload` closes it; the client sees "cannot connect to bus".
-            }
-        }
+        });
     }
     Ok(())
 }
 
-/// Ask the facade (node 0) for a D-Bus mediation conduit for `bus`.
-fn broker(device: &str, bus: Bus) -> io::Result<UnixStream> {
+/// Mediate one workload bus connection over the binder gateway.
+fn mediate(device: &str, workload: UnixStream, bus: Bus) -> io::Result<()> {
+    let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+    // One binder client shared by both directions (the kernel routes per-thread; transactions
+    // are `&self`). Register the connection with kenneld first.
+    let binder = Arc::new(open_binder(device)?);
     let bus_byte = match bus {
         Bus::Session => dbus::SESSION,
         Bus::System => dbus::SYSTEM,
     };
-    let fd = OpenOptions::new().read(true).write(true).open(device)?;
-    let conn = Connection::open(fd.into(), MAP_SIZE)?;
-    let conduit = conn.transact_fd(
-        CONTEXT_MANAGER_HANDLE,
-        verb::CONNECT_DBUS,
-        &dbus::encode_request(bus_byte),
-    )?;
-    Ok(UnixStream::from(conduit))
-}
+    let reply = binder.transact(CONTEXT_MANAGER_HANDLE, verb::DBUS_OPEN, &dbus::encode_open(conn_id, bus_byte))?;
+    if reply.first() != Some(&status::OK) {
+        // The bus is not enabled (or refused): drop, the client sees "cannot connect to bus".
+        return Ok(());
+    }
 
-/// Mediate one workload bus connection: run the facade engine, relaying workload bytes to
-/// typed frames on the conduit and delegate frames back to reconstructed messages.
-///
-/// Two directions run concurrently and share the engine behind a mutex (its methods do no
-/// blocking I/O, so the lock is held only across the fast parse/encode). Writes to each
-/// stream are serialised through their own handle.
-fn mediate(workload: UnixStream, conduit: UnixStream, bus: Bus) {
     let facade = Arc::new(Mutex::new(Facade::new(bus)));
-    let (Ok(workload_w), Ok(conduit_w)) = (workload.try_clone(), conduit.try_clone()) else {
-        return;
+    let Ok(writer) = workload.try_clone() else {
+        return Ok(());
     };
-    let workload_w = Arc::new(Mutex::new(workload_w));
-    let conduit_w = Arc::new(Mutex::new(conduit_w));
+    let workload_w = Arc::new(Mutex::new(writer));
 
-    // Conduit → workload: read framed delegate replies/signals, reconstruct, write to workload.
+    // Inbound: one DBUS_RECV outstanding; each reply is a frame (or AGAIN to re-arm).
     let inbound = {
+        let binder = Arc::clone(&binder);
         let facade = Arc::clone(&facade);
         let workload_w = Arc::clone(&workload_w);
-        thread::spawn(move || delegate_to_workload(conduit, &facade, &workload_w))
+        thread::spawn(move || recv_loop(&binder, conn_id, &facade, &workload_w))
     };
 
-    // Workload → conduit: read the bus stream, drive the engine, dispatch its actions.
-    workload_to_delegate(workload, &facade, &workload_w, &conduit_w);
+    // Outbound: read the workload, drive the engine, fire ToDelegate frames as oneway sends.
+    workload_to_binder(&binder, conn_id, workload, &facade, &workload_w);
 
-    // The workload side ended (EOF/error); dropping the conduit write half unblocks the
-    // inbound reader, which then joins.
-    drop(conduit_w);
+    // Teardown: close the connection at kenneld (also unblocks the parked DBUS_RECV).
+    let _ = binder.transact_oneway(CONTEXT_MANAGER_HANDLE, verb::DBUS_CLOSE, &dbus::encode_conn(conn_id));
     let _ = inbound.join();
+    Ok(())
 }
 
-/// Drive the engine over workload bytes until EOF, dispatching each action.
-fn workload_to_delegate(
+/// Drive the engine over workload bytes; fire each `ToDelegate` frame as a oneway `DBUS_SEND`.
+fn workload_to_binder(
+    binder: &Connection,
+    conn_id: u32,
     mut workload: UnixStream,
     facade: &Mutex<Facade>,
     workload_w: &Mutex<UnixStream>,
-    conduit_w: &Mutex<UnixStream>,
 ) {
     let mut buf = [0u8; CHUNK];
     while let Ok(n) = workload.read(&mut buf) {
         if n == 0 {
-            break; // clean EOF
+            break;
         }
         let actions = {
-            let Ok(mut f) = facade.lock() else {
-                break;
-            };
+            let Ok(mut f) = facade.lock() else { break };
             match f.on_workload_bytes(buf.get(..n).unwrap_or(&[])) {
                 Ok(actions) => actions,
                 Err(e) => {
@@ -183,177 +169,94 @@ fn workload_to_delegate(
                 }
             }
         };
-        if dispatch(&actions, workload_w, conduit_w).is_err() {
-            break;
+        for action in &actions {
+            match action {
+                Action::ToWorkload(bytes) => {
+                    let Ok(mut w) = workload_w.lock() else { return };
+                    if w.write_all(bytes).is_err() {
+                        return;
+                    }
+                }
+                Action::ToDelegate(frame) => {
+                    let req = dbus::encode_send(conn_id, &frame.encode());
+                    if binder
+                        .transact_oneway(CONTEXT_MANAGER_HANDLE, verb::DBUS_SEND, &req)
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
         }
     }
 }
 
-/// Read framed frames from the conduit until EOF, reconstruct, and write to the workload.
-fn delegate_to_workload(
-    mut conduit: UnixStream,
+/// Keep one `DBUS_RECV` outstanding; reconstruct each inbound frame to the workload.
+fn recv_loop(
+    binder: &Connection,
+    conn_id: u32,
     facade: &Mutex<Facade>,
     workload_w: &Mutex<UnixStream>,
 ) {
-    while let Some(frame) = read_frame(&mut conduit).unwrap_or(None) {
-        let actions = {
-            let Ok(mut f) = facade.lock() else {
-                break;
-            };
-            match f.on_delegate_frame(frame) {
-                Ok(actions) => actions,
-                Err(e) => {
-                    eprintln!("facade-dbus: {e}");
-                    break;
-                }
-            }
+    loop {
+        let Ok(reply) =
+            binder.transact(CONTEXT_MANAGER_HANDLE, verb::DBUS_RECV, &dbus::encode_conn(conn_id))
+        else {
+            return; // kenneld closed the connection (or a fatal error): stop.
         };
-        for action in &actions {
-            if let Action::ToWorkload(bytes) = action {
-                let Ok(mut w) = workload_w.lock() else {
-                    return;
+        match parse_recv(&reply) {
+            RecvReply::Again => {}                 // nothing pending; re-arm.
+            RecvReply::Closed => return,           // kenneld tore the connection down.
+            RecvReply::Frame(frame) => {
+                let actions = {
+                    let Ok(mut f) = facade.lock() else { return };
+                    match f.on_delegate_frame(frame) {
+                        Ok(actions) => actions,
+                        Err(_) => return,
+                    }
                 };
-                if w.write_all(bytes).is_err() {
-                    return;
+                for action in &actions {
+                    if let Action::ToWorkload(bytes) = action {
+                        let Ok(mut w) = workload_w.lock() else { return };
+                        if w.write_all(bytes).is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/// Write each action to its destination stream.
-fn dispatch(
-    actions: &[Action],
-    workload_w: &Mutex<UnixStream>,
-    conduit_w: &Mutex<UnixStream>,
-) -> io::Result<()> {
-    for action in actions {
-        match action {
-            Action::ToWorkload(bytes) => {
-                let mut w = workload_w.lock().map_err(|_| broken())?;
-                w.write_all(bytes)?;
-            }
-            Action::ToDelegate(frame) => {
-                let mut w = conduit_w.lock().map_err(|_| broken())?;
-                w.write_all(&frame.encode())?;
-            }
-        }
-    }
-    Ok(())
+/// The outcome of a `DBUS_RECV`: a frame to deliver, re-arm, or a clean close.
+enum RecvReply {
+    Frame(Frame),
+    Again,
+    Closed,
 }
 
-/// Read one length-prefixed [`wire::Frame`] from `stream`. `Ok(None)` on a clean EOF.
-fn read_frame(stream: &mut UnixStream) -> io::Result<Option<wire::Frame>> {
-    let mut len_buf = [0u8; 4];
-    if let Err(e) = stream.read_exact(&mut len_buf) {
-        if e.kind() == io::ErrorKind::UnexpectedEof {
-            return Ok(None);
-        }
-        return Err(e);
-    }
-    let len = match wire::frame_len(&len_buf) {
-        Ok(Some(len)) => len,
-        Ok(None) => return Ok(None),
-        Err(_) => return Err(broken()),
-    };
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload)?;
-    wire::Frame::decode(&payload)
-        .map(Some)
-        .map_err(|_| broken())
-}
-
-fn broken() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "malformed IDBus conduit frame")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kennel_lib_dbus::message::reconstruct_call;
-    use kennel_lib_dbus::wire::{Call, Frame, Reply};
-    use std::net::Shutdown;
-
-    /// Build the D-Bus bytes a workload would send for one method call.
-    fn call_bytes(dest: &str, path: &str, iface: &str, member: &str, serial: u32) -> Vec<u8> {
-        let call = Call {
-            bus: Bus::Session,
-            serial,
-            no_reply: false,
-            destination: dest.to_owned(),
-            path: path.to_owned(),
-            interface: iface.to_owned(),
-            member: member.to_owned(),
-            signature: String::new(),
-            body_endian: b'l',
-            body: Vec::new(),
-        };
-        reconstruct_call(&call, serial).expect("encode call")
-    }
-
-    /// Drive the whole relay over socketpairs: a workload on one end, a fake delegate on the
-    /// conduit. Proves SASL completes, `Hello` is answered locally, a normal call is forwarded
-    /// as a typed frame, a delegate reply is reconstructed back, and teardown joins cleanly.
-    #[test]
-    fn relay_round_trip_through_the_engine() {
-        let (mut wl_test, wl_relay) = UnixStream::pair().expect("workload pair");
-        let (mut cd_test, cd_relay) = UnixStream::pair().expect("conduit pair");
-
-        let relay = thread::spawn(move || mediate(wl_relay, cd_relay, Bus::Session));
-
-        // The fake delegate: read the forwarded call, reply once, then close (ending inbound).
-        let delegate = thread::spawn(move || {
-            while let Ok(Some(frame)) = read_frame(&mut cd_test) {
-                if let Frame::Call(call) = frame {
-                    let reply = Frame::Reply(Reply {
-                        reply_serial: call.serial,
-                        signature: String::new(),
-                        body_endian: b'l',
-                        body: Vec::new(),
-                    });
-                    cd_test.write_all(&reply.encode()).expect("delegate reply");
-                    break;
+/// Parse a `DBUS_RECV` reply: `[status]` then, on `OK`, the length-prefixed frame relayed
+/// verbatim by kenneld. An empty reply is a clean close.
+fn parse_recv(reply: &[u8]) -> RecvReply {
+    match reply.first() {
+        Some(&status::AGAIN) => RecvReply::Again,
+        Some(&status::OK) => {
+            let rest = reply.get(1..).unwrap_or(&[]);
+            match wire::frame_len(rest) {
+                Ok(Some(len)) => {
+                    let payload = rest.get(4..4usize.saturating_add(len)).unwrap_or(&[]);
+                    Frame::decode(payload).map_or(RecvReply::Closed, RecvReply::Frame)
                 }
+                _ => RecvReply::Closed,
             }
-            // Returning drops cd_test, which EOFs the facade's inbound reader.
-        });
-
-        // The workload: SASL, then Hello (answered locally), then a normal call (forwarded).
-        let mut sasl = vec![0u8];
-        sasl.extend_from_slice(b"AUTH EXTERNAL\r\nBEGIN\r\n");
-        wl_test.write_all(&sasl).expect("sasl");
-        wl_test
-            .write_all(&call_bytes(
-                "org.freedesktop.DBus",
-                "/org/freedesktop/DBus",
-                "org.freedesktop.DBus",
-                "Hello",
-                1,
-            ))
-            .expect("hello");
-        wl_test
-            .write_all(&call_bytes(
-                "org.freedesktop.Notifications",
-                "/org/freedesktop/Notifications",
-                "org.freedesktop.Notifications",
-                "GetCapabilities",
-                2,
-            ))
-            .expect("call");
-        wl_test.shutdown(Shutdown::Write).expect("half-close");
-
-        let mut got = Vec::new();
-        wl_test.read_to_end(&mut got).expect("read replies");
-
-        // The SASL OK was delivered, plus two D-Bus messages (Hello return + the forwarded
-        // call's reconstructed reply) — well more than the 37-byte OK line alone.
-        assert!(
-            got.windows(3).any(|w| w == b"OK "),
-            "SASL OK not delivered"
-        );
-        assert!(got.len() > 37, "expected OK + two D-Bus replies, got {} bytes", got.len());
-
-        delegate.join().expect("delegate");
-        relay.join().expect("relay");
+        }
+        // An empty reply or any other status is a clean close.
+        _ => RecvReply::Closed,
     }
+}
+
+/// Open the binder device and map the client buffer.
+fn open_binder(device: &str) -> io::Result<Connection> {
+    let fd = OpenOptions::new().read(true).write(true).open(device)?;
+    Connection::open(fd.into(), MAP_SIZE)
 }
