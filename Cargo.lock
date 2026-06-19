@@ -96,6 +96,7 @@ version = "0.1.0"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-scm",
+ "mini-sansio-dbus",
 ]
 
 [[package]]
@@ -284,6 +285,12 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "mini-sansio-dbus"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba85699922b8c4df5cc522fd1aaa9d8b562dfd2b4b334bc510e5ed021eb288eb"
 
 [[package]]
 name = "nix"

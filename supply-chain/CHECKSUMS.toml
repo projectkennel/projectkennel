@@ -193,6 +193,17 @@ verified-against = [
 ]
 notes = "Transitive via object (byte search); also used by time."
 
+[crate."mini-sansio-dbus"]
+version = "=5.0.1"
+crate-sha256 = "ba85699922b8c4df5cc522fd1aaa9d8b562dfd2b4b334bc510e5ed021eb288eb"
+audited-by = "remco"
+audited-on = "2026-06-19"
+verified-against = [
+    "crates.io static.crates.io .crate download (independent re-download via tools/audit-helper.sh confirm) — sha256 matches",
+    "github.com/iliabylich/mini-sansio-dbus @ b1adcf603bd6705313decd65dece865894d74e3b (tag v5.0.1) — 77 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep of kennel-facade (facade-dbus, §7.7) — the D-Bus wire marshalling. Outside the daemon TCB. `#![forbid(unsafe_code)]`, 0 runtime deps (anyhow/rustix are dev-only). Only the marshalling core (encoder/incoming/types) is linked; the app-specific `messages/` tree is dead code. The incoming decoder parses adversarial workload wire and carries a fuzz target."
+
 [crate."num-conv"]
 version = "=0.2.2"
 crate-sha256 = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
