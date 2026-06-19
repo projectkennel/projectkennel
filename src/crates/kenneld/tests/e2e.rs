@@ -325,6 +325,8 @@ fn no_ipc_kennel_runs_through_the_factory() {
         audit_base: Some(audit_base.clone()),
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
+        facade_dbus_bin: Some(sibling_binary("facade-dbus")),
+        host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
@@ -460,6 +462,8 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         audit_base: Some(audit_base.clone()),
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
+        facade_dbus_bin: Some(sibling_binary("facade-dbus")),
+        host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
@@ -598,6 +602,8 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
         audit_base: Some(audit_base.clone()),
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
+        facade_dbus_bin: Some(sibling_binary("facade-dbus")),
+        host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
@@ -747,6 +753,8 @@ fn run_ttl_kennel(
         audit_base: Some(audit_base.clone()),
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
+        facade_dbus_bin: Some(sibling_binary("facade-dbus")),
+        host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
@@ -936,6 +944,8 @@ fn interactive_harness(tag: &str) -> Option<InteractiveHarness> {
         audit_base: Some(audit_base.clone()),
         bastion: None,
         afunix_bin: Some(sibling_binary("facade-afunix")),
+        facade_dbus_bin: Some(sibling_binary("facade-dbus")),
+        host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };

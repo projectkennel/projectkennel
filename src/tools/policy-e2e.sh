@@ -97,7 +97,8 @@ trap cleanup EXIT
 if [ "$DO_INSTALL" = 1 ]; then
     echo "== building release =="
     cargo build --release --offline --frozen --locked \
-        -p kenneld -p host-netproxy -p facade-socks5 -p facade-ssh -p kennel-bin-init \
+        -p kenneld -p kennel-host-delegate -p kennel-host-dbus \
+        -p kennel-facade -p kennel-bin-init \
         || { echo "build failed" >&2; exit 1; }
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress \
         || { echo "privhelper build failed" >&2; exit 1; }

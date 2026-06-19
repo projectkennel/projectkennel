@@ -1,0 +1,23 @@
+[package]
+name = "kennel-lib-dbus"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel D-Bus mediation library (§7.7): the typed IDBus transaction wire spoken across the facade↔delegate conduit, the server-side SASL handshake, and the message-loop that turns an in-kennel workload's adversarial D-Bus connection into typed transactions. Shared by facade-dbus (in-kennel, untrusted) and host-dbus (operator context). Outside the daemon TCB. The adversarial-wire decode is mini-sansio-dbus; this crate is the framing and server logic around it."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The D-Bus wire marshalling: the sans-IO incoming decoder (header/body) and the
+# message encoder (replies + reconstructed outbound calls). The adversarial-wire
+# parse the facade quarantines (§7.7.2). forbid(unsafe_code), 0 runtime deps.
+mini-sansio-dbus = "=5.0.1"
+# The conduit TLV codec + the token-bucket rate limiter (re-exported as `wire`/`ratelimit`).
+# They live there, not here, so kenneld — which frames/rate-limits/relays the conduit — can
+# link them without this crate's marshaller reaching the daemon TCB (§7.7.2a/§7.7.2c).
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+
+[lints]
+workspace = true

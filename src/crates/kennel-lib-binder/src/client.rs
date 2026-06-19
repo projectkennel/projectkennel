@@ -181,6 +181,51 @@ impl Connection {
         }
     }
 
+    /// Send a **one-way** (async, no reply) transaction (`TF_ONE_WAY`).
+    ///
+    /// Returns once the driver acknowledges the transaction (`BR_TRANSACTION_COMPLETE`); there is
+    /// no reply buffer. Used for the fire-and-forget D-Bus relay sends ([`crate::service::verb::DBUS_SEND`]
+    /// / [`crate::service::verb::DBUS_CLOSE`], §7.7.2): the bus reply returns asynchronously on a
+    /// separate [`crate::service::verb::DBUS_RECV`], so no looper thread is held here per call.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transact`] (driver `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/error), minus the reply.
+    pub fn transact_oneway(&self, handle: u32, code: u32, data: &[u8]) -> io::Result<()> {
+        let td = TransactionData {
+            target: u64::from(handle),
+            code,
+            flags: proto::TF_ONE_WAY,
+            data_size: len_u64(data.len())?,
+            buffer: data.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, false, &td);
+        let mut to_send: &[u8] = &write;
+        loop {
+            let brs = self.cycle(to_send)?;
+            to_send = &[];
+            self.ack_refcounts(&brs)?;
+            for br in brs {
+                match br {
+                    Br::TransactionComplete => return Ok(()),
+                    Br::Failed => {
+                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
+                        return Err(io::Error::other(format!(
+                            "oneway binder transaction failed (BR_FAILED_REPLY, extended errno {errno})"
+                        )));
+                    }
+                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
+                    Br::Error(code) => {
+                        return Err(io::Error::other(format!("binder driver error {code}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Send a synchronous transaction expecting a file descriptor in the reply (the
     /// af-unix facade: `CONNECT` a path, receive the connected socket — `07-1`/`02-4`).
     /// Sets `TF_ACCEPT_FDS` so the kernel permits the reply's fd, and returns the fd

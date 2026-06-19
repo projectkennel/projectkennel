@@ -58,8 +58,8 @@ name = "kennel-facade"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-binder",
+ "kennel-lib-dbus",
  "kennel-lib-scm",
- "mini-sansio-dbus",
 ]
 
 [[package]]
@@ -69,6 +69,7 @@ dependencies = [
  "arbitrary",
  "kennel-facade",
  "kennel-lib-binder",
+ "kennel-lib-dbus",
  "kennel-lib-policy",
  "kennel-lib-spawn",
  "kennel-lib-term",
@@ -119,6 +120,14 @@ name = "kennel-lib-control"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-syscall",
+]
+
+[[package]]
+name = "kennel-lib-dbus"
+version = "0.1.0"
+dependencies = [
+ "kennel-lib-binder",
+ "mini-sansio-dbus",
 ]
 
 [[package]]

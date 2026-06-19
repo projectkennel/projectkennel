@@ -189,6 +189,7 @@ impl PolicyLoader for TrustStoreLoader {
         let ssh = substituted.ssh;
         let unix = substituted.unix;
         let binder = substituted.binder;
+        let dbus = substituted.dbus;
         let audit = substituted.audit;
         let env = substituted.env;
         Ok(Loaded {
@@ -199,6 +200,7 @@ impl PolicyLoader for TrustStoreLoader {
             ssh,
             unix,
             binder,
+            dbus,
             groups,
             audit,
             env,

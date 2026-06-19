@@ -59,6 +59,9 @@ pub struct Loaded {
     /// The per-kennel binder IPC runtime (§7.1.4): the user-defined services the
     /// context manager gates against. Empty for a kennel with no `[binder]` policy.
     pub binder: kennel_lib_policy::BinderRuntime,
+    /// The per-kennel D-Bus mediation runtime (§7.7): the enabled buses and their compiled
+    /// allow/deny tables. Empty (no bus enabled) for a kennel with no `[dbus]` policy.
+    pub dbus: kennel_lib_policy::DbusRuntime,
     /// The granted supplementary groups `(name, gid)` (§7.4): resolved and
     /// membership-checked by the loader, named in the synthetic `/etc/group`. The
     /// loader also sets `plan.supplementary_groups` to these gids (what the seal
@@ -151,6 +154,13 @@ pub struct Identity {
     /// facade (§7.6 / `07-1` §7.1.5). `None` disables the facade path, so `[unix]`
     /// grants go unserved (no host socket is exposed by other means).
     pub afunix_bin: Option<PathBuf>,
+    /// The host path of `facade-dbus`, bound into the view and launched by the seal to terminate
+    /// the workload's bus connection and frame typed transactions onto binder node 0 (§7.7.2).
+    /// `None` disables the D-Bus facade path, so `[dbus]` grants go unserved.
+    pub facade_dbus_bin: Option<PathBuf>,
+    /// The host path of `host-dbus`, the operator-context D-Bus mediation delegate kenneld spawns
+    /// per enabled bus (§7.7.2b). `None` disables mediation (no delegate, so the relay denies).
+    pub host_dbus_bin: Option<PathBuf>,
     /// The host path of the trusted root-owned `kennel-bin-init` the privhelper factory
     /// `fexecve`s as the kennel's uid-0 PID 1 (`07-2`). `Some` selects the factory
     /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
@@ -366,6 +376,49 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             env,
             afunix_bin: self.identity.afunix_bin.clone(),
         }
+    }
+
+    /// Prepare a kennel's D-Bus mediation (§7.7): for each enabled bus, pair the compiled
+    /// allow/deny table with the operator's real bus address (what `host-dbus` connects) and the
+    /// in-view socket path `facade-dbus` binds (what the workload's `DBUS_*_BUS_ADDRESS` points
+    /// at). A no-op (empty [`crate::DbusPrep`]) when the kennel enables no bus.
+    ///
+    /// `shim_root` is the kennel's in-view `$HOME` (a writable tmpfs); the in-view bus sockets live
+    /// under it, so the facade can `bind(2)` them and the workload can connect.
+    fn prepare_dbus(
+        &self,
+        dbus: &kennel_lib_policy::DbusRuntime,
+        shim_root: &Path,
+    ) -> crate::DbusPrep {
+        // The in-view directory facade-dbus binds its per-bus sockets in (it create_dir_all's it).
+        let listen_dir = shim_root.join(".kennel-dbus");
+        let bus_prep = |rules: &kennel_lib_policy::DbusBusRuntime, address: String, leaf: &str| {
+            crate::DbusBusPrep {
+                rules: rules.clone(),
+                bus_address: address,
+                listen_path: listen_dir.join(leaf),
+            }
+        };
+        crate::DbusPrep {
+            session: dbus
+                .session
+                .as_ref()
+                .map(|r| bus_prep(r, self.session_bus_address(), "session")),
+            system: dbus
+                .system
+                .as_ref()
+                .map(|r| bus_prep(r, system_bus_address(), "system")),
+            facade_bin: self.identity.facade_dbus_bin.clone(),
+            host_bin: self.identity.host_dbus_bin.clone(),
+            cmd_dir: crate::socket::runtime_dir().join("dbus"),
+        }
+    }
+
+    /// The operator's real session-bus address `host-dbus` connects to: the daemon's own
+    /// `DBUS_SESSION_BUS_ADDRESS`, else the well-known per-user socket.
+    fn session_bus_address(&self) -> String {
+        std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .unwrap_or_else(|_| format!("unix:path=/run/user/{}/bus", self.identity.uid))
     }
 
     /// Drop a kennel's SSH edges from the bastion on teardown (§7.10.2): a synthetic
@@ -878,6 +931,9 @@ pub fn run_kennel<P, L>(
     // Prepare the AF_UNIX socket shims (§7.6): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
+    // Prepare D-Bus mediation (§7.7): pair each enabled bus's compiled table with the real bus
+    // address and the in-view socket the facade presents. Stateless, like the unix shims.
+    let dbus = shared.prepare_dbus(&loaded.dbus, &shim_root);
     // Re-derive the compile-time footgun warning at spawn (§7.10.1): a policy may shim a
     // real ssh-agent socket via `[[unix.allow]]`, which the framework permits but warns
     // loudly about — an exposed agent is a destination-blind signing oracle. An operator
@@ -975,6 +1031,7 @@ pub fn run_kennel<P, L>(
             .map(|base| base.join(format!("root-{ctx}"))),
         ssh,
         unix,
+        dbus,
         binder: None,
         tracer: tr,
     };
@@ -1330,6 +1387,13 @@ fn recv_pty_master(sock: &OwnedFd) -> io::Result<OwnedFd> {
 /// (`<kennel>`/`<ctx>`/`<uid>`/`<home>`) and expand a leading `~`/`$HOME` against
 /// `base_home` and `$XDG_RUNTIME_DIR`/`$UID` against the uid (§7.6). `base_home` is
 /// the real home for a `real` path, the in-view shim root for a `shim` path.
+/// The operator's real system-bus address `host-dbus` connects to: `DBUS_SYSTEM_BUS_ADDRESS`, else
+/// the well-known path. (Free function: the system bus address is uid-independent.)
+fn system_bus_address() -> String {
+    std::env::var("DBUS_SYSTEM_BUS_ADDRESS")
+        .unwrap_or_else(|_| "unix:path=/run/dbus/system_bus_socket".to_owned())
+}
+
 fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> PathBuf {
     let uid = subst.uid.to_string();
     let s = raw
@@ -1716,6 +1780,7 @@ mod tests {
                 ssh: kennel_lib_policy::SshRuntime::default(),
                 unix: kennel_lib_policy::UnixRuntime::default(),
                 binder: kennel_lib_policy::BinderRuntime::default(),
+                dbus: kennel_lib_policy::DbusRuntime::default(),
                 groups: Vec::new(),
                 audit: kennel_lib_policy::AuditRuntime::default(),
                 env: kennel_lib_policy::EnvRuntime::default(),
@@ -1755,6 +1820,8 @@ mod tests {
                 audit_base: None,
                 bastion: None,
                 afunix_bin: None,
+                facade_dbus_bin: None,
+                host_dbus_bin: None,
                 init_bin: None,
                 tracer: kennel_lib_config::Tracer::new(
                     "kenneld",

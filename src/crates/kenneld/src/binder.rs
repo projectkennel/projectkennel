@@ -28,6 +28,8 @@ use kennel_lib_binder::client::Incoming;
 use kennel_lib_binder::ctxmgr::{ContextManager, Handler, Reply};
 use kennel_lib_policy::{BinderRuntime, UnixRuntime};
 
+use crate::dbus::DbusRelay;
+
 /// The binder buffer mapping size per instance (ample for service-name transactions).
 const MAP_SIZE: usize = 128 * 1024;
 /// How long the looper waits per poll before re-checking the stop flag.
@@ -200,6 +202,7 @@ pub fn spawn(
     lifecycle: Lifecycle,
     net: crate::inet::NetRuntime,
     inbound: Arc<crate::inbound::InboundRuntime>,
+    dbus: Option<Arc<DbusRelay>>,
     writer: Arc<Writer>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
@@ -214,7 +217,15 @@ pub fn spawn(
     let lifecycle = Arc::new(lifecycle);
     let handler: Handler = Arc::new(move |incoming: &Incoming| {
         handle(
-            &registry, &unix, &net, &inbound, &lifecycle, incoming, ctx, &writer,
+            &registry,
+            &unix,
+            &net,
+            &inbound,
+            &lifecycle,
+            dbus.as_deref(),
+            incoming,
+            ctx,
+            &writer,
         )
     });
 
@@ -236,6 +247,7 @@ fn handle(
     net: &crate::inet::NetRuntime,
     inbound: &crate::inbound::InboundRuntime,
     lifecycle: &Lifecycle,
+    dbus: Option<&DbusRelay>,
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
@@ -256,6 +268,16 @@ fn handle(
     }
     if incoming.code == verb::BIND_INET {
         return inet_bind(inbound, incoming, ctx, writer);
+    }
+    // The D-Bus mediation membrane (§7.7.2a): kenneld relays opaque frames to the host-dbus
+    // delegate by connection id, lock-free (the relay owns its own state + rate cap). `DBUS_RECV`
+    // parks the looper until a frame is ready, so — like the af-unix/INet dials — it is dispatched
+    // off the registry lock; the relay bounds parked loopers to one per connection.
+    if matches!(
+        incoming.code,
+        verb::DBUS_OPEN | verb::DBUS_SEND | verb::DBUS_RECV | verb::DBUS_CLOSE
+    ) {
+        return dbus_handle(dbus, incoming, ctx, writer);
     }
     let name = decode_name(&incoming.data);
     // The registry verbs are O(1) in-memory; take the lock only for them.
@@ -590,6 +612,71 @@ fn inet_event(incoming: &Incoming, ctx: u16, dest: &str, port: u16, outcome: Out
     .field("dest", Value::untrusted(dest.to_owned()))
     .field("port", Value::Uint(u64::from(port)))
     .field("ctx", Value::Uint(u64::from(ctx)))
+}
+
+/// Serve a D-Bus mediation verb (§7.7.2a). kenneld is the **membrane**, not a filter or parser:
+/// it binds each connection to its opener (the relay's per-connection owner check, on the
+/// kernel-attested sender pid), applies the token-bucket rate cap, and relays the opaque frame
+/// to/from the `host-dbus` delegate by connection id. The relay owns all of that state, so no
+/// registry lock is taken here.
+///
+/// `dbus == None` means the kennel enabled no bus (`[dbus]` absent or the delegate failed to
+/// start): every verb is denied — fail-closed, never a silent bus exposure.
+///
+/// Only the connection-lifecycle verbs (`OPEN`/`CLOSE`) are audited here: they are low-volume and
+/// security-relevant. `SEND`/`RECV` are per-message transport — auditing them at the membrane would
+/// drown the log, and the real bus decisions (the allowlist, §7.7.2a) are audited by the delegate,
+/// which owns filtering.
+fn dbus_handle(dbus: Option<&DbusRelay>, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
+    let Some(relay) = dbus else {
+        return Reply::Data(one(status::DENIED));
+    };
+    let pid = incoming.sender_pid;
+    match incoming.code {
+        verb::DBUS_OPEN => {
+            let reply = relay.open(pid, &incoming.data);
+            audit_dbus(
+                writer,
+                incoming,
+                ctx,
+                "binder.dbus-open",
+                reply.first().copied(),
+            );
+            Reply::Data(reply)
+        }
+        verb::DBUS_CLOSE => {
+            let reply = relay.close(pid, &incoming.data);
+            audit_dbus(
+                writer,
+                incoming,
+                ctx,
+                "binder.dbus-close",
+                reply.first().copied(),
+            );
+            Reply::Data(reply)
+        }
+        verb::DBUS_SEND => Reply::Data(relay.send(pid, &incoming.data)),
+        verb::DBUS_RECV => Reply::Data(relay.recv(pid, &incoming.data)),
+        // Unreachable: `handle` dispatches here only for the four DBUS_* codes.
+        _ => Reply::Data(one(status::BAD_REQUEST)),
+    }
+}
+
+/// Audit one D-Bus lifecycle verb, mapping the relay's reply status byte to an outcome (an empty
+/// reply — a denied/gone `recv` — is `Info`).
+fn audit_dbus(
+    writer: &Writer,
+    incoming: &Incoming,
+    ctx: u16,
+    action: &'static str,
+    status_byte: Option<u8>,
+) {
+    let outcome = status_byte.map_or(Outcome::Info, outcome_for);
+    writer.emit(
+        &Event::new(action, Resource::Binder, outcome, Source::Kenneld)
+            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+            .field("ctx", Value::Uint(u64::from(ctx))),
+    );
 }
 
 /// A one-byte status reply.

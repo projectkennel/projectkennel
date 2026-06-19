@@ -44,3 +44,7 @@ kennel-facade = { path = "../crates/kennel-facade" }
 # speaks raw D-Bus wire to facade-dbus, so the header/body decode reads fully
 # workload-controlled bytes. Driven through the public sans-IO read loop.
 mini-sansio-dbus = "=5.0.1"
+# The D-Bus mediation parsers (07-7 §7.7): the facade's SASL handshake reads
+# workload-controlled auth bytes, and the typed-frame decoder reads frames the
+# untrusted in-kennel facade produced (host-dbus side). Both are bounded parsers.
+kennel-lib-dbus = { path = "../crates/kennel-lib-dbus" }

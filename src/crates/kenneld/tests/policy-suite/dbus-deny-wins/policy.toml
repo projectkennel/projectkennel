@@ -1,0 +1,49 @@
+# ============================================================================
+# Suite case: dbus-deny-wins — an explicit `[dbus.session.deny]` overrides the allow (§7.7.6).
+#
+# The session bus is enabled and `talk` GRANTS the bus driver `org.freedesktop.DBus`, but the
+# belt-and-braces `deny.talk` names the same destination. Deny wins: the host-dbus delegate refuses
+# the call with `org.freedesktop.DBus.Error.AccessDenied` before it ever reaches the real bus, even
+# though the allow list admits it. (The facade still answers the local Hello, so the connection
+# itself establishes — only the brokered call is denied; this is the mediated path, not a missing
+# bus.)
+#
+# The workload calls `org.freedesktop.DBus.GetId` and inverts the result: it exits 0 IFF the call
+# was refused. A success would mean deny failed to override the allow — a real policy regression —
+# so the case fails. The kennel's exit code IS the verdict.
+# ============================================================================
+
+template_name = "dbus-deny-wins"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[dbus.session]
+enabled = true
+
+[dbus.session.allow]
+talk = ["org.freedesktop.DBus"]
+
+[dbus.session.deny]
+talk = ["org.freedesktop.DBus"]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/dbus-send"]
+
+[workload]
+argv = [
+    "/bin/sh",
+    "-c",
+    """
+    if dbus-send --session --print-reply --dest=org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus.GetId; then
+        echo 'ERROR: the call was allowed, but deny must win over allow (§7.7.6)' >&2
+        exit 1
+    fi
+    echo 'call refused as expected (deny wins)'
+    exit 0
+    """,
+]

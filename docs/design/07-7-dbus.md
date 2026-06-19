@@ -35,24 +35,35 @@ asking the session to act on its behalf. Direct grants are never offered.
 ## 7.7.2 The mediation architecture: facade · filter · delegate
 
 D-Bus rides the kennel's single auditable inter-namespace chokepoint — the binder gateway
-(§7.1). The **adversarial-wire parser** runs in the kennel; the **bus connection** and the
-**mechanical filter** run in the operator-context delegate; **kenneld builds them at
-construction and steps out of the per-message path** — at run time the typed messages flow
-facade ↔ conduit ↔ delegate directly, exactly as egress data flows `facade-socks5` ↔
-socketpair ↔ `host-netproxy` once kenneld has minted it.
+(§7.1) — and it rides it **per message**. This is the defining difference from the INet egress
+(§7.5), and it dictates the transport. INet makes one *connect-time* decision and then hands the
+kennel an already-established socket to stream over: a single fd, no further mediation, because
+the security decision was the connect. D-Bus has a security decision on **every message**, so the
+channel never becomes a post-decision stream — it stays security-relevant for its whole life.
+A raw conduit fd is therefore exactly wrong here: handing the kennel a direct fd to the trusted,
+operator-context delegate would expose the entire `host-dbus` process to whatever holds the other
+end — the facade, or malware in the kennel pretending to be it.
+
+So every D-Bus message is transacted across the binder gateway to node 0, and **kenneld relays it
+to the delegate doing as little as possible**. kenneld neither parses the frame (so the D-Bus
+engine never enters the daemon TCB) nor filters it (that is the delegate's mechanical job,
+§7.7.2a) — but it *is* the membrane: the kennel reaches `host-dbus` only through kenneld, over the
+enforced binder hop, with kenneld binding each connection to the in-kennel consumer that opened it
+(§7.7.2a, per-connection ownership). The adversarial-wire parser runs in the kennel; the bus
+connection and the mechanical filter run in the operator-context delegate; kenneld is the cheap,
+owner-checked relay between them.
 
 ```
-  kennel (own user+net ns)                       │  operator context (host)
-                                                 │
-  workload ──D-Bus wire──▶ facade-dbus ──typed───┼──▶ host-dbus delegate ──▶ real
-     (libdbus / sd-bus)         ▲      message    │    · mechanical filter      bus
-                                │      (conduit)  │      (compiled [dbus] table)
-                                │                 │    · reconstruct + send
-  workload ◀── reply/signal ◀───┘◀────────────────┼──◀ reply (by serial) /
-                                                 │     match-rule'd signal
-                                                 │
-   kenneld: at construction only — spawns facade-dbus + host-dbus, mints the conduit,
-            compiles [dbus] → the filter table. Not in the per-message path.
+  kennel (own user+net ns)          │  kenneld (the membrane)   │  operator context (host)
+                                    │                           │
+  workload ─D-Bus wire─▶ facade-dbus ─binder txn (node 0)─▶ relay ─owner-only pipe─▶ host-dbus ─▶ real
+    (libdbus/sd-bus)       ▲    parse→typed frame │  · no parse, no filter   │  · filter (table)   bus
+                           │                      │  · binds each conn to    │  · reconstruct+send
+  workload ◀─reply/signal◀─┘◀─binder reply / DBUS_RECV◀─  its in-kennel opener◀─┴──◀ reply (by serial) /
+                                    │              · shovels frame bytes      │     match-rule'd signal
+                                    │                by connection id         │
+   kenneld: spawns facade-dbus + host-dbus, compiles [dbus] → the filter table it hands the
+            delegate, and per message is the minimal-work relay — NOT cut out of the path.
 ```
 
 - **`facade-dbus` (in-kennel, untrusted side).** The **sole parser of adversarial D-Bus
@@ -70,57 +81,76 @@ socketpair ↔ `host-netproxy` once kenneld has minted it.
   runtime form); the delegate is a mechanical enforcer of that table, not a second author of
   policy — the same way `host-netproxy` dials a kenneld-pinned address rather than deciding the
   address itself. This is why the filter runs in the delegate and not kenneld (§7.7.2a).
-- **`host-dbus` delegate (operator context).** Joins `host-netproxy`/`host-inetd` as a
-  third host-side conduit, run unprivileged in the operator's own context (it reaches exactly
-  the operator's own buses, no more). It holds the connections to the real session and system
-  buses, **filters** each typed transaction through the compiled table kenneld handed it at
-  spawn, and on a pass **reconstructs** a well-formed D-Bus message from the vetted typed fields
-  and sends it. It never re-parses the kennel's adversarial bytes — it reads only the typed
-  fields the facade produced. Its concurrency model is §7.7.2b.
+- **`host-dbus` delegate (operator context).** Joins `host-netproxy`/`host-inetd` as a third
+  host-side delegate, run unprivileged in the operator's own context (it reaches exactly the
+  operator's own buses, no more). It is reachable **only from kenneld**, over an owner-only pipe —
+  never directly from the kennel. It holds the connections to the real session and system buses,
+  **filters** each typed transaction kenneld relays to it through the compiled table kenneld
+  handed it at spawn, and on a pass **reconstructs** a well-formed D-Bus message from the vetted
+  typed fields and sends it. It never re-parses the kennel's adversarial bytes — it reads only the
+  typed fields the facade produced. Its concurrency model is §7.7.2b.
 
-### 7.7.2a Why the filter runs in the delegate, not kenneld
+### 7.7.2a kenneld relays per message but neither parses nor filters
 
-The per-method check is a **mechanical filter** (apply a compiled match table), not a policy
-decision the daemon must author — so the only question is *where it runs*, and that is a
-scaling question:
+Two separable questions — *what mediates the transport* and *what applies the filter* — and the
+answer to the first is **kenneld**, to the second the **delegate**. Conflating them is what
+produced the earlier (wrong) idea that kenneld could be cut out of the per-message path with a
+raw socketpair.
 
-- kenneld is **synchronous** — a blocking, thread-per-connection daemon already carrying
-  construction, supervision, node-0 service, the service registry, and the audit drain. D-Bus
-  is chatty (dozens of messages a minute even idle), and per-message mediation is on the data
-  plane, not the control plane. Routing every D-Bus message through kenneld's loop would put
-  high-rate, per-message work on top of everything else it does, and it scales poorly there.
-- The **delegate** is a separate process whose throughput scales on its own threads (§7.7.2b),
-  independent of the daemon, and — like every host delegate — runs at operator authority
-  outside the daemon TCB. The policy still has one source (the compiled table); only the
-  enforcement runs here.
+**kenneld is the membrane (transport).** The kennel reaches the trusted `host-dbus` process only
+by transacting node 0; kenneld relays each message to the delegate over an owner-only pipe and
+the reply back. Because it is the only path, the binder gateway enforces the one hop the kennel
+controls — bounded transaction size, the fuzzed decoder, no fd injection, and **per-connection
+ownership** kenneld enforces. There is no daemon-wide "the facade" identity to check: a binder pid
+cannot prove a caller *is* the wire-terminating facade, and `facade-dbus` is restartable (a crash
+re-forks it under a fresh pid), so a fixed pid gate would be both unprovable and brittle. What
+kenneld *can* enforce, and does, is narrower and real: `DBUS_OPEN` records the kernel-attested
+opener pid as the connection's owner, and a later `DBUS_SEND`/`DBUS_RECV`/`DBUS_CLOSE` from a
+different pid is refused — so one in-kennel consumer cannot hijack, drain, or tear down another's
+bus connection by guessing its `conn_id`. (Any in-kennel process may still open its *own*
+connection; the delegate's allowlist, not caller identity, bounds what a connection can do.) A raw
+conduit fd would throw all of that away and expose the delegate to whatever in the kennel holds the
+fd — the exposure a per-message security boundary cannot accept.
 
-So the daemon TCB does not grow ([[tcb-only-shrinks]]): kenneld's role is construction —
-spawn `facade-dbus` and `host-dbus` and mint the conduit between them, exactly as it does for
-`facade-socks5`↔`host-netproxy` — and it is out of the per-message path. *(This refines the
-`07-1-binder.md` framing, which put the check in kenneld; that cross-reference is updated to
-the delegate locus.)*
+**kenneld does as little as possible.** Per message it routes opaque frame bytes by connection id
+and shovels the reply back. It does **not** parse the frame — so `kennel-lib-dbus`/the D-Bus
+marshaller never enter the daemon TCB ([[tcb-only-shrinks]]); `cargo tree -p kenneld` stays clean
+of them — and it does **not** apply the allowlist. That is why it can sit in the path cheaply:
+the expensive, chatty work (parsing adversarial wire, matching the per-method table, the bus
+round-trip) is exactly what is kept *off* kenneld's synchronous loop. This is the sense in which
+kenneld was "designed to do as little as possible passing on the messages" — minimal-work relay,
+not absentee.
+
+**The filter runs in the delegate.** The per-method check is a mechanical match-table application
+(not policy authorship), it scales on the delegate's own threads (§7.7.2b), and it runs at
+operator authority outside the daemon TCB — the same division as every host delegate, which acts
+on a kenneld-pinned decision rather than re-deciding. *(This refines the `07-1-binder.md`
+framing, which put the check in kenneld; the filter locus is the delegate, the transport locus is
+kenneld.)*
 
 ### 7.7.2b The delegate's concurrency model
 
 `host-dbus` is sized for per-message mediation without a single serial bottleneck — no async
 runtime, real threads, the same sync bar as kenneld and `host-netproxy`:
 
-- **Outbound — a small fixed mediation pool (≈4–8 threads).** Each reads typed messages off
-  the facade conduit and runs the compiled filter (§7.7.2a). A message that passes is fired
-  into an **ephemeral per-request worker**; a message that fails is refused back to the facade
-  as `AccessDenied` without ever touching the bus. The mediation threads never block on the
-  bus, so a slow or hung host service cannot stall mediation of other calls.
+- **Outbound — the typed messages kenneld relays in.** Each is run through the compiled filter
+  (§7.7.2a). A message that passes is reconstructed and sent to the bus; a message that fails is
+  refused — an `AccessDenied` frame returned to kenneld (and on to the facade) without ever
+  touching the bus. Mediation never blocks on the bus, so a slow or hung host service cannot
+  stall mediation of other calls. *(The as-built delegate realises this on a single-threaded
+  `poll(2)` event loop over the kenneld pipe and the bus fd; the thread-pool sketch here is the
+  throughput target for a very chatty bus, not a correctness requirement.)*
 - **Per-request worker (ephemeral).** Owns one host-bus round-trip: it reconstructs the
   well-formed message, assigns it a delegate-side serial (the kennel's serials and the bus's
   serials are different namespaces — the worker records `kennel_serial ↔ bus_serial` so the
   reply can be matched back), sends it on the shared bus connection, and parks awaiting its
   reply. The worker count is bounded by the kennel cgroup (`pids.max`); a flood of calls
   applies back-pressure on the outbound pool rather than unbounded thread growth.
-- **Inbound — a small fixed pool (≈2, ≪ the outbound pool).** Each reads the host bus
-  connection and **demultiplexes**: a **reply** is matched by `reply_serial` to its parked
-  worker, which pops it back over the conduit to the facade; a **signal/broadcast** is run
-  through the compiled match-rule filter (§7.7.4) and, on a pass, forwarded to the facade for
-  re-emission to the workload. A message matching no live request and no rule is dropped.
+- **Inbound — reading the host bus connection and demultiplexing.** A **reply** is matched by
+  `reply_serial` to its recorded `kennel_serial` and returned to kenneld, which routes it to the
+  facade (as the reply to the originating `DBUS_SEND`); a **signal/broadcast** is run through the
+  compiled match-rule filter (§7.7.4) and, on a pass, pushed to kenneld, which delivers it to the
+  facade's outstanding `DBUS_RECV`. A message matching no live request and no rule is dropped.
 
 Two consequences worth stating: independent calls fan out to separate workers, so the bus may
 see a single client's distinct calls **out of order** — acceptable because D-Bus gives no
@@ -134,14 +164,37 @@ Routing D-Bus through the binder gateway gives the kennel no bus-socket artefact
 audit on the same path as every other binder transaction.
 
 **The cost (§4.8).** D-Bus mediation is **per message** — the security property *is* the
-per-method allowlist, so something trusted must see every call (unlike `INet`, which mediates
-the connection once and then hands off an fd). That "something" is the
-operator-context `host-dbus`, not the daemon (§7.7.2a): the typed messages flow facade ↔
-conduit ↔ delegate, so kenneld is out of the per-message path and no raw bus fd is ever vended
-to the kennel. The per-message work lands on the facade and the delegate's thread pools
-(§7.7.2b), bounded by the kennel cgroup (`pids.max`/`memory.max`). D-Bus is chatty; this is the
-price of method-level mediation, and it is paid outside the TCB by a process that scales on its
-own threads rather than on kenneld's synchronous loop.
+per-method allowlist, so something trusted must see every call (unlike `INet`, which mediates the
+connection once and then hands off an fd to stream over). Two trusted things see each call, by
+design: kenneld **relays** it (cheaply — route bytes, owner-check the connection, no parse, no
+filter) and the operator-context `host-dbus` **filters** it (§7.7.2a). No raw bus fd, and no raw
+conduit fd, is ever vended to the kennel — the kennel's only D-Bus channel is binder transactions
+to node 0. The expensive per-message work (parse, allowlist, bus round-trip) lands on the facade
+and the delegate, bounded by the kennel cgroup (`pids.max`/`memory.max`) and the rate limiter
+(§7.7.2c); kenneld's added cost is the minimal relay, which is why it can be on the path. D-Bus is
+chatty; this is the price of method-level mediation, paid mostly outside the TCB.
+
+### 7.7.2c Bounding the conduit: framing and rate
+
+Riding binder rather than a raw fd is what *lets* the gateway bound the per-message channel; the
+bounds themselves are explicit, because the conduit carries security-relevant message units, not
+an opaque stream:
+
+- **Size.** The typed transaction is a flat, length-prefixed TLV (tag · length · fields), each
+  field bounded; an over-long length is a decode error, never an allocation. The decoder is
+  fuzzed (CODING-STANDARDS §10.6) — and because kenneld frames and relays these, the TLV codec
+  lives in a crate kenneld already links (`kennel-lib-binder`, the node-0 service wire), **not**
+  in the D-Bus engine crate that pulls the marshaller. kenneld gets framing without mini-sansio
+  entering the TCB.
+- **Rate.** A token-bucket filter caps the message rate a kennel can push. It is enforced at the
+  membrane — kenneld sheds a flood at the gateway before it reaches `host-dbus` at all — and
+  again at the delegate (defence in depth). The bucket (sustained rate + burst) lives beside the
+  TLV codec in `kennel-lib-binder`, so kenneld owns the cap without the engine. A kennel over its
+  rate gets `org.freedesktop.DBus.Error.LimitsExceeded` back, a clean failure rather than a hang.
+
+These replace, explicitly, the implicit bounds binder transactions would have given a direct
+node-to-node path (kernel transaction size limit, buffer back-pressure) — here re-derived in our
+own wire because the relay hop to the host delegate is a pipe, not a binder node.
 
 ## 7.7.3 Message-level mediation, not byte filtering
 

@@ -40,6 +40,8 @@
 pub mod binderfs;
 pub mod client;
 pub mod ctxmgr;
+pub mod dbus;
 pub mod proto;
+pub mod ratelimit;
 pub mod service;
 pub mod sys;
