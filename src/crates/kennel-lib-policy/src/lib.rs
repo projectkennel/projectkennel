@@ -47,12 +47,12 @@ pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
-    BinderRuntime, CapPolicy, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
-    IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, OnChangeAction,
-    ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen, ResolvedArtifact, SeccompAction,
-    SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant, SshRuntime, TmpPolicy,
-    TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
-    RESERVED_PREFIX, ULIMIT_RESOURCES,
+    BinderRuntime, CapPolicy, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
+    ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule,
+    OnChangeAction, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
+    ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant,
+    SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime,
+    UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 
@@ -254,6 +254,7 @@ mod tests {
             unix: settled::UnixRuntime::default(),
             identity: settled::IdentityRuntime::default(),
             binder: settled::BinderRuntime::default(),
+            dbus: settled::DbusRuntime::default(),
             audit: settled::AuditRuntime::default(),
             env: settled::EnvRuntime::default(),
             ulimits: settled::UlimitsRuntime::default(),

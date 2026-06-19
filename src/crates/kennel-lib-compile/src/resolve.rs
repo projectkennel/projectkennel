@@ -44,10 +44,11 @@
 //! the `+=`/`-=` delta operators land in later increments.
 
 use crate::source::{
-    self, BinderSection, BoundaryAcl, CapSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
-    FsSection, FsTmp, IdentitySection, LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl,
-    NetIpv6, NetProxy, NetProxyDeny, NetSection, SeccompSection, SourcePolicy, SshSection,
-    TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
+    self, BinderSection, BoundaryAcl, CapSection, DbusAudit, DbusBus, DbusRules, DbusSection,
+    EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
+    LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny,
+    NetSection, SeccompSection, SourcePolicy, SshSection, TrustSection, TtySection, UnixSection,
+    UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use kennel_lib_policy::audit::{
@@ -234,6 +235,61 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         workload: merge(&parent.workload, &child.workload, fold_workload),
         tty: merge(&parent.tty, &child.tty, fold_tty),
         trust: merge(&parent.trust, &child.trust, fold_trust),
+        dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
+    }
+}
+
+/// Fold `[dbus]` down the chain: `enabled` is scalar-wins per bus; the allow/deny rule
+/// lists union (a child or fragment widens what the bus may reach), matching how
+/// `[[net.proxy.allow]]` composes. The `[dbus.audit]` level is scalar-wins.
+fn fold_dbus(p: &DbusSection, c: &DbusSection) -> DbusSection {
+    DbusSection {
+        session: fold_dbus_bus(p.session.as_ref(), c.session.as_ref()),
+        system: fold_dbus_bus(p.system.as_ref(), c.system.as_ref()),
+        audit: match (&c.audit, &p.audit) {
+            (Some(ca), Some(pa)) => Some(DbusAudit {
+                level: or(&ca.level, &pa.level),
+            }),
+            (some, None) | (None, some) => some.clone(),
+        },
+    }
+}
+
+/// Fold one bus: child `enabled` wins; allow/deny rule lists union parent ∪ child.
+fn fold_dbus_bus(p: Option<&DbusBus>, c: Option<&DbusBus>) -> Option<DbusBus> {
+    match (p, c) {
+        (None, None) => None,
+        (Some(b), None) | (None, Some(b)) => Some(b.clone()),
+        (Some(p), Some(c)) => Some(DbusBus {
+            enabled: or(&c.enabled, &p.enabled),
+            allow: union_dbus_rules(p.allow.as_ref(), c.allow.as_ref()),
+            deny: union_dbus_rules(p.deny.as_ref(), c.deny.as_ref()),
+        }),
+    }
+}
+
+/// Union two optional rule sets, de-duplicating each class (order-independent compose).
+fn union_dbus_rules(p: Option<&DbusRules>, c: Option<&DbusRules>) -> Option<DbusRules> {
+    match (p, c) {
+        (None, None) => None,
+        (Some(r), None) | (None, Some(r)) => Some(r.clone()),
+        (Some(p), Some(c)) => {
+            let join = |a: &[String], b: &[String]| {
+                let mut v = a.to_vec();
+                for x in b {
+                    if !v.contains(x) {
+                        v.push(x.clone());
+                    }
+                }
+                v
+            };
+            Some(DbusRules {
+                talk: join(&p.talk, &c.talk),
+                call: join(&p.call, &c.call),
+                broadcast: join(&p.broadcast, &c.broadcast),
+                own: join(&p.own, &c.own),
+            })
+        }
     }
 }
 
@@ -620,6 +676,29 @@ fn fold_lifecycle(p: &LifecycleSection, c: &LifecycleSection) -> LifecycleSectio
 mod tests {
     use super::*;
     use crate::source::parse;
+
+    #[test]
+    fn dbus_folds_additively_with_scalar_enabled_winning() {
+        // Parent enables session + grants Notifications; child adds portals (union) and the
+        // child's enabled wins. The deny union holds too.
+        let parent = parse(
+            b"template_name = \"p\"\n[dbus.session]\nenabled = true\n[dbus.session.allow]\ntalk = [\"org.freedesktop.Notifications\"]\n",
+        )
+        .expect("parent");
+        let child = parse(
+            b"name = \"k\"\ntemplate_base = \"p@v1\"\n[dbus.session]\nenabled = true\n[dbus.session.allow]\ntalk = [\"org.freedesktop.portal.*\"]\n",
+        )
+        .expect("child");
+        let folded = fold_dbus(
+            parent.dbus.as_ref().expect("p dbus"),
+            child.dbus.as_ref().expect("c dbus"),
+        );
+        let allow = folded.session.expect("session").allow.expect("allow");
+        assert!(allow
+            .talk
+            .contains(&"org.freedesktop.Notifications".to_owned()));
+        assert!(allow.talk.contains(&"org.freedesktop.portal.*".to_owned()));
+    }
 
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =

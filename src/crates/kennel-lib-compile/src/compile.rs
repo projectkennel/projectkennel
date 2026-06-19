@@ -385,6 +385,7 @@ fn assemble(
         unix: translated.unix.clone(),
         identity: translated.identity.clone(),
         binder: translated.binder.clone(),
+        dbus: translated.dbus.clone(),
         audit: translated.audit.clone(),
         env: translated.env.clone(),
         ulimits: translated.ulimits.clone(),
