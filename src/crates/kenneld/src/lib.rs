@@ -1001,6 +1001,12 @@ fn bring_up<P: Privileged + Sync>(
         }
     }
 
+    // The per-kennel D-Bus mediation relay (§7.7.2a), passed into the node-0 handler so the
+    // DBUS_* verbs reach it. Constructed by the bring-up's host-dbus spawn (with a bounded sender
+    // to each enabled bus's delegate); `None` here until that wiring runs, in which case the
+    // membrane denies every D-Bus verb (fail-closed).
+    let dbus_relay: Option<std::sync::Arc<crate::dbus::DbusRelay>> = None;
+
     // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
     // so kennel-bin-init can pull its supervision-half. kennel-bin-init has execed (boot-sync above), so
     // the device is reachable via /proc/<init>/root — a single open, no retry.
@@ -1027,6 +1033,7 @@ fn bring_up<P: Privileged + Sync>(
             lifecycle,
             net_runtime,
             std::sync::Arc::clone(&inbound_runtime),
+            dbus_relay,
         ) {
             Ok(manager) => {
                 tracer.step("bring-up: binder node 0 acquired, lifecycle served");
@@ -1217,6 +1224,7 @@ fn acquire_binder_node0(
     lifecycle: crate::binder::Lifecycle,
     net: crate::inet::NetRuntime,
     inbound: std::sync::Arc<crate::inbound::InboundRuntime>,
+    dbus: Option<std::sync::Arc<crate::dbus::DbusRelay>>,
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
@@ -1238,6 +1246,7 @@ fn acquire_binder_node0(
         lifecycle,
         net,
         inbound,
+        dbus,
         std::sync::Arc::clone(&prep.writer),
     )
 }
