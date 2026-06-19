@@ -1,0 +1,42 @@
+# ============================================================================
+# Suite case: dbus-session-allowed — the full D-Bus mediation path, allow side (§7.7).
+#
+# `[dbus.session]` enables the session bus and grants `talk` to the bus driver
+# `org.freedesktop.DBus`. At bring-up kenneld seals facade-dbus into the view (the workload's
+# DBUS_SESSION_BUS_ADDRESS points at its in-view socket) and spawns the host-dbus delegate in the
+# operator's context, handing it the compiled allow table; kenneld is the membrane between them.
+#
+# The workload runs a real D-Bus client (`dbus-send --print-reply`) against the facade and calls
+# `org.freedesktop.DBus.GetId`. That exercises the whole round trip: SASL + the locally-answered
+# Hello at the facade, a typed DBUS_SEND transacted to node 0, kenneld's owner-checked relay to
+# host-dbus over the owner-only pipe, the delegate's allowlist pass + reconstruction onto the real
+# bus, and the reply demultiplexed back via DBUS_RECV. `dbus-send` exits 0 iff it received the
+# reply — so the kennel's exit code IS the verdict that the allowed call completed end to end.
+# ============================================================================
+
+template_name = "dbus-session-allowed"
+template_version = "1"
+template_base = "base-confined@v1"
+
+[dbus.session]
+enabled = true
+
+[dbus.session.allow]
+talk = ["org.freedesktop.DBus"]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/dbus-send"]
+
+[workload]
+argv = [
+    "/usr/bin/dbus-send",
+    "--session",
+    "--print-reply",
+    "--dest=org.freedesktop.DBus",
+    "/org/freedesktop/DBus",
+    "org.freedesktop.DBus.GetId",
+]
