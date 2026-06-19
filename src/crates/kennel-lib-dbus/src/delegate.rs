@@ -63,13 +63,13 @@ impl Delegate {
     /// [`MessageError`] if an approved call cannot be reconstructed (e.g. a big-endian body).
     pub fn on_conduit_call(&mut self, call: &Call) -> Result<Outbound, MessageError> {
         match self.filter.decide(call) {
-            crate::filter::Decision::Deny(reason) => Ok(Outbound::ToConduit(Frame::Error(
-                ErrorReply {
+            crate::filter::Decision::Deny(reason) => {
+                Ok(Outbound::ToConduit(Frame::Error(ErrorReply {
                     reply_serial: call.serial,
                     name: ACCESS_DENIED.to_owned(),
                     message: reason,
-                },
-            ))),
+                })))
+            }
             crate::filter::Decision::Allow => {
                 let bus_serial = self.take_bus_serial();
                 let bytes = message::reconstruct_call(call, bus_serial)?;

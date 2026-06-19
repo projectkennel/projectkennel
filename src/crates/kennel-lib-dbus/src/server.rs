@@ -365,9 +365,7 @@ mod tests {
         // Refused locally: a ToWorkload error, never forwarded to the delegate.
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions.first(), Some(Action::ToWorkload(_))));
-        assert!(!actions
-            .iter()
-            .any(|a| matches!(a, Action::ToDelegate(_))));
+        assert!(!actions.iter().any(|a| matches!(a, Action::ToDelegate(_))));
     }
 
     #[test]

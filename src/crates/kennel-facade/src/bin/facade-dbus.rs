@@ -117,7 +117,11 @@ fn mediate(device: &str, workload: UnixStream, bus: Bus) -> io::Result<()> {
         Bus::Session => dbus::SESSION,
         Bus::System => dbus::SYSTEM,
     };
-    let reply = binder.transact(CONTEXT_MANAGER_HANDLE, verb::DBUS_OPEN, &dbus::encode_open(conn_id, bus_byte))?;
+    let reply = binder.transact(
+        CONTEXT_MANAGER_HANDLE,
+        verb::DBUS_OPEN,
+        &dbus::encode_open(conn_id, bus_byte),
+    )?;
     if reply.first() != Some(&status::OK) {
         // The bus is not enabled (or refused): drop, the client sees "cannot connect to bus".
         return Ok(());
@@ -141,7 +145,11 @@ fn mediate(device: &str, workload: UnixStream, bus: Bus) -> io::Result<()> {
     workload_to_binder(&binder, conn_id, workload, &facade, &workload_w);
 
     // Teardown: close the connection at kenneld (also unblocks the parked DBUS_RECV).
-    let _ = binder.transact(CONTEXT_MANAGER_HANDLE, verb::DBUS_CLOSE, &dbus::encode_conn(conn_id));
+    let _ = binder.transact(
+        CONTEXT_MANAGER_HANDLE,
+        verb::DBUS_CLOSE,
+        &dbus::encode_conn(conn_id),
+    );
     let _ = inbound.join();
     Ok(())
 }
@@ -201,14 +209,16 @@ fn recv_loop(
     workload_w: &Mutex<UnixStream>,
 ) {
     loop {
-        let Ok(reply) =
-            binder.transact(CONTEXT_MANAGER_HANDLE, verb::DBUS_RECV, &dbus::encode_conn(conn_id))
-        else {
+        let Ok(reply) = binder.transact(
+            CONTEXT_MANAGER_HANDLE,
+            verb::DBUS_RECV,
+            &dbus::encode_conn(conn_id),
+        ) else {
             return; // kenneld closed the connection (or a fatal error): stop.
         };
         match parse_recv(&reply) {
-            RecvReply::Again => {}                 // nothing pending; re-arm.
-            RecvReply::Closed => return,           // kenneld tore the connection down.
+            RecvReply::Again => {}       // nothing pending; re-arm.
+            RecvReply::Closed => return, // kenneld tore the connection down.
             RecvReply::Frame(frame) => {
                 let actions = {
                     let Ok(mut f) = facade.lock() else { return };

@@ -635,12 +635,24 @@ fn dbus_handle(dbus: Option<&DbusRelay>, incoming: &Incoming, ctx: u16, writer: 
     match incoming.code {
         verb::DBUS_OPEN => {
             let reply = relay.open(pid, &incoming.data);
-            audit_dbus(writer, incoming, ctx, "binder.dbus-open", reply.first().copied());
+            audit_dbus(
+                writer,
+                incoming,
+                ctx,
+                "binder.dbus-open",
+                reply.first().copied(),
+            );
             Reply::Data(reply)
         }
         verb::DBUS_CLOSE => {
             let reply = relay.close(pid, &incoming.data);
-            audit_dbus(writer, incoming, ctx, "binder.dbus-close", reply.first().copied());
+            audit_dbus(
+                writer,
+                incoming,
+                ctx,
+                "binder.dbus-close",
+                reply.first().copied(),
+            );
             Reply::Data(reply)
         }
         verb::DBUS_SEND => Reply::Data(relay.send(pid, &incoming.data)),

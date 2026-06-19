@@ -32,7 +32,10 @@ pub const REFUSE_TO_BROKER: &[&str] = &[
 #[must_use]
 pub fn is_refused(name: &str) -> bool {
     REFUSE_TO_BROKER.iter().any(|&r| {
-        name == r || name.strip_prefix(r).is_some_and(|rest| rest.starts_with('.'))
+        name == r
+            || name
+                .strip_prefix(r)
+                .is_some_and(|rest| rest.starts_with('.'))
     })
 }
 
@@ -111,7 +114,6 @@ impl Filter {
             bus_name(call.bus)
         ))
     }
-
 }
 
 /// Whether a `call` entry (`destination=interface.member`) admits this call: its destination
@@ -149,7 +151,9 @@ pub fn pattern_admits(pattern: &str, name: &str) -> bool {
         .and_then(|p| p.strip_suffix('.'))
         .is_some_and(|prefix| {
             name == prefix
-                || name.strip_prefix(prefix).is_some_and(|r| r.starts_with('.'))
+                || name
+                    .strip_prefix(prefix)
+                    .is_some_and(|r| r.starts_with('.'))
         })
 }
 
@@ -243,7 +247,12 @@ mod tests {
     #[test]
     fn disabled_bus_denies_everything() {
         let f = notifications_filter(); // system is None
-        let d = f.decide(&call(Bus::System, "org.freedesktop.Notifications", "x", "y"));
+        let d = f.decide(&call(
+            Bus::System,
+            "org.freedesktop.Notifications",
+            "x",
+            "y",
+        ));
         assert!(matches!(d, Decision::Deny(m) if m.contains("system bus is not enabled")));
     }
 
@@ -262,7 +271,12 @@ mod tests {
             Decision::Deny(_)
         ));
         assert_eq!(
-            f.decide(&call(Bus::Session, "org.freedesktop.Notifications", "x", "y")),
+            f.decide(&call(
+                Bus::Session,
+                "org.freedesktop.Notifications",
+                "x",
+                "y"
+            )),
             Decision::Allow
         );
     }
@@ -301,13 +315,22 @@ mod tests {
     fn pattern_semantics_match_the_compiler() {
         // The same cases kennel_lib_compile::source::dbus_pattern_admits is tested on.
         assert!(pattern_admits("*", "anything.at.all"));
-        assert!(pattern_admits("org.freedesktop.Notifications", "org.freedesktop.Notifications"));
-        assert!(pattern_admits("org.freedesktop.portal.*", "org.freedesktop.portal"));
+        assert!(pattern_admits(
+            "org.freedesktop.Notifications",
+            "org.freedesktop.Notifications"
+        ));
+        assert!(pattern_admits(
+            "org.freedesktop.portal.*",
+            "org.freedesktop.portal"
+        ));
         assert!(pattern_admits(
             "org.freedesktop.portal.*",
             "org.freedesktop.portal.FileChooser"
         ));
-        assert!(!pattern_admits("org.freedesktop.portal.*", "org.freedesktop.portalX"));
+        assert!(!pattern_admits(
+            "org.freedesktop.portal.*",
+            "org.freedesktop.portalX"
+        ));
         assert!(!pattern_admits("org.a", "org.b"));
     }
 }

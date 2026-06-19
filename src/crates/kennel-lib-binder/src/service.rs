@@ -231,7 +231,9 @@ pub mod dbus {
 
     #[cfg(test)]
     mod tests {
-        use super::{decode_conn, decode_open, decode_send, encode_conn, encode_open, encode_send, SESSION};
+        use super::{
+            decode_conn, decode_open, decode_send, encode_conn, encode_open, encode_send, SESSION,
+        };
 
         #[test]
         fn open_round_trips() {

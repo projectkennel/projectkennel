@@ -102,7 +102,13 @@ fn dispatch(kenneld: UnixStream, bus: Bus, bus_address: &str, filter: &Filter) -
                 std::thread::spawn(move || {
                     let _ = mediate(theirs, bus, &addr, filt);
                 });
-                conns.insert(conn_id, Conn { to_bridge, shutdown });
+                conns.insert(
+                    conn_id,
+                    Conn {
+                        to_bridge,
+                        shutdown,
+                    },
+                );
             }
             Record::Frame { conn_id, frame } => {
                 if let Some(conn) = conns.get(&conn_id) {
@@ -160,9 +166,7 @@ fn read_record(stream: &mut UnixStream) -> io::Result<Option<Record>> {
     let Some(payload) = read_len_prefixed(stream)? else {
         return Ok(None);
     };
-    Record::decode(&payload)
-        .map(Some)
-        .map_err(|_| broken())
+    Record::decode(&payload).map(Some).map_err(|_| broken())
 }
 
 /// Read one length-prefixed frame from a bridge and return the **full** `[len][payload]` bytes
@@ -411,7 +415,9 @@ impl Loop<'_> {
             return Ok(None);
         }
         let payload: Vec<u8> = self.conduit_in.drain(..total).skip(4).collect();
-        wire::Frame::decode(&payload).map(Some).map_err(|_| broken())
+        wire::Frame::decode(&payload)
+            .map(Some)
+            .map_err(|_| broken())
     }
 }
 
@@ -498,7 +504,8 @@ fn hello_message() -> io::Result<Vec<u8>> {
         SliceMessageEncoder::new(&mut buf, MessageType::MethodCall).map_err(|_| broken())?;
     enc.set_destination("org.freedesktop.DBus")
         .map_err(|_| broken())?;
-    enc.set_path("/org/freedesktop/DBus").map_err(|_| broken())?;
+    enc.set_path("/org/freedesktop/DBus")
+        .map_err(|_| broken())?;
     enc.set_interface("org.freedesktop.DBus")
         .map_err(|_| broken())?;
     enc.set_member("Hello").map_err(|_| broken())?;
@@ -524,8 +531,6 @@ fn parse_unix_address(address: &str) -> io::Result<String> {
 fn broken() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "D-Bus mediation error")
 }
-
-
 
 /// A queue of fully-formed outbound messages sent to the bus verbatim — the serial is already
 /// written by [`message::reconstruct_call`] (the delegate owns the bus serial namespace), so

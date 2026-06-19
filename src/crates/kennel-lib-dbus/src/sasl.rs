@@ -122,8 +122,7 @@ impl SaslServer {
             if self.line.ends_with(b"\r\n") {
                 let line_len = self.line.len().saturating_sub(2);
                 let line_bytes = self.line.get(..line_len).unwrap_or(&[]);
-                let command =
-                    core::str::from_utf8(line_bytes).map_err(|_| SaslError::NotAscii)?;
+                let command = core::str::from_utf8(line_bytes).map_err(|_| SaslError::NotAscii)?;
                 let command = command.to_owned();
                 self.line.clear();
                 match self.handle(&command, &mut reply)? {
@@ -192,7 +191,6 @@ impl SaslServer {
             }
         }
     }
-
 }
 
 enum LineResult {

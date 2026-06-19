@@ -1623,9 +1623,13 @@ fn spawn_dbus_delegates(
             "bring-up: spawning D-Bus delegate {} ({name} bus)",
             host_bin.display()
         ));
-        state
-            .dbus
-            .push(spawn_host_dbus(host_bin, &sock, name, &prep.bus_address, &prep.rules)?);
+        state.dbus.push(spawn_host_dbus(
+            host_bin,
+            &sock,
+            name,
+            &prep.bus_address,
+            &prep.rules,
+        )?);
         // The delegate binds then blocks on accept; connect once (the owner-only pipe). One clone
         // feeds the bounded writer (outbound frames), the original drives the inbound reader.
         let stream = connect_host_dbus(&sock)?;

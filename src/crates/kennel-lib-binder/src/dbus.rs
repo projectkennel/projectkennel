@@ -506,7 +506,9 @@ mod tests {
 
     /// The frame payload — the bytes after the outer 4-byte length prefix.
     fn payload(bytes: &[u8]) -> &[u8] {
-        bytes.get(4..).expect("a frame is at least its length prefix")
+        bytes
+            .get(4..)
+            .expect("a frame is at least its length prefix")
     }
 
     fn sample_call() -> Call {
@@ -597,7 +599,9 @@ mod tests {
     #[test]
     fn frame_len_rejects_oversize_and_waits_on_short_prefix() {
         assert_eq!(frame_len(&[0, 0]).expect("short ok"), None);
-        let over = u32::try_from(MAX_FRAME).expect("fits u32").saturating_add(1);
+        let over = u32::try_from(MAX_FRAME)
+            .expect("fits u32")
+            .saturating_add(1);
         let mut huge = over.to_be_bytes().to_vec();
         huge.push(0);
         assert_eq!(frame_len(&huge), Err(WireError::TooLong));

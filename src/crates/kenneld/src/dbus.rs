@@ -200,7 +200,13 @@ impl DbusRelay {
         };
         // Relay is non-blocking and lock-free; a stalled delegate sheds (audit 3) rather than
         // blocking the binder thread or holding the relay lock.
-        if self.try_relay(bus, &Record::Frame { conn_id, frame: frame.to_vec() }) {
+        if self.try_relay(
+            bus,
+            &Record::Frame {
+                conn_id,
+                frame: frame.to_vec(),
+            },
+        ) {
             vec![status::OK]
         } else {
             vec![status::AGAIN]
@@ -397,7 +403,7 @@ mod tests {
             vec![status::OK]
         );
         let _ = read_record(&mut delegate); // the Open
-        // A different pid is refused on every verb for a connection it does not own.
+                                            // A different pid is refused on every verb for a connection it does not own.
         assert_eq!(
             relay.open(OTHER, &wire::encode_open(1, wire::SESSION)),
             vec![status::DENIED],

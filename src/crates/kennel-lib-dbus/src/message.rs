@@ -202,7 +202,9 @@ pub fn body_slice(message: &[u8]) -> Result<(u8, &[u8]), MessageError> {
     let body_end = body_offset
         .checked_add(body_len)
         .ok_or(MessageError::Framing)?;
-    let body = message.get(body_offset..body_end).ok_or(MessageError::Framing)?;
+    let body = message
+        .get(body_offset..body_end)
+        .ok_or(MessageError::Framing)?;
     Ok((endian, body))
 }
 
