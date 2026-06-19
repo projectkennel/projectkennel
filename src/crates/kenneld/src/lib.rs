@@ -28,6 +28,7 @@ pub mod binder;
 pub mod bpf_audit;
 pub mod cgroup;
 pub mod ctx;
+pub mod dbus;
 pub mod etc;
 pub mod inbound;
 pub mod inet;

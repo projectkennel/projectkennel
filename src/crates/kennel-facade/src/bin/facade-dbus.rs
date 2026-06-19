@@ -141,7 +141,7 @@ fn mediate(device: &str, workload: UnixStream, bus: Bus) -> io::Result<()> {
     workload_to_binder(&binder, conn_id, workload, &facade, &workload_w);
 
     // Teardown: close the connection at kenneld (also unblocks the parked DBUS_RECV).
-    let _ = binder.transact_oneway(CONTEXT_MANAGER_HANDLE, verb::DBUS_CLOSE, &dbus::encode_conn(conn_id));
+    let _ = binder.transact(CONTEXT_MANAGER_HANDLE, verb::DBUS_CLOSE, &dbus::encode_conn(conn_id));
     let _ = inbound.join();
     Ok(())
 }
@@ -178,12 +178,14 @@ fn workload_to_binder(
                     }
                 }
                 Action::ToDelegate(frame) => {
+                    // Synchronous send: kenneld writes the frame to the host-dbus pipe and acks
+                    // immediately (it does NOT wait for the bus round-trip — the reply returns on
+                    // DBUS_RECV), so no kenneld thread is held per call. The ack also carries the
+                    // membrane's rate-limit verdict; a non-OK status means shed/over-rate, drop.
                     let req = dbus::encode_send(conn_id, &frame.encode());
-                    if binder
-                        .transact_oneway(CONTEXT_MANAGER_HANDLE, verb::DBUS_SEND, &req)
-                        .is_err()
-                    {
-                        return;
+                    match binder.transact(CONTEXT_MANAGER_HANDLE, verb::DBUS_SEND, &req) {
+                        Ok(reply) if reply.first() == Some(&status::OK) => {}
+                        _ => return,
                     }
                 }
             }

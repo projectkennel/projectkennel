@@ -31,7 +31,7 @@
 
 /// Which bus a transaction targets. The numeric values are internal-stable (both ends
 /// ship from one release), mirroring the `[dbus]` `session`/`system` split (§7.7.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Bus {
     /// The session bus (`session.enabled`).
     Session,
