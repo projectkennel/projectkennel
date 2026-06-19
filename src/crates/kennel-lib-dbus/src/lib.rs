@@ -21,5 +21,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod message;
 pub mod sasl;
 pub mod wire;
