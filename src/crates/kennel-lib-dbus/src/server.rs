@@ -23,17 +23,6 @@ use crate::{message, wire};
 /// facade answers or relays rather than a normal mediated destination.
 const BUS_DRIVER: &str = "org.freedesktop.DBus";
 
-/// The refuse-to-broker set (§7.7.5): destinations the facade refuses regardless of policy.
-/// Policy compilation already rejects naming these in an `allow` list; this is the runtime
-/// backstop (§7.7.10). A prefix entry ending in `.` matches that destination and its children.
-const REFUSE_TO_BROKER: &[&str] = &[
-    "org.freedesktop.secrets",
-    "org.freedesktop.systemd1",
-    "org.freedesktop.login1",
-    "org.gnome.SessionManager",
-    "org.kde.ksmserver",
-];
-
 /// The unique name the facade assigns the workload at `Hello`. A kennel has exactly one bus
 /// client (its workload), so a fixed name is sufficient and need not be allocated.
 const WORKLOAD_UNIQUE_NAME: &str = ":1.0";
@@ -251,8 +240,9 @@ fn handle_message(
         return Ok(Some(Action::ToWorkload(bytes)));
     }
 
-    // Refuse-to-broker backstop (§7.7.5/§7.7.10): refuse before the conduit.
-    if is_refused(destination) {
+    // Refuse-to-broker backstop (§7.7.5/§7.7.10): refuse before the conduit. The delegate
+    // re-checks this (it is the trusted boundary; this facade is untrusted) — see crate::filter.
+    if crate::filter::is_refused(destination) {
         let err = wire::ErrorReply {
             reply_serial: msg.serial,
             name: "org.freedesktop.DBus.Error.AccessDenied".to_owned(),
@@ -278,16 +268,6 @@ fn handle_message(
         body: body.to_vec(),
     };
     Ok(Some(Action::ToDelegate(wire::Frame::Call(call))))
-}
-
-/// Whether `destination` is in the refuse-to-broker set (exact name or a `.`-prefixed child).
-fn is_refused(destination: &str) -> bool {
-    REFUSE_TO_BROKER.iter().any(|&r| {
-        destination == r
-            || destination
-                .strip_prefix(r)
-                .is_some_and(|rest| rest.starts_with('.'))
-    })
 }
 
 fn take_serial(out_serial: &mut u32) -> u32 {
@@ -392,11 +372,11 @@ mod tests {
 
     #[test]
     fn systemd1_child_paths_are_refused() {
-        assert!(is_refused("org.freedesktop.systemd1"));
-        assert!(is_refused("org.freedesktop.login1"));
+        assert!(crate::filter::is_refused("org.freedesktop.systemd1"));
+        assert!(crate::filter::is_refused("org.freedesktop.login1"));
         // A name that merely shares a prefix segment is NOT refused.
-        assert!(!is_refused("org.freedesktop.secretsmanager"));
-        assert!(!is_refused("org.freedesktop.Notifications"));
+        assert!(!crate::filter::is_refused("org.freedesktop.secretsmanager"));
+        assert!(!crate::filter::is_refused("org.freedesktop.Notifications"));
     }
 
     #[test]
