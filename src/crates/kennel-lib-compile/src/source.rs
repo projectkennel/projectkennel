@@ -135,6 +135,10 @@ pub struct SourcePolicy {
     /// each writable root. Folds scalar-wins up the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust: Option<TrustSection>,
+    /// D-Bus mediation (`[dbus]`, §7.7): the per-method allowlist the `IDBus` facade
+    /// enforces. Absent ⇒ no bus access (no facade node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dbus: Option<DbusSection>,
 }
 
 /// Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).
@@ -858,6 +862,106 @@ pub struct TrustSection {
     pub on_change: Option<kennel_lib_policy::OnChangeAction>,
 }
 
+/// `[dbus]` — D-Bus mediation (§7.7).
+///
+/// The per-method allowlist the `IDBus` facade enforces; the operator writes structured
+/// policy, never proxy flags. A kennel with no `[dbus]` gets no facade node — the secure
+/// default by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusSection {
+    /// `[dbus.session]` — the user session bus (the common case: notifications, portals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<DbusBus>,
+    /// `[dbus.system]` — the system bus (rarely needed; mostly refuse-listed services).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<DbusBus>,
+    /// `[dbus.audit]` — per-kennel D-Bus call audit verbosity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<DbusAudit>,
+}
+
+/// `[dbus.session]` / `[dbus.system]` — one bus's enable flag and rule set.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusBus {
+    /// Whether this bus is reachable at all. Absent/`false` ⇒ no connection to this bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// `[dbus.<bus>.allow]` — what the kennel may reach (an allowlist; default-deny).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<DbusRules>,
+    /// `[dbus.<bus>.deny]` — belt-and-braces explicit denies over the allowlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<DbusRules>,
+}
+
+/// `[dbus.<bus>.allow]` / `[dbus.<bus>.deny]` — the four rule classes at
+/// destination / interface / member granularity.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusRules {
+    /// Destinations the kennel may call methods on and receive replies/signals from
+    /// (`org.freedesktop.Notifications`, `org.freedesktop.portal.*`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub talk: Vec<String>,
+    /// Finer than `talk`: specific `destination=interface.member` calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call: Vec<String>,
+    /// Signals the kennel may receive (a subset of senders it may `talk` to).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broadcast: Vec<String>,
+    /// Names the kennel may own (be addressable as). Almost always empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own: Vec<String>,
+}
+
+/// `[dbus.audit]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusAudit {
+    /// Verbosity (`"off"`, `"summary"`, `"full"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+}
+
+/// Destinations that cannot be brokered to a kennel at all (§7.7.5).
+///
+/// A credential oracle or a session/process-control escape. Naming one (or a pattern that
+/// admits one) in an `allow` list is a compile error, not a warning — the same axiom
+/// carve-out as the §11.2 signing oracle, not a footgun the operator may choose.
+pub const DBUS_REFUSE_TO_BROKER: &[&str] = &[
+    "org.freedesktop.secrets", // Secret Service: a read-stored-credentials oracle
+    "org.freedesktop.systemd1", // StartTransientUnit: spawn an unconfined process
+    "org.freedesktop.login1",  // logout / reboot / lock / power
+    "org.gnome.SessionManager", // GNOME session control
+    "org.kde.ksmserver",       // KDE session control
+];
+
+/// Whether a D-Bus `allow` pattern admits `name` — exact, a trailing `.*` prefix
+/// wildcard (`org.freedesktop.*`), or the catch-all `*`.
+#[must_use]
+pub fn dbus_pattern_admits(pattern: &str, name: &str) -> bool {
+    if pattern == "*" || pattern == name {
+        return true;
+    }
+    pattern
+        .strip_suffix('*')
+        .and_then(|p| p.strip_suffix('.'))
+        .is_some_and(|prefix| {
+            name == prefix
+                || name
+                    .strip_prefix(prefix)
+                    .is_some_and(|r| r.starts_with('.'))
+        })
+}
+
+/// The destination part of an `allow` entry: the substring before the first `=`
+/// (a `call` entry is `destination=interface.member`; `talk`/`broadcast`/`own` are bare).
+fn dbus_destination(entry: &str) -> &str {
+    entry.split('=').next().unwrap_or(entry).trim()
+}
+
 /// Parse source-policy TOML bytes into a [`SourcePolicy`].
 ///
 /// This is parse-only: it enforces the schema shape (`deny_unknown_fields`, types,
@@ -891,6 +995,7 @@ impl SourcePolicy {
         self.check_identity(&mut errs);
         self.check_references(&mut errs);
         self.check_reasons(&mut errs);
+        self.check_dbus(&mut errs);
         if errs.is_empty() {
             Ok(())
         } else {
@@ -1018,6 +1123,38 @@ impl SourcePolicy {
             }
         }
     }
+
+    /// Refuse-to-broker check (§7.7.5): a `[dbus.*.allow]` entry that names — or whose
+    /// wildcard admits — a categorically un-brokerable destination (Secret Service,
+    /// session/process control) is a compile error, not a footgun. The same axiom
+    /// carve-out as the §11.2 signing oracle.
+    fn check_dbus(&self, errs: &mut Vec<String>) {
+        let Some(dbus) = &self.dbus else { return };
+        for (bus_name, bus) in [("session", &dbus.session), ("system", &dbus.system)] {
+            let Some(allow) = bus.as_ref().and_then(|b| b.allow.as_ref()) else {
+                continue;
+            };
+            let entries = allow
+                .talk
+                .iter()
+                .chain(&allow.call)
+                .chain(&allow.broadcast)
+                .chain(&allow.own);
+            for entry in entries {
+                let dest = dbus_destination(entry);
+                if let Some(refused) = DBUS_REFUSE_TO_BROKER
+                    .iter()
+                    .find(|r| dbus_pattern_admits(dest, r))
+                {
+                    errs.push(format!(
+                        "[dbus.{bus_name}.allow] `{entry}` reaches `{refused}`, which cannot be \
+                         brokered to a kennel (§7.7.5: a credential oracle or session-control \
+                         escape — refused by axiom, not a footgun)"
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// Whether an optional string is absent or whitespace-only.
@@ -1068,6 +1205,84 @@ pub(crate) fn validate_ref_version(version: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod dbus_tests {
+    use super::*;
+
+    fn parse_ok(toml: &str) -> SourcePolicy {
+        let p = parse(toml.as_bytes()).expect("parse");
+        p.validate().expect("validate");
+        p
+    }
+
+    #[test]
+    fn benign_dbus_grants_parse_and_validate() {
+        let p = parse_ok(
+            "name = \"k\"\ntemplate_base = \"base-confined@v1\"\n\
+             [dbus.session]\nenabled = true\n\
+             [dbus.session.allow]\ntalk = [\"org.freedesktop.Notifications\", \"org.freedesktop.portal.*\"]\n\
+             [dbus.audit]\nlevel = \"summary\"\n",
+        );
+        let dbus = p.dbus.expect("dbus");
+        assert_eq!(dbus.session.expect("session").enabled, Some(true));
+    }
+
+    #[test]
+    fn refuse_to_broker_destinations_are_a_compile_error() {
+        // Exact name, and a wildcard that admits a refused name, both rejected; system bus too.
+        for entry in [
+            "org.freedesktop.secrets",
+            "org.freedesktop.systemd1",
+            "org.gnome.SessionManager",
+            "org.freedesktop.*", // admits secrets/systemd1/login1
+            "*",
+        ] {
+            let toml = format!(
+                "name = \"k\"\ntemplate_base = \"base-confined@v1\"\n\
+                 [dbus.session]\nenabled = true\n[dbus.session.allow]\ntalk = [\"{entry}\"]\n"
+            );
+            let err = parse(toml.as_bytes())
+                .expect("parses")
+                .validate()
+                .expect_err(&format!("`{entry}` must be refused"));
+            assert!(
+                matches!(err, PolicyError::SourceValidation(_)),
+                "got {err} for {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuse_check_covers_call_own_and_the_system_bus() {
+        let toml = "name = \"k\"\ntemplate_base = \"base-confined@v1\"\n\
+             [dbus.system]\nenabled = true\n\
+             [dbus.system.allow]\ncall = [\"org.freedesktop.login1=org.freedesktop.login1.Manager.Reboot\"]\n";
+        assert!(parse(toml.as_bytes()).expect("parse").validate().is_err());
+    }
+
+    #[test]
+    fn pattern_admits_matches_exact_prefix_and_catchall() {
+        assert!(dbus_pattern_admits(
+            "org.freedesktop.secrets",
+            "org.freedesktop.secrets"
+        ));
+        assert!(dbus_pattern_admits(
+            "org.freedesktop.*",
+            "org.freedesktop.secrets"
+        ));
+        assert!(dbus_pattern_admits("*", "anything.at.all"));
+        // A sibling prefix must NOT admit: `org.freedesktop.portal.*` does not reach secrets.
+        assert!(!dbus_pattern_admits(
+            "org.freedesktop.portal.*",
+            "org.freedesktop.secrets"
+        ));
+        assert!(!dbus_pattern_admits(
+            "org.freedesktop.Notifications",
+            "org.freedesktop.secrets"
+        ));
+    }
 }
 
 #[cfg(test)]

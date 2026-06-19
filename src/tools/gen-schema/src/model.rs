@@ -123,6 +123,7 @@ pub static TABLES: &[Table] = &[
             f("workload", Ty::Obj("workload"), "The command the kennel runs, optionally pinned."),
             f("tty", Ty::Obj("tty"), "Terminal hardening for an interactive (PTY) workload."),
             f("trust", Ty::Obj("trust"), "The masked workspace trust manifest (T2.8)."),
+            f("dbus", Ty::Obj("dbus"), "D-Bus mediation via the IDBus facade (§7.7)."),
         ],
     },
     Table {
@@ -472,6 +473,39 @@ pub static TABLES: &[Table] = &[
             f("manifest", Ty::Bool, "Maintain a masked `.trust-manifest.json` at every writable workspace root. Default true."),
             f("on_change", Ty::Enum(&["warn", "freeze", "kill"]), "What kenneld does when a watched trigger is mutated during the run (default `warn`)."),
         ],
+    },
+    Table {
+        name: "dbus",
+        title: "`[dbus]` — D-Bus mediation (§7.7). Absent ⇒ no bus access (no facade node).",
+        fields: &[
+            f("session", Ty::Obj("dbus_bus"), "`[dbus.session]` — the user session bus (notifications, portals)."),
+            f("system", Ty::Obj("dbus_bus"), "`[dbus.system]` — the system bus (rarely needed)."),
+            f("audit", Ty::Obj("dbus_audit"), "`[dbus.audit]` — per-kennel D-Bus call audit verbosity."),
+        ],
+    },
+    Table {
+        name: "dbus_bus",
+        title: "One bus's enable flag and rule set (`[dbus.session]` / `[dbus.system]`).",
+        fields: &[
+            f("enabled", Ty::Bool, "Whether this bus is reachable at all (default false ⇒ no facade node)."),
+            f("allow", Ty::Obj("dbus_rules"), "`[dbus.<bus>.allow]` — what the kennel may reach (allowlist; default-deny)."),
+            f("deny", Ty::Obj("dbus_rules"), "`[dbus.<bus>.deny]` — belt-and-braces explicit denies."),
+        ],
+    },
+    Table {
+        name: "dbus_rules",
+        title: "The four D-Bus rule classes at destination/interface/member granularity.",
+        fields: &[
+            f("talk", Ty::StrArray, "Destinations the kennel may call methods on and receive replies/signals from."),
+            f("call", Ty::StrArray, "Finer than `talk`: specific `destination=interface.member` calls."),
+            f("broadcast", Ty::StrArray, "Signals the kennel may receive (a subset of `talk` senders)."),
+            f("own", Ty::StrArray, "Names the kennel may own (be addressable as). Almost always empty."),
+        ],
+    },
+    Table {
+        name: "dbus_audit",
+        title: "`[dbus.audit]` — D-Bus call audit verbosity.",
+        fields: &[f("level", Ty::Enum(&["off", "summary", "full"]), "Audit verbosity (default `summary`).")],
     },
     Table {
         name: "audit",

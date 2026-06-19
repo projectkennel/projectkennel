@@ -175,6 +175,14 @@
           "$ref": "#/definitions/trust"
         }
       ]
+    },
+    "dbus": {
+      "description": "D-Bus mediation via the IDBus facade (§7.7).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/dbus"
+        }
+      ]
     }
   },
   "definitions": {
@@ -1221,6 +1229,115 @@
             "warn",
             "freeze",
             "kill"
+          ]
+        }
+      }
+    },
+    "dbus": {
+      "description": "`[dbus]` — D-Bus mediation (§7.7). Absent ⇒ no bus access (no facade node).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session": {
+          "description": "`[dbus.session]` — the user session bus (notifications, portals).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_bus"
+            }
+          ]
+        },
+        "system": {
+          "description": "`[dbus.system]` — the system bus (rarely needed).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_bus"
+            }
+          ]
+        },
+        "audit": {
+          "description": "`[dbus.audit]` — per-kennel D-Bus call audit verbosity.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_audit"
+            }
+          ]
+        }
+      }
+    },
+    "dbus_bus": {
+      "description": "One bus's enable flag and rule set (`[dbus.session]` / `[dbus.system]`).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Whether this bus is reachable at all (default false ⇒ no facade node).",
+          "type": "boolean"
+        },
+        "allow": {
+          "description": "`[dbus.<bus>.allow]` — what the kennel may reach (allowlist; default-deny).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_rules"
+            }
+          ]
+        },
+        "deny": {
+          "description": "`[dbus.<bus>.deny]` — belt-and-braces explicit denies.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_rules"
+            }
+          ]
+        }
+      }
+    },
+    "dbus_rules": {
+      "description": "The four D-Bus rule classes at destination/interface/member granularity.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "talk": {
+          "description": "Destinations the kennel may call methods on and receive replies/signals from.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "call": {
+          "description": "Finer than `talk`: specific `destination=interface.member` calls.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "broadcast": {
+          "description": "Signals the kennel may receive (a subset of `talk` senders).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "own": {
+          "description": "Names the kennel may own (be addressable as). Almost always empty.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "dbus_audit": {
+      "description": "`[dbus.audit]` — D-Bus call audit verbosity.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "description": "Audit verbosity (default `summary`).",
+          "type": "string",
+          "enum": [
+            "off",
+            "summary",
+            "full"
           ]
         }
       }

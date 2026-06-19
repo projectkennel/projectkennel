@@ -821,6 +821,7 @@ mod tests {
             unix: kennel_lib_policy::UnixRuntime::default(),
             identity: kennel_lib_policy::IdentityRuntime::default(),
             binder: kennel_lib_policy::BinderRuntime::default(),
+            dbus: kennel_lib_policy::DbusRuntime::default(),
             audit: kennel_lib_policy::AuditRuntime::default(),
             env: kennel_lib_policy::EnvRuntime::default(),
             ulimits: kennel_lib_policy::UlimitsRuntime::default(),

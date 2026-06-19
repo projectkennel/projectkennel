@@ -745,6 +745,57 @@ impl BinderRuntime {
     }
 }
 
+/// The per-kennel D-Bus runtime (§7.7) — a *service* input `kenneld` realises (the
+/// `IDBus` facade/delegate pair), not part of the enforcement core.
+///
+/// Carries the resolved `[dbus]` rule set the operator-context delegate compiles into its
+/// match table at construction. Absent (empty) for a kennel with no `[dbus]` policy — then
+/// omitted from the canonical form, so a policy without D-Bus signs exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusRuntime {
+    /// Audit verbosity (`"off"`/`"summary"`/`"full"`); default `"summary"` realised by kenneld.
+    /// A scalar — declared before the bus tables so the canonical TOML emits values first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_level: Option<String>,
+    /// The session bus rule set, present iff `[dbus.session].enabled = true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<DbusBusRuntime>,
+    /// The system bus rule set, present iff `[dbus.system].enabled = true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<DbusBusRuntime>,
+}
+
+impl DbusRuntime {
+    /// Whether there is no D-Bus access to realise (no enabled bus).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.session.is_none() && self.system.is_none()
+    }
+}
+
+/// One enabled bus's resolved rules — the allow/deny lists at destination/interface/
+/// member granularity, as the facade's match table is built from.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusBusRuntime {
+    /// Destinations the kennel may call (and receive replies/signals from).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub talk: Vec<String>,
+    /// Specific `destination=interface.member` calls (finer than `talk`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call: Vec<String>,
+    /// Signals the kennel may receive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broadcast: Vec<String>,
+    /// Names the kennel may own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own: Vec<String>,
+    /// Explicit denies layered over the allow lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_talk: Vec<String>,
+}
+
 /// One registrable service: a name and the peer kennels allowed to look it up.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1184,6 +1235,11 @@ pub struct SettledPolicy {
     /// no-`[binder]` policy signs exactly as before.
     #[serde(default, skip_serializing_if = "BinderRuntime::is_empty")]
     pub binder: BinderRuntime,
+    /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set. A table like
+    /// [`binder`](Self::binder); omitted from the canonical form when empty, so a
+    /// no-`[dbus]` policy signs exactly as before.
+    #[serde(default, skip_serializing_if = "DbusRuntime::is_empty")]
+    pub dbus: DbusRuntime,
     /// The per-kennel audit runtime (`02-3`). A table like [`ssh`](Self::ssh) and
     /// declared after the others; omitted from the canonical form when empty, so a
     /// policy with no (or all-default) `[audit]` signs exactly as before.

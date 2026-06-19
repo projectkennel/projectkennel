@@ -39,11 +39,11 @@
 
 use crate::source::SourcePolicy;
 use kennel_lib_policy::settled::{
-    AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy, DevPolicy,
-    EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule,
-    NetMode, NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProxyListen, SeccompAction,
-    SeccompPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime,
-    UnixSocket, WorkloadRuntime,
+    AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy,
+    DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
+    IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
+    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshRuntime,
+    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use kennel_lib_policy::PolicyError;
 use std::collections::BTreeSet;
@@ -62,6 +62,8 @@ pub struct Translated {
     pub identity: IdentityRuntime,
     /// The per-kennel binder IPC runtime (§7.1.4) — user-defined provide/consume grants.
     pub binder: BinderRuntime,
+    /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set.
+    pub dbus: DbusRuntime,
     /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
     pub audit: AuditRuntime,
     /// The synthesised environment (§7.9.2) — the fixed `[env].set` vars.
@@ -133,6 +135,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective)?;
     let binder = translate_binder(effective);
+    let dbus = translate_dbus(effective);
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
     let ulimits = translate_ulimits(effective)?;
@@ -154,6 +157,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         unix,
         identity,
         binder,
+        dbus,
         audit,
         env,
         ulimits,
@@ -236,6 +240,37 @@ fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
         })
         .collect();
     BinderRuntime { provide, consume }
+}
+
+/// Translate `[dbus]` into the settled [`DbusRuntime`] (§7.7): one resolved rule set per
+/// *enabled* bus. A bus with `enabled` unset/false yields no entry (no connection), so a
+/// no-`[dbus]` (or all-disabled) policy signs exactly as before. The refuse-to-broker set
+/// was already rejected at validation (`SourcePolicy::check_dbus`).
+fn translate_dbus(src: &SourcePolicy) -> DbusRuntime {
+    use crate::source::DbusBus;
+    let Some(dbus) = &src.dbus else {
+        return DbusRuntime::default();
+    };
+    let bus = |b: &Option<DbusBus>| -> Option<DbusBusRuntime> {
+        let b = b.as_ref()?;
+        if b.enabled != Some(true) {
+            return None;
+        }
+        let allow = b.allow.clone().unwrap_or_default();
+        let deny = b.deny.clone().unwrap_or_default();
+        Some(DbusBusRuntime {
+            talk: allow.talk,
+            call: allow.call,
+            broadcast: allow.broadcast,
+            own: allow.own,
+            deny_talk: deny.talk,
+        })
+    };
+    DbusRuntime {
+        session: bus(&dbus.session),
+        system: bus(&dbus.system),
+        audit_level: dbus.audit.as_ref().and_then(|a| a.level.clone()),
+    }
 }
 
 /// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.4). Each entry is a
@@ -1124,6 +1159,29 @@ mod tests {
     use crate::source::parse;
     use kennel_lib_policy::settled::{AuditSinkKind, Provenance, ResolvedArtifact, SettledPolicy};
 
+    #[test]
+    fn dbus_translates_only_enabled_buses() {
+        // session enabled with rules; system present but disabled ⇒ omitted.
+        let src = parse(
+            b"name = \"k\"\n\
+              [dbus.session]\nenabled = true\n\
+              [dbus.session.allow]\ntalk = [\"org.freedesktop.Notifications\"]\nbroadcast = [\"org.freedesktop.Notifications\"]\n\
+              [dbus.session.deny]\ntalk = [\"org.freedesktop.UDisks2\"]\n\
+              [dbus.system]\nenabled = false\n\
+              [dbus.audit]\nlevel = \"full\"\n",
+        )
+        .expect("parse");
+        let d = translate_dbus(&src);
+        let session = d.session.as_ref().expect("session enabled");
+        assert_eq!(session.talk, ["org.freedesktop.Notifications"]);
+        assert_eq!(session.deny_talk, ["org.freedesktop.UDisks2"]);
+        assert!(d.system.is_none(), "disabled bus is omitted");
+        assert_eq!(d.audit_level.as_deref(), Some("full"));
+        assert!(!d.is_empty());
+        // No [dbus] ⇒ empty runtime.
+        assert!(translate_dbus(&SourcePolicy::default()).is_empty());
+    }
+
     const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
         include_str!("../../../../templates/ai-coding-strict/policy.toml");
@@ -1798,6 +1856,7 @@ mod tests {
             unix: t.unix,
             identity: t.identity,
             binder: t.binder,
+            dbus: t.dbus,
             audit: t.audit,
             env: t.env,
             ulimits: t.ulimits,
