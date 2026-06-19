@@ -25,6 +25,9 @@ pub enum MessageError {
     /// The source body is big-endian; verbatim copy into a little-endian message is not yet
     /// supported (the body would need transcoding against its signature).
     BigEndianBody,
+    /// A message buffer was too short or self-inconsistent to locate its body (only seen on
+    /// a message that did not come from the validating decoder).
+    Framing,
     /// The encoder rejected the message (field too long, buffer exhausted, …).
     Encode(EncodeError),
 }
@@ -39,6 +42,7 @@ impl core::fmt::Display for MessageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::BigEndianBody => f.write_str("big-endian D-Bus body is not yet supported"),
+            Self::Framing => f.write_str("malformed D-Bus message framing"),
             Self::Encode(e) => write!(f, "D-Bus encode error: {e}"),
         }
     }
@@ -159,6 +163,62 @@ pub fn reconstruct_signal(sig: &wire::Signal, serial: u32) -> Result<Vec<u8>, Me
         body_endian: sig.body_endian,
         body: &sig.body,
     })
+}
+
+/// The raw marshalled body of an already-decoded D-Bus message: its endianness flag and the
+/// body byte slice, with no re-marshalling.
+///
+/// `mini-sansio-dbus` exposes typed header fields and an iterator over body *values*, but not
+/// the raw body bytes the facade must forward verbatim (§7.7.3). The fixed D-Bus header
+/// records the body length (`message[4..8]`) and the header-fields length (`message[12..16]`),
+/// from which the body offset (`align8(16 + header_fields_len)`) and extent follow. `message`
+/// is a complete message the decoder already validated; this only relocates the body slice.
+///
+/// # Errors
+///
+/// [`MessageError::Framing`] if the buffer is too short or the lengths overflow its bounds.
+pub fn body_slice(message: &[u8]) -> Result<(u8, &[u8]), MessageError> {
+    let head = message.get(..16).ok_or(MessageError::Framing)?;
+    let endian = *head.first().ok_or(MessageError::Framing)?;
+    let read_u32 = |off: usize| -> Result<usize, MessageError> {
+        let end = off.checked_add(4).ok_or(MessageError::Framing)?;
+        let b = message.get(off..end).ok_or(MessageError::Framing)?;
+        let array = <[u8; 4]>::try_from(b).map_err(|_| MessageError::Framing)?;
+        let v = match endian {
+            b'B' => u32::from_be_bytes(array),
+            // Default (and `b'l'`): little-endian, what every supported client emits.
+            _ => u32::from_le_bytes(array),
+        };
+        Ok(v as usize)
+    };
+    let body_len = read_u32(4)?;
+    let header_fields_len = read_u32(12)?;
+    let after_fields = 16usize
+        .checked_add(header_fields_len)
+        .ok_or(MessageError::Framing)?;
+    let body_offset = after_fields
+        .checked_next_multiple_of(8)
+        .ok_or(MessageError::Framing)?;
+    let body_end = body_offset
+        .checked_add(body_len)
+        .ok_or(MessageError::Framing)?;
+    let body = message.get(body_offset..body_end).ok_or(MessageError::Framing)?;
+    Ok((endian, body))
+}
+
+/// Marshal a single D-Bus string as a little-endian message body (signature `s`).
+///
+/// A 4-byte length, the UTF-8 bytes, and a NUL terminator. The body starts 8-aligned in a
+/// message, so the string's 4-byte alignment is already satisfied. Used for the facade's local
+/// replies (e.g. `Hello` returning the assigned unique name) that it answers without the bus.
+#[must_use]
+pub fn marshal_string(s: &str) -> Vec<u8> {
+    let len = u32::try_from(s.len()).unwrap_or(u32::MAX);
+    let mut body = Vec::with_capacity(s.len().saturating_add(5));
+    body.extend_from_slice(&len.to_le_bytes());
+    body.extend_from_slice(s.as_bytes());
+    body.push(0);
+    body
 }
 
 /// The fields of a message to build with a verbatim-copied body.
@@ -433,6 +493,32 @@ mod tests {
         call.body = 0x2Au32.to_le_bytes().to_vec();
         let bytes = reconstruct_call(&call, 5).expect("reconstruct");
         assert_eq!(first_body_u32(&bytes), Some(0x2A));
+    }
+
+    #[test]
+    fn body_slice_recovers_the_reconstructed_body() {
+        // Reconstruct a call with a known little-endian u32 body, then recover the raw body
+        // bytes — body_slice must return exactly what reconstruct copied in (the round trip
+        // facade-dbus relies on to forward a call's arguments verbatim).
+        let mut call = sample_call();
+        call.signature = "u".to_owned();
+        call.body = 0xDEAD_BEEFu32.to_le_bytes().to_vec();
+        let bytes = reconstruct_call(&call, 9).expect("reconstruct");
+        let (endian, body) = body_slice(&bytes).expect("body slice");
+        assert_eq!(endian, b'l');
+        assert_eq!(body, call.body.as_slice());
+    }
+
+    #[test]
+    fn body_slice_of_empty_body_is_empty() {
+        let bytes = reconstruct_call(&sample_call(), 1).expect("reconstruct");
+        let (_, body) = body_slice(&bytes).expect("body slice");
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn body_slice_rejects_a_truncated_message() {
+        assert_eq!(body_slice(&[0u8; 4]), Err(MessageError::Framing));
     }
 
     #[test]

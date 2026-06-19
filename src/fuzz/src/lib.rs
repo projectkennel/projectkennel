@@ -93,6 +93,13 @@ pub fn fuzz_parsers(data: &[u8]) {
     // untrusted input. `data` is the frame payload after the length prefix.
     let _ = kennel_lib_dbus::wire::Frame::decode(data);
     let _ = kennel_lib_dbus::wire::frame_len(data);
+
+    // The facade's whole connection driver (07-7 §7.7.2): `data` stands in for the bytes
+    // a workload's bus client sends — SASL handshake then the binary message stream. This
+    // exercises the SASL state machine, the mini-sansio decode loop, body extraction, and
+    // the Hello/refuse-to-broker handling end to end. Must never panic/hang on any input.
+    let mut facade = kennel_lib_dbus::server::Facade::new(kennel_lib_dbus::wire::Bus::Session);
+    let _ = facade.on_workload_bytes(data);
 }
 
 /// Drive `data` through `mini-sansio-dbus`'s public sans-IO read loop exactly as

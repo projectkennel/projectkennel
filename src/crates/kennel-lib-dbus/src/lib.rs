@@ -23,4 +23,5 @@
 
 pub mod message;
 pub mod sasl;
+pub mod server;
 pub mod wire;
