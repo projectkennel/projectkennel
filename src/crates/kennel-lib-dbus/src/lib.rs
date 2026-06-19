@@ -26,4 +26,10 @@ pub mod filter;
 pub mod message;
 pub mod sasl;
 pub mod server;
-pub mod wire;
+
+// The conduit TLV and the token-bucket rate limiter live in `kennel-lib-binder` — the node-0
+// service wire, which kenneld already links — so kenneld can frame, rate-limit, and relay the
+// conduit without the D-Bus marshaller reaching the daemon TCB. Re-exported here under the names
+// the engine and the binaries already use (`kennel_lib_dbus::wire`, `::ratelimit`).
+pub use kennel_lib_binder::dbus as wire;
+pub use kennel_lib_binder::ratelimit;

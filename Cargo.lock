@@ -168,6 +168,7 @@ dependencies = [
 name = "kennel-lib-dbus"
 version = "0.1.0"
 dependencies = [
+ "kennel-lib-binder",
  "mini-sansio-dbus",
 ]
 

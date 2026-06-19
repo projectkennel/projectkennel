@@ -12,8 +12,13 @@
 //! trivial parse surface. The decoder in the delegate reads frames produced by the
 //! in-kennel (untrusted) facade, so [`Frame::decode`] is a trusted component parsing
 //! untrusted input: it is fully bounds-checked, never panics, and is fuzzed
-//! (CODING-STANDARDS §10.6). The adversarial *D-Bus* parse stays quarantined in the
-//! facade ([`crate::server`]); only typed fields cross the conduit.
+//! (CODING-STANDARDS §10.6). The adversarial *D-Bus* parse stays quarantined in
+//! `facade-dbus`; only typed fields cross the conduit.
+//!
+//! This codec lives in `kennel-lib-binder` (the node-0 service wire) rather than the D-Bus
+//! engine crate because the conduit frame is the `DBUS_SEND` node-0 transaction payload:
+//! kenneld frames, rate-limits, and relays it, so it must be reachable from the daemon — and
+//! it is pure data, so the marshaller (`mini-sansio-dbus`) never follows it into the TCB.
 //!
 //! # Layout
 //!

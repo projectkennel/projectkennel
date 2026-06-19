@@ -14,6 +14,10 @@ repository.workspace = true
 # message encoder (replies + reconstructed outbound calls). The adversarial-wire
 # parse the facade quarantines (§7.7.2). forbid(unsafe_code), 0 runtime deps.
 mini-sansio-dbus = "=5.0.1"
+# The conduit TLV codec + the token-bucket rate limiter (re-exported as `wire`/`ratelimit`).
+# They live there, not here, so kenneld — which frames/rate-limits/relays the conduit — can
+# link them without this crate's marshaller reaching the daemon TCB (§7.7.2a/§7.7.2c).
+kennel-lib-binder = { path = "../kennel-lib-binder" }
 
 [lints]
 workspace = true
