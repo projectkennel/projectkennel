@@ -48,17 +48,18 @@ So every D-Bus message is transacted across the binder gateway to node 0, and **
 to the delegate doing as little as possible**. kenneld neither parses the frame (so the D-Bus
 engine never enters the daemon TCB) nor filters it (that is the delegate's mechanical job,
 §7.7.2a) — but it *is* the membrane: the kennel reaches `host-dbus` only through kenneld, over the
-enforced binder hop, with kenneld authenticating the sender. The adversarial-wire parser runs in
-the kennel; the bus connection and the mechanical filter run in the operator-context delegate;
-kenneld is the cheap, authenticated relay between them.
+enforced binder hop, with kenneld binding each connection to the in-kennel consumer that opened it
+(§7.7.2a, per-connection ownership). The adversarial-wire parser runs in the kennel; the bus
+connection and the mechanical filter run in the operator-context delegate; kenneld is the cheap,
+owner-checked relay between them.
 
 ```
   kennel (own user+net ns)          │  kenneld (the membrane)   │  operator context (host)
                                     │                           │
   workload ─D-Bus wire─▶ facade-dbus ─binder txn (node 0)─▶ relay ─owner-only pipe─▶ host-dbus ─▶ real
     (libdbus/sd-bus)       ▲    parse→typed frame │  · no parse, no filter   │  · filter (table)   bus
-                           │                      │  · authenticates the     │  · reconstruct+send
-  workload ◀─reply/signal◀─┘◀─binder reply / DBUS_RECV◀─  facade as sender  ◀─┴──◀ reply (by serial) /
+                           │                      │  · binds each conn to    │  · reconstruct+send
+  workload ◀─reply/signal◀─┘◀─binder reply / DBUS_RECV◀─  its in-kennel opener◀─┴──◀ reply (by serial) /
                                     │              · shovels frame bytes      │     match-rule'd signal
                                     │                by connection id         │
    kenneld: spawns facade-dbus + host-dbus, compiles [dbus] → the filter table it hands the
@@ -99,11 +100,17 @@ raw socketpair.
 **kenneld is the membrane (transport).** The kennel reaches the trusted `host-dbus` process only
 by transacting node 0; kenneld relays each message to the delegate over an owner-only pipe and
 the reply back. Because it is the only path, the binder gateway enforces the one hop the kennel
-controls — bounded transaction size, the fuzzed decoder, no fd injection, and a kernel-stamped
-**sender identity** kenneld checks (only the real facade may inject D-Bus traffic; in-kennel
-malware "pretending to be the facade" can at most transact node 0, never touch `host-dbus`
-directly). A raw conduit fd would throw all of that away and expose the delegate to whatever in
-the kennel holds the fd — the exposure a per-message security boundary cannot accept.
+controls — bounded transaction size, the fuzzed decoder, no fd injection, and **per-connection
+ownership** kenneld enforces. There is no daemon-wide "the facade" identity to check: a binder pid
+cannot prove a caller *is* the wire-terminating facade, and `facade-dbus` is restartable (a crash
+re-forks it under a fresh pid), so a fixed pid gate would be both unprovable and brittle. What
+kenneld *can* enforce, and does, is narrower and real: `DBUS_OPEN` records the kernel-attested
+opener pid as the connection's owner, and a later `DBUS_SEND`/`DBUS_RECV`/`DBUS_CLOSE` from a
+different pid is refused — so one in-kennel consumer cannot hijack, drain, or tear down another's
+bus connection by guessing its `conn_id`. (Any in-kennel process may still open its *own*
+connection; the delegate's allowlist, not caller identity, bounds what a connection can do.) A raw
+conduit fd would throw all of that away and expose the delegate to whatever in the kennel holds the
+fd — the exposure a per-message security boundary cannot accept.
 
 **kenneld does as little as possible.** Per message it routes opaque frame bytes by connection id
 and shovels the reply back. It does **not** parse the frame — so `kennel-lib-dbus`/the D-Bus
@@ -159,7 +166,7 @@ audit on the same path as every other binder transaction.
 **The cost (§4.8).** D-Bus mediation is **per message** — the security property *is* the
 per-method allowlist, so something trusted must see every call (unlike `INet`, which mediates the
 connection once and then hands off an fd to stream over). Two trusted things see each call, by
-design: kenneld **relays** it (cheaply — route bytes, authenticate the sender, no parse, no
+design: kenneld **relays** it (cheaply — route bytes, owner-check the connection, no parse, no
 filter) and the operator-context `host-dbus` **filters** it (§7.7.2a). No raw bus fd, and no raw
 conduit fd, is ever vended to the kennel — the kennel's only D-Bus channel is binder transactions
 to node 0. The expensive per-message work (parse, allowlist, bus round-trip) lands on the facade

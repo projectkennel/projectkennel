@@ -1,17 +1,29 @@
 //! The D-Bus mediation membrane (§7.7.2a): kenneld's minimal-work relay between the in-kennel
 //! facade (binder node 0) and the operator-context `host-dbus` delegate (an owner-only pipe).
 //!
-//! kenneld is the membrane, not a filter and not a parser. Per message it authenticates the
-//! sender (only the real facade may inject D-Bus traffic — the pid is kernel-attested), applies
-//! the token-bucket rate cap (§7.7.2c), and shovels the opaque frame bytes to/from the bus's
-//! delegate by connection id. It never decodes the TLV (so `mini-sansio-dbus` never enters the
-//! daemon TCB) and never applies the allowlist (the delegate's mechanical job).
+//! kenneld is the membrane, not a filter and not a parser. Per message it binds each connection to
+//! its opener (the **per-connection owner** check below), applies the token-bucket rate cap
+//! (§7.7.2c), and shovels the opaque frame bytes to/from the bus's delegate by connection id. It
+//! never decodes the TLV (so `mini-sansio-dbus` never enters the daemon TCB) and never applies the
+//! allowlist (the delegate's mechanical job — the real per-call boundary).
 //!
-//! # Denial-of-service isolation (the facade is untrusted)
+//! # Per-connection owner identity
 //!
-//! `conn_id` is an arbitrary number the in-kennel facade chooses, not a kernel-backed fd, so it
-//! is not constrained by the cgroup. kenneld must therefore bound every piece of state the facade
-//! can grow and must never let the facade stall a binder thread:
+//! There is no single "the facade" pid to authenticate against: facade-dbus is restartable
+//! (`kennel-bin-init` re-forks a crashed facade with a fresh pid), and the kernel-attested binder
+//! pid cannot prove a caller *is* the wire-terminating facade anyway. The value kenneld adds is
+//! narrower and real: a connection belongs to whoever **opened** it. `DBUS_OPEN` records the
+//! kernel-attested `sender_pid` as the connection's owner; a later `DBUS_SEND`/`DBUS_RECV`/
+//! `DBUS_CLOSE` from a *different* pid is refused. So one in-kennel consumer cannot hijack, drain,
+//! or tear down another's bus connection by guessing its `conn_id`. (Any in-kennel process may
+//! open its *own* connection — the host-dbus allowlist, not caller identity, is what bounds what a
+//! connection may actually do.)
+//!
+//! # Denial-of-service isolation (the caller is untrusted)
+//!
+//! `conn_id` is an arbitrary number the in-kennel caller chooses, not a kernel-backed fd, so it
+//! is not constrained by the cgroup. kenneld must therefore bound every piece of state the caller
+//! can grow and must never let it stall a binder thread:
 //!
 //! - **Connection count** is capped ([`MAX_CONNS`]); a new id beyond it is refused.
 //! - **Inbound queues** are byte-budgeted ([`MAX_QUEUE_BYTES`]); a facade that never drains via
@@ -51,8 +63,6 @@ const OUTBOUND_DEPTH: usize = 32;
 /// [`spawn_pipe_writer`]) and shared by the node-0 handlers; pipe reader threads feed its inbound
 /// queues via [`DbusRelay::deliver_inbound`].
 pub struct DbusRelay {
-    /// The kernel-attested pid of the spawned `facade-dbus`; only it may transact these verbs.
-    facade_pid: i32,
     /// Monotonic base for the rate limiter's clock.
     start: Instant,
     /// The bounded outbound channel to each enabled bus's delegate. Immutable after construction
@@ -71,6 +81,9 @@ struct Inner {
 
 struct ConnState {
     bus: Bus,
+    /// The kernel-attested pid that opened this connection. Only it may send, receive, or close on
+    /// it — so one in-kennel consumer cannot operate on another's bus connection.
+    owner_pid: i32,
     /// Inbound frames (encoded TLV, `[len][payload]`) awaiting a `DBUS_RECV`.
     queue: VecDeque<Vec<u8>>,
     /// Total bytes currently in `queue` (the byte budget, [`MAX_QUEUE_BYTES`]).
@@ -81,9 +94,10 @@ struct ConnState {
 }
 
 impl ConnState {
-    const fn new(bus: Bus) -> Self {
+    const fn new(bus: Bus, owner_pid: i32) -> Self {
         Self {
             bus,
+            owner_pid,
             queue: VecDeque::new(),
             queued_bytes: 0,
             recv_parked: false,
@@ -111,15 +125,11 @@ pub fn spawn_pipe_writer(mut pipe: UnixStream) -> SyncSender<Vec<u8>> {
 }
 
 impl DbusRelay {
-    /// A relay for `facade_pid`, given a bounded sender to each enabled bus's delegate.
+    /// A relay given a bounded sender to each enabled bus's delegate. Connection ownership is
+    /// established per-connection at `DBUS_OPEN`, so there is no daemon-wide caller identity.
     #[must_use]
-    pub fn new(
-        facade_pid: i32,
-        senders: HashMap<Bus, SyncSender<Vec<u8>>>,
-        limiter: RateLimiter,
-    ) -> Self {
+    pub fn new(senders: HashMap<Bus, SyncSender<Vec<u8>>>, limiter: RateLimiter) -> Self {
         Self {
-            facade_pid,
             start: Instant::now(),
             senders,
             inner: Mutex::new(Inner {
@@ -130,12 +140,11 @@ impl DbusRelay {
         }
     }
 
-    /// Handle `DBUS_OPEN` `[conn_id | bus]`: register the connection and tell the delegate.
+    /// Handle `DBUS_OPEN` `[conn_id | bus]`: register the connection owned by `sender_pid` and tell
+    /// the delegate. Re-opening an id is idempotent for its owner; a *different* pid opening a live
+    /// id is refused (it would be hijacking another consumer's connection).
     #[must_use]
     pub fn open(&self, sender_pid: i32, data: &[u8]) -> Vec<u8> {
-        if sender_pid != self.facade_pid {
-            return vec![status::DENIED];
-        }
         let Some((conn_id, bus_byte)) = wire::decode_open(data) else {
             return vec![status::BAD_REQUEST];
         };
@@ -150,12 +159,16 @@ impl DbusRelay {
             if !inner.limiter.allow(self.now_ms()) {
                 return vec![status::AGAIN]; // rate cap (audit 4)
             }
-            // Connection cap (audit 1): refuse a *new* id once the table is full; re-opening an
-            // existing id is idempotent and always allowed.
-            if !inner.conns.contains_key(&conn_id) && inner.conns.len() >= MAX_CONNS {
-                return vec![status::DENIED];
+            match inner.conns.get(&conn_id) {
+                // Re-open by the owner is idempotent; by anyone else it is a hijack attempt.
+                Some(existing) if existing.owner_pid == sender_pid => {}
+                Some(_) => return vec![status::DENIED],
+                // Connection cap (audit 1): refuse a *new* id once the table is full.
+                None if inner.conns.len() >= MAX_CONNS => return vec![status::DENIED],
+                None => {
+                    inner.conns.insert(conn_id, ConnState::new(bus, sender_pid));
+                }
             }
-            inner.conns.entry(conn_id).or_insert_with(|| ConnState::new(bus));
         }
         // Tell the delegate (no lock held — the write rides the bounded channel). Roll the
         // registration back if a stalled delegate sheds it, so no half-open connection lingers.
@@ -167,12 +180,10 @@ impl DbusRelay {
         }
     }
 
-    /// Handle `DBUS_SEND` `[conn_id | frame]`: rate-limit, relay the frame, ack immediately.
+    /// Handle `DBUS_SEND` `[conn_id | frame]`: rate-limit, relay the frame, ack immediately. Only
+    /// the connection's owner may send on it.
     #[must_use]
     pub fn send(&self, sender_pid: i32, data: &[u8]) -> Vec<u8> {
-        if sender_pid != self.facade_pid {
-            return vec![status::DENIED];
-        }
         let Some((conn_id, frame)) = wire::decode_send(data) else {
             return vec![status::BAD_REQUEST];
         };
@@ -181,8 +192,9 @@ impl DbusRelay {
             if !inner.limiter.allow(self.now_ms()) {
                 return vec![status::AGAIN]; // rate cap (audit 4)
             }
-            match inner.conns.get(&conn_id).map(|c| c.bus) {
-                Some(bus) => bus,
+            match inner.conns.get(&conn_id) {
+                Some(conn) if conn.owner_pid == sender_pid => conn.bus,
+                Some(_) => return vec![status::DENIED], // not the owner
                 None => return vec![status::BAD_REQUEST],
             }
         };
@@ -200,17 +212,16 @@ impl DbusRelay {
     /// already parked on it (only one is allowed, bounding parked binder threads).
     #[must_use]
     pub fn recv(&self, sender_pid: i32, data: &[u8]) -> Vec<u8> {
-        if sender_pid != self.facade_pid {
-            return Vec::new();
-        }
         let Some(conn_id) = wire::decode_conn(data) else {
             return Vec::new();
         };
         let mut inner = self.lock();
-        // One parked recv per connection: refuse a duplicate so a (compromised) facade cannot park
-        // many binder loopers on one connection. With MAX_CONNS this bounds parked threads.
+        // Gate on ownership (a non-owner may not drain another's connection), then enforce one
+        // parked recv per connection: a duplicate is refused so a caller cannot park many binder
+        // loopers on one connection. With MAX_CONNS this bounds parked threads.
         match inner.conns.get_mut(&conn_id) {
             None => return Vec::new(),
+            Some(conn) if conn.owner_pid != sender_pid => return Vec::new(),
             Some(conn) if conn.recv_parked => return Vec::new(),
             Some(conn) => conn.recv_parked = true,
         }
@@ -243,11 +254,9 @@ impl DbusRelay {
     }
 
     /// Handle `DBUS_CLOSE` `[conn_id]`: tear the connection down and wake any parked `DBUS_RECV`.
+    /// Only the owner may close its connection (so a guessed id cannot drop another's bus session).
     #[must_use]
     pub fn close(&self, sender_pid: i32, data: &[u8]) -> Vec<u8> {
-        if sender_pid != self.facade_pid {
-            return vec![status::DENIED];
-        }
         let Some(conn_id) = wire::decode_conn(data) else {
             return vec![status::BAD_REQUEST];
         };
@@ -257,11 +266,12 @@ impl DbusRelay {
                 return vec![status::AGAIN]; // rate cap (audit 4)
             }
             match inner.conns.get_mut(&conn_id) {
-                Some(conn) => {
+                Some(conn) if conn.owner_pid == sender_pid => {
                     conn.closed = true;
                     Some(conn.bus)
                 }
-                None => None,
+                Some(_) => return vec![status::DENIED], // not the owner
+                None => None,                           // already gone — idempotent OK
             }
         };
         if let Some(bus) = bus {
@@ -321,6 +331,7 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    /// A representative owner pid (the connection-opener) used across the tests.
     const FACADE_PID: i32 = 4242;
 
     /// A relay wired to a fake session-bus delegate; returns the relay and the delegate's read end
@@ -334,7 +345,7 @@ mod tests {
         let (kenneld_end, delegate_end) = UnixStream::pair().expect("pipe");
         let mut senders = HashMap::new();
         senders.insert(Bus::Session, spawn_pipe_writer(kenneld_end));
-        (DbusRelay::new(FACADE_PID, senders, limiter), delegate_end)
+        (DbusRelay::new(senders, limiter), delegate_end)
     }
 
     fn read_record(stream: &mut UnixStream) -> Record {
@@ -347,11 +358,47 @@ mod tests {
     }
 
     #[test]
-    fn wrong_sender_is_denied() {
-        let (relay, _delegate) = relay_with_session();
+    fn a_non_owner_cannot_operate_on_anothers_connection() {
+        // Per-connection identity (§7.7.2a): the opener owns the connection; another in-kennel pid
+        // that guesses the conn_id may not send, receive, or close on it.
+        let (relay, mut delegate) = relay_with_session();
+        const OWNER: i32 = 4242;
+        const OTHER: i32 = 9999;
         assert_eq!(
-            relay.open(9999, &wire::encode_open(1, wire::SESSION)),
+            relay.open(OWNER, &wire::encode_open(1, wire::SESSION)),
+            vec![status::OK]
+        );
+        let _ = read_record(&mut delegate); // the Open
+        // A different pid is refused on every verb for a connection it does not own.
+        assert_eq!(
+            relay.open(OTHER, &wire::encode_open(1, wire::SESSION)),
+            vec![status::DENIED],
+            "re-opening another's live id is a hijack attempt"
+        );
+        assert_eq!(
+            relay.send(OTHER, &wire::encode_send(1, &[0xAA])),
             vec![status::DENIED]
+        );
+        assert_eq!(relay.recv(OTHER, &wire::encode_conn(1)), Vec::<u8>::new());
+        assert_eq!(
+            relay.close(OTHER, &wire::encode_conn(1)),
+            vec![status::DENIED]
+        );
+    }
+
+    #[test]
+    fn any_pid_may_open_its_own_connection() {
+        // There is no daemon-wide "the facade" pid; any caller may open its *own* connection (the
+        // host-dbus allowlist, not caller identity, bounds what it can do).
+        let (relay, mut delegate) = relay_with_session();
+        assert_eq!(
+            relay.open(1234, &wire::encode_open(1, wire::SESSION)),
+            vec![status::OK]
+        );
+        let _ = read_record(&mut delegate);
+        assert_eq!(
+            relay.open(5678, &wire::encode_open(2, wire::SESSION)),
+            vec![status::OK]
         );
     }
 

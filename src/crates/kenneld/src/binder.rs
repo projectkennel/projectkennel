@@ -615,9 +615,10 @@ fn inet_event(incoming: &Incoming, ctx: u16, dest: &str, port: u16, outcome: Out
 }
 
 /// Serve a D-Bus mediation verb (§7.7.2a). kenneld is the **membrane**, not a filter or parser:
-/// it authenticates the sender (the relay checks the kernel-attested facade pid), applies the
-/// token-bucket rate cap, and relays the opaque frame to/from the `host-dbus` delegate by
-/// connection id. The relay owns all of that state, so no registry lock is taken here.
+/// it binds each connection to its opener (the relay's per-connection owner check, on the
+/// kernel-attested sender pid), applies the token-bucket rate cap, and relays the opaque frame
+/// to/from the `host-dbus` delegate by connection id. The relay owns all of that state, so no
+/// registry lock is taken here.
 ///
 /// `dbus == None` means the kennel enabled no bus (`[dbus]` absent or the delegate failed to
 /// start): every verb is denied — fail-closed, never a silent bus exposure.
