@@ -35,6 +35,16 @@ pub mod verb {
     /// `[net.bpf].bind` cgroup ACL already gated the bind; this is a pure socketpair handoff. The
     /// handler never parks a looper (it bounded-polls then returns).
     pub const BIND_INET: u32 = 7;
+    /// Broker the D-Bus mediation conduit for a workload bus connection (the `IDBus` facade,
+    /// §7.7.2).
+    ///
+    /// `facade-dbus` transacts the request `[bus: u8]` (see [`crate::service::dbus`]; `0`
+    /// session, `1` system) to kenneld once per accepted workload connection. With the
+    /// `host-dbus` delegate running, kenneld returns one end of a socketpair conduit
+    /// ([`crate::ctxmgr::Reply::Fd`], sent with `transact_fd`); typed `IDBus` frames then flow
+    /// facade ↔ conduit ↔ delegate directly, kenneld out of the per-message path. A bus the
+    /// policy did not enable yields [`crate::service::status::DENIED`].
+    pub const CONNECT_DBUS: u32 = 8;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
@@ -132,6 +142,52 @@ pub mod inet {
             assert!(decode_bind_request(&[0, 0x0B]).is_none()); // short (2 bytes)
             assert!(decode_bind_request(&[0, 0x0B, 0xB8, 0x00]).is_none()); // long (4 bytes)
             assert!(decode_bind_request(&[]).is_none()); // empty
+        }
+    }
+}
+
+/// The [`verb::CONNECT_DBUS`] request wire: a single `[bus: u8]` byte (`0` session, `1`
+/// system), mirroring `kennel_lib_dbus::wire::Bus`.
+///
+/// The wire is internal-stable (both ends ship from one release). `facade-dbus`
+/// [`dbus::encode_request`]s; kenneld [`dbus::decode_request`]s and checks the bus is
+/// policy-enabled before brokering the conduit.
+pub mod dbus {
+    /// The session bus selector byte.
+    pub const SESSION: u8 = 0;
+    /// The system bus selector byte.
+    pub const SYSTEM: u8 = 1;
+
+    /// Encode a `CONNECT_DBUS` request for `bus`.
+    #[must_use]
+    pub fn encode_request(bus: u8) -> Vec<u8> {
+        vec![bus]
+    }
+
+    /// Decode a `CONNECT_DBUS` request into its bus selector byte. `None` for any payload that
+    /// is not exactly one byte (untrusted; the byte's validity is the caller's concern).
+    #[must_use]
+    pub fn decode_request(data: &[u8]) -> Option<u8> {
+        match data {
+            [bus] => Some(*bus),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{decode_request, encode_request, SESSION, SYSTEM};
+
+        #[test]
+        fn round_trips_both_buses() {
+            assert_eq!(decode_request(&encode_request(SESSION)), Some(SESSION));
+            assert_eq!(decode_request(&encode_request(SYSTEM)), Some(SYSTEM));
+        }
+
+        #[test]
+        fn rejects_wrong_length() {
+            assert!(decode_request(&[]).is_none());
+            assert!(decode_request(&[0, 1]).is_none());
         }
     }
 }

@@ -209,7 +209,7 @@ verified-against = [
 # a panic on adversarial wire is unmaskable under release `panic = "abort"` (§8.5). Reported
 # upstream; drop the patch and restore byte-identical vendoring on the fixed release.
 # `patch -p1` against pristine v5.0.1 reproduces these exact bytes.
-notes = "Direct dep of kennel-facade (facade-dbus, §7.7) — the D-Bus wire marshalling. Outside the daemon TCB. `#![forbid(unsafe_code)]`, 0 runtime deps (anyhow/rustix are dev-only). Only the marshalling core (encoder/incoming/types) is linked; the app-specific `messages/` tree is dead code. The incoming decoder parses adversarial workload wire; the kennel-fuzz harness fuzzes it (and found the panic the local patch fixes)."
+notes = "Direct dep of kennel-lib-dbus (the D-Bus mediation engine for facade-dbus, §7.7) — the D-Bus wire marshalling. Outside the daemon TCB. `#![forbid(unsafe_code)]`, 0 runtime deps (anyhow/rustix are dev-only). Only the marshalling core (encoder/incoming/types) is linked; the app-specific `messages/` tree is dead code. The incoming decoder parses adversarial workload wire; the kennel-fuzz harness fuzzes it (and found the panic the local patch fixes)."
 
 [crate."num-conv"]
 version = "=0.2.2"

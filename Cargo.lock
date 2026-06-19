@@ -95,8 +95,8 @@ name = "kennel-facade"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-binder",
+ "kennel-lib-dbus",
  "kennel-lib-scm",
- "mini-sansio-dbus",
 ]
 
 [[package]]

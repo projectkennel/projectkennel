@@ -28,17 +28,20 @@ path = "src/bin/facade-client.rs"
 name = "facade-ssh"
 path = "src/bin/facade-ssh.rs"
 
+[[bin]]
+name = "facade-dbus"
+path = "src/bin/facade-dbus.rs"
+
 [dependencies]
 # The binder client transaction surface every facade uses to reach node 0.
 kennel-lib-binder = { path = "../kennel-lib-binder" }
 # The shared bidirectional splice (conduit relay) — used by facade-socks5 and
 # facade-client after brokering a conduit fd; harmless for the two that do not.
 kennel-lib-scm = { path = "../kennel-lib-scm" }
-# The D-Bus wire marshalling for facade-dbus (§7.7): decode incoming method-call
-# headers (destination/path/interface/member) + encode replies; sans-IO, the facade
-# owns the socket I/O. forbid(unsafe_code), 0 runtime deps. Only the marshalling core
-# is linked. Outside the daemon TCB (facades run confined in the kennel).
-mini-sansio-dbus = "=5.0.1"
+# The D-Bus mediation engine for facade-dbus (§7.7): the typed conduit wire, the SASL
+# handshake, message reconstruction, and the Facade connection state machine. Wraps the
+# mini-sansio-dbus marshalling. Outside the daemon TCB (facades run confined in the kennel).
+kennel-lib-dbus = { path = "../kennel-lib-dbus" }
 
 [lints]
 workspace = true
