@@ -48,6 +48,7 @@ members = [
     # The host ends of binder connectors (kenneld's dial + inbound-bind delegates):
     # one crate, two binaries (host-netproxy, host-inetd) + the shared conduit lib.
     "src/crates/kennel-host-delegate",
+    "src/crates/kennel-host-dbus",
     # The in-kennel ends of binder connectors (push workload traffic into binder, or pull it back):
     # one crate, four binaries (facade-afunix/socks5/client/ssh).
     "src/crates/kennel-facade",

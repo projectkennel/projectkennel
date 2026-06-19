@@ -1,0 +1,465 @@
+//! `host-dbus`: the D-Bus mediation **delegate** (§7.7.2b).
+//!
+//! `kenneld` compiles the `[dbus]` policy into a match table and brokers the facade↔delegate
+//! conduit; this is what's left — the bus-side I/O around the I/O-free
+//! [`kennel_lib_dbus::delegate::Delegate`] core. It holds the operator's real bus connection,
+//! reads typed [`Frame`]s off the conduit, runs each through the compiled
+//! [`Filter`](kennel_lib_dbus::filter::Filter) (the real enforcement boundary — the in-kennel
+//! facade is untrusted), reconstructs and sends the approved calls, and demultiplexes the bus's
+//! replies and allowlisted signals back over the conduit.
+//!
+//! A single-threaded `poll(2)` event loop over the conduit and bus fds — no per-message threads
+//! and no head-of-line blocking on a quiet bus. (The §7.7.2b thread-pool model is a throughput
+//! refinement for very chatty buses; one connection's mediation is correct on the event loop.)
+//!
+//! This is a **separate crate** from `kennel-host-delegate` on purpose: kenneld depends on that
+//! crate's conduit-wire helpers, so putting the D-Bus engine (and `mini-sansio-dbus`) here keeps
+//! it out of kenneld's dependency closure — the daemon TCB only shrinks.
+
+#![forbid(unsafe_code)]
+
+use std::collections::VecDeque;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::net::{UnixListener, UnixStream};
+
+use mini_sansio_dbus::{
+    DBusConnection, DBusConnectorWants, MessageType, OutgoingQueue, SliceMessageEncoder,
+};
+use nix::poll::{PollFd, PollFlags, PollTimeout};
+
+use kennel_lib_dbus::delegate::{BusReply, BusSignal, Delegate, Outbound};
+use kennel_lib_dbus::filter::Filter;
+use kennel_lib_dbus::message::body_slice;
+use kennel_lib_dbus::wire::{self, Bus, Frame};
+
+/// The read buffer for the bus connection's decoder.
+const READBUF: usize = wire::MAX_BODY + 64 * 1024;
+
+/// Serve the owner-only command socket: for each conduit fd `kenneld` sends over it (one per
+/// workload bus connection), spawn a mediation against `bus`/`bus_address` under `filter`.
+///
+/// Mirrors `host-netproxy`'s `serve_conduit`: `kenneld` minted the conduit socketpair and passes
+/// the delegate end here as `SCM_RIGHTS`; the bus address and the compiled table are this
+/// delegate's per-kennel configuration (passed at spawn), so the command carries only the fd.
+pub fn serve(listener: &UnixListener, bus: Bus, bus_address: &str, filter: &Filter) {
+    for stream in listener.incoming().flatten() {
+        let bus_address = bus_address.to_owned();
+        let filter = filter.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let Ok((_n, mut fds)) = kennel_lib_scm::recv_with_fds(stream.as_fd(), &mut buf) else {
+                return;
+            };
+            // Exactly one fd (the conduit end) is expected.
+            let Some(conduit_fd) = fds.pop() else { return };
+            if !fds.is_empty() {
+                return;
+            }
+            if let Err(e) = mediate(UnixStream::from(conduit_fd), bus, &bus_address, filter) {
+                eprintln!("host-dbus: {e}");
+            }
+        });
+    }
+}
+
+/// Mediate one workload bus connection against `bus` at `bus_address`, applying `filter`.
+///
+/// Connects the operator's real bus, runs the SASL handshake, sends the delegate's own `Hello`,
+/// then services the conduit and the bus until either closes.
+///
+/// # Errors
+///
+/// Returns an I/O error on a fatal socket failure; a clean EOF on either side is `Ok(())`.
+pub fn mediate(conduit: UnixStream, bus: Bus, bus_address: &str, filter: Filter) -> io::Result<()> {
+    let path = parse_unix_address(bus_address)?;
+    let bus_stream = UnixStream::connect(path)?;
+    let seq = handshake(&bus_stream)?;
+
+    let mut conn = DBusConnection::new(seq);
+    let mut queue = RawQueue::default();
+    // The delegate's own Hello (serial 1) so the bus assigns it a unique name; its reply is
+    // unmatched in the delegate's serial map (which starts at 2) and is dropped.
+    queue.push_raw(&hello_message()?);
+
+    let mut delegate = Delegate::new(filter);
+    let mut state = Loop {
+        conn: &mut conn,
+        queue: &mut queue,
+        delegate: &mut delegate,
+        bus,
+        bus_stream,
+        conduit,
+        readbuf: vec![0u8; READBUF],
+        conduit_in: Vec::new(),
+        conduit_out: VecDeque::new(),
+    };
+    state.run()
+}
+
+/// The event-loop state for one mediation.
+struct Loop<'a> {
+    conn: &'a mut DBusConnection,
+    queue: &'a mut RawQueue,
+    delegate: &'a mut Delegate,
+    bus: Bus,
+    bus_stream: UnixStream,
+    conduit: UnixStream,
+    readbuf: Vec<u8>,
+    conduit_in: Vec<u8>,
+    conduit_out: VecDeque<u8>,
+}
+
+impl Loop<'_> {
+    fn run(&mut self) -> io::Result<()> {
+        self.bus_stream.set_nonblocking(true)?;
+        self.conduit.set_nonblocking(true)?;
+        loop {
+            // Flush whatever is queued for the bus and the conduit first.
+            if self.pump_bus_writes()?.closed() || self.pump_conduit_writes()?.closed() {
+                return Ok(());
+            }
+
+            let mut bus_flags = PollFlags::POLLIN;
+            if self.bus_has_pending_write() {
+                bus_flags |= PollFlags::POLLOUT;
+            }
+            let mut conduit_flags = PollFlags::POLLIN;
+            if !self.conduit_out.is_empty() {
+                conduit_flags |= PollFlags::POLLOUT;
+            }
+            // SAFETY-equivalent: PollFd borrows the streams we own for the call's duration.
+            let mut fds = [
+                PollFd::new(self.bus_stream_borrow(), bus_flags),
+                PollFd::new(self.conduit_borrow(), conduit_flags),
+            ];
+            if nix::poll::poll(&mut fds, PollTimeout::NONE).is_err() {
+                return Ok(());
+            }
+            let bus_ready = fds
+                .first()
+                .and_then(PollFd::revents)
+                .unwrap_or_else(PollFlags::empty);
+            let conduit_ready = fds
+                .get(1)
+                .and_then(PollFd::revents)
+                .unwrap_or_else(PollFlags::empty);
+            // `revents` are Copy; `fds` (and its borrows of self) are unused past here, so the
+            // borrow ends and `self` is free to mutate below.
+
+            if conduit_ready.intersects(PollFlags::POLLIN) && self.read_conduit()?.closed() {
+                return Ok(());
+            }
+            if bus_ready.intersects(PollFlags::POLLIN) && self.read_bus()?.closed() {
+                return Ok(());
+            }
+            if bus_ready.intersects(PollFlags::POLLHUP | PollFlags::POLLERR)
+                || conduit_ready.intersects(PollFlags::POLLHUP | PollFlags::POLLERR)
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    fn bus_stream_borrow(&self) -> BorrowedFd<'_> {
+        self.bus_stream.as_fd()
+    }
+
+    fn conduit_borrow(&self) -> BorrowedFd<'_> {
+        self.conduit.as_fd()
+    }
+
+    /// Whether the bus connection still has bytes queued to write.
+    fn bus_has_pending_write(&mut self) -> bool {
+        matches!(
+            self.conn.wants(&*self.queue, &mut self.readbuf),
+            Ok((_, Some(_)))
+        )
+    }
+
+    /// Drain as much of the bus outbound queue as the socket accepts (non-blocking).
+    fn pump_bus_writes(&mut self) -> io::Result<Flow> {
+        loop {
+            let n = {
+                let Ok((_r, w)) = self.conn.wants(&*self.queue, &mut self.readbuf) else {
+                    return Ok(Flow::Closed);
+                };
+                let Some(write) = w else {
+                    return Ok(Flow::Open);
+                };
+                match (&self.bus_stream).write(write.buf) {
+                    Ok(0) => return Ok(Flow::Closed),
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Flow::Open),
+                    Err(e) => return Err(e),
+                }
+            };
+            if self.conn.satisfy_write(n, self.queue).is_err() {
+                return Ok(Flow::Closed);
+            }
+        }
+    }
+
+    /// Drain the conduit outbound buffer (non-blocking).
+    fn pump_conduit_writes(&mut self) -> io::Result<Flow> {
+        while !self.conduit_out.is_empty() {
+            let (head, _) = self.conduit_out.as_slices();
+            match (&self.conduit).write(head) {
+                Ok(0) => return Ok(Flow::Closed),
+                Ok(n) => {
+                    self.conduit_out.drain(..n);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Flow::Open),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Flow::Open)
+    }
+
+    /// One non-blocking read from the bus, dispatching a completed message.
+    fn read_bus(&mut self) -> io::Result<Flow> {
+        let n = {
+            let Ok((read, _w)) = self.conn.wants(&*self.queue, &mut self.readbuf) else {
+                return Ok(Flow::Closed);
+            };
+            match (&self.bus_stream).read(read.buf) {
+                Ok(0) => return Ok(Flow::Closed),
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Flow::Open),
+                Err(e) => return Err(e),
+            }
+        };
+        let frame = match self.conn.satisfy_read(n, &self.readbuf) {
+            Ok(Some(msg)) => dispatch_bus_message(self.delegate, self.bus, &msg, &self.readbuf),
+            Ok(None) => None,
+            Err(_) => return Ok(Flow::Closed),
+        };
+        if let Some(frame) = frame {
+            self.conduit_out.extend(frame.encode());
+        }
+        Ok(Flow::Open)
+    }
+
+    /// Read conduit bytes, decode each complete frame, and feed the delegate.
+    fn read_conduit(&mut self) -> io::Result<Flow> {
+        let mut chunk = [0u8; 16 * 1024];
+        match (&self.conduit).read(&mut chunk) {
+            Ok(0) => return Ok(Flow::Closed),
+            Ok(n) => self
+                .conduit_in
+                .extend_from_slice(chunk.get(..n).unwrap_or(&[])),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Flow::Open),
+            Err(e) => return Err(e),
+        }
+        while let Some(frame) = self.take_conduit_frame()? {
+            if let Frame::Call(call) = frame {
+                match self.delegate.on_conduit_call(&call) {
+                    Ok(Outbound::ToBus(bytes)) => {
+                        self.queue.push_raw(&bytes);
+                    }
+                    Ok(Outbound::ToConduit(reply)) => {
+                        self.conduit_out.extend(reply.encode());
+                    }
+                    Err(_) => {} // an unencodable approved call: drop it
+                }
+            }
+            // The facade never sends Reply/Error/Signal to the delegate; ignore.
+        }
+        Ok(Flow::Open)
+    }
+
+    /// Pop one complete length-prefixed frame from the conduit input buffer, if present.
+    fn take_conduit_frame(&mut self) -> io::Result<Option<Frame>> {
+        let Some(len) = wire::frame_len(&self.conduit_in).map_err(|_| broken())? else {
+            return Ok(None);
+        };
+        let total = 4usize.checked_add(len).ok_or_else(broken)?;
+        if self.conduit_in.len() < total {
+            return Ok(None);
+        }
+        let payload: Vec<u8> = self.conduit_in.drain(..total).skip(4).collect();
+        wire::Frame::decode(&payload).map(Some).map_err(|_| broken())
+    }
+}
+
+/// Whether the connection should keep running or has hit a clean close.
+#[derive(Clone, Copy)]
+enum Flow {
+    Open,
+    Closed,
+}
+
+impl Flow {
+    const fn closed(self) -> bool {
+        matches!(self, Self::Closed)
+    }
+}
+
+/// Turn a decoded bus message into the conduit frame to forward, or `None` to drop it.
+fn dispatch_bus_message(
+    delegate: &mut Delegate,
+    bus: Bus,
+    msg: &mini_sansio_dbus::IncomingMessage<'_>,
+    raw: &[u8],
+) -> Option<Frame> {
+    let (body_endian, body) = body_slice(raw).ok()?;
+    match msg.message_type {
+        MessageType::MethodReturn | MessageType::Error => {
+            let reply_serial = msg.reply_serial?;
+            delegate.on_bus_reply(BusReply {
+                reply_serial,
+                error_name: if msg.message_type == MessageType::Error {
+                    msg.error_name
+                } else {
+                    None
+                },
+                error_message: None,
+                signature: msg.signature.unwrap_or(""),
+                body_endian,
+                body,
+            })
+        }
+        MessageType::Signal => delegate.on_bus_signal(BusSignal {
+            bus,
+            path: msg.path.unwrap_or(""),
+            interface: msg.interface.unwrap_or(""),
+            member: msg.member.unwrap_or(""),
+            signature: msg.signature.unwrap_or(""),
+            body_endian,
+            body,
+        }),
+        // An inbound MethodCall to an owned name (rare) or anything else: drop in phase 4.
+        _ => None,
+    }
+}
+
+/// Drive the `mini-sansio-dbus` client connector over a blocking stream until connected,
+/// returning the sequence number to seed the [`DBusConnection`].
+fn handshake(bus: &UnixStream) -> io::Result<u64> {
+    let mut connector = mini_sansio_dbus::DBusConnector::new();
+    let mut readbuf = [0u8; 1024];
+    loop {
+        let wants = connector.wants(&mut readbuf).map_err(|_| broken())?;
+        match wants {
+            DBusConnectorWants::Read { buf, .. } => {
+                let n = (&*bus).read(buf)?;
+                if n == 0 {
+                    return Err(broken());
+                }
+                connector.satisfy_read(n, &readbuf).map_err(|_| broken())?;
+            }
+            DBusConnectorWants::Write { buf, .. } => {
+                let n = (&*bus).write(buf)?;
+                if let Some(seq) = connector.satisfy_write(n).map_err(|_| broken())? {
+                    return Ok(seq);
+                }
+            }
+        }
+    }
+}
+
+/// The delegate's own `Hello` call to the bus driver (serial 1).
+fn hello_message() -> io::Result<Vec<u8>> {
+    let mut buf = [0u8; 256];
+    let mut enc =
+        SliceMessageEncoder::new(&mut buf, MessageType::MethodCall).map_err(|_| broken())?;
+    enc.set_destination("org.freedesktop.DBus")
+        .map_err(|_| broken())?;
+    enc.set_path("/org/freedesktop/DBus").map_err(|_| broken())?;
+    enc.set_interface("org.freedesktop.DBus")
+        .map_err(|_| broken())?;
+    enc.set_member("Hello").map_err(|_| broken())?;
+    enc.__dbus_begin_body().map_err(|_| broken())?;
+    let len = enc.finish().map_err(|_| broken())?;
+    let mut out = buf.get(..len).ok_or_else(broken)?.to_vec();
+    mini_sansio_dbus::DBusSerial::write_to_message(&mut out, 1).map_err(|_| broken())?;
+    Ok(out)
+}
+
+/// Parse a `unix:path=/run/user/1000/bus` (or `unix:abstract=…`) D-Bus address into the socket
+/// path. Only the `path=` form is handled (abstract sockets are a noted gap).
+fn parse_unix_address(address: &str) -> io::Result<String> {
+    let body = address.strip_prefix("unix:").ok_or_else(broken)?;
+    for field in body.split(',') {
+        if let Some(path) = field.strip_prefix("path=") {
+            return Ok(path.to_owned());
+        }
+    }
+    Err(broken())
+}
+
+fn broken() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "D-Bus mediation error")
+}
+
+
+
+/// A queue of fully-formed outbound messages sent to the bus verbatim — the serial is already
+/// written by [`message::reconstruct_call`] (the delegate owns the bus serial namespace), so
+/// `push_raw` does **not** rewrite it.
+#[derive(Default)]
+struct RawQueue {
+    messages: VecDeque<Vec<u8>>,
+}
+
+impl OutgoingQueue for RawQueue {
+    fn push_raw(&mut self, buf: &[u8]) -> u32 {
+        let serial = buf
+            .get(8..12)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map_or(0, u32::from_le_bytes);
+        self.messages.push_back(buf.to_vec());
+        serial
+    }
+
+    fn peek(&self) -> Option<&[u8]> {
+        self.messages.front().map(Vec::as_slice)
+    }
+
+    fn pop(&mut self) {
+        self.messages.pop_front();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_unix_path_address() {
+        assert_eq!(
+            parse_unix_address("unix:path=/run/user/1000/bus").expect("path"),
+            "/run/user/1000/bus"
+        );
+        assert_eq!(
+            parse_unix_address("unix:guid=abc,path=/tmp/dbus-XYZ").expect("path"),
+            "/tmp/dbus-XYZ"
+        );
+        assert!(parse_unix_address("tcp:host=localhost").is_err());
+    }
+
+    #[test]
+    fn raw_queue_preserves_bytes_and_reads_the_serial() {
+        let mut q = RawQueue::default();
+        // A 12-byte stub with serial 0x2A at offset 8 (little-endian).
+        let mut msg = vec![0u8; 8];
+        msg.extend_from_slice(&0x2Au32.to_le_bytes());
+        assert_eq!(q.push_raw(&msg), 0x2A);
+        assert_eq!(q.peek(), Some(msg.as_slice()));
+        q.pop();
+        assert!(q.peek().is_none());
+    }
+
+    #[test]
+    fn hello_message_is_a_valid_method_call_serial_1() {
+        let bytes = hello_message().expect("hello");
+        // Little-endian, MethodCall (type 1), serial at [8..12] == 1.
+        assert_eq!(bytes.first(), Some(&b'l'));
+        assert_eq!(bytes.get(1), Some(&1u8));
+        let serial = bytes
+            .get(8..12)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_le_bytes);
+        assert_eq!(serial, Some(1));
+    }
+}
