@@ -5,7 +5,8 @@ use crate::{short_name, Inventory};
 use std::fmt::Write as _;
 
 /// The marker that opens the generated region (everything to [`END`] is rewritten by the tool).
-pub const BEGIN: &str = "<!-- BEGIN GENERATED: crate-inventory (gen-inventory; do not edit by hand) -->";
+pub const BEGIN: &str =
+    "<!-- BEGIN GENERATED: crate-inventory (gen-inventory; do not edit by hand) -->";
 /// The marker that closes the generated region.
 pub const END: &str = "<!-- END GENERATED: crate-inventory -->";
 

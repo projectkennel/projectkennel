@@ -91,7 +91,7 @@ impl Inventory {
                 name,
                 sloc: sloc::count_dir(&src)?,
                 uses_unsafe: sloc::uses_unsafe(&src)?,
-                in_tcb: false, // filled below
+                in_tcb: false,         // filled below
                 consumers: Vec::new(), // filled below
                 bins,
                 fp_deps,
@@ -114,7 +114,10 @@ impl Inventory {
             })
             .collect();
 
-        let tcb: BTreeSet<String> = tcb_closure(&edges).iter().map(|s| (*s).to_owned()).collect();
+        let tcb: BTreeSet<String> = tcb_closure(&edges)
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
         let mut consumers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for c in &raw {
             for dep in &c.fp_deps {

@@ -149,13 +149,19 @@ mod tests {
 
     #[test]
     fn detects_unsafe_use_not_mentions() {
-        assert!(super::line_uses_unsafe("    let r = unsafe { ptr.read() };"));
+        assert!(super::line_uses_unsafe(
+            "    let r = unsafe { ptr.read() };"
+        ));
         assert!(super::line_uses_unsafe("unsafe fn raw() {}"));
         assert!(super::line_uses_unsafe("unsafe impl Send for X {}"));
         // Mentions, not uses — must not flag:
         assert!(!super::line_uses_unsafe("#![forbid(unsafe_code)]"));
-        assert!(!super::line_uses_unsafe("    pub unsafe_section: UnsafeSection,"));
+        assert!(!super::line_uses_unsafe(
+            "    pub unsafe_section: UnsafeSection,"
+        ));
         assert!(!super::line_uses_unsafe("        \"[unsafe.ptrace]\","));
-        assert!(!super::line_uses_unsafe("    /// the [unsafe] section uses unsafe { } sometimes"));
+        assert!(!super::line_uses_unsafe(
+            "    /// the [unsafe] section uses unsafe { } sometimes"
+        ));
     }
 }
