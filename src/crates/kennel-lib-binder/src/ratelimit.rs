@@ -2,17 +2,18 @@
 //!
 //! # Why this exists
 //!
-//! Per-message D-Bus rides a socketpair conduit, not binder (§7.7.2a keeps kenneld off the
-//! per-message path). That means it gets none of binder's implicit enforcement — no kernel
-//! transaction bound, no looper-threadpool backpressure. We already bound message *size*
-//! ([`crate::dbus::MAX_FRAME`]); this bounds *rate*, the other dimension binder would have given
-//! us. It is enforced at **both** ends:
+//! Per-message D-Bus rides the binder gateway: the facade transacts each message to node 0 and
+//! **kenneld is the membrane** (§7.7.2a) — it relays the opaque frame to the operator-context
+//! `host-dbus` delegate over an owner-only pipe. Because that relay hop is a pipe rather than a
+//! binder-node transaction, it does not get binder's implicit per-transaction enforcement, so the
+//! membrane re-derives the bounds explicitly: message *size* ([`crate::dbus::MAX_FRAME`]) and, here,
+//! *rate*.
 //!
-//! - the facade (facade-dbus) — early backpressure to the workload (a clean error reply)
-//!   before a flood reaches the trusted side;
-//! - the delegate (host-dbus) — the real boundary: the delegate runs in the
-//!   operator's context, off the kennel's cgroup, so a flood there would otherwise amplify into
-//!   operator CPU/memory and **real-bus traffic**. This cap is what stops that.
+//! The cap is enforced at the **membrane** — kenneld spends a token per control/data verb
+//! (`DBUS_OPEN`/`DBUS_SEND`/`DBUS_CLOSE`) and sheds a flood at the gateway before it reaches
+//! `host-dbus` at all. It can also be applied at the delegate (defence in depth: `host-dbus` runs
+//! in the operator's context, off the kennel's cgroup, so an unbounded flood there would amplify
+//! into operator CPU/memory and **real-bus traffic**).
 //!
 //! # Clock injection
 //!
