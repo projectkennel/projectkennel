@@ -318,6 +318,34 @@ impl DbusRelay {
     }
 }
 
+/// Drain inbound `Record`s from one bus's `host-dbus` delegate pipe to the relay's queues.
+///
+/// Runs on a dedicated per-bus thread for the pipe's life; returns when the delegate closes the
+/// pipe (kennel teardown) or sends a malformed record. The delegate only ever sends
+/// [`Record::Frame`] inbound (a bus reply or an allowlisted signal, already framed as the
+/// `[len][payload]` TLV the facade decodes); `Open`/`Close` are outbound-only, so any other record
+/// here is ignored.
+pub fn run_inbound_reader(relay: &DbusRelay, mut pipe: UnixStream) {
+    use std::io::Read;
+    let mut len_buf = [0u8; 4];
+    while pipe.read_exact(&mut len_buf).is_ok() {
+        // Bound the record by the same TLV frame cap kenneld enforces outbound (a hostile delegate
+        // is not in the threat model, but a corrupt length must not allocate unboundedly).
+        let Ok(Some(len)) = kennel_lib_binder::dbus::frame_len(&len_buf) else {
+            return;
+        };
+        let mut payload = vec![0u8; len];
+        if pipe.read_exact(&mut payload).is_err() {
+            return;
+        }
+        match Record::decode(&payload) {
+            Ok(Record::Frame { conn_id, frame }) => relay.deliver_inbound(conn_id, frame),
+            Ok(_) => {} // Open/Close are outbound-only; ignore.
+            Err(_) => return,
+        }
+    }
+}
+
 const fn bus_from_byte(byte: u8) -> Option<Bus> {
     match byte {
         wire::SESSION => Some(Bus::Session),
@@ -361,9 +389,9 @@ mod tests {
     fn a_non_owner_cannot_operate_on_anothers_connection() {
         // Per-connection identity (§7.7.2a): the opener owns the connection; another in-kennel pid
         // that guesses the conn_id may not send, receive, or close on it.
-        let (relay, mut delegate) = relay_with_session();
         const OWNER: i32 = 4242;
         const OTHER: i32 = 9999;
+        let (relay, mut delegate) = relay_with_session();
         assert_eq!(
             relay.open(OWNER, &wire::encode_open(1, wire::SESSION)),
             vec![status::OK]

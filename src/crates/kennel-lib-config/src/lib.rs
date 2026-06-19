@@ -235,6 +235,8 @@ struct RawDeployment {
     socks5: Option<PathBuf>,
     inetd: Option<PathBuf>,
     facade_client: Option<PathBuf>,
+    facade_dbus: Option<PathBuf>,
+    host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
     log_level: Option<LogLevel>,
 }
@@ -254,6 +256,8 @@ impl RawDeployment {
             socks5: higher.socks5.or(self.socks5),
             inetd: higher.inetd.or(self.inetd),
             facade_client: higher.facade_client.or(self.facade_client),
+            facade_dbus: higher.facade_dbus.or(self.facade_dbus),
+            host_dbus: higher.host_dbus.or(self.host_dbus),
             init: higher.init.or(self.init),
             log_level: higher.log_level.or(self.log_level),
         }
@@ -277,6 +281,8 @@ impl RawDeployment {
             socks5: self.socks5,
             inetd: self.inetd,
             facade_client: self.facade_client,
+            facade_dbus: self.facade_dbus,
+            host_dbus: self.host_dbus,
             init: self.init,
             log_level: self.log_level.unwrap_or_default(),
         }
@@ -298,6 +304,8 @@ pub struct Deployment {
     socks5: Option<PathBuf>,
     inetd: Option<PathBuf>,
     facade_client: Option<PathBuf>,
+    facade_dbus: Option<PathBuf>,
+    host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
     log_level: LogLevel,
 }
@@ -410,6 +418,20 @@ impl Deployment {
     #[must_use]
     pub fn facade_client(&self) -> PathBuf {
         self.resolve_bin(self.facade_client.as_deref(), "facade-client")
+    }
+
+    /// The in-kennel `facade-dbus` bound into the view and launched by the seal: it terminates the
+    /// workload's bus connection and frames typed transactions onto binder node 0 (§7.7.2).
+    #[must_use]
+    pub fn facade_dbus(&self) -> PathBuf {
+        self.resolve_bin(self.facade_dbus.as_deref(), "facade-dbus")
+    }
+
+    /// The `host-dbus` D-Bus mediation delegate kenneld spawns in the operator's context: it holds
+    /// the real bus connection and applies the compiled `[dbus]` filter table (§7.7.2b).
+    #[must_use]
+    pub fn host_dbus(&self) -> PathBuf {
+        self.resolve_bin(self.host_dbus.as_deref(), "host-dbus")
     }
 
     /// The trusted root-owned `kennel-bin-init` the privhelper factory `fexecve`s as the

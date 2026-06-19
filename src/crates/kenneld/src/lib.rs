@@ -49,6 +49,7 @@ pub use kennel_lib_control::{control, socket};
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
@@ -328,6 +329,10 @@ pub struct Spec {
     /// at their shim paths, plus any env vars to set. Empty ([`UnixPrep::default`])
     /// for a kennel with no `[unix]` grant.
     pub unix: UnixPrep,
+    /// The prepared D-Bus mediation (§7.7): the enabled buses, their compiled tables, the
+    /// in-view facade sockets, and the delegate/facade binaries. Empty ([`DbusPrep::default`])
+    /// for a kennel with no `[dbus]` grant.
+    pub dbus: DbusPrep,
     /// The prepared binder IPC context manager (§7.1): the settled binder policy and
     /// the audit writer. `None` for a kennel with no `[binder]` grant (no context
     /// manager is run; the seal still mounts no binderfs because the plan's view
@@ -373,6 +378,42 @@ pub struct UnixPrep {
     pub afunix_bin: Option<PathBuf>,
 }
 
+/// The D-Bus mediation prepared for one kennel (§7.7).
+///
+/// Built by `crate::server::Shared::prepare_dbus` and consumed by the bring-up: per enabled bus,
+/// `apply_dbus` binds `facade-dbus` into the view (it terminates the workload's bus connection at
+/// the in-view `listen_path` and frames typed transactions onto binder node 0) and points the
+/// workload's `DBUS_*_BUS_ADDRESS` there; `spawn_dbus_delegates` launches the operator-context
+/// `host-dbus` delegate (holding the real bus at `bus_address` and applying the compiled table)
+/// and wires its owner-only pipe to the per-kennel [`crate::dbus::DbusRelay`]. Empty
+/// ([`DbusPrep::default`]) for a kennel with no `[dbus]` grant.
+#[derive(Debug, Default, Clone)]
+pub struct DbusPrep {
+    /// The session bus, if enabled by policy.
+    pub session: Option<DbusBusPrep>,
+    /// The system bus, if enabled by policy.
+    pub system: Option<DbusBusPrep>,
+    /// The host path of `facade-dbus` (in-kennel, bound into the view). `None` ⇒ no facade binary
+    /// configured: the grants go unserved (fail-closed, no host bus socket exposed otherwise).
+    pub facade_bin: Option<PathBuf>,
+    /// The host path of `host-dbus` (the operator-context delegate). `None` ⇒ no delegate: the
+    /// relay is not constructed and the membrane denies every D-Bus verb.
+    pub host_bin: Option<PathBuf>,
+    /// The host directory the per-bus `host-dbus` command sockets are bound in.
+    pub cmd_dir: PathBuf,
+}
+
+/// One enabled bus's mediation inputs (§7.7).
+#[derive(Debug, Clone)]
+pub struct DbusBusPrep {
+    /// The compiled allow/deny table `host-dbus` enforces (talk/call/broadcast/own/deny-talk).
+    pub rules: kennel_lib_policy::DbusBusRuntime,
+    /// The operator's real bus address `host-dbus` connects to (e.g. `unix:path=/run/user/<uid>/bus`).
+    pub bus_address: String,
+    /// The in-view socket path `facade-dbus` binds; the workload's `DBUS_*_BUS_ADDRESS` points here.
+    pub listen_path: PathBuf,
+}
+
 /// The SSH egress prepared for one kennel (§7.10).
 ///
 /// Built by `crate::server::Shared::register_ssh` and consumed by the bring-up: it
@@ -409,6 +450,10 @@ pub struct Kennel {
     /// The inbound BIND delegate child (`host-inetd`, §7.5.7), if one was launched. Killed and
     /// reaped on teardown — its accept loops and the per-port reader threads end with it.
     inetd: Option<Child>,
+    /// The D-Bus mediation delegate children (`host-dbus`, one per enabled bus, §7.7.2b), if any
+    /// were launched. Killed and reaped on teardown — kenneld's inbound reader threads end with the
+    /// pipes the delegates close.
+    dbus: Vec<Child>,
     /// The constructed-view staging mountpoint, if one was created. Removed on
     /// teardown (the tmpfs mounted on it lived in the workload's now-gone mount
     /// namespace, so only the empty host directory remains).
@@ -491,6 +536,7 @@ impl Kennel {
             self.v6,
             self.proxy.take(),
             self.inetd.take(),
+            std::mem::take(&mut self.dbus),
             self.view_root.as_deref(),
         );
         Ok(status)
@@ -519,6 +565,7 @@ struct Provision {
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
     inetd: Option<Child>,
+    dbus: Vec<Child>,
     view_root: Option<PathBuf>,
     binder: Option<crate::binder::Manager>,
     /// The kennel was built by the privhelper factory (the returned `Child` is the
@@ -552,6 +599,7 @@ pub fn start<P: Privileged + Sync>(
         view_root,
         ssh,
         unix,
+        dbus,
         binder,
         tracer,
     } = spec;
@@ -570,6 +618,7 @@ pub fn start<P: Privileged + Sync>(
         view_root.as_deref(),
         &ssh,
         &unix,
+        &dbus,
         binder.as_ref(),
         tracer,
         command,
@@ -583,6 +632,7 @@ pub fn start<P: Privileged + Sync>(
             v6: state.v6,
             proxy: state.proxy,
             inetd: state.inetd,
+            dbus: state.dbus,
             view_root: state.view_root,
             binder: state.binder,
         }),
@@ -598,6 +648,7 @@ pub fn start<P: Privileged + Sync>(
                 state.v6,
                 state.proxy,
                 state.inetd,
+                std::mem::take(&mut state.dbus),
                 state.view_root.as_deref(),
             );
             Err(e)
@@ -623,6 +674,7 @@ fn bring_up<P: Privileged + Sync>(
     view_root: Option<&Path>,
     ssh: &SshPrep,
     unix: &UnixPrep,
+    dbus: &DbusPrep,
     binder: Option<&BinderPrep>,
     tracer: kennel_lib_config::Tracer,
     command: &mut Command,
@@ -861,6 +913,12 @@ fn bring_up<P: Privileged + Sync>(
     let unix_pivoting = view_root.is_some() && plan.view.is_some();
     apply_afunix(plan, unix, command, unix_pivoting);
 
+    // 3c-dbus. D-Bus mediation (§7.7): bind facade-dbus into the view, point the workload's
+    //     DBUS_*_BUS_ADDRESS at the in-view sockets it presents, and grant the Landlock the facade
+    //     needs to bind them. The host-dbus delegate is launched later (after boot-sync), beside the
+    //     other host delegates. Needs the constructed view, so it engages only when pivoting.
+    apply_dbus(plan, dbus, command, unix_pivoting);
+
     // 3d. constructed-view wiring (§7.4.5). When the plan carries a shim view and
     //     the daemon gave us a staging mountpoint: point HOME at the shim root,
     //     add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
@@ -1001,11 +1059,18 @@ fn bring_up<P: Privileged + Sync>(
         }
     }
 
-    // The per-kennel D-Bus mediation relay (§7.7.2a), passed into the node-0 handler so the
-    // DBUS_* verbs reach it. Constructed by the bring-up's host-dbus spawn (with a bounded sender
-    // to each enabled bus's delegate); `None` here until that wiring runs, in which case the
-    // membrane denies every D-Bus verb (fail-closed).
-    let dbus_relay: Option<std::sync::Arc<crate::dbus::DbusRelay>> = None;
+    // The per-kennel D-Bus mediation relay (§7.7.2a), passed into the node-0 handler so the DBUS_*
+    // verbs reach it. Launch the host-dbus delegate(s) — operator context, one per enabled bus —
+    // before releasing the binder pull, so their command sockets are bound before the workload's
+    // first D-Bus message. With no delegate (no `[dbus]` grant or no binary) the relay is `None`
+    // and the membrane denies every D-Bus verb (fail-closed).
+    let dbus_relay = match spawn_dbus_delegates(dbus, ctx, &tracer, state) {
+        Ok(relay) => relay,
+        Err(e) => {
+            eprintln!("kenneld: warning: D-Bus mediation delegate not started: {e}");
+            None
+        }
+    };
 
     // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
     // so kennel-bin-init can pull its supervision-half. kennel-bin-init has execed (boot-sync above), so
@@ -1436,6 +1501,197 @@ fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, po
     });
 }
 
+/// Bind `facade-dbus` into the view, point the workload's `DBUS_*_BUS_ADDRESS` at the in-view
+/// sockets it presents, and grant the Landlock it needs to create + bind them. Mirrors
+/// `apply_socks5`'s view-bind + Landlock + loader grants; the `host-dbus` delegate it pairs with is
+/// launched later (after boot-sync) by [`spawn_dbus_delegates`].
+///
+/// A no-op unless `pivoting` (the facade needs the constructed view + its binderfs) and the kennel
+/// enables at least one bus. When a bus is enabled but no facade binary is configured, it warns and
+/// serves nothing — fail-closed, never a host bus socket exposed by other means.
+fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting: bool) {
+    use kennel_lib_syscall::landlock::AccessFs;
+    let buses = [
+        (dbus.session.as_ref(), "DBUS_SESSION_BUS_ADDRESS", "session"),
+        (dbus.system.as_ref(), "DBUS_SYSTEM_BUS_ADDRESS", "system"),
+    ];
+    if !pivoting || buses.iter().all(|(b, _, _)| b.is_none()) {
+        return;
+    }
+    let Some(facade_bin) = dbus.facade_bin.clone() else {
+        eprintln!(
+            "kenneld: warning: kennel grants [dbus] mediation but no facade-dbus binary is \
+             configured (deployment `facade_dbus`); the bus(es) will be unserved."
+        );
+        return;
+    };
+    // Per enabled bus: point the workload's bus address at the in-view socket facade-dbus presents,
+    // grant the facade the Landlock to create the socket's parent dir (it `create_dir_all`s it under
+    // $HOME) and bind a socket beneath, and add it to the facade's argv.
+    let mut args = vec![IN_VIEW_BINDER_DEVICE.to_owned()];
+    let mut grant_dirs = std::collections::BTreeSet::new();
+    for (bus, env_var, name) in buses {
+        let Some(prep) = bus else { continue };
+        command.env(env_var, format!("unix:path={}", prep.listen_path.display()));
+        // Grant the existing ancestor (the kennel's writable $HOME): a Landlock rule on a directory
+        // covers files+subdirs created beneath it, so this one grant lets the facade create
+        // `.kennel-dbus/` and bind the socket inside. (The immediate parent does not exist at
+        // ruleset-build time, so the rule must ride an ancestor that does.)
+        if let Some(home) = prep.listen_path.parent().and_then(std::path::Path::parent) {
+            grant_dirs.insert(home.to_path_buf());
+        }
+        args.push(format!("{}={}", prep.listen_path.display(), name));
+    }
+    for dir in grant_dirs {
+        plan.landlock_fs.push((
+            dir,
+            AccessFs::READ_FILE
+                | AccessFs::WRITE_FILE
+                | AccessFs::READ_DIR
+                | AccessFs::MAKE_DIR
+                | AccessFs::MAKE_SOCK
+                | AccessFs::REMOVE_FILE,
+        ));
+    }
+    // Bind the facade binary into the view (read-only) and grant execute + its loaders.
+    if let Some(view) = plan.view.as_mut() {
+        view.binds.push(kennel_lib_spawn::BindMount {
+            source: facade_bin.clone(),
+            target: facade_bin.clone(),
+            writable: false,
+            exclusive: false,
+        });
+    }
+    plan.landlock_fs
+        .push((facade_bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[facade_bin
+        .to_string_lossy()
+        .into_owned()]);
+    for loader in resolution.loaders {
+        plan.landlock_fs.push((
+            PathBuf::from(loader),
+            AccessFs::READ_FILE | AccessFs::EXECUTE,
+        ));
+    }
+    // `facade-dbus <device> <listen-path>=<bus> ...`, run inside the sealed view.
+    plan.aux.push(kennel_lib_spawn::AuxProcess {
+        path: facade_bin,
+        args,
+    });
+}
+
+/// Launch the `host-dbus` delegate(s) — one per enabled bus, in the operator's context — and build
+/// the per-kennel [`crate::dbus::DbusRelay`] wired to them. Each delegate binds its command socket;
+/// kenneld connects once (the owner-only pipe), relays outbound frames through a bounded writer
+/// ([`crate::dbus::spawn_pipe_writer`]), and drains inbound frames on a per-bus thread
+/// ([`crate::dbus::run_inbound_reader`]).
+///
+/// Returns `Ok(None)` (mediation off) when no bus is enabled or no `host-dbus` binary is
+/// configured; the membrane then denies every D-Bus verb. The spawned children are recorded in
+/// `state` for teardown.
+fn spawn_dbus_delegates(
+    dbus: &DbusPrep,
+    ctx: u16,
+    tracer: &kennel_lib_config::Tracer,
+    state: &mut Provision,
+) -> io::Result<Option<std::sync::Arc<crate::dbus::DbusRelay>>> {
+    use kennel_lib_binder::dbus::Bus;
+    let enabled: Vec<(Bus, &DbusBusPrep, &str)> = [
+        (Bus::Session, dbus.session.as_ref(), "session"),
+        (Bus::System, dbus.system.as_ref(), "system"),
+    ]
+    .into_iter()
+    .filter_map(|(bus, prep, name)| prep.map(|p| (bus, p, name)))
+    .collect();
+    if enabled.is_empty() {
+        return Ok(None);
+    }
+    let Some(host_bin) = dbus.host_bin.as_ref() else {
+        eprintln!(
+            "kenneld: warning: kennel grants [dbus] mediation but no host-dbus binary is \
+             configured (deployment `host_dbus`); the bus(es) will be unserved."
+        );
+        return Ok(None);
+    };
+    std::fs::create_dir_all(&dbus.cmd_dir)?;
+    let mut senders = std::collections::HashMap::new();
+    let mut readers: Vec<UnixStream> = Vec::new();
+    for (bus, prep, name) in enabled {
+        let sock = dbus.cmd_dir.join(format!("dbus-{name}-{ctx}.sock"));
+        let _ = std::fs::remove_file(&sock);
+        tracer.step(&format!(
+            "bring-up: spawning D-Bus delegate {} ({name} bus)",
+            host_bin.display()
+        ));
+        state
+            .dbus
+            .push(spawn_host_dbus(host_bin, &sock, name, &prep.bus_address, &prep.rules)?);
+        // The delegate binds then blocks on accept; connect once (the owner-only pipe). One clone
+        // feeds the bounded writer (outbound frames), the original drives the inbound reader.
+        let stream = connect_host_dbus(&sock)?;
+        senders.insert(bus, crate::dbus::spawn_pipe_writer(stream.try_clone()?));
+        readers.push(stream);
+    }
+    let relay = std::sync::Arc::new(crate::dbus::DbusRelay::new(
+        senders,
+        kennel_lib_binder::ratelimit::RateLimiter::with_defaults(),
+    ));
+    for stream in readers {
+        let relay = std::sync::Arc::clone(&relay);
+        std::thread::spawn(move || crate::dbus::run_inbound_reader(&relay, stream));
+    }
+    Ok(Some(relay))
+}
+
+/// Spawn one `host-dbus` delegate: `host-dbus <command-socket> <session|system> <bus-address>
+/// [--talk P]… [--call P]… [--broadcast P]… [--own P]… [--deny-talk P]…`. No inherited stdio.
+fn spawn_host_dbus(
+    binary: &Path,
+    socket: &Path,
+    bus: &str,
+    bus_address: &str,
+    rules: &kennel_lib_policy::DbusBusRuntime,
+) -> io::Result<Child> {
+    use std::process::Stdio;
+    let mut cmd = Command::new(binary);
+    cmd.arg(socket).arg(bus).arg(bus_address);
+    for pattern in &rules.talk {
+        cmd.arg("--talk").arg(pattern);
+    }
+    for pattern in &rules.call {
+        cmd.arg("--call").arg(pattern);
+    }
+    for pattern in &rules.broadcast {
+        cmd.arg("--broadcast").arg(pattern);
+    }
+    for pattern in &rules.own {
+        cmd.arg("--own").arg(pattern);
+    }
+    for pattern in &rules.deny_talk {
+        cmd.arg("--deny-talk").arg(pattern);
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).spawn()
+}
+
+/// Connect kenneld's end of the owner-only pipe to a just-spawned `host-dbus`, absorbing the
+/// bind/accept spawn race with a brief retry. The delegate `chmod`s the socket `0600`, so only the
+/// operator (kenneld) can connect.
+fn connect_host_dbus(socket: &Path) -> io::Result<UnixStream> {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(5);
+    loop {
+        match UnixStream::connect(socket) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                if start.elapsed() >= timeout {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+}
+
 /// Best-effort reverse of bring-up: kill the proxy, remove the addresses, then the
 /// cgroup (which detaches the egress BPF). Each step is independent so a failure
 /// does not skip the rest.
@@ -1448,10 +1704,14 @@ fn teardown<P: Privileged>(
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
     inetd: Option<Child>,
+    dbus: Vec<Child>,
     view_root: Option<&Path>,
 ) {
     reap_proxy(proxy);
     reap_proxy(inetd); // same kill+reap; the inbound delegate's reader threads end with it
+    for child in dbus {
+        reap_proxy(Some(child)); // host-dbus delegates; kenneld's pipe reader threads end with them
+    }
     if let Some(addr) = v6 {
         let _ = privileged.del_address(ctx, LOOPBACK, addr.into(), V6_PREFIX);
     }

@@ -131,6 +131,8 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
         audit_base,
         bastion,
         afunix_bin: Some(deployment.afunix()),
+        facade_dbus_bin: Some(deployment.facade_dbus()),
+        host_dbus_bin: Some(deployment.host_dbus()),
         init_bin: Some(deployment.kennel_bin_init()),
         tracer: kennel_lib_config::Tracer::new("kenneld", deployment.log_level()),
     })
