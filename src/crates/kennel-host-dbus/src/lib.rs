@@ -29,7 +29,8 @@ use mini_sansio_dbus::{
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::net::Shutdown;
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 
 use kennel_lib_dbus::delegate::{BusReply, BusSignal, Delegate, Outbound};
 use kennel_lib_dbus::filter::Filter;
@@ -38,6 +39,10 @@ use kennel_lib_dbus::wire::{self, Bus, Frame, Record};
 
 /// The read buffer for the bus connection's decoder.
 const READBUF: usize = wire::MAX_BODY + 64 * 1024;
+
+/// The depth of an outbound channel (to a mediation's bridge, and to kenneld). A stalled peer
+/// fills it and the sender sheds or back-pressures rather than blocking the dispatcher.
+const OUTBOUND_DEPTH: usize = 64;
 
 /// Serve the owner-only command socket.
 ///
@@ -56,53 +61,98 @@ pub fn serve(listener: &UnixListener, bus: Bus, bus_address: &str, filter: &Filt
     }
 }
 
+/// One demultiplexed connection: the bounded inbound channel to its mediation, and a handle to
+/// shut the bridge down (both directions) on teardown.
+struct Conn {
+    to_bridge: SyncSender<Vec<u8>>,
+    shutdown: UnixStream,
+}
+
 /// Demultiplex kenneld's record stream into per-connection mediations.
+///
+/// The dispatcher reads kenneld's single pipe; it must never block on a per-connection write (one
+/// stalled mediation would head-of-line-block every connection), and it must not serialise all
+/// outbound under a shared lock held across I/O. So every cross-thread write rides a *bounded*
+/// channel drained by a dedicated writer thread ([`spawn_writer`]): the dispatcher and the conn
+/// pumps `try_send`/`send` and never hold a lock across blocking I/O — the same isolation the
+/// kenneld relay uses.
 fn dispatch(kenneld: UnixStream, bus: Bus, bus_address: &str, filter: &Filter) -> io::Result<()> {
-    let writer = Arc::new(Mutex::new(kenneld.try_clone()?));
-    // conn-id → the dispatcher's end of the bridge to that connection's mediation.
-    let mut conns: HashMap<u32, UnixStream> = HashMap::new();
+    // One writer thread owns the kenneld write half; conn pumps send to it. No shared lock is ever
+    // held across the blocking write.
+    let to_kenneld = spawn_writer(kenneld.try_clone()?);
+    let mut conns: HashMap<u32, Conn> = HashMap::new();
     let mut reader = kenneld;
     while let Some(record) = read_record(&mut reader)? {
         match record {
             Record::Open { conn_id, bus: _ } => {
+                if conns.contains_key(&conn_id) {
+                    continue; // duplicate open id — ignore
+                }
                 let (ours, theirs) = UnixStream::pair()?;
-                let bridge = ours.try_clone()?;
-                conns.insert(conn_id, ours);
-                // The per-connection mediation (the existing single-conn poll loop).
+                // Inbound to the mediation rides a bounded channel + writer thread, so the
+                // dispatcher's `try_send` below is non-blocking.
+                let to_bridge = spawn_writer(ours.try_clone()?);
+                let shutdown = ours.try_clone()?;
+                // Outbound: read this conn's mediation output and forward to kenneld.
+                let out = to_kenneld.clone();
+                std::thread::spawn(move || conn_to_kenneld(ours, conn_id, &out));
+                // The per-connection mediation (the robust single-conn poll loop, unchanged).
                 let addr = bus_address.to_owned();
                 let filt = filter.clone();
                 std::thread::spawn(move || {
                     let _ = mediate(theirs, bus, &addr, filt);
                 });
-                // Pump this connection's outgoing frames back to kenneld as Records.
-                let writer = Arc::clone(&writer);
-                std::thread::spawn(move || conn_to_kenneld(bridge, conn_id, &writer));
+                conns.insert(conn_id, Conn { to_bridge, shutdown });
             }
             Record::Frame { conn_id, frame } => {
-                if let Some(end) = conns.get_mut(&conn_id) {
-                    // `frame` is the encoded TLV (length-prefixed); the mediation reads it as such.
-                    let _ = end.write_all(&frame);
+                if let Some(conn) = conns.get(&conn_id) {
+                    // Non-blocking. A backed-up mediation sheds (Full) rather than stalling every
+                    // connection; a dead mediation (Disconnected) is reaped here — no zombie entry.
+                    match conn.to_bridge.try_send(frame) {
+                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => teardown(&mut conns, conn_id),
+                    }
                 }
             }
-            Record::Close { conn_id } => {
-                // Dropping our end EOFs the mediation's conduit, which tears the connection down.
-                conns.remove(&conn_id);
-            }
+            Record::Close { conn_id } => teardown(&mut conns, conn_id),
         }
     }
     Ok(())
 }
 
-/// Read outgoing frames from one connection's mediation and wrap each as a [`Record::Frame`]
-/// back to kenneld (under the shared writer lock).
-fn conn_to_kenneld(mut bridge: UnixStream, conn_id: u32, writer: &Mutex<UnixStream>) {
+/// Remove a connection and shut its bridge down both ways, so the mediation and both pump threads
+/// unblock and exit (rather than leaking until process end).
+fn teardown(conns: &mut HashMap<u32, Conn>, conn_id: u32) {
+    if let Some(conn) = conns.remove(&conn_id) {
+        let _ = conn.shutdown.shutdown(Shutdown::Both);
+    }
+}
+
+/// Read outgoing frames from one connection's mediation and forward each to kenneld as a
+/// [`Record::Frame`]. The blocking is the channel send on this dedicated per-conn thread — never a
+/// shared lock — so a slow kenneld back-pressures only this connection, not all of them.
+fn conn_to_kenneld(mut bridge: UnixStream, conn_id: u32, to_kenneld: &SyncSender<Vec<u8>>) {
     while let Some(frame) = read_frame_bytes(&mut bridge) {
         let record = Record::Frame { conn_id, frame };
-        let Ok(mut w) = writer.lock() else { return };
-        if w.write_all(&record.encode()).is_err() {
-            return;
+        if to_kenneld.send(record.encode()).is_err() {
+            return; // kenneld writer gone — the pipe is dead.
         }
     }
+}
+
+/// Spawn a writer thread draining a bounded channel to `stream`, returning the channel's sender.
+/// The blocking `write_all` lives only on this dedicated thread — never on the dispatcher, a conn
+/// reader, or under a lock. A dead peer ends the thread and disconnects the sender.
+fn spawn_writer(mut stream: UnixStream) -> SyncSender<Vec<u8>> {
+    let (tx, rx) = sync_channel::<Vec<u8>>(OUTBOUND_DEPTH);
+    std::thread::spawn(move || {
+        while let Ok(bytes) = rx.recv() {
+            if stream.write_all(&bytes).is_err() {
+                break;
+            }
+        }
+    });
+    tx
 }
 
 /// Read one length-prefixed [`Record`] from kenneld's stream. `Ok(None)` on a clean EOF.
