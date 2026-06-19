@@ -67,6 +67,12 @@ criteria = "safe-to-deploy"
 version = "0.9.1"
 notes = "§5.5 (DEPENDENCIES.md, 2026-06-05): byte-identical to github.com/Gilnaa/memoffset at tag 0.9.1 via tools/audit-source.sh. Pulled by nix's `socket` feature for the CMSG offset macros (scm.rs). Provides the `offset_of!`/`span_of!` macros — pointer-offset arithmetic over `MaybeUninit`; the unsafe is confined to that struct-field-offset computation. No network/fs/process/env. Its build.rs uses autocfg (above) to probe for raw-ref/const-fn support; no proc-macro."
 
+[[audits.mini-sansio-dbus]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+version = "5.0.1"
+notes = "§5.5 (DEPENDENCIES.md, 2026-06-19): byte-identical to github.com/iliabylich/mini-sansio-dbus @ b1adcf603bd6705313decd65dece865894d74e3b (tag v5.0.1), 77 source files + Cargo.toml.orig, via tools/audit-source.sh, EXCEPT one applied hardening hunk (src/vendor/patches/mini-sansio-dbus-5.0.1-header-field-panic.patch): the header-field decoder's `unreachable!()` for an out-of-range field code — reachable from the wire — becomes the `Err(MalformedHeaderField)` the caller already expects, because a panic on adversarial input is unmaskable under release `panic = \"abort\"` (§8.5). Found by the kennel-fuzz harness; reported upstream; dropped on the fixed release. The recorded crate-sha256 is the patched artifact (file list identical to upstream; only incoming/header_fields.rs differs; `patch -p1` against pristine v5.0.1 reproduces it). Direct dep of kennel-facade (facade-dbus, §7.7), the D-Bus wire marshalling — outside the daemon TCB. `#![forbid(unsafe_code)]` (no unsafe in the crate). No build.rs, no proc-macro, no FFI/asm; sans-IO, so no std::process/net/fs/env (the caller owns all I/O — red-flag scan clean). 0 runtime deps (the index's anyhow/rustix are dev-only, for its examples/tests, never built when consumed). Only the marshalling core (encoder/incoming/types, ~1.4k SLOC, self-contained — incoming/ pulls only the crate's error type) is linked; the app-specific messages/ tree (network-manager, StatusNotifier, ~1.7k SLOC) is never linked. The incoming decoder parses adversarial workload wire and carries a fuzz target (fuzz/). Source review performed by the assistant and accepted by the maintainer on review of those findings."
+
 [[audits.nix]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"

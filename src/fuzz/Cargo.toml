@@ -8,11 +8,11 @@
 # the offline `cargo build --frozen --locked` gate for the shipped crates is
 # unaffected by anything here.
 #
-# STATUS: staged. Building/running this needs the `arbitrary` crate vendored per
-# §5.5 (it is the only new dependency, and with `default-features = false` it has
-# ZERO transitive deps — one crate, no proc-macro, no build script). See README.md
-# for the vendoring step; until then the harness does not compile, by design, and
-# nothing in the shipped build references it.
+# Runs via `cargo test -p kennel-fuzz` from this directory. Its one fuzzing-only
+# dependency, `arbitrary` (`default-features = false` -> zero transitive deps, no
+# proc-macro, no build script), is vendored per §5.5 like every other crate; the
+# parser crates come from the workspace by path. Nothing in the shipped build
+# references this harness.
 [workspace]
 
 [package]
@@ -40,3 +40,7 @@ kennel-lib-spawn = { path = "../crates/kennel-lib-spawn" }
 # the in-kennel shim, so its protocol classifier and HTTP request-head parser read
 # fully workload-controlled bytes (07-5 §7.5.2). Library target only — the bins do not link.
 kennel-facade = { path = "../crates/kennel-facade" }
+# The D-Bus facade's incoming-message decoder (07-7 §7.7): the workload's bus client
+# speaks raw D-Bus wire to facade-dbus, so the header/body decode reads fully
+# workload-controlled bytes. Driven through the public sans-IO read loop.
+mini-sansio-dbus = "=5.0.1"
