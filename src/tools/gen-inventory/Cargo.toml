@@ -1,0 +1,28 @@
+[package]
+name = "gen-inventory"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel crate-inventory generator (not shipped). Computes the per-crate SLOC / unsafe / TCB-membership / consumer / external-dep table from the workspace itself and emits docs/architecture/crate-inventory.json (the source of truth) plus the rendered table into the marked block of 03-crate-decomposition.md, so the inventory cannot drift from the actual crate graph. Std-only: no third-party dependencies."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Std-only by design (CODING-STANDARDS §5.1): the crate graph is read by parsing each
+# crate's `[dependencies]` (the declarations are one-per-line `name = …`), SLOC by a
+# `#[cfg(test)]`-stripping line count, and a tiny hand-rolled JSON writer emits the
+# artifact — so no cargo_metadata / serde_json is vendored onto a tool crate.
+[dependencies]
+
+[lints]
+workspace = true
+
+# A library half so the SLOC counter and dep parser are unit-testable.
+[lib]
+name = "gen_inventory"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gen-inventory"
+path = "src/main.rs"

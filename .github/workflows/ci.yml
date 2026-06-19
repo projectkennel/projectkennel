@@ -257,3 +257,24 @@ jobs:
         run: git diff --exit-code schema/
       - name: Schema is valid JSON
         run: python3 -c "import json,sys; json.load(open('schema/policy.toml.schema'))"
+
+  inventory:
+    name: inventory (crate-inventory regen check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show && cargo --version
+      # Regenerate the committed crate inventory from the workspace; a non-empty diff means
+      # crate-inventory.json / the generated block in 03-crate-decomposition.md is stale relative to
+      # the actual crate graph (a new crate, a vendored dep, a moved edge, an SLOC change). The
+      # surrounding prose is hand-written; only the marked block + the JSON are generated.
+      - name: Regenerate the crate inventory
+        run: >-
+          cargo run --offline --locked -p gen-inventory --
+          --json docs/architecture/crate-inventory.json
+          --doc docs/architecture/03-crate-decomposition.md
+      - name: No drift (the inventory matches the workspace)
+        run: git diff --exit-code docs/architecture/crate-inventory.json docs/architecture/03-crate-decomposition.md
+      - name: Inventory is valid JSON
+        run: python3 -c "import json,sys; json.load(open('docs/architecture/crate-inventory.json'))"

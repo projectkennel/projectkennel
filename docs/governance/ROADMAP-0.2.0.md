@@ -238,8 +238,17 @@ layer on top:
   detach handling.
 
 - **W12 · Honest TCB accounting in the inventory.** *(→ `03-crate-decomposition.md`)* **S.**
-  **✅ Built + merged** (with #39) — the inventory carries the vendored logic-vs-bindings accounting,
-  regenerated after the W11 cut.
+  **✅ Structure built (with #39); now GENERATED + CI-checked.** The logic-vs-bindings /
+  adversarial-vs-trusted accounting *shape* landed first, but the **numbers drift on every
+  crate-graph change** — building W8 added `kennel-lib-dbus` + `kennel-host-dbus` and vendored
+  `mini-sansio-dbus`, and the doc was already stale (and stale from several other merges: 21→23
+  crates, 22.5k→27.3k SLOC). Hand-maintaining it is the disease; the cure is a **generator**: the
+  first-party table / dependency edges / totals (SLOC, `unsafe`, TCB membership, consumers, external
+  deps) are now emitted by `gen-inventory` (std-only, like `gen-man`/`gen-schema`) into
+  `crate-inventory.json` (source of truth) + a marked block in `03-crate-decomposition.md`, with an
+  **`inventory` CI regen-check** (`git diff --exit-code`) that fails the build on drift. The vendored
+  logic/bindings classification stays hand-curated prose (it's a judgment call). So W12 stops being
+  recurring manual work — drift now fails CI instead.
   The crate inventory counts *first-party* SLOC only, which understates the real TCB ~13× — the trusted
   base is the vendored deps too (~215k vendored vs ~16k first-party). Upgrade the inventory's
   "Crate inventory and TCB" section to carry the **vendored dimension, split logic vs bindings**:
