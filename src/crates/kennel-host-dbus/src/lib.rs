@@ -4,7 +4,7 @@
 //! conduit; this is what's left — the bus-side I/O around the I/O-free
 //! [`kennel_lib_dbus::delegate::Delegate`] core. It holds the operator's real bus connection,
 //! reads typed [`Frame`]s off the conduit, runs each through the compiled
-//! [`Filter`](kennel_lib_dbus::filter::Filter) (the real enforcement boundary — the in-kennel
+//! [`Filter`] (the real enforcement boundary — the in-kennel
 //! facade is untrusted), reconstructs and sends the approved calls, and demultiplexes the bus's
 //! replies and allowlisted signals back over the conduit.
 //!
