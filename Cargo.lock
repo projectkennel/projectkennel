@@ -104,7 +104,6 @@ name = "kennel-host-dbus"
 version = "0.1.0"
 dependencies = [
  "kennel-lib-dbus",
- "kennel-lib-scm",
  "mini-sansio-dbus",
  "nix",
 ]

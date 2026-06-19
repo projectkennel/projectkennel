@@ -17,10 +17,8 @@ path = "src/bin/host-dbus.rs"
 
 [dependencies]
 # The D-Bus mediation engine: the delegate core (filter + serial demux), message
-# reconstruction, and the typed conduit frame. This bin is the bus-side I/O around it.
+# reconstruction, the typed conduit frame, and the kenneld↔host-dbus Record envelope.
 kennel-lib-dbus = { path = "../kennel-lib-dbus" }
-# SCM_RIGHTS fd-passing: kenneld sends each conduit fd over the owner-only command socket.
-kennel-lib-scm = { path = "../kennel-lib-scm" }
 # The bus-side D-Bus client: the sans-IO connector (SASL handshake) and connection.
 mini-sansio-dbus = "=5.0.1"
 # poll(2) over the conduit + bus fds (single-threaded event loop, no per-message threads).

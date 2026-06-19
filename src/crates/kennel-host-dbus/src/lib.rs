@@ -28,39 +28,122 @@ use mini_sansio_dbus::{
 };
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use kennel_lib_dbus::delegate::{BusReply, BusSignal, Delegate, Outbound};
 use kennel_lib_dbus::filter::Filter;
 use kennel_lib_dbus::message::body_slice;
-use kennel_lib_dbus::wire::{self, Bus, Frame};
+use kennel_lib_dbus::wire::{self, Bus, Frame, Record};
 
 /// The read buffer for the bus connection's decoder.
 const READBUF: usize = wire::MAX_BODY + 64 * 1024;
 
-/// Serve the owner-only command socket: for each conduit fd `kenneld` sends over it (one per
-/// workload bus connection), spawn a mediation against `bus`/`bus_address` under `filter`.
+/// Serve the owner-only command socket.
 ///
-/// Mirrors `host-netproxy`'s `serve_conduit`: `kenneld` minted the conduit socketpair and passes
-/// the delegate end here as `SCM_RIGHTS`; the bus address and the compiled table are this
-/// delegate's per-kennel configuration (passed at spawn), so the command carries only the fd.
+/// `kenneld` connects and streams [`Record`]s over it for **all** of this kennel's bus
+/// connections, multiplexed by connection id (§7.7.2a — kenneld is the membrane; host-dbus is
+/// reachable only from it, never from the kennel).
+///
+/// host-dbus is one process per kennel: it demultiplexes the records and runs one mediation per
+/// connection. Each mediation is the existing single-connection poll loop ([`mediate`]), bridged
+/// to kenneld by an internal socketpair, so the per-connection logic is unchanged.
 pub fn serve(listener: &UnixListener, bus: Bus, bus_address: &str, filter: &Filter) {
     for stream in listener.incoming().flatten() {
-        let bus_address = bus_address.to_owned();
-        let filter = filter.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            let Ok((_n, mut fds)) = kennel_lib_scm::recv_with_fds(stream.as_fd(), &mut buf) else {
-                return;
-            };
-            // Exactly one fd (the conduit end) is expected.
-            let Some(conduit_fd) = fds.pop() else { return };
-            if !fds.is_empty() {
-                return;
-            }
-            if let Err(e) = mediate(UnixStream::from(conduit_fd), bus, &bus_address, filter) {
-                eprintln!("host-dbus: {e}");
-            }
-        });
+        if let Err(e) = dispatch(stream, bus, bus_address, filter) {
+            eprintln!("host-dbus: {e}");
+        }
     }
+}
+
+/// Demultiplex kenneld's record stream into per-connection mediations.
+fn dispatch(kenneld: UnixStream, bus: Bus, bus_address: &str, filter: &Filter) -> io::Result<()> {
+    let writer = Arc::new(Mutex::new(kenneld.try_clone()?));
+    // conn-id → the dispatcher's end of the bridge to that connection's mediation.
+    let mut conns: HashMap<u32, UnixStream> = HashMap::new();
+    let mut reader = kenneld;
+    while let Some(record) = read_record(&mut reader)? {
+        match record {
+            Record::Open { conn_id, bus: _ } => {
+                let (ours, theirs) = UnixStream::pair()?;
+                let bridge = ours.try_clone()?;
+                conns.insert(conn_id, ours);
+                // The per-connection mediation (the existing single-conn poll loop).
+                let addr = bus_address.to_owned();
+                let filt = filter.clone();
+                std::thread::spawn(move || {
+                    let _ = mediate(theirs, bus, &addr, filt);
+                });
+                // Pump this connection's outgoing frames back to kenneld as Records.
+                let writer = Arc::clone(&writer);
+                std::thread::spawn(move || conn_to_kenneld(bridge, conn_id, &writer));
+            }
+            Record::Frame { conn_id, frame } => {
+                if let Some(end) = conns.get_mut(&conn_id) {
+                    // `frame` is the encoded TLV (length-prefixed); the mediation reads it as such.
+                    let _ = end.write_all(&frame);
+                }
+            }
+            Record::Close { conn_id } => {
+                // Dropping our end EOFs the mediation's conduit, which tears the connection down.
+                conns.remove(&conn_id);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read outgoing frames from one connection's mediation and wrap each as a [`Record::Frame`]
+/// back to kenneld (under the shared writer lock).
+fn conn_to_kenneld(mut bridge: UnixStream, conn_id: u32, writer: &Mutex<UnixStream>) {
+    while let Some(frame) = read_frame_bytes(&mut bridge) {
+        let record = Record::Frame { conn_id, frame };
+        let Ok(mut w) = writer.lock() else { return };
+        if w.write_all(&record.encode()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Read one length-prefixed [`Record`] from kenneld's stream. `Ok(None)` on a clean EOF.
+fn read_record(stream: &mut UnixStream) -> io::Result<Option<Record>> {
+    let Some(payload) = read_len_prefixed(stream)? else {
+        return Ok(None);
+    };
+    Record::decode(&payload)
+        .map(Some)
+        .map_err(|_| broken())
+}
+
+/// Read one length-prefixed frame from a bridge and return the **full** `[len][payload]` bytes
+/// (the encoded TLV, ready to relay verbatim in a [`Record::Frame`]). `None` on EOF.
+fn read_frame_bytes(stream: &mut UnixStream) -> Option<Vec<u8>> {
+    let payload = read_len_prefixed(stream).ok().flatten()?;
+    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    let mut out = Vec::with_capacity(payload.len().saturating_add(4));
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&payload);
+    Some(out)
+}
+
+/// Read a `[u32 len][payload]` record off a stream, returning the payload. `Ok(None)` on a clean
+/// EOF at a record boundary; bounded by [`wire::MAX_FRAME`].
+fn read_len_prefixed(stream: &mut UnixStream) -> io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    if let Err(e) = stream.read_exact(&mut len_buf) {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            return Ok(None);
+        }
+        return Err(e);
+    }
+    let len = match wire::frame_len(&len_buf) {
+        Ok(Some(len)) => len,
+        Ok(None) => return Ok(None),
+        Err(_) => return Err(broken()),
+    };
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload)?;
+    Ok(Some(payload))
 }
 
 /// Mediate one workload bus connection against `bus` at `bus_address`, applying `filter`.
