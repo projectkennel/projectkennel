@@ -44,6 +44,10 @@ pub struct BusRules {
     pub talk: Vec<String>,
     /// Specific `destination=interface.member` calls (finer than `talk`).
     pub call: Vec<String>,
+    /// Signals the kennel may receive (the match-rule allowlist, §7.7.4).
+    pub broadcast: Vec<String>,
+    /// Names the kennel may own (be addressable as, §7.7.4). Almost always empty.
+    pub own: Vec<String>,
     /// Explicit denies layered over the allows (belt-and-braces, §7.7.6).
     pub deny_talk: Vec<String>,
 }

@@ -21,6 +21,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod delegate;
 pub mod filter;
 pub mod message;
 pub mod sasl;
