@@ -1,7 +1,14 @@
 # Project Kennel — 0.2.0 plan
 
-Status: **reviewed** — mix settled; W1 is the design-open critical path · Drafted: 2026-06-18 · Targets: 0.2.0
+Status: **building — 14 of 15 workstreams landed** (2026-06-19); only **W15** (the as-built prose pass) is open · Drafted: 2026-06-18 · Targets: 0.2.0
 Baseline: 0.1.0 (first versioned cut, 2026-06-18)
+
+> **Progress (2026-06-19).** W1+W2 (persistence), W8 (D-Bus), W9 (fragments), W10 (IDE schema),
+> W11 (terminal filter → CLI), W12 (TCB accounting), W13 (operator-prompt channel), and W14
+> (`essential_etc` cascade) are **built + merged**; each is marked inline below. The one remaining
+> workstream is **W15** (strip history/apology prose + purge never-built mechanisms). The
+> per-workstream prose is kept as the plan-of-record; the as-built truth lives in the design corpus
+> and `CHANGELOG.md`.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -97,16 +104,17 @@ layer on top:
   attack surface §4.6 set out not to add. So 0.2.0 (and beyond) **reacts-and-cleans** — inotify
   tripwire + teardown snapshot, both unprivileged — and never pre-blocks.
 
-- **W1 · Post-run inspection of persistent writes (T2.8).** *(→ design §11.1)* **L** *(critical
-  path — only design-open item, intrinsic completeness gap; bound its claims before its mechanism).*
+- **W1 · Post-run inspection of persistent writes (T2.8).** *(→ design §11.1)* **L.**
+  **✅ Built + merged** (#36 design · #37 build) — graduated to THREATS T2.8 / §7.4 (manifest v2 +
+  content store + catalogue + `review --revert` + `.d` mask).
   Pins are **explicit** (`kennel compile`/`review`, host-side) — enumerate the declared writable binds
   and pin every existing **trigger-class** path (git hooks, `core.hooksPath`, `Makefile`/`package.json`
   scripts, `.vscode`/`.idea` tasks) into the manifest + the `.d` store. **`kennel run` never pins; it
   verifies fail-closed** — an unpinned catalogue-matching file or a divergent pin is a *failed settled
   config* (refuse, direct to `review`), so a run starts from a verified-complete surface and teardown
   changes attribute cleanly to the workload. `kennel review` is the inspect-and-re-pin surface, one
-  with the commit-time review. **No TOFU.** Key bounds (design pass settled this — see
-  `persistence-control-design.md`):
+  with the commit-time review. **No TOFU.** Key bounds (the design pass settled these; the as-built
+  truth is now in THREATS T2.8 / design §7.4):
   - **Two-tier cost.** Always content-**hash** the trigger class (mtime-games-proof — never trust
     `stat` for the security path); reserve full snapshot/restore cost for when `revert` is actually
     selected.
@@ -121,7 +129,9 @@ layer on top:
     matters most.
 
 - **W2 · Boundary-escape symlinks — same pin/diff/restore pipeline as W1.**
-  *(→ [[vfs-bind-source-nofollow-owed]], reframed)* **M.** Not a standalone `openat2` runtime guard.
+  *(→ [[vfs-bind-source-nofollow-owed]], reframed)* **M.** **✅ Built + merged** (#36/#37) —
+  escaping-symlink trigger detection + pins shipped with the W1 store.
+  Not a standalone `openat2` runtime guard.
   A symlink inside a delegated writable subtree that points *outside* the delegation boundary is both
   a read-escape and a persistence vector — it's a trigger class, pinned and restored by the same
   content-addressed store:
@@ -136,7 +146,8 @@ layer on top:
     **every** writable bind (not just project root); the host trusts blobs by content address, never
     by the workload-visible listing.
 
-- **W13 · Operator-prompt channel + TTL `renew` prompt.** *(→ §9.7, pulled from 0.3)* **M.** Today
+- **W13 · Operator-prompt channel + TTL `renew` prompt.** *(→ §9.7, pulled from 0.3)* **M.**
+  **✅ Built + merged** — `PromptPort` + control-wire variants + the TTL `renew` prompt + CLI surfacing. Today
   kenneld is a daemon with no session channel, so the TTL `renew` action degrades to an audited
   `warn`. Build the **kenneld → attached-CLI prompt path** (over the detachable PTY broker's control
   channel) so kenneld can ask the operator a question and get an answer. It lands the real TTL `renew`
@@ -147,6 +158,11 @@ layer on top:
 ### Thrust 2 — A new mediated surface
 
 - **W8 · D-Bus mediation — facade / host split.** *(→ design §7.7, `07-1-binder.md`, §8.1)* **L.**
+  **✅ Built + merged** (#43 design · #44 schema · #45 vendored crate · #46 facade/membrane/delegate
+  + e2e). **As-built note:** the split evolved past "kenneld decides on the typed form / simple
+  bidirectional filter" (Decision 3 below) to the **membrane** model — kenneld relays opaque frames
+  and owner-checks the connection; the `host-dbus` delegate applies the allowlist. Proven by the
+  `dbus-session-allowed` + `dbus-deny-wins` policy-suite cases. See `docs/design/07-7-dbus.md`.
   The binder successor to the never-built `xdg-dbus-proxy` design, built to the egress convert/decide/
   act line — and the review's correction is load-bearing: **drop the pty-filter analogy, it builds the
   wrong thing.** The pty filter pattern-strips bytes without understanding a protocol; D-Bus filtering
@@ -171,13 +187,16 @@ layer on top:
 ### Thrust 3 — Authoring experience
 
 - **W9 · Composable fragment catalogue — with the framing that makes it usable.** *(→ design
-  §5.10, §8.1)* **M.** The `include` mechanism is built; the gap is not content alone but the
+  §5.10, §8.1)* **M.** **✅ Built + merged** (#42) — the signed fragment catalogue + leaf syntax.
+  The `include` mechanism is built; the gap is not content alone but the
   **framing** that makes fragments a shortcut people actually reach for — discoverability, how
   they compose without surprising the author, the convenience story in the docs and the CLI. Owed:
   that framing + the signed fragments (`lang-python`, `lang-node`, `toolchain-c`, `net-permissive`,
   `vcs-git`) + per-fragment tests.
 
-- **W10 · IDE policy intellisense (VSCode extension).** *(new)* **M.** A VSCode/editor extension
+- **W10 · IDE policy intellisense (VSCode extension).** *(new)* **M.** **✅ Built + merged** (#41) —
+  the policy JSON Schema is emitted from the `kennel-lib-compile` source structs and CI-checked.
+  A VSCode/editor extension
   giving policy-TOML authors completion, hover docs, and inline validation. **The real prerequisite is
   *generating* the schema, not consuming one** (review): the corpus cites `schema/policy.toml.schema`
   as canonical (00, 05, the worked template) but **the file isn't in the tree** (confirmed). W10 must
@@ -189,7 +208,9 @@ layer on top:
 ### Thrust 4 — TCB hygiene
 
 - **W11 · Move the terminal-escape filter out of the daemon TCB into the CLI.** *(→ §4.8,
-  [[tcb-only-shrinks]])* **S–M.** Today `kenneld`'s PTY broker (`pty_broker.rs`) runs
+  [[tcb-only-shrinks]])* **S–M.** **✅ Built + merged** (#39) — the broker is a raw-byte router and
+  the filter runs CLI-side; `vte` is out of `cargo tree -p kenneld`.
+  Today `kenneld`'s PTY broker (`pty_broker.rs`) runs
   `kennel-lib-term` (the vendored `vte` ANSI parser) at the single master-read point — so an
   *untrusted-input parser* (it parses workload-controlled PTY bytes) runs inside the privileged
   daemon, the §4.8 anti-pattern, and its only consumer is the `kennel` CLI. Move the filter
@@ -214,8 +235,10 @@ layer on top:
   workload-controlled bytes in the daemon" claim is airtight rather than apparently contradicted by
   detach handling.
 
-- **W12 · Honest TCB accounting in the inventory.** *(→ `03-crate-decomposition.md`)* **S.** The
-  crate inventory counts *first-party* SLOC only, which understates the real TCB ~13× — the trusted
+- **W12 · Honest TCB accounting in the inventory.** *(→ `03-crate-decomposition.md`)* **S.**
+  **✅ Built + merged** (with #39) — the inventory carries the vendored logic-vs-bindings accounting,
+  regenerated after the W11 cut.
+  The crate inventory counts *first-party* SLOC only, which understates the real TCB ~13× — the trusted
   base is the vendored deps too (~215k vendored vs ~16k first-party). Upgrade the inventory's
   "Crate inventory and TCB" section to carry the **vendored dimension, split logic vs bindings**:
   - **logic** (runs in our process — the real attack surface): `object` ~36k, `serde`+`serde_core`
@@ -238,7 +261,9 @@ layer on top:
   edge changes (W11 included).
 
 - **W14 · Move `essential_etc_subtrees()` to a vendor+system config cascade.** *(→ §2.6,
-  [[no-hardcoded-paths-config-cascade]], [[deploy-gotchas-etc-binds]])* **S–M.** `kenneld` binds a
+  [[no-hardcoded-paths-config-cascade]], [[deploy-gotchas-etc-binds]])* **S–M.**
+  **✅ Built + merged** (#38) — the list is an `etc-binds.catalog` vendor+system cascade.
+  `kenneld` binds a
   **hardcoded** list of host `/etc` subtrees read-only into every view (`etc.rs`
   `essential_etc_subtrees()`: `/etc/ssl/certs`, `/etc/ca-certificates`, `/etc/pki`, `/etc/ld.so.*`,
   `/etc/alternatives`) — the **same opacity footgun** the trust-trigger catalogue had (W1): the
@@ -253,7 +278,9 @@ layer on top:
   W1 catalogue loader shape (additive, `-` to prune) minus the user layer. Sequenced after W12/W13.
 
 - **W15 · As-built prose pass — strip history/apology and never-built mechanisms.** *(→
-  [[docs-as-built-no-prerelease-history]], [[comments-no-history-no-apology]])* **S–M.** Two coupled
+  [[docs-as-built-no-prerelease-history]], [[comments-no-history-no-apology]])* **S–M.**
+  **⏳ OPEN — the one remaining 0.2.0 workstream.** (The grep gate still finds `xdg-dbus-proxy` /
+  `IGpgAgent` / `per-kennel ssh-agent` residue across the corpus.) Two coupled
   cleanups across `docs/` and code comments: **(1)** the "this is *not* X" / "replaced by" / "the old
   X" / "no longer" apology-history prose — state the design in present-tense as-built, never narrate
   what was removed or what we don't do; and **(2)** purge the mechanisms that were *designed-on-paper
@@ -337,7 +364,11 @@ stable-surface change (CLI / policy schema / IPC / BPF ABI) per CODING-STANDARDS
      (prompt) / **`warn`** (audited report). Snapshot-authoritative.
    Defaults TBD in the design pass.
 3. **W8 host delegate runs in the operator context** alongside `host-netproxy`/`host-inetd`,
-   subscribing to the host bus and applying the simple bidirectional filter. *(confirmed)*
+   applying the compiled allow/deny table to each typed call. *(confirmed)* **As-built supersedes the
+   "simple bidirectional filter" framing:** kenneld is the **membrane** (it relays opaque frames per
+   message and owner-checks the connection — it does *not* decide on the typed form); the `host-dbus`
+   delegate is the sole filter; per-connection ownership replaced any daemon-wide facade identity.
+   See `docs/design/07-7-dbus.md`.
 
 ## Open decisions for the maintainer
 

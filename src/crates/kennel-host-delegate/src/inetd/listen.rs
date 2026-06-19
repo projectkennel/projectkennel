@@ -14,10 +14,41 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// The address-family tag bytes in the wire format (mirrors `host_netproxy::conduit`).
 const TAG_V4: u8 = 4;
 const TAG_V6: u8 = 6;
+
+/// The most concurrent inbound conduits one mirrored listener will splice at once.
+///
+/// Unlike egress (`host-netproxy`), where the workload initiates and the kennel cgroup bounds the
+/// connection count, the inbound mirror is `accept()`ed here in the **operator's context** — outside
+/// the cgroup — on behalf of whoever connects to the mirrored host-loopback port. Without a cap, a
+/// local flood of that port would mint unbounded host threads + fds here and pile unbounded conduit
+/// ends in `kenneld`'s pending queue (which is itself unbounded — this cap is what bounds it: we
+/// never push past the cap). Set well above any realistic concurrency for a mirrored dev service;
+/// once reached, further accepts are **shed** (dropped before any socketpair/thread/kenneld wake).
+const MAX_ACTIVE_CONDUITS: usize = 1024;
+
+/// Tracks one listener's live conduit count: increments on construction, decrements when the
+/// splice thread (and its connection) ends — so the [`MAX_ACTIVE_CONDUITS`] gate sees an accurate
+/// count even if the splice panics.
+struct ActiveGuard(Arc<AtomicUsize>);
+
+impl ActiveGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter)
+    }
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Encode a bind registration: `[tag: u8 | addr | port: u16 big-endian]`.
 ///
@@ -114,8 +145,16 @@ fn handle_registration(stream: &UnixStream) {
             return;
         }
     };
+    let active = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
         let Ok(accepted) = conn else { continue };
+        // Shed before minting anything once at the host-resource cap: drop the accepted connection
+        // (the client sees it close) rather than spawn a thread + fds + wake kenneld. The accept
+        // loop is single-threaded, so this load-then-`ActiveGuard::new` increment is not racy.
+        if active.load(Ordering::Acquire) >= MAX_ACTIVE_CONDUITS {
+            drop(accepted);
+            continue;
+        }
         // Mint the conduit socketpair: the host end stays here (spliced to the accepted
         // connection), the kennel end goes to kenneld → facade-client. kenneld routes the kennel
         // end as one opaque fd and never touches a payload byte (mirrors host-netproxy's split).
@@ -133,7 +172,11 @@ fn handle_registration(stream: &UnixStream) {
             return;
         }
         drop(kennel_end); // kenneld holds its received copy via SCM_RIGHTS
-        std::thread::spawn(move || splice(accepted, host_end));
+        let guard = ActiveGuard::new(Arc::clone(&active));
+        std::thread::spawn(move || {
+            let _guard = guard; // decrements the live count when the splice ends
+            splice(accepted, host_end);
+        });
     }
 }
 

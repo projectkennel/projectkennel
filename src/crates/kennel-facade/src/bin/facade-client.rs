@@ -44,9 +44,12 @@ use kennel_lib_binder::service::{inet, status, transport, verb};
 
 /// The binder buffer mapping size for the facade's client (matches `facade-socks5`).
 const MAP_SIZE: usize = 128 * 1024;
-/// Backoff between `BIND_INET` re-arms when no inbound connection is pending (`status::AGAIN`).
-/// Short enough to keep latency low, long enough that an idle port is not a busy-loop.
-const REARM_BACKOFF: Duration = Duration::from_millis(50);
+/// The shortest re-arm gap after an active hit: low enough to keep delivery latency small.
+const REARM_BACKOFF_MIN: Duration = Duration::from_millis(50);
+/// The longest re-arm gap an idle port backs off to. An idle mirror should not transact 20×/s
+/// forever — kenneld replies `AGAIN` and wakes a looper each time — so back off geometrically toward
+/// this ceiling while idle, and snap back to [`REARM_BACKOFF_MIN`] the moment a connection arrives.
+const REARM_BACKOFF_MAX: Duration = Duration::from_secs(1);
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -79,29 +82,58 @@ fn main() -> ExitCode {
 }
 
 /// Service one mirrored port forever: pull each inbound conduit and deliver it to the workload.
+///
+/// The binder connection is opened **once** and reused for every re-arm — an idle port must not
+/// churn a fresh binderfs open + 128 KiB `mmap` 20×/s. The re-arm gap backs off geometrically while
+/// idle (toward [`REARM_BACKOFF_MAX`]) and snaps back to [`REARM_BACKOFF_MIN`] on a hit, so an idle
+/// mirror settles to ~1 wake/s instead of 20 while keeping delivery latency low under load.
 fn service_port(device: &str, kennel_ip: IpAddr, port: u16) {
+    let mut backoff = REARM_BACKOFF_MIN;
     loop {
-        match pull_inbound(device, port) {
-            Ok(Some(conduit)) => {
-                // Deliver this connection to the workload on its own thread so the pull loop
-                // re-arms immediately for the next inbound connection.
-                thread::spawn(move || deliver(conduit, kennel_ip, port));
-            }
-            Ok(None) => thread::sleep(REARM_BACKOFF),
-            // A transient binder/transport error: back off and re-arm.
+        // (Re)establish the binder connection, reused across the inner pull loop below. A transport
+        // error breaks back out to here to reopen it.
+        let conn = match open_connection(device) {
+            Ok(conn) => conn,
             Err(e) => {
-                eprintln!("facade-client: BIND_INET :{port} error: {e}");
-                thread::sleep(REARM_BACKOFF);
+                eprintln!("facade-client: binder open :{port} error: {e}");
+                thread::sleep(backoff);
+                backoff = backoff.saturating_mul(2).min(REARM_BACKOFF_MAX);
+                continue;
+            }
+        };
+        loop {
+            match pull_inbound(&conn, port) {
+                Ok(Some(conduit)) => {
+                    // Active: deliver on its own thread so the pull loop re-arms immediately, and
+                    // reset the backoff so the next pull is prompt.
+                    backoff = REARM_BACKOFF_MIN;
+                    thread::spawn(move || deliver(conduit, kennel_ip, port));
+                }
+                Ok(None) => {
+                    // Idle (`AGAIN`): wait, then ease off toward the ceiling.
+                    thread::sleep(backoff);
+                    backoff = backoff.saturating_mul(2).min(REARM_BACKOFF_MAX);
+                }
+                Err(e) => {
+                    eprintln!("facade-client: BIND_INET :{port} error: {e}");
+                    thread::sleep(backoff);
+                    backoff = backoff.saturating_mul(2).min(REARM_BACKOFF_MAX);
+                    break; // reopen the binder connection
+                }
             }
         }
     }
 }
 
-/// Transact one `BIND_INET` to node 0. `Ok(Some(fd))` = a host-side connection's conduit;
-/// `Ok(None)` = `status::AGAIN` (re-arm); `Err` = a binder/transport error (retry).
-fn pull_inbound(device: &str, port: u16) -> io::Result<Option<UnixStream>> {
+/// Open one binder connection to the kennel's node 0.
+fn open_connection(device: &str) -> io::Result<Connection> {
     let fd = OpenOptions::new().read(true).write(true).open(device)?;
-    let conn = Connection::open(fd.into(), MAP_SIZE)?;
+    Connection::open(fd.into(), MAP_SIZE)
+}
+
+/// Transact one `BIND_INET` over the reused `conn`. `Ok(Some(fd))` = a host-side connection's
+/// conduit; `Ok(None)` = `status::AGAIN` (re-arm); `Err` = a binder/transport error (reopen).
+fn pull_inbound(conn: &Connection, port: u16) -> io::Result<Option<UnixStream>> {
     let request = inet::encode_bind_request(transport::TCP, port);
     let (data, fd) = conn.transact_with_fd(CONTEXT_MANAGER_HANDLE, verb::BIND_INET, &request)?;
     match fd {

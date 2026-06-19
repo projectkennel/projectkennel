@@ -47,6 +47,11 @@ use kennel_lib_binder::service::{inet, transport, verb};
 const MAP_SIZE: usize = 128 * 1024;
 /// The largest host name the shim forwards (the facade enforces the same bound).
 const MAX_HOST: usize = 255;
+/// The largest HTTP-proxy request head (`CONNECT … \r\n\r\n`) the shim will buffer. A well-formed
+/// CONNECT head is well under this; the cap fails closed on a client that streams bytes without ever
+/// terminating the head, so it cannot grow the buffer until the kennel's `memory.max` OOM-kills the
+/// proxy (a self-DoS). 16 KiB is generous for a method line + a few headers.
+const MAX_REQUEST_HEAD: usize = 16 * 1024;
 
 // SOCKS5 reply codes (RFC 1928 §6).
 const REP_SUCCEEDED: u8 = 0x00;
@@ -167,6 +172,11 @@ fn read_http_request(client: &mut TcpStream) -> io::Result<http::HttpRequest> {
                     ));
                 }
                 buf.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
+                // Fail closed before an unterminated head can grow without bound (self-DoS:
+                // a client streaming bytes with no CRLF CRLF would otherwise OOM the proxy).
+                if buf.len() > MAX_REQUEST_HEAD {
+                    return Err(invalid("HTTP-proxy request head exceeds the size limit"));
+                }
             }
             Err(e) => {
                 return Err(invalid_owned(format!(
