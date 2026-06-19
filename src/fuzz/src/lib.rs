@@ -81,6 +81,18 @@ pub fn fuzz_parsers(data: &[u8]) {
     // (destination/path/interface/member/signature — the entire allowlist surface)
     // and walks the body, all from fully workload-controlled bytes.
     fuzz_dbus_incoming(data);
+
+    // The facade's SASL handshake (07-7 §7.7.2): the workload's bus client speaks the
+    // line-based auth exchange before any message; `data` stands in for those bytes,
+    // fed in one push. Bounded line parser — must never panic/hang on any input.
+    let mut sasl = kennel_lib_dbus::sasl::SaslServer::new();
+    let _ = sasl.push(data);
+
+    // The typed IDBus conduit frame (07-7 §7.7.2): `host-dbus` (trusted) decodes frames
+    // the in-kennel (untrusted) facade produced, so the small flat frame decoder reads
+    // untrusted input. `data` is the frame payload after the length prefix.
+    let _ = kennel_lib_dbus::wire::Frame::decode(data);
+    let _ = kennel_lib_dbus::wire::frame_len(data);
 }
 
 /// Drive `data` through `mini-sansio-dbus`'s public sans-IO read loop exactly as

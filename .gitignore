@@ -7,3 +7,4 @@
 /.ci-tools/
 # Private signing seeds never belong in the repo (keys/ holds *.pub only).
 *.key
+scratch/

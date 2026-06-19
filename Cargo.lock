@@ -155,6 +155,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-lib-dbus"
+version = "0.1.0"
+dependencies = [
+ "mini-sansio-dbus",
+]
+
+[[package]]
 name = "kennel-lib-landlock"
 version = "0.1.0"
 dependencies = [
