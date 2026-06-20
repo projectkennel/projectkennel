@@ -71,7 +71,29 @@ fn run() -> Result<(), String> {
     // Env: image env (sanitised) is the floor; the launcher's own environ (Kennel-synthesised) is
     // layered on top, unfiltered, and wins — so policy `[env]` keeps the final say.
     let kennel_env: Vec<(String, String)> = std::env::vars().collect();
-    let merged = env_strip::merge_env(&kennel_env, &cfg.env);
+    let mut merged = env_strip::merge_env(&kennel_env, &cfg.env);
+
+    // PATH is the exception to "policy wins": honor the IMAGE's PATH first (the substrate knows
+    // where its binaries live — many images put them in /usr/local/bin, /usr/sbin, or /opt/.../bin
+    // that the policy's `[exec].path` does not list), then the kennel-synthesised PATH as fallback.
+    // A plain overwrite would drop the image's dirs, so a bare-name entrypoint outside the policy
+    // path would fail to resolve. (The exec is still Landlock-gated; PATH only picks the dir.)
+    let kennel_path = kennel_env
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .map(|(_, v)| v.as_str());
+    let image_path = cfg
+        .env
+        .iter()
+        .filter_map(|e| e.split_once('='))
+        .find(|(k, _)| *k == "PATH")
+        .map(|(_, v)| v);
+    if let Some(path) = env_strip::compose_path(image_path, kennel_path) {
+        match merged.iter_mut().find(|(k, _)| k == "PATH") {
+            Some(slot) => slot.1 = path,
+            None => merged.push(("PATH".to_owned(), path)),
+        }
+    }
 
     let mut command = Command::new(prog);
     command.args(rest).env_clear().envs(merged);

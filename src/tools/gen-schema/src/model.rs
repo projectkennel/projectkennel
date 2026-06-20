@@ -219,7 +219,7 @@ pub static TABLES: &[Table] = &[
     },
     Table {
         name: "rootfs",
-        title: "`[rootfs]` — an OCI image unpacked as the kennel's root filesystem (OCI run model; design §7.11). Substrate-trust waiver T3.8.",
+        title: "`[rootfs]` — an OCI image unpacked as the kennel's root filesystem (OCI run model; design §7.11). Substrate-trust waiver T3.8. **Mutually exclusive with `[workload]`**: an OCI policy has a mandatory `[rootfs]` and never a `[workload]` (the compiler refuses both). There is no per-binary pin in the OCI model — `[workload].sha256` does not apply; execution integrity rests on the image **digest** (the runner checks `[rootfs].image` against the recorded digest) plus the operator's unconfined `kennel oci run … -- <cmd>` invocation, not a daemon-enforced cryptographic pin of the entrypoint binary.",
         fields: &[
             req("path", Ty::Str, "The unpacked image rootfs (the store entry's `rootfs/`). Its presence marks the policy OCI-model."),
             req("image", Ty::Str, "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store entry's recorded digest."),

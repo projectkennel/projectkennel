@@ -108,9 +108,24 @@ pub fn merge_env(
     out.into_iter().collect()
 }
 
+/// Compose the OCI workload's `PATH`: the **image's** `PATH` first (the substrate's own binary
+/// layout), then the kennel-synthesised `PATH` (the policy `[exec].path`) as a fallback — so both
+/// dir sets are searched and the image's binaries are found even when they sit outside the policy
+/// path. Either alone if the other is absent/empty; `None` if neither is set.
+#[must_use]
+pub fn compose_path(image: Option<&str>, kennel: Option<&str>) -> Option<String> {
+    let image = image.filter(|s| !s.is_empty());
+    let kennel = kennel.filter(|s| !s.is_empty());
+    match (image, kennel) {
+        (Some(i), Some(k)) => Some(format!("{i}:{k}")),
+        (Some(v), None) | (None, Some(v)) => Some(v.to_owned()),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{merge_env, strip_image_env};
+    use super::{compose_path, merge_env, strip_image_env};
 
     #[test]
     fn image_loader_and_interpreter_vars_are_stripped() {
@@ -153,6 +168,19 @@ mod tests {
         assert_eq!(get("PATH"), Some("/usr/local/bin:/usr/bin")); // policy wins
         assert_eq!(get("LD_LIBRARY_PATH"), Some("/opt/app/lib")); // re-add survives
         assert_eq!(get("LD_PRELOAD"), None); // image's injection is gone
+    }
+
+    #[test]
+    fn compose_path_puts_image_dirs_first_then_kennel() {
+        assert_eq!(
+            compose_path(Some("/opt/app/bin:/usr/sbin"), Some("/usr/bin:/bin")),
+            Some("/opt/app/bin:/usr/sbin:/usr/bin:/bin".to_owned())
+        );
+        // Either alone survives; empty is treated as absent; neither ⇒ None.
+        assert_eq!(compose_path(Some("/img"), None), Some("/img".to_owned()));
+        assert_eq!(compose_path(None, Some("/k")), Some("/k".to_owned()));
+        assert_eq!(compose_path(Some(""), Some("/k")), Some("/k".to_owned()));
+        assert_eq!(compose_path(None, None), None);
     }
 
     #[test]
