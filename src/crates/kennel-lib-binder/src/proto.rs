@@ -56,6 +56,14 @@ pub const BC_REGISTER_LOOPER: u32 = ioc(DIR_NONE, b'c', 11, 0);
 pub const BC_ENTER_LOOPER: u32 = ioc(DIR_NONE, b'c', 12, 0);
 /// `BC_EXIT_LOOPER`: announce a looper thread is leaving the pool.
 pub const BC_EXIT_LOOPER: u32 = ioc(DIR_NONE, b'c', 13, 0);
+/// `BC_REQUEST_DEATH_NOTIFICATION`: ask the driver to send `BR_DEAD_BINDER` when the
+/// node behind `handle` dies (payload `struct binder_handle_cookie`, packed 12 bytes).
+pub const BC_REQUEST_DEATH_NOTIFICATION: u32 = ioc(DIR_WRITE, b'c', 14, 12);
+/// `BC_CLEAR_DEATH_NOTIFICATION`: cancel a death notification on `handle`.
+pub const BC_CLEAR_DEATH_NOTIFICATION: u32 = ioc(DIR_WRITE, b'c', 15, 12);
+/// `BC_DEAD_BINDER_DONE`: ack a `BR_DEAD_BINDER` so the driver releases the notification
+/// (payload `binder_uintptr_t cookie`, 8 bytes).
+pub const BC_DEAD_BINDER_DONE: u32 = ioc(DIR_WRITE, b'c', 16, 8);
 
 // BR_* — driver return protocol ('r'), received from the read buffer.
 const BR_ERROR: u32 = ioc(DIR_READ, b'r', 0, 4);
@@ -123,6 +131,81 @@ pub fn flat_binder_object_fd_value(bytes: &[u8]) -> Option<i32> {
     let _high = r.u32()?;
     let _cookie = r.u64()?;
     Some(i32::from_ne_bytes(fd.to_ne_bytes()))
+}
+
+/// `BINDER_TYPE_BINDER`: a `flat_binder_object` carrying a **local node** an endpoint owns.
+///
+/// `B_PACK_CHARS('s', 'b', '*', B_TYPE_LARGE=0x85)`. The driver rewrites it to a
+/// [`BINDER_TYPE_HANDLE`] for the receiver. The inbound-mirror facade sends one to register its
+/// callback node with node 0 (`07-5` §7.5.7).
+pub const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
+
+/// `BINDER_TYPE_HANDLE`: a `flat_binder_object` carrying a **remote handle** — what a
+/// [`BINDER_TYPE_BINDER`] becomes for the receiving process.
+pub const BINDER_TYPE_HANDLE: u32 = 0x7368_2a85;
+
+/// `FLAT_BINDER_FLAG_ACCEPTS_FDS`: a node-flag permitting transactions to it to carry fds.
+///
+/// Set in a node's `flat_binder_object` flags. The mirror node MUST set it or the kernel refuses
+/// the conduit fd in `DELIVER_INET` (`-EPERM` at `binder_translate_fd`).
+pub const FLAT_BINDER_FLAG_ACCEPTS_FDS: u32 = 0x100;
+
+/// Encode a `flat_binder_object` of type [`BINDER_TYPE_BINDER`] naming the local node `(ptr, cookie)`.
+///
+/// Set `flags` to [`FLAT_BINDER_FLAG_ACCEPTS_FDS`] for a node that receives fds. The full 8-byte
+/// `binder` pointer sits in the union; the receiver gets it translated to a [`BINDER_TYPE_HANDLE`].
+#[must_use]
+pub fn flat_binder_object_binder(
+    ptr: u64,
+    cookie: u64,
+    flags: u32,
+) -> [u8; FLAT_BINDER_OBJECT_SIZE] {
+    // hdr.type @0, flags @4, union (8-byte binder ptr) @8, cookie (8) @16.
+    let seq = BINDER_TYPE_BINDER
+        .to_ne_bytes()
+        .into_iter()
+        .chain(flags.to_ne_bytes())
+        .chain(ptr.to_ne_bytes())
+        .chain(cookie.to_ne_bytes());
+    let mut out = [0u8; FLAT_BINDER_OBJECT_SIZE];
+    for (slot, byte) in out.iter_mut().zip(seq) {
+        *slot = byte;
+    }
+    out
+}
+
+/// Decode the handle from a `flat_binder_object` at the start of `bytes`.
+///
+/// Returns the handle if `bytes` begins with a [`BINDER_TYPE_HANDLE`] object (the translated form of
+/// a peer's [`BINDER_TYPE_BINDER`]); `None` if the slice is too short or not a handle object.
+#[must_use]
+pub fn flat_binder_object_handle_value(bytes: &[u8]) -> Option<u32> {
+    let mut r = Reader::new(bytes);
+    if r.u32()? != BINDER_TYPE_HANDLE {
+        return None;
+    }
+    let _flags = r.u32()?;
+    let handle = r.u32()?; // union low: the handle descriptor
+    let _high = r.u32()?;
+    let _cookie = r.u64()?;
+    Some(handle)
+}
+
+/// Append a `{handle, cookie}` death-notification `BC_*`.
+///
+/// `BC_REQUEST_DEATH_NOTIFICATION` / `BC_CLEAR_DEATH_NOTIFICATION`. The payload is
+/// `struct binder_handle_cookie`, which is `__attribute__((packed))` — a 4-byte handle directly
+/// followed by an 8-byte cookie, no padding (12 bytes total).
+pub fn write_handle_cookie(out: &mut Vec<u8>, cmd: u32, handle: u32, cookie: u64) {
+    out.extend_from_slice(&cmd.to_ne_bytes());
+    out.extend_from_slice(&handle.to_ne_bytes());
+    out.extend_from_slice(&cookie.to_ne_bytes());
+}
+
+/// Append a `BC_DEAD_BINDER_DONE` acking the `BR_DEAD_BINDER` for `cookie`.
+pub fn write_dead_binder_done(out: &mut Vec<u8>, cookie: u64) {
+    out.extend_from_slice(&BC_DEAD_BINDER_DONE.to_ne_bytes());
+    out.extend_from_slice(&cookie.to_ne_bytes());
 }
 
 /// A `struct binder_transaction_data`.
@@ -521,5 +604,78 @@ mod tests {
         assert_eq!(flat_binder_object_fd_value(&bad), None);
         // Too short.
         assert_eq!(flat_binder_object_fd_value(&[0u8; 8]), None);
+    }
+
+    #[test]
+    fn binder_node_and_handle_types_match_b_pack_chars() {
+        let pack = |c1: u8, c2: u8, c3: u8, c4: u8| {
+            (u32::from(c1) << 24) | (u32::from(c2) << 16) | (u32::from(c3) << 8) | u32::from(c4)
+        };
+        assert_eq!(BINDER_TYPE_BINDER, pack(b's', b'b', b'*', 0x85));
+        assert_eq!(BINDER_TYPE_HANDLE, pack(b's', b'h', b'*', 0x85));
+    }
+
+    #[test]
+    fn death_notification_codes_match_the_ioc_encoding() {
+        // _IOW('c', 14, struct binder_handle_cookie) — packed handle(4)+cookie(8)=12 bytes.
+        assert_eq!(BC_REQUEST_DEATH_NOTIFICATION, ioc(DIR_WRITE, b'c', 14, 12));
+        assert_eq!(BC_CLEAR_DEATH_NOTIFICATION, ioc(DIR_WRITE, b'c', 15, 12));
+        // _IOW('c', 16, binder_uintptr_t) — 8 bytes.
+        assert_eq!(BC_DEAD_BINDER_DONE, ioc(DIR_WRITE, b'c', 16, 8));
+    }
+
+    #[test]
+    fn flat_binder_object_binder_lays_out_type_flags_ptr_cookie() {
+        let obj =
+            flat_binder_object_binder(0x1122_3344_5566_7788, 0x99, FLAT_BINDER_FLAG_ACCEPTS_FDS);
+        assert_eq!(obj.len(), FLAT_BINDER_OBJECT_SIZE);
+        assert_eq!(obj.get(0..4), Some(&BINDER_TYPE_BINDER.to_ne_bytes()[..]));
+        assert_eq!(
+            obj.get(4..8),
+            Some(&FLAT_BINDER_FLAG_ACCEPTS_FDS.to_ne_bytes()[..])
+        );
+        assert_eq!(
+            obj.get(8..16),
+            Some(&0x1122_3344_5566_7788u64.to_ne_bytes()[..])
+        );
+        assert_eq!(obj.get(16..24), Some(&0x99u64.to_ne_bytes()[..]));
+    }
+
+    #[test]
+    fn flat_binder_object_handle_value_round_trips_and_rejects() {
+        // A hand-built BINDER_TYPE_HANDLE object: type @0, flags @4, handle @8, cookie @16.
+        let mut obj = [0u8; FLAT_BINDER_OBJECT_SIZE];
+        for (slot, byte) in obj.iter_mut().zip(
+            BINDER_TYPE_HANDLE
+                .to_ne_bytes()
+                .into_iter()
+                .chain(0u32.to_ne_bytes()) // flags
+                .chain(0x4242u32.to_ne_bytes()) // handle
+                .chain(0u32.to_ne_bytes()) // high
+                .chain(0u64.to_ne_bytes()), // cookie
+        ) {
+            *slot = byte;
+        }
+        assert_eq!(flat_binder_object_handle_value(&obj), Some(0x4242));
+        // A BINDER_TYPE_BINDER (node, not handle) is not a handle object.
+        assert_eq!(
+            flat_binder_object_handle_value(&flat_binder_object_binder(1, 2, 0)),
+            None
+        );
+        // Too short.
+        assert_eq!(flat_binder_object_handle_value(&[0u8; 8]), None);
+    }
+
+    #[test]
+    fn write_handle_cookie_frames_packed_12_byte_payload() {
+        let mut out = Vec::new();
+        write_handle_cookie(&mut out, BC_REQUEST_DEATH_NOTIFICATION, 0xAB, 0xCDEF);
+        assert_eq!(out.len(), 4 + 12);
+        assert_eq!(
+            out.get(..4),
+            Some(&BC_REQUEST_DEATH_NOTIFICATION.to_ne_bytes()[..])
+        );
+        assert_eq!(out.get(4..8), Some(&0xABu32.to_ne_bytes()[..]));
+        assert_eq!(out.get(8..16), Some(&0xCDEFu64.to_ne_bytes()[..]));
     }
 }

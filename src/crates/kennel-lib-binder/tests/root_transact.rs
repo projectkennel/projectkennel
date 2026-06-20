@@ -57,7 +57,7 @@ fn run_manager() {
     std::fs::File::create(dir.with_extension("ready")).expect("manager: write ready file");
 
     let stop = AtomicBool::new(false);
-    cm.serve(POLL_MS, &stop, |incoming| {
+    cm.serve(POLL_MS, &stop, |incoming, _conn| {
         assert_eq!(incoming.code, 42, "manager: unexpected transaction code");
         let mut reply = b"reply:".to_vec();
         reply.extend_from_slice(&incoming.data);

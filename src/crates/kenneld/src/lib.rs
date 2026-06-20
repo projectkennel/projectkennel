@@ -823,14 +823,17 @@ fn bring_up<P: Privileged + Sync>(
             (None, crate::inet::NetRuntime::denied())
         };
 
-    // 3b-inbound. The per-kennel inbound BIND mirror (§7.5.7): the queue the BIND_INET handler
-    //     drains, plus the set of policy-mirrored ports to bind host-side. The host-inetd delegate
-    //     launch + the eager registrations are deferred to *after* construct (below, beside the
-    //     egress delegate), so the kennel's loopback alias exists before host-inetd binds it. The
-    //     runtime is created unconditionally (empty when there is nothing to mirror) so the binder
-    //     handler always has a queue to consult.
+    // 3b-inbound. The per-kennel inbound BIND mirror (§7.5.7): the runtime kenneld pushes
+    //     DELIVER_INET through, plus the set of policy-mirrored ports to bind host-side. The
+    //     host-inetd delegate launch + the eager registrations are deferred to *after* construct
+    //     (below, beside the egress delegate), so the kennel's loopback alias exists before
+    //     host-inetd binds it. The runtime is created unconditionally (no mirror ports ⇒ every
+    //     REGISTER_MIRROR refused) so the binder handler always has one to consult. The mirror set
+    //     is the registration gate (guard 3), seeded here — before binder::spawn serves the pool —
+    //     so a REGISTER_MIRROR can never race an unset gate.
     let inbound_runtime = std::sync::Arc::new(crate::inbound::InboundRuntime::new());
     let mirror_ports = mirror_bind_ports(net);
+    inbound_runtime.allow_ports(mirror_ports.iter().copied());
 
     // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
     //     binds that shadow them over the kennel's view. Built here because it
@@ -1099,8 +1102,8 @@ fn bring_up<P: Privileged + Sync>(
     // Launch the inbound BIND delegate (§7.5.7) and eagerly register each policy-mirrored port,
     // also before releasing the binder pull so the host-side listeners are up before the workload
     // runs. The kennel's loopback alias exists now (the factory added it), so host-inetd can bind
-    // it. For each registration kenneld starts a reader thread (off the binder pool) that drains
-    // host-inetd's accept notifications into the inbound queue the BIND_INET handler serves.
+    // it. For each registration kenneld starts a reader thread (off the binder pool) that pushes
+    // host-inetd's accepted conduits into the kennel (DELIVER_INET) once the facade has registered.
     if let Some(setup) = proxy {
         if !mirror_ports.is_empty() {
             if let Some(kennel_ip) = state

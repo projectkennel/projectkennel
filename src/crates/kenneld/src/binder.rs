@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
-use kennel_lib_binder::client::Incoming;
-use kennel_lib_binder::ctxmgr::{ContextManager, Handler, Reply};
+use kennel_lib_binder::client::{Connection, Incoming};
+use kennel_lib_binder::ctxmgr::{ContextManager, DeathHandler, Handler, Reply};
 use kennel_lib_policy::{BinderRuntime, UnixRuntime};
 
 use crate::dbus::DbusRelay;
@@ -208,6 +208,11 @@ pub fn spawn(
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
     let stop = Arc::new(AtomicBool::new(false));
 
+    // kenneld pushes DELIVER_INET (§7.5.7) on this same connection — a binder handle is valid only
+    // on the open that received it — so the inbound runtime borrows the context manager. Attached
+    // before the pool serves, so a REGISTER_MIRROR can never race an unattached pusher.
+    inbound.attach_pusher(Arc::clone(&cm));
+
     // The handler runs concurrently on every looper, so its state is shared: the registry behind
     // a Mutex (taken only for the O(1) registry verbs, never across the blocking facade dial), and
     // the rest by Arc.
@@ -215,7 +220,8 @@ pub fn spawn(
     let unix = Arc::new(unix);
     let net = Arc::new(net);
     let lifecycle = Arc::new(lifecycle);
-    let handler: Handler = Arc::new(move |incoming: &Incoming| {
+    let inbound_for_death = Arc::clone(&inbound);
+    let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
         handle(
             &registry,
             &unix,
@@ -224,12 +230,17 @@ pub fn spawn(
             &lifecycle,
             dbus.as_deref(),
             incoming,
+            conn,
             ctx,
             &writer,
         )
     });
+    // A watched mirror node died: drop its stale handle (§7.5.7, guard 1).
+    let death: DeathHandler = Arc::new(move |cookie: u64, conn: &Connection| {
+        inbound_for_death.drop_dead(conn, cookie);
+    });
 
-    let loopers = cm.serve_pool(POOL_MAX_THREADS, POLL_MS, &stop, &handler)?;
+    let loopers = cm.serve_pool(POOL_MAX_THREADS, POLL_MS, &stop, &handler, &death)?;
     Ok(Manager { stop, loopers })
 }
 
@@ -249,6 +260,7 @@ fn handle(
     lifecycle: &Lifecycle,
     dbus: Option<&DbusRelay>,
     incoming: &Incoming,
+    conn: &Connection,
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
@@ -266,8 +278,11 @@ fn handle(
     if incoming.code == verb::CONNECT_INET {
         return inet_connect(net, incoming, ctx, writer);
     }
-    if incoming.code == verb::BIND_INET {
-        return inet_bind(inbound, incoming, ctx, writer);
+    // Inbound mirror registration (§7.5.7): the facade hands kenneld its callback node; kenneld
+    // gates the port, acquires the handle, watches its death, and maps port → handle. No conduit
+    // is handed back here (the reply is a status byte) — kenneld pushes DELIVER_INET on accept.
+    if incoming.code == verb::REGISTER_MIRROR {
+        return register_mirror(inbound, incoming, conn, ctx, writer);
     }
     // The D-Bus mediation membrane (§7.7.2a): kenneld relays opaque frames to the host-dbus
     // delegate by connection id, lock-free (the relay owns its own state + rate cap). `DBUS_RECV`
@@ -570,34 +585,91 @@ fn inet_connect(
     reply
 }
 
-/// Serve a `BIND_INET` request: hand `facade-client` the next pending inbound conduit for the
-/// requested mirrored port, or `AGAIN` if none is waiting (§7.5.7).
+/// Serve a `REGISTER_MIRROR` request: bind a facade's callback node to a mirrored port (§7.5.7).
 ///
-/// **No policy decision** — the `[net.bpf].bind` cgroup ACL already gated the bind, and `host-inetd`
-/// only ever binds a port kenneld registered. **Looper-safe** — this only pops a ready fd or returns
-/// promptly; the unbounded wait for an external connection lives in the inbound reader thread, off
-/// the binder pool. A handoff replies `[OK]` + the conduit fd; an empty queue replies `[AGAIN]`.
-fn inet_bind(
+/// The push counterpart of the old `BIND_INET` poll. The facade transacts `[transport | port]`
+/// plus its own binder node (`transact_node`); kenneld:
+/// 1. **port-gates** the request against the policy mirror set (guard 3) — `DENIED` otherwise;
+/// 2. parses the translated handle from the node object (the trailing `flat_binder_object`);
+/// 3. **acquires** the handle so it survives this transaction's buffer free, and requests its
+///    **death notification** (guard 1) — both must happen before the reply frees the buffer;
+/// 4. maps `port → handle` and drains any bounced conduits.
+///
+/// **No per-connection policy decision** — the `[net.bpf].bind` ACL already gated the bind. The
+/// reply is a status byte; conduits are pushed later with `DELIVER_INET`.
+fn register_mirror(
     inbound: &crate::inbound::InboundRuntime,
     incoming: &Incoming,
+    conn: &Connection,
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    let Some((_transport, port)) =
-        kennel_lib_binder::service::inet::decode_bind_request(&incoming.data)
-    else {
-        writer.emit(&inet_event(incoming, ctx, "bind", 0, Outcome::Error));
-        return Reply::DataAndFd(one(status::BAD_REQUEST), None);
+    use kennel_lib_binder::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
+    use kennel_lib_binder::service::inet::decode_port_prefix;
+
+    let Some((_transport, port)) = decode_port_prefix(&incoming.data) else {
+        writer.emit(&inet_event(
+            incoming,
+            ctx,
+            "mirror-register",
+            0,
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::BAD_REQUEST));
     };
-    inbound.take_pending(port).map_or_else(
-        // No connection pending — tell the facade to re-arm. Not audited: an idle poll is not an
-        // event, and auditing every re-arm would drown the log.
-        || Reply::DataAndFd(one(status::AGAIN), None),
-        |conduit| {
-            writer.emit(&inet_event(incoming, ctx, "bind", port, Outcome::Allow));
-            Reply::DataAndFd(one(status::OK), Some(conduit))
-        },
-    )
+    // Guard 3: registration is port-gated, not caller-gated (the facade and the workload share the
+    // persona uid, so kenneld cannot tell them apart by sender_euid). Only a policy-mirrored port
+    // is accepted; a workload registering its own mirrored port merely gets its own conduits.
+    if !inbound.is_allowed(port) {
+        writer.emit(&inet_event(
+            incoming,
+            ctx,
+            "mirror-register",
+            port,
+            Outcome::Deny,
+        ));
+        return Reply::Data(one(status::DENIED));
+    }
+    // The node object the facade sent is the trailing flat_binder_object; the driver translated it
+    // to a handle for us.
+    let handle = incoming
+        .data
+        .len()
+        .checked_sub(FLAT_BINDER_OBJECT_SIZE)
+        .and_then(|off| incoming.data.get(off..))
+        .and_then(flat_binder_object_handle_value);
+    let Some(handle) = handle else {
+        writer.emit(&inet_event(
+            incoming,
+            ctx,
+            "mirror-register",
+            port,
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::BAD_REQUEST));
+    };
+    // Keep the handle past this transaction's buffer free, and learn when its node dies. Both ride
+    // `conn` here, before the reply (and its BC_FREE_BUFFER) drops the transaction's temporary ref.
+    if conn.acquire_handle(handle).is_err() {
+        writer.emit(&inet_event(
+            incoming,
+            ctx,
+            "mirror-register",
+            port,
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::BAD_REQUEST));
+    }
+    let _ = conn.request_death(handle, u64::from(handle));
+    inbound.register(conn, port, handle);
+    writer.emit(&inet_event(
+        incoming,
+        ctx,
+        "mirror-register",
+        port,
+        Outcome::Allow,
+    ));
+    Reply::Data(one(status::OK))
 }
 
 /// The audit event for an `INet` CONNECT decision.

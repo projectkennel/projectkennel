@@ -25,7 +25,19 @@ use crate::sys;
 /// `Fn + Send + Sync` because every looper thread calls it concurrently; any state it mutates
 /// (the per-kennel registry) sits behind a lock the handler takes only for the O(1) registry
 /// verbs, never across a blocking facade call.
-pub type Handler = Arc<dyn Fn(&Incoming) -> Reply + Send + Sync>;
+///
+/// The `&Connection` is the serving endpoint, for the rare verb that must issue a node-reference
+/// command inline — the inbound mirror's `REGISTER_MIRROR` acquires the caller's node handle and
+/// requests its death notification *before* the reply frees the transaction buffer (`07-5`
+/// §7.5.7). A handler must use it only for those ref/death commands; the loop owns recv/reply.
+pub type Handler = Arc<dyn Fn(&Incoming, &Connection) -> Reply + Send + Sync>;
+
+/// A death-notification handler: called once per watched node that died this cycle.
+///
+/// `BR_DEAD_BINDER`, with the node's cookie and the serving connection. kenneld drops the stale
+/// mirror handle here (release + `BC_DEAD_BINDER_DONE`). `Fn + Send + Sync` — any looper may surface
+/// a death.
+pub type DeathHandler = Arc<dyn Fn(u64, &Connection) + Send + Sync>;
 
 /// What a node-0 handler returns for one transaction: reply bytes, a file descriptor,
 /// or both (data with an optional fd — the `kennel-bin-init` `GET_SANDBOX_PLAN` pull).
@@ -82,7 +94,7 @@ impl ContextManager {
         &self,
         poll_ms: i32,
         stop: &AtomicBool,
-        mut handler: impl FnMut(&Incoming) -> Reply,
+        mut handler: impl FnMut(&Incoming, &Connection) -> Reply,
     ) -> io::Result<()> {
         self.conn.enter_looper()?;
         while !stop.load(Ordering::Acquire) {
@@ -90,7 +102,7 @@ impl ContextManager {
                 continue;
             }
             for incoming in self.conn.recv()? {
-                let reply = handler(&incoming);
+                let reply = handler(&incoming, &self.conn);
                 self.dispatch_reply(&incoming, reply)?;
             }
         }
@@ -129,6 +141,7 @@ impl ContextManager {
         poll_ms: i32,
         stop: &Arc<AtomicBool>,
         handler: &Handler,
+        death: &DeathHandler,
     ) -> io::Result<Arc<Mutex<Vec<JoinHandle<()>>>>> {
         // Non-blocking reads: a transaction may `poll`-wake several loopers, and all but the one
         // that reads it must not block in `BINDER_WRITE_READ` (which would also wedge shutdown).
@@ -145,6 +158,7 @@ impl ContextManager {
             poll_ms,
             stop,
             handler,
+            death,
         );
         Ok(loopers)
     }
@@ -161,12 +175,14 @@ impl ContextManager {
         poll_ms: i32,
         stop: &Arc<AtomicBool>,
         handler: &Handler,
+        death: &DeathHandler,
     ) {
         let cm = Arc::clone(cm);
         let live = Arc::clone(live);
         let loopers_for_loop = Arc::clone(loopers);
         let stop = Arc::clone(stop);
         let handler = Arc::clone(handler);
+        let death = Arc::clone(death);
         let spawned = std::thread::Builder::new()
             .name("kennel-lib-binder-looper".to_owned())
             .spawn(move || {
@@ -183,6 +199,7 @@ impl ContextManager {
                     &loopers_for_loop,
                     &stop,
                     &handler,
+                    &death,
                 );
                 live.fetch_sub(1, Ordering::AcqRel);
             });
@@ -194,7 +211,9 @@ impl ContextManager {
     }
 
     /// One looper thread's loop: poll, receive, grow the pool if the driver asked and we
-    /// are below `max_threads`, then handle and reply to each transaction inline.
+    /// are below `max_threads`, then handle and reply to each transaction inline (and run the
+    /// death handler for any watched node that died this cycle).
+    #[allow(clippy::too_many_arguments)]
     fn looper_loop(
         self: &Arc<Self>,
         poll_ms: i32,
@@ -203,6 +222,7 @@ impl ContextManager {
         loopers: &Arc<Mutex<Vec<JoinHandle<()>>>>,
         stop: &Arc<AtomicBool>,
         handler: &Handler,
+        death: &DeathHandler,
     ) {
         while !stop.load(Ordering::Acquire) {
             match self.conn.poll(poll_ms) {
@@ -226,10 +246,14 @@ impl ContextManager {
                     poll_ms,
                     stop,
                     handler,
+                    death,
                 );
             }
+            for cookie in batch.dead {
+                death(cookie, &self.conn);
+            }
             for incoming in batch.transactions {
-                let reply = handler(&incoming);
+                let reply = handler(&incoming, &self.conn);
                 let _ = self.dispatch_reply(&incoming, reply);
             }
         }
