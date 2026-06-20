@@ -110,6 +110,12 @@ pub struct StartRequest {
     /// Empty when `[trust].manifest = false`, when there are no writable triggers, or for a
     /// non-CLI caller.
     pub watch_paths: Vec<PathBuf>,
+    /// For an OCI-model run (`kennel oci run`, §7.11): the host path of the store entry's
+    /// `config.json`. When the policy is OCI and no argv is supplied, kenneld binds this
+    /// read-only into the view and runs the launcher (`kennel-bin-oci-entry`) over it. `None`
+    /// for a non-OCI run, or an OCI run given an explicit `-- <cmd>`/`[workload].argv` (which
+    /// runs in-root without the launcher).
+    pub oci_config: Option<PathBuf>,
 }
 
 /// A response from the daemon to the CLI.
@@ -324,6 +330,13 @@ impl Request {
                 for p in &req.watch_paths {
                     put_str(&mut b, &p.to_string_lossy());
                 }
+                match &req.oci_config {
+                    None => put_u8(&mut b, 0),
+                    Some(p) => {
+                        put_u8(&mut b, 1);
+                        put_str(&mut b, &p.to_string_lossy());
+                    }
+                }
             }
             Self::Stop { kennel } => {
                 put_u8(&mut b, 2);
@@ -369,6 +382,11 @@ impl Request {
                 interactive: r.u8()? != 0,
                 force: r.u8()? != 0,
                 watch_paths: r.strings()?.into_iter().map(PathBuf::from).collect(),
+                oci_config: if r.u8()? != 0 {
+                    Some(PathBuf::from(r.string()?))
+                } else {
+                    None
+                },
             })),
             2 => Ok(Self::Stop {
                 kennel: r.string()?,
@@ -611,6 +629,9 @@ mod tests {
                 PathBuf::from("/home/dev/project/Makefile"),
                 PathBuf::from("/home/dev/project/.git/hooks"),
             ],
+            oci_config: Some(PathBuf::from(
+                "/home/dev/.local/share/kennel/images/app/config.json",
+            )),
         }));
     }
 

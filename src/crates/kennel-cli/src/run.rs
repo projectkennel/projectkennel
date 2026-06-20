@@ -112,6 +112,11 @@ pub fn launch(
     display: &str,
 ) -> Result<ExitCode, String> {
     let allow_oci = oci_digest.is_some();
+    // For an OCI run the launcher reads the store entry's `config.json` (the sibling of the
+    // entry's `policy.toml`); kenneld binds it into the view. Derived from the original policy
+    // path (the store entry), not the in-memory temp the compile path may stage elsewhere.
+    let oci_config =
+        oci_digest.and_then(|_| policy_file.parent().map(|dir| dir.join("config.json")));
     let mut template_dirs = template_dirs;
     let mut trust_dirs = trust_dirs;
     // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
@@ -231,6 +236,7 @@ pub fn launch(
         // Force an override of a pinned policy [workload] (only meaningful with a `--` cmd).
         force,
         watch_paths,
+        oci_config,
     });
 
     let mut conn = connect()?;

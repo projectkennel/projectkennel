@@ -338,6 +338,9 @@ pub struct Spec {
     /// manager is run; the seal still mounts no binderfs because the plan's view
     /// `binder` flag is false in that case).
     pub binder: Option<BinderPrep>,
+    /// The prepared OCI substrate launch (§7.11): the launcher + image `config.json` to bind
+    /// in when the image's own entrypoint is run. Empty ([`OciPrep::default`]) otherwise.
+    pub oci: OciPrep,
     /// Spawn-path diagnostic tracer (the `log_level` knob): `bring_up` traces each
     /// step (egress, view, factory construct, boot-sync, proxy, binder node 0) through
     /// it. No-op at the default `info`.
@@ -431,6 +434,28 @@ pub struct SshPrep {
     /// The host path of `facade-ssh`, bound into the view (read+execute)
     /// so the synthetic `config`'s `ProxyCommand` can run it. `None` when no SSH.
     pub ssh_bin: Option<PathBuf>,
+}
+
+/// The in-view path kenneld binds an OCI image's `config.json` at, and passes the
+/// launcher as `argv[1]` (§7.11). Under `/run/kennel/`, the runtime tree the launcher
+/// reads from, not the image.
+pub const OCI_CONFIG_VIEW_PATH: &str = "/run/kennel/oci-config.json";
+
+/// The prepared OCI substrate launch (§7.11 / T3.8): how kenneld runs the image's own entrypoint.
+///
+/// Set only when the policy is OCI-model (`[rootfs]`) **and** no explicit argv was given — then
+/// the workload-side launcher (`kennel-bin-oci-entry`) is `argv[0]`, bound read-only into the view
+/// with the image `config.json`, and parses the config to `execve` the entrypoint in-root. Empty
+/// ([`OciPrep::default`]) for a non-OCI run, or an OCI run given an explicit `-- <cmd>`/
+/// `[workload].argv` (which runs in-root without the launcher).
+#[derive(Debug, Default, Clone)]
+pub struct OciPrep {
+    /// The host path of the trusted launcher (`kennel-bin-oci-entry`, resolved from the
+    /// root-owned config cascade, never the wire), bound at its own path and run as `argv[0]`.
+    pub launcher_bin: Option<PathBuf>,
+    /// The host path of the store entry's `config.json`, bound read-only at
+    /// [`OCI_CONFIG_VIEW_PATH`] for the launcher to read.
+    pub config_src: Option<PathBuf>,
 }
 
 /// A running kennel: the workload plus what must be torn down when it stops.
@@ -601,6 +626,7 @@ pub fn start<P: Privileged + Sync>(
         unix,
         dbus,
         binder,
+        oci,
         tracer,
     } = spec;
     let mut state = Provision::default();
@@ -620,6 +646,7 @@ pub fn start<P: Privileged + Sync>(
         &unix,
         &dbus,
         binder.as_ref(),
+        &oci,
         tracer,
         command,
         &mut state,
@@ -676,6 +703,7 @@ fn bring_up<P: Privileged + Sync>(
     unix: &UnixPrep,
     dbus: &DbusPrep,
     binder: Option<&BinderPrep>,
+    oci: &OciPrep,
     tracer: kennel_lib_config::Tracer,
     command: &mut Command,
     state: &mut Provision,
@@ -951,6 +979,26 @@ fn bring_up<P: Privileged + Sync>(
                     exclusive: false,
                 });
             }
+            // OCI launcher (§7.11): when the image's own entrypoint is run, bind the trusted
+            // launcher in at its own path (= argv[0]) and the image's config.json read-only at
+            // the launcher's known in-view path. Both read-only — the workload runs them, never
+            // rewrites them.
+            if let Some(bin) = &oci.launcher_bin {
+                view.binds.push(kennel_lib_spawn::BindMount {
+                    source: bin.clone(),
+                    target: bin.clone(),
+                    writable: false,
+                    exclusive: false,
+                });
+            }
+            if let Some(cfg) = &oci.config_src {
+                view.binds.push(kennel_lib_spawn::BindMount {
+                    source: cfg.clone(),
+                    target: PathBuf::from(OCI_CONFIG_VIEW_PATH),
+                    writable: false,
+                    exclusive: false,
+                });
+            }
             command.env("HOME", &view.shim_root);
         }
         // Grant Landlock execute on the dialer + its loaders (outside the `view` borrow of plan).
@@ -969,6 +1017,25 @@ fn bring_up<P: Privileged + Sync>(
                     ));
                 }
             }
+        }
+        // Grant Landlock execute on the OCI launcher + its loaders, and read on the bound
+        // config.json (outside the `view` borrow). The launcher's exec of the IMAGE entrypoint
+        // is gated separately by the policy's own `[exec]` grants.
+        if let (Some(bin), true) = (&oci.launcher_bin, plan.view.is_some()) {
+            use kennel_lib_syscall::landlock::AccessFs;
+            plan.landlock_fs
+                .push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+            let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[bin
+                .to_string_lossy()
+                .into_owned()]);
+            for loader in resolution.loaders {
+                plan.landlock_fs.push((
+                    PathBuf::from(loader),
+                    AccessFs::READ_FILE | AccessFs::EXECUTE,
+                ));
+            }
+            plan.landlock_fs
+                .push((PathBuf::from(OCI_CONFIG_VIEW_PATH), AccessFs::READ_FILE));
         }
     }
     if let Some(view_root) = view_root {

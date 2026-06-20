@@ -329,6 +329,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         facade_dbus_bin: Some(sibling_binary("facade-dbus")),
         host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
@@ -353,6 +354,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         interactive: false,
         force: false,
         watch_paths: Vec::new(),
+        oci_config: None,
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -466,6 +468,7 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         facade_dbus_bin: Some(sibling_binary("facade-dbus")),
         host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
@@ -490,6 +493,7 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         interactive: false,
         force: false,
             watch_paths: Vec::new(),
+            oci_config: None,
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -606,6 +610,7 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
         facade_dbus_bin: Some(sibling_binary("facade-dbus")),
         host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
@@ -628,6 +633,7 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
         interactive: false,
         force: false,
         watch_paths: Vec::new(),
+        oci_config: None,
     };
 
     let sentinel = proj.join("KENNEL-EXCLUSIVE-LOCK");
@@ -757,6 +763,7 @@ fn run_ttl_kennel(
         facade_dbus_bin: Some(sibling_binary("facade-dbus")),
         host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
@@ -774,6 +781,7 @@ fn run_ttl_kennel(
         interactive: false,
         force: false,
         watch_paths: Vec::new(),
+        oci_config: None,
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
@@ -948,6 +956,7 @@ fn interactive_harness(tag: &str) -> Option<InteractiveHarness> {
         facade_dbus_bin: Some(sibling_binary("facade-dbus")),
         host_dbus_bin: Some(sibling_binary("host-dbus")),
         init_bin: Some(sibling_binary("kennel-bin-init")),
+        oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
     let shared = Shared::new(
@@ -999,6 +1008,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         interactive: true,
         force: false,
         watch_paths: Vec::new(),
+        oci_config: None,
     };
 
     let (mut control, mut server) = UnixStream::pair().expect("control socketpair");
@@ -1081,6 +1091,7 @@ fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
         interactive: true,
         force: false,
         watch_paths: Vec::new(),
+        oci_config: None,
     };
 
     // First client = the Start connection. Run `run_kennel` on its own thread: it blocks
