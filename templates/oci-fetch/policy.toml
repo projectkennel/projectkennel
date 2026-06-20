@@ -124,3 +124,8 @@ reason = "Google Container Registry — image pull"
 # The fetch tools need only the synthesised baseline (HOME/PATH/USER from the
 # spawn; $HOME is the writable tmpfs skopeo/umoci use for their cache). No image
 # Env is involved here — this confines the *fetch*, not a booted image.
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "IjOivQLqM0bY9hmmjLEpcdt23Xgsynb577nIJhFX/50o+vx4icdOJNoBo3Z/E2v6iFuwgvQ3H/O6C1RYBDs9Cg=="
