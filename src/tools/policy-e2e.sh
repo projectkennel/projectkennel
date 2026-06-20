@@ -200,11 +200,13 @@ fi
 export KENNEL_VENDOR_DIR="$REPO_ROOT/dist/vendor"
 export REPO_ROOT SUITE_DIR
 echo "== running ${#CASES[@]} case(s) against the installed service =="
-pass=0; fail=0; results=""
+pass=0; fail=0; skip=0; results=""
 for name in "${CASES[@]}"; do
     pol="$SUITE_DIR/$name/policy.toml"
     printf "== %-16s " "$name"
-    if [ ! -f "$pol" ]; then
+    # A case is either a `policy.toml` (driven by `kennel run`) or a `run.sh` hook (self-driving,
+    # e.g. the OCI-substrate case which uses `kennel oci run` and generates its policy).
+    if [ ! -f "$pol" ] && [ ! -x "$SUITE_DIR/$name/run.sh" ]; then
         echo "?? (no such case)"; results="$results\n  ?? $name"; fail=$((fail+1)); continue
     fi
     # Per-case setup hook: a case needing host fixtures it cannot carry ships a setup.sh,
@@ -213,6 +215,25 @@ for name in "${CASES[@]}"; do
     # (if any) runs after. A bounded timeout keeps a wedged fixture from hanging the suite.
     run_pol="$pol"
     scratch="/tmp/kennel-suite-$name.scratch"
+    # Self-driving hook (`run.sh`): an OCI-substrate case is driven by `kennel oci run`, not
+    # `kennel run` (the grammar partition refuses `[rootfs]` under `kennel run`), so it ships a
+    # `run.sh` that owns the whole flow — fetch + build the store entry, boot, self-check — and
+    # returns the verdict (exit 77 = SKIP, a missing prerequisite reported, never a silent pass).
+    if [ -x "$SUITE_DIR/$name/run.sh" ]; then
+        rm -rf "$scratch"; mkdir -p "$scratch"
+        timeout 120 "$SUITE_DIR/$name/run.sh" "$SUITE_DIR/$name" "$KENNEL" "$SUITE_KEY" "$scratch" \
+            </dev/null >"/tmp/kennel-suite-$name.log" 2>&1
+        rc=$?
+        rm -rf "$scratch"
+        if [ "$rc" = 77 ]; then
+            echo "SKIP — $(grep -m1 '^SKIP' "/tmp/kennel-suite-$name.log" | sed 's/^SKIP: *//' || echo 'prerequisite missing')"
+            results="$results\n  SKIP  $name"; skip=$((skip+1)); continue
+        fi
+        if [ "$rc" = 0 ]; then echo "PASS"; results="$results\n  PASS  $name"; pass=$((pass+1));
+        elif [ "$rc" = 124 ]; then echo "FAIL (timeout) — see /tmp/kennel-suite-$name.log"; results="$results\n  FAIL(timeout) $name"; fail=$((fail+1));
+        else echo "FAIL (exit $rc) — see /tmp/kennel-suite-$name.log"; results="$results\n  FAIL($rc) $name"; fail=$((fail+1)); fi
+        continue
+    fi
     if [ -x "$SUITE_DIR/$name/setup.sh" ]; then
         rm -rf "$scratch"; mkdir -p "$scratch"
         if ! gen=$(timeout 60 "$SUITE_DIR/$name/setup.sh" "$SUITE_DIR/$name" "$scratch" \
@@ -244,6 +265,6 @@ for name in "${CASES[@]}"; do
 done
 
 echo
-echo "== suite summary: $pass passed, $fail failed =="
+echo "== suite summary: $pass passed, $fail failed, $skip skipped =="
 printf "%b\n" "$results"
 [ "$fail" = 0 ]

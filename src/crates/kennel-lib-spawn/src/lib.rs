@@ -508,7 +508,35 @@ fn build_image_view_and_pivot(
     //    netns/BPF/uid-map/Landlock/seccomp, never file content, so nothing is ro-bound here.
     materialize_binds(&view.binds, &under)?;
 
-    // 7. The seal tail (constructed /dev, binderfs, /proc, /tmp, home dir, masks, pivot).
+    // 7. Closure-lock (§7.11.4c): lock the executable closure as **read-only mounts** — Landlock
+    //    rights are additive (the `/` write grant cannot be subtracted at `/usr`), so the lock is a
+    //    mount, robust against the persona workload (no `CAP_SYS_ADMIN` to remount, `mount`
+    //    seccomp-blocked). The `writable` carve-outs bind FIRST (a fresh RW bind of the writable
+    //    overlay inode at the deeper mountpoint), so a later read-only remount of the enclosing
+    //    `readonly` path does not touch them — the deeper mount serves its own subtree.
+    for w in &img.writable {
+        let target = under(w);
+        if target.exists() {
+            mount::bind(&target, &target, false).map_err(|e| {
+                io::Error::new(e.kind(), format!("writable carve-out {}: {e}", w.display()))
+            })?;
+        }
+    }
+    for ro in &img.readonly {
+        let target = under(ro);
+        if target.exists() {
+            mount::bind(&target, &target, true)
+                .and_then(|()| mount::remount_readonly(&target))
+                .map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("closure-lock ro mount {}: {e}", ro.display()),
+                    )
+                })?;
+        }
+    }
+
+    // 8. The seal tail (constructed /dev, binderfs, /proc, /tmp, home dir, masks, pivot).
     seal_view_tail(view, &root)
 }
 

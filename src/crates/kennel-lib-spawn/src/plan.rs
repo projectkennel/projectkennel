@@ -448,6 +448,15 @@ pub struct ImageRoot {
     /// The managed `(upper, work)` dirs under the store entry — `Some` iff `persistence` is
     /// `Persist`. Filled (and validated/created) by kenneld; `None` for `Discard`/`Readonly`.
     pub store_upper: Option<(PathBuf, PathBuf)>,
+    /// Closure-lock (§7.11.4c): rootfs paths made **read-only mounts** over the merged root, so a
+    /// write fails `EROFS`. Landlock rights are additive (a broad `/` write cannot be subtracted
+    /// at `/usr`), so the executable closure is locked at the *mount* layer instead — robust
+    /// because the persona workload holds no `CAP_SYS_ADMIN` to remount and `mount` is
+    /// seccomp-blocked. `["/"]` makes the whole tree immutable.
+    pub readonly: Vec<PathBuf>,
+    /// Closure-lock holes (§7.11.4c): rootfs paths remounted **read-write** on top of a `readonly`
+    /// ancestor (longest-prefix wins by mount nesting), carving a writable hole back out.
+    pub writable: Vec<PathBuf>,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -972,27 +981,18 @@ impl Plan {
         // The view-root grant. For a constructed view: READ_DIR on `/` only (`ls /`; the
         // top-level entries are not sensitive and their contents stay separately gated).
         //
-        // For an OCI image root: the **closure-lock** base (§7.11.4c). The unprivileged `oci
-        // build` flattens every image inode to the one persona uid, erasing every intra-image DAC
-        // boundary — so the flattened rootfs is read+write+execute by default (honest labelling:
-        // the flatten made DAC vacuous, there is no boundary to assert on an unlisted path). The
-        // build-derived `[rootfs].readonly` set then re-imposes the executable-closure boundary as
-        // read+execute (no write), and `[rootfs].writable` carves holes back; Landlock's
-        // longest-prefix-wins gives the layering. This holds against in-namespace root (a root
-        // entrypoint's `CAP_DAC_OVERRIDE` would defeat a DAC scheme, but not Landlock). The
-        // constructed mounts (`/tmp`, the persona `/home`, `/dev`) keep their own more-specific
-        // write grants above this base, so `readonly = ["/"]` does not strand them.
+        // For an OCI image root: the substrate base. The unprivileged `oci build` flattens every
+        // image inode to the one persona uid, so the flattened rootfs is read+write+execute by
+        // default (the flatten made DAC vacuous; there is no boundary to assert on an unlisted
+        // path). Landlock grants the broad writable substrate here — `/` read+write+execute — and
+        // the **closure-lock is enforced at the mount layer** (`[rootfs].readonly` → read-only
+        // mounts in the construction child, §7.11.4c), because Landlock rights are additive: a `/`
+        // write cannot be subtracted at `/usr`. Read-only `[fs.read]` binds and the T2.8 masks are
+        // likewise read-only *mounts*, so this broad Landlock grant does not make them writable.
         if policy.rootfs.path.is_empty() {
             landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
         } else {
-            let rw_x = write_access() | AccessFs::EXECUTE;
-            landlock_fs.push((PathBuf::from("/"), rw_x));
-            for ro in &policy.rootfs.readonly {
-                landlock_fs.push((glob_root(ro), read_access(true)));
-            }
-            for w in &policy.rootfs.writable {
-                landlock_fs.push((glob_root(w), rw_x));
-            }
+            landlock_fs.push((PathBuf::from("/"), write_access() | AccessFs::EXECUTE));
         }
 
         // Binder IPC (07-1/02-4): the binder bus is the universal control plane — every
@@ -1048,6 +1048,20 @@ impl Plan {
                 image: PathBuf::from(&policy.rootfs.path),
                 persistence: Persistence::from_settled(&policy.rootfs.persistence),
                 store_upper: None,
+                // Closure-lock paths are enforced as read-only mounts in the construction child
+                // (§7.11.4c) — `glob_root`-stripped so a `/usr/**` entry keys on `/usr`.
+                readonly: policy
+                    .rootfs
+                    .readonly
+                    .iter()
+                    .map(|p| glob_root(p))
+                    .collect(),
+                writable: policy
+                    .rootfs
+                    .writable
+                    .iter()
+                    .map(|p| glob_root(p))
+                    .collect(),
             }),
         });
 

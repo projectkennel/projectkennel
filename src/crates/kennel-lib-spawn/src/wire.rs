@@ -414,6 +414,14 @@ fn put_view(w: &mut Writer, v: &ShimView) {
                     w.path(work);
                 }
             }
+            w.count(img.readonly.len());
+            for p in &img.readonly {
+                w.path(p);
+            }
+            w.count(img.writable.len());
+            for p in &img.writable {
+                w.path(p);
+            }
         }
     }
 }
@@ -584,10 +592,20 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         } else {
             None
         };
+        let mut readonly = Vec::new();
+        for _ in 0..r.count()? {
+            readonly.push(r.path()?);
+        }
+        let mut writable = Vec::new();
+        for _ in 0..r.count()? {
+            writable.push(r.path()?);
+        }
         Some(ImageRoot {
             image,
             persistence,
             store_upper,
+            readonly,
+            writable,
         })
     } else {
         None
@@ -1039,6 +1057,8 @@ mod tests {
                         PathBuf::from("/home/op/.local/share/kennel/images/app/upper"),
                         PathBuf::from("/home/op/.local/share/kennel/images/app/work"),
                     )),
+                    readonly: vec![PathBuf::from("/usr"), PathBuf::from("/lib")],
+                    writable: vec![PathBuf::from("/usr/lib/python3.12")],
                 }),
             }),
             new_root: Some(PathBuf::from("/run/user/1000/kennel/root-7")),
