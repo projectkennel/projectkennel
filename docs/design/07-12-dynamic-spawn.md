@@ -2,8 +2,8 @@
 
 > **A confined workload can ask `kenneld` to spawn a constrained, ephemeral sibling kennel and
 > hand it a stdio channel — without authoring policy, and without `kenneld` entering the byte
-> path.** The workload names an operator-signed template and supplies operator-constrained
-> variables; `kenneld` instantiates it in memory, passes the file descriptors across the `SPAWN`
+> path.** The workload names an operator-signed template and writes only its operator-declared
+> mutable fields; `kenneld` instantiates it in memory, passes the file descriptors across the `SPAWN`
 > transaction, and steps out. MCP rides the channel as opaque JSON-RPC; Kennel neither frames nor
 > parses it. The spawned kennel's lifecycle is coupled to the requester's binder session and reaped
 > on its death. Spawning is a loud, operator-declared capability (T3.9). The concrete shape — the
@@ -25,8 +25,8 @@ that keeps `kenneld` out of it (§7.12.5), and the trust the operator declares w
 ## 7.12.1 Request, don't author
 
 The load-bearing rule, and the one the rest of the chapter rests on: **a workload cannot introduce
-policy at runtime.** It can only *name* an operator-signed template and supply a constrained set of
-*variables*. The template was signed when the operator installed it into the trust store; the
+policy at runtime.** It can only *name* an operator-signed template and write the fields that template's
+manifest declares mutable. The template was signed when the operator installed it into the trust store; the
 agent's `SPAWN` is a reference to capability the operator already consented to, not a new grant.
 
 This is why dynamic spawning does not weaken the signature model the way an in-RAM "build a child
@@ -34,8 +34,8 @@ policy on the fly" path would. No new policy is authored, so no new signature is
 signature was checked at install time, on the template. Ephemerality (the instantiation never
 touches host disk, §7.12.6) and consent (the template is signed) are *separate* properties: the
 first is about leaving no trace, the second about authority, and neither is asked to do the other's
-work. The agent controls exactly one thing — the variable values — and that surface is the entire
-attack surface of a spawn (§7.12.3).
+work. The agent controls exactly one thing — the writes it makes to the template's mutable
+fields — and that surface is the entire attack surface of a spawn (§7.12.3).
 
 Spawning is lateral, as everything in Kennel is. `kenneld` is the spawner; the requesting kennel and
 the spawned kennel are siblings joined by an FD channel and a `kenneld`-brokered lifecycle coupling,
@@ -54,42 +54,79 @@ the way `mode = host` derives T1.6.
 max_instances = 8                 # concurrent ceiling; fork-bomb bound
 
 [[spawn.allow]]
-template = "pure-compute@v2"       # exact, versioned, trust-store template
-vars     = ["workspace_subpath"]   # the variable names the requester may supply
+template = "net-fetch@v1"          # exact, versioned, trust-store template
+# mutable = ["net.allow"]         # optional: sub-scope which of the template's
+                                  # manifest fields this requester may write
+                                  # (default: the template's full manifest)
 ```
 
-The requester names *which* signed templates it may instantiate and *which* variable names it may
-supply. It does not name capabilities — those live in the template. If `pure-compute@v2` fixes
-`[net] mode = "none"`, no `[spawn]` grant and no variable can give the spawned kennel a network: the
-compiler denies any capability the template does not grant, and the agent cannot supply policy to
-add one. The capability floor of every spawn is the signed template's, full stop.
+The requester names *which* signed templates it may instantiate, and optionally
+*which of each template's mutable fields* it may write (§7.12.3). It does not name
+capabilities — those live in the template. If `net-fetch@v1` fixes `[net].mode`
+frozen, no `[spawn]` grant and no mutable-field write can change it: the compiler
+denies any capability the template does not grant, and the agent writes only the
+fields the manifest opens. The capability floor of every spawn is the signed
+template's, full stop.
 
-## 7.12.3 Variables are the attack surface
+## 7.12.3 The mutable-field surface
 
-Once policy authoring is off the table, the *only* agent-controlled input is the variable values,
-and they are therefore where the entire security argument concentrates. An unconstrained variable
-that flows into a template's `[fs]` path is a path-traversal primitive: the agent supplies
-`workspace_subpath = "../../../../etc"`, and the signed template faithfully binds it. The template is
-signed; the *interpolation* is the agent's. "The agent cannot grant network access" can hold while
-"the agent can redirect a filesystem grant" remains open — the same class of breach, one axis over.
+A template is not a constraint over values authored by the agent. It is a **complete, signed,
+runnable policy, plus a declared manifest of which fields an autogen or child step may write.**
+Everything outside the manifest is frozen and inherited verbatim. The spawn request carries the
+agent's writes to the manifest fields and nothing else, and the compiler accepts the candidate
+**iff it differs from the template only within the manifest** — `candidate ∖ manifest == template ∖
+manifest`, any write outside the manifest a hard reject, fail-closed.
 
-So variables carry declared constraints, and the constraint lives in the **template**, which is
-signed and whose author knows what the variable means:
+This inverts the surface from *synthesis* to *selection*, which is the single most useful thing for
+making agent-generated policy tractable. The agent does not author a policy the validator then
+checks; it fills a few labelled, fenced blanks in a sealed document, and the compiler proves it
+filled only the blanks. Membership in a constrained surface is a far smaller and harder-to-fool
+check than satisfaction of a predicate over an open value space, and an LLM cannot squeak a novel
+grant through by finding a value that technically passes — the field it would need to write is
+frozen, not in its write set.
+
+Each manifest field carries its own **bound**; "mutable" means writable *within that bound*, never
+free. A mutable `net.allow` that accepts `0.0.0.0/0` defeats the purpose, so the bound is part of
+the signed declaration. Three bound kinds cover the cases, and they are one mechanism, not three:
 
 ```toml
-# inside pure-compute@v2 (operator-signed)
-[[vars]]
-name  = "workspace_subpath"
-type  = "relpath"                  # relative path; absolute is rejected
-under = "workspace"                # resolved beneath the requester's own workspace root
-                                   # no '..'; resolved with RESOLVE_IN_ROOT at instantiation
+# net-fetch@v1 (operator-signed): a full policy with [net].mode = "constrained" frozen
+# and net.allow empty, plus the manifest naming what may move —
+
+[[mutable]]
+field = "net.allow"          # pool + max: the agent appends, drawn from a fixed pool
+from  = ["10.0.0.0/8", "ghcr.io", "pypi.org"]
+max   = 16
+
+[[mutable]]
+field = "rootfs.writable"    # oneof: the agent picks from an enumerated member list
+oneof = ["/usr/lib/python3.12", "/opt/app/cache"]
+
+[[mutable]]
+field = "fs.workspace"       # predicate: the runtime-relative escape hatch (below)
+type  = "relpath"            # traversal-free, RESOLVE_IN_ROOT at instantiation
+under = "workspace"
 ```
 
-The split is clean: the requester's `[spawn.allow].vars` authorises *which* variable names it
-controls; the template's `[[vars]]` constrains *what values* are legal. `kenneld` validates the
-supplied value against the template's declared constraint at instantiation — typed, traversal-free,
-resolved in-root — which is policy validation in the existing compiler, not a new parser in the TCB.
-A variable with no declared constraint is refused, not passed through; the default is closed.
+The **predicate** kind is the old free-variable case, demoted to what it is — the minority escape
+hatch for a value that genuinely cannot be enumerated or pooled at sign time, such as the agent's
+actual working subpath. It is the loud one: most templates are pure pool/oneof selection and carry
+*zero* agent-authored free text, so the open-value residual (R1, §7.12.9) attaches only to templates
+that declare a predicate field, not to instantiation in general. The recommendation is variants and
+allowlists by default, a predicate field by exception and with justification.
+
+The frozen set is what carries the invariants. The single-leg property (§7.12.2), the resource
+ceilings, and the TTL live in frozen fields — `net.mode`, the absence of an `[fs]` root grant, the
+cgroup limits — so no manifest write can add a trifecta leg, lift a ceiling, or escape the TTL,
+because those fields are not in the agent's write set. Mutability is scoped to the leg-safe degrees
+of freedom by construction: filling `net.allow` extends reach *within* the one leg the template
+already granted, never across to a second. Single-leg is enforced once, at the floor; the manifest
+flexes underneath it.
+
+The unit of mutation is the leaf field (or an explicitly scoped subtree), enforced by the diff, so a
+manifest opening `net.allow` cannot be used to rewrite `net.mode` beside it. The signed artifact is
+*template + manifest*; the requester's `[spawn.allow].mutable` may narrow the manifest further per
+requester (§7.12.2), never widen it.
 
 ## 7.12.4 The capability handoff
 
@@ -100,11 +137,11 @@ a kennel and the FD rides the transaction directly.
 1. The requester creates a `socketpair()` (bidirectional JSON-RPC: a local end it keeps, a remote end
    it will hand over) and a `pipe()` (the spawned kennel's `stderr`, kept separate so unstructured
    error text never corrupts the framed channel — §7.12.5).
-2. It sends a `SPAWN` transaction to `kenneld` naming `pure-compute@v2` and the variable values,
+2. It sends a `SPAWN` transaction to `kenneld` naming the template and its mutable-field writes,
    attaching the socketpair-remote and pipe-write ends as `BINDER_TYPE_FD` objects.
-3. `kenneld` validates the grant and the variables (§7.12.3), resolves the template from the trust
-   store, builds the instantiation in memory, and injects the translated FDs into the spawned
-   kennel's supervision plan.
+3. `kenneld` validates the grant and diffs the candidate against the manifest (§7.12.3), resolves the
+   template from the trust store, builds the instantiation in memory, and injects the translated FDs
+   into the spawned kennel's supervision plan.
 4. `kennel-bin-init` boots the spawned kennel, `dup2`s the injected FDs onto stdin/stdout/stderr, and
    `execve`s the template's entrypoint — for MCP, a stdio JSON-RPC server.
 
@@ -189,11 +226,11 @@ every `[spawn]` grant is a loud, declared, risk-derived capability.
 T3-family residual (workload-class — a workload that instantiates workloads, the sibling of containers
 at T3.8), derived from the `[spawn]` grant the way T1.6 derives from `mode = host`:
 
-- **The variable surface is agent-controlled.** The requester chooses variable *values*; the template
-  constrains them (§7.12.3), and the strength of the boundary is exactly the strength of the template's
-  declared constraints. An under-constrained variable in a signed template is the residual's sharp edge,
-  and the catalogue says so — the operator signing a template that takes variables is signing its
-  constraint declarations as load-bearing.
+- **The mutable-field surface is agent-controlled.** The requester writes the fields the template's
+  manifest opens (§7.12.3), and the strength of the boundary is exactly the strength of the per-field
+  bounds. An under-bounded mutable field in a signed template is the residual's sharp edge — the
+  operator signing a template with a manifest is signing its per-field bounds as load-bearing.
+  Pure pool/oneof manifests carry no agent free text; a predicate field is the loud exception.
 - **Delegated reach is the requester's to compose.** A requester that may spawn a network-capable tool
   and a filesystem-capable tool, and bridge their channels itself, can reconstitute the trifecta across
   two kennels even though no single kennel holds both legs. Kennel bounds each spawned kennel to its
@@ -216,21 +253,22 @@ the tools it is permitted to spawn.
 >
 > *Adversary.* A compromised or prompt-injected spawning workload. It cannot author policy or invent
 > capability — every spawn floors at the signed template (§7.12.1), and the compiler denies any
-> capability the template does not grant. It controls two inputs only: the variable values it supplies,
-> and the composition of the tools it is permitted to spawn.
+> capability the template does not grant. It controls two inputs only: the mutable-field writes it
+> supplies, and the composition of the tools it is permitted to spawn.
 >
 > *Mitigations in place.* Request-don't-author (the capability floor is the signed template, not
-> agent-supplied policy); template variable constraints validated at instantiation — typed,
-> traversal-free, `RESOLVE_IN_ROOT` (§7.12.3); depth-1 by hard rule, refused transitively at install
+> agent-supplied policy); a frozen template plus a mutable-field manifest, the candidate diffed against
+> the template and accepted only if it differs within the manifest, each field within its bound (§7.12.3); depth-1 by hard rule, refused transitively at install
 > (§7.12.8); the `max_instances` ceiling and the double-reaper fate-sharing (§7.12.7); ephemerality,
 > no host persistence (§7.12.6).
 >
 > *Residuals.*
-> - **R1 — variable surface.** The boundary is exactly as strong as the template's declared variable
->   constraints; an under-constrained variable in a signed template that flows into an `[fs]` path or
->   other capability-shaping field is unguarded (a traversal value redirecting a workspace bind is the
->   canonical case). Operator-owned: signing a template that takes variables signs its constraint
->   declarations as load-bearing. Closes to the strength of those declarations, not below.
+> - **R1 — mutable-field surface.** The boundary is exactly as strong as the template's per-field
+>   bounds; an under-bounded mutable field (a `net.allow` whose pool is too wide, a predicate field that
+>   admits traversal) is the residual's edge. Pure pool/oneof manifests reduce this to closed-set
+>   selection — the agent writes no free text; a predicate field is the loud exception that reintroduces
+>   an open value, and the bound (typed, traversal-free, `RESOLVE_IN_ROOT`) is what holds it.
+>   Operator-owned: signing a manifest signs its per-field bounds as load-bearing.
 > - **R2 — delegated composition.** Kennel bounds each spawned kennel to its template but does not
 >   bound what an agent composes across several; an agent permitted to spawn a network-capable tool and
 >   a filesystem-capable tool can bridge their channels and reconstitute the lethal trifecta across two
@@ -259,14 +297,16 @@ that is already served, badly enough to discourage, by an existing verb.
 ## 7.12.11 Roadmap implementation steps
 
 1. `[spawn]` in `schema/policy.toml.schema` and `kennel-lib-compile`, with the `max_instances` ceiling,
-   the `[[spawn.allow]]` template+vars grant, and the T3.9 risk derivation; the compiler refuses, at
-   install time and transitively, any spawn-target template that carries `[spawn]` (depth-1, §7.12.8).
-2. Template `[[vars]]` constraint grammar (`type`, `under`, traversal-free, `RESOLVE_IN_ROOT`) and the
-   instantiation-time validator in the compiler — the §7.12.3 attack surface.
-3. The `SPAWN` transaction verb on Node 0 (`kenneld/src/binder.rs`): grant + variable validation,
+   the `[[spawn.allow]]` template grant (+ optional per-requester `mutable` narrowing), and the T3.9 risk
+   derivation; the compiler refuses, at install time and transitively, any spawn-target template that
+   carries `[spawn]` (depth-1, §7.12.8).
+2. Template `[[mutable]]` manifest grammar (the three bound kinds: pool+`max`, `oneof`, predicate) and
+   the instantiation-time diff validator (`candidate ∖ manifest == template ∖ manifest`, each field within
+   its bound, writes outside the manifest hard-rejected) — the §7.12.3 attack surface.
+3. The `SPAWN` transaction verb on Node 0 (`kenneld/src/binder.rs`): grant + manifest-diff validation,
    in-memory template resolution, FD translation and injection.
 4. `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init` `dup2`s
    them before `execve`.
 5. Binder-session tracking for the hard reaper, and the kill-decrements-`max_instances` accounting.
-6. The T3.9 THREATS entry (variable surface + delegated-composition residuals) and the compliance-table
-   mapping.
+6. The T3.9 THREATS entry (mutable-field surface + delegated-composition residuals) and the
+   compliance-table mapping.

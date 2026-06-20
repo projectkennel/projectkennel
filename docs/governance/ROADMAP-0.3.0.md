@@ -43,9 +43,9 @@ Standing constraints that shape the mix:
   the existing privhelper *factory* (one validated op, then exit); it adds no lifetime-held
   capability.
 - **Request, don't author** (§7.12.1, the load-bearing rule). A workload cannot introduce
-  policy at runtime — it *names* an operator-signed template and supplies *constrained
-  variables*. No new policy is authored, so no new signature is needed; the variable values are
-  the entire agent-controlled attack surface (§7.12.3).
+  policy at runtime — it *names* an operator-signed template and writes only the fields the
+  template's *mutable-field manifest* opens. No new policy is authored, so no new signature is
+  needed; those manifest writes are the entire agent-controlled attack surface (§7.12.3).
 - **Depth-1 is a hard rule** (§7.12.8). A spawn-target template may not carry `[spawn]`,
   refused transitively at install. This is a fork-bomb prohibition, not a deferred feature;
   there is no depth-N roadmap item.
@@ -61,7 +61,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 - **W1 · Promote the dynamic-spawn design + author the architecture contract.** **[dep] M.**
   The §7.12 design chapter is **promoted** into `docs/design/` (this plan's PR). The
   architecture/implementation contract **`02-10-dynamic-spawn.md`** — the `SPAWN` transaction,
-  the FD-injection sequence, the variable-validation point, the double reaper — is written
+  the FD-injection sequence, the manifest-diff validation point, the double reaper — is written
   *as-built* across W6–W8 ([[doc-layering-design-arch-code]]: architecture holds the as-built
   truth, so it grows with the code, not ahead of it). The thesis blockquote in §7.12 already
   points to it.
@@ -72,7 +72,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   (kept in sync by `src/tools/tests/threats-catalogue.sh`), and wire the **derivation**: the
   `[spawn]` grant derives T3.9 in `kennel-lib-policy::risks` the way `mode = host` derives T1.6
   — the grant is the tag, no stored `threats.reinstated` field. Carry both residuals (R1
-  variable surface, R2 delegated composition) and the compliance mapping (NIS2 21(2)(i)
+  mutable-field surface, R2 delegated composition) and the compliance mapping (NIS2 21(2)(i)
   least-privilege + 21(2)(d) supply chain; DORA Art. 9/28). Once it lands, the §7.12.9
   blockquote becomes a cross-reference. Foundational: W3's risk derivation and W6's grant
   validation both reference the catalogued threat.
@@ -81,7 +81,8 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 - **W3 · The `[spawn]` grant + spawn-eligibility rules.** **[dep] L.**
   `[spawn]` in `schema/policy.toml.schema` and `kennel-lib-compile`: the `max_instances`
-  ceiling (fork-bomb bound), the `[[spawn.allow]]` template+vars grant, and the T3.9 risk
+  ceiling (fork-bomb bound), the `[[spawn.allow]]` template grant (+ optional per-requester
+  `mutable` narrowing), and the T3.9 risk
   derivation. The compiler enforces **spawn-eligibility transitively at install time**: a
   template named in any `[spawn.allow]` is refused if it (1) carries `[spawn]` itself (depth-1,
   §7.12.8 — fail-closed before any instantiation can reach it), or (2) fails to declare its own
@@ -89,14 +90,16 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   its mutable-field manifest. *Instantiation is a manifest diff, not value synthesis.* All
   compiler-side — out of `cargo tree -p kenneld`.
 
-- **W4 · Template `[[vars]]` constraint grammar + instantiation-time validator.** **[dep] M.**
-  The §7.12.3 attack surface. The template (signed, author knows what the variable means)
-  declares each variable's constraint (`type`, `under`, traversal-free, resolved with
-  `RESOLVE_IN_ROOT` at instantiation); `[spawn.allow].vars` authorises *which* names the
-  requester may supply. `kenneld` validates the supplied value against the template's declared
-  constraint at instantiation — typed, traversal-free, resolved in-root: policy validation in
-  the existing compiler, **not a new parser in the TCB**. A variable with no declared
-  constraint is refused, not passed through (default-closed).
+- **W4 · Template `[[mutable]]` manifest grammar + instantiation-time diff validator.** **[dep] M.**
+  The §7.12.3 attack surface — *selection, not synthesis*. The signed template is a complete
+  runnable policy plus a `[[mutable]]` manifest naming which leaf fields may move, each with a
+  **bound**: pool (`from` + `max` — append from a fixed set), `oneof` (pick from an enumerated
+  list), or `predicate` (the loud free-value escape hatch — `type`/`under`, traversal-free,
+  `RESOLVE_IN_ROOT`). `kenneld` accepts the candidate **iff `candidate ∖ manifest == template ∖
+  manifest`** and each manifest write is within its bound; any write outside the manifest is a hard
+  reject (fail-closed). Frozen fields (single-leg `net.mode`, ceilings, TTL) are not in the agent's
+  write set, so no write can add a trifecta leg. Policy validation in the existing compiler — **not
+  a new parser in the TCB**.
 
 - **W5 · Signed single-leg template set + per-template tests.** **[dep] M.**
   A small Kennel-shipped set of spawn templates, each holding **at most one** trifecta leg, so
@@ -116,14 +119,17 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 ### Thrust 3 — Spawn runtime path (daemon, binder, init)
 
 - **W6 · The `SPAWN` transaction verb on Node 0.** **[dep] L.** The keystone.
-  In `kenneld/src/binder.rs`: grant + variable validation (W3/W4), in-memory template
+  In `kenneld/src/binder.rs`: grant + manifest-diff validation (W3/W4), in-memory template
   resolution from the trust store, FD translation, and injection into the spawned kennel's
   supervision plan. The requester provisions the channel (`socketpair()` for the JSON-RPC, a
   separate `pipe()` for the spawned kennel's `stderr` so unstructured error text never corrupts
   the framed channel) and attaches the remote ends as `BINDER_TYPE_FD` objects; `kenneld`
-  injects the translated FDs. The daemon mounts nothing beyond the template's own view, parses
-  no JSON, routes no traffic — the FD-passing safety verdict ([[binder-fd-passing-safety-verdict]])
-  must hold (fds flow *out* of the TCB only).
+  injects the translated FDs. The requester mints the channel and passes the remote ends *in* —
+  kenneld accepts inbound fds for `SPAWN` only, a scoped, bounded relaxation of the
+  [[binder-fd-passing-safety-verdict]] injection-blocked stance (02-10 carries the safety argument:
+  arity-2, opaque conduits the daemon never dereferences, blast radius confined to the requester's
+  own spawn). The daemon mounts nothing beyond the template's own view, parses no JSON, routes no
+  traffic.
 
 - **W7 · Injected-stdio supervision + `kennel-bin-init` dup2.** **[dep] M.**
   `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init`
@@ -230,7 +236,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 1. **Design lock first — W1 (promote design, this PR) + W2 (T3.9 catalogue).** W3's risk
    derivation and W6's grant validation both reference the catalogued threat and the settled
-   transaction shape; settle the remaining open design questions (variable-grammar defaults,
+   transaction shape; settle the remaining open design questions (manifest-grammar defaults,
    reaper accounting, `max_instances` default) in `02-10` before W6 builds.
 2. **Spawn policy surface — W3 → W4 → W5.** Compiler-only, out of the TCB, fully testable
    without the daemon; lands the schema both the templates and the runtime consume. W5 needs
@@ -251,8 +257,9 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 ## Exit criteria
 
 0.3.0 ships when: dynamic spawn is built end-to-end (W3–W8) and proven by a policy-suite case
-([[policy-test-suite-is-the-e2e]]) exercising request-don't-author, variable-constraint
-enforcement, the depth-1 install-time refusal, the double reaper, and the `max_instances`
+([[policy-test-suite-is-the-e2e]]) exercising request-don't-author, manifest-diff enforcement
+(writes confined to the declared mutable fields, each within its bound), the depth-1 install-time
+refusal, the double reaper, and the `max_instances`
 ceiling; T3.9 is catalogued and risk-derived (W2); the single-leg template set is signed and
 tested (W5); `02-10-dynamic-spawn.md` is written as-built (W1); per-kennel address provisioning
 is gated on inbound bind (W9); the latency harness reports the five-boundary spawn profile and
@@ -260,15 +267,15 @@ the teardown span (W10); X11 is removed and the ABI4/BPF decision is recorded (W
 spawn-surface red-team pass is complete with the R2 composition residual explicitly
 accepted-and-tagged (W19); and the **complete spawn/MCP agent-to-worker surface ships** — the
 live-topology surface and the MCP interposer included (W20/W21), nothing in the set fenced or
-deferred. CHANGELOG records every stable-surface change — the `[spawn]` / `[[vars]]` policy
+deferred. CHANGELOG records every stable-surface change — the `[spawn]` / `[[mutable]]` policy
 schema, any CLI surface, the `SPAWN` IPC verb, and the T3.9 threat-catalogue addition — per
 CODING-STANDARDS §13/§14.
 
 ## Decisions taken (2026-06-20)
 
-1. **Request, don't author.** A workload names a signed template and supplies constrained
-   variables; it cannot introduce policy at runtime (§7.12.1). The capability floor of every
-   spawn is the signed template's, full stop.
+1. **Request, don't author.** A workload names a signed template and writes only the fields its
+   `[[mutable]]` manifest opens; it cannot introduce policy at runtime (§7.12.1). The capability
+   floor of every spawn is the signed template's, full stop.
 2. **Depth-1 by hard rule, refused transitively at install** (§7.12.8). Not a deferred feature;
    there is no depth-N roadmap item.
 3. **Kennel does not understand MCP** (§7.12.5). The `SPAWN`/FD primitive is a generic
