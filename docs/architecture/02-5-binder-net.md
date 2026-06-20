@@ -10,8 +10,9 @@ the relationship to the existing `host-netproxy` crate.
 > **Status: largely built.** The core network subsystem is as-built: the four modes
 > (`none`/`constrained`/`unconstrained`/`host`), the per-kennel net-ns + loopback alias, the
 > socketpair conduit, the `CONNECT_INET` egress path (`facade-socks5` → node 0 → kenneld
-> resolve/pin → `host-netproxy` dumb dialer), and the `BIND_INET` inbound host-side mirror
-> (`host-inetd` + `facade-client`, pull-based — see §The host-side mirror and `BIND`). What remains
+> resolve/pin → `host-netproxy` dumb dialer), and the inbound host-side mirror
+> (`host-inetd` + `facade-client`, built pull-based; the chosen design is **push** —
+> see §The host-side mirror and `BIND`). What remains
 > roadmap is the **cross-instance / inter-kennel relay** (one kennel reaching another kennel's
 > services through kenneld) and `SpawnKennel`; those legs still read "kenneld is designed to do X".
 
@@ -231,10 +232,16 @@ host-side mirror (observe / expose at the same IP) — BUILT, pull-based:
        ▼  bytes: external → accepted → host_end⇄kennel_end → facade-client → listener
 ```
 
-> **Pull-based (built), not the earlier push/callback sketch.** kenneld makes no inbound policy
-> decision (the `bind4`/`6` ACL already gated the bind) and the `BIND_INET` handler never parks a
-> looper — the unbounded accept wait is in a per-port reader thread, off the binder pool. See
-> [`07-5-network.md`](../design/07-5-network.md) §7.5.7.
+> **As-built is pull; the chosen design is push.** The built path polls (`facade-client` →
+> `BIND_INET` → conduit-or-`AGAIN`); kenneld makes no inbound policy decision (the `bind4`/`6` ACL
+> already gated the bind) and the handler never parks a looper — the unbounded accept wait is in a
+> per-port reader thread, off the binder pool. The **push** model is now the chosen design
+> ([`07-5-network.md`](../design/07-5-network.md) §7.5.7): the facade registers a mirror node and
+> sleeps, kenneld pushes a one-way `DELIVER_INET` on accept (the per-port queue above becomes the
+> bounce buffer), eliminating pull's idle-poll CPU + delivery latency. It reverses the
+> no-callback-node property knowingly — for inbound, kenneld→kennel is the data direction — with
+> three guards (death-notify lifecycle, one-way + queue bounce, port-gated registration). This
+> section reconciles to push when that delta lands.
 
 ---
 
