@@ -240,8 +240,11 @@ entry, two verbs act on the managed upper without reconstructing anything:
   managed upper exists).
 - **`kennel oci update <name> -- <new-image-ref>`** replaces the assured layer: fetch and unpack the
   new image by digest through the vetted builder path, swap `rootfs/` + `config.json` + `digest`,
-  bump `[rootfs].image`, and **re-derive the closure lock** from the new image (§7.11.4c). Because the
-  run policy was signed against the old digest, update **clears the signature** and leaves the entry
+  bump `[rootfs].image`, and **re-derive the *base* closure lock** from the new image while
+  **preserving the operator's hand-added carve-outs**, surfacing the diff at re-sign (§7.11.4c, and
+  `02-9` for the rule) — so a hand-tuned lock is never silently regressed under a cleared signature.
+  Because the run policy was signed against the old digest, update **clears the signature** and leaves
+  the entry
   in the "operator reviews and re-signs" state a fresh build does — it never auto-signs, because a
   fetch silently changing what a signed policy authorises is exactly what the signature exists to
   prevent. The managed upper is **discarded by default** (an upper layered over the old image carries
