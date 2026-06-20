@@ -199,6 +199,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         env: kennel_lib_policy::EnvRuntime::default(),
         ulimits: kennel_lib_policy::UlimitsRuntime::default(),
         workload: kennel_lib_policy::WorkloadRuntime::default(),
+        rootfs: kennel_lib_policy::settled::RootfsRuntime::default(),
     }
 }
 

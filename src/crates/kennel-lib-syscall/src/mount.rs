@@ -140,6 +140,43 @@ pub fn mount_tmpfs(
     .map_err(map_err)
 }
 
+/// Mount an `overlay` filesystem at `target` with `nosuid,nodev`.
+///
+/// `lower` (read-only) shows through, every write lands in `upper`, with `work` as
+/// overlayfs's scratch (same filesystem as `upper`, must be empty).
+///
+/// Used by the OCI substrate root (§7.11): the unpacked image is the inert
+/// `lower`, an ephemeral `tmpfs` is the `upper`, so the image is never written and
+/// the integrity-ladder hash/verity is never invalidated by the runner's own
+/// writes. overlayfs is unprivileged-userns-mountable (kernel ≥ 5.11), so this
+/// mounts in the kennel's own userns with no real privilege.
+///
+/// The three paths flow into overlayfs's comma-separated option string, so a path
+/// containing a literal `,` or `:` would split an option — callers pass only
+/// kennel-runtime (`$XDG_RUNTIME_DIR`) and validated-name store paths, neither of
+/// which carries those bytes.
+///
+/// # Errors
+///
+/// Returns the OS error if the mount fails (e.g. `work` non-empty, `upper`/`work`
+/// on different filesystems, or the kernel lacks unprivileged overlay support).
+pub fn mount_overlay(lower: &Path, upper: &Path, work: &Path, target: &Path) -> io::Result<()> {
+    let data = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lower.display(),
+        upper.display(),
+        work.display()
+    );
+    nix::mount::mount(
+        Some("overlay"),
+        target,
+        Some("overlay"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some(data.as_str()),
+    )
+    .map_err(map_err)
+}
+
 /// `f_type` of a `bpf` filesystem (`BPF_FS_MAGIC`, `<linux/magic.h>`), as the
 /// `statfs` `FsType` newtype (its inner integer type varies by platform, so we
 /// let the literal infer into it rather than casting).

@@ -398,6 +398,14 @@ pub struct ShimView {
     /// (a `revert` baseline / diff source) nor write into — or create — the host store. Empty
     /// when `[trust].manifest = false` or there are no writable binds.
     pub mask_dir_paths: Vec<PathBuf>,
+    /// OCI substrate root (§7.11 / T3.8): the read-only unpacked image `rootfs/` to
+    /// boot as the kennel root, used as the **`overlay` lowerdir** with an ephemeral
+    /// `tmpfs` upper — so the image is never written and the rest of the view
+    /// (binds, `/etc` hooks, `/dev`, `/proc`, `/tmp`, home) layers on top. `None` is
+    /// the ordinary constructed view (a fresh `tmpfs` new-root). When `Some`, the
+    /// host system closure is *not* mirrored (the image carries its own `/usr`
+    /// layout) and `/etc` is seeded from the image, not synthesised.
+    pub image_lower: Option<PathBuf>,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -969,6 +977,11 @@ impl Plan {
             binder: true,
             mask_paths,
             mask_dir_paths,
+            // OCI-model policy (§7.11): a non-empty `[rootfs].path` boots the image as
+            // the overlay lowerdir. The translate step has already subst-resolved it to
+            // an absolute host path; empty means an ordinary constructed view.
+            image_lower: (!policy.rootfs.path.is_empty())
+                .then(|| PathBuf::from(&policy.rootfs.path)),
         });
 
         // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the

@@ -344,18 +344,22 @@ never in `cargo tree -p kenneld`.
   `AT_SECURE` hole. No daemon code; movable now.
 
 - **W18 · OCI daemon spawn-path branch.** *(→ `02-9-oci.md` §daemon, [[spawn-userns-owner-yama]])*
-  **M. Sign-off given (2026-06-20).** `[rootfs]` → `Spec` → `Plan.new_root` set to the image tree;
-  the [`build_view_and_pivot`](../../src/crates/kennel-lib-spawn/src/lib.rs) branch (no tmpfs
-  scaffold, no merged-usr mirror, the targeted `/etc` tmpfs overlay with verbatim-symlink seed-copy
-  + unlink-replace + ro-bind); in-root entrypoint resolution (`openat2(RESOLVE_IN_ROOT)` + fexecve);
-  and the `policy.image == store/digest` equality check. Bounded — `new_root` plumbing already
-  exists; this is its OCI branch. Proven by a policy-suite case ([[policy-test-suite-is-the-e2e]]).
+  **M. Sign-off given 2026-06-20; producer + consumer BUILT (clippy/tests green).** `[rootfs]` →
+  `RootfsRuntime` (signed settled policy) → `ShimView.image_lower`; the
+  [`build_view_and_pivot`](../../src/crates/kennel-lib-spawn/src/lib.rs) **overlay** head (image as
+  read-only lowerdir, ephemeral tmpfs upper — image never written) + shared `seal_view_tail`; no
+  merged-usr mirror; the image-seeded `/etc` (Kennel's hooks unlink-then-create on top); `mount_overlay`
+  in `kennel-lib-syscall`. In-root resolution is inherent to the post-pivot launcher `execve`; the
+  `image == store/digest` check rides the runner (W17b), not the daemon. **Remaining:** the
+  policy-suite e2e case that boots a real image ([[policy-test-suite-is-the-e2e]]).
 
 - **W19 · OCI integrity ladder (opt-in, behind the floor).** *(→ §7.11.8)* **M.** Rung 1
   (content-addressed store entry, verified before pivot — record-and-verify, the entry keeps its
   `<name>` key) and Rung 2 (fs-verity over `rootfs/` + `config.json`). Opt-in so the operator who
   needs at-rest tamper-evidence pays for it; **may slip to 0.3** (the digest-pinned floor is the
-  0.2.0 minimum).
+  0.2.0 minimum). The overlay root (W18) is also the natural seam for a future **persistent run
+  layer** — `base + image (lower) + persistent-or-tmpfs (upper)` — swapping the ephemeral upper for
+  a retained one per `[fs.home].persist`-style opt-in; noted, not scheduled.
 
 ## Dropped / deferred (with reasons)
 

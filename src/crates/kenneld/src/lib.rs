@@ -925,15 +925,21 @@ fn bring_up<P: Privileged + Sync>(
     //     read-only — distro content, no host specifics), and hand the seal the
     //     new-root staging dir to pivot_root into. Without a view (or staging) the
     //     seal keeps the in-place fallback.
+    // An OCI substrate view (§7.11) seeds its own `/etc` from the image, so the
+    // host TLS/linker subtrees must not be bound over it; everything else (the ssh
+    // dialer, the HOME env) applies the same.
+    let oci_view = plan.view.as_ref().is_some_and(|v| v.image_lower.is_some());
     if view_root.is_some() {
         if let Some(view) = plan.view.as_mut() {
-            for sub in crate::etc::essential_etc_subtrees() {
-                view.binds.push(kennel_lib_spawn::BindMount {
-                    source: sub.clone(),
-                    target: sub,
-                    writable: false,
-                    exclusive: false,
-                });
+            if !oci_view {
+                for sub in crate::etc::essential_etc_subtrees() {
+                    view.binds.push(kennel_lib_spawn::BindMount {
+                        source: sub.clone(),
+                        target: sub,
+                        writable: false,
+                        exclusive: false,
+                    });
+                }
             }
             // Bind the ssh binder-dialer in at its own path (read-only) so the synthetic
             // ssh config's ProxyCommand can exec it.

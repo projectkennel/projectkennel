@@ -325,6 +325,13 @@ pub fn build_view_and_pivot(
 ) -> io::Result<()> {
     use kennel_lib_syscall::mount;
 
+    // OCI substrate root (§7.11 / T3.8): boot the read-only image as an overlay
+    // lowerdir instead of a constructed tmpfs. Distinct head (no host-closure
+    // mirror, image-seeded /etc), shared seal tail.
+    if let Some(image) = &view.image_lower {
+        return build_image_view_and_pivot(view, new_root, image, file_binds);
+    }
+
     // Map an absolute in-kennel path to its staging location under `new_root`.
     let under = |abs: &Path| new_root.join(abs.strip_prefix("/").unwrap_or(abs));
 
@@ -373,6 +380,89 @@ pub fn build_view_and_pivot(
         }
         std::fs::copy(source, &dest)?;
     }
+
+    // 4–7. The seal tail (constructed /dev, binderfs, /proc, /tmp, home, masks, pivot).
+    seal_view_tail(view, new_root)
+}
+
+/// The OCI substrate variant of [`build_view_and_pivot`] (§7.11 / T3.8): the
+/// read-only image `rootfs/` is the `overlay` lowerdir and an ephemeral `tmpfs`
+/// (under the kenneld-provided `staging` dir) is the upper, so **nothing is written
+/// to the image** — the integrity-ladder hash/verity is never invalidated by the
+/// runner's own writes, and `<store>/<name>/rootfs/` is shared read-only across runs.
+///
+/// Two deliberate departures from the constructed view:
+/// - **No host-closure mirror.** The merged-usr symlink mirror is skipped — the image
+///   carries its own `/usr` layout (it may be musl/busybox, not the host's).
+/// - **Image-seeded /etc.** The image's `/etc` shows through the overlay; rather than
+///   synthesising `/etc`, only Kennel's network/hostname/uid hooks (`file_binds`) are
+///   written on top, **unlink-then-create** so a crafted image symlink (e.g.
+///   `resolv.conf → ../../<host>`) is replaced rather than followed, and the write
+///   lands in the overlay upper (the image's own `/etc` inode is untouched).
+fn build_image_view_and_pivot(
+    view: &ShimView,
+    staging: &Path,
+    image: &Path,
+    file_binds: &[(PathBuf, PathBuf)],
+) -> io::Result<()> {
+    use kennel_lib_syscall::mount;
+
+    // 1. A tmpfs backing under the kenneld-provided staging dir holds the overlay's
+    //    ephemeral upper + work, plus the `merged` mountpoint we build into and pivot to.
+    mount::mount_tmpfs(staging, None, Some("0755"), false).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("mount tmpfs overlay backing {}: {e}", staging.display()),
+        )
+    })?;
+    let upper = staging.join("upper");
+    let work = staging.join("work");
+    let root = staging.join("merged");
+    for d in [&upper, &work, &root] {
+        std::fs::create_dir_all(d)?;
+    }
+
+    // 2. The overlay: the image is the inert read-only lower; every write lands in `upper`.
+    mount::mount_overlay(image, &upper, &work, &root).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("mount overlay (lower {}): {e}", image.display()),
+        )
+    })?;
+
+    // From here `root` is the merged tree we build into and pivot to.
+    let under = |abs: &Path| root.join(abs.strip_prefix("/").unwrap_or(abs));
+
+    // 3. Bind the granted ~/ + host paths in (over the overlay upper).
+    materialize_binds(&view.binds, &under)?;
+
+    // 4. Targeted /etc (§7.2): write only Kennel's hooks over the image's /etc,
+    //    unlink-then-create (never follow an image symlink).
+    let etc = under(Path::new("/etc"));
+    std::fs::create_dir_all(&etc)?;
+    for (source, target) in file_binds {
+        let dest = under(target);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let _ = std::fs::remove_file(&dest);
+        std::fs::copy(source, &dest)?;
+    }
+
+    // 5–8. The seal tail, identical to the constructed view, on the merged root.
+    seal_view_tail(view, &root)
+}
+
+/// The seal tail shared by [`build_view_and_pivot`]'s constructed-tmpfs head and
+/// [`build_image_view_and_pivot`]'s OCI-overlay head: the constructed `/dev`, the
+/// per-kennel binderfs, a fresh `/proc` + private `/tmp`, the shim `$HOME`, the
+/// trust-manifest masks, and finally `pivot_root` into `root` (detaching the old
+/// root). `root` is the about-to-be-pivoted-into mount; every path is keyed beneath it.
+fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
+    use kennel_lib_syscall::mount;
+
+    // Map an absolute in-kennel path to its staging location under `root`.
+    let under = |abs: &Path| root.join(abs.strip_prefix("/").unwrap_or(abs));
 
     // 4. The constructed /dev: a dev-permitting tmpfs with the allowlisted nodes
     //    bind-mounted from the host (same inode, so they function and the Landlock
@@ -437,16 +527,16 @@ pub fn build_view_and_pivot(
     //     read-only file so the workload sees an empty file it cannot read pins from or
     //     forge, while the host IDE reads the untouched real inode. The mask source is a
     //     fresh empty file in the root tmpfs scaffold (never the host manifest).
-    materialize_masks(&view.mask_paths, new_root, &under)?;
+    materialize_masks(&view.mask_paths, root, &under)?;
     // 6c. Mask the blob store directory (`.trust-manifest.d`, §2.3) the same way, but with an
     //     empty read-only *directory* over-mount: `readdir` shows nothing, the workload cannot
     //     read a pinned blob, and a write into — or creation of — the host store is denied.
-    materialize_dir_masks(&view.mask_dir_paths, new_root, &under)?;
+    materialize_dir_masks(&view.mask_dir_paths, root, &under)?;
 
     // 7. pivot_root into the new root, then detach the old one.
     let put_old = under(Path::new("/.kennel-oldroot"));
     std::fs::create_dir_all(&put_old)?;
-    mount::pivot_root(new_root, &put_old)?;
+    mount::pivot_root(root, &put_old)?;
     std::env::set_current_dir("/")?;
     mount::unmount_detach(Path::new("/.kennel-oldroot"))?;
     let _ = std::fs::remove_dir(Path::new("/.kennel-oldroot"));
@@ -826,6 +916,7 @@ mod tests {
             env: kennel_lib_policy::EnvRuntime::default(),
             ulimits: kennel_lib_policy::UlimitsRuntime::default(),
             workload: kennel_lib_policy::WorkloadRuntime::default(),
+            rootfs: kennel_lib_policy::settled::RootfsRuntime::default(),
         }
     }
 
