@@ -63,7 +63,7 @@ template = "net-fetch@v1"          # exact, versioned, trust-store template
 The requester names *which* signed templates it may instantiate, and optionally
 *which of each template's mutable fields* it may write (§7.12.3). It does not name
 capabilities — those live in the template. If `net-fetch@v1` fixes `[net].mode`
-frozen, no `[spawn]` grant and no mutable-field write can change it: the compiler
+frozen, no `[spawn]` grant and no mutable-field write can change it: the compiler, at install,
 denies any capability the template does not grant, and the agent writes only the
 fields the manifest opens. The capability floor of every spawn is the signed
 template's, full stop.
@@ -85,11 +85,13 @@ outside the manifest, never waved through because the difference came out empty.
 key is a hard reject, fail-closed. And because a spawn target is signed *pre-resolved* — its template
 chain folded at sign time — applying the patch is a bounded field-write over an already-parsed policy in
 the daemon's **verify path**, not a compilation: `SPAWN` pulls in no policy *compiler*, only the
-verify-and-load half the daemon already carries.
+verify-and-load half the daemon already carries. The write is a **typed mutation on the already-parsed
+policy, never a TOML re-serialise and re-parse** — that round-trip would smuggle the parser back into the
+daemon, so it is the parser, not only the compiler, that `SPAWN` keeps out.
 
 This inverts the surface from *synthesis* to *selection*, which is the single most useful thing for
 making agent-generated policy tractable. The agent does not author a policy the validator then
-checks; it fills a few labelled, fenced blanks in a sealed document, and the compiler proves it
+checks; it fills a few labelled, fenced blanks in a sealed document, and the patch validator proves it
 filled only the blanks. Membership in a constrained surface is a far smaller and harder-to-fool
 check than satisfaction of a predicate over an open value space, and an LLM cannot squeak a novel
 grant through by finding a value that technically passes — the field it would need to write is
@@ -275,8 +277,9 @@ instantiation safe against a mutable trust store.
 
 ## 7.12.9 Security posture — what holds, what is waived
 
-**What holds.** The spawned kennel receives no ambient authority *from the requester* beyond the channel
-`kenneld` mints and injects; its base capability is the signed template's and nothing more. The requester
+**What holds.** The spawned kennel receives no ambient authority beyond its signed template and the
+channel `kenneld` mints for it — nothing flows from the requester at all; its base capability is the
+signed template's and nothing more. The requester
 holds neither `ptrace` nor signal reach into it. `kenneld` mounts nothing, parses no JSON, and routes no
 bytes for it — it evaluates an ACL, brokers FDs outbound, and mints the channel. The TCB grows by exactly
 that and no more: the bounded `SPAWN` validation in the verify half (patch-apply, bound-check, pin and
@@ -314,8 +317,8 @@ the tools it is permitted to spawn.
 > `threats.reinstated` field; the grant is the tag. Workload-class family, sibling to T3.8.
 >
 > *Adversary.* A compromised or prompt-injected spawning workload. It cannot author policy or invent
-> capability — every spawn floors at the signed template (§7.12.1), and the compiler denies any
-> capability the template does not grant. It controls two inputs only: the mutable-field writes it
+> capability — every spawn floors at the signed template (§7.12.1), and the install-time compiler denies
+> any capability the template does not grant. It controls two inputs only: the mutable-field writes it
 > supplies, and the composition of the tools it is permitted to spawn.
 >
 > *Mitigations in place.* Request-don't-author (the capability floor is the signed template, not

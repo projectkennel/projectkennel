@@ -35,8 +35,8 @@ and no new capability can be invented. Everything in this contract follows from 
   channel and a `kenneld`-brokered lifecycle coupling — not a parent owning a child. The requester
   holds no `ptrace` or signal reach into the spawned process (it runs in its own user/PID namespace
   with a distinct uid), or the isolation the spawn exists to create would be defeated at creation.
-- `kenneld` stays **control-plane**: it evaluates the grant, diffs the candidate against the
-  manifest, resolves the template in memory, and brokers descriptors. It mounts nothing beyond the
+- `kenneld` stays **control-plane**: it evaluates the grant, applies the validated manifest patch,
+  resolves the template in memory, and mints and brokers the channel descriptors. It mounts nothing beyond the
   template's own view, parses no JSON, and routes no traffic — the same discipline as the net-proxy
   data path ([`02-5-binder-net.md`](02-5-binder-net.md)), and the same TCB argument
   ([[tcb-only-shrinks]]): a protocol parser that co-evolves with the MCP specification never sits
@@ -80,7 +80,9 @@ no policy compiler enters `cargo tree -p kenneld` ([[tcb-only-shrinks]]):
 3. **Manifest patch.** The request carries the agent's writes as a **patch** — `(field-path, value)`
    pairs, never a full candidate policy. `kenneld` rejects any field-path not in the
    (per-requester-narrowed) manifest, validates each value against that field's **bound**, and applies
-   the surviving writes onto the resolved template. The invariant established is `candidate ∖ manifest
+   the surviving writes onto the resolved template **as a typed mutation on the deserialised policy
+   struct** — never a re-serialise to TOML and re-parse, which would put the parser back in `kenneld`
+   through the side door and falsify the no-compiler property. The invariant established is `candidate ∖ manifest
    == template ∖ manifest`, but the enforcement is **key-membership on the patch**, not a whole-tree
    set-difference: a write whose value equals a frozen field's is still rejected for naming an
    out-of-manifest field, and no adversarial policy parser or deep tree-diff enters the daemon. Any
