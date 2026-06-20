@@ -3,7 +3,7 @@
 # Inherits: base-confined@v1
 # Threat catalogue: THREATS.md v0.3  (T3.8 — substrate trust)
 #
-# `kennel oci build` runs `skopeo` (pull) + `umoci` (rootless unpack) INSIDE a
+# `kennel oci build` runs `skopeo` (pull) + a no-chown tar extraction INSIDE a
 # kennel under this policy to populate an operator-owned store entry (§7.11.7).
 # The broad egress an image pull needs lives HERE and nowhere else — the egress
 # high-water mark of the OCI flow — so the operator never authors or signs the
@@ -25,14 +25,20 @@ template_name = "oci-fetch"
 template_version = "1"
 
 # --- Execution --------------------------------------------------------------
-# The pull/unpack tools plus the shell that sequences them. Dynamically linked;
-# the compiler resolves each binary's PT_INTERP loader. deny_writable (inherited)
-# keeps them read-only — they live in /usr (inherited fs.read), never a writable path.
+# `skopeo` pulls into an OCI layout; `umoci unpack --rootless` applies the layers into a
+# bundle rootfs (rootless: no chown — the single-uid flatten closure-lock repairs, §7.11.4c);
+# `sh` sequences them. Dynamically linked; the compiler resolves each binary's PT_INTERP loader.
+# deny_writable (inherited) keeps them read-only — they live in /usr (inherited fs.read), never a
+# writable path.
 [exec]
 allow = [
-    "/bin/sh", "/usr/bin/sh",
-    "/usr/bin/skopeo",
+    "/bin/sh", "/usr/bin/sh",                 # the kennel's default shell (exec.shell invariant)
+    "/usr/bin/skopeo", "/usr/local/bin/skopeo",
     "/usr/bin/umoci", "/usr/local/bin/umoci",
+    # coreutils the fetch script sequences (rm/mv/cat); /bin and /usr/bin variants for merged-usr.
+    "/bin/rm", "/usr/bin/rm",
+    "/bin/mv", "/usr/bin/mv",
+    "/bin/cat", "/usr/bin/cat",
 ]
 
 # --- Network: the registry allowlist (the vetted broad-egress step) ----------
@@ -64,10 +70,15 @@ ports = [443]
 protocol = "tcp"
 reason = "Docker Hub — token auth"
 [[net.proxy.allow]]
+name = "production.cloudfront.docker.com"
+ports = [443]
+protocol = "tcp"
+reason = "Docker Hub — blob CDN (AWS CloudFront)"
+[[net.proxy.allow]]
 name = "production.cloudflare.docker.com"
 ports = [443]
 protocol = "tcp"
-reason = "Docker Hub — blob CDN"
+reason = "Docker Hub — blob CDN (Cloudflare, legacy)"
 # GitHub Container Registry (ghcr.io):
 [[net.proxy.allow]]
 name = "ghcr.io"

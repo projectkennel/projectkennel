@@ -505,33 +505,169 @@ fn single_name<'a>(args: &'a [String], verb: &str) -> Result<&'a str, String> {
     }
 }
 
-/// `kennel oci build <name> --image <ref>` — provision a named store entry's metadata: record
-/// the provenance digest and scaffold the run policy the operator completes and signs.
+/// Options for the confined fetch, threaded from `build`'s flags into [`crate::run::launch`].
+struct FetchOpts<'a> {
+    key: Option<&'a str>,
+    template_dirs: Vec<PathBuf>,
+    trust_dirs: Vec<PathBuf>,
+}
+
+/// The fetch+unpack the confined kennel runs (§7.11.7), an `sh -c` program with positional args
+/// `ref entry-path` (`$1`, `$2`).
 ///
-/// The confined fetch+unpack of `rootfs/` + `config.json` (running `skopeo`/`umoci` under the
-/// Kennel-shipped vetted fetch policy, §7.11.7) is W17c; until it lands, this prepares the entry
-/// and reports the remaining step. Populating `rootfs/`/`config.json` out of band (e.g. a test
-/// harness) is supported — the entry layout is the contract.
+/// `skopeo` pulls into a local OCI layout, the image config blob is captured for the launcher
+/// (`skopeo inspect --config`), and `umoci unpack --rootless` applies the layers into a bundle
+/// rootfs — rootless, so every inode lands owned by the persona uid (the single-uid flatten
+/// closure-lock repairs, §7.11.4c). The resolved digest is recorded as a pinned reference.
+/// `--insecure-policy` declines skopeo's own signature policy — Kennel's trust layer is the digest
+/// pin and the run-policy signature, not skopeo's `/etc/containers/policy.json` (absent from the
+/// kennel view). All writes land in the entry dir (the only `fs.write` the per-build leaf grants);
+/// egress is the vetted registry allowlist of `oci-fetch@v1`. Each tool's stderr is captured to
+/// `.fetch.err` so a failure (offline, denied registry, bad ref) surfaces to the operator.
+const FETCH_SCRIPT: &str = r#"
+ref="$1"; entry="$2"
+layout="$entry/.layout"; bundle="$entry/.bundle"; err="$entry/.fetch.err"
+rm -rf "$layout" "$bundle"
+if ! skopeo copy --insecure-policy --digestfile "$entry/.digest" "docker://$ref" "oci:$layout:img" 2>"$err"; then exit 1; fi
+if ! skopeo inspect --insecure-policy --config "oci:$layout:img" >"$entry/config.json" 2>>"$err"; then exit 1; fi
+if ! umoci unpack --rootless --image "$layout:img" "$bundle" 2>>"$err"; then exit 1; fi
+rm -rf "$entry/rootfs"
+mv "$bundle/rootfs" "$entry/rootfs"
+dig=$(cat "$entry/.digest")
+case "$ref" in
+  *@*) printf '%s\n' "$ref" > "$entry/digest" ;;
+  *) printf '%s@%s\n' "$ref" "$dig" > "$entry/digest" ;;
+esac
+rm -rf "$layout" "$bundle" "$entry/.digest" "$err"
+"#;
+
+/// Run the confined image fetch+unpack (§7.11.7): `skopeo` pull + `umoci` rootless unpack into the
+/// store entry, under the vendor-signed `oci-fetch@v1` policy plus a per-build leaf that grants only
+/// `fs.write` to this entry (the vetted broad egress lives in the template, never operator-authored).
+/// Populates `rootfs/`, `config.json`, and the pinned `digest`.
 ///
 /// # Errors
 ///
-/// Returns an error if the name is invalid, `--image` is missing, or the entry cannot be written.
+/// Returns an error if the leaf cannot be staged, the fetch kennel cannot run, or the entry was not
+/// populated (skopeo/umoci failed inside the kennel — needs both on the host).
+fn confined_fetch(
+    name: &str,
+    entry: &StoreEntry,
+    image: &str,
+    opts: &FetchOpts<'_>,
+) -> Result<(), String> {
+    // The entry's path inside the fetch kennel's view. The store lives under the operator's $HOME,
+    // so the `fs.write` grant canonicalises to `~/…` and the spawn remaps `~` to the persona home
+    // (/home/kennel); the script writes that remapped path. A store outside $HOME (XDG_DATA_HOME
+    // elsewhere) is granted and seen at its own absolute path.
+    let home = std::env::var("HOME")
+        .map_err(|_| "HOME is not set; cannot run the confined fetch".to_owned())?;
+    let (fs_write, view) = entry.dir().strip_prefix(&home).map_or_else(
+        |_| {
+            let abs = entry.dir().display().to_string();
+            (abs.clone(), abs)
+        },
+        |rel| {
+            (
+                format!("~/{}", rel.display()),
+                format!("/home/kennel/{}", rel.display()),
+            )
+        },
+    );
+    let leaf = format!(
+        "name = \"{name}-fetch\"\ntemplate_base = \"oci-fetch@v1\"\n[fs]\nwrite = [\"{fs_write}\"]\n"
+    );
+    let leaf_path = std::env::temp_dir().join(format!(
+        "kennel-oci-fetch-{name}-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&leaf_path, leaf).map_err(|e| format!("staging the fetch leaf: {e}"))?;
+
+    let inst = format!("{name}-fetch");
+    let argv = vec![
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        FETCH_SCRIPT.to_owned(),
+        "sh".to_owned(), // $0 for `sh -c`; image/view become $1/$2
+        image.to_owned(),
+        view,
+    ];
+    eprintln!("kennel: fetching `{image}` confined under oci-fetch@v1 …");
+    let res = crate::run::launch(
+        leaf_path.clone(),
+        &inst,
+        &argv,
+        false,
+        opts.key,
+        opts.template_dirs.clone(),
+        opts.trust_dirs.clone(),
+        None,
+        &inst,
+    );
+    let _ = std::fs::remove_file(&leaf_path);
+    // A launch error (compile/daemon) propagates; a fetch failure surfaces as an unpopulated entry
+    // (the workload exit code is folded into the returned ExitCode, so the post-condition is the gate).
+    res?;
+    if !entry.rootfs().is_dir() || !entry.config().exists() || !entry.digest_path().exists() {
+        // The fetch program writes the precise cause to `.fetch.err` (skopeo/unpack stderr); surface it.
+        let errf = entry.dir().join(".fetch.err");
+        let detail = std::fs::read_to_string(&errf).unwrap_or_default();
+        let _ = std::fs::remove_file(&errf);
+        let detail = detail.trim();
+        let hint = if detail.is_empty() {
+            "skopeo/umoci failed inside the kennel (the host needs both, and the registry must be in oci-fetch@v1's allowlist)".to_owned()
+        } else {
+            detail.to_owned()
+        };
+        return Err(format!(
+            "the confined fetch did not populate `{name}` — {hint}"
+        ));
+    }
+    let _ = std::fs::remove_file(entry.dir().join(".fetch.err"));
+    Ok(())
+}
+
+/// `kennel oci build <name> --image <ref>` — fetch an image into a named store entry, confined.
+///
+/// Runs the `skopeo`/`umoci` pull+unpack inside a kennel under the vendor-signed `oci-fetch@v1`
+/// policy (§7.11.7), populating `rootfs/` + `config.json` + the pinned `digest`, then derives the
+/// closure-lock from the image's `config.User` and scaffolds the run policy the operator completes
+/// and signs. `--no-fetch` skips the fetch and records `--image` as-is (out-of-band population, e.g.
+/// a local unpack or a test harness — the entry layout is the contract). `--key`/`--template-dir`/
+/// `--trust-dir` thread to the fetch kennel's in-memory compile.
+///
+/// # Errors
+///
+/// Returns an error if the name is invalid, `--image` is missing, the fetch fails, or the entry
+/// cannot be written.
 pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
     let mut name: Option<&str> = None;
     let mut image: Option<&str> = None;
     let mut force = false;
+    let mut no_fetch = false;
+    let mut key_path: Option<&str> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--image" => image = Some(it.next().ok_or("--image needs a value")?),
             "--force" => force = true,
+            "--no-fetch" => no_fetch = true,
+            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             v if name.is_none() => name = Some(v),
             _ => return Err("unexpected extra argument".to_owned()),
         }
     }
-    let name = name.ok_or("usage: kennel oci build <name> --image <ref> [--force]")?;
-    let image = image.ok_or("`kennel oci build` needs --image <ref> (the image@sha256 to pin)")?;
+    let name = name
+        .ok_or("usage: kennel oci build <name> --image <ref> [--no-fetch] [--force] [--key K]")?;
+    let image =
+        image.ok_or("`kennel oci build` needs --image <ref> (the image[@sha256] to pull)")?;
 
     let store = Store::open()?;
     let entry = store.entry(name)?;
@@ -541,35 +677,48 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
             entry.dir().display()
         ));
     }
-    std::fs::create_dir_all(entry.rootfs())
-        .map_err(|e| format!("creating {}: {e}", entry.rootfs().display()))?;
-    entry.write_digest(image)?;
-    // Closure-lock (§7.11.4c): derive the readonly set from the image's config.User if the
-    // confined fetch already populated config.json (out of band, or once W17c lands). A non-root
-    // image gets the FHS executable closure locked; an all-root image gets nothing. The derived
-    // set goes into the scaffolded policy text, where the operator reviews and signs it.
+    std::fs::create_dir_all(entry.dir())
+        .map_err(|e| format!("creating {}: {e}", entry.dir().display()))?;
+
+    if no_fetch {
+        // Out-of-band population (a local unpack / test harness): record the digest as given.
+        std::fs::create_dir_all(entry.rootfs())
+            .map_err(|e| format!("creating {}: {e}", entry.rootfs().display()))?;
+        entry.write_digest(image)?;
+    } else {
+        let opts = FetchOpts {
+            key: key_path,
+            template_dirs,
+            trust_dirs,
+        };
+        confined_fetch(name, &entry, image, &opts)?;
+    }
+
+    // The scaffold's `[rootfs].image` must equal the recorded digest (the confined fetch resolved
+    // the tag to a pinned `…@sha256:` reference) — `kennel oci run` asserts they match before boot.
+    let recorded = entry.read_digest().unwrap_or_else(|_| image.to_owned());
+    // Closure-lock (§7.11.4c): derive the readonly set from the fetched image's config.User. A
+    // non-root image gets the FHS executable closure locked; an all-root image gets nothing. The
+    // derived set goes into the scaffolded policy, where the operator reviews and signs it.
     let readonly = derive_closure_readonly(read_image_user(&entry.config()).as_deref());
     let policy = entry.policy();
     if !policy.exists() || force {
         std::fs::write(
             &policy,
-            scaffold_policy(name, &entry.rootfs(), image, &readonly),
+            scaffold_policy(name, &entry.rootfs(), &recorded, &readonly),
         )
         .map_err(|e| format!("writing {}: {e}", policy.display()))?;
     }
     eprintln!(
-        "kennel: prepared store entry `{name}` at {}",
+        "kennel: built store entry `{name}` at {}",
         entry.dir().display()
     );
-    eprintln!("  digest: {image}");
+    eprintln!("  digest: {recorded}");
     eprintln!(
         "  policy: {} (complete `reason`, then `kennel policy sign`)",
         policy.display()
     );
-    eprintln!(
-        "  rootfs: {} — populate via the confined fetch (W17c) or a local unpack",
-        entry.rootfs().display()
-    );
+    eprintln!("  rootfs: {}", entry.rootfs().display());
     Ok(std::process::ExitCode::SUCCESS)
 }
 
