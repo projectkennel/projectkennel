@@ -96,10 +96,16 @@ trap cleanup EXIT
 #    already-installed kennel.
 if [ "$DO_INSTALL" = 1 ]; then
     echo "== building release =="
+    # Host-side (dynamic) and in-kennel (static-pie) sets, mirroring install.sh — the in-kennel
+    # binaries (launcher, init, facades) must be static to run inside an arbitrary OCI image root.
+    HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
     cargo build --release --offline --frozen --locked \
-        -p kenneld -p kennel-host-delegate -p kennel-host-dbus \
-        -p kennel-facade -p kennel-bin-init \
+        -p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus \
         || { echo "build failed" >&2; exit 1; }
+    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
+        --target "$HOST_TRIPLE" \
+        -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade \
+        || { echo "static in-kernel build failed" >&2; exit 1; }
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress \
         || { echo "privhelper build failed" >&2; exit 1; }
     echo "== installing (sudo tools/install.sh --no-build) =="

@@ -88,19 +88,37 @@ run() {
 	fi
 }
 
-# The unprivileged binaries kenneld locates via the config (all under libexec).
-USER_BINS="kenneld kennel host-netproxy host-inetd host-dbus facade-socks5 facade-client facade-afunix facade-ssh facade-dbus kennel-akc"
+# Host-side binaries: run in the operator's context where the host libc is present, so they link
+# dynamically. kenneld + the CLI + the host-side delegates (netproxy/inetd/dbus) + the AKC.
+HOST_BINS="kenneld kennel host-netproxy host-inetd host-dbus kennel-akc"
+
+# In-kennel binaries: the seal runs these INSIDE the kennel's root, which for an OCI substrate
+# (§7.11) is an arbitrary image's filesystem — possibly musl, distroless, or scratch with no host
+# `ld.so`/`libc`. A dynamically-linked host binary would fail to load there (`libgcc_s.so.1: cannot
+# open shared object`). So the launcher and the in-kennel facades are built **statically**
+# (glibc `+crt-static` → static-pie, no interpreter, no NEEDED libs) and run in any root. The
+# trusted init `kennel-bin-init` is the same class but installed root-owned (below).
+INKERNEL_BINS="kennel-bin-oci-entry facade-socks5 facade-client facade-afunix facade-ssh facade-dbus"
+
+# The host triple, so the static `--target` build lands in a separate `target/<triple>/release`
+# (specifying `--target` always uses the triple subdir, even when it equals the host default).
+# Derived from `uname` rather than `rustc` so it also resolves under a `sudo` install where the
+# rustup shim is not on root's PATH; a glibc Linux host is always `<arch>-unknown-linux-gnu`.
+HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
+STATIC_RUSTFLAGS="-C target-feature=+crt-static"
 
 build_binaries() {
 	[ "$do_build" -eq 1 ] || { echo "install.sh: --no-build, using target/release"; return 0; }
 	echo "install.sh: building release binaries (offline, frozen, locked)"
-	# -p kenneld builds the kenneld, kennel, and kennel-akc bins; -p kennel-host-delegate builds
-	# host-netproxy + host-inetd; -p kennel-host-dbus builds host-dbus; -p kennel-facade builds all
-	# facade-* bins (socks5/client/afunix/ssh/dbus).
+	# Host-side (dynamic): -p kenneld builds kenneld + kennel-akc; -p kennel-cli the `kennel` CLI;
+	# -p kennel-host-delegate host-netproxy + host-inetd; -p kennel-host-dbus host-dbus.
 	run cargo build --release --offline --frozen --locked \
-		-p kenneld -p kennel-host-delegate -p kennel-host-dbus \
-		-p kennel-facade -p kennel-bin-init
-	# The privhelper needs its BPF feature; build it separately.
+		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus
+	# In-kennel (static-pie): the launcher, the trusted init, and all facade-* bins (kennel-facade).
+	run env RUSTFLAGS="$STATIC_RUSTFLAGS" cargo build --release --offline --frozen --locked \
+		--target "$HOST_TRIPLE" \
+		-p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade
+	# The privhelper needs its BPF feature; build it separately (host-side, dynamic).
 	run cargo build --release --offline --frozen --locked \
 		-p kennel-privhelper --features bpf-egress
 }
@@ -115,11 +133,17 @@ require_root() {
 
 install_binaries() {
 	local rel="$repo_root/target/release"
+	local stat="$repo_root/target/$HOST_TRIPLE/release"
 	run install -d -m 0755 "$libexec"
-	# Unprivileged binaries (mode 0755).
+	# Host-side dynamic binaries (mode 0755) from the default target dir.
 	local b
-	for b in $USER_BINS; do
+	for b in $HOST_BINS; do
 		run install -m 0755 "$rel/$b" "$libexec/$b"
+	done
+	# In-kennel static binaries (mode 0755) from the `+crt-static` target dir — they run inside
+	# an arbitrary image root, so they carry their own libc (no `ld.so` to find).
+	for b in $INKERNEL_BINS; do
+		run install -m 0755 "$stat/$b" "$libexec/$b"
 	done
 	# The privhelper: setuid root (mode 4755, owner root). This is the one
 	# privilege boundary; everything else runs as the user.
@@ -128,8 +152,8 @@ install_binaries() {
 	# The trusted init: the privhelper factory fexecves this as the kennel's uid-0
 	# PID 1, so it is a trust anchor — install it root-owned and not group/other
 	# writable (verify_trusted_init refuses any other owner or a 0o022 bit). It is
-	# NOT setuid: it gains uid 0 only inside the kennel's user namespace.
-	run install -m 0755 -o root -g root "$rel/kennel-bin-init" "$libexec/kennel-bin-init"
+	# NOT setuid: it gains uid 0 only inside the kennel's user namespace. Static (in-kennel).
+	run install -m 0755 -o root -g root "$stat/kennel-bin-init" "$libexec/kennel-bin-init"
 }
 
 install_config() {
