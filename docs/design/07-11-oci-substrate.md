@@ -46,13 +46,17 @@ an operator-owned store. The separation does three things a single overloaded `k
 could not:
 
 - **It partitions the policy grammar by run model.** `[rootfs]` and the substrate-trust grant it
-  carries are valid *only* in an OCI-model policy that `kennel oci run` consumes. `kennel run`
-  rejects a policy containing `[rootfs]`; `kennel oci run` rejects one without it. The two grammars
+  carries are valid *only* in an OCI-model policy that `kennel oci run` consumes. The two grammars
   are **mutually exclusive at the block level**: a normal policy has an optional `[workload]` and
-  never `[rootfs]`; an OCI policy has a mandatory `[rootfs]` and never `[workload]`. The compiler
-  keys the run model off which block is present, so the universal policy grammar that most workloads
-  use never grows a substrate-replacement primitive, and the substrate-trust risk derivation stays
-  local to the OCI model.
+  never `[rootfs]`; an OCI policy has a mandatory `[rootfs]` and never `[workload]`. The split lives
+  in two places, and the distinction matters: the **compiler** validates *structure* — it enforces
+  `[rootfs]` XOR `[workload]`, the required `reason`, and the persistence/closure-lock fields, and it
+  compiles and signs **either** model (it must — an OCI policy has to become a signed artefact like
+  any other), keying the run model off which block is present. The **run-model rejection** is the
+  *verb router's*: `kennel run` refuses a settled policy that carries `[rootfs]`, and `kennel oci run`
+  refuses one without it (and checks the digest). So `kennel policy compile` never rejects `[rootfs]`;
+  the universal policy grammar that most workloads use never grows a substrate-replacement primitive,
+  and the substrate-trust risk derivation stays local to the OCI model.
 - **It removes a per-policy "append argv" knob.** The only reason to append CLI tokens to a pinned
   `argv` would be a generic `kennel run build-oci -- …` shape; with a dedicated verb, "the trailing
   tokens are the image reference" is the meaning of `oci build`, baked into the verb rather than a
@@ -85,6 +89,14 @@ and it runs under a **Kennel-shipped, vetted** fetch policy (`constrained` egres
 allowlist, `fs.write` to the store entry), so the operator never authors or signs the broad-egress
 step. The builder pulls **by digest**; when the reference is a tag it resolves the tag to a digest
 *at build time* and records that digest, so even a tag-built image freezes to a pinned digest.
+
+The unpack is **rootless**: the builder kennel is unprivileged and has no subuid range, so it cannot
+`chown` extracted files to the image's uids — it discards the tarball ownership headers and writes
+every inode as the operator (`umoci unpack --rootless`, or `skopeo` + a no-`chown` tar extraction).
+This is not an incidental detail: it is the *cause* of the single-uid flatten that closure-lock
+exists to repair (§7.11.4c). The builder must therefore never be granted (and cannot acquire) a uid
+map that would let it preserve image ownership — the flatten is structural, and the lock, not DAC,
+is what re-imposes the boundary.
 
 **The runner** (`kennel oci run`) resolves `<name>` to its store entry, verifies the signed run
 policy, asserts the signed `[rootfs].image` equals the recorded `digest`, and hands `kenneld` the
@@ -153,12 +165,15 @@ binaries included**. Absent re-imposition, the OCI substrate is *strictly more p
 same image under Docker*, where the app uid cannot write root-owned `/usr`.
 
 **Closure-lock** restores the one load-bearing boundary the flatten destroyed: the executable surface
-is not self-writable. It is **Landlock**, not a DAC scheme or a read-only bind, because it must hold
-against in-namespace root — an image whose entrypoint runs as root holds `CAP_DAC_OVERRIDE` in its
-own userns, so no DAC check on the overlay stops it writing root-owned `/usr`; Landlock restricts
-in-ns root too. (Single owner also means DAC has nothing left to express, so there is no DAC-based
-alternative to weigh.) The lock is expressed as two `[rootfs]` lists over existing rootfs paths,
-longest-prefix wins:
+is not self-writable. It is **Landlock**, not a DAC scheme, because after the flatten DAC has nothing
+left to deny. The build collapses every inode to the single persona uid, so the workload is the sole
+owner of the entire tree — and an owner may write its own files, or `chmod` them writable first, no
+matter its uid or capabilities. Ownership-based permission is structurally vacuous here; it is not
+that DAC is bypassed but that there is no longer a foreign owner for it to protect. Landlock denies
+by path regardless of owner, so it re-imposes a boundary the uid model can no longer express. This is
+map-independent — it holds whether the workload runs as in-namespace root or the persona uid — which
+is why the lock does not rely on, and is not weakened by, the runtime uid choice (residual C). The
+lock is expressed as two `[rootfs]` lists over existing rootfs paths, longest-prefix wins:
 
 ```toml
 [rootfs]
@@ -240,6 +255,15 @@ kennel* at workload authority, applies `WorkingDir`/`Env`/`Entrypoint`+`Cmd`, an
 real entrypoint. A bug in it is a bug in a confined, unprivileged process holding no capability, no
 `mount`, no `unshare` — contained exactly like the builder's parsers.
 
+The launcher runs *inside the image's filesystem*, which may be musl, distroless, or `scratch` with
+no host `ld.so`/`libc`, so it — like every Kennel binary the seal runs inside a kennel root
+(`kennel-bin-init` and the in-kennel facades) — is **statically linked**; a dynamically-linked host
+binary would fail to load against an alien substrate. The default launcher does a standard `execve`
+of the image entrypoint *from within the root* (it holds nothing to drop and crosses no boundary —
+the pivot already happened): there is no host-side `openat2(RESOLVE_IN_ROOT)` and no TOCTOU fd-pin
+on the image entrypoint, because the OCI model's provenance anchor is the image digest, not a
+per-binary hash (§7.11.7 residual A).
+
 The launcher **always** resolves the entrypoint from the image config; there is no `[workload]` block
 in an OCI policy (`[rootfs]` and `[workload]` are mutually exclusive, §7.11.2), so there is no
 per-binary pin in the OCI model — provenance is anchored on the recorded image digest (§7.11.8), the
@@ -273,28 +297,42 @@ delegated to policy. The exact denylist is the implementation contract (`02-9-oc
 **What holds over an image root.** Every property the confinement limb provides is unchanged,
 because none of it depends on the substrate's provenance: the per-kennel network namespace and its
 egress boundary; brokered crossings over binder; the SOCKS proxy and `[net]` policy; the masked
-identity and the targeted `/etc` overlay that overrides the image's `resolv.conf`/`nsswitch`/
-`hostname`/`passwd`; the constructed `/dev` allowlist; seccomp; the absence of a daemon socket; the
-absence of a nested user namespace. The workload acquires no kernel capability, no `mount`, no
-`unshare`. The TCB is the size it was — the launcher and every image parser run at workload
-authority, not in the daemon.
+identity; the constructed `/dev` allowlist; seccomp; the closure-lock executable boundary
+(§7.11.4c); the absence of a daemon socket; the absence of a nested user namespace. The workload
+acquires no kernel capability, no `mount`, no `unshare`. The TCB is the size it was — the launcher
+and every image parser run at workload authority, not in the daemon.
+
+The targeted `/etc` is **not** in this hard-invariant set: it is a *default*, not a boundary the
+workload cannot touch. The `kennel-etc` lower sets Kennel's `resolv.conf`/`nsswitch`/`hostname`/
+`passwd` over the image's, but `/etc` is writable-through (§7.11.4a) so a workload may copy-up-shadow
+them in its own upper — harmlessly, since enforcement is the netns/BPF/uid-map/Landlock/seccomp
+above, never the file content. It overrides the image; it is not an invariant.
 
 **What the operator waives.** The image supplies its own runtime closure — `ld.so`, libc, the NSS
 modules, everything `argv[0]` loads after `execve`, and its own entrypoint, env, and config. This is
 the substrate-trust residual catalogued as **T3.8**, derived from the `[rootfs]` grant the way T1.6
 is derived from `mode = host` (no `threats.reinstated` field; the shape of the grant is the tag):
 
-- **Provenance, not a per-binary pin.** `argv[0]` is the Kennel-pinned launcher; the image entrypoint
-  it execs is image-chosen and provenance-covered (it came from `image@sha256`) but not separately
-  hashed. There is no per-binary pin in the OCI model — the standard run model's "this exact
-  entrypoint binary" narrows to "this exact image, by digest," and the digest is the whole of the
-  assertion. The dynamic closure stays unpinned.
+- **Provenance, not a per-binary pin — and not a per-invocation one.** `argv[0]` is the Kennel-pinned
+  launcher; the image entrypoint it execs is image-chosen and provenance-covered (it came from
+  `image@sha256`) but not separately hashed. There is no per-binary pin in the OCI model — the
+  standard run model's "this exact entrypoint binary" narrows to "this exact image, by digest," and
+  the digest is the whole of the assertion. The dynamic closure stays unpinned. The signature pins the
+  *substrate*, not the *invocation*: a `kennel oci run … -- <cmd>` override (§7.11.5) changes the
+  command under an unchanged signature, where the standard model's `[workload].argv` *is* signed. So
+  two operators sharing one signed OCI policy can run different commands under an identical signature —
+  the OCI signature attests the image and the policy grants, not the exact command line.
 - **Image `Env` enters the workload, sanitised** (§7.11.6) — declared substrate beneath policy's
   final say.
-- **Image `User` is not honored as a runtime uid** — the userns maps the precise operator identity
-  with no subuid range, so the workload runs as the persona uid; a uid-baked image fails on `EACCES`,
-  not identity. (`config.User` *is* read at build, for the closure-lock decision, §7.11.4c — the same
-  field, a different consumer, no conflict.)
+- **Image `User` is not honored as a runtime uid.** The userns maps a single entry — the host operator
+  identity to one in-namespace uid — with no subuid range, so the workload runs as the persona uid and
+  `config.User` is not applied. The failure this produces is **identity, not permission**: because the
+  build already flattened every inode to the persona uid, the workload owns its whole tree and writes
+  succeed where a real foreign-owned dir would have refused, so there is no ownership `EACCES`. What
+  breaks instead is an image that *assumes* its uid — `gosu 1000`/`su-exec` dropping to a uid the map
+  does not contain, or an `id -u` equality check — which is the same `config.User = 0` reading that
+  costs such images their closure-lock (§7.11.4c). `config.User` is read at build, for the lock
+  decision; the same field, a different consumer, no conflict.
 - **Closure-tampering is closed for a non-root image, by build-derived closure-lock** (§7.11.4c): the
   executable surface (the FHS closure) equals the pinned image throughout the session, enforced by
   Landlock against in-namespace root. For an all-root image there is no lock — but that is the image's
