@@ -827,21 +827,21 @@ pub fn run_kennel<P, L>(
             loaded.unix.sockets.len()
         ));
     }
-    // OCI substrate (§7.11): an `[rootfs]` policy with no explicit argv runs the image's own
-    // entrypoint via the workload-side launcher (`kennel-bin-oci-entry`) — kenneld makes it
-    // argv[0] (with the entry's config.json as argv[1]) and binds both into the view. An
-    // explicit `-- <cmd>` or `[workload].argv` takes the normal in-root path (no launcher).
+    // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
+    // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
+    // launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
+    // binds both into the view; any `kennel oci run … -- <cmd>` tokens follow as a Cmd override
+    // the launcher applies (keeping the image Entrypoint + Env), no policy impact.
     let oci_image = loaded
         .plan
         .view
         .as_ref()
         .is_some_and(|v| v.image_lower.is_some());
-    let oci_launcher_mode = oci_image && req.argv.is_empty() && loaded.workload.argv.is_empty();
     let mut oci_prep = crate::OciPrep::default();
     // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
     // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
     // only here is the policy's workload known. The request wins unless the policy pins it.
-    let (argv, cwd) = if oci_launcher_mode {
+    let (argv, cwd) = if oci_image {
         let Some(launcher) = shared.identity.oci_entry_bin.clone() else {
             return fail(
                 shared,
@@ -864,10 +864,12 @@ pub fn run_kennel<P, L>(
                     .to_owned(),
             );
         }
-        let argv = vec![
+        let mut argv = vec![
             launcher.to_string_lossy().into_owned(),
             crate::OCI_CONFIG_VIEW_PATH.to_owned(),
         ];
+        // The `-- <cmd>` override tokens (if any), passed through as the launcher's Cmd override.
+        argv.extend(req.argv.iter().cloned());
         oci_prep = crate::OciPrep {
             launcher_bin: Some(launcher),
             config_src: req.oci_config.clone(),

@@ -56,18 +56,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_owned());
+    // argv: [config-path] [-- override Cmd tokens...]. kenneld passes the config path as the
+    // launcher's argv[1]; any `kennel oci run … -- <cmd>` tokens follow as a Cmd override.
+    let mut cli = std::env::args().skip(1);
+    let config_path = cli.next().unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_owned());
+    let override_cmd: Vec<String> = cli.collect();
     let cfg = read_config(Path::new(&config_path))?.config;
 
-    // argv = Entrypoint ++ Cmd (OCI semantics); Entrypoint-absent ⇒ Cmd alone.
-    let argv: Vec<String> = cfg
-        .entrypoint
-        .iter()
-        .chain(cfg.cmd.iter())
-        .cloned()
-        .collect();
+    let argv = resolve_argv(&cfg.entrypoint, &cfg.cmd, &override_cmd);
     let Some((prog, rest)) = argv.split_first() else {
         return Err("image config has neither Entrypoint nor Cmd".to_owned());
     };
@@ -89,4 +85,52 @@ fn run() -> Result<(), String> {
 fn read_config(path: &Path) -> Result<ImageConfigBlob, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("parsing {}: {e}", path.display()))
+}
+
+/// Resolve the final argv: `Entrypoint ++ Cmd` per OCI image-spec semantics, with a non-empty
+/// CLI `override_cmd` replacing the image `Cmd` while keeping `Entrypoint` (the
+/// `docker run <image> <cmd>` shape). An absent `Entrypoint` leaves `Cmd`/override as the whole argv.
+fn resolve_argv(entrypoint: &[String], cmd: &[String], override_cmd: &[String]) -> Vec<String> {
+    let effective_cmd = if override_cmd.is_empty() {
+        cmd
+    } else {
+        override_cmd
+    };
+    entrypoint
+        .iter()
+        .chain(effective_cmd.iter())
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod argv_tests {
+    use super::resolve_argv;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn override_replaces_cmd_keeps_entrypoint() {
+        // Entrypoint kept, image Cmd replaced by the override (docker run <img> <cmd>).
+        let got = resolve_argv(
+            &v(&["/entry"]),
+            &v(&["default-arg"]),
+            &v(&["custom", "--flag"]),
+        );
+        assert_eq!(got, v(&["/entry", "custom", "--flag"]));
+    }
+
+    #[test]
+    fn no_override_uses_image_cmd() {
+        let got = resolve_argv(&v(&["/entry"]), &v(&["default-arg"]), &[]);
+        assert_eq!(got, v(&["/entry", "default-arg"]));
+    }
+
+    #[test]
+    fn no_entrypoint_uses_cmd_or_override_alone() {
+        assert_eq!(resolve_argv(&[], &v(&["sh"]), &[]), v(&["sh"]));
+        assert_eq!(resolve_argv(&[], &v(&["sh"]), &v(&["bash"])), v(&["bash"]));
+    }
 }
