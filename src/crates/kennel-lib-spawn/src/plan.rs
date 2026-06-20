@@ -271,13 +271,27 @@ fn dev_access() -> AccessFs {
 }
 
 /// The Landlock access a write-granted path subtree receives: read plus the
-/// mutating rights (create/remove/truncate).
+/// mutating rights (create/remove/truncate, including symlink creation).
+///
+/// `MAKE_SYM` is included: ordinary writable-path work (an unpack, `npm`, a build) creates
+/// symlinks, and Landlock re-evaluates a symlink's *target* against the ruleset on every access,
+/// so a created link cannot reach a path the policy did not grant (a link to `/etc/shadow` resolves
+/// to a denied path). `MAKE_SOCK`/`MAKE_FIFO`/`MAKE_CHAR`/`MAKE_BLOCK` are deliberately omitted —
+/// no writable-path workflow needs to mint those, and device nodes are the constructed `/dev`'s job.
+///
+/// `REFER` is included so a `rename`/`link` *between two directories* within a writable subtree
+/// succeeds (without it Landlock fails such a cross-directory move with `EXDEV` — the
+/// "invalid cross-device link" a temp-then-rename, e.g. skopeo's blob writer or an editor's
+/// atomic save, hits). Landlock's REFER rule still forbids moving a file into a directory with
+/// *broader* rights, so it cannot escalate access across the boundary of a writable subtree.
 fn write_access() -> AccessFs {
     AccessFs::READ_FILE
         | AccessFs::READ_DIR
         | AccessFs::WRITE_FILE
         | AccessFs::MAKE_REG
         | AccessFs::MAKE_DIR
+        | AccessFs::MAKE_SYM
+        | AccessFs::REFER
         | AccessFs::REMOVE_FILE
         | AccessFs::REMOVE_DIR
         | AccessFs::TRUNCATE
