@@ -109,29 +109,100 @@ mountpoint directories so a distroless or scratch image that ships none of `/pro
 `/etc` still boots. The mechanism — the lower-stack order, the assembly, the unprivileged-userns
 overlay floor — is the implementation contract (`02-9-oci.md`).
 
-**Rootfs persistence is a single loud tri-state**, not an operator-chosen writable path. Kennel owns
-the backing location; the operator chooses only *whether* the rootfs persists:
+`/etc` is **writable-through**: the `kennel-etc` lower sets the defaults, a workload may copy-up a
+file into its own upper, and that harms only its own view. Nothing in `/etc` is pinned, because the
+criterion for what to defend is **enforcement is the netns, BPF, uid-map, Landlock, and seccomp —
+never file content**: `resolv.conf`/`hosts`/`nsswitch` are not security-load-bearing (the proxied
+modes have no DNS endpoint to redirect to; `host` mode gates the connect IP in BPF), and
+`passwd`/`group` are persona coherence, self-affecting. A workload rewriting them disarms only
+itself, so they stay writable-through (an image can `useradd` at runtime).
+
+**Rootfs persistence is a single loud binary**, not an operator-chosen writable path. Kennel owns the
+backing location; the operator chooses only *whether* the rootfs persists:
 
 ```toml
 [rootfs]
-persistence = "discard"   # "discard" (default) | "readonly" | "persist"
+persistence = "discard"   # "discard" (default) | "persist"
 ```
 
 - **`discard`** (default) — an ephemeral upper makes the root writable for image compatibility and is
   gone at teardown. Nothing persists to shadow the pinned image, so the integrity story is untouched.
-- **`readonly`** — no upper; the merged root is immutable. The scaffold supplies the mountpoints, so
-  it works on any image. The strictest mode; image runtime writes (e.g. a startup `useradd`) fail.
 - **`persist`** — a Kennel-managed upper under the store entry. This is the **loud** value: it
   accumulates divergence *outside* the integrity ladder (which covers the image layer, not
   lower+upper), and `kennel policy risks` derives that exposure from `persistence = "persist"`,
   surfaced against the `[rootfs]` block's `reason`.
 
-A `persistence = "readonly"` root plus a narrow additive `[fs.write]` bind for the workload's
+There is **always an upper** — whole-tree immutability is `[rootfs].readonly = ["/"]`, a Landlock
+fact (§7.11.4c), not a no-upper mount mode (which dissolves a separate immutable assembly into one
+uniform path). A `readonly = ["/"]` root plus a narrow additive `[fs.write]` bind for the workload's
 writable `/data` is the recommended posture for a long-running workload: the image stays immutable
-and ladder-covered, the writable surface is operator-named, path-scoped, and T2.8-masked, and no
-whole-root layer accumulates divergence. Additive `[fs.write]` binds are orthogonal to the
-persistence axis — a bind is operator-named host content under its existing grant semantics, whereas
-the upper is a Kennel-managed whole-root layer the operator does not name.
+and ladder-covered, the writable surface is operator-named, path-scoped, and T2.8-masked. Additive
+`[fs.write]` binds are orthogonal to the persistence axis *and* the closure-lock axis — a bind is
+operator-named host content (different verb: `[fs]` binds a host path *in*; `[rootfs].readonly`/
+`writable` lock/unlock an *existing rootfs* path), whereas the upper is a Kennel-managed whole-root
+layer the operator does not name.
+
+## 7.11.4c Closure-lock: re-imposing the boundary the build-flatten erased
+
+The unprivileged `oci build` cannot `chown` to the image's uids — there is no subuid range, and the
+builder kennel grants nothing that writes other-uid-owned files — so `umoci`/`skopeo` **flatten every
+inode in the image to the single persona uid**. That does not merely drop root ownership; it erases
+*every* intra-image DAC boundary at once (root/app, app/other), because there is now one owner. The
+workload runs as that same uid, so DAC permits it to write anything it can reach — **its own
+binaries included**. Absent re-imposition, the OCI substrate is *strictly more permissive than the
+same image under Docker*, where the app uid cannot write root-owned `/usr`.
+
+**Closure-lock** restores the one load-bearing boundary the flatten destroyed: the executable surface
+is not self-writable. It is **Landlock**, not a DAC scheme or a read-only bind, because it must hold
+against in-namespace root — an image whose entrypoint runs as root holds `CAP_DAC_OVERRIDE` in its
+own userns, so no DAC check on the overlay stops it writing root-owned `/usr`; Landlock restricts
+in-ns root too. (Single owner also means DAC has nothing left to express, so there is no DAC-based
+alternative to weigh.) The lock is expressed as two `[rootfs]` lists over existing rootfs paths,
+longest-prefix wins:
+
+```toml
+[rootfs]
+readonly = ["/usr", "/lib"]            # Landlock deny-write (read + execute kept)
+writable = ["/usr/lib/python3.12"]     # carve a hole back out; loud, derived risk
+```
+
+The **unlisted-path default is writable, and that is honest labelling, not a policy assertion** — the
+flatten made DAC vacuous, so for any path the build did not lock there is no boundary to assert.
+Boundaries come from the build-derived `readonly` set written into the signed policy, never from a
+grammar default; there is no compiler-side default closure. `readonly = ["/"]` is whole-tree
+immutable.
+
+**The `readonly` set is derived at `oci build`, written into the scaffolded `policy.toml`, and
+visible in the signed text** — the operator reviews and signs the resurrected boundary; the build
+derives, the signature ratifies. Derivation is **best-effort and high-level**, gated on one signal:
+does the image declare a non-root `config.User` (effective runtime uid ≠ 0)?
+
+- **All-root image** (no non-root `USER`) — derive nothing; everything writable. *If everything is
+  root, nothing is*: a flat image intends a writable substrate, and Kennel matches that intent rather
+  than inventing a boundary the author did not. This is also the root-running compat tail — runtime
+  `pip -g`/`npm -g`/`apt` work because root-running images get no lock. (A root image under Kennel is
+  then at Docker parity — root in a container can write `/usr` too — not a regression.)
+- **Non-root `USER` declared** — the author intended `/usr` off-limits to the app. Derive the coarse
+  FHS closure (`/usr`, `/bin`, `/sbin`, `/lib*`, which the merged-usr symlinks resolve into). Not a
+  per-inode ownership walk; an FHS-level estimate. The `writable` carve-out is the recourse when the
+  estimate over-reaches.
+
+`config.User` is read at build for this decision **even though it is ignored as a runtime uid** (the
+workload runs as the persona uid — residual C). Same field, two consumers, no conflict.
+
+Closure-lock is active wherever there is a writable upper — i.e. always, since there is always an
+upper — and is **independent of `persist`**: the point is that the writable upper plus the uid-map
+manufactures a write capability that does not exist on a normal filesystem, so the boundary is
+re-imposed whenever that capability exists, not only when it persists.
+
+**Two known gaps** (the derivation is a `config.User` gate, not a per-inode walk): an image that
+**drops privilege in its entrypoint** (`gosu`/`su-exec` — common in official `postgres`/`redis`
+images) keeps `config.User = 0` and reads as all-root, so it gets no lock despite a clear app/root
+intent; and **app code installed outside `/usr|/lib`** (`/app`, `/opt`, `/srv` — most Node/Python/Go
+images) stays writable, so for those the claim is "the FHS closure is locked," not "the executable
+surface is locked." The `writable` carve-out handles over-reach; under-reach is the operator's to
+lock by hand. A future per-inode build-time walk (over the still-unflattened layers) would close
+both.
 
 ## 7.11.4b Layer lifecycle: `revert` and `update`
 
@@ -142,15 +213,17 @@ entry, two verbs act on the managed upper without reconstructing anything:
   merged root is the lowers plus a clean layer. It is the *total* case of the persistence-safety
   revert (the blunt end of selective revert), a host-side operator act the workload cannot perform,
   refused while the entry runs. Its claim is narrow — it returns the mutable state to empty; it does
-  not re-attest the image lower (the integrity ladder's job). A no-op for `readonly`/`discard`.
+  not re-attest the image lower (the integrity ladder's job). A no-op for a `discard` entry (no
+  managed upper exists).
 - **`kennel oci update <name> -- <new-image-ref>`** replaces the assured layer: fetch and unpack the
-  new image by digest through the vetted builder path, swap `rootfs/` + `config.json` + `digest`, and
-  bump `[rootfs].image`. Because the run policy was signed against the old digest, update **clears the
-  signature** and leaves the entry in the "operator reviews and re-signs" state a fresh build does —
-  it never auto-signs, because a fetch silently changing what a signed policy authorises is exactly
-  what the signature exists to prevent. The managed upper is **discarded by default** (an upper
-  layered over the old image carries copy-ups that would shadow the new one's patched binaries);
-  `--keep-state` preserves it with a derived rebase-hazard warning. Refused while running.
+  new image by digest through the vetted builder path, swap `rootfs/` + `config.json` + `digest`,
+  bump `[rootfs].image`, and **re-derive the closure lock** from the new image (§7.11.4c). Because the
+  run policy was signed against the old digest, update **clears the signature** and leaves the entry
+  in the "operator reviews and re-signs" state a fresh build does — it never auto-signs, because a
+  fetch silently changing what a signed policy authorises is exactly what the signature exists to
+  prevent. The managed upper is **discarded by default** (an upper layered over the old image carries
+  copy-ups that would shadow the new one's patched binaries); `--keep-state` preserves it with a
+  derived rebase-hazard warning. Refused while running.
 
 `build` creates and refuses an existing `<name>`; `update` replaces and refuses an absent one — the
 same grammar discipline across the `oci` noun. Rollback is not a version stack: re-`update` to a
@@ -218,10 +291,17 @@ is derived from `mode = host` (no `threats.reinstated` field; the shape of the g
   assertion. The dynamic closure stays unpinned.
 - **Image `Env` enters the workload, sanitised** (§7.11.6) — declared substrate beneath policy's
   final say.
-- **Image `User` is not honored** — the userns maps the precise operator identity with no subuid
-  range, so the workload runs as the persona uid; a uid-baked image fails on `EACCES`, not identity.
-- **`fs.execute` is coarse** over a declared substrate — the operator granted execute across a
-  userspace they chose to run.
+- **Image `User` is not honored as a runtime uid** — the userns maps the precise operator identity
+  with no subuid range, so the workload runs as the persona uid; a uid-baked image fails on `EACCES`,
+  not identity. (`config.User` *is* read at build, for the closure-lock decision, §7.11.4c — the same
+  field, a different consumer, no conflict.)
+- **Closure-tampering is closed for a non-root image, by build-derived closure-lock** (§7.11.4c): the
+  executable surface (the FHS closure) equals the pinned image throughout the session, enforced by
+  Landlock against in-namespace root. For an all-root image there is no lock — but that is the image's
+  own posture (Docker parity), not a Kennel gap. Two derivation gaps remain (`gosu`/`su-exec`
+  drop-privilege images read as all-root; app code outside `/usr|/lib` stays writable); a `persist`
+  upper additionally diverges *data* outside the integrity ladder, and each `writable` carve-out is
+  its own derived risk line. `fs.execute` coarseness is unchanged.
 
 The posture claim is confinement, not content integrity. The build/run split keeps all image parsing
 out of the daemon, and the runner adds no registry, manifest, or tarball parser.

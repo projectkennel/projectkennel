@@ -348,11 +348,13 @@ never in `cargo tree -p kenneld`.
   layered-overlay design (§7.11.4a).** `[rootfs]` → `RootfsRuntime` → `ShimView.image`. The overlay
   is a **three-lower stack** (`kennel-etc : image : scaffold`, leftmost wins) so Kennel's `/etc` and
   the mountpoints win by layer precedence — retiring the seed-copy + symlink-dereference hazard — with
-  a **`persistence` tri-state** upper (`discard` tmpfs / `readonly` none / `persist` managed under the
-  store). Assembly ro-binds `resolv.conf`+`hostname`, leaves `passwd`/`group` writable-through; the
-  constructed-home chown keys on the merged `st_dev`. Ships the `oci-scaffold` artifact; adds
-  `oci revert`/`update`. `image == store/digest` rides the runner. **Remaining:** the policy-suite e2e
-  case that boots a real image ([[policy-test-suite-is-the-e2e]]).
+  a **binary `persistence`** upper (`discard` tmpfs / `persist` managed under the store; always an
+  upper). `/etc` is writable-through (no ro-bind); the constructed-home chown keys on the home's own
+  `st_dev` + ownership. Adds **closure-lock** (the DAC-resurrection): the unprivileged build flattens
+  every inode to the persona uid, so `[rootfs].readonly`/`writable` Landlock deny-write re-imposes the
+  executable boundary (build-derived from `config.User`, signed in the policy) — holding against in-ns
+  root where DAC cannot. Scaffold built in the staging tmpfs; adds `oci revert`/`update`.
+  **Remaining:** the policy-suite e2e case that boots a real image ([[policy-test-suite-is-the-e2e]]).
 
 - **W19 · OCI integrity ladder (opt-in, behind the floor).** *(→ §7.11.8)* **M.** Rung 1
   (content-addressed store entry, verified before pivot — record-and-verify, the entry keeps its
