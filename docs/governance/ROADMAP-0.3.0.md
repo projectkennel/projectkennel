@@ -177,7 +177,8 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   single-entry userns-map contract sentence in `02-9-oci.md`.
 
 - **W14 · `.trust-manifest.d/<sha256>` content-addressed side store as a shared mechanism.** **[dep] M.**
-  The 0.2.0 W1/W2 persistence store gets its **second consumer**: `oci revert` is defined as the
+  The 0.2.0 persistence store (the trust-manifest review/revert family) gets its **second
+  consumer**: `oci revert` is defined as the
   *total* case of the store's selective revert (pin / diff-against-pin / restore-from-pin). One
   mechanism, two callers.
 
@@ -215,13 +216,15 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   information-flow reasoning in the daemon, a larger project. The ship gate is a deliberate
   review of the spawn surface, with R2 explicitly stated as the residual's load-bearing line.
 
-- **W20 · Live topology surface.** **[opt] M.**
-  A `kennel ps`-equivalent including ephemeral spawns and what-spawned-what.
+- **W20 · Live topology surface.** **[dep] M.**
+  A `kennel ps`-equivalent including ephemeral spawns and what-spawned-what — operating a fleet
+  of agent-spawned workers is unmanageable without it, so it ships with the spawn set.
 
-- **W21 · MCP interposer.** **[opt] M.**
-  The opt-in in-kennel tool-filter/audit kennel from §7.12.5 — a small MCP-aware kennel the
-  operator wires between requester and tool, parsing JSON-RPC *because it is confined and
-  disposable, not because the daemon does*. Only if tool-level allow-listing is a 0.3.0 goal.
+- **W21 · MCP interposer.** **[dep] M.**
+  The in-kennel tool-filter/audit kennel from §7.12.5 — a small MCP-aware kennel the operator
+  wires between requester and tool, parsing JSON-RPC *because it is confined and disposable, not
+  because the daemon does*. The application-semantic mediation half of the spawn/MCP surface;
+  operator-opt-in to *wire*, but shipped, not deferred.
 
 ## Sequencing
 
@@ -241,8 +244,9 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
    may slip.
 6. **Hygiene — W16–W18 any time.** Do W16 (X11 removal) early to shrink the surface before the
    red-team pass reads it.
-7. **Pre-ship — W19 last and gating**, after the whole spawn surface (W3–W9) exists. W20/W21 are
-   opt, only if tool-level mediation is a 0.3.0 goal.
+7. **Pre-ship — W19 last and gating**, after the whole spawn surface (W3–W9) exists. **W20
+   (topology) and W21 (interposer) ship with the spawn/MCP set** — both are spawn-target/observer
+   kennels that need the spawn runtime (W8), so they sequence after it; neither is optional.
 
 ## Exit criteria
 
@@ -254,9 +258,11 @@ tested (W5); `02-10-dynamic-spawn.md` is written as-built (W1); per-kennel addre
 is gated on inbound bind (W9); the latency harness reports the five-boundary spawn profile and
 the teardown span (W10); X11 is removed and the ABI4/BPF decision is recorded (W16/W17); and the
 spawn-surface red-team pass is complete with the R2 composition residual explicitly
-accepted-and-tagged (W19). CHANGELOG records every stable-surface change — the `[spawn]` /
-`[[vars]]` policy schema, any CLI surface, the `SPAWN` IPC verb, and the T3.9 threat-catalogue
-addition — per CODING-STANDARDS §13/§14.
+accepted-and-tagged (W19); and the **complete spawn/MCP agent-to-worker surface ships** — the
+live-topology surface and the MCP interposer included (W20/W21), nothing in the set fenced or
+deferred. CHANGELOG records every stable-surface change — the `[spawn]` / `[[vars]]` policy
+schema, any CLI surface, the `SPAWN` IPC verb, and the T3.9 threat-catalogue addition — per
+CODING-STANDARDS §13/§14.
 
 ## Decisions taken (2026-06-20)
 
@@ -274,13 +280,12 @@ addition — per CODING-STANDARDS §13/§14.
 
 ## Open decisions for the maintainer
 
-- **OCI first-party unpacker (W12): 0.3.0 `[dep]` or slip to 0.4 as `[opt]`?** The 0.2.0 notes
-  framed it as a "0.3 follow-up." Listed here as `[dep]` (it completes the OCI surface), but it
-  is the natural cut line if 0.3.0 gets tight — `umoci` works as the interim.
+- **OCI first-party unpacker (W12): 0.3.0 `[dep]` or slip to 0.4 as `[opt]`?** 0.2.0 shipped
+  `umoci` as the interim and flagged the first-party unpacker as a 0.3 follow-up. Listed here as
+  `[dep]` (it completes the OCI surface), but it is the natural cut line if 0.3.0 gets tight —
+  `umoci` works as the interim.
 - **OCI integrity rungs (W15): in-scope or 0.4?** Marked `[opt]`/may-slip, as in 0.2.0 — the
   digest-pinned floor is the minimum.
-- **Tool-level mediation (W20/W21): a 0.3.0 goal?** Both are `[opt]`; they only land if
-  tool-level allow-listing/audit is in scope for 0.3.0. Maintainer call.
 - **W11 (skip constrained-mode BPF egress attach):** worth the defence-in-depth loss for the
   latency? Profile-gated — surface only if W10 dictates.
 - **Defaults:** the `max_instances` default value; whether the spawn-target memory-ceiling floor
@@ -301,10 +306,12 @@ addition — per CODING-STANDARDS §13/§14.
 
 ## Fenced to 0.4+
 
-- The binder **cross-instance / MCP relay** (`provide`/`consume`, `SpawnKennel`-over-binder)
-  beyond the single-hop spawn delegation — grows the TCB; the dynamic-spawn model is
-  kennel-to-kennel single-hop by definition (§7.12.10).
-- **Reproducible double-build + release image** (deferred from 0.2.0 W5), **multi-kernel BPF
-  verifier matrix** (0.2.0 W6).
+> The complete spawn/MCP agent-to-worker surface (§7.12) ships in 0.3.0 — the SPAWN verb, the
+> template/var grant model, the reaper, the topology surface, and the MCP interposer (W3–W8,
+> W20, W21). Nothing in that set is fenced; the dynamic-spawn model is bounded to single-hop
+> kennel-to-kennel by design (§7.12.10), not by deferral.
+
+- **Reproducible double-build + release image**; **multi-kernel BPF verifier matrix** —
+  release-pipeline and kernel-matrix infra, deferred from prior releases.
 - **§11.1 v2 design forks** — Wayland clipboard, GPU compute-only, TPM/FIDO per-key,
   comprehensive-seccomp template. Tracked, not scheduled.
