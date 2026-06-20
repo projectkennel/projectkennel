@@ -343,23 +343,24 @@ never in `cargo tree -p kenneld`.
   (W17c):** the Kennel-shipped vetted fetch policy + the `TEMPLATE-oci` run-policy scaffold (mirrors
   the `env_strip` denylist as `[env].deny` globs) so `oci build` fetches+unpacks confined.
 
-- **W18 · OCI daemon spawn-path branch.** *(→ `02-9-oci.md` §daemon, [[spawn-userns-owner-yama]])*
-  **M. Sign-off given 2026-06-20; producer + consumer BUILT (clippy/tests green).** `[rootfs]` →
-  `RootfsRuntime` (signed settled policy) → `ShimView.image_lower`; the
-  [`build_view_and_pivot`](../../src/crates/kennel-lib-spawn/src/lib.rs) **overlay** head (image as
-  read-only lowerdir, ephemeral tmpfs upper — image never written) + shared `seal_view_tail`; no
-  merged-usr mirror; the image-seeded `/etc` (Kennel's hooks unlink-then-create on top); `mount_overlay`
-  in `kennel-lib-syscall`. In-root resolution is inherent to the post-pivot launcher `execve`; the
-  `image == store/digest` check rides the runner (W17b), not the daemon. **Remaining:** the
-  policy-suite e2e case that boots a real image ([[policy-test-suite-is-the-e2e]]).
+- **W18 · OCI daemon spawn-path branch (layered overlay).** *(→ `02-9-oci.md` §daemon,
+  [[spawn-userns-owner-yama]])* **M. Sign-off given 2026-06-20; BUILT, then reconciled to the
+  layered-overlay design (§7.11.4a).** `[rootfs]` → `RootfsRuntime` → `ShimView.image`. The overlay
+  is a **three-lower stack** (`kennel-etc : image : scaffold`, leftmost wins) so Kennel's `/etc` and
+  the mountpoints win by layer precedence — retiring the seed-copy + symlink-dereference hazard — with
+  a **`persistence` tri-state** upper (`discard` tmpfs / `readonly` none / `persist` managed under the
+  store). Assembly ro-binds `resolv.conf`+`hostname`, leaves `passwd`/`group` writable-through; the
+  constructed-home chown keys on the merged `st_dev`. Ships the `oci-scaffold` artifact; adds
+  `oci revert`/`update`. `image == store/digest` rides the runner. **Remaining:** the policy-suite e2e
+  case that boots a real image ([[policy-test-suite-is-the-e2e]]).
 
 - **W19 · OCI integrity ladder (opt-in, behind the floor).** *(→ §7.11.8)* **M.** Rung 1
   (content-addressed store entry, verified before pivot — record-and-verify, the entry keeps its
   `<name>` key) and Rung 2 (fs-verity over `rootfs/` + `config.json`). Opt-in so the operator who
   needs at-rest tamper-evidence pays for it; **may slip to 0.3** (the digest-pinned floor is the
-  0.2.0 minimum). The overlay root (W18) is also the natural seam for a future **persistent run
-  layer** — `base + image (lower) + persistent-or-tmpfs (upper)` — swapping the ephemeral upper for
-  a retained one per `[fs.home].persist`-style opt-in; noted, not scheduled.
+  0.2.0 minimum). The persistent run layer landed in W18 as `[rootfs].persistence = "persist"`
+  (a managed upper under the store entry); Rung 1/2 cover the image lower, not lower+upper, and
+  `kennel policy risks` derives the persist-divergence exposure separately.
 
 ## Dropped / deferred (with reasons)
 

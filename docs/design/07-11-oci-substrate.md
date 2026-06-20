@@ -47,10 +47,12 @@ could not:
 
 - **It partitions the policy grammar by run model.** `[rootfs]` and the substrate-trust grant it
   carries are valid *only* in an OCI-model policy that `kennel oci run` consumes. `kennel run`
-  rejects a policy containing `[rootfs]`; `kennel oci run` rejects one without it. The compiler
-  enforces the split, so the universal policy grammar that most workloads use never grows a
-  substrate-replacement primitive, and the substrate-trust risk derivation stays local to the OCI
-  model.
+  rejects a policy containing `[rootfs]`; `kennel oci run` rejects one without it. The two grammars
+  are **mutually exclusive at the block level**: a normal policy has an optional `[workload]` and
+  never `[rootfs]`; an OCI policy has a mandatory `[rootfs]` and never `[workload]`. The compiler
+  keys the run model off which block is present, so the universal policy grammar that most workloads
+  use never grows a substrate-replacement primitive, and the substrate-trust risk derivation stays
+  local to the OCI model.
 - **It removes a per-policy "append argv" knob.** The only reason to append CLI tokens to a pinned
   `argv` would be a generic `kennel run build-oci -- …` shape; with a dedicated verb, "the trailing
   tokens are the image reference" is the meaning of `oci build`, baked into the verb rather than a
@@ -88,8 +90,72 @@ step. The builder pulls **by digest**; when the reference is a tag it resolves t
 policy, asserts the signed `[rootfs].image` equals the recorded `digest`, and hands `kenneld` the
 unpacked rootfs. `kenneld` boots it under the standard view construction — constructed `/dev`, fresh
 `/proc`, private `/tmp`, the T2.8 masks, the per-kennel netns boundary, the SOCKS proxy, seccomp,
-Landlock — with two image-specific adaptations: a minimal targeted `/etc` overlay (not the host-mode
-synthetic tree) and an in-kennel launcher as the entrypoint.
+Landlock — with two image-specific adaptations: an **overlay** root that keeps the image read-only
+while letting Kennel's `/etc` files and the mountpoints win (§7.11.4a), and an in-kennel launcher as
+the entrypoint (§7.11.5).
+
+## 7.11.4a View construction: the overlay, and rootfs persistence
+
+When the root is an image, the view is an `overlayfs`, not a bind of the image directory. The image
+is a **read-only lower** — never an upperdir, because an image upperdir would make the image
+writable and land every workload write in the digest-pinned, ladder-covered store entry, destroying
+the integrity unit. Above and below it sit two trusted layers the untrusted image cannot shadow
+upward: a small **Kennel layer** holding only the invariant `/etc` files (`resolv.conf`, `hostname`,
+`passwd`, `group`, `hosts`, `nsswitch.conf`), so Kennel's resolver and persona win by *layer
+precedence* — a real Kennel file outranks an image symlink at the same path with no unlink-replace,
+which is the §7.2 targeted-`/etc` intent expressed as ordering and which retires the seed-copy of
+image `/etc` and its symlink-dereference hazard entirely; and a Kennel-shipped **scaffold** of empty
+mountpoint directories so a distroless or scratch image that ships none of `/proc`, `/dev`, `/tmp`,
+`/etc` still boots. The mechanism — the lower-stack order, the assembly, the unprivileged-userns
+overlay floor — is the implementation contract (`02-9-oci.md`).
+
+**Rootfs persistence is a single loud tri-state**, not an operator-chosen writable path. Kennel owns
+the backing location; the operator chooses only *whether* the rootfs persists:
+
+```toml
+[rootfs]
+persistence = "discard"   # "discard" (default) | "readonly" | "persist"
+```
+
+- **`discard`** (default) — an ephemeral upper makes the root writable for image compatibility and is
+  gone at teardown. Nothing persists to shadow the pinned image, so the integrity story is untouched.
+- **`readonly`** — no upper; the merged root is immutable. The scaffold supplies the mountpoints, so
+  it works on any image. The strictest mode; image runtime writes (e.g. a startup `useradd`) fail.
+- **`persist`** — a Kennel-managed upper under the store entry. This is the **loud** value: it
+  accumulates divergence *outside* the integrity ladder (which covers the image layer, not
+  lower+upper), and `kennel policy risks` derives that exposure from `persistence = "persist"`,
+  surfaced against the `[rootfs]` block's `reason`.
+
+A `persistence = "readonly"` root plus a narrow additive `[fs.write]` bind for the workload's
+writable `/data` is the recommended posture for a long-running workload: the image stays immutable
+and ladder-covered, the writable surface is operator-named, path-scoped, and T2.8-masked, and no
+whole-root layer accumulates divergence. Additive `[fs.write]` binds are orthogonal to the
+persistence axis — a bind is operator-named host content under its existing grant semantics, whereas
+the upper is a Kennel-managed whole-root layer the operator does not name.
+
+## 7.11.4b Layer lifecycle: `revert` and `update`
+
+Because the image lower is never mutated and the upper is a known Kennel-owned path under the store
+entry, two verbs act on the managed upper without reconstructing anything:
+
+- **`kennel oci revert <name>`** obliterates the managed upper and recreates it empty; the next run's
+  merged root is the lowers plus a clean layer. It is the *total* case of the persistence-safety
+  revert (the blunt end of selective revert), a host-side operator act the workload cannot perform,
+  refused while the entry runs. Its claim is narrow — it returns the mutable state to empty; it does
+  not re-attest the image lower (the integrity ladder's job). A no-op for `readonly`/`discard`.
+- **`kennel oci update <name> -- <new-image-ref>`** replaces the assured layer: fetch and unpack the
+  new image by digest through the vetted builder path, swap `rootfs/` + `config.json` + `digest`, and
+  bump `[rootfs].image`. Because the run policy was signed against the old digest, update **clears the
+  signature** and leaves the entry in the "operator reviews and re-signs" state a fresh build does —
+  it never auto-signs, because a fetch silently changing what a signed policy authorises is exactly
+  what the signature exists to prevent. The managed upper is **discarded by default** (an upper
+  layered over the old image carries copy-ups that would shadow the new one's patched binaries);
+  `--keep-state` preserves it with a derived rebase-hazard warning. Refused while running.
+
+`build` creates and refuses an existing `<name>`; `update` replaces and refuses an absent one — the
+same grammar discipline across the `oci` noun. Rollback is not a version stack: re-`update` to a
+prior digest (recorded in the entry's audit line) is the supported path; keeping N old layers is a
+non-goal.
 
 ## 7.11.5 The in-kennel launcher
 
@@ -101,12 +167,14 @@ kennel* at workload authority, applies `WorkingDir`/`Env`/`Entrypoint`+`Cmd`, an
 real entrypoint. A bug in it is a bug in a confined, unprivileged process holding no capability, no
 `mount`, no `unshare` — contained exactly like the builder's parsers.
 
-The default is launcher-resolves-from-config; an operator who wants the standard run model's
-stronger guarantee overrides with an explicit `[workload].argv` (with optional `sha256`), which
-`kenneld` resolves and pins in-root. The override is **all-or-nothing**: explicit argv opts out of
-the *entire* image config (the `Env` merge and `WorkingDir` included), so policy `[env]` becomes the
-sole environment source. The half-way reading (operator argv but image env still merged) is a muddy
-trust story; the launcher is simply not invoked in the override path.
+The launcher **always** resolves the entrypoint from the image config; there is no `[workload]` block
+in an OCI policy (`[rootfs]` and `[workload]` are mutually exclusive, §7.11.2), so there is no
+per-binary pin in the OCI model — provenance is anchored on the recorded image digest (§7.11.8), the
+whole of the assertion. A `kennel oci run <name> -- <cmd>` supplies a **`Cmd` override**: the launcher
+runs it in place of the image's `Cmd` while keeping the image `Entrypoint` and the sanitised `Env`
+(the same shape as `docker run <image> <cmd>`). This is a runtime convenience with no policy impact —
+it changes no grant and crosses no trust boundary, since the entrypoint, env, and substrate are all
+still the image's — so it is allowed rather than friction the operator routes around.
 
 ## 7.11.6 Image `Env` is sanitised, not merged raw
 
@@ -143,10 +211,11 @@ modules, everything `argv[0]` loads after `execve`, and its own entrypoint, env,
 the substrate-trust residual catalogued as **T3.8**, derived from the `[rootfs]` grant the way T1.6
 is derived from `mode = host` (no `threats.reinstated` field; the shape of the grant is the tag):
 
-- **Provenance, not a per-binary pin.** In the default flow the launcher is `argv[0]`; the image
-  entrypoint it execs is image-chosen and provenance-covered (it came from `image@sha256`) but not
-  separately hashed. The `[workload].argv` + `sha256` override restores the per-binary pin; the
-  dynamic closure stays unpinned regardless.
+- **Provenance, not a per-binary pin.** `argv[0]` is the Kennel-pinned launcher; the image entrypoint
+  it execs is image-chosen and provenance-covered (it came from `image@sha256`) but not separately
+  hashed. There is no per-binary pin in the OCI model — the standard run model's "this exact
+  entrypoint binary" narrows to "this exact image, by digest," and the digest is the whole of the
+  assertion. The dynamic closure stays unpinned.
 - **Image `Env` enters the workload, sanitised** (§7.11.6) — declared substrate beneath policy's
   final say.
 - **Image `User` is not honored** — the userns maps the precise operator identity with no subuid
