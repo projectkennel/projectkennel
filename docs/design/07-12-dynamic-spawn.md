@@ -73,9 +73,16 @@ template's, full stop.
 A template is not a constraint over values authored by the agent. It is a **complete, signed,
 runnable policy, plus a declared manifest of which fields an autogen or child step may write.**
 Everything outside the manifest is frozen and inherited verbatim. The spawn request carries the
-agent's writes to the manifest fields and nothing else, and the compiler accepts the candidate
-**iff it differs from the template only within the manifest** — `candidate ∖ manifest == template ∖
-manifest`, any write outside the manifest a hard reject, fail-closed.
+agent's writes as a **patch** — a set of `(field-path, value)` pairs naming manifest fields, never a
+full candidate policy. `kenneld` rejects any field-path not in the (per-requester-narrowed) manifest,
+validates each value against that field's bound, and applies the surviving writes onto the resolved
+template; it never ingests or whole-tree-diffs an agent-supplied document, so no adversarial policy
+parser or deep tree comparison enters the daemon. The invariant this establishes is `candidate ∖
+manifest == template ∖ manifest` — the instantiation differs from the signed template *only* within
+the manifest — but the enforcement is **key-membership on the patch**, not a set-difference over two
+trees: a write whose value happens to equal a frozen field's is still rejected for naming a field
+outside the manifest, never waved through because the difference came out empty. Any out-of-manifest
+key is a hard reject, fail-closed.
 
 This inverts the surface from *synthesis* to *selection*, which is the single most useful thing for
 making agent-generated policy tractable. The agent does not author a policy the validator then
@@ -123,8 +130,8 @@ of freedom by construction: filling `net.allow` extends reach *within* the one l
 already granted, never across to a second. Single-leg is enforced once, at the floor; the manifest
 flexes underneath it.
 
-The unit of mutation is the leaf field (or an explicitly scoped subtree), enforced by the diff, so a
-manifest opening `net.allow` cannot be used to rewrite `net.mode` beside it. The signed artifact is
+The unit of mutation is the leaf field (or an explicitly scoped subtree), enforced by patch
+key-membership, so a manifest opening `net.allow` cannot be used to rewrite `net.mode` beside it. The signed artifact is
 *template + manifest*; the requester's `[spawn.allow].mutable` may narrow the manifest further per
 requester (§7.12.2), never widen it.
 
@@ -139,9 +146,11 @@ a kennel and the FD rides the transaction directly.
    error text never corrupts the framed channel — §7.12.5).
 2. It sends a `SPAWN` transaction to `kenneld` naming the template and its mutable-field writes,
    attaching the socketpair-remote and pipe-write ends as `BINDER_TYPE_FD` objects.
-3. `kenneld` validates the grant and diffs the candidate against the manifest (§7.12.3), resolves the
-   template from the trust store, builds the instantiation in memory, and injects the translated FDs
-   into the spawned kennel's supervision plan.
+3. `kenneld` validates the grant, resolves the named template from the trust store and **verifies it
+   against the content-pin the spawner's compiled policy recorded** (fail-closed on mismatch, §7.12.8),
+   **re-checks spawn-eligibility on the resolved template**, applies the manifest patch (§7.12.3),
+   builds the instantiation in memory, and injects the translated FDs into the spawned kennel's
+   supervision plan.
 4. `kennel-bin-init` boots the spawned kennel, `dup2`s the injected FDs onto stdin/stdout/stderr, and
    `execve`s the template's entrypoint — for MCP, a stdio JSON-RPC server.
 
@@ -169,7 +178,11 @@ because the daemon does.
 `stderr` on its own pipe is the one detail worth stating explicitly: a traceback, compiler warning, or
 panic in the spawned tool flows out a separate descriptor, so the framed JSON-RPC channel is never
 corrupted by unstructured text, and the requester can capture the exact error and feed it back to the
-model.
+model. The injected `stderr` carries only the *tool's* output: `kennel-bin-init`'s own pre-`execve`
+failures — a Landlock seal that will not apply, a seccomp filter that will not compile — route to the
+host audit and the boot-sync channel, **never** to the injected pipe. The agent sees a clean `EOF` for
+an infrastructure failure (no host-side init state leaks to it) and tracebacks only once its own tool is
+the thing running.
 
 ## 7.12.6 Ephemerality
 
@@ -210,9 +223,12 @@ validating the ceiling and incrementing the live count are a single indivisible 
 accounting lock, taken *before* the spawn is enqueued for construction. Because the `SPAWN` reply is
 asynchronous to the build (§7.12.4), the check cannot be deferred to when construction completes — two
 concurrent `SPAWN`s on different loopers would otherwise both pass a ceiling they jointly exceed. Under
-the lock, the second to acquire it sees the first's claim. A slot is held from claim until a reaper
-releases it on teardown; a kill-path release decrements the count, so a flapping requester cannot leak
-slots across teardown races.
+the lock, the second to acquire it sees the first's claim. A slot is held from claim until release, and
+release covers **every** terminal outcome, not only reaper teardown: a reaper kill releases it, and the
+construction worker holds the slot as an RAII guard that releases it if the build aborts before the
+spawned kennel reaches the reaper subsystem (a failed `clone`/`pivot_root`/init exec). A boot failure
+therefore cannot permanently leak a slot, and a flapping requester cannot leak slots across teardown
+races.
 
 ## 7.12.8 Depth-1 and spawn-eligibility
 
@@ -238,6 +254,17 @@ preconditions above — fail-closed, before any instantiation can reach it. The 
 gate cannot run at the target's install, because a template cannot know, when it is installed, which
 future policy will name it; and depth-1 means there is no chain, so there is nothing transitive to walk.
 If A names B, the check runs when A is installed and rejects A if B is ineligible.
+
+Install-time eligibility is **fail-fast, not the authoritative gate**: it validates the template as it
+stood when the spawner was compiled, but `kenneld` resolves the template by name from the *mutable* trust
+store at `SPAWN` time, so a re-signed or replaced entry would otherwise slip an ineligible target past a
+stale install-time pass — a TOCTOU. Two things close it, both at `SPAWN`. The spawner's compiled policy
+**content-pins** every template it names (the lockfile closure records each template's hash), and
+`kenneld` verifies the resolved template against that pin, fail-closed on mismatch — so the bytes
+instantiated are the bytes the install gate actually checked. And `kenneld` **re-runs the eligibility
+check on the resolved template** regardless, cheap defense-in-depth that holds even if a pin is ever
+mis-recorded. The install gate is authoring-time feedback; the pin-plus-recheck is what makes the runtime
+instantiation safe against a mutable trust store.
 
 ## 7.12.9 Security posture — what holds, what is waived
 
@@ -331,8 +358,8 @@ that is already served, badly enough to discourage, by an existing verb.
 2. Template `[[mutable]]` manifest grammar (the three bound kinds: pool+`max`, `oneof`, predicate) and
    the instantiation-time diff validator (`candidate ∖ manifest == template ∖ manifest`, each field within
    its bound, writes outside the manifest hard-rejected) — the §7.12.3 attack surface.
-3. The `SPAWN` transaction verb on Node 0 (`kenneld/src/binder.rs`): grant + manifest-diff validation,
-   in-memory template resolution, FD translation and injection.
+3. The `SPAWN` transaction verb on Node 0 (`kenneld/src/binder.rs`): grant + content-pin + eligibility
+   re-check + manifest-patch validation, in-memory template resolution, FD translation and injection.
 4. `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init` `dup2`s
    them before `execve`.
 5. Binder-session tracking for the hard reaper, the spawned-kennel `max_lifetime` self-reap, and the

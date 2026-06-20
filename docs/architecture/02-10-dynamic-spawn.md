@@ -47,7 +47,7 @@ and no new capability can be invented. Everything in this contract follows from 
 | Process | Namespace | Binder role | Responsibility |
 |---|---|---|---|
 | **Requester workload** | its own kennel | Node 0 client (`SPAWN`) | Mints the channel fds, names the template + its mutable-field writes, keeps the local ends |
-| **`kenneld`** | host (operator) | Node 0 context manager | Validates grant + manifest diff, resolves the template in memory, accepts the channel fds, drives construction |
+| **`kenneld`** | host (operator) | Node 0 context manager | Validates grant, pin/eligibility, and manifest patch; resolves the template in memory, accepts the channel fds, drives construction |
 | **`kennel-privhelper`** | transient, per-spawn | — | Factory: clones the spawned kennel's namespaces, injects the channel fds, `fexecve`s `kennel-bin-init` ([[no-standing-host-privilege]]) |
 | **Spawned sibling** | fresh kennel | Node 0 client (own instance) | Runs the template's entrypoint (for MCP, a stdio JSON-RPC server) with the injected fds as stdio |
 
@@ -56,26 +56,35 @@ its own view. It is constructed by the same privhelper factory as an operator-la
 ([[kennel-init-and-uid0]], [[spawn-userns-owner-yama]]); dynamic spawn adds the descriptor injection
 and the lifecycle coupling, not a new construction path.
 
-## The `[spawn]` grant and manifest-diff validation
+## The `[spawn]` grant and `SPAWN`-time validation
 
 The agent controls exactly one thing: the writes it makes to the template's **mutable fields**. A
 template is a *complete, signed, runnable policy* plus a declared `[[mutable]]` manifest naming which
 leaf fields a spawn may write; everything outside the manifest is frozen and inherited verbatim
-(§7.12.3). `kenneld` performs two checks at `SPAWN` time, both **policy validation in the existing
-compiler**, not a new parser in the TCB:
+(§7.12.3). `kenneld` performs three checks at `SPAWN` time, all on the **verify/compile path**, never a new
+parser in the daemon TCB:
 
 1. **Grant.** The requesting kennel's compiled policy carries its `[spawn]` ACL — the
    `[[spawn.allow]]` template set, `max_instances`, and an optional per-requester `mutable` list
    that *narrows* (never widens) the template's manifest for this requester. It is held in the
    kennel's `kenneld`-side runtime record from construction. A template not in the ACL is **denied**
    (`kennel.spawn` / `outcome: Deny`).
-2. **Manifest diff.** `kenneld` accepts the candidate **iff `candidate ∖ manifest == template ∖
-   manifest`** — the candidate may differ from the signed template *only* within the declared
-   (and per-requester-narrowed) mutable fields, and each such write must satisfy that field's
-   **bound**. Any write outside the manifest is a **hard reject, fail-closed**. This inverts the
-   surface from *synthesis* to *selection*: the agent fills labelled, fenced blanks in a sealed
-   document and the compiler proves it filled only the blanks — a membership check, not satisfaction
-   of a predicate over an open value space.
+2. **Template pin + eligibility.** `kenneld` resolves the named template from the (mutable) trust
+   store and verifies it against the **content-pin** the spawner's compiled policy recorded for it
+   (fail-closed on mismatch), then **re-runs spawn-eligibility** (§7.12.8) on the resolved template.
+   The install-time eligibility pass is fail-fast authoring feedback; *this* is the authoritative gate,
+   because the trust store is mutable and a re-signed entry must not slip an ineligible target past a
+   stale install-time result (a TOCTOU).
+3. **Manifest patch.** The request carries the agent's writes as a **patch** — `(field-path, value)`
+   pairs, never a full candidate policy. `kenneld` rejects any field-path not in the
+   (per-requester-narrowed) manifest, validates each value against that field's **bound**, and applies
+   the surviving writes onto the resolved template. The invariant established is `candidate ∖ manifest
+   == template ∖ manifest`, but the enforcement is **key-membership on the patch**, not a whole-tree
+   set-difference: a write whose value equals a frozen field's is still rejected for naming an
+   out-of-manifest field, and no adversarial policy parser or deep tree-diff enters the daemon. Any
+   out-of-manifest key is a hard reject, fail-closed. This inverts the surface from *synthesis* to
+   *selection* — the agent fills fenced blanks in a sealed document, never authors a policy the daemon
+   must parse.
 
 Each mutable field carries one of three **bound kinds** — one mechanism, not three:
 
@@ -97,13 +106,15 @@ not in the agent's write set. Single-leg is enforced once, at the floor; the man
 underneath it. The unit of mutation is the leaf field (or an explicitly scoped subtree), so a
 manifest opening `net.allow` cannot be used to rewrite `net.mode` beside it.
 
-**Spawn-eligibility** (§7.12.8) is **not** re-checked here. Every template a `[[spawn.allow]]` names is
-validated at the *spawner's* install: it carries no `[spawn]` of its own (depth-1), and it declares its
-`max_lifetime`, its resource ceilings (memory/pids/CPU), and its `[[mutable]]` manifest. The gate runs
-at the spawner's install, not the target's — a template cannot know at its own install which future
-policy will name it, and depth-1 means there is no chain to walk. So by the time a `SPAWN` arrives the
-target is already known eligible: a non-spawner, single-hop, bounded in lifetime and resources, with a
-fenced write surface.
+**Spawn-eligibility is verified at `SPAWN`, not assumed from install** (check 2 above). The install-time
+gate validates each named template at the *spawner's* compile — it carries no `[spawn]` (depth-1), and
+declares its `max_lifetime`, resource ceilings (memory/pids/CPU), and `[[mutable]]` manifest; that gate
+runs at the spawner's install, not the target's (a template cannot know which future policy will name
+it, and depth-1 means no chain to walk). But that pass is **fail-fast authoring feedback**: because
+`kenneld` resolves the template from the *mutable* trust store at `SPAWN`, the authoritative gate is the
+content-pin verification plus the eligibility re-run on the resolved bytes (§7.12.8). So by the time
+construction begins the target is *verified* eligible on the actual instantiated bytes — a non-spawner,
+single-hop, bounded in lifetime and resources, with a fenced write surface.
 
 ## The `SPAWN` transaction
 
@@ -129,18 +140,26 @@ already holds its local ends.
 
 ### Inbound descriptor acceptance — the safety argument
 
-`SPAWN` is the **one** Node 0 verb that accepts descriptors *into* `kenneld`. Every other Node 0
+`SPAWN` is the **one** Node 0 verb meant to accept descriptors *into* `kenneld`. Every other Node 0
 verb issues descriptors *outward* (the connected socket from `CONNECT_*`, the pushed conduit from
-`DELIVER_INET`), and Node 0 is created `accept_fds = 0` so the kernel rejects any inbound fd before
-a handler sees it ([[binder-fd-passing-safety-verdict]]). Accepting inbound fds for `SPAWN` is a
-deliberate, **scoped** relaxation, and it holds because:
+`DELIVER_INET`), and node 0 is published *without* the accepts-fds flag, so the kernel refuses any
+inbound fd before a handler sees it ([[binder-fd-passing-safety-verdict]]). Accepting inbound fds for
+`SPAWN` is a deliberate, **scoped** relaxation — and the relaxation is coarser than it looks, because
+`accept_fds` is a per-node **boolean** (`FLAT_BINDER_FLAG_ACCEPTS_FDS`), not a per-verb count:
 
-- **Bounded arity.** Node 0's `accept_fds` is raised to exactly **2** — the `SPAWN` maximum. A
-  transaction presenting any other count is rejected. No fd-table-exhaustion vector opens.
-- **Injection stays blocked for every other verb.** Each non-`SPAWN` handler asserts its `Incoming`
-  carries no descriptors and returns `BAD_REQUEST` otherwise. The "injection-blocked" property is
-  preserved by *handler-level rejection*, not by the driver-level `accept_fds = 0` it replaces — the
-  registry/facade verbs gain no inbound-fd path.
+- **The flag is node-wide; the arity bound is the handler's.** To accept the two `SPAWN` fds, node 0
+  must be published *with* `FLAT_BINDER_FLAG_ACCEPTS_FDS` (via `BINDER_SET_CONTEXT_MGR_EXT` — the
+  current plain `BINDER_SET_CONTEXT_MGR` cannot set it). That flag permits fds on **every** transaction
+  to node 0, not just `SPAWN`, so "exactly two" is enforced by the `SPAWN` **handler** (reject any
+  arity but 2) *after* the kernel has already translated the fds — not by a kernel cap.
+- **Residual: an fd-translation DoS on every node-0 verb.** The kernel dups a sender's fd objects into
+  `kenneld`'s table *before* the handler runs, so a malicious workload can attach many fd objects to
+  *any* node-0 verb (`GET_SERVICE`, …) and force the dups before the handler rejects them. The bound is
+  the transaction-buffer size (`MAP_SIZE`, ~4k objects) and `kenneld`'s `RLIMIT_NOFILE`, **not** "2."
+  Every non-`SPAWN` handler asserts `Incoming.fds` is empty, returns `BAD_REQUEST`, and **closes any
+  received fds immediately**; the `SPAWN` handler rejects arity ≠ 2. This is the real cost of the
+  requester-mints model — `kenneld` minting the channel itself would have avoided it — accepted,
+  bounded, and audited, not hidden.
 - **The descriptors are opaque conduits, never operated on.** `kenneld` does not `read`, `write`,
   `seek`, `stat`, or otherwise act on the received fds. It translates them once (the kernel's
   `BINDER_TYPE_FD` translation is atomic and unforgeable) and relays them straight into the spawned
@@ -175,12 +194,16 @@ On a validated `SPAWN`, `kenneld`:
    the pty/controlling-tty setup and before the Landlock/seccomp seal. A dynamically-spawned tool is
    non-interactive (it speaks JSON-RPC over stdio), so it takes the injected-fd path, not the
    pty-allocation path. Init makes no policy judgment here ([[init-is-dumb-executor]]); the
-   descriptors and their disposition were decided by `kenneld` pre-handoff.
+   descriptors and their disposition were decided by `kenneld` pre-handoff. Init's own pre-`execve`
+   failures (a Landlock seal that will not apply, a seccomp filter that will not compile) route to the
+   host audit and boot-sync channel, **never** to the injected `stderr` — the agent sees a clean `EOF`
+   for an infrastructure failure (no host-init state leaks to it) and tool tracebacks only once `execve`
+   has handed `stderr` to the tool (§7.12.5).
 
 ### Construction is asynchronous to the reply
 
 The `SPAWN` reply returns **after validation and fd acceptance, not after the spawned kennel boots.**
-`kenneld` validates the grant + manifest diff, takes the two descriptors, enqueues the construction,
+`kenneld` validates the grant, pin/eligibility, and manifest patch, takes the two descriptors, enqueues the construction,
 and replies immediately with the `spawn-<uuid>`; the heavy construction (privhelper factory,
 namespace clone, `pivot_root`, init exec) proceeds off the binder looper. Rationale:
 
@@ -196,7 +219,7 @@ namespace clone, `pivot_root`, init exec) proceeds off the binder looper. Ration
 
 1. Requester mints `socketpair()` + `pipe()`; keeps the local socketpair end and the pipe read end.
 2. Requester sends `SPAWN(template@version, mutable-writes, [socketpair-remote, pipe-write])` to Node 0.
-3. `kenneld` validates the `[spawn]` grant and the manifest diff, and **atomically claims a
+3. `kenneld` validates the grant, pin/eligibility, and manifest patch, and **atomically claims a
    `max_instances` slot** under the Node 0 accounting lock (§7.12.7) — deny, or ceiling full → reply +
    audit, fds dropped.
 4. `kenneld` accepts the two descriptors, resolves the template in memory, replies `spawn-<uuid>`.
@@ -206,7 +229,7 @@ namespace clone, `pivot_root`, init exec) proceeds off the binder looper. Ration
    `execve`s the template entrypoint.
 7. Data flows kernel-to-kernel over the socketpair; `kenneld` and binder are out of the byte path.
 
-## Fate-sharing: the double reaper
+## Fate-sharing, self-reap, and slot accounting
 
 A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokered, not parental
 (§7.12.7).
@@ -228,8 +251,11 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
   live count, taken at validation (step 3) **before** the reply and the asynchronous construction enqueue.
   Deferring the check to construction would let two concurrent `SPAWN`s on different loopers both pass a
   ceiling they jointly exceed; under the lock the second sees the first's claim. The slot is held from
-  claim until a reaper releases it; a kill-path release decrements, so a flapping requester cannot leak
-  slots across teardown races. `max_instances` is global (depth-1 keeps it so, not per-node).
+  claim until **release on any terminal outcome**: a reaper release on teardown, *and* a release by the
+  construction worker — which holds the claim as an RAII guard — if the build aborts before the spawned
+  kennel reaches the reaper subsystem (a failed `clone`/`pivot_root`/init exec). A boot failure therefore
+  cannot permanently leak a slot, and a flapping requester cannot leak slots across teardown races.
+  `max_instances` is global (depth-1 keeps it so, not per-node).
 
 ## Ephemerality and identity
 
@@ -251,7 +277,7 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
 | Event | Emitted when |
 |---|---|
 | `kennel.spawn` (`outcome: Allow`) | a validated `SPAWN` is accepted and construction enqueued |
-| `kennel.spawn` (`outcome: Deny`) | grant/manifest-diff validation fails, or construction fails |
+| `kennel.spawn` (`outcome: Deny`) | grant, pin/eligibility, or manifest-patch validation fails, or construction fails |
 | `kennel.spawn.reaped` | soft or hard reaper tears the spawned kennel down (with which path) |
 
 ## Threat bearing
@@ -288,10 +314,10 @@ daemon), mitigated by scoping `[[spawn.allow]]` to the templates an agent actual
 - **Spawn-eligibility defaults** — the resource ceilings (memory/pids/CPU) and `max_lifetime` are
   mandatory spawn-eligibility declarations (§7.12.8); the open question is whether each carries a
   framework default when a template omits it, or eligibility hard-requires an explicit value.
-- **Manifest-diff canonicalisation** — the diff `candidate ∖ manifest == template ∖ manifest` is
-  computed over the resolved policy's leaf fields; the open detail is the canonical form the leaf
-  comparison runs on (list-ordering for pool appends, subtree scoping) so that a semantically-empty
-  write outside the manifest cannot read as equal.
+- **Per-field value normalisation** — patch key-membership removes the whole-tree-diff canonicalisation
+  concern; the residual is normalising each patched *value* before its bound check (CIDR/host canonical
+  form for a `pool` membership test, path normalisation for a `predicate`), so an
+  equivalent-but-differently-spelled value cannot dodge or spoof the bound.
 - **Async-construction confirmation** — whether the early `spawn-<uuid>` reply is sufficient or a
   later `kennel.spawn.ready` signal on the channel is worth the added surface (default: no — boot
   success is observable as the tool responding; failure is observable as EOF).

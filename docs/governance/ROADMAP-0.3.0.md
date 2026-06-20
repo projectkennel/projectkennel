@@ -91,15 +91,17 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   the target's — a template cannot know which future policy will name it.) *Instantiation is a manifest diff, not value synthesis.* All
   compiler-side — out of `cargo tree -p kenneld`.
 
-- **W4 · Template `[[mutable]]` manifest grammar + instantiation-time diff validator.** **[dep] M.**
+- **W4 · Template `[[mutable]]` manifest grammar + instantiation-time patch validator.** **[dep] M.**
   The §7.12.3 attack surface — *selection, not synthesis*. The signed template is a complete
   runnable policy plus a `[[mutable]]` manifest naming which leaf fields may move, each with a
   **bound**: pool (`from` + `max` — append from a fixed set), `oneof` (pick from an enumerated
   list), or `predicate` (the loud free-value escape hatch — `type`/`under`, traversal-free,
-  `RESOLVE_IN_ROOT`). `kenneld` accepts the candidate **iff `candidate ∖ manifest == template ∖
-  manifest`** and each manifest write is within its bound; any write outside the manifest is a hard
-  reject (fail-closed). Frozen fields (single-leg `net.mode`, ceilings, TTL) are not in the agent's
-  write set, so no write can add a trifecta leg. Policy validation in the existing compiler — **not
+  `RESOLVE_IN_ROOT`). The request is a **patch** (`(field-path, value)` pairs), not a full policy;
+  `kenneld` rejects any field-path outside the (per-requester-narrowed) manifest, checks each value
+  against its bound, and applies the survivors — establishing `candidate ∖ manifest == template ∖
+  manifest` by key-membership, not a whole-tree diff (no adversarial policy parser in the daemon). Frozen
+  fields (single-leg `net.mode`, ceilings, TTL) are not in the agent's write set, so no write can add a
+  trifecta leg. Policy validation in the existing compiler — **not
   a new parser in the TCB**.
 
 - **W5 · Signed single-leg template set + per-template tests.** **[dep] M.**
@@ -120,7 +122,8 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 ### Thrust 3 — Spawn runtime path (daemon, binder, init)
 
 - **W6 · The `SPAWN` transaction verb on Node 0.** **[dep] L.** The keystone.
-  In `kenneld/src/binder.rs`: grant + manifest-diff validation (W3/W4), in-memory template
+  In `kenneld/src/binder.rs`: grant + template pin/eligibility re-check + manifest-patch validation
+  (W3/W4), in-memory template
   resolution from the trust store, FD translation, and injection into the spawned kennel's
   supervision plan. The requester provisions the channel (`socketpair()` for the JSON-RPC, a
   separate `pipe()` for the spawned kennel's `stderr` so unstructured error text never corrupts
