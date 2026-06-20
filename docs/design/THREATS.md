@@ -33,7 +33,7 @@ The catalogue is organised into four in-scope families plus a set of out-of-scop
 |---|---|---|
 | Reconnaissance and exfiltration | T1.1–T1.11 | What the workload reads, where it connects, what it leaks |
 | Posture degradation | T2.1–T2.8 | What the workload does to the user's host configuration and to the artefacts it produces |
-| Workload-class-specific | T3.1–T3.7 | Threats whose realisation is distinctive to a specific workload class (containers, MCP servers, build environments) |
+| Workload-class-specific | T3.1–T3.8 | Threats whose realisation is distinctive to a specific workload class (containers, MCP servers, build environments) |
 | Framework attack surface | T5.1–T5.4 | Threats against the framework's own boundary-crossing mechanism — the binder gateway, the inter-kennel relay, and kennel construction |
 | Out of scope | X1–X11 | Threats Project Kennel deliberately does not address |
 
@@ -385,7 +385,7 @@ Composes with the older partial `fs.deny` on `.git/hooks/**` etc., which a templ
 
 ---
 
-# Family 3 — Workload-class-specific threats (T3.1–T3.7)
+# Family 3 — Workload-class-specific threats (T3.1–T3.8)
 
 Threats whose realisation is distinctive to a specific workload class. Most threats in families 1 and 2 apply across workload types with minor variation; the threats in this family are sharper for one class than others and warrant separate documentation.
 
@@ -500,6 +500,22 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 **Residuals.** Injected instructions that direct the agent to actions within its policy succeed. An agent with network access to `api.openai.com` can be prompt-injected to send exfiltrated content to that endpoint as part of an apparently-legitimate API call. Same in-band exfiltration problem as T1.8. Pattern-based detection of injection attempts in agent inputs is the complementary control (out of scope for this framework).
 
 **MITRE ATT&CK.** T1199 (Trusted Relationship), T1556 (Modify Authentication Process — partial analogue applied to instruction-handling).
+
+## T3.8 — Substrate trust: the image-supplied runtime closure is unvetted
+
+**Definition.** A `[rootfs]` grant boots an operator-declared OCI image as the kennel's root filesystem (design §7.11). Kennel applies its full confinement contract to the image, but does *not* vet the image's contents: the entrypoint's dynamic closure (`ld.so`, libc, the NSS modules, every shared object loaded after `execve`) and the image's runtime config (`Env`, `Entrypoint`, `User`) are operator-declared substrate, not Kennel-pinned. The integrity assertion the standard run model makes over a host-trusted read-only `/usr` narrows to *provenance*: the substrate provably came from `image@sha256:…`, but its bytes are not vouched for.
+
+**Workload class.** Container / image-substrate-specific.
+
+**Observed instances.** This is the deliberate trade of running vendor OCI images — the same trust posture Docker and Podman take, where the image's userspace is trusted by the operator who chose to run it. It is distinct from T3.2 (escape) and T3.5 (root with host-UID mapping): here there is no escape and no host-uid mapping, and the workload acquires no capability, no `mount`, no `unshare`. The residual is narrower and is the whole point of the grant — the *confined* substrate is unvetted.
+
+**Attack pattern.** A malicious or compromised image ships a trojaned libc / `ld.so` / NSS module, or an entrypoint whose dynamic closure pulls attacker code; or sets a loader-control `Env` (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `NODE_OPTIONS`); or bakes a non-root uid and `chown`s its writable dirs to it. The code runs *confined* — no host capability, no mount, no egress beyond `[net]` policy, no read outside the constructed view — but executes attacker logic inside the granted confinement, against the granted filesystem and network. The image's content integrity is the operator's waiver, not Kennel's guarantee.
+
+**Mitigation in Project Kennel.** The build/run split keeps every parser — registry protocol, manifest, tar extraction, and the image's own runtime config — out of the daemon: each runs inside a confined kennel at workload authority, so a parser bug is contained like any workload and the TCB does not grow (design §7.11.1, §7.11.4). The image is digest-pinned at fetch (the provenance floor), and the runner refuses unless the signed `[rootfs].image` equals the store entry's recorded `digest`. The launcher strips the `AT_SECURE`-equivalent env-injection set (design §7.11.6) before applying the image's `Env`, so the image cannot acquire loader/runtime/shell injection for free. Every confinement property holds over the image root, none of it depending on the substrate's provenance: the per-kennel network namespace and its egress boundary, the SOCKS proxy and `[net]` policy, the masked identity and the targeted `/etc` overlay (`resolv.conf`/`nsswitch`/`hostname`/`passwd`), the constructed `/dev` allowlist, seccomp, Landlock, the absence of a daemon socket, the absence of a nested user namespace. The grant is **loud**: `[rootfs]` requires a `reason`, and the substrate-trust exposure is *derived* from the grant and surfaced by `kennel policy risks` with the grant as carrier — the mechanism by which `mode = host` derives T1.6. Opt-in hardening up the integrity ladder closes the at-rest gap: a content-addressed store entry (verified before pivot) and per-file fs-verity give tamper-evidence over the operator-owned tree and the config the launcher parses.
+
+**Residuals.** Confinement is the claim; content integrity is not. The entrypoint is provenance-pinned (the image digest), not per-binary hashed — an explicit `[workload].argv` + `sha256` override restores the per-binary pin; its dynamic closure stays unpinned regardless. Image `Env` enters the workload (sanitised of injection vectors, policy `[env]` overriding); image `User` is not honored (no subuid range — a uid-baked image fails on `EACCES`, not identity); `fs.execute` is coarse over a declared substrate. Content integrity over the image tree past the fetch digest is the operator's to raise via the integrity ladder. These residuals are derived from the `[rootfs]` grant, not stored on a `threats.reinstated` field; the shape of the grant is the tag (design §7.11.9).
+
+**MITRE ATT&CK.** T1610 (Deploy Container), T1525 (Implant Internal Image), T1195.002 (Compromise Software Supply Chain).
 
 ---
 

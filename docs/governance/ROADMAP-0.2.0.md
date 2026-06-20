@@ -1,6 +1,6 @@
 # Project Kennel — 0.2.0 plan
 
-Status: **building — 14 of 15 original workstreams landed** (2026-06-19); **W15** (as-built prose pass) open; **W16** (facade-client poll-elimination) added post-plan from the delegate/facade audit · Drafted: 2026-06-18 · Targets: 0.2.0
+Status: **building — 14 of 15 original workstreams landed** (2026-06-19); **W15** (as-built prose pass) open; **W16** (facade-client poll-elimination) added post-plan from the delegate/facade audit; **Thrust 5 / W17–W19** (OCI substrate execution) added post-plan (2026-06-20), design + T3.8 landed, build sequenced · Drafted: 2026-06-18 · Targets: 0.2.0
 Baseline: 0.1.0 (first versioned cut, 2026-06-18)
 
 > **Progress (2026-06-19).** W1+W2 (persistence), W8 (D-Bus), W9 (fragments), W10 (IDE schema),
@@ -317,6 +317,45 @@ layer on top:
   eventfd the facade waits on (no parked looper), or a pool bump tied to the mirror-port count. A
   kenneld change ([[tcb-only-shrinks]] — keep it transport-only, no new parser), so it needs
   maintainer sign-off before build.
+
+### Thrust 5 — OCI substrate execution
+
+**NEW — added post-plan (2026-06-20). Design + THREATS landed; build sequenced.** A deployment
+model, not a confinement fix: run a vendor OCI image as the kennel's root filesystem so the
+container-packaged workloads developers actually ship are adoptable under Kennel's contract. The
+design is [`07-11-oci-substrate.md`](../design/07-11-oci-substrate.md) (§7.11), the implementation
+contract [`02-9-oci.md`](../architecture/02-9-oci.md), the trust residual **T3.8** (substrate trust
+— written this pass; corrected from the scratch's "T2" placement, since unvetted-image threats are
+workload-class-specific, Family 3, alongside T3.2/T3.4/T3.5). The model boots an unpacked rootfs
+directly under `kenneld`'s namespaces — **no container daemon, no daemon socket, no in-daemon
+parser** — and splits `kennel oci build` (fetch + unpack, every parser confined) from
+`kennel oci run` (boot under policy). The posture claim is **confinement, not content integrity**;
+`[rootfs]` is a loud grant ([[footgun-warn-dont-forbid]] / [[no-security-theatre]] register, like
+`mode = host`). [[tcb-only-shrinks]] holds: the launcher and every parser run at workload authority,
+never in `cargo tree -p kenneld`.
+
+- **W17 · OCI unprivileged surface.** *(→ §7.11, `02-9-oci.md`)* **L.** The `kennel oci build`/`run`
+  verbs + the named store manager; `[rootfs]` schema + the `kennel-lib-compile` **grammar partition**
+  (`[rootfs]` valid iff OCI-model) + the T3.8 risk derivation; the Kennel-shipped vetted fetch policy
+  + the `TEMPLATE-oci` run-policy scaffold (mirrors the `env_strip` denylist as `[env].deny` globs);
+  and **`kennel-bin-oci-entry`**, the workload-side launcher (config parse, env **sanitise + merge**,
+  `chdir`, in-root `execve`). The one invariant: the image-`Env` strip is wired into the merge in the
+  *same* change, with the `env_strip` behavioural tests — a bare merge silently reopens the
+  `AT_SECURE` hole. No daemon code; movable now.
+
+- **W18 · OCI daemon spawn-path branch.** *(→ `02-9-oci.md` §daemon, [[spawn-userns-owner-yama]])*
+  **M. Sign-off given (2026-06-20).** `[rootfs]` → `Spec` → `Plan.new_root` set to the image tree;
+  the [`build_view_and_pivot`](../../src/crates/kennel-lib-spawn/src/lib.rs) branch (no tmpfs
+  scaffold, no merged-usr mirror, the targeted `/etc` tmpfs overlay with verbatim-symlink seed-copy
+  + unlink-replace + ro-bind); in-root entrypoint resolution (`openat2(RESOLVE_IN_ROOT)` + fexecve);
+  and the `policy.image == store/digest` equality check. Bounded — `new_root` plumbing already
+  exists; this is its OCI branch. Proven by a policy-suite case ([[policy-test-suite-is-the-e2e]]).
+
+- **W19 · OCI integrity ladder (opt-in, behind the floor).** *(→ §7.11.8)* **M.** Rung 1
+  (content-addressed store entry, verified before pivot — record-and-verify, the entry keeps its
+  `<name>` key) and Rung 2 (fs-verity over `rootfs/` + `config.json`). Opt-in so the operator who
+  needs at-rest tamper-evidence pays for it; **may slip to 0.3** (the digest-pinned floor is the
+  0.2.0 minimum).
 
 ## Dropped / deferred (with reasons)
 
