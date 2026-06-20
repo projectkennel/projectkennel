@@ -11,8 +11,8 @@ the relationship to the existing `host-netproxy` crate.
 > (`none`/`constrained`/`unconstrained`/`host`), the per-kennel net-ns + loopback alias, the
 > socketpair conduit, the `CONNECT_INET` egress path (`facade-socks5` → node 0 → kenneld
 > resolve/pin → `host-netproxy` dumb dialer), and the inbound host-side mirror
-> (`host-inetd` + `facade-client`, built pull-based; the chosen design is **push** —
-> see §The host-side mirror and `BIND`). What remains
+> (`host-inetd` + `facade-client`, **push-based**: the facade registers a callback node and kenneld
+> pushes each accepted conduit — see §The host-side mirror and `BIND`). What remains
 > roadmap is the **cross-instance / inter-kennel relay** (one kennel reaching another kennel's
 > services through kenneld) and `SpawnKennel`; those legs still read "kenneld is designed to do X".
 
@@ -215,7 +215,7 @@ intra-kennel path (always — the load-bearing case):
   other in-kennel process ── connect() 127.43.16.1:8080 ──►  reaches it directly
                   (normal loopback; no proxy, no binder)
 
-host-side mirror (observe / expose at the same IP) — BUILT, pull-based:
+host-side mirror (observe / expose at the same IP) — BUILT, push-based:
 
   bring-up ──► kenneld eagerly registers each policy-mirrored port with host-inetd
        ▼
@@ -224,24 +224,32 @@ host-side mirror (observe / expose at the same IP) — BUILT, pull-based:
        │  per accept: mint socketpair, splice accepted⇄host_end LOCALLY,
        │             push the kennel_end + port to kenneld (SCM_RIGHTS)
        ▼
-  kenneld  enqueues the kennel_end on pending-inbound[port]  (pure fd router)
+  kenneld  pushes the kennel_end to the port's registered mirror node  (pure fd router)
        ▼
   facade-client (in-kennel; reverse of facade-socks5)
-       │  BIND_INET(port) → kenneld replies the kennel_end fd, or AGAIN (re-arm)
+       │  REGISTER_MIRROR(port) + own node, at bring-up, then SLEEPS in a server loop
+       │  on each push: one-way DELIVER_INET(port) carries the kennel_end fd
        │  connect() the native inside listener 127.43.16.1:8080 and splice
        ▼  bytes: external → accepted → host_end⇄kennel_end → facade-client → listener
 ```
 
-> **As-built is pull; the chosen design is push.** The built path polls (`facade-client` →
-> `BIND_INET` → conduit-or-`AGAIN`); kenneld makes no inbound policy decision (the `bind4`/`6` ACL
-> already gated the bind) and the handler never parks a looper — the unbounded accept wait is in a
-> per-port reader thread, off the binder pool. The **push** model is now the chosen design
-> ([`07-5-network.md`](../design/07-5-network.md) §7.5.7): the facade registers a mirror node and
-> sleeps, kenneld pushes a one-way `DELIVER_INET` on accept (the per-port queue above becomes the
-> bounce buffer), eliminating pull's idle-poll CPU + delivery latency. It reverses the
-> no-callback-node property knowingly — for inbound, kenneld→kennel is the data direction — with
-> three guards (death-notify lifecycle, one-way + queue bounce, port-gated registration). This
-> section reconciles to push when that delta lands.
+> **As-built: push (§7.5.7).** `facade-client` registers a callback node per mirrored port
+> ([`REGISTER_MIRROR`], `transact_node` sending a `BINDER_TYPE_BINDER`) and then sleeps in a binder
+> server loop — zero CPU, no poll. kenneld acquires the translated handle, watches its death, maps
+> `port → handle`, and on each `host-inetd` accept pushes a **one-way** [`DELIVER_INET`] carrying the
+> conduit fd ([`transact_oneway_fd`]). kenneld makes no inbound policy decision (the `bind4`/`6` ACL
+> already gated the bind). Three guards bound the new callback surface: **death-notify** lifecycle
+> (`BR_DEAD_BINDER` → drop the stale handle), **one-way + per-port bounce buffer** (kenneld never
+> blocks on the facade; the queue above is the bounce path for the register/full-buffer window), and
+> **port-gated registration** (the facade and workload share the persona uid, so registration is
+> gated on the policy mirror set, not `sender_euid`). It reverses the no-callback-node property
+> knowingly — for inbound, kenneld→kennel is the data direction — while the conduit fd stays
+> out-of-TCB (the [fd-passing verdict, `02-4`](02-4-binder.md) is intact). Why push beats the earlier
+> pull (idle-poll CPU + delivery latency; the thread-bound-reply sidestep): [`07-5`](../design/07-5-network.md) §7.5.7.
+>
+> [`REGISTER_MIRROR`]: the inbound-mirror registration verb (node 0).
+> [`DELIVER_INET`]: the one-way conduit-delivery push (to the mirror node).
+> [`transact_oneway_fd`]: `kennel-lib-binder` one-way transaction carrying a `BINDER_TYPE_FD`.
 
 ---
 
