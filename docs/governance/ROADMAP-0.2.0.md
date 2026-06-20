@@ -1,17 +1,17 @@
 # Project Kennel — 0.2.0 plan
 
-Status: **building — 14 of 15 original workstreams landed** (2026-06-19); **W15** (as-built prose pass) open; **W16** (facade-client poll-elimination → inbound mirror push) **built + merged** (2026-06-20); **Thrust 5 / W17–W19** (OCI substrate execution) added post-plan (2026-06-20), design + T3.8 landed, build sequenced · Drafted: 2026-06-18 · Targets: 0.2.0
+Status: **building — all 15 original workstreams landed** (2026-06-20, W15 as-built prose pass merged); **W16** (facade-client poll-elimination → inbound mirror push) **built + merged** (2026-06-20); **Thrust 5 / W17–W19** (OCI substrate execution) design + T3.8 landed, full vertical built, **W17c** (vetted confined fetch policy + `TEMPLATE-oci` scaffold) the remaining build item · Drafted: 2026-06-18 · Targets: 0.2.0
 Baseline: 0.1.0 (first versioned cut, 2026-06-18)
 
-> **Progress (2026-06-19).** W1+W2 (persistence), W8 (D-Bus), W9 (fragments), W10 (IDE schema),
-> W11 (terminal filter → CLI), W12 (TCB accounting), W13 (operator-prompt channel), and W14
-> (`essential_etc` cascade) are **built + merged**; each is marked inline below. The one remaining
-> workstream is **W15** (strip history/apology prose + purge never-built mechanisms). **W16**
-> (`facade-client` poll-elimination) was added post-plan from the delegate/facade DoS audit and is
-> now **built + merged** — resolved by reversing the inbound mirror to push (the facade sleeps on a
+> **Progress (2026-06-20).** All 15 original workstreams are **built + merged**, including **W15**
+> (the as-built prose pass: apology-history rewritten to present tense, the never-built
+> `xdg-dbus-proxy` / per-kennel `ssh-agent` shim / `IGpgAgent` facade deleted with a CI grep gate).
+> **W16** (`facade-client` poll-elimination), added post-plan from the delegate/facade DoS audit, is
+> also **built + merged** — resolved by reversing the inbound mirror to push (the facade sleeps on a
 > callback node; kenneld pushes each conduit), which dissolved the parked-looper pool-exhaustion
-> decision the parked-poll variant was gated on. The per-workstream prose is kept as the
-> plan-of-record; the as-built truth lives in the design corpus and `CHANGELOG.md`.
+> decision the parked-poll variant was gated on. The remaining build item is **W17c** (the vetted
+> confined OCI fetch policy + `TEMPLATE-oci` scaffold, Thrust 5). The per-workstream prose is kept as
+> the plan-of-record; the as-built truth lives in the design corpus and `CHANGELOG.md`.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -291,17 +291,16 @@ layer on top:
 
 - **W15 · As-built prose pass — strip history/apology and never-built mechanisms.** *(→
   [[docs-as-built-no-prerelease-history]], [[comments-no-history-no-apology]])* **S–M.**
-  **⏳ OPEN — the one remaining 0.2.0 workstream.** (The grep gate still finds `xdg-dbus-proxy` /
-  `IGpgAgent` / `per-kennel ssh-agent` residue across the corpus.) Two coupled
-  cleanups across `docs/` and code comments: **(1)** the "this is *not* X" / "replaced by" / "the old
-  X" / "no longer" apology-history prose — state the design in present-tense as-built, never narrate
-  what was removed or what we don't do; and **(2)** purge the mechanisms that were *designed-on-paper
-  but never built and never will be* — `xdg-dbus-proxy` (the D-Bus carrier is the `IDBus` facade,
-  §7.7), the per-kennel `ssh-agent` socket shim (SSH egress is the §7.10 bastion), and any residual
-  `gpg-agent`/`IGpgAgent` facade (GPG signing is not brokered; §11.2). These were never written and
-  never used, so they are deleted outright — **no tombstone, no "we don't do X" marker**, which is
-  itself the apology pattern. A grep gate (`xdg-dbus-proxy`, `IGpgAgent`, `per-kennel ssh-agent`) keeps
-  them out once removed. Touches ~15 corpus files; do it as one pass, not per-edit drive-bys.
+  **✅ Built + merged.** Two coupled cleanups across `docs/` and code comments: **(1)** the
+  "this is *not* X" / "replaced by" / "the old X" / "no longer" apology-history prose was rewritten to
+  present-tense as-built; and **(2)** the mechanisms that were *designed-on-paper but never built* were
+  deleted outright — `xdg-dbus-proxy` (the D-Bus carrier is the `IDBus` facade, §7.7), the per-kennel
+  `ssh-agent` socket shim (SSH egress is the §7.10 bastion), and any `gpg-agent`/`IGpgAgent` facade (GPG
+  signing is not brokered; §11.2) — **no tombstone, no "we don't do X" marker**. The legitimate
+  `[unix].allow` ssh-agent/gpg-agent footgun documentation stays (a real, loudly-warned user choice).
+  A grep gate (`src/tools/tests/no-never-built-mechanisms.sh`, run in CI) keeps the three names out.
+  Surfaced and fixed one as-built drift in passing: the D-Bus mediation membrane (the `IDBus` facade)
+  is built (W8), so `08-as-built-notes.md` moved it from "not built yet" to "built".
 
 - **W16 · `facade-client` poll-elimination — inbound mirror pull→push.** *(→ §7.5.7,
   `07-1-binder.md`, [[ipc-inventory-binder-is-sole-in-kennel-core]], [[binder-fd-passing-safety-verdict]])*

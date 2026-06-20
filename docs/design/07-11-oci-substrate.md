@@ -205,6 +205,17 @@ does the image declare a non-root `config.User` (effective runtime uid ≠ 0)?
   than inventing a boundary the author did not. This is also the root-running compat tail — runtime
   `pip -g`/`npm -g`/`apt` work because root-running images get no lock. (A root image under Kennel is
   then at Docker parity — root in a container can write `/usr` too — not a regression.)
+
+  **This is a deliberate W^X (write-xor-execute) waiver for all-root images.** The OCI substrate
+  Landlock base grants the merged root `/` both `WRITE` and `EXECUTE` (execute is coarse over a
+  *declared* substrate — there is no per-binary `exec.allow` gate inside an image), and with no derived
+  `readonly` set there is no read-only mount to narrow it. So the same paths are writable *and*
+  executable: a workload can write a binary anywhere in the tree and then execute it — the
+  write-vs-execute separation the standard run model enforces (a host-trusted read-only `/usr`, exec
+  default-deny) does not hold here. The only remaining barrier is the image's own internal DAC, which
+  the build-flatten made vacuous (one owner, §7.11.4c above). This is the cost of the all-root posture,
+  the same cost Docker carries; a non-root image gets it back via the read-only closure (`fs.execute`
+  over the locked paths becomes read+execute, write ⇒ `EROFS`).
 - **Non-root `USER` declared** — the author intended `/usr` off-limits to the app. Derive the coarse
   FHS closure (`/usr`, `/bin`, `/sbin`, `/lib*`, which the merged-usr symlinks resolve into). Not a
   per-inode ownership walk; an FHS-level estimate. The `writable` carve-out is the recourse when the
@@ -276,9 +287,10 @@ on the image entrypoint, because the OCI model's provenance anchor is the image 
 per-binary hash (§7.11.7 residual A).
 
 The launcher **always** resolves the entrypoint from the image config; there is no `[workload]` block
-in an OCI policy (`[rootfs]` and `[workload]` are mutually exclusive, §7.11.2), so there is no
-per-binary pin in the OCI model — provenance is anchored on the recorded image digest (§7.11.8), the
-whole of the assertion. A `kennel oci run <name> -- <cmd>` supplies a **`Cmd` override**: the launcher
+in an OCI policy (`[rootfs]` and `[workload]` are mutually exclusive, §7.11.2), so the standard run
+model's daemon-enforced `[workload].sha256` entrypoint pin **cannot be expressed** — there is no
+per-binary hash in the OCI model. Provenance shifts entirely to the recorded image digest (§7.11.8)
+plus the operator's invocation, the whole of the assertion. A `kennel oci run <name> -- <cmd>` supplies a **`Cmd` override**: the launcher
 runs it in place of the image's `Cmd` while keeping the image `Entrypoint` and the sanitised `Env`
 (the same shape as `docker run <image> <cmd>`). This is a runtime convenience with no policy impact —
 it changes no grant and crosses no trust boundary, since the entrypoint, env, and substrate are all

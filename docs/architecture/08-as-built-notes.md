@@ -14,10 +14,6 @@ narration is kept here; the chapter named is the source of truth.
 
 ### Not built yet
 
-- **D-Bus proxy** (`07-7-dbus.md`) — designed, not built. The `[dbus]` config surface has been
-  **removed from the schema** (a policy declaring it is now rejected at parse, not carried as a
-  no-op toggle); the design stands as roadmap, and the binder successor is
-  `org.projectkennel.IDBus/default` (below), not the old `xdg-dbus-proxy`.
 - **X11 isolation** (`07-8-x11.md`) — designed, not built. The `[x11]` config surface
   (`xwayland_isolated`/`xephyr_isolated`) has been **removed from the schema** (rejected at
   parse); the design stands as roadmap.
@@ -53,10 +49,9 @@ narration is kept here; the chapter named is the source of truth.
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
-  kennel's services through kenneld (the MCP topology) is designed, not built. So is the
-  `org.projectkennel.IDBus/default` D-Bus facade (the binder successor to `xdg-dbus-proxy`,
-  superseding the unbuilt `07-7-dbus.md` proxy) and `SpawnKennel`-over-binder. kenneld owns
-  the reserved nodes; the relay grows kenneld's TCB and is tracked as a new threat surface.
+  kennel's services through kenneld (the MCP topology) is designed, not built, as is
+  `SpawnKennel`-over-binder. kenneld owns the reserved nodes; the relay grows kenneld's TCB and
+  is tracked as a new threat surface.
 - **`[container]` runtime** (`05-templates.md` §5.7) — there is no container-runtime integration,
   and the `[container]` config surface has been **removed from the schema** (rejected at parse)
   rather than kept as design-level language. No shipped template uses it: `containerised-service`
@@ -67,6 +62,11 @@ narration is kept here; the chapter named is the source of truth.
 Each graduated from this roadmap; its as-built detail lives in the named architecture
 chapter (and the design § for the mechanism). No build notes are kept here.
 
+- **D-Bus mediation** (`07-7-dbus.md`, `02-4-binder.md` §Node 0) — the `org.projectkennel.IDBus/default`
+  facade and the membrane: `facade-dbus` (in-kennel) speaks D-Bus to the workload and the `DBUS_*`
+  verbs to node 0; kenneld is the membrane (per-connection state + rate cap) relaying opaque frames to
+  the `host-dbus` delegate over the owner-only pipe; the `[dbus]` policy surface gates the session/system
+  buses. Proven by the `dbus-session-allowed` / `dbus-deny-wins` policy-suite cases.
 - **`kennel policy diff`** (`05-templates.md` §5.11/§5.13, `02-1-cli.md`) — the interpreted,
   threat-impact-annotated effective-policy delta (`+`/`~`/`-` per grant, each with the threats it
   exposes/mitigates, a widening marker, and a net threat-posture summary). One argument diffs a
@@ -141,7 +141,7 @@ chapter (and the design § for the mechanism). No build notes are kept here.
     the operator identity line (and one line per granted gid), written by the privhelper in a
     single `write(2)` with `CAP_SETFCAP`. There is no "0 0 N" range and no single-extent rule;
     the only constraint was always the single write. The privhelper gains `CAP_SETUID` for this;
-    the old deferred-gid map handshake (§7.4.8) is subsumed — the maps are written once, fully,
+    the gid map is part of this single write (§7.4.8) — the maps are written once, fully,
     by the constructor before `kennel-bin-init` starts. The escalation hazard of a userns-0 is
     bounded by the crux invariant: operator code never runs as userns-0 (only privhelper code
     runs between `clone` and `fexecve`; thereafter only the trusted `kennel-bin-init`; the workload

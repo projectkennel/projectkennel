@@ -276,8 +276,8 @@ besides kenneld that touches binder.
 **`host-netproxy`:** no binder. One delegate-request reader thread on its
 `kenneld`↔delegate `socketpair`; each `CONNECT` request dispatches a worker thread (DNS
 resolution, dial) that returns the connected fd by `SCM_RIGHTS`. The existing `Proxy`,
-`Ruleset`, and `Resolver` split is unchanged; only the inbound half (previously the SOCKS5
-accept loop) becomes the delegate-socketpair reader. `Proxy::reload` is unaffected.
+`Ruleset`, and `Resolver` split is unchanged; the inbound half is the delegate-socketpair
+reader. `Proxy::reload` is unaffected.
 
 **host-side spawn leg:** no binder. One delegate-request reader thread on its `socketpair`;
 for each mirror request it binds the same `ip:port` on the host alias, retains the mirror
@@ -313,10 +313,8 @@ as follows. New steps are marked **†**; existing steps are condensed.
    kennel's assigned loopback address at :1080.
 7. Landlock seal, workload exec — existing
 
-**`host-netproxy` launch timing** is the surgery. It previously launched early with a
-config file and a SOCKS5 listen address; it now launches after binderfs is up and attaches
-to the delegate socketpair instead of binding a SOCKS5 listener. The config file path
-(`Proxy::reload`) is unchanged; only the startup ordering and the inbound half change.
+**`host-netproxy` launch timing.** host-netproxy launches after binderfs is up and attaches
+to the delegate socketpair (the config-file path via `Proxy::reload` is unchanged).
 
 `CLONE_NEWNET` at step 1 means the kennel's network namespace is empty from the moment of
 creation — no host network state is ever visible inside it. The `AddLoopbackAlias`
@@ -330,7 +328,7 @@ privhelper call at step 2 must complete before any host-side `bind()` at step 5/
 
 ## Relationship to `host-netproxy` crate
 
-The `host-netproxy` crate splits into two concerns that were previously unified:
+The `host-netproxy` crate splits into two concerns:
 
 | Concern | Pre-netns | Post-netns |
 |---|---|---|

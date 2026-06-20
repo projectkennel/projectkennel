@@ -119,9 +119,7 @@ default), e.g. `127.<…>:1080`. The address is computed from the kennel's tag/c
 (`07-5-network.md` §7.5.2) and carried in the signed policy (`net.proxy`); kenneld
 writes it into `proxy-<ctx>.toml` as the proxy's `listen` address. Reconfiguration
 is by respawn with a fresh config file, not an on-socket control protocol — there
-is no `proxy.ctl`/`proxy.sock`. The per-kennel ssh-agent and D-Bus proxy are
-*future work* (`08-as-built-notes.md`); when built, their sockets stage under this
-same per-user tree, never a shared one.
+is no `proxy.ctl`/`proxy.sock`.
 
 **The host loopback alias.** Each kennel gets its own network namespace
 (`CLONE_NEWNET` in the construction child, for every mode but `host`;
@@ -131,9 +129,7 @@ same per-user tree, never a shared one.
 **inbound BIND mirror** (`host-inetd`, §7.5.7) binds: an allowed in-kennel `bind()`
 is exposed back on the host at the same `ip:port` for host observability and
 ingress. The same `/28`+`/64` is also the egress proxy's loopback listen address
-inside the kennel's net-ns (above). The remaining roadmap piece is the per-kennel
-ssh-agent and D-Bus proxy sockets (future work, `08-as-built-notes.md`), which
-would stage under this same per-user tree.
+inside the kennel's net-ns (above).
 
 ---
 

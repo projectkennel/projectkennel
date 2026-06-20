@@ -47,8 +47,8 @@ kennel-bin-init (PID 1, uid 0, trapped in the pivoted view, zero argv/envp)
  11. waitpid loop: NOTIFY_FACADE_CRASH on a facade death; on workload exit, _exit its status
 ```
 
-Single `clone(CLONE_NEWPID|…)` — the child is PID 1 directly; no double-fork (that was only
-needed when `unshare` left the unsharer in the old pidns). The privhelper does **not** stay C's
+Single `clone(CLONE_NEWPID|…)` — the child is PID 1 directly; no double-fork is needed, because
+`CLONE_NEWPID` is in the single clone call rather than a later `unshare`. The privhelper does **not** stay C's
 parent: it reports C's host pid to kenneld over the construction socketpair and exits (its job
 is done — it is not a reaper proxy). C (PID 1 of its own namespace) outlives it and reparents to
 kenneld, which set itself a child subreaper and `waitpid`s C directly for the exit status. The

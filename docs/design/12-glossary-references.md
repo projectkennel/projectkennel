@@ -70,8 +70,6 @@
 
 **Wayland.** A display server protocol replacing X11. Per-client capability model is stricter than X11's; Project Kennel supports Xwayland-isolated as the X11 path on Wayland hosts.
 
-**xdg-dbus-proxy.** A small daemon for filtering D-Bus traffic at the method-call level. Used here as the per-kennel D-Bus broker. See §7.7.
-
 **Xephyr.** A nested X server (X-server-inside-X-server) used for the X11-isolated path on X11 hosts. See §7.8.4.
 
 **Xwayland.** An X server running as a Wayland client. Used for the X11-isolated path on Wayland hosts. See §7.8.3.
@@ -100,7 +98,7 @@
 
 ### Related projects
 
-- Flatpak: <https://flatpak.org/> — desktop application sandboxing; the portal model and xdg-dbus-proxy come from here.
+- Flatpak: <https://flatpak.org/> — desktop application sandboxing; inspired the portal model and D-Bus method-filtering concept (realized in Kennel as the `IDBus` facade, §7.7).
 - Bubblewrap: <https://github.com/containers/bubblewrap> — low-level sandboxing primitives.
 - Firejail: <https://firejail.wordpress.com/> — broader sandboxing tool; alternative philosophy (seccomp-primary).
 - systemd-nspawn: a different point in the design space (full container, separate root).

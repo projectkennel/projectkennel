@@ -58,7 +58,7 @@ Sources of events (where they originate before being passed to the sinks):
 - **Kernel** via Landlock and AppArmor LSM hooks (filesystem denials, ptrace denials).
 - **cgroup BPF programs.** Network connect/bind/sock-create denials, allow events under summary or full level. Programs write to *our* `audit_ringbuf`; the audit reader in kenneld (`kenneld::bpf_audit`) drains it and translates each event to a canonical `net.*` event through the unified writer with `source: bpf` (`02-7-bpf-abi.md` §The audit ring buffer).
 - **The netproxy.** SOCKS5-level allow/deny, DNS resolution, byte counters.
-- **xdg-dbus-proxy.** D-Bus method allow/deny.
+- **dbus-proxy.** D-Bus method allow/deny (the `IDBus` mediation membrane, §7.7).
 - **kennel-privhelper.** Privileged-operation invocations and refusals.
 - **The spawn wrapper (kennel-lib-spawn).** Lifecycle events for the workload (start, exit, signal).
 - **kenneld.** Daemon lifecycle, policy load, kennel registration, and — as binder node 0 — every binder registry verb (`binder.register`/`lookup`) and the `kennel-bin-init`↔node-0 lifecycle verbs (`lifecycle.plan-pull`/`boot-sync`/`facade-crash`/`workload-exec`).
