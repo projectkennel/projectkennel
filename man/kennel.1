@@ -127,7 +127,7 @@ Stream new events as they arrive.
 Print the equivalent journalctl invocation and exit.
 .RE
 .TP
-\fBkennel oci <build|run> <name> [\-\-image <ref>] [\-\-key K] [\-\-force] [\-\- <cmd...>]\fR
+\fBkennel oci <build|run|revert|update> <name> [\-\-image <ref>] [\-\-key K] [\-\-force] [\-\- <cmd...>]\fR
 build and run an OCI image as a confined kennel substrate (§7.11)
 .RS
 .TP
@@ -138,6 +138,16 @@ Provision a named image store entry: record the provenance digest and scaffold a
 .TP
 \fBrun <name> [\-\-key K] [\-\- <cmd...>]\fR
 Boot a built store entry under its signed policy (the digest is checked against [rootfs].image).
+.RE
+.RS
+.TP
+\fBrevert <name>\fR
+Obliterate the persisted overlay upper (persistence = persist); a no\-op for discard/readonly.
+.RE
+.RS
+.TP
+\fBupdate <name> \-\- <ref>\fR
+Replace the image layer: record the new digest, discard the upper (\-\-keep\-state to keep).
 .RE
 .RS
 .TP

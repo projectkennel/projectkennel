@@ -252,9 +252,150 @@ pub fn dispatch(args: &[String]) -> Result<std::process::ExitCode, String> {
     match verb.as_str() {
         "build" => build(rest),
         "run" => run(rest),
+        "revert" => revert(rest),
+        "update" => update(rest),
         other => Err(format!(
-            "unknown `kennel oci` verb `{other}` (expected build|run)"
+            "unknown `kennel oci` verb `{other}` (expected build|run|revert|update)"
         )),
+    }
+}
+
+/// Refuse a store-mutating verb (`revert`/`update`) while a kennel of the same `<name>` is
+/// running — its overlay has the store entry mounted live, and mutating `upper/`/`rootfs/`
+/// underneath it would corrupt the running view. A kenneld we cannot reach means nothing is
+/// running, so the op proceeds.
+fn refuse_if_running(name: &str) -> Result<(), String> {
+    use kennel_lib_control::control::{self, Request, Response};
+    let Ok(conn) = crate::connect() else {
+        return Ok(()); // no daemon ⇒ nothing running
+    };
+    crate::send(&conn, &Request::List, &[])?;
+    let mut conn = conn;
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Listing(kennels) => {
+            if kennels.iter().any(|k| k.kennel == name) {
+                return Err(format!(
+                    "kennel `{name}` is running; stop it (`kennel stop {name}`) before this operation"
+                ));
+            }
+            Ok(())
+        }
+        Response::Error(message) => Err(message),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+/// `kennel oci revert <name>` — obliterate the managed overlay upper (and its workdir) so the
+/// next run's merged root is the lowers plus a clean layer. A no-op for a `discard`/`readonly`
+/// entry (no managed upper exists). Refused while the entry is running; the image lower is never
+/// touched (revert returns the *mutable* state to empty, it does not re-attest the image).
+///
+/// # Errors
+///
+/// Returns an error if the name is invalid, the entry is not built, the kennel is running, or the
+/// upper cannot be removed.
+pub fn revert(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let name = single_name(args, "revert")?;
+    let store = Store::open()?;
+    let entry = store.entry(name)?;
+    if !entry.exists() {
+        return Err(format!("store entry `{name}` is not built"));
+    }
+    refuse_if_running(name)?;
+    let upper = entry.dir().join("upper");
+    let work = entry.dir().join("work");
+    let had = upper.exists() || work.exists();
+    for d in [&upper, &work] {
+        if d.exists() {
+            std::fs::remove_dir_all(d).map_err(|e| format!("removing {}: {e}", d.display()))?;
+        }
+    }
+    if had {
+        eprintln!(
+            "kennel: reverted the persisted overlay upper for `{name}` (mutable state cleared)"
+        );
+    } else {
+        eprintln!("kennel: `{name}` has no persisted upper (discard/readonly) — nothing to revert");
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// `kennel oci update <name> -- <new-image-ref>` — replace the assured (image) layer.
+///
+/// Records the new provenance digest and discards the managed upper by default (a stale copy-up
+/// over the old image would shadow the new one's patched binaries); `--keep-state` preserves it.
+/// Refused while running; refuses an absent `<name>` (as `build` refuses a present one).
+///
+/// The confined fetch + unpack of the new `rootfs/`/`config.json`, the `[rootfs].image` bump, and
+/// the signature-clear (so the operator re-signs — `update` never auto-signs) land with the vetted
+/// builder path (W17c); until then this records the digest and prepares the entry, reporting the
+/// remaining step.
+///
+/// # Errors
+///
+/// Returns an error if the name is invalid, `<new-image-ref>` is missing, the entry is absent, the
+/// kennel is running, or the store cannot be written.
+pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let (head, tail) = args
+        .iter()
+        .position(|a| a == "--")
+        .map_or((args, &[][..]), |sep| {
+            (
+                args.get(..sep).unwrap_or(&[]),
+                args.get(sep.saturating_add(1)..).unwrap_or(&[]),
+            )
+        });
+    let mut name: Option<&str> = None;
+    let mut keep_state = false;
+    for arg in head {
+        match arg.as_str() {
+            "--keep-state" => keep_state = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if name.is_none() => name = Some(v),
+            _ => return Err("unexpected extra argument before `--`".to_owned()),
+        }
+    }
+    let name = name.ok_or("usage: kennel oci update <name> [--keep-state] -- <new-image-ref>")?;
+    let new_ref = tail
+        .first()
+        .ok_or("`kennel oci update` needs `-- <new-image-ref>`")?;
+
+    let store = Store::open()?;
+    let entry = store.entry(name)?;
+    if !entry.exists() {
+        return Err(format!(
+            "store entry `{name}` does not exist; use `kennel oci build {name}` to create it"
+        ));
+    }
+    refuse_if_running(name)?;
+    entry.write_digest(new_ref)?;
+    if !keep_state {
+        for d in [entry.dir().join("upper"), entry.dir().join("work")] {
+            if d.exists() {
+                std::fs::remove_dir_all(&d)
+                    .map_err(|e| format!("removing {}: {e}", d.display()))?;
+            }
+        }
+    }
+    let state_note = if keep_state {
+        " (kept the persisted upper — review for a rebase hazard against the new image)"
+    } else {
+        " (discarded the persisted upper)"
+    };
+    eprintln!("kennel: recorded `{new_ref}` for `{name}`{state_note}");
+    eprintln!(
+        "  remaining (W17c): re-fetch rootfs/ + config.json confined, bump [rootfs].image, and \
+         clear the policy signature so you re-sign ({})",
+        entry.policy().display()
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Parse a lone `<name>` argument for a single-arg verb.
+fn single_name<'a>(args: &'a [String], verb: &str) -> Result<&'a str, String> {
+    match args {
+        [name] if !name.starts_with('-') => Ok(name),
+        _ => Err(format!("usage: kennel oci {verb} <name>")),
     }
 }
 
