@@ -63,6 +63,8 @@ implementation-independent. The as-built *how* lives under
 | 07.8 | [X11](07-8-x11.md) | Display isolation (roadmap) |
 | 07.9 | [Other](07-9-other.md) | Procfs, env, capabilities, seccomp, the tty (escape filter, controlling pty) |
 | 07.10 | [SSH](07-10-ssh.md) | The double-blind re-origination bastion |
+| 07.11 | [OCI substrate](07-11-oci-substrate.md) | Booting a vendor OCI image as a confined kennel root |
+| 07.12 | [Dynamic spawn](07-12-dynamic-spawn.md) | Delegated ephemeral sibling kennels; MCP-over-stdio transport |
 | 08 | [Enforcement architecture](08-enforcement-architecture.md) | How the kernel mechanisms compose |
 | 09 | [Policy lifecycle](09-policy-lifecycle.md) | Author → compile → sign → run |
 | 10 | [Failure modes](10-failure-modes.md) | What happens when each step fails |
