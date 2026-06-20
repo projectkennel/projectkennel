@@ -845,8 +845,8 @@ set = {
     HOME = "/run/kennel/<kennel>/home",
     TMPDIR = "/tmp",
     XDG_RUNTIME_DIR = "/run/user/<uid>",  # real path; contents shimmed
-    # No SSH_AUTH_SOCK: there is no ssh-agent in the kennel. git-over-SSH goes
-    # through the §7.10 bastion, configured via the synthetic ~/.ssh/config.
+    # SSH egress via the §7.10 bastion (SSH_AUTH_SOCK unset), configured via
+    # the synthetic ~/.ssh/config.
     # Point tools at the per-kennel proxy. `localhost` resolves (via the
     # synthetic /etc/hosts) to the kennel's primary loopback, where the proxy
     # listens; the daemon also exports the same address as $KENNEL_SOCKS_PROXY.

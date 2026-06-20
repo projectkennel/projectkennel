@@ -31,7 +31,6 @@ Total user content: ~10 lines. Everything else is inherited from the template.
 - Read and write `~/projects/myproj/**`.
 - Read `/usr/**`, `/lib/**`, `/etc/**` (baseline).
 - Talk to `api.anthropic.com:443`.
-- Use a per-kennel ssh-agent (if the template grants one).
 - Pop notifications (`org.freedesktop.Notifications` from template baseline).
 
 The agent cannot:

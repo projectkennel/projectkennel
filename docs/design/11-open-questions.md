@@ -6,7 +6,7 @@
 
 **GPU access nuances.** The current GPU grant (§7.9.9) is binary: either the kennel has `/dev/nvidia*` etc. or it doesn't. Real workflows want finer control: "this kennel can compute on the GPU but cannot read the framebuffer of other GPU users". The kernel's GPU drivers offer some primitives (GEM handles, DRM lease) that could plumb into a finer policy. Open question: what does a useful "GPU compute only" policy look like, and is it expressible without driver-specific code?
 
-**TPM and FIDO access policy.** Currently Project Kennel grants device-level access (`/dev/tpmrm0`, `/dev/hidraw*`) and trusts the userspace stack to enforce per-key or per-credential policy. Open question: should Project Kennel interpose at a higher level (the PKCS#11 socket, the FIDO HID protocol) to enforce per-key per-kennel bindings? This is significant engineering for marginal benefit, but the use case (per-kennel FIDO unlock for per-kennel ssh-agents) is exactly the motivating workflow.
+**TPM and FIDO access policy.** Currently Project Kennel grants device-level access (`/dev/tpmrm0`, `/dev/hidraw*`) and trusts the userspace stack to enforce per-key or per-credential policy. Open question: should Project Kennel interpose at a higher level (the PKCS#11 socket, the FIDO HID protocol) to enforce per-key per-kennel bindings? This is significant engineering for marginal benefit, but the use case (per-kennel FIDO unlock for the SSH bastion's keys) is exactly the motivating workflow.
 
 **Syscall filtering as primary mechanism.** Some confinement frameworks (Firejail, Bubblewrap) use seccomp as their primary mechanism. Project Kennel treats seccomp as defence-in-depth (§7.9.6). Open question: should an "extra-strict" template family use comprehensive seccomp filters as a primary defence, accepting the brittleness and compatibility cost?
 
@@ -16,7 +16,7 @@
 
 ## 11.2 Explicitly out of scope
 
-Only the boundaries the framework's own claims might invite the reader to assume are stated here. The universal limits of any user-space tool — side channels, hardware and physical attacks, and bugs in the kernel or in the vetted building blocks it relies on (Landlock, `xdg-dbus-proxy`, Xephyr) — are assumptions of the threat model, catalogued in [`THREATS.md`](THREATS.md) (X7–X8), not re-listed here.
+Only the boundaries the framework's own claims might invite the reader to assume are stated here. The universal limits of any user-space tool — side channels, hardware and physical attacks, and bugs in the kernel or in the vetted building blocks it relies on (Landlock, Xephyr) — are assumptions of the threat model, catalogued in [`THREATS.md`](THREATS.md) (X7–X8), not re-listed here.
 
 **The user is the trust root.** Project Kennel is built on user-space trust: a process in the user's default context (the unconfined shell) can read Project Kennel's state, signal its components, and edit its policies. Cross-kennel isolation of the mediating components is structural — a kennel reaches them only through the binder gateway and cannot see host pids — but isolating them from the user's *own* default context is not a goal, because that context is the trust root itself. By the same token Project Kennel cannot stop a user from editing policies, disabling enforcement, or bypassing the framework entirely; **mandatory** enforcement against the user is a different administrative layer.
 
