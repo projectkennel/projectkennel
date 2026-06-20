@@ -183,6 +183,14 @@
           "$ref": "#/definitions/dbus"
         }
       ]
+    },
+    "rootfs": {
+      "description": "`[rootfs]` — boot an unpacked OCI image as the kennel root (OCI run model only; §7.11). A loud substrate-trust grant: rejected by `kennel run`, required by `kennel oci run`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/rootfs"
+        }
+      ]
     }
   },
   "definitions": {
@@ -456,6 +464,30 @@
           ]
         }
       }
+    },
+    "rootfs": {
+      "description": "`[rootfs]` — an OCI image unpacked as the kennel's root filesystem (OCI run model; design §7.11). Substrate-trust waiver T3.8.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "The unpacked image rootfs (the store entry's `rootfs/`). Its presence marks the policy OCI-model.",
+          "type": "string"
+        },
+        "image": {
+          "description": "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store entry's recorded digest.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why this substrate is trusted (required; the substrate-trust waiver is loud).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "image",
+        "reason"
+      ]
     },
     "net": {
       "description": "`[net]` and its sub-tables.",

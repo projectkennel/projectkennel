@@ -139,6 +139,27 @@ pub struct SourcePolicy {
     /// enforces. Absent ⇒ no bus access (no facade node).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbus: Option<DbusSection>,
+    /// OCI substrate (`[rootfs]`, §7.11): an unpacked image used as the kennel root. Its
+    /// presence marks the policy OCI-model — `kennel run` rejects it, `kennel oci run` requires
+    /// it. A loud substrate-trust grant (T3.8); the `reason` is mandatory (validated at compile).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<RootfsSection>,
+}
+
+/// `[rootfs]` (§7.11) — an OCI image unpacked as the kennel's root filesystem.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootfsSection {
+    /// The unpacked image rootfs (the store entry's `rootfs/`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The `image@sha256:…` the build pulled from; the runner refuses unless it equals the
+    /// store entry's recorded `digest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Why this substrate is trusted (required; the substrate-trust waiver is loud).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).

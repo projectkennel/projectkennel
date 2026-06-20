@@ -124,6 +124,7 @@ pub static TABLES: &[Table] = &[
             f("tty", Ty::Obj("tty"), "Terminal hardening for an interactive (PTY) workload."),
             f("trust", Ty::Obj("trust"), "The masked workspace trust manifest (T2.8)."),
             f("dbus", Ty::Obj("dbus"), "D-Bus mediation via the IDBus facade (§7.7)."),
+            f("rootfs", Ty::Obj("rootfs"), "`[rootfs]` — boot an unpacked OCI image as the kennel root (OCI run model only; §7.11). A loud substrate-trust grant: rejected by `kennel run`, required by `kennel oci run`."),
         ],
     },
     Table {
@@ -214,6 +215,15 @@ pub static TABLES: &[Table] = &[
             f("group", Ty::Str, "The owning group that gates access (DAC; the user must already be a member)."),
             f("reason", Ty::Str, "Why this device is exposed (required)."),
             f("threats", Ty::Obj("threats"), "Threat tags — must carry an `exposed` tag."),
+        ],
+    },
+    Table {
+        name: "rootfs",
+        title: "`[rootfs]` — an OCI image unpacked as the kennel's root filesystem (OCI run model; design §7.11). Substrate-trust waiver T3.8.",
+        fields: &[
+            req("path", Ty::Str, "The unpacked image rootfs (the store entry's `rootfs/`). Its presence marks the policy OCI-model."),
+            req("image", Ty::Str, "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store entry's recorded digest."),
+            req("reason", Ty::Str, "Why this substrate is trusted (required; the substrate-trust waiver is loud)."),
         ],
     },
     Table {
