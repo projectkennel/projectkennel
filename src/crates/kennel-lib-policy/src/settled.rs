@@ -1214,11 +1214,20 @@ pub struct RootfsRuntime {
     /// entry's recorded `digest`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub image: String,
-    /// Rootfs persistence (§7.11.4a): `"discard"` (default) | `"readonly"` | `"persist"`. Empty in
-    /// the settled form means the default `discard`, so an OCI policy that does not set it signs
-    /// unchanged; the spawn path reads empty as `discard`.
+    /// Rootfs persistence (§7.11.4a): `"discard"` (default) | `"persist"`. Empty in the settled
+    /// form means the default `discard`, so an OCI policy that does not set it signs unchanged; the
+    /// spawn path reads empty as `discard`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub persistence: String,
+    /// Closure-lock (§7.11.4c): rootfs paths the spawn Landlock-denies writes to (read+execute
+    /// kept). The executable-closure boundary the DAC-flatten erased; build-derived for a non-root
+    /// image. `["/"]` is whole-tree-immutable. Longest-prefix wins with `writable`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readonly: Vec<String>,
+    /// Closure-lock holes (§7.11.4c): rootfs paths kept writable, carved out of `readonly`
+    /// (longest-prefix wins). Each carve-out is a loud, separately-derived exposure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable: Vec<String>,
 }
 
 impl RootfsRuntime {

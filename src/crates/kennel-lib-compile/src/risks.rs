@@ -291,6 +291,17 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
                 rootfs.reason.clone(),
             ));
         }
+        // Each closure-lock `writable` carve-out re-opens a hole in the executable-closure
+        // boundary (§7.11.4c) — a loud, separately-derived exposure.
+        for hole in rootfs.writable.as_deref().unwrap_or_default() {
+            out.push((
+                "T3.8".to_owned(),
+                format!(
+                    "[rootfs].writable = {hole} (closure-lock hole — path is workload-writable)"
+                ),
+                rootfs.reason.clone(),
+            ));
+        }
     }
 
     out

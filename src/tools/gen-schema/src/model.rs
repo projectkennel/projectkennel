@@ -224,7 +224,9 @@ pub static TABLES: &[Table] = &[
             req("path", Ty::Str, "The unpacked image rootfs (the store entry's `rootfs/`). Its presence marks the policy OCI-model."),
             req("image", Ty::Str, "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store entry's recorded digest."),
             req("reason", Ty::Str, "Why this substrate is trusted (required; the substrate-trust waiver is loud)."),
-            f("persistence", Ty::Enum(&["discard", "readonly", "persist"]), "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper) | `readonly` (no upper, immutable) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from)."),
+            f("persistence", Ty::Enum(&["discard", "persist"]), "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper, gone at teardown) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from)."),
+            f("readonly", Ty::StrArray, "Closure-lock (§7.11.4c): rootfs paths Landlock denies writes to (the executable-closure boundary the DAC-flatten erased; the FHS closure is build-derived for a non-root image). `[\"/\"]` is whole-tree-immutable. Longest-prefix wins with `writable`."),
+            f("writable", Ty::StrArray, "Closure-lock holes (§7.11.4c): rootfs paths to keep writable, carved back out of `readonly` (longest-prefix wins). Loud — each carve-out derives its own risk line."),
         ],
     },
     Table {

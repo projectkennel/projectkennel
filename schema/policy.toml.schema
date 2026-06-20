@@ -483,13 +483,26 @@
           "type": "string"
         },
         "persistence": {
-          "description": "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper) | `readonly` (no upper, immutable) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from).",
+          "description": "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper, gone at teardown) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from).",
           "type": "string",
           "enum": [
             "discard",
-            "readonly",
             "persist"
           ]
+        },
+        "readonly": {
+          "description": "Closure-lock (§7.11.4c): rootfs paths Landlock denies writes to (the executable-closure boundary the DAC-flatten erased; the FHS closure is build-derived for a non-root image). `[\"/\"]` is whole-tree-immutable. Longest-prefix wins with `writable`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "writable": {
+          "description": "Closure-lock holes (§7.11.4c): rootfs paths to keep writable, carved back out of `readonly` (longest-prefix wins). Loud — each carve-out derives its own risk line.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

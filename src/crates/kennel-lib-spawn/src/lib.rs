@@ -464,57 +464,49 @@ fn build_image_view_and_pivot(
         let _ = std::fs::File::create(scaffold.join("etc").join(f))?;
     }
 
-    // 4. The overlay: kennel-etc : image : scaffold (read-only lowers, leftmost wins), with the
-    //    persistence tri-state upper. The image is never an upper.
+    // 4. The overlay: kennel-etc : image : scaffold (read-only lowers, leftmost wins). There is
+    //    ALWAYS an upper (§7.11.4c — whole-tree-immutable is `readonly = ["/"]` via Landlock, not
+    //    a no-upper mount); the image is never an upper. discard = ephemeral tmpfs, persist =
+    //    managed store upper.
     let lowers: [&Path; 3] = [&kennel_etc, &img.image, &scaffold];
-    let upper_work: Option<(PathBuf, PathBuf)> = match img.persistence {
+    let (upper, work) = match img.persistence {
         Persistence::Discard => {
             let upper = staging.join("upper");
             let work = staging.join("work");
             std::fs::create_dir_all(&upper)?;
             std::fs::create_dir_all(&work)?;
-            Some((upper, work))
+            (upper, work)
         }
-        Persistence::Readonly => None,
         Persistence::Persist => {
             // kenneld validated/created these under the store entry; overlay requires `work`
             // empty and on the same fs as `upper`.
-            let (upper, work) = img.store_upper.clone().ok_or_else(|| {
+            img.store_upper.clone().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "persistence = persist but no store upper/work was provided",
                 )
-            })?;
-            Some((upper, work))
+            })?
         }
     };
-    let uw_ref = upper_work.as_ref().map(|(u, w)| (u.as_path(), w.as_path()));
-    mount::mount_overlay(&lowers, uw_ref, &root).map_err(|e| {
+    mount::mount_overlay(&lowers, Some((&upper, &work)), &root).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("mount overlay (image {}): {e}", img.image.display()),
         )
     })?;
 
-    // 5. A writable, ephemeral $HOME independent of the rootfs persistence axis: a tmpfs at
-    //    `/home` (the scaffold supplies the mountpoint), so the persona home works even under
-    //    `readonly`. `[fs.home].persist` paths bind on top via `view.binds`.
+    // 5. A writable, ephemeral $HOME independent of the rootfs closure-lock: a tmpfs at `/home`
+    //    (the scaffold supplies the mountpoint), so the persona home works even when the rootfs
+    //    is `readonly = ["/"]`. `[fs.home].persist` paths bind on top via `view.binds`.
     let under = |abs: &Path| root.join(abs.strip_prefix("/").unwrap_or(abs));
     let home = under(Path::new("/home"));
     mount::mount_tmpfs(&home, None, Some("0755"), false)?;
 
-    // 6. Assembly (§7.11.4a): bind the granted ~/ + launcher + config + additive binds, then
-    //    ro-bind resolv.conf + hostname over their merged paths so a writable upper cannot
-    //    copy-up-shadow them (passwd/group stay writable-through for a runtime `useradd`).
+    // 6. Assembly (§7.11.4a): bind the granted ~/ + launcher + config + additive binds. `/etc` is
+    //    writable-through (§7.11.4c) — the `kennel-etc` lower sets the defaults and a workload may
+    //    copy-up-shadow them in its own upper, harming only its own view; enforcement is the
+    //    netns/BPF/uid-map/Landlock/seccomp, never file content, so nothing is ro-bound here.
     materialize_binds(&view.binds, &under)?;
-    for f in ["resolv.conf", "hostname"] {
-        let target = under(Path::new("/etc").join(f).as_path());
-        if target.exists() {
-            mount::bind(&target, &target, false)
-                .and_then(|()| mount::remount_readonly(&target))
-                .map_err(|e| io::Error::new(e.kind(), format!("ro-bind /etc/{f}: {e}")))?;
-        }
-    }
 
     // 7. The seal tail (constructed /dev, binderfs, /proc, /tmp, home dir, masks, pivot).
     seal_view_tail(view, &root)

@@ -404,8 +404,7 @@ fn put_view(w: &mut Writer, v: &ShimView) {
             w.path(&img.image);
             w.u8(match img.persistence {
                 Persistence::Discard => 0,
-                Persistence::Readonly => 1,
-                Persistence::Persist => 2,
+                Persistence::Persist => 1,
             });
             match &img.store_upper {
                 None => w.bool(false),
@@ -577,8 +576,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         let image = r.path()?;
         let persistence = match r.u8()? {
             0 => Persistence::Discard,
-            1 => Persistence::Readonly,
-            2 => Persistence::Persist,
+            1 => Persistence::Persist,
             _ => return Err(PlanWireError::BadTag),
         };
         let store_upper = if r.bool()? {

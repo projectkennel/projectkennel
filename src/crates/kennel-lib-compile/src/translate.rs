@@ -190,8 +190,12 @@ fn translate_rootfs_runtime(src: &SourcePolicy, deferred: &mut BTreeSet<String>)
         image: r.image.clone().unwrap_or_default(),
         // Empty (unset) stays empty in the settled form — the spawn path reads it as `discard`
         // — so an OCI policy that does not set persistence signs unchanged. `validate_rootfs`
-        // has already rejected any value outside the three.
+        // has already rejected any value outside the two.
         persistence: r.persistence.clone().unwrap_or_default(),
+        // Closure-lock lists pass through verbatim (rootfs paths, not subst-resolved — they are
+        // in-image absolute paths the spawn keys Landlock rules on post-pivot).
+        readonly: r.readonly.clone().unwrap_or_default(),
+        writable: r.writable.clone().unwrap_or_default(),
     }
 }
 
@@ -477,13 +481,24 @@ fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
                 .to_owned(),
         ));
     }
-    // Persistence is one of the three modes; empty (unset) means the default `discard`.
-    if let Some(p) = rootfs.persistence.as_deref() {
-        if !matches!(p, "discard" | "readonly" | "persist") {
-            return Err(translation(format!(
-                "[rootfs].persistence must be `discard`, `readonly`, or `persist`, got `{p}`"
-            )));
-        }
+    // Persistence is binary; empty (unset) means the default `discard`.
+    let persistence = rootfs.persistence.as_deref().unwrap_or("discard");
+    if !matches!(persistence, "discard" | "persist") {
+        return Err(translation(format!(
+            "[rootfs].persistence must be `discard` or `persist`, got `{persistence}`"
+        )));
+    }
+    // `persist` + whole-tree-immutable is a contradiction (an upper that can never be written).
+    let whole_tree_ro = rootfs
+        .readonly
+        .as_deref()
+        .is_some_and(|r| r.iter().any(|p| p == "/"));
+    if persistence == "persist" && whole_tree_ro {
+        return Err(translation(
+            "[rootfs] persistence = \"persist\" with readonly = [\"/\"] is a contradiction: the \
+             managed upper could never be written — drop one"
+                .to_owned(),
+        ));
     }
     Ok(())
 }
@@ -1270,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn rootfs_persistence_is_one_of_three_modes() {
+    fn rootfs_persistence_is_binary() {
         let mk = |mode: &str| {
             parse(
                 format!(
@@ -1281,11 +1296,24 @@ mod tests {
             )
             .expect("parse")
         };
-        for ok in ["discard", "readonly", "persist"] {
+        for ok in ["discard", "persist"] {
             assert!(validate_rootfs(&mk(ok)).is_ok(), "{ok} should validate");
         }
-        let err = validate_rootfs(&mk("forever")).expect_err("bad mode");
+        // `readonly` is no longer a persistence mode — it is a closure-lock list now.
+        let err = validate_rootfs(&mk("readonly")).expect_err("readonly not a mode");
         assert!(format!("{err}").contains("persistence"), "{err}");
+    }
+
+    #[test]
+    fn persist_with_whole_tree_readonly_is_rejected() {
+        let p = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+              image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\n\
+              persistence = \"persist\"\nreadonly = [\"/\"]\n",
+        )
+        .expect("parse");
+        let err = validate_rootfs(&p).expect_err("persist + readonly=/");
+        assert!(format!("{err}").contains("contradiction"), "{err}");
     }
 
     #[test]

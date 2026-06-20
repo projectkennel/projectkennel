@@ -249,6 +249,11 @@ fn fold_rootfs(p: &RootfsSection, c: &RootfsSection) -> RootfsSection {
         image: or(&c.image, &p.image),
         reason: or(&c.reason, &p.reason),
         persistence: or(&c.persistence, &p.persistence),
+        // Closure-lock lists fold scalar-wins like `fs.read` (the SSH list model — the chain
+        // replaces, leaf `+=`/`-=` deltas apply separately); in practice these live on the leaf,
+        // build-derived, so the leaf's set wins.
+        readonly: or(&c.readonly, &p.readonly),
+        writable: or(&c.writable, &p.writable),
     }
 }
 

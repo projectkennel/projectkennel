@@ -407,13 +407,14 @@ pub struct ShimView {
 }
 
 /// Rootfs persistence mode (§7.11.4a): which upper the OCI overlay gets.
+///
+/// **Binary** — there is always an upper now (whole-tree-immutable is `[rootfs].readonly = ["/"]`
+/// via Landlock, §7.11.4c, not a no-upper mount mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Persistence {
     /// An ephemeral `tmpfs` upper (under the kenneld staging dir), gone at teardown.
     #[default]
     Discard,
-    /// No upper — the merged root is immutable (the scaffold supplies the mountpoints).
-    Readonly,
     /// A Kennel-managed upper under the store entry; accumulates divergence (the loud value).
     Persist,
 }
@@ -425,7 +426,6 @@ impl Persistence {
     #[must_use]
     pub fn from_settled(s: &str) -> Self {
         match s {
-            "readonly" => Self::Readonly,
             "persist" => Self::Persist,
             _ => Self::Discard,
         }
@@ -969,10 +969,31 @@ impl Plan {
         if ep.fs.tmp.private {
             landlock_fs.push((PathBuf::from("/tmp"), write_access()));
         }
-        // Let the workload list the view root (`ls /`). READ_DIR only — the top-level
-        // entries (usr, lib, etc, dev, proc, tmp, home) are not sensitive and their
-        // contents stay separately gated. Without it, `ls /` is a jarring EACCES.
-        landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
+        // The view-root grant. For a constructed view: READ_DIR on `/` only (`ls /`; the
+        // top-level entries are not sensitive and their contents stay separately gated).
+        //
+        // For an OCI image root: the **closure-lock** base (§7.11.4c). The unprivileged `oci
+        // build` flattens every image inode to the one persona uid, erasing every intra-image DAC
+        // boundary — so the flattened rootfs is read+write+execute by default (honest labelling:
+        // the flatten made DAC vacuous, there is no boundary to assert on an unlisted path). The
+        // build-derived `[rootfs].readonly` set then re-imposes the executable-closure boundary as
+        // read+execute (no write), and `[rootfs].writable` carves holes back; Landlock's
+        // longest-prefix-wins gives the layering. This holds against in-namespace root (a root
+        // entrypoint's `CAP_DAC_OVERRIDE` would defeat a DAC scheme, but not Landlock). The
+        // constructed mounts (`/tmp`, the persona `/home`, `/dev`) keep their own more-specific
+        // write grants above this base, so `readonly = ["/"]` does not strand them.
+        if policy.rootfs.path.is_empty() {
+            landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
+        } else {
+            let rw_x = write_access() | AccessFs::EXECUTE;
+            landlock_fs.push((PathBuf::from("/"), rw_x));
+            for ro in &policy.rootfs.readonly {
+                landlock_fs.push((glob_root(ro), read_access(true)));
+            }
+            for w in &policy.rootfs.writable {
+                landlock_fs.push((glob_root(w), rw_x));
+            }
+        }
 
         // Binder IPC (07-1/02-4): the binder bus is the universal control plane — every
         // kennel mounts a per-kennel binderfs instance so `kennel-bin-init` can pull its
