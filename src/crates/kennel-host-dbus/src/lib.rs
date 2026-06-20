@@ -30,7 +30,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout};
 
 use std::collections::HashMap;
 use std::net::Shutdown;
-use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::mpsc::{sync_channel, SyncSender};
 
 use kennel_lib_dbus::delegate::{BusReply, BusSignal, Delegate, Outbound};
 use kennel_lib_dbus::filter::Filter;
@@ -39,6 +39,12 @@ use kennel_lib_dbus::wire::{self, Bus, Frame, Record};
 
 /// The read buffer for the bus connection's decoder.
 const READBUF: usize = wire::MAX_BODY + 64 * 1024;
+
+/// High-water mark for `conduit_out` (the buffer of real-bus messages bound for kenneld over the
+/// conduit). Above it, [`Loop::run`] stops reading the real bus so the kernel socket backpressures
+/// it, bounding the delegate's memory when a kennel stops draining. Two read buffers' worth leaves
+/// room for one in-flight max-size message plus slack.
+const CONDUIT_OUT_HIGH_WATER: usize = 2 * READBUF;
 
 /// The depth of an outbound channel (to a mediation's bridge, and to kenneld). A stalled peer
 /// fills it and the sender sheds or back-pressures rather than blocking the dispatcher.
@@ -112,11 +118,15 @@ fn dispatch(kenneld: UnixStream, bus: Bus, bus_address: &str, filter: &Filter) -
             }
             Record::Frame { conn_id, frame } => {
                 if let Some(conn) = conns.get(&conn_id) {
-                    // Non-blocking. A backed-up mediation sheds (Full) rather than stalling every
-                    // connection; a dead mediation (Disconnected) is reaped here — no zombie entry.
-                    match conn.to_bridge.try_send(frame) {
-                        Ok(()) | Err(TrySendError::Full(_)) => {}
-                        Err(TrySendError::Disconnected(_)) => teardown(&mut conns, conn_id),
+                    // Non-blocking, so one connection's stall does not block every other. But a
+                    // dropped frame is NOT safe: `Record::Frame` has no ACK back to kenneld, so a
+                    // silently-shed `MethodCall` leaves the workload hanging forever on a
+                    // `MethodReturn` that never comes. Both `Full` (the mediation thread is stalled
+                    // on a slow real bus) and `Disconnected` (dead mediation) therefore tear the
+                    // connection down — the workload sees a clean reset and a D-Bus client
+                    // reconnects, rather than wedging.
+                    if conn.to_bridge.try_send(frame).is_err() {
+                        teardown(&mut conns, conn_id);
                     }
                 }
             }
@@ -257,7 +267,16 @@ impl Loop<'_> {
                 return Ok(());
             }
 
-            let mut bus_flags = PollFlags::POLLIN;
+            // Read from the real bus only while the conduit-out buffer is below its high-water
+            // mark. If the kennel stops draining (the facade stops issuing DBUS_RECV), kenneld's
+            // MAX_QUEUE_BYTES backs up the conduit pipe, `pump_conduit_writes` stops draining, and
+            // `read_bus` would otherwise keep appending to `conduit_out` unboundedly — an idle or
+            // hostile kennel OOMs the delegate. Stopping the bus read lets the kernel socket
+            // backpressure the real bus naturally; we resume once the conduit drains.
+            let mut bus_flags = PollFlags::empty();
+            if self.conduit_out.len() < CONDUIT_OUT_HIGH_WATER {
+                bus_flags |= PollFlags::POLLIN;
+            }
             if self.bus_has_pending_write() {
                 bus_flags |= PollFlags::POLLOUT;
             }
