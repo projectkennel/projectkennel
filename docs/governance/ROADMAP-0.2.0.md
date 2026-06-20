@@ -334,14 +334,19 @@ parser** — and splits `kennel oci build` (fetch + unpack, every parser confine
 `mode = host`). [[tcb-only-shrinks]] holds: the launcher and every parser run at workload authority,
 never in `cargo tree -p kenneld`.
 
-- **W17 · OCI unprivileged surface.** *(→ §7.11, `02-9-oci.md`)* **L. Mostly BUILT.** Done: the
+- **W17 · OCI unprivileged surface.** *(→ §7.11, `02-9-oci.md`)* **L. ✅ Built + proven.** The
   `kennel oci build`/`run` verbs + the named store manager; `[rootfs]` schema + the
   `kennel-lib-compile` **grammar partition** (`[rootfs]` valid iff OCI-model, enforced at the verb)
   + the T3.8 risk derivation; **`kennel-bin-oci-entry`**, the workload-side launcher (config parse,
-  env **sanitise + merge**, `chdir`, in-root `execve`) with the image-`Env` strip wired into the
-  merge in the same change + its behavioural tests; and the daemon launcher binding (W18). **Remaining
-  (W17c):** the Kennel-shipped vetted fetch policy + the `TEMPLATE-oci` run-policy scaffold (mirrors
-  the `env_strip` denylist as `[env].deny` globs) so `oci build` fetches+unpacks confined.
+  env **sanitise + merge**, `chdir`, in-root `execve`) with the image-`Env` strip; the daemon
+  launcher binding (W18); and **W17c — the confined fetch**: `oci build` runs `skopeo` + `umoci`
+  inside a kennel under the maintainer-signed vendor `oci-fetch@v1` (constrained egress to a registry
+  allowlist, overridable at system/user via the template cascade), and the run-policy scaffold's
+  `[env].deny` mirrors the launcher's `env_strip`. Proven by the `oci-confined-fetch` policy-suite
+  case. Fixing the confined unpack surfaced a real Landlock gap — `write_access` lacked `MAKE_SYM`
+  and `REFER` (no symlink creation, no cross-directory rename in writable paths) — now closed.
+  **0.3 follow-up:** replace the `umoci` host dependency with a first-party static in-kennel
+  unpacker (a vetted `tar` crate; no host prereq); umoci is the interim tool.
 
 - **W18 · OCI daemon spawn-path branch (layered overlay).** *(→ `02-9-oci.md` §daemon,
   [[spawn-userns-owner-yama]])* **M. Sign-off given 2026-06-20; BUILT, then reconciled to the

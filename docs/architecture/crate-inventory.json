@@ -1,8 +1,8 @@
 {
   "crate_count": 24,
-  "total_sloc": 28868,
+  "total_sloc": 29022,
   "tcb_crate_count": 16,
-  "tcb_sloc": 18096,
+  "tcb_sloc": 18098,
   "crates": [
     {
       "name": "kenneld",
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 3407,
+      "sloc": 3559,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel"],
@@ -36,7 +36,7 @@
     },
     {
       "name": "kennel-lib-spawn",
-      "sloc": 1931,
+      "sloc": 1933,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],

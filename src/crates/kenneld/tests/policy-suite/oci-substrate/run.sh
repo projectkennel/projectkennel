@@ -48,9 +48,11 @@ json.dump({"config": {"User": "12345", "Cmd": ["sh"],
 PY
 
 # 3. Build the store entry: records the digest and scaffolds policy.toml, deriving the closure-lock
-#    `readonly` set from config.User (non-root ⇒ the FHS closure). Then complete `reason`.
+#    `readonly` set from config.User (non-root ⇒ the FHS closure). `--no-fetch`: this case unpacks
+#    the rootfs + writes the faked non-root config.json itself (above), so the confined fetch
+#    (proven by the oci-confined-fetch case) is skipped here. Then complete `reason`.
 IMG="docker.io/library/busybox@sha256:e2e0000000000000000000000000000000000000000000000000000000000000"
-"$KENNEL" oci build "$NAME" --image "$IMG" --force >"$SCRATCH/build.log" 2>&1 || {
+"$KENNEL" oci build "$NAME" --image "$IMG" --no-fetch --force >"$SCRATCH/build.log" 2>&1 || {
     echo "FAIL: oci build — $(tail -2 "$SCRATCH/build.log")"; exit 1; }
 sed -i 's|^reason = .*|reason = "e2e: boot busybox as an OCI substrate"|' "$ENTRY/policy.toml"
 # Assert the build actually derived a live closure-lock (not a commented hint) from the non-root User.
