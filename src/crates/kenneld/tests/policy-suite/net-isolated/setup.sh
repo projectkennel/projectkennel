@@ -21,7 +21,10 @@ HOST_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0))
 # Background a host-side listener on that port (host net namespace). It just accepts and
 # closes; the point is only that the port is reachable HOST-side, so the kennel failing to
 # reach it proves the kennel is in a different net-ns.
-python3 - "$HOST_PORT" <<'PY' &
+# stdout/stderr to a scratch log, NOT the caller's pipe: the harness reads this fixture
+# via `gen=$(setup.sh)`, and a backgrounded child that inherited the pipe's write-end would
+# hold the command substitution open forever (deadlock). Redirecting releases the pipe.
+python3 - "$HOST_PORT" >"$SCRATCH/host_listener.log" 2>&1 <<'PY' &
 import socket, sys
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

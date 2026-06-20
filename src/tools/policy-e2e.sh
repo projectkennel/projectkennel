@@ -236,14 +236,19 @@ for name in "${CASES[@]}"; do
     fi
     if [ -x "$SUITE_DIR/$name/setup.sh" ]; then
         rm -rf "$scratch"; mkdir -p "$scratch"
-        if ! gen=$(timeout 60 "$SUITE_DIR/$name/setup.sh" "$SUITE_DIR/$name" "$scratch" \
-                    2>"/tmp/kennel-suite-$name.setup.log"); then
+        # Capture setup stdout to a FILE, not a `$(...)` pipe. A fixture that backgrounds a
+        # daemon (host listener, sshd) which inherits stdout would hold a command-substitution
+        # pipe open forever and DEADLOCK the suite — `timeout` bounds setup.sh itself but not
+        # its orphaned children. A regular-file fd is never blocking; the last line is the policy.
+        if timeout 60 "$SUITE_DIR/$name/setup.sh" "$SUITE_DIR/$name" "$scratch" \
+                    >"$scratch/setup.out" 2>"/tmp/kennel-suite-$name.setup.log"; then
+            run_pol="$(tail -n1 "$scratch/setup.out")"
+        else
             echo "FAIL (setup) — see /tmp/kennel-suite-$name.setup.log"
             results="$results\n  FAIL(setup) $name"; fail=$((fail+1))
             [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
             continue
         fi
-        run_pol="$gen"
     fi
     # Distinct instance name per case; </dev/null = non-interactive. A timeout bounds a
     # wedged spawn. The workload exit code is the run status.
