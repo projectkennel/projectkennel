@@ -188,16 +188,13 @@ This is purely about the **device** name. The `org.projectkennel.*` strings (§C
 binder *service-registry* names, not devices — and reverse-DNS service naming is itself the
 Android convention (cf. `android.os.*`, `vendor.*`), so those are kept as-is.
 
-### Privilege: no binder-specific op, but construction is now privhelper-driven
+### Privilege: no binder-specific op, but construction is privhelper-driven
 
-> **Updated by the uid-0 construction model ([`../design/07-2-kennel-bin-init.md`](../design/07-2-kennel-bin-init.md)).**
-> The original claim here — that the entire mount → allocate → become-context-manager chain
-> runs *without real privilege* — no longer holds. It rested on the spawn running uid-mapped
-> 1:1 as the operator, but binderfs nodes are owned by the mounting userns's uid 0, which a
-> pure-identity map does not provide. The kennel now maps host root `0 0 1`, which requires
-> `CAP_SETUID` and so is written by the **privhelper**, which also `execve`s the root-owned
-> `kennel-bin-init`. The privhelper is therefore now the kennel *constructor*, not a minimal
-> add-addr/egress/gid-map helper (supersedes that framing in `01-process-model.md`).
+Construction is privhelper-driven and privileged. binderfs nodes are owned by the mounting
+userns's uid 0, so the kennel maps host root `0 0 1` (plus operator lines), which requires the
+privhelper's `CAP_SETUID`/`CAP_SETFCAP`. The privhelper writes the identity map and `fexecve`s the
+root-owned `kennel-bin-init`; the privhelper, not kenneld, is the kennel **constructor**
+(`01-process-model.md`, `../design/07-2-kennel-bin-init.md`).
 
 There is still **no binder-*specific* privhelper op**: binderfs is `FS_USERNS_MOUNT`, so the
 mount itself is namespace-local, done by the privhelper factory in its post-`clone` child
@@ -348,8 +345,8 @@ with `org.projectkennel.`.
 The protocol-facade services (`dbus`, `wayland`) are kenneld-owned nodes
 backed by spawned service processes that parse foreign, untrusted wire protocols and
 translate to binder. Each is a new binary crate, each an untrusted-input parser requiring
-its own fuzz target, and the D-Bus one displaces an external dependency
-(`xdg-dbus-proxy`) with first-party code. They are **out of scope for this chapter** and
+its own fuzz target, and the D-Bus one carries the bus with first-party code (the `IDBus`
+facade, §7.7). They are **out of scope for this chapter** and
 get their own architecture chapter(s); §7.1.5 is the design.
 
 ---

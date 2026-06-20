@@ -168,7 +168,7 @@ pub enum Source {
     Bpf,
     /// The per-kennel egress proxy.
     Proxy,
-    /// The xdg-dbus-proxy.
+    /// The D-Bus mediation membrane (the `IDBus` facade).
     DbusProxy,
     /// The spawn wrapper.
     KennelSpawn,

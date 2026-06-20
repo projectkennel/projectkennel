@@ -14,7 +14,7 @@ Grades: **Equivalent** · **Superior** (exceeds Linux) · **Conditional** (depen
 | **Recon-resistance** | Bind-mount blank targets | Jail root via `chroot(2)`; host paths physically absent; `enforce_statfs=2` hides host mounts | **Superior** |
 | **Network egress** | cgroup BPF + SOCKS5 proxy | `ip4.addr`/`ip6.addr`-restricted jail or VNET, + SOCKS5 proxy (with explicit jail→proxy path) | **Equivalent** |
 | **Loopback isolation (same UID)** | cgroup BPF (`inet` hooks) | **VNET (VIMAGE)** private network stack per jail | **Superior** (VNET) / **Equivalent** (IP-restricted) |
-| **IPC boundary** | AF_UNIX shims + `xdg-dbus-proxy` | Per-jail IPC namespace; SysV IPC isolated; UNIX sockets bounded by jail root | **Equivalent** |
+| **IPC boundary** | AF_UNIX shims + the `IDBus` facade (§7.7) | Per-jail IPC namespace; SysV IPC isolated; UNIX sockets bounded by jail root | **Equivalent** |
 | **Execution control** | Landlock (`FS_EXECUTE`) | Capsicum (`cap_enter`) for Kennel's own helpers; jail path restriction for workloads | **Conditional** (Capsicum needs code; jails are path-based) |
 | **Privileged helper** | setuid binary / `CAP_NET_ADMIN` | `rc.d` system daemon (root) | **Equivalent** |
 | **Supervision** | `systemd --user` | `rc.d` / daemon supervisor | **Equivalent** |

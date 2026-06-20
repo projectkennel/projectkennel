@@ -57,7 +57,7 @@ Which limb applies to a class is a design decision, not an accident of mechanism
 | Network (§7.5) | Both | Empty per-kennel netns removes every destination (construction); the egress facade governs the one that remains (interposition) |
 | AF_UNIX, pathname (§7.6) | Both | Path absent from the view (construction); brokered connect per endpoint (interposition) |
 | AF_UNIX, abstract (§7.6) | Construction | Landlock `SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 6) scopes the abstract namespace to the kennel; seccomp/AppArmor fallback below 6.12 |
-| D-Bus (§7.7) | Interposition | Per-method filtering needs the protocol parsed; xdg-dbus-proxy today, binder facade on the roadmap |
+| D-Bus (§7.7) | Interposition | Per-method filtering via the typed `IDBus` facade (§7.7) |
 | Process visibility (§7.9) | Construction | PID namespace; only the kennel's own descendants |
 | Environment (§7.9) | Construction | Synthesised spawn (`env_clear`); built from policy, framework variables forced, parent pass-through a warned per-variable opt-in |
 | X11 (§7.8) | Construction | A separate X server per kennel (Xwayland- or Xephyr-isolated); there is no useful protocol-level filter to interpose, so the host display is simply not reachable |
@@ -91,7 +91,7 @@ The boundaries that must not weaken:
 
 - **Default context ↔ kennel.** A kennel cannot influence default-context processes, files outside its grants, sockets, or environment. The default context owns its confined children and can inspect, signal, and kill them.
 - **Sibling kennels.** Two kennels are mutually invisible unless a grant says otherwise. Their loopback subnets are disjoint, their AF_UNIX views are disjoint, their PID visibility is disjoint.
-- **Kennel ↔ kernel.** Every syscall passes through the kennel's policy; there is no bypass via "I am still uid 1000." Same-uid is no longer the trust boundary. Cgroup membership, the mount namespace, and the Landlock ruleset are.
+- **Kennel ↔ kernel.** Every syscall passes through the kennel's policy; there is no bypass via "I am still uid 1000." The uid is not the trust boundary; cgroup membership, the mount namespace, and the Landlock ruleset are.
 - **Refining policy ↔ base policy.** A kennel whose policy refines another's computes the intersection of its own declarations and the base; it may narrow, never widen.
 
 ## 4.6 Tamperproofing the monitor
@@ -146,7 +146,7 @@ Each class needs specific mechanisms to construct or interpose its boundary safe
 | AF_UNIX, abstract | Landlock `SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 6); seccomp/AppArmor fallback below | 6.12 for native scoping |
 | Construction + binder bus | User namespace + binderfs (`FS_USERNS_MOUNT`) | 3.8 user ns; 5.0 binderfs |
 | Signal isolation | Landlock `SCOPE_SIGNAL` (ABI 6) + PID namespace; AppArmor fallback below | 6.12 for native scoping |
-| D-Bus view | binder facade or xdg-dbus-proxy, over the AF_UNIX view above | user space |
+| D-Bus view | the `IDBus` facade (§7.7), over the AF_UNIX view above | user space |
 | Process view | PID namespace + procfs `hidepid` | 3.8 (PID ns) |
 | Environment view | Spawn wrapper | none |
 

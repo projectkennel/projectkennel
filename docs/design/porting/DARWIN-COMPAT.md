@@ -29,7 +29,7 @@ Grades: **Equivalent** (matches the Linux property, same enforcement class) · *
 | **Recon-resistance** | Bind-mount blank targets — path truly absent | Seatbelt denial (returns `EPERM`) | **Inferior** — existence is observable via errno; see [T-NEW: DARWIN-RECON] |
 | **Network egress** | cgroup BPF + SOCKS5 proxy | SOCKS5 proxy + Seatbelt `network-outbound` deny-all-except-loopback-listener (primary); NetworkExtension content filter / transparent proxy as system-wide backstop (optional) | **Strong / unsupported-API** (primary); **Equivalent / supported** (backstop) |
 | **Loopback isolation (same UID)** | cgroup BPF (`inet` hooks) | Per-kennel Seatbelt network rules keyed to the confined process; loopback alias per kennel | **Inferior via PF, Strong via Seatbelt** — see [T-NEW: DARWIN-LOOPBACK] |
-| **IPC / system-service boundary** | AF_UNIX shims + `xdg-dbus-proxy` (method-level) | Seatbelt `mach-lookup` allowlist (service-level) | **Partial** — coarser; coupled to egress, see [T-NEW: DARWIN-XPC] |
+| **IPC / system-service boundary** | AF_UNIX shims + the `IDBus` facade (§7.7, method-level) | Seatbelt `mach-lookup` allowlist (service-level) | **Partial** — coarser; coupled to egress, see [T-NEW: DARWIN-XPC] |
 | **Execution control** | Landlock (`FS_EXECUTE`) | Seatbelt `process-exec*` allowlist (primary); Endpoint Security `AUTH_EXEC` deny (optional, entitlement-gated) | **Strong / unsupported-API** (primary); **Equivalent / supported-but-gated** (ES) |
 | **Privileged helper** | setuid binary / `CAP_NET_ADMIN` | launchd **System Daemon** (root), registered via `SMAppService`, on a UID-restricted socket | **Equivalent** |
 | **Supervision** | `systemd --user` | launchd **User Agents** (`SMAppService`) | **Equivalent** |
@@ -96,7 +96,7 @@ macOS processes reach system services (Keychain, Apple Events, Pasteboard, and c
 
 Two honesty points:
 
-1. **Service-level, not method-level.** Once a service is allowed, every method it exposes is reachable. `xdg-dbus-proxy` on Linux filters individual methods. The macOS control is strictly coarser; grade **Partial**, and the allowlist must be kept minimal precisely because each entry is all-or-nothing.
+1. **Service-level, not method-level.** Once a service is allowed, every method it exposes is reachable. The `IDBus` D-Bus method filter on Linux filters individual methods. The macOS control is strictly coarser; grade **Partial**, and the allowlist must be kept minimal precisely because each entry is all-or-nothing.
 2. **It is coupled to the egress claim.** Because networking is partly brokered through XPC services, "egress is sealed" is only true if `mach-lookup` is *also* sealed against the daemons that could re-introduce a network path. The two controls are not independent and must be reviewed together. This coupling is the substance of **[T-NEW: DARWIN-XPC]**.
 
 ### 2.4 Execution control

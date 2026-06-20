@@ -64,8 +64,8 @@ allow it can still do so via the compiler's `-=` list delta, §5; that is policy
 composition, not a runtime deny.)
 
 The escape hatch for an open posture is an explicit **`permissive-exec`** opt-out: a
-`**` (or `/**`) entry in `allow` restores the old "anything readable is executable"
-behaviour. It is the one case the compiler *warns* about — a deliberate, diff-visible
+`**` (or `/**`) entry in `allow` opts into permissive-exec: anything readable becomes
+executable (the inverse of the default-deny posture). It is the one case the compiler *warns* about — a deliberate, diff-visible
 choice, never the default.
 
 The `deny_writable` flag deserves attention. Without it, a kennel with `fs.write` access to `~/projects/foo/` and `exec.allow = ["/usr/bin/python3"]` could still write a static binary to `~/projects/foo/evil` and execute it via interpreter shenanigans, or could write a shell script and run it via the allowed `python3`. With `deny_writable`, the union of writable paths and executable paths is empty by enforcement, closing this hole.

@@ -47,7 +47,7 @@ Project Kennel requires the following kernel features, with version requirements
 | PID namespace | 3.8 | Universal |
 | Network namespace | 2.6.x | Universal (used optionally) |
 | User namespace | 3.8 | **The spawn foundation.** Created by the privhelper factory (§7.2) as the operator, so the userns is operator-owned. Its maps are precise identity lines — host root `0 0 1` + the operator `<op> <op> 1` (+ one per granted gid), no subuid — giving the kennel a real uid 0 and `CAP_SYS_ADMIN` *inside the namespace* to `mount`/`pivot_root` (the bubblewrap-equivalent mechanism). The `0 0 1` line needs `CAP_SETUID`, so construction is privileged; the privhelper's post-`clone` child does it, then `fexecve`s the trusted `kennel-bin-init` as PID 1 / uid 0. |
-| PID namespace (via userns) | 3.8 | `CLONE_NEWPID` is in the factory's single `clone`, so the privhelper child is PID 1 of the fresh PID namespace directly — no double-fork (that was only needed when `unshare` left the unsharer in the old pidns). Being PID 1 is what lets it mount a fresh `/proc`. `kennel-bin-init` inherits this as PID 1 and forks the operator-uid workload beneath it. |
+| PID namespace (via userns) | 3.8 | `CLONE_NEWPID` is in the factory's single `clone`, so the privhelper child is PID 1 of the fresh PID namespace directly — no double-fork (a later `unshare(CLONE_NEWPID)` would leave the caller in the parent namespace and force one; the clone does not). Being PID 1 is what lets it mount a fresh `/proc`. `kennel-bin-init` inherits this as PID 1 and forks the operator-uid workload beneath it. |
 | `PR_SET_NO_NEW_PRIVS` | 3.5 | Universal |
 | AppArmor | Distribution-dependent | Below-ABI-6 abstract-AF_UNIX/signal fallback. **Also a deploy prerequisite** where the distro restricts unprivileged user namespaces (next paragraph). |
 | `legacy_tiocsti` sysctl | 6.2 | Defaults safe on newer kernels |
@@ -92,9 +92,8 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    - the egress proxy — on the kennel's loopback address, or, under the
      network-namespace model (§7.5), in the host net-ns as a CONNECT delegate
      behind a kenneld↔delegate socketpair rather than a TCP loopback listener
-   - xdg-dbus-proxy for session bus (if dbus.session.enabled)
-   - xdg-dbus-proxy for system bus (if dbus.system.enabled)
-   - Per-kennel ssh-agent (if templates reference one)
+   - the `IDBus` facade (§7.7) for the session bus (if dbus.session.enabled)
+   - the `IDBus` facade (§7.7) for the system bus (if dbus.system.enabled)
    - Xwayland or Xephyr (if X11 isolation enabled)
 
 6. Compile and attach BPF programs to cgroup:
@@ -256,7 +255,7 @@ Project Kennel also provides `kennel audit <kennel> [--since 1h] [--resource net
 
 ## 8.7 Lifecycle of the supporting daemons
 
-Per-kennel daemons (SOCKS5 proxy, dbus-proxy, ssh-agent, Xwayland/Xephyr) are managed by Project Kennel's supervisor:
+Per-kennel daemons (SOCKS5 proxy, the D-Bus facade, Xwayland/Xephyr) are managed by Project Kennel's supervisor:
 
 **Launch.** When a kennel starts and a daemon is needed, the supervisor launches it. The daemon's socket is placed at a framework-known path (`/run/kennel/<ctx>/<daemon>.sock`).
 

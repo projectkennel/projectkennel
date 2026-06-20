@@ -255,7 +255,6 @@ base-confined          ← minimal: no_new_privs, deny setuid, deny-by-default e
 ai-coding-strict       ← adds: project-tree fs scope (in user delta),
                          exec.allow for python/node/git/build tools,
                          net.allow for registries and LLM API (latter in user delta),
-                         per-kennel ssh-agent shim,
                          fs.scrub for .env-like patterns.
   ↓
 your-ai-coding         ← user policy: the specific project path,
