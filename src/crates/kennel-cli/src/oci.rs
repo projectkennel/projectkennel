@@ -89,10 +89,9 @@ impl StoreEntry {
         self.dir.join("rootfs")
     }
 
-    /// The image runtime config (`<entry>/config.json`).
-    // Read by the daemon launcher binding (bound at `/run/kennel/oci-config.json`); part of the
-    // store-layout contract today, consumed once that wiring lands.
-    #[allow(dead_code)]
+    /// The image runtime config (`<entry>/config.json`): the launcher's entrypoint/env source
+    /// (bound at `/run/kennel/oci-config.json`) and the build-time closure-lock derivation's
+    /// `config.User` source.
     #[must_use]
     pub fn config(&self) -> PathBuf {
         self.dir.join("config.json")
@@ -192,8 +191,23 @@ impl Store {
 ///
 /// The operator edits `reason` and signs; `kennel oci run` then verifies the signature like any
 /// policy. Returned as text (the caller writes it) so this stays pure and testable.
+///
+/// `readonly` is the build-derived closure-lock set (§7.11.4c); emitted as `[rootfs].readonly` for
+/// the operator to review and sign (empty ⇒ no lock line, an all-root image's writable substrate).
 #[must_use]
-pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str) -> String {
+pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str, readonly: &[String]) -> String {
+    let readonly_line = if readonly.is_empty() {
+        // All-root image: no closure-lock (the writable substrate is the image's own posture).
+        "# readonly = [\"/usr\", \"/lib\"]   # closure-lock: build derived none (all-root image)\n"
+            .to_owned()
+    } else {
+        let list = readonly
+            .iter()
+            .map(|p| format!("\"{p}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("readonly = [{list}]   # closure-lock (build-derived, §7.11.4c); review + sign\n")
+    };
     format!(
         "# Scaffolded by `kennel oci build {name}`. Complete `reason`, then sign:\n\
          #   kennel policy sign {name} --key <key>\n\
@@ -204,8 +218,9 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str) -> String {
          path   = \"{path}\"\n\
          image  = \"{image}\"\n\
          reason = \"TODO: why this image is trusted as the kennel substrate\"\n\
-         \n\
-         # persistence = \"discard\"  # discard (default) | readonly | persist\n\
+         {readonly_line}\
+         # persistence = \"discard\"  # discard (default) | persist\n\
+         # writable = [\"/usr/lib/python3.12\"]  # carve a hole back out of readonly (loud)\n\
          \n\
          # Additive grants bind on top of the image, e.g.:\n\
          # [fs]\n\
@@ -217,6 +232,46 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str) -> String {
         path = rootfs_path.display(),
         image = image,
     )
+}
+
+/// The FHS-coarse executable closure (§7.11.4c): locking `/usr` and `/lib*` covers the merged-usr
+/// symlinks (`/bin → /usr/bin`, `/lib → /usr/lib`), which resolve into these locked targets; `/bin`
+/// and `/sbin` are listed too for a non-merged-usr image where they are real directories.
+const FHS_CLOSURE: &[&str] = &[
+    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32",
+];
+
+/// Derive the closure-lock `readonly` set from the image's effective runtime user (`config.User`).
+///
+/// Best-effort and high-level (§7.11.4c): a non-root `User` means the author intended `/usr`
+/// off-limits to the app, so lock the FHS closure; an all-root image (no non-root `User`) gets no
+/// lock — a flat image intends a writable substrate (and root-running `pip -g`/`apt` work). KNOWN
+/// GAPS: an image that drops privilege in its entrypoint (`gosu`/`su-exec`) keeps `config.User = 0`
+/// and reads as all-root; app code outside `/usr|/lib` (e.g. `/app`, `/opt`) stays writable. The
+/// `writable` carve-out handles over-reach; under-reach is the operator's to lock by hand.
+#[must_use]
+pub fn derive_closure_readonly(config_user: Option<&str>) -> Vec<String> {
+    let runs_nonroot = config_user
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .is_some_and(|u| {
+            // OCI `User` is `uid`, `uid:gid`, `user`, or `user:group`; non-root iff the user part
+            // is neither `0` nor `root`.
+            let user = u.split(':').next().unwrap_or(u);
+            user != "0" && user != "root"
+        });
+    if runs_nonroot {
+        FHS_CLOSURE.iter().map(|s| (*s).to_owned()).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Read `config.User` from an image config blob (`config.json`), if the file exists and carries it.
+fn read_image_user(config_path: &Path) -> Option<String> {
+    let bytes = std::fs::read(config_path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("config")?.get("User")?.as_str().map(str::to_owned)
 }
 
 /// Whether settled-policy bytes are the OCI substrate model: a non-empty `[rootfs].path`.
@@ -438,10 +493,18 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
     std::fs::create_dir_all(entry.rootfs())
         .map_err(|e| format!("creating {}: {e}", entry.rootfs().display()))?;
     entry.write_digest(image)?;
+    // Closure-lock (§7.11.4c): derive the readonly set from the image's config.User if the
+    // confined fetch already populated config.json (out of band, or once W17c lands). A non-root
+    // image gets the FHS executable closure locked; an all-root image gets nothing. The derived
+    // set goes into the scaffolded policy text, where the operator reviews and signs it.
+    let readonly = derive_closure_readonly(read_image_user(&entry.config()).as_deref());
     let policy = entry.policy();
     if !policy.exists() || force {
-        std::fs::write(&policy, scaffold_policy(name, &entry.rootfs(), image))
-            .map_err(|e| format!("writing {}: {e}", policy.display()))?;
+        std::fs::write(
+            &policy,
+            scaffold_policy(name, &entry.rootfs(), image, &readonly),
+        )
+        .map_err(|e| format!("writing {}: {e}", policy.display()))?;
     }
     eprintln!(
         "kennel: prepared store entry `{name}` at {}",
@@ -567,11 +630,44 @@ mod tests {
             "my-app",
             Path::new("/store/my-app/rootfs"),
             "ghcr.io/o/a@sha256:abc",
+            &["/usr".to_owned(), "/lib".to_owned()],
         );
         assert!(p.contains("[rootfs]"));
         assert!(p.contains("/store/my-app/rootfs"));
         assert!(p.contains("ghcr.io/o/a@sha256:abc"));
         assert!(p.contains("reason ="));
         assert!(p.contains("name = \"my-app\""));
+        // A derived closure-lock is emitted as a live `readonly =` line, not a comment.
+        assert!(p.contains("readonly = [\"/usr\", \"/lib\"]"));
+    }
+
+    #[test]
+    fn closure_derives_for_nonroot_user_only() {
+        // Non-root User (uid or name, with/without group) ⇒ the FHS closure.
+        for u in ["1000", "1000:1000", "app", "app:app"] {
+            let ro = derive_closure_readonly(Some(u));
+            assert!(ro.contains(&"/usr".to_owned()), "{u} should lock /usr");
+            assert!(ro.contains(&"/lib".to_owned()));
+        }
+        // Root (uid 0, name root, or unset) ⇒ no lock — the writable substrate.
+        for u in [Some("0"), Some("root"), Some("0:0"), Some("  "), None] {
+            assert!(
+                derive_closure_readonly(u).is_empty(),
+                "{u:?} should not lock"
+            );
+        }
+    }
+
+    #[test]
+    fn scaffold_all_root_emits_a_commented_lock_hint() {
+        let p = scaffold_policy("a", Path::new("/s/a/rootfs"), "img@sha256:x", &[]);
+        assert!(
+            p.contains("# readonly ="),
+            "all-root scaffold should hint, not lock"
+        );
+        assert!(
+            !p.contains("\nreadonly ="),
+            "all-root scaffold must not emit a live lock"
+        );
     }
 }
