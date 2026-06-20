@@ -186,6 +186,46 @@ impl Store {
     }
 }
 
+/// The `[env].deny` globs the OCI run-policy scaffold emits — a declarative mirror of the
+/// `kennel-bin-oci-entry` launcher's `env_strip` denylist (the `AT_SECURE`-equivalent
+/// loader/runtime/shell-injection set). The launcher strips these from the image `Env`
+/// unconditionally; emitting them as `[env].deny` makes the posture visible in the signed run
+/// policy and also denies them on any `[env].pass` an operator adds (defence in depth, §7.11.6).
+/// Keep in sync with `kennel-bin-oci-entry`'s `env_strip` (the enforcing source of truth).
+const SCAFFOLD_ENV_DENY: &[&str] = &[
+    "LD_*",
+    "GLIBC_*",
+    "GCONV_PATH",
+    "GETCONF_DIR",
+    "HOSTALIASES",
+    "LOCALDOMAIN",
+    "LOCPATH",
+    "MALLOC_TRACE",
+    "NIS_PATH",
+    "NLSPATH",
+    "RESOLV_HOST_CONF",
+    "RES_OPTIONS",
+    "TZDIR",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "PERL5LIB",
+    "PERL5OPT",
+    "PERLLIB",
+    "RUBYLIB",
+    "RUBYOPT",
+    "CLASSPATH",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+];
+
 /// Render the scaffolded run policy for a freshly built entry: the confined default plus the
 /// `[rootfs]` block (path + recorded image + a `reason` the operator completes and signs).
 ///
@@ -208,6 +248,11 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str, readonly: &[
             .join(", ");
         format!("readonly = [{list}]   # closure-lock (build-derived, §7.11.4c); review + sign\n")
     };
+    let env_deny = SCAFFOLD_ENV_DENY
+        .iter()
+        .map(|g| format!("\"{g}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "# Scaffolded by `kennel oci build {name}`. Complete `reason`, then sign:\n\
          #   kennel policy sign {name} --key <key>\n\
@@ -221,6 +266,12 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str, readonly: &[
          {readonly_line}\
          # persistence = \"discard\"  # discard (default) | persist\n\
          # writable = [\"/usr/lib/python3.12\"]  # carve a hole back out of readonly (loud)\n\
+         \n\
+         # Loader/runtime/shell-injection env denied (mirrors the launcher's env_strip, §7.11.6):\n\
+         # the launcher strips these from the image Env; denying them here also covers any\n\
+         # [env].pass you add. The image's own benign Env still merges (sanitised) via the launcher.\n\
+         [env]\n\
+         deny = [{env_deny}]\n\
          \n\
          # Additive grants bind on top of the image, e.g.:\n\
          # [fs]\n\
