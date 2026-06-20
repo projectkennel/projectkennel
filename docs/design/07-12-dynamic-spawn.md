@@ -3,8 +3,8 @@
 > **A confined workload can ask `kenneld` to spawn a constrained, ephemeral sibling kennel and
 > hand it a stdio channel — without authoring policy, and without `kenneld` entering the byte
 > path.** The workload names an operator-signed template and writes only its operator-declared
-> mutable fields; `kenneld` instantiates it in memory, passes the file descriptors across the `SPAWN`
-> transaction, and steps out. MCP rides the channel as opaque JSON-RPC; Kennel neither frames nor
+> mutable fields; `kenneld` instantiates it in memory, mints the channel and returns its file descriptors
+> across the `SPAWN` reply, and steps out. MCP rides the channel as opaque JSON-RPC; Kennel neither frames nor
 > parses it. The spawned kennel's lifecycle is coupled to the requester's binder session and reaped
 > on its death. Spawning is a loud, operator-declared capability (T3.9). The concrete shape — the
 > `SPAWN` transaction, the FD-injection sequence, the reaper — is the implementation contract in
@@ -82,7 +82,10 @@ manifest == template ∖ manifest` — the instantiation differs from the signed
 the manifest — but the enforcement is **key-membership on the patch**, not a set-difference over two
 trees: a write whose value happens to equal a frozen field's is still rejected for naming a field
 outside the manifest, never waved through because the difference came out empty. Any out-of-manifest
-key is a hard reject, fail-closed.
+key is a hard reject, fail-closed. And because a spawn target is signed *pre-resolved* — its template
+chain folded at sign time — applying the patch is a bounded field-write over an already-parsed policy in
+the daemon's **verify path**, not a compilation: `SPAWN` pulls in no policy *compiler*, only the
+verify-and-load half the daemon already carries.
 
 This inverts the surface from *synthesis* to *selection*, which is the single most useful thing for
 making agent-generated policy tractable. The agent does not author a policy the validator then
@@ -137,25 +140,29 @@ requester (§7.12.2), never widen it.
 
 ## 7.12.4 The capability handoff
 
-The requester provisions the channel, then references it in a single `SPAWN` transaction; there is no
-routing binary and no facade, because there is no host process that owns the pipe — the requester is
-a kennel and the FD rides the transaction directly.
+`kenneld` mints the channel and hands each side its ends; nothing flows *into* the daemon. Node 0 stays
+free of inbound descriptors — the fd-passing invariant that it issues fds outward and never accepts them
+inward holds unbroken — and the shape is the same as every other `kenneld` fd broker (`CONNECT_INET`
+returns a connected socket; `SPAWN` returns a channel).
 
-1. The requester creates a `socketpair()` (bidirectional JSON-RPC: a local end it keeps, a remote end
-   it will hand over) and a `pipe()` (the spawned kennel's `stderr`, kept separate so unstructured
-   error text never corrupts the framed channel — §7.12.5).
-2. It sends a `SPAWN` transaction to `kenneld` naming the template and its mutable-field writes,
-   attaching the socketpair-remote and pipe-write ends as `BINDER_TYPE_FD` objects.
-3. `kenneld` validates the grant, resolves the named template from the trust store and **verifies it
+1. The requester sends a `SPAWN` transaction naming the template and its mutable-field writes (a patch,
+   §7.12.3), carrying **no descriptors**, with its reply flagged to accept fds.
+2. `kenneld` validates the grant, resolves the named template from the trust store and **verifies it
    against the content-pin the spawner's compiled policy recorded** (fail-closed on mismatch, §7.12.8),
-   **re-checks spawn-eligibility on the resolved template**, applies the manifest patch (§7.12.3),
-   builds the instantiation in memory, and injects the translated FDs into the spawned kennel's
-   supervision plan.
-4. `kennel-bin-init` boots the spawned kennel, `dup2`s the injected FDs onto stdin/stdout/stderr, and
-   `execve`s the template's entrypoint — for MCP, a stdio JSON-RPC server.
+   **re-checks spawn-eligibility on the resolved template**, and applies the manifest patch — all in the
+   daemon's verify path, never its policy compiler (§7.12.3).
+3. `kenneld` **mints the channel** — a `socketpair()` (bidirectional JSON-RPC) and a `pipe()` (the
+   spawned kennel's `stderr`, kept separate so unstructured error text never corrupts the framed channel
+   — §7.12.5). It injects the spawned-kennel ends (the socketpair remote, the pipe write) into the
+   spawned kennel's supervision plan, and **returns the requester's ends** (the socketpair local, the
+   pipe read) in the `SPAWN` reply, alongside the transient `spawn-<uuid>`.
+4. `kennel-bin-init` boots the spawned kennel, seals it, and — as the **final step before `execve`** —
+   places the injected ends onto stdin/stdout/stderr, then `execve`s the template's entrypoint (for MCP,
+   a stdio JSON-RPC server). Init keeps its own diagnostics on a host-side descriptor throughout, so a
+   failure during sealing reaches the host audit, never the channel (§7.12.5).
 
-`kenneld` evaluates an ACL and brokers file descriptors. It mounts nothing for the spawned kennel
-beyond the template's own view, parses no JSON, and routes no traffic.
+`kenneld` evaluates an ACL and brokers file descriptors, all **outbound**. It mounts nothing for the
+spawned kennel beyond the template's own view, parses no JSON, and routes no traffic.
 
 ## 7.12.5 The data plane: Kennel out of the byte path, MCP opaque
 
@@ -268,12 +275,14 @@ instantiation safe against a mutable trust store.
 
 ## 7.12.9 Security posture — what holds, what is waived
 
-**What holds.** The spawned kennel receives no ambient authority *from the requester* beyond the file
-descriptors handed across the `SPAWN` transaction; its base capability is the signed template's and
-nothing more. The requester holds neither `ptrace` nor signal reach into it. `kenneld` mounts nothing,
-parses no JSON, and routes no bytes for it — the daemon evaluates an ACL and brokers FDs, so the TCB is
-the size it was. The whole multi-kennel topology is operator-consented: every template is signed, and
-every `[spawn]` grant is a loud, declared, risk-derived capability.
+**What holds.** The spawned kennel receives no ambient authority *from the requester* beyond the channel
+`kenneld` mints and injects; its base capability is the signed template's and nothing more. The requester
+holds neither `ptrace` nor signal reach into it. `kenneld` mounts nothing, parses no JSON, and routes no
+bytes for it — it evaluates an ACL, brokers FDs outbound, and mints the channel. The TCB grows by exactly
+that and no more: the bounded `SPAWN` validation in the verify half (patch-apply, bound-check, pin and
+eligibility) and the channel mint — never a policy compiler, never an MCP parser. The whole multi-kennel
+topology is operator-consented: every template is signed, and every `[spawn]` grant is a loud, declared,
+risk-derived capability.
 
 **What is waived, T3.9.** Spawning is the delegation of instantiation to a workload, catalogued as a
 T3-family residual (workload-class — a workload that instantiates workloads, the sibling of containers
@@ -298,7 +307,7 @@ the tools it is permitted to spawn.
 > `THREATS.md` when the catalogue entry lands, at which point this block is replaced by a cross-reference.
 >
 > **T3.9 — Delegated spawning.** A workload holding `[spawn]` instantiates ephemeral sibling kennels
-> from operator-signed templates and hands them file descriptors (§7.12). The capability delegates
+> from operator-signed templates, each handed a `kenneld`-minted channel (§7.12). The capability delegates
 > *instantiation* to a workload that, for an AI agent, is itself untrusted and prompt-injectable. The
 > exposure is **derived** from the `[spawn]` grant — `kennel policy risks` reports it with the grant as
 > carrier and the operator's `reason`, the path `mode = host` uses for T1.6 — with no stored
@@ -310,8 +319,8 @@ the tools it is permitted to spawn.
 > supplies, and the composition of the tools it is permitted to spawn.
 >
 > *Mitigations in place.* Request-don't-author (the capability floor is the signed template, not
-> agent-supplied policy); a frozen template plus a mutable-field manifest, the candidate diffed against
-> the template and accepted only if it differs within the manifest, each field within its bound (§7.12.3);
+> agent-supplied policy); a frozen template plus a mutable-field manifest, the agent's writes applied as a
+> patch and accepted only for fields the manifest opens, each within its bound (§7.12.3);
 > depth-1 and spawn-eligibility (lifetime, ceilings, manifest) checked at the spawner's install (§7.12.8);
 > the `max_instances` ceiling enforced by atomic check-and-claim, the fate-sharing double reaper, and the
 > spawned kennel's own-lifetime self-reap (§7.12.7); ephemerality, no host persistence (§7.12.6).
@@ -356,12 +365,16 @@ that is already served, badly enough to discourage, by an existing verb.
    that is not spawn-eligible — carries `[spawn]` (depth-1), or fails to declare its `max_lifetime`,
    its resource ceilings, or its `[[mutable]]` manifest (§7.12.8).
 2. Template `[[mutable]]` manifest grammar (the three bound kinds: pool+`max`, `oneof`, predicate) and
-   the instantiation-time diff validator (`candidate ∖ manifest == template ∖ manifest`, each field within
-   its bound, writes outside the manifest hard-rejected) — the §7.12.3 attack surface.
+   the instantiation-time **patch validator** (reject out-of-manifest keys, validate each value against
+   its bound, apply onto the resolved template; the invariant established is `candidate ∖ manifest ==
+   template ∖ manifest`, by key-membership, not a whole-tree diff) — the §7.12.3 attack surface. Spawn
+   targets are signed pre-resolved, so this runs in the verify half, not the compiler.
 3. The `SPAWN` transaction verb on Node 0 (`kenneld/src/binder.rs`): grant + content-pin + eligibility
-   re-check + manifest-patch validation, in-memory template resolution, FD translation and injection.
-4. `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init` `dup2`s
-   them before `execve`.
+   re-check + manifest-patch validation, in-memory instantiation, channel minting, fd injection into
+   construction, and the **two-fd reply** (no inbound fds — node 0 stays fd-free).
+4. `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init` places
+   them onto 0/1/2 *after* the seal, as the final step before `execve` (its own diagnostics stay on a
+   host fd throughout).
 5. Binder-session tracking for the hard reaper, the spawned-kennel `max_lifetime` self-reap, and the
    atomic check-and-claim `max_instances` accounting (the Node 0 accounting lock).
 6. The T3.9 THREATS entry (mutable-field surface + delegated-composition residuals) and the

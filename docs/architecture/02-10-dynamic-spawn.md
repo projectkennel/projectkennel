@@ -46,8 +46,8 @@ and no new capability can be invented. Everything in this contract follows from 
 
 | Process | Namespace | Binder role | Responsibility |
 |---|---|---|---|
-| **Requester workload** | its own kennel | Node 0 client (`SPAWN`) | Mints the channel fds, names the template + its mutable-field writes, keeps the local ends |
-| **`kenneld`** | host (operator) | Node 0 context manager | Validates grant, pin/eligibility, and manifest patch; resolves the template in memory, accepts the channel fds, drives construction |
+| **Requester workload** | its own kennel | Node 0 client (`SPAWN`) | Names the template + its mutable-field writes (carries no fds); receives its channel ends in the reply |
+| **`kenneld`** | host (operator) | Node 0 context manager | Validates grant, pin/eligibility, and manifest patch; resolves the template, **mints the channel**, injects the spawned-kennel ends, returns the requester's ends, drives construction |
 | **`kennel-privhelper`** | transient, per-spawn | — | Factory: clones the spawned kennel's namespaces, injects the channel fds, `fexecve`s `kennel-bin-init` ([[no-standing-host-privilege]]) |
 | **Spawned sibling** | fresh kennel | Node 0 client (own instance) | Runs the template's entrypoint (for MCP, a stdio JSON-RPC server) with the injected fds as stdio |
 
@@ -61,8 +61,10 @@ and the lifecycle coupling, not a new construction path.
 The agent controls exactly one thing: the writes it makes to the template's **mutable fields**. A
 template is a *complete, signed, runnable policy* plus a declared `[[mutable]]` manifest naming which
 leaf fields a spawn may write; everything outside the manifest is frozen and inherited verbatim
-(§7.12.3). `kenneld` performs three checks at `SPAWN` time, all on the **verify/compile path**, never a new
-parser in the daemon TCB:
+(§7.12.3). `kenneld` performs three checks at `SPAWN` time, all in the **verify half (`kennel-lib-policy`)
+the daemon already links — never `kennel-lib-compile`**. The spawn-target template is signed *pre-resolved*
+(its template chain folded at sign time), so instantiation is load-verify + patch-apply, not a compile, and
+no policy compiler enters `cargo tree -p kenneld` ([[tcb-only-shrinks]]):
 
 1. **Grant.** The requesting kennel's compiled policy carries its `[spawn]` ACL — the
    `[[spawn.allow]]` template set, `max_instances`, and an optional per-requester `mutable` list
@@ -127,60 +129,47 @@ range is gated `sender_pid == init_host_pid && sender_euid == 0`, which is `kenn
 |---|---|---|
 | `code` | req | `SPAWN` (facade range, next free verb code) |
 | template | req | length-prefixed `name@version` (`<= MAX_NAME`) |
-| mutable writes | req | count-prefixed `(field-path, value)` length-prefixed pairs — the candidate's manifest-field writes |
-| **fd[0]** | req | `BINDER_TYPE_FD` — the socketpair remote end (spawned kennel's stdin + stdout) |
-| **fd[1]** | req | `BINDER_TYPE_FD` — the pipe write end (spawned kennel's stderr) |
-| reply | rep | status byte + transient `spawn-<uuid>` (audit/tracking handle) |
+| mutable writes | req | count-prefixed `(field-path, value)` length-prefixed pairs — the manifest-field patch |
+| flags | req | `TF_ACCEPT_FDS` set so the reply may carry fds; the request itself carries **none** |
+| reply | rep | status + transient `spawn-<uuid>` + **two `BINDER_TYPE_FD`**: the socketpair local end (workload stdin+stdout) and the pipe read end (workload stderr) |
 
-The requester mints a `socketpair()` (bidirectional JSON-RPC: it keeps the local end) and a
-`pipe()` (the spawned kennel's `stderr`, kept on a separate descriptor so unstructured error text
-never corrupts the framed channel — §7.12.5), and attaches the *remote* ends to the `SPAWN`
-transaction as exactly **two** `BINDER_TYPE_FD` objects. The reply carries no fd — the requester
-already holds its local ends.
+The requester carries no descriptors; it sets `TF_ACCEPT_FDS` so the reply may return them. `kenneld`
+mints the `socketpair()` (bidirectional JSON-RPC) and the `pipe()` (the spawned kennel's `stderr`, on a
+separate descriptor so unstructured error text never corrupts the framed channel — §7.12.5), injects the
+spawned-kennel ends into construction, and returns the requester's two ends in the reply. This extends the
+node-0 reply codec, which today returns a single fd (`Reply::Fd` / `DataAndFd`), to carry two — a small
+`Reply::DataAndFds` addition, the same multi-offset shape the transaction encoder already has.
 
-### Inbound descriptor acceptance — the safety argument
+### Outbound descriptors only — the safety argument
 
-`SPAWN` is the **one** Node 0 verb meant to accept descriptors *into* `kenneld`. Every other Node 0
-verb issues descriptors *outward* (the connected socket from `CONNECT_*`, the pushed conduit from
-`DELIVER_INET`), and node 0 is published *without* the accepts-fds flag, so the kernel refuses any
-inbound fd before a handler sees it ([[binder-fd-passing-safety-verdict]]). Accepting inbound fds for
-`SPAWN` is a deliberate, **scoped** relaxation — and the relaxation is coarser than it looks, because
-`accept_fds` is a per-node **boolean** (`FLAT_BINDER_FLAG_ACCEPTS_FDS`), not a per-verb count:
+Because `kenneld` mints the channel, **no descriptor ever flows into node 0.** Node 0 keeps the plain
+`BINDER_SET_CONTEXT_MGR` registration with the accepts-fds flag *unset*, so the kernel refuses any inbound
+fd on any verb before a handler sees it — the [[binder-fd-passing-safety-verdict]] invariant (fds flow
+*out* of the TCB only) holds unbroken, and there is no daemon-wide fd-translation surface to bound. The
+only fd movement is outbound:
 
-- **The flag is node-wide; the arity bound is the handler's.** To accept the two `SPAWN` fds, node 0
-  must be published *with* `FLAT_BINDER_FLAG_ACCEPTS_FDS` (via `BINDER_SET_CONTEXT_MGR_EXT` — the
-  current plain `BINDER_SET_CONTEXT_MGR` cannot set it). That flag permits fds on **every** transaction
-  to node 0, not just `SPAWN`, so "exactly two" is enforced by the `SPAWN` **handler** (reject any
-  arity but 2) *after* the kernel has already translated the fds — not by a kernel cap.
-- **Residual: an fd-translation DoS on every node-0 verb.** The kernel dups a sender's fd objects into
-  `kenneld`'s table *before* the handler runs, so a malicious workload can attach many fd objects to
-  *any* node-0 verb (`GET_SERVICE`, …) and force the dups before the handler rejects them. The bound is
-  the transaction-buffer size (`MAP_SIZE`, ~4k objects) and `kenneld`'s `RLIMIT_NOFILE`, **not** "2."
-  Every non-`SPAWN` handler asserts `Incoming.fds` is empty, returns `BAD_REQUEST`, and **closes any
-  received fds immediately**; the `SPAWN` handler rejects arity ≠ 2. This is the real cost of the
-  requester-mints model — `kenneld` minting the channel itself would have avoided it — accepted,
-  bounded, and audited, not hidden.
-- **The descriptors are opaque conduits, never operated on.** `kenneld` does not `read`, `write`,
-  `seek`, `stat`, or otherwise act on the received fds. It translates them once (the kernel's
-  `BINDER_TYPE_FD` translation is atomic and unforgeable) and relays them straight into the spawned
-  kennel's construction. No content is trusted because no content is read.
-- **Self-contained blast radius.** A malicious requester can pass an arbitrary descriptor (a file,
-  not a socket; a pipe to nowhere). The only consequence is that *its own* spawned tool's stdio is
-  that descriptor — the requester degrades a channel it owns. The fd cannot reach another kennel,
-  another spawn, or any `kenneld` state; it is `CLOEXEC` on receipt and flows only to the one
-  sibling the requester is authorised to spawn.
+- **Into construction.** The spawned-kennel ends are injected through the existing supervision-plan path
+  ([[kennel-init-and-uid0]]) — the same outbound mechanism that already places the pty and workload fds.
+- **Into the reply.** The requester's two ends ride the `SPAWN` reply, which the requester opted into with
+  `TF_ACCEPT_FDS`; the kernel translates them into the requester's table. A requester receiving the
+  channel it asked for is the trusted direction.
 
-This is the residual the `requester-mints` model carries; it is acceptable precisely because the
-descriptors are conduits the daemon never dereferences and the damage is confined to the requester's
-own delegation.
+The rejected requester-mints alternative would have published `FLAT_BINDER_FLAG_ACCEPTS_FDS` on node 0
+(via `BINDER_SET_CONTEXT_MGR_EXT`) and paid an fd-translation DoS on *every* node-0 verb — the kernel dups
+a sender's fd objects into `kenneld`'s table before any handler runs, bounded only by the transaction
+buffer (`MAP_SIZE`) and `RLIMIT_NOFILE`, not by the two `SPAWN` needs. Minting in `kenneld` removes that
+surface outright. The cost paid instead is the bounded one §7.12.9 names — the channel mint and the
+verify-half `SPAWN` validation — in the daemon, where it is reasoned about, not at an inbound-fd boundary.
 
 ## The capability handoff (construction)
 
 On a validated `SPAWN`, `kenneld`:
 
-1. **Resolves the template in memory** from the trust store and applies the validated mutable-field
-   writes — no child policy is ever written to disk, because no child policy is ever authored
-   (§7.12.1, §7.12.6). The instantiation is the signed template with the manifest blanks filled.
+1. **Resolves, mints, and replies.** `kenneld` resolves the template in memory, pin-verifies it, and
+   applies the validated patch — no child policy is ever written to disk (§7.12.1, §7.12.6); the
+   instantiation is the signed template with the manifest blanks filled. It then **mints the channel**
+   (`socketpair()` + stderr `pipe()`) and returns the requester's two ends with the `spawn-<uuid>` in the
+   reply, before construction proceeds (below).
 2. **Builds the supervision plan** with the two injected descriptors recorded as **presence flags**.
    The plan codec (`kennel-lib-spawn`) carries fds out-of-band via `SCM_RIGHTS` in a fixed order and
    records only a `bool` per fd in the wire bytes — the established pattern for the pty and
@@ -190,22 +179,23 @@ On a validated `SPAWN`, `kenneld`:
    their slots before `fexecve`. *(W7. Adding required fields to the settled `Supervision` /
    `ConstructionHalf` structs touches every plan fixture across crates — a single coordinated
    commit, per the §8.3 settled-schema gotcha.)*
-3. **`kennel-bin-init` `dup2`s** the injected slots onto the workload's stdin/stdout/stderr **before**
-   the pty/controlling-tty setup and before the Landlock/seccomp seal. A dynamically-spawned tool is
-   non-interactive (it speaks JSON-RPC over stdio), so it takes the injected-fd path, not the
-   pty-allocation path. Init makes no policy judgment here ([[init-is-dumb-executor]]); the
-   descriptors and their disposition were decided by `kenneld` pre-handoff. Init's own pre-`execve`
-   failures (a Landlock seal that will not apply, a seccomp filter that will not compile) route to the
-   host audit and boot-sync channel, **never** to the injected `stderr` — the agent sees a clean `EOF`
-   for an infrastructure failure (no host-init state leaks to it) and tool tracebacks only once `execve`
-   has handed `stderr` to the tool (§7.12.5).
+3. **`kennel-bin-init` places the injected slots onto stdin/stdout/stderr as the final step before
+   `execve`, after the seal** — not before it. A dynamically-spawned tool is non-interactive (it speaks
+   JSON-RPC over stdio), so it takes the injected-fd path, not the pty-allocation path. The ordering is
+   load-bearing: init keeps its *own* stderr on a host-side descriptor (the boot-sync channel) throughout
+   construction and sealing, so a Landlock/seccomp failure — or a panic — during the seal writes to the
+   host audit, never the agent's pipe; the injected fds reach 0/1/2 only as init hands control to the
+   tool. (The spawn-template seccomp profile must therefore permit the `dup3`/`execve` that close out the
+   placement.) Init makes no policy judgment here ([[init-is-dumb-executor]]); the descriptors and their
+   disposition were decided by `kenneld` pre-handoff.
 
 ### Construction is asynchronous to the reply
 
-The `SPAWN` reply returns **after validation and fd acceptance, not after the spawned kennel boots.**
-`kenneld` validates the grant, pin/eligibility, and manifest patch, takes the two descriptors, enqueues the construction,
-and replies immediately with the `spawn-<uuid>`; the heavy construction (privhelper factory,
-namespace clone, `pivot_root`, init exec) proceeds off the binder looper. Rationale:
+The `SPAWN` reply returns **after validation and channel minting, not after the spawned kennel boots.**
+`kenneld` validates the grant, pin/eligibility, and manifest patch, claims the slot, mints the channel,
+returns the requester's two ends and the `spawn-<uuid>` in the reply, and enqueues the construction; the
+heavy build (privhelper factory, namespace clone, `pivot_root`, init exec) proceeds off the binder looper.
+Rationale:
 
 - The Node 0 looper pool is bounded (`POOL_MAX_THREADS`); holding a looper for a full kennel
   construction would let concurrent spawns exhaust it. Returning early keeps `kenneld`
@@ -217,17 +207,19 @@ namespace clone, `pivot_root`, init exec) proceeds off the binder looper. Ration
 
 ## Spawn sequencing
 
-1. Requester mints `socketpair()` + `pipe()`; keeps the local socketpair end and the pipe read end.
-2. Requester sends `SPAWN(template@version, mutable-writes, [socketpair-remote, pipe-write])` to Node 0.
-3. `kenneld` validates the grant, pin/eligibility, and manifest patch, and **atomically claims a
+1. Requester sends `SPAWN(template@version, mutable-patch)` to Node 0, carrying **no fds**, with
+   `TF_ACCEPT_FDS` set.
+2. `kenneld` validates the grant, pin/eligibility, and manifest patch, and **atomically claims a
    `max_instances` slot** under the Node 0 accounting lock (§7.12.7) — deny, or ceiling full → reply +
-   audit, fds dropped.
-4. `kenneld` accepts the two descriptors, resolves the template in memory, replies `spawn-<uuid>`.
-5. `kenneld` enqueues construction; the privhelper factory clones namespaces and injects the fds
-   into the supervision plan at the new fixed slots.
-6. `kennel-bin-init` boots the sibling, `dup2`s the injected fds onto stdin/stdout/stderr, seals, and
-   `execve`s the template entrypoint.
-7. Data flows kernel-to-kernel over the socketpair; `kenneld` and binder are out of the byte path.
+   audit.
+3. `kenneld` **mints** the `socketpair()` + stderr `pipe()` and replies with `spawn-<uuid>` + the
+   requester's two ends (socketpair local, pipe read).
+4. `kenneld` enqueues construction; the privhelper factory clones namespaces and injects the
+   spawned-kennel ends (socketpair remote, pipe write) into the supervision plan at the new fixed slots.
+5. `kennel-bin-init` boots the sibling, **seals it, then** places the injected ends onto
+   stdin/stdout/stderr as the final pre-`execve` step (its own diagnostics on the host channel
+   throughout), and `execve`s the template entrypoint.
+6. Data flows kernel-to-kernel over the socketpair; `kenneld` and binder are out of the byte path.
 
 ## Fate-sharing, self-reap, and slot accounting
 
@@ -248,7 +240,7 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
   requester holds its session open forever. Same `cgroup.freeze`/`cgroup.kill` plumbing.
 - **Slot accounting — claim, not check (§7.12.7).** `max_instances` is enforced by an **atomic
   check-and-claim**: a single Node 0 accounting-lock operation validates the ceiling *and* increments the
-  live count, taken at validation (step 3) **before** the reply and the asynchronous construction enqueue.
+  live count, taken at validation (step 2) **before** the reply and the asynchronous construction enqueue.
   Deferring the check to construction would let two concurrent `SPAWN`s on different loopers both pass a
   ceiling they jointly exceed; under the lock the second sees the first's claim. The slot is held from
   claim until **release on any terminal outcome**: a reaper release on teardown, *and* a release by the
@@ -285,7 +277,8 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
 Defends the dynamic-spawn delegation as **T3.9 — Delegated spawning** (workload-class, derived from
 the `[spawn]` grant the way `mode = host` derives T1.6; W2). What holds: the capability floor of
 every spawn is the signed template's; the requester holds no `ptrace`/signal reach; `kenneld` brokers
-fds and parses no JSON, so the TCB does not grow. The waived residuals: **R1** — the mutable-field
+fds outbound and parses no JSON; the TCB grows only by the bounded verify-half `SPAWN` validation and the
+channel mint — never a compiler or MCP parser (§7.12.9). The waived residuals: **R1** — the mutable-field
 surface is agent-controlled, and the boundary is exactly the strength of the template's per-field
 bounds (pure pool/oneof manifests reduce this to closed-set selection with no agent free text; a
 predicate field is the loud exception that reintroduces an open value, held by its typed,

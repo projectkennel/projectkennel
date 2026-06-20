@@ -123,17 +123,13 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 - **W6 · The `SPAWN` transaction verb on Node 0.** **[dep] L.** The keystone.
   In `kenneld/src/binder.rs`: grant + template pin/eligibility re-check + manifest-patch validation
-  (W3/W4), in-memory template
-  resolution from the trust store, FD translation, and injection into the spawned kennel's
-  supervision plan. The requester provisions the channel (`socketpair()` for the JSON-RPC, a
-  separate `pipe()` for the spawned kennel's `stderr` so unstructured error text never corrupts
-  the framed channel) and attaches the remote ends as `BINDER_TYPE_FD` objects; `kenneld`
-  injects the translated FDs. The requester mints the channel and passes the remote ends *in* —
-  kenneld accepts inbound fds for `SPAWN` only, a scoped, bounded relaxation of the
-  [[binder-fd-passing-safety-verdict]] injection-blocked stance (02-10 carries the safety argument:
-  arity-2, opaque conduits the daemon never dereferences, blast radius confined to the requester's
-  own spawn). The daemon mounts nothing beyond the template's own view, parses no JSON, routes no
-  traffic.
+  (W3/W4, all in the verify half — no `kennel-lib-compile` in the daemon), in-memory instantiation, and
+  the channel handoff. **`kenneld` mints** the `socketpair()` (JSON-RPC) + `pipe()` (`stderr`), injects
+  the spawned-kennel ends into the supervision plan, and **returns the requester's two ends in the
+  reply** — so node 0 stays fd-free inbound and the [[binder-fd-passing-safety-verdict]] invariant (fds
+  out of the TCB only) holds unbroken. Needs the small two-fd reply codec (`Reply::DataAndFds`); the
+  daemon mounts nothing beyond the template's own view, parses no JSON, routes no traffic. (02-10 carries
+  the outbound-only safety argument.)
 
 - **W7 · Injected-stdio supervision + `kennel-bin-init` dup2.** **[dep] M.**
   `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init`
