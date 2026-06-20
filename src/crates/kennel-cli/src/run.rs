@@ -13,11 +13,13 @@ use std::process::ExitCode;
 
 use kennel_lib_control::control::{self, Request, Response, StartRequest};
 
+use crate::policy::{
+    build_settled, is_source_policy, mint_ssh_keys, print_warnings, FsTemplateSource, TempSettled,
+};
 use crate::review;
 use crate::{
-    add_default_template_dirs, add_system_trust_dirs, build_settled, connect, default_signing_key,
-    exit_code, is_source_policy, load_signing_key, load_trust_store, mint_ssh_keys, print_warnings,
-    resolve_policy, send, FsTemplateSource, TempSettled,
+    add_default_template_dirs, add_system_trust_dirs, connect, default_signing_key, exit_code,
+    load_signing_key, load_trust_store, resolve_policy, send,
 };
 
 /// `kennel run <policy> <name> [--key K] [--template-dir D]... [--trust-dir D]... -- <argv...>`

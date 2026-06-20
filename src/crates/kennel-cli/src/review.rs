@@ -9,7 +9,8 @@ use std::io::{self, IsTerminal as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::{is_source_policy, resolve_policy};
+use crate::policy::is_source_policy;
+use crate::resolve_policy;
 
 /// `kennel review <policy> [--yes]` — the operator's sign-off on a workspace's trust
 /// manifest after legitimate edits (T2.8). The confined workload cannot update the manifest
