@@ -42,8 +42,8 @@ use kennel_lib_policy::settled::{
     AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy,
     DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
-    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshRuntime,
-    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    ProcVisibility, Protocol, ProxyListen, RootfsRuntime, SeccompAction, SeccompPolicy, SshGrant,
+    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use kennel_lib_policy::PolicyError;
 use std::collections::BTreeSet;
@@ -72,6 +72,8 @@ pub struct Translated {
     pub ulimits: UlimitsRuntime,
     /// The workload to run (§7.4) — argv, cwd, pin, and optional sha256.
     pub workload: WorkloadRuntime,
+    /// The per-kennel OCI substrate (§7.11) — the image root the daemon boots, when OCI-model.
+    pub rootfs: RootfsRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -87,6 +89,7 @@ pub struct Translated {
 /// form (CIDR, size, duration, port spec, net mode) is malformed.
 pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let mut deferred = BTreeSet::new();
+    validate_rootfs(effective)?;
     let net = translate_net(effective, &mut deferred)?;
     let fs = translate_fs(effective, &mut deferred)?;
     let exec = translate_exec(effective, &mut deferred)?;
@@ -140,6 +143,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let env = translate_env(effective, &mut deferred);
     let ulimits = translate_ulimits(effective)?;
     let workload = translate_workload(effective, &mut deferred)?;
+    let rootfs = translate_rootfs_runtime(effective, &mut deferred);
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -162,8 +166,37 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         env,
         ulimits,
         workload,
+        rootfs,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Translate `[rootfs]` into the settled [`RootfsRuntime`] (§7.11). Carries the substrate `path`
+/// (`subst`-resolved for `~`/`<home>` like other in-view paths) and the provenance `image`. The
+/// loud-grant well-formedness (path/image/reason all present) is already enforced by
+/// [`validate_rootfs`] at the top of [`translate`], so this only shapes the runtime; `reason`
+/// stays in source (the risk surface), never the settled artefact. Absent ⇒ an empty runtime,
+/// omitted from the canonical form, so a non-OCI policy signs exactly as before.
+fn translate_rootfs_runtime(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> RootfsRuntime {
+    let Some(r) = src.rootfs.as_ref() else {
+        return RootfsRuntime::default();
+    };
+    RootfsRuntime {
+        path: r
+            .path
+            .as_deref()
+            .map(|p| subst(p, deferred))
+            .unwrap_or_default(),
+        image: r.image.clone().unwrap_or_default(),
+        // Empty (unset) stays empty in the settled form — the spawn path reads it as `discard`
+        // — so an OCI policy that does not set persistence signs unchanged. `validate_rootfs`
+        // has already rejected any value outside the two.
+        persistence: r.persistence.clone().unwrap_or_default(),
+        // Closure-lock lists pass through verbatim (rootfs paths, not subst-resolved — they are
+        // in-image absolute paths the spawn keys Landlock rules on post-pivot).
+        readonly: r.readonly.clone().unwrap_or_default(),
+        writable: r.writable.clone().unwrap_or_default(),
+    }
 }
 
 /// Translate `[workload]` into the settled [`WorkloadRuntime`] (§7.4). `argv` carries
@@ -419,6 +452,57 @@ fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError
 /// and the *path component* of `$HOME` (`/home/<user>`); `identity.group` becomes the
 /// synthetic primary-group name. A `/`, `:`, NUL, or whitespace would corrupt the
 /// passwd/group file or escape the home path — refuse, never sanitise.
+/// Validate `[rootfs]` (§7.11): the OCI substrate grant is loud and self-contained. When present
+/// it must carry `path`, `image`, and a non-empty `reason` — the substrate-trust waiver (T3.8) is
+/// loud the way `mode = host` requires `net.reason`. Absent ⇒ not an OCI-model policy, nothing to
+/// check here; the `kennel run` vs `kennel oci run` consumer split is enforced at the verb.
+fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
+    let Some(rootfs) = &src.rootfs else {
+        return Ok(());
+    };
+    let need = |field: &str, val: &Option<String>| -> Result<(), PolicyError> {
+        if val.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(translation(format!(
+                "[rootfs] is an OCI substrate grant and requires a non-empty `{field}`"
+            )));
+        }
+        Ok(())
+    };
+    need("path", &rootfs.path)?;
+    need("image", &rootfs.image)?;
+    need("reason", &rootfs.reason)?;
+    // Grammar partition (§7.11.2): `[rootfs]` and `[workload]` are mutually exclusive — an OCI
+    // policy runs the image entrypoint via the launcher and has no per-binary pin, so a
+    // `[workload]` block is a category error, not a silently-ignored field.
+    if src.workload.is_some() {
+        return Err(translation(
+            "[rootfs] and [workload] are mutually exclusive: an OCI-model policy runs the image \
+             entrypoint via the launcher (use `kennel oci run … -- <cmd>` for a Cmd override)"
+                .to_owned(),
+        ));
+    }
+    // Persistence is binary; empty (unset) means the default `discard`.
+    let persistence = rootfs.persistence.as_deref().unwrap_or("discard");
+    if !matches!(persistence, "discard" | "persist") {
+        return Err(translation(format!(
+            "[rootfs].persistence must be `discard` or `persist`, got `{persistence}`"
+        )));
+    }
+    // `persist` + whole-tree-immutable is a contradiction (an upper that can never be written).
+    let whole_tree_ro = rootfs
+        .readonly
+        .as_deref()
+        .is_some_and(|r| r.iter().any(|p| p == "/"));
+    if persistence == "persist" && whole_tree_ro {
+        return Err(translation(
+            "[rootfs] persistence = \"persist\" with readonly = [\"/\"] is a contradiction: the \
+             managed upper could never be written — drop one"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_name(field: &str, name: &str) -> Result<(), PolicyError> {
     let invalid =
         |why: &str| PolicyError::Translation(format!("{field} `{name}` is invalid: {why}"));
@@ -1160,6 +1244,96 @@ mod tests {
     use kennel_lib_policy::settled::{AuditSinkKind, Provenance, ResolvedArtifact, SettledPolicy};
 
     #[test]
+    fn rootfs_requires_path_image_and_reason() {
+        // Loud grant: each of the three fields is mandatory when [rootfs] is present.
+        let missing_reason = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\nimage = \"ghcr.io/o/a@sha256:abc\"\n",
+        )
+        .expect("parse");
+        let err = validate_rootfs(&missing_reason).expect_err("missing reason");
+        assert!(format!("{err}").contains("reason"));
+
+        let missing_image =
+            parse(b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\nreason = \"v\"\n")
+                .expect("parse");
+        assert!(validate_rootfs(&missing_image).is_err());
+    }
+
+    #[test]
+    fn rootfs_wellformed_and_absent_both_validate() {
+        let ok = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+              image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"vendor image\"\n",
+        )
+        .expect("parse");
+        assert!(validate_rootfs(&ok).is_ok());
+        // No [rootfs] at all ⇒ not OCI-model, nothing to validate.
+        assert!(validate_rootfs(&parse(b"name = \"x\"\n").expect("parse")).is_ok());
+    }
+
+    #[test]
+    fn rootfs_and_workload_are_mutually_exclusive() {
+        // An OCI policy carrying a [workload] is a category error (§7.11.2 grammar partition).
+        let both = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+              image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\n\
+              [workload]\nargv = [\"/bin/sh\"]\n",
+        )
+        .expect("parse");
+        let err = validate_rootfs(&both).expect_err("rootfs + workload");
+        assert!(format!("{err}").contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn rootfs_persistence_is_binary() {
+        let mk = |mode: &str| {
+            parse(
+                format!(
+                    "name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+                     image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\npersistence = \"{mode}\"\n"
+                )
+                .as_bytes(),
+            )
+            .expect("parse")
+        };
+        for ok in ["discard", "persist"] {
+            assert!(validate_rootfs(&mk(ok)).is_ok(), "{ok} should validate");
+        }
+        // `readonly` is no longer a persistence mode — it is a closure-lock list now.
+        let err = validate_rootfs(&mk("readonly")).expect_err("readonly not a mode");
+        assert!(format!("{err}").contains("persistence"), "{err}");
+    }
+
+    #[test]
+    fn persist_with_whole_tree_readonly_is_rejected() {
+        let p = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+              image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\n\
+              persistence = \"persist\"\nreadonly = [\"/\"]\n",
+        )
+        .expect("parse");
+        let err = validate_rootfs(&p).expect_err("persist + readonly=/");
+        assert!(format!("{err}").contains("contradiction"), "{err}");
+    }
+
+    #[test]
+    fn rootfs_runtime_carries_path_and_image_subst_resolved() {
+        let p = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+              image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\n",
+        )
+        .expect("parse");
+        let mut d = BTreeSet::new();
+        let rt = translate_rootfs_runtime(&p, &mut d);
+        assert_eq!(rt.image, "ghcr.io/o/a@sha256:abc");
+        assert!(rt.path.contains("img/rootfs"), "path: {}", rt.path);
+        assert!(!rt.is_empty());
+        // No [rootfs] ⇒ empty runtime, omitted from the canonical form.
+        let none = translate_rootfs_runtime(&parse(b"name = \"x\"\n").expect("parse"), &mut d);
+        assert!(none.is_empty());
+    }
+
+    #[test]
     fn dbus_translates_only_enabled_buses() {
         // session enabled with rules; system present but disabled ⇒ omitted.
         let src = parse(
@@ -1861,6 +2035,7 @@ mod tests {
             env: t.env,
             ulimits: t.ulimits,
             workload: t.workload,
+            rootfs: t.rootfs,
         };
         kennel_lib_policy::invariant::validate(&policy).expect("framework invariants must hold");
     }

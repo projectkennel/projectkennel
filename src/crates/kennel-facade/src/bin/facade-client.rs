@@ -1,33 +1,32 @@
-//! In-kennel inbound BIND facade: pull host-side connections and deliver them to the workload.
+//! In-kennel inbound BIND facade: register callback nodes and deliver pushed connections.
 //!
 //! # Purpose
 //!
 //! The reverse of `facade-socks5` (`docs/design/07-5-network.md` §7.5.7). The workload `bind()`s a
 //! port natively in the kennel net-ns (gated by the `[net.bpf].bind` cgroup ACL); `host-inetd`
 //! mirrors that port on the host loopback and accepts. This facade is the in-kennel end that
-//! delivers each accepted connection to the workload's listener: for every mirrored port it
-//! transacts a [`BIND_INET`] to node 0 and blocks for a conduit; on a hit it `connect()`s the
-//! workload's native listener at `<kennel-ip>:<port>` and splices the conduit to it; on
-//! [`AGAIN`] it backs off and re-arms.
+//! delivers each accepted connection to the workload's listener.
 //!
-//! Pull-based, the exact symmetric of `CONNECT`: where `facade-socks5` pulls outbound conduits and
-//! the workload drives them, this pulls inbound conduits that kenneld minted on `host-inetd`'s
-//! accept. kenneld mints both socketpair ends, so the only fd crossing into the kennel is a benign
-//! socketpair end — no daemon-pushed fd, no callback node.
+//! **Push, not poll.** For every mirrored port the facade registers a binder **callback node** with
+//! node 0 ([`REGISTER_MIRROR`], via [`Connection::transact_node`]) and then **sleeps in a binder
+//! server loop** — zero CPU, no re-arm. On each host-side accept kenneld pushes a one-way
+//! [`DELIVER_INET`] to the node carrying the conduit fd; the kernel wakes the facade, which
+//! `connect()`s the workload's native listener at `<kennel-ip>:<port>` and splices the conduit to
+//! it. The conduit fd flows **out** of the TCB (kenneld → kennel); no fd ever flows in.
 //!
 //! # Invocation
 //!
 //! `facade-client <binder-device> <kennel-ip> <port>...`, spawned by kenneld into the kennel's view.
 //! `<binder-device>` is `/dev/binderfs/binder`; `<kennel-ip>` is the kennel's own loopback alias;
-//! each `<port>` is a policy-mirrored bind port. One thread per port.
+//! each `<port>` is a policy-mirrored bind port.
 //!
 //! # Non-goals
 //!
 //! No policy, no resolver, no listener: the `[net.bpf].bind` ACL already gated the bind and kenneld
-//! brokers the host-side accept. This process only pulls conduits and splices bytes.
+//! brokers the host-side accept. This process only registers nodes and splices pushed conduits.
 //!
-//! [`BIND_INET`]: kennel_lib_binder::service::verb::BIND_INET
-//! [`AGAIN`]: kennel_lib_binder::service::status::AGAIN
+//! [`REGISTER_MIRROR`]: kennel_lib_binder::service::verb::REGISTER_MIRROR
+//! [`DELIVER_INET`]: kennel_lib_binder::service::verb::DELIVER_INET
 
 #![forbid(unsafe_code)]
 
@@ -37,19 +36,16 @@ use std::net::{IpAddr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::thread;
-use std::time::Duration;
 
-use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
+use kennel_lib_binder::client::{Connection, Incoming, CONTEXT_MANAGER_HANDLE};
+use kennel_lib_binder::proto::FLAT_BINDER_FLAG_ACCEPTS_FDS;
 use kennel_lib_binder::service::{inet, status, transport, verb};
 
 /// The binder buffer mapping size for the facade's client (matches `facade-socks5`).
 const MAP_SIZE: usize = 128 * 1024;
-/// The shortest re-arm gap after an active hit: low enough to keep delivery latency small.
-const REARM_BACKOFF_MIN: Duration = Duration::from_millis(50);
-/// The longest re-arm gap an idle port backs off to. An idle mirror should not transact 20×/s
-/// forever — kenneld replies `AGAIN` and wakes a looper each time — so back off geometrically toward
-/// this ceiling while idle, and snap back to [`REARM_BACKOFF_MIN`] the moment a connection arrives.
-const REARM_BACKOFF_MAX: Duration = Duration::from_secs(1);
+/// Poll quantum for the server loop. The facade sleeps in the kernel between transactions; this
+/// only bounds how promptly a torn-down binder connection is noticed (an idle mirror costs nothing).
+const POLL_MS: i32 = 1000;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -67,62 +63,26 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // One thread per mirrored port; each owns its binder connection and pull loop.
-    let mut handles = Vec::new();
-    for port in ports {
-        let device = device.clone();
-        handles.push(thread::spawn(move || {
-            service_port(&device, kennel_ip, port);
-        }));
-    }
-    for h in handles {
-        let _ = h.join();
-    }
-    ExitCode::SUCCESS
-}
-
-/// Service one mirrored port forever: pull each inbound conduit and deliver it to the workload.
-///
-/// The binder connection is opened **once** and reused for every re-arm — an idle port must not
-/// churn a fresh binderfs open + 128 KiB `mmap` 20×/s. The re-arm gap backs off geometrically while
-/// idle (toward [`REARM_BACKOFF_MAX`]) and snaps back to [`REARM_BACKOFF_MIN`] on a hit, so an idle
-/// mirror settles to ~1 wake/s instead of 20 while keeping delivery latency low under load.
-fn service_port(device: &str, kennel_ip: IpAddr, port: u16) {
-    let mut backoff = REARM_BACKOFF_MIN;
-    loop {
-        // (Re)establish the binder connection, reused across the inner pull loop below. A transport
-        // error breaks back out to here to reopen it.
-        let conn = match open_connection(device) {
-            Ok(conn) => conn,
-            Err(e) => {
-                eprintln!("facade-client: binder open :{port} error: {e}");
-                thread::sleep(backoff);
-                backoff = backoff.saturating_mul(2).min(REARM_BACKOFF_MAX);
-                continue;
-            }
-        };
-        loop {
-            match pull_inbound(&conn, port) {
-                Ok(Some(conduit)) => {
-                    // Active: deliver on its own thread so the pull loop re-arms immediately, and
-                    // reset the backoff so the next pull is prompt.
-                    backoff = REARM_BACKOFF_MIN;
-                    thread::spawn(move || deliver(conduit, kennel_ip, port));
-                }
-                Ok(None) => {
-                    // Idle (`AGAIN`): wait, then ease off toward the ceiling.
-                    thread::sleep(backoff);
-                    backoff = backoff.saturating_mul(2).min(REARM_BACKOFF_MAX);
-                }
-                Err(e) => {
-                    eprintln!("facade-client: BIND_INET :{port} error: {e}");
-                    thread::sleep(backoff);
-                    backoff = backoff.saturating_mul(2).min(REARM_BACKOFF_MAX);
-                    break; // reopen the binder connection
-                }
-            }
+    // One binder connection serves every port: each port gets its own callback node, all read on
+    // this one connection's server loop.
+    let conn = match open_connection(&device) {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("facade-client: binder open error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for &port in &ports {
+        if let Err(e) = register(&conn, port) {
+            eprintln!("facade-client: REGISTER_MIRROR :{port} error: {e}");
+            return ExitCode::FAILURE;
         }
     }
+    if let Err(e) = serve(&conn, kennel_ip) {
+        eprintln!("facade-client: server loop ended: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 /// Open one binder connection to the kennel's node 0.
@@ -131,39 +91,82 @@ fn open_connection(device: &str) -> io::Result<Connection> {
     Connection::open(fd.into(), MAP_SIZE)
 }
 
-/// Transact one `BIND_INET` over the reused `conn`. `Ok(Some(fd))` = a host-side connection's
-/// conduit; `Ok(None)` = `status::AGAIN` (re-arm); `Err` = a binder/transport error (reopen).
-fn pull_inbound(conn: &Connection, port: u16) -> io::Result<Option<UnixStream>> {
-    let request = inet::encode_bind_request(transport::TCP, port);
-    let (data, fd) = conn.transact_with_fd(CONTEXT_MANAGER_HANDLE, verb::BIND_INET, &request)?;
-    match fd {
-        Some(fd) => Ok(Some(UnixStream::from(fd))),
-        None if data.first() == Some(&status::AGAIN) => Ok(None),
-        None => Err(io::Error::other(
-            "BIND_INET reply carried neither a conduit nor AGAIN",
-        )),
+/// A distinct, opaque node identity per mirrored port (binder never dereferences it; it only
+/// identifies the node). Kept off zero so it is never mistaken for a null object.
+fn node_ptr(port: u16) -> u64 {
+    0x1000_0000 | u64::from(port)
+}
+
+/// Register a callback node for `port` with node 0 ([`REGISTER_MIRROR`](verb::REGISTER_MIRROR)). The node is flagged
+/// `ACCEPTS_FDS` so kenneld may push the conduit fd to it. kenneld replies [`status::OK`] (or
+/// [`status::DENIED`] for a port outside the policy mirror set).
+fn register(conn: &Connection, port: u16) -> io::Result<()> {
+    let payload = inet::encode_bind_request(transport::TCP, port);
+    let reply = conn.transact_node(
+        CONTEXT_MANAGER_HANDLE,
+        verb::REGISTER_MIRROR,
+        &payload,
+        node_ptr(port),
+        u64::from(port),
+        FLAT_BINDER_FLAG_ACCEPTS_FDS,
+    )?;
+    match reply.first() {
+        Some(&status::OK) => Ok(()),
+        Some(&status::DENIED) => Err(io::Error::other(format!(
+            "kenneld refused mirror registration for :{port} (not in the policy mirror set)"
+        ))),
+        _ => Err(io::Error::other(format!(
+            "unexpected REGISTER_MIRROR reply for :{port}"
+        ))),
     }
+}
+
+/// Sleep in the binder server loop, delivering each pushed `DELIVER_INET` to the workload. Returns
+/// only on a binder transport error (the connection died / the kennel is tearing down).
+fn serve(conn: &Connection, kennel_ip: IpAddr) -> io::Result<()> {
+    conn.enter_looper()?;
+    loop {
+        if !conn.poll(POLL_MS)? {
+            continue; // idle: slept in the kernel, no work
+        }
+        for mut incoming in conn.recv()? {
+            if incoming.code == verb::DELIVER_INET {
+                deliver(&mut incoming, kennel_ip);
+            }
+            // One-way: no reply carries the free, so release the buffer explicitly. The conduit fd
+            // was already taken above and survives the free.
+            let _ = conn.free_buffer(&incoming);
+        }
+    }
+}
+
+/// Handle one pushed `DELIVER_INET`: take the conduit fd, read the port, and splice it to the
+/// workload's native listener on a short-lived thread (so the server loop returns at once).
+fn deliver(incoming: &mut Incoming, kennel_ip: IpAddr) {
+    let Some((_transport, port)) = inet::decode_port_prefix(&incoming.data) else {
+        eprintln!("facade-client: malformed DELIVER_INET payload");
+        return;
+    };
+    let Some(conduit) = incoming.fds.pop() else {
+        eprintln!("facade-client: DELIVER_INET :{port} carried no conduit fd");
+        return;
+    };
+    let conduit = UnixStream::from(conduit);
+    thread::spawn(move || deliver_conduit(conduit, kennel_ip, port));
 }
 
 /// Connect the workload's native in-kennel listener at `<kennel-ip>:<port>` and splice the conduit
 /// to it. A connect failure (the workload isn't listening yet) drops the conduit — the external
 /// client sees the connection close, the same as connecting to a down service.
-fn deliver(conduit: UnixStream, kennel_ip: IpAddr, port: u16) {
+fn deliver_conduit(conduit: UnixStream, kennel_ip: IpAddr, port: u16) {
     let upstream = match TcpStream::connect((kennel_ip, port)) {
         Ok(u) => u,
         Err(e) => {
-            // The workload isn't listening (yet, or at all) — drop the conduit; the external client
-            // sees the connection close, the same as connecting to a down service. Logged because a
-            // silent drop here looks like the mirror "not working".
             eprintln!("facade-client: workload {kennel_ip}:{port} not reachable: {e}");
             return;
         }
     };
-    splice(conduit, upstream);
-}
-
-/// Bidirectionally splice the conduit (the kennel end of kenneld's socketpair) against the
-/// workload's TCP connection. The bidirectional relay is shared (`kennel_lib_scm::splice`).
-fn splice(conduit: UnixStream, upstream: TcpStream) {
+    // Bidirectionally splice the conduit (the kennel end of kenneld's socketpair) against the
+    // workload's TCP connection. The bidirectional relay is shared (`kennel_lib_scm::splice`).
     kennel_lib_scm::splice::splice(conduit, upstream);
 }

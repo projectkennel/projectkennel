@@ -43,6 +43,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   host-side delegates become one `kennel-host-delegate` crate (two binaries + the shared
   conduit-wire library). Binary names are unchanged.
 
+### IPC protocol changes
+
+- **Inbound BIND mirror (§7.5.7) is now push, not poll.** The in-kennel `facade-client`
+  no longer polls node 0 with `BIND_INET` and re-arms on `AGAIN`; it registers a binder
+  **callback node** per mirrored port (`REGISTER_MIRROR`) and sleeps in a server loop,
+  and kenneld pushes each accepted conduit with a **one-way `DELIVER_INET`** carrying the
+  fd. Removes the idle-poll CPU (a geometric 50 ms → 1 s wake per port) and the
+  up-to-1 s first-connection latency. New node-0 verbs `REGISTER_MIRROR`/`DELIVER_INET`
+  replace the `BIND_INET` poll; bounded by death-notify lifecycle, one-way delivery with
+  a per-port bounce buffer, and port-gated registration. Internal-stable surface (kenneld
+  and the facade ship from one release); no external client is affected.
+
 ## [0.1.0] — 2026-06-16
 
 The first versioned cut. Verified on Linux 6.17 (Landlock ABI 7; ABI ≥ 6 is required for native abstract-socket and signal scoping). Pre-release: interfaces and guarantees may change.

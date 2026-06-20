@@ -203,6 +203,13 @@ scope = "in"
 title = "AI agent prompt injection from project content"
 residual = "Confinement limits what an injected instruction can DO (reach, write); it cannot prevent the injection itself — a model-alignment concern."
 
+[[threat]]
+id = "T3.8"
+family = 3
+scope = "in"
+title = "Substrate trust: the image-supplied runtime closure is unvetted"
+residual = "Confinement holds over an image root, but not content integrity: the entrypoint is provenance-pinned not per-binary hashed, the dynamic closure is unpinned, image env is sanitised-then-merged, image User is not honored (EACCES, no subuid). Derived from the [rootfs] grant; opt-in integrity ladder closes the at-rest gap."
+
 # ── Family 5 — Framework attack surface ─────────────────────────────────────
 
 [[threat]]

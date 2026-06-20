@@ -64,6 +64,27 @@ pub mod verb {
     /// `facade-dbus` transacts `[conn-id: u32]` when the workload's connection closes; kenneld
     /// drops the connection state and tells `host-dbus` to release its serial map for it.
     pub const DBUS_CLOSE: u32 = 11;
+    /// Register a callback node for a policy-mirrored bind port (the inbound mirror, §7.5.7).
+    ///
+    /// The push counterpart of [`BIND_INET`]: instead of `facade-client` polling, it transacts
+    /// `REGISTER_MIRROR` once per mirrored port with [`crate::client::Connection::transact_node`],
+    /// the payload `[transport: u8 | port: u16 be]` (see [`crate::service::inet::encode_bind_request`])
+    /// plus its own binder node (flagged `FLAT_BINDER_FLAG_ACCEPTS_FDS`). kenneld acquires the
+    /// translated handle, watches its death, and maps `port → handle`, replying
+    /// [`crate::service::status::OK`] (or [`crate::service::status::DENIED`] if the port is not in
+    /// the policy mirror set — registration is port-gated). The facade then blocks in a binder
+    /// server loop. kenneld makes no per-connection policy decision — the `[net.bpf].bind` ACL
+    /// already gated the bind.
+    pub const REGISTER_MIRROR: u32 = 12;
+    /// Deliver one inbound conduit to a registered mirror node (the inbound mirror, §7.5.7). **`oneway`.**
+    ///
+    /// kenneld pushes `DELIVER_INET` to the facade's registered node on each host-side accept, the
+    /// payload `[transport: u8 | port: u16 be]` (decode with [`crate::service::inet::decode_port_prefix`],
+    /// tolerant of the trailing fd object) carrying the conduit fd as a `BINDER_TYPE_FD` object via
+    /// [`crate::client::Connection::transact_oneway_fd`]. One-way for backpressure: kenneld never
+    /// blocks on the facade. The facade `connect`s its native listener at `<kennel-ip>:<port>` and
+    /// splices.
+    pub const DELIVER_INET: u32 = 13;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
@@ -127,6 +148,20 @@ pub mod inet {
         Some((*transport, u16::from_be_bytes([*hi, *lo])))
     }
 
+    /// Decode the leading `[transport: u8 | port: u16 be]` prefix, **ignoring** any trailing bytes.
+    ///
+    /// Used for [`crate::service::verb::REGISTER_MIRROR`] and [`crate::service::verb::DELIVER_INET`],
+    /// whose received payload carries the 3-byte prefix followed by alignment padding and a
+    /// `flat_binder_object` (the node / the conduit fd). `None` if fewer than 3 bytes are present
+    /// (untrusted input).
+    #[must_use]
+    pub fn decode_port_prefix(data: &[u8]) -> Option<(u8, u16)> {
+        let [transport, hi, lo, ..] = data else {
+            return None;
+        };
+        Some((*transport, u16::from_be_bytes([*hi, *lo])))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{decode_bind_request, decode_request, encode_bind_request, encode_request};
@@ -161,6 +196,19 @@ pub mod inet {
             assert!(decode_bind_request(&[0, 0x0B]).is_none()); // short (2 bytes)
             assert!(decode_bind_request(&[0, 0x0B, 0xB8, 0x00]).is_none()); // long (4 bytes)
             assert!(decode_bind_request(&[]).is_none()); // empty
+        }
+
+        #[test]
+        fn port_prefix_tolerates_trailing_object_bytes() {
+            use super::decode_port_prefix;
+            // Exactly the 3-byte prefix.
+            assert_eq!(decode_port_prefix(&[0, 0x0B, 0xB8]), Some((0, 3000)));
+            // Prefix followed by padding + a 24-byte flat_binder_object (the DELIVER_INET wire).
+            let mut wire = vec![0, 0x0B, 0xB8, 0, 0, 0, 0, 0];
+            wire.extend_from_slice(&[0xCC; 24]);
+            assert_eq!(decode_port_prefix(&wire), Some((0, 3000)));
+            // Fewer than 3 bytes is rejected.
+            assert!(decode_port_prefix(&[0, 0x0B]).is_none());
         }
     }
 }

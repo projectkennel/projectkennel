@@ -1,16 +1,17 @@
 # Project Kennel — 0.2.0 plan
 
-Status: **building — 14 of 15 original workstreams landed** (2026-06-19); **W15** (as-built prose pass) open; **W16** (facade-client poll-elimination) added post-plan from the delegate/facade audit · Drafted: 2026-06-18 · Targets: 0.2.0
+Status: **building — 14 of 15 original workstreams landed** (2026-06-19); **W15** (as-built prose pass) open; **W16** (facade-client poll-elimination → inbound mirror push) **built + merged** (2026-06-20); **Thrust 5 / W17–W19** (OCI substrate execution) added post-plan (2026-06-20), design + T3.8 landed, build sequenced · Drafted: 2026-06-18 · Targets: 0.2.0
 Baseline: 0.1.0 (first versioned cut, 2026-06-18)
 
 > **Progress (2026-06-19).** W1+W2 (persistence), W8 (D-Bus), W9 (fragments), W10 (IDE schema),
 > W11 (terminal filter → CLI), W12 (TCB accounting), W13 (operator-prompt channel), and W14
 > (`essential_etc` cascade) are **built + merged**; each is marked inline below. The one remaining
 > workstream is **W15** (strip history/apology prose + purge never-built mechanisms). **W16**
-> (`facade-client` poll-elimination) was added post-plan from the delegate/facade DoS audit — a
-> follow-up to the shipped facade-only mitigation, gated on a kenneld-side design decision (see
-> Thrust 4). The per-workstream prose is kept as the plan-of-record; the as-built truth lives in the
-> design corpus and `CHANGELOG.md`.
+> (`facade-client` poll-elimination) was added post-plan from the delegate/facade DoS audit and is
+> now **built + merged** — resolved by reversing the inbound mirror to push (the facade sleeps on a
+> callback node; kenneld pushes each conduit), which dissolved the parked-looper pool-exhaustion
+> decision the parked-poll variant was gated on. The per-workstream prose is kept as the
+> plan-of-record; the as-built truth lives in the design corpus and `CHANGELOG.md`.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -302,21 +303,71 @@ layer on top:
   itself the apology pattern. A grep gate (`xdg-dbus-proxy`, `IGpgAgent`, `per-kennel ssh-agent`) keeps
   them out once removed. Touches ~15 corpus files; do it as one pass, not per-edit drive-bys.
 
-- **W16 · `facade-client` poll-elimination — parked/blocking `BIND_INET`.** *(→ §7.5.7,
-  `07-1-binder.md`, [[ipc-inventory-binder-is-sole-in-kennel-core]])* **S–M.** **NEW — surfaced by
-  the W8-era delegate/facade DoS audit; the facade-only mitigation already shipped, so this is a
-  follow-up, not a 0.2.0 blocker (target: maintainer's call).** `facade-client` services each
-  mirrored inbound port by *polling* `BIND_INET` and re-arming on `AGAIN`; the kennel-cleanup PR
-  reduced the cost (one reused binder connection + geometric idle backoff 50 ms → 1 s) but the model
-  is still a poll. The complete fix is to **park** the `BIND_INET` transaction in kenneld until a
-  conduit actually arrives (the `DBUS_RECV` long-poll pattern — condvar demux off the
-  `InboundRuntime` queue), eliminating idle wakeups and first-connection-after-idle latency
-  together. **The design decision that gates it:** parking one looper per mirrored port interacts
-  with the serving pool (`POOL_MAX_THREADS = 8`) — a kennel mirroring >8 ports would exhaust it. So
-  W16 must first settle one of: parked recvs not counting against the serving pool, a per-port
-  eventfd the facade waits on (no parked looper), or a pool bump tied to the mirror-port count. A
-  kenneld change ([[tcb-only-shrinks]] — keep it transport-only, no new parser), so it needs
-  maintainer sign-off before build.
+- **W16 · `facade-client` poll-elimination — inbound mirror pull→push.** *(→ §7.5.7,
+  `07-1-binder.md`, [[ipc-inventory-binder-is-sole-in-kennel-core]], [[binder-fd-passing-safety-verdict]])*
+  **S–M.** **✅ Built + merged + hardware-proven (2026-06-20).** Surfaced by the W8-era
+  delegate/facade DoS audit (`facade-client` polled `BIND_INET` and re-armed on `AGAIN` — a
+  geometric 50 ms → 1 s idle wake that scaled with ports × kennels, plus up-to-1 s
+  first-connection latency). Resolved by **reversing the data direction to push** rather than the
+  parked-poll the item first proposed: the facade registers a binder callback node per mirrored port
+  (`REGISTER_MIRROR`) and **sleeps** in a server loop (zero CPU); kenneld pushes each accepted
+  conduit with a **one-way `DELIVER_INET`** on the context-manager connection. This dissolves the
+  design decision that gated the parked-poll variant — push **parks nothing**, so the
+  `POOL_MAX_THREADS` exhaustion concern (one parked looper per mirrored port) simply does not arise.
+  Three guards keep it bounded (death-notify lifecycle, one-way + per-port bounce buffer, port-gated
+  registration); the fd-passing verdict is intact (the conduit fd still flows out of the TCB). Kept
+  transport-only ([[tcb-only-shrinks]] — no new parser in the daemon closure). Proven by the full
+  policy suite (`net-bind-mirror` push delivery + `net-bind-deny-wins` ACL gating).
+
+### Thrust 5 — OCI substrate execution
+
+**NEW — added post-plan (2026-06-20). Design + THREATS landed; build sequenced.** A deployment
+model, not a confinement fix: run a vendor OCI image as the kennel's root filesystem so the
+container-packaged workloads developers actually ship are adoptable under Kennel's contract. The
+design is [`07-11-oci-substrate.md`](../design/07-11-oci-substrate.md) (§7.11), the implementation
+contract [`02-9-oci.md`](../architecture/02-9-oci.md), the trust residual **T3.8** (substrate trust
+— written this pass; corrected from the scratch's "T2" placement, since unvetted-image threats are
+workload-class-specific, Family 3, alongside T3.2/T3.4/T3.5). The model boots an unpacked rootfs
+directly under `kenneld`'s namespaces — **no container daemon, no daemon socket, no in-daemon
+parser** — and splits `kennel oci build` (fetch + unpack, every parser confined) from
+`kennel oci run` (boot under policy). The posture claim is **confinement, not content integrity**;
+`[rootfs]` is a loud grant ([[footgun-warn-dont-forbid]] / [[no-security-theatre]] register, like
+`mode = host`). [[tcb-only-shrinks]] holds: the launcher and every parser run at workload authority,
+never in `cargo tree -p kenneld`.
+
+- **W17 · OCI unprivileged surface.** *(→ §7.11, `02-9-oci.md`)* **L. Mostly BUILT.** Done: the
+  `kennel oci build`/`run` verbs + the named store manager; `[rootfs]` schema + the
+  `kennel-lib-compile` **grammar partition** (`[rootfs]` valid iff OCI-model, enforced at the verb)
+  + the T3.8 risk derivation; **`kennel-bin-oci-entry`**, the workload-side launcher (config parse,
+  env **sanitise + merge**, `chdir`, in-root `execve`) with the image-`Env` strip wired into the
+  merge in the same change + its behavioural tests; and the daemon launcher binding (W18). **Remaining
+  (W17c):** the Kennel-shipped vetted fetch policy + the `TEMPLATE-oci` run-policy scaffold (mirrors
+  the `env_strip` denylist as `[env].deny` globs) so `oci build` fetches+unpacks confined.
+
+- **W18 · OCI daemon spawn-path branch (layered overlay).** *(→ `02-9-oci.md` §daemon,
+  [[spawn-userns-owner-yama]])* **M. Sign-off given 2026-06-20; BUILT, then reconciled to the
+  layered-overlay design (§7.11.4a).** `[rootfs]` → `RootfsRuntime` → `ShimView.image`. The overlay
+  is a **three-lower stack** (`kennel-etc : image : scaffold`, leftmost wins) so Kennel's `/etc` and
+  the mountpoints win by layer precedence — retiring the seed-copy + symlink-dereference hazard — with
+  a **binary `persistence`** upper (`discard` tmpfs / `persist` managed under the store; always an
+  upper). `/etc` is writable-through (no ro-bind); the constructed-home chown keys on the home's own
+  `st_dev` + ownership. Adds **closure-lock** (the DAC-resurrection): the unprivileged build flattens
+  every inode to the persona uid, so `[rootfs].readonly`/`writable` re-impose the executable boundary
+  as **read-only mounts** (Landlock rights are additive — a `/` write can't be subtracted at `/usr`;
+  the persona workload can't remount, `mount` seccomp-blocked), build-derived from `config.User` and
+  signed in the policy. Scaffold built in the staging tmpfs; adds `oci revert`/`update`. **PROVEN on
+  hardware** by the `oci-substrate` policy-suite case ([[policy-test-suite-is-the-e2e]]): a real
+  busybox image with a non-root `config.User` boots as an overlay root and self-checks that the
+  persona uid is imposed, `/usr` is read-only (still executable), `/tmp` writable, Kennel's `/etc`
+  wins.
+
+- **W19 · OCI integrity ladder (opt-in, behind the floor).** *(→ §7.11.8)* **M.** Rung 1
+  (content-addressed store entry, verified before pivot — record-and-verify, the entry keeps its
+  `<name>` key) and Rung 2 (fs-verity over `rootfs/` + `config.json`). Opt-in so the operator who
+  needs at-rest tamper-evidence pays for it; **may slip to 0.3** (the digest-pinned floor is the
+  0.2.0 minimum). The persistent run layer landed in W18 as `[rootfs].persistence = "persist"`
+  (a managed upper under the store entry); Rung 1/2 cover the image lower, not lower+upper, and
+  `kennel policy risks` derives the persist-divergence exposure separately.
 
 ## Dropped / deferred (with reasons)
 

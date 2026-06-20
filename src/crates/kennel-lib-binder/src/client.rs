@@ -22,12 +22,20 @@ const READ_CAP: usize = 4096;
 pub const CONTEXT_MANAGER_HANDLE: u32 = 0;
 
 /// An inbound transaction received by a node we own.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`: it owns any file descriptors the transaction carried
+/// ([`Self::fds`]), which the kernel installed into us at delivery.
+#[derive(Debug)]
 pub struct Incoming {
     /// The transaction code (method selector).
     pub code: u32,
     /// The transaction payload bytes (copied out of the mapping).
     pub data: Vec<u8>,
+    /// Any `BINDER_TYPE_FD` descriptors the transaction carried, in offset order, already
+    /// installed into us by the driver and owned here (the inbound-mirror `DELIVER_INET`
+    /// push delivers the conduit fd this way — `07-5` §7.5.7). Empty for the registry verbs
+    /// and for node 0, which is created with `accept_fds = 0` so a request can carry none.
+    pub fds: Vec<OwnedFd>,
     /// The sending process pid (kernel-attested).
     pub sender_pid: i32,
     /// The sending process euid (kernel-attested).
@@ -45,6 +53,10 @@ pub struct RecvBatch {
     /// The driver asked for another looper thread (`BR_SPAWN_LOOPER`) — all current
     /// loopers are busy and the registered count is below `set_max_threads`.
     pub spawn_looper: bool,
+    /// Cookies of nodes we were watching that died this cycle (`BR_DEAD_BINDER`). The
+    /// caller drops its handle to each (release + `BC_DEAD_BINDER_DONE`) — the inbound
+    /// mirror's death-notify lifecycle (`07-5` §7.5.7, guard 1).
+    pub dead: Vec<u64>,
 }
 
 /// One open binder endpoint.
@@ -224,6 +236,195 @@ impl Connection {
                 }
             }
         }
+    }
+
+    /// Send a **one-way** transaction (`TF_ONE_WAY`) carrying a single file descriptor as a
+    /// `BINDER_TYPE_FD` object — the inbound-mirror push: kenneld delivers a conduit fd to a
+    /// facade's registered node (`07-5` §7.5.7, `DELIVER_INET`). The target node must have been
+    /// created with [`proto::FLAT_BINDER_FLAG_ACCEPTS_FDS`] or the driver refuses the fd.
+    ///
+    /// One-way for backpressure: kenneld never blocks a thread on the facade. The driver queues
+    /// the completion to *this* (the calling) thread's todo, so a single cycle returns
+    /// `BR_TRANSACTION_COMPLETE` without ever reading the shared proc work-queue — safe to call
+    /// from a non-looper thread alongside the node-0 looper pool on the same connection.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transact_oneway`] (driver `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/error) — a dead
+    /// target surfaces here so the caller can drop a stale mirror handle.
+    pub fn transact_oneway_fd(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &[u8],
+        fd: BorrowedFd<'_>,
+    ) -> io::Result<()> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(data);
+        let obj_off = buf.len().next_multiple_of(8);
+        buf.resize(obj_off, 0);
+        buf.extend_from_slice(&proto::flat_binder_object_fd(fd.as_raw_fd()));
+        let offsets: [u64; 1] = [len_u64(obj_off)?];
+        let td = TransactionData {
+            target: u64::from(handle),
+            code,
+            flags: proto::TF_ONE_WAY,
+            data_size: len_u64(buf.len())?,
+            offsets_size: len_u64(std::mem::size_of_val(&offsets))?,
+            buffer: buf.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, false, &td);
+        let mut to_send: &[u8] = &write;
+        loop {
+            let brs = self.cycle(to_send)?;
+            to_send = &[];
+            self.ack_refcounts(&brs)?;
+            for br in brs {
+                match br {
+                    Br::TransactionComplete => return Ok(()),
+                    Br::Failed => {
+                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
+                        return Err(io::Error::other(format!(
+                            "oneway fd transaction failed (BR_FAILED_REPLY, extended errno {errno})"
+                        )));
+                    }
+                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
+                    Br::Error(code) => {
+                        return Err(io::Error::other(format!("binder driver error {code}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Send a synchronous transaction that hands a **local node** `(ptr, cookie)` we own to the
+    /// target as a `BINDER_TYPE_BINDER` object (the driver translates it to a handle for the
+    /// receiver), and return the reply bytes. The inbound-mirror facade uses this to register its
+    /// callback node with node 0 (`07-5` §7.5.7, `REGISTER_MIRROR`); `node_flags` carries
+    /// [`proto::FLAT_BINDER_FLAG_ACCEPTS_FDS`] so the node may later receive the conduit fd.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transact`] (driver `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/error, or a copy failure).
+    pub fn transact_node(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &[u8],
+        node_ptr: u64,
+        node_cookie: u64,
+        node_flags: u32,
+    ) -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(data);
+        let obj_off = buf.len().next_multiple_of(8);
+        buf.resize(obj_off, 0);
+        buf.extend_from_slice(&proto::flat_binder_object_binder(
+            node_ptr,
+            node_cookie,
+            node_flags,
+        ));
+        let offsets: [u64; 1] = [len_u64(obj_off)?];
+        let td = TransactionData {
+            target: u64::from(handle),
+            code,
+            data_size: len_u64(buf.len())?,
+            offsets_size: len_u64(std::mem::size_of_val(&offsets))?,
+            buffer: buf.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, false, &td);
+        let mut to_send: &[u8] = &write;
+        loop {
+            let brs = self.cycle(to_send)?;
+            to_send = &[];
+            self.ack_refcounts(&brs)?;
+            for br in brs {
+                match br {
+                    Br::Reply(reply) => return self.take_buffer(reply),
+                    Br::Failed => {
+                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
+                        return Err(io::Error::other(format!(
+                            "node-register transaction failed (BR_FAILED_REPLY, extended errno {errno})"
+                        )));
+                    }
+                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
+                    Br::Error(code) => {
+                        return Err(io::Error::other(format!("binder driver error {code}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Take a strong (and backing weak) reference on a remote `handle` so it outlives the
+    /// transaction buffer that delivered it. The driver drops the transaction's temporary ref
+    /// when that buffer is freed, so this MUST be issued **before** [`Self::free_buffer`] /
+    /// [`Self::reply_and_free`] for the registering transaction (kenneld acquires the mirror
+    /// handle in the `REGISTER_MIRROR` handler, before the reply frees the buffer).
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn acquire_handle(&self, handle: u32) -> io::Result<()> {
+        let mut w = Vec::new();
+        proto::write_ref(&mut w, proto::BC_INCREFS, handle);
+        proto::write_ref(&mut w, proto::BC_ACQUIRE, handle);
+        self.write_only(&w)
+    }
+
+    /// Drop the strong (and weak) reference [`Self::acquire_handle`] took on `handle`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn release_handle(&self, handle: u32) -> io::Result<()> {
+        let mut w = Vec::new();
+        proto::write_ref(&mut w, proto::BC_RELEASE, handle);
+        proto::write_ref(&mut w, proto::BC_DECREFS, handle);
+        self.write_only(&w)
+    }
+
+    /// Ask the driver to send `BR_DEAD_BINDER` carrying `cookie` when the node behind `handle`
+    /// dies (its owning process exits). Surfaced by [`Self::recv_batch`] as [`RecvBatch::dead`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn request_death(&self, handle: u32, cookie: u64) -> io::Result<()> {
+        let mut w = Vec::new();
+        proto::write_handle_cookie(&mut w, proto::BC_REQUEST_DEATH_NOTIFICATION, handle, cookie);
+        self.write_only(&w)
+    }
+
+    /// Ack a `BR_DEAD_BINDER` for `cookie` so the driver releases the death notification.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn dead_binder_done(&self, cookie: u64) -> io::Result<()> {
+        let mut w = Vec::new();
+        proto::write_dead_binder_done(&mut w, cookie);
+        self.write_only(&w)
+    }
+
+    /// Free a received transaction's buffer without replying — for a one-way transaction
+    /// (`DELIVER_INET`), where there is no reply to carry the `BC_FREE_BUFFER`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn free_buffer(&self, incoming: &Incoming) -> io::Result<()> {
+        let mut w = Vec::new();
+        proto::write_free_buffer(&mut w, incoming.buffer);
+        self.write_only(&w)
     }
 
     /// Send a synchronous transaction expecting a file descriptor in the reply (the
@@ -509,6 +710,7 @@ impl Connection {
         self.ack_refcounts(&brs)?;
         let mut transactions = Vec::new();
         let mut spawn_looper = false;
+        let mut dead = Vec::new();
         for br in brs {
             match br {
                 Br::Transaction(td) => {
@@ -518,22 +720,58 @@ impl Connection {
                         .read_at(td.buffer, len)
                         .ok_or_else(|| io::Error::other("transaction buffer out of range"))?
                         .to_vec();
+                    let fds = self.extract_fds(&td);
                     transactions.push(Incoming {
                         code: td.code,
                         data,
+                        fds,
                         sender_pid: td.sender_pid,
                         sender_euid: td.sender_euid,
                         buffer: td.buffer,
                     });
                 }
                 Br::SpawnLooper => spawn_looper = true,
+                Br::DeadBinder(cookie) => dead.push(cookie),
                 _ => {}
             }
         }
         Ok(RecvBatch {
             transactions,
             spawn_looper,
+            dead,
         })
+    }
+
+    /// Extract and take ownership of every `BINDER_TYPE_FD` object a received transaction
+    /// carried. The driver has already installed each fd into our table at delivery, so it
+    /// survives the later `BC_FREE_BUFFER` (the same lifetime the af-unix reply path relies
+    /// on — see [`Self::take_fd`]). A malformed or non-fd object at an offset is skipped, not
+    /// fatal: the offsets array originates with the (untrusted) sender.
+    fn extract_fds(&self, td: &TransactionData) -> Vec<OwnedFd> {
+        let mut fds = Vec::new();
+        let count = usize::try_from(td.offsets_size / 8).unwrap_or(0);
+        for i in 0..count {
+            let Some(off_bytes) = self
+                .map
+                .read_at(td.offsets.wrapping_add((i as u64).wrapping_mul(8)), 8)
+                .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            else {
+                continue;
+            };
+            let obj_off = u64::from_ne_bytes(off_bytes);
+            let Some(obj) = self.map.read_at(
+                td.buffer.wrapping_add(obj_off),
+                proto::FLAT_BINDER_OBJECT_SIZE,
+            ) else {
+                continue;
+            };
+            if let Some(raw) = proto::flat_binder_object_fd_value(obj).filter(|&fd| fd >= 0) {
+                // SAFETY: `raw` is a fd the driver just installed into us (a translated
+                // BINDER_TYPE_FD), filtered `>= 0` — a valid fd we solely own.
+                fds.push(unsafe { sys::own_fd(raw) });
+            }
+        }
+        fds
     }
 
     /// Reply to the most recently received transaction with `data`, then free its

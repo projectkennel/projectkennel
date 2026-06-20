@@ -398,6 +398,65 @@ pub struct ShimView {
     /// (a `revert` baseline / diff source) nor write into — or create — the host store. Empty
     /// when `[trust].manifest = false` or there are no writable binds.
     pub mask_dir_paths: Vec<PathBuf>,
+    /// OCI substrate root (§7.11.4a / T3.8): the layered overlay's inputs, or `None` for
+    /// the ordinary constructed view (a fresh `tmpfs` new-root). When `Some`, the view is a
+    /// three-lower `overlay` (`kennel-etc : image : scaffold`) with the persistence tri-state
+    /// choosing the upper; the host system closure is *not* mirrored (the image carries its
+    /// own `/usr` layout) and `/etc` wins by layer precedence, not by a synthesised copy.
+    pub image: Option<ImageRoot>,
+}
+
+/// Rootfs persistence mode (§7.11.4a): which upper the OCI overlay gets.
+///
+/// **Binary** — there is always an upper now (whole-tree-immutable is `[rootfs].readonly = ["/"]`
+/// via Landlock, §7.11.4c, not a no-upper mount mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Persistence {
+    /// An ephemeral `tmpfs` upper (under the kenneld staging dir), gone at teardown.
+    #[default]
+    Discard,
+    /// A Kennel-managed upper under the store entry; accumulates divergence (the loud value).
+    Persist,
+}
+
+impl Persistence {
+    /// Parse the settled `[rootfs].persistence` string; empty (unset) ⇒ the default `Discard`.
+    /// An unrecognised value never reaches here (the compiler validates it), so it maps to the
+    /// safe default.
+    #[must_use]
+    pub fn from_settled(s: &str) -> Self {
+        match s {
+            "persist" => Self::Persist,
+            _ => Self::Discard,
+        }
+    }
+}
+
+/// The OCI substrate root (§7.11.4a): the inputs the construction child assembles the overlay from.
+///
+/// `image` + `persistence` are policy-derived; `store_upper` is a kenneld runtime input filled at
+/// bring-up (like the view staging dir), so the struct is complete before it crosses to the
+/// privileged construction child. The other two lowers are built in the staging tmpfs per spawn:
+/// `kennel-etc` from the synthetic `/etc` (`file_binds`), and the `scaffold` of empty mountpoint
+/// dirs + `/etc` placeholders (fixed content, so it needs no shipped artifact).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRoot {
+    /// The unpacked image `rootfs/` — the overlay's read-only middle lower. **Never an upper.**
+    pub image: PathBuf,
+    /// The persistence mode for the upper.
+    pub persistence: Persistence,
+    /// The managed `(upper, work)` dirs under the store entry — `Some` iff `persistence` is
+    /// `Persist`. Filled (and validated/created) by kenneld; `None` for `Discard`/`Readonly`.
+    pub store_upper: Option<(PathBuf, PathBuf)>,
+    /// Closure-lock (§7.11.4c): rootfs paths made **read-only mounts** over the merged root, so a
+    /// write fails `EROFS`. Landlock rights are additive (a broad `/` write cannot be subtracted
+    /// at `/usr`), so the executable closure is locked at the *mount* layer instead — robust
+    /// because the persona workload holds no `CAP_SYS_ADMIN` to remount and `mount` is
+    /// seccomp-blocked. `["/"]` makes the whole tree immutable.
+    pub readonly: Vec<PathBuf>,
+    /// Closure-lock holes (§7.11.4c): rootfs paths remounted **read-write** on top of a `readonly`
+    /// ancestor (longest-prefix wins by mount nesting), carving a writable hole back out.
+    pub writable: Vec<PathBuf>,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -919,10 +978,22 @@ impl Plan {
         if ep.fs.tmp.private {
             landlock_fs.push((PathBuf::from("/tmp"), write_access()));
         }
-        // Let the workload list the view root (`ls /`). READ_DIR only — the top-level
-        // entries (usr, lib, etc, dev, proc, tmp, home) are not sensitive and their
-        // contents stay separately gated. Without it, `ls /` is a jarring EACCES.
-        landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
+        // The view-root grant. For a constructed view: READ_DIR on `/` only (`ls /`; the
+        // top-level entries are not sensitive and their contents stay separately gated).
+        //
+        // For an OCI image root: the substrate base. The unprivileged `oci build` flattens every
+        // image inode to the one persona uid, so the flattened rootfs is read+write+execute by
+        // default (the flatten made DAC vacuous; there is no boundary to assert on an unlisted
+        // path). Landlock grants the broad writable substrate here — `/` read+write+execute — and
+        // the **closure-lock is enforced at the mount layer** (`[rootfs].readonly` → read-only
+        // mounts in the construction child, §7.11.4c), because Landlock rights are additive: a `/`
+        // write cannot be subtracted at `/usr`. Read-only `[fs.read]` binds and the T2.8 masks are
+        // likewise read-only *mounts*, so this broad Landlock grant does not make them writable.
+        if policy.rootfs.path.is_empty() {
+            landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
+        } else {
+            landlock_fs.push((PathBuf::from("/"), write_access() | AccessFs::EXECUTE));
+        }
 
         // Binder IPC (07-1/02-4): the binder bus is the universal control plane — every
         // kennel mounts a per-kennel binderfs instance so `kennel-bin-init` can pull its
@@ -969,6 +1040,29 @@ impl Plan {
             binder: true,
             mask_paths,
             mask_dir_paths,
+            // OCI-model policy (§7.11.4a): a non-empty `[rootfs].path` boots the image as the
+            // overlay's middle lower. The translate step subst-resolved it to an absolute host
+            // path; empty means an ordinary constructed view. `scaffold`/`store_upper` are
+            // kenneld runtime inputs filled at bring-up (the staging dir is set the same way).
+            image: (!policy.rootfs.path.is_empty()).then(|| ImageRoot {
+                image: PathBuf::from(&policy.rootfs.path),
+                persistence: Persistence::from_settled(&policy.rootfs.persistence),
+                store_upper: None,
+                // Closure-lock paths are enforced as read-only mounts in the construction child
+                // (§7.11.4c) — `glob_root`-stripped so a `/usr/**` entry keys on `/usr`.
+                readonly: policy
+                    .rootfs
+                    .readonly
+                    .iter()
+                    .map(|p| glob_root(p))
+                    .collect(),
+                writable: policy
+                    .rootfs
+                    .writable
+                    .iter()
+                    .map(|p| glob_root(p))
+                    .collect(),
+            }),
         });
 
         // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the

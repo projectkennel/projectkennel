@@ -45,6 +45,8 @@ members = [
     "src/crates/kennel-lib-text",
     # Binaries that are not a binder-connector end.
     "src/crates/kennel-bin-init",
+    # The OCI launcher: workload-side argv[0] for an image-root kennel (not in the daemon TCB).
+    "src/crates/kennel-bin-oci-entry",
     # The host ends of binder connectors (kenneld's dial + inbound-bind delegates):
     # one crate, two binaries (host-netproxy, host-inetd) + the shared conduit lib.
     "src/crates/kennel-host-delegate",

@@ -259,6 +259,7 @@ mod tests {
             env: settled::EnvRuntime::default(),
             ulimits: settled::UlimitsRuntime::default(),
             workload: settled::WorkloadRuntime::default(),
+            rootfs: settled::RootfsRuntime::default(),
         }
     }
 

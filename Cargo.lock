@@ -76,6 +76,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-bin-oci-entry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kennel-cli"
 version = "0.1.0"
 dependencies = [

@@ -390,6 +390,7 @@ fn assemble(
         env: translated.env.clone(),
         ulimits: translated.ulimits.clone(),
         workload: translated.workload.clone(),
+        rootfs: translated.rootfs.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),
             schema_version: SETTLED_SCHEMA_VERSION,

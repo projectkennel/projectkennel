@@ -271,6 +271,39 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
         }
     }
 
+    // `[rootfs]` boots an operator-declared OCI image as the kennel root; the substrate-trust
+    // residual (the image's runtime closure is unvetted by construction) is derived from the
+    // grant the way T1.6 is derived from `mode = host` (design §7.11.9).
+    if let Some(rootfs) = &p.rootfs {
+        out.push((
+            "T3.8".to_owned(),
+            label("[rootfs]", rootfs.image.as_deref()),
+            rootfs.reason.clone(),
+        ));
+        // `persistence = "persist"` adds a distinct exposure: the managed overlay upper
+        // accumulates divergence outside the integrity ladder (§7.11.4a), surfaced against the
+        // same `[rootfs]` reason.
+        if rootfs.persistence.as_deref() == Some("persist") {
+            out.push((
+                "T3.8".to_owned(),
+                "[rootfs].persistence = persist (managed upper diverges from the pinned image)"
+                    .to_owned(),
+                rootfs.reason.clone(),
+            ));
+        }
+        // Each closure-lock `writable` carve-out re-opens a hole in the executable-closure
+        // boundary (§7.11.4c) — a loud, separately-derived exposure.
+        for hole in rootfs.writable.as_deref().unwrap_or_default() {
+            out.push((
+                "T3.8".to_owned(),
+                format!(
+                    "[rootfs].writable = {hole} (closure-lock hole — path is workload-writable)"
+                ),
+                rootfs.reason.clone(),
+            ));
+        }
+    }
+
     out
 }
 
@@ -314,6 +347,25 @@ mod tests {
             .exposures
             .iter()
             .any(|f| f.carrier.contains("/dev/ttyUSB0")));
+    }
+
+    #[test]
+    fn rootfs_derives_t3_8_substrate_trust_exposure() {
+        let p = parse(
+            "name = \"x\"\n[rootfs]\npath = \"~/img/app/rootfs\"\n\
+             image = \"ghcr.io/org/app@sha256:abc\"\nreason = \"vendor image\"\n",
+        );
+        let r = evaluate(&p, &cat());
+        let f = r
+            .exposures
+            .iter()
+            .find(|f| f.threat_id == "T3.8")
+            .expect("T3.8 derived");
+        assert_eq!(f.origin, Origin::Derived);
+        assert_eq!(f.reason.as_deref(), Some("vendor image"));
+        assert!(f.carrier.contains("ghcr.io/org/app"));
+        assert!(f.title.is_some());
+        assert!(!f.residual.is_empty());
     }
 
     #[test]

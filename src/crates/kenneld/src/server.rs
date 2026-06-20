@@ -166,6 +166,11 @@ pub struct Identity {
     /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
     /// the legacy in-process unprivileged spawn.
     pub init_bin: Option<PathBuf>,
+    /// The host path of the workload-side OCI launcher (`kennel-bin-oci-entry`, §7.11). When an
+    /// OCI-model policy (`[rootfs]`) supplies no argv, kenneld makes this `argv[0]` and binds it
+    /// (with the entry's `config.json`) read-only into the view. `None` disables the
+    /// image-entrypoint path (an OCI run then requires an explicit argv).
+    pub oci_entry_bin: Option<PathBuf>,
     /// Spawn-path diagnostic tracer (the `log_level` knob, §`system.toml`). Tags lines
     /// `kenneld: [debug]/[trace] …`; no-ops at the default `info`. Carried here so every
     /// step of `run_kennel`/`bring_up` can trace without re-reading config.
@@ -822,17 +827,105 @@ pub fn run_kennel<P, L>(
             loaded.unix.sockets.len()
         ));
     }
+    // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
+    // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
+    // launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
+    // binds both into the view; any `kennel oci run … -- <cmd>` tokens follow as a Cmd override
+    // the launcher applies (keeping the image Entrypoint + Env), no policy impact.
+    let oci_image = loaded.plan.view.as_ref().is_some_and(|v| v.image.is_some());
+    let mut oci_prep = crate::OciPrep::default();
     // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
     // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
     // only here is the policy's workload known. The request wins unless the policy pins it.
-    let (argv, cwd) = match effective_workload(req, &loaded.workload) {
-        Ok(pair) => pair,
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
+    let (argv, cwd) = if oci_image {
+        let Some(launcher) = shared.identity.oci_entry_bin.clone() else {
+            return fail(
+                shared,
+                &req.kennel,
+                ctx,
+                conn,
+                "oci launcher",
+                "policy declares [rootfs] but no OCI launcher (kennel-bin-oci-entry) is configured"
+                    .to_owned(),
+            );
+        };
+        if req.oci_config.is_none() {
+            return fail(
+                shared,
+                &req.kennel,
+                ctx,
+                conn,
+                "oci launcher",
+                "OCI run reached the daemon without a config.json path (use `kennel oci run`)"
+                    .to_owned(),
+            );
+        }
+        let mut argv = vec![
+            launcher.to_string_lossy().into_owned(),
+            crate::OCI_CONFIG_VIEW_PATH.to_owned(),
+        ];
+        // The `-- <cmd>` override tokens (if any), passed through as the launcher's Cmd override.
+        argv.extend(req.argv.iter().cloned());
+        oci_prep = crate::OciPrep {
+            launcher_bin: Some(launcher),
+            config_src: req.oci_config.clone(),
+        };
+        // The launcher chdirs to the image's WorkingDir itself; give it the request cwd as the
+        // fallback the kernel starts it in.
+        (argv, req.cwd.clone())
+    } else {
+        match effective_workload(req, &loaded.workload) {
+            Ok(pair) => pair,
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
+        }
     };
     tr.detail(&format!(
         "run_kennel: effective workload argv={argv:?} cwd={}",
         cwd.display()
     ));
+    // Persist-mode rootfs (§7.11.4a): the managed overlay upper lives under the store entry
+    // (the `config.json`'s dir). Create `upper/` + `work/` and fill them into the plan so the
+    // construction child mounts the overlay with a persisted upper. The store fs must carry
+    // `user.*` xattrs for the userxattr whiteouts — if it does not, the overlay mount in the
+    // construction child fails with a clear error (the refusal the spec calls for).
+    if oci_image {
+        if let Some(img) = loaded
+            .plan
+            .view
+            .as_mut()
+            .and_then(|v| v.image.as_mut())
+            .filter(|i| i.persistence == kennel_lib_spawn::Persistence::Persist)
+        {
+            let Some(entry) = req.oci_config.as_deref().and_then(std::path::Path::parent) else {
+                return fail(
+                    shared,
+                    &req.kennel,
+                    ctx,
+                    conn,
+                    "oci persist",
+                    "persistence = persist needs the store entry path (config.json)".to_owned(),
+                );
+            };
+            let upper = entry.join("upper");
+            let work = entry.join("work");
+            if let Err(e) =
+                std::fs::create_dir_all(&upper).and_then(|()| std::fs::create_dir_all(&work))
+            {
+                return fail(
+                    shared,
+                    &req.kennel,
+                    ctx,
+                    conn,
+                    "oci persist",
+                    format!(
+                        "creating the managed overlay upper under {}: {e}",
+                        entry.display()
+                    ),
+                );
+            }
+            img.store_upper = Some((upper, work));
+        }
+    }
     // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
     // decision made here, on the host, before the kennel is built: kennel-bin-init is a
     // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
@@ -1033,6 +1126,7 @@ pub fn run_kennel<P, L>(
         unix,
         dbus,
         binder: None,
+        oci: oci_prep,
         tracer: tr,
     };
 
@@ -1575,6 +1669,7 @@ mod tests {
             interactive: false,
             force,
             watch_paths: Vec::new(),
+            oci_config: None,
         }
     }
 
@@ -1823,6 +1918,7 @@ mod tests {
                 facade_dbus_bin: None,
                 host_dbus_bin: None,
                 init_bin: None,
+                oci_entry_bin: None,
                 tracer: kennel_lib_config::Tracer::new(
                     "kenneld",
                     kennel_lib_config::LogLevel::Info,

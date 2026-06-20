@@ -271,17 +271,28 @@ impl DbusRelay {
             if !inner.limiter.allow(self.now_ms()) {
                 return vec![status::AGAIN]; // rate cap (audit 4)
             }
-            match inner.conns.get_mut(&conn_id) {
-                Some(conn) if conn.owner_pid == sender_pid => {
-                    conn.closed = true;
-                    Some(conn.bus)
-                }
+            match inner.conns.get(&conn_id) {
+                Some(conn) if conn.owner_pid == sender_pid => Some(conn.bus),
                 Some(_) => return vec![status::DENIED], // not the owner
-                None => None,                           // already gone — idempotent OK
+                None => return vec![status::OK],        // already gone — idempotent
             }
         };
+        // Relay the teardown to the delegate BEFORE marking the connection closed locally. The
+        // relay is non-blocking and can fail when the delegate's pipe is full; a fire-and-forget
+        // here (the old bug) would leave kenneld thinking the connection is dead while `host-dbus`
+        // never tears down its mediation loop + bridge socket — a permanent host-side leak. So if
+        // the relay does not land, leave the connection intact and return AGAIN: the facade retries
+        // (exactly as `open()` does). Mark `closed` only after the Close is on its way.
         if let Some(bus) = bus {
-            let _ = self.try_relay(bus, &Record::Close { conn_id });
+            if !self.try_relay(bus, &Record::Close { conn_id }) {
+                return vec![status::AGAIN];
+            }
+        }
+        {
+            let mut inner = self.lock();
+            if let Some(conn) = inner.conns.get_mut(&conn_id) {
+                conn.closed = true;
+            }
         }
         // Wake every parked recv so the one for this conn observes `closed` and returns.
         self.inbound.notify_all();

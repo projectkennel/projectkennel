@@ -124,6 +124,7 @@ pub static TABLES: &[Table] = &[
             f("tty", Ty::Obj("tty"), "Terminal hardening for an interactive (PTY) workload."),
             f("trust", Ty::Obj("trust"), "The masked workspace trust manifest (T2.8)."),
             f("dbus", Ty::Obj("dbus"), "D-Bus mediation via the IDBus facade (§7.7)."),
+            f("rootfs", Ty::Obj("rootfs"), "`[rootfs]` — boot an unpacked OCI image as the kennel root (OCI run model only; §7.11). A loud substrate-trust grant: rejected by `kennel run`, required by `kennel oci run`."),
         ],
     },
     Table {
@@ -214,6 +215,18 @@ pub static TABLES: &[Table] = &[
             f("group", Ty::Str, "The owning group that gates access (DAC; the user must already be a member)."),
             f("reason", Ty::Str, "Why this device is exposed (required)."),
             f("threats", Ty::Obj("threats"), "Threat tags — must carry an `exposed` tag."),
+        ],
+    },
+    Table {
+        name: "rootfs",
+        title: "`[rootfs]` — an OCI image unpacked as the kennel's root filesystem (OCI run model; design §7.11). Substrate-trust waiver T3.8. **Mutually exclusive with `[workload]`**: an OCI policy has a mandatory `[rootfs]` and never a `[workload]` (the compiler refuses both). There is no per-binary pin in the OCI model — `[workload].sha256` does not apply; execution integrity rests on the image **digest** (the runner checks `[rootfs].image` against the recorded digest) plus the operator's unconfined `kennel oci run … -- <cmd>` invocation, not a daemon-enforced cryptographic pin of the entrypoint binary.",
+        fields: &[
+            req("path", Ty::Str, "The unpacked image rootfs (the store entry's `rootfs/`). Its presence marks the policy OCI-model."),
+            req("image", Ty::Str, "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store entry's recorded digest."),
+            req("reason", Ty::Str, "Why this substrate is trusted (required; the substrate-trust waiver is loud)."),
+            f("persistence", Ty::Enum(&["discard", "persist"]), "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper, gone at teardown) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from)."),
+            f("readonly", Ty::StrArray, "Closure-lock (§7.11.4c): rootfs paths Landlock denies writes to (the executable-closure boundary the DAC-flatten erased; the FHS closure is build-derived for a non-root image). `[\"/\"]` is whole-tree-immutable. Longest-prefix wins with `writable`."),
+            f("writable", Ty::StrArray, "Closure-lock holes (§7.11.4c): rootfs paths to keep writable, carved back out of `readonly` (longest-prefix wins). Loud — each carve-out derives its own risk line."),
         ],
     },
     Table {

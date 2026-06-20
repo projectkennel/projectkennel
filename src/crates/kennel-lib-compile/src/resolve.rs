@@ -47,8 +47,8 @@ use crate::source::{
     self, BinderSection, BoundaryAcl, CapSection, DbusAudit, DbusBus, DbusRules, DbusSection,
     EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
     LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny,
-    NetSection, SeccompSection, SourcePolicy, SshSection, TrustSection, TtySection, UnixSection,
-    UnsafeSection, WorkloadSection,
+    NetSection, RootfsSection, SeccompSection, SourcePolicy, SshSection, TrustSection, TtySection,
+    UnixSection, UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use kennel_lib_policy::audit::{
@@ -236,6 +236,24 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         tty: merge(&parent.tty, &child.tty, fold_tty),
         trust: merge(&parent.trust, &child.trust, fold_trust),
         dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
+        rootfs: merge(&parent.rootfs, &child.rootfs, fold_rootfs),
+    }
+}
+
+/// Fold `[rootfs]` down the chain: each field is scalar-wins, child overriding. OCI-model
+/// policies are leaves, so a leaf names the substrate; this lets a template carry a default
+/// `reason` or a leaf override one field without restating all three.
+fn fold_rootfs(p: &RootfsSection, c: &RootfsSection) -> RootfsSection {
+    RootfsSection {
+        path: or(&c.path, &p.path),
+        image: or(&c.image, &p.image),
+        reason: or(&c.reason, &p.reason),
+        persistence: or(&c.persistence, &p.persistence),
+        // Closure-lock lists fold scalar-wins like `fs.read` (the SSH list model — the chain
+        // replaces, leaf `+=`/`-=` deltas apply separately); in practice these live on the leaf,
+        // build-derived, so the leaf's set wins.
+        readonly: or(&c.readonly, &p.readonly),
+        writable: or(&c.writable, &p.writable),
     }
 }
 

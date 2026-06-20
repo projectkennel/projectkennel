@@ -21,7 +21,11 @@ PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.2",0));prin
 
 # Background a host-side accept/close listener on each address:port (host netns).
 for ip in 127.0.0.2 127.0.0.3; do
-    python3 - "$ip" "$PORT" <<'PY' &
+    # stdout/stderr to a scratch log, NOT the caller's pipe: the harness reads this
+    # fixture via `gen=$(setup.sh)`, and a backgrounded child that inherited the pipe's
+    # write-end would hold the command substitution open forever (deadlock, not a case
+    # failure). Redirecting releases the pipe so `$(...)` sees EOF when setup.sh exits.
+    python3 - "$ip" "$PORT" >"$SCRATCH/listener.$ip.log" 2>&1 <<'PY' &
 import socket, sys
 ip, port = sys.argv[1], int(sys.argv[2])
 s = socket.socket()

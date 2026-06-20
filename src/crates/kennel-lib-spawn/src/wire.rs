@@ -22,7 +22,9 @@ use kennel_lib_syscall::namespace::Namespaces;
 use kennel_lib_syscall::process::{resource_by_name, resource_name};
 use kennel_lib_syscall::seccomp::Action;
 
-use crate::plan::{AuxProcess, BindMount, ConstructionHalf, Plan, ShimView, Supervision};
+use crate::plan::{
+    AuxProcess, BindMount, ConstructionHalf, ImageRoot, Persistence, Plan, ShimView, Supervision,
+};
 
 /// Maximum element count for any length-prefixed vector (a `DoS`/corruption bound).
 const MAX_ENTRIES: usize = 65_536;
@@ -394,6 +396,34 @@ fn put_view(w: &mut Writer, v: &ShimView) {
     for p in &v.mask_dir_paths {
         w.path(p);
     }
+    // image: Option<ImageRoot>
+    match &v.image {
+        None => w.bool(false),
+        Some(img) => {
+            w.bool(true);
+            w.path(&img.image);
+            w.u8(match img.persistence {
+                Persistence::Discard => 0,
+                Persistence::Persist => 1,
+            });
+            match &img.store_upper {
+                None => w.bool(false),
+                Some((upper, work)) => {
+                    w.bool(true);
+                    w.path(upper);
+                    w.path(work);
+                }
+            }
+            w.count(img.readonly.len());
+            for p in &img.readonly {
+                w.path(p);
+            }
+            w.count(img.writable.len());
+            for p in &img.writable {
+                w.path(p);
+            }
+        }
+    }
 }
 
 /// Decode a [`Plan`] from its wire bytes (the inverse of [`encode_plan`]).
@@ -550,6 +580,36 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
     for _ in 0..r.count()? {
         mask_dir_paths.push(r.path()?);
     }
+    let image = if r.bool()? {
+        let image = r.path()?;
+        let persistence = match r.u8()? {
+            0 => Persistence::Discard,
+            1 => Persistence::Persist,
+            _ => return Err(PlanWireError::BadTag),
+        };
+        let store_upper = if r.bool()? {
+            Some((r.path()?, r.path()?))
+        } else {
+            None
+        };
+        let mut readonly = Vec::new();
+        for _ in 0..r.count()? {
+            readonly.push(r.path()?);
+        }
+        let mut writable = Vec::new();
+        for _ in 0..r.count()? {
+            writable.push(r.path()?);
+        }
+        Some(ImageRoot {
+            image,
+            persistence,
+            store_upper,
+            readonly,
+            writable,
+        })
+    } else {
+        None
+    };
     Ok(ShimView {
         shim_root,
         binds,
@@ -560,6 +620,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         binder,
         mask_paths,
         mask_dir_paths,
+        image,
     })
 }
 
@@ -989,6 +1050,16 @@ mod tests {
                 binder: true,
                 mask_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.json")],
                 mask_dir_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.d")],
+                image: Some(ImageRoot {
+                    image: PathBuf::from("/home/op/.local/share/kennel/images/app/rootfs"),
+                    persistence: Persistence::Persist,
+                    store_upper: Some((
+                        PathBuf::from("/home/op/.local/share/kennel/images/app/upper"),
+                        PathBuf::from("/home/op/.local/share/kennel/images/app/work"),
+                    )),
+                    readonly: vec![PathBuf::from("/usr"), PathBuf::from("/lib")],
+                    writable: vec![PathBuf::from("/usr/lib/python3.12")],
+                }),
             }),
             new_root: Some(PathBuf::from("/run/user/1000/kennel/root-7")),
             landlock_fs: vec![

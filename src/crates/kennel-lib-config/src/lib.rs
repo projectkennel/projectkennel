@@ -238,6 +238,7 @@ struct RawDeployment {
     facade_dbus: Option<PathBuf>,
     host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
+    oci_entry: Option<PathBuf>,
     log_level: Option<LogLevel>,
 }
 
@@ -259,6 +260,7 @@ impl RawDeployment {
             facade_dbus: higher.facade_dbus.or(self.facade_dbus),
             host_dbus: higher.host_dbus.or(self.host_dbus),
             init: higher.init.or(self.init),
+            oci_entry: higher.oci_entry.or(self.oci_entry),
             log_level: higher.log_level.or(self.log_level),
         }
     }
@@ -284,6 +286,7 @@ impl RawDeployment {
             facade_dbus: self.facade_dbus,
             host_dbus: self.host_dbus,
             init: self.init,
+            oci_entry: self.oci_entry,
             log_level: self.log_level.unwrap_or_default(),
         }
     }
@@ -307,6 +310,7 @@ pub struct Deployment {
     facade_dbus: Option<PathBuf>,
     host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
+    oci_entry: Option<PathBuf>,
     log_level: LogLevel,
 }
 
@@ -439,6 +443,16 @@ impl Deployment {
     #[must_use]
     pub fn kennel_bin_init(&self) -> PathBuf {
         self.resolve_bin(self.init.as_deref(), "kennel-bin-init")
+    }
+
+    /// The workload-side OCI launcher (`kennel-bin-oci-entry`, §7.11): when a `[rootfs]`
+    /// policy supplies no explicit argv, kenneld makes this `argv[0]` and binds it read-only
+    /// into the view (with the image `config.json`) so it parses the config and `execve`s the
+    /// image entrypoint in-root. Resolved from the root-owned cascade (never the wire), so the
+    /// workload cannot substitute its own launcher.
+    #[must_use]
+    pub fn oci_entry(&self) -> PathBuf {
+        self.resolve_bin(self.oci_entry.as_deref(), "kennel-bin-oci-entry")
     }
 
     /// An explicit override, else `<libexec_dir>/<name>`.

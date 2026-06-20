@@ -1,0 +1,23 @@
+[package]
+name = "kennel-bin-oci-entry"
+version.workspace = true
+publish.workspace = true
+description = "The OCI launcher: workload-side argv[0] for an image-root kennel. Reads the image runtime config, sanitises + merges its Env (the AT_SECURE-equivalent strip), applies WorkingDir, and execve()s the image entrypoint. Runs at workload authority post-pivot_root, so it is not in the daemon TCB (07-11 §7.11.5)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kennel-bin-oci-entry"
+path = "src/main.rs"
+
+[dependencies]
+# Workload-side, not in the daemon TCB — so serde_json (the OCI config parser) is fine here, the
+# same vendored versions the CLI uses. The TCB invariant only bars these from `cargo tree -p kenneld`.
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.150", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
