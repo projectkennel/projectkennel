@@ -87,8 +87,13 @@ confined kennel to pull an image and unpack its rootfs into the operator-owned s
 egress an image pull needs lives here and nowhere else — the egress high-water mark of the flow —
 and it runs under a **Kennel-shipped, vetted** fetch policy (`constrained` egress, registry
 allowlist, `fs.write` to the store entry), so the operator never authors or signs the broad-egress
-step. The builder pulls **by digest**; when the reference is a tag it resolves the tag to a digest
-*at build time* and records that digest, so even a tag-built image freezes to a pinned digest.
+step. That policy is the maintainer-signed `oci-fetch@v1` template, shipped in the **vendor** layer
+(`/usr/lib/kennel/templates`) and **overridable at the system and user layers** through the template
+cascade — a private registry is an `oci-fetch` override signed by a key trusted at that layer, so the
+default's vetted allowlist is never widened silently. `oci build` resolves it and runs the fetch with
+a per-build leaf that adds only the store-entry `fs.write` (a local write, not egress). The builder
+pulls **by digest**; when the reference is a tag it resolves the tag to a digest *at build time* and
+records that digest, so even a tag-built image freezes to a pinned digest.
 
 The unpack is **rootless**: the builder kennel is unprivileged and has no subuid range, so it cannot
 `chown` extracted files to the image's uids — it discards the tarball ownership headers and writes

@@ -19,6 +19,24 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 - `kennel policy risks` now evaluates a **delta-leaf** policy (`[[fs.read.add]]`, …), not
   only a template/source document — both verbs share the `effective_source` fold that
   folds either form to its threat-bearing effective source.
+- **`kennel oci build` now performs the confined image fetch (§7.11.7).** It runs `skopeo`
+  (pull) + `umoci unpack --rootless` **inside a kennel** under the maintainer-signed,
+  vendor-shipped `oci-fetch@v1` policy (constrained egress to a registry allowlist;
+  `fs.write` only to the store entry, added by a per-build leaf), populating `rootfs/` +
+  `config.json` + a digest-pinned `digest`. The broad egress an image pull needs lives only
+  there, so the operator never authors or signs it; `oci-fetch@v1` is overridable at the
+  system/user layer (a private registry) via the template cascade. `--no-fetch` keeps the
+  prior prepare-only behaviour (out-of-band population). Needs `skopeo` + `umoci` on the host.
+
+### Runtime &amp; enforcement
+
+- **Writable paths now permit symlink creation and cross-directory rename.** The Landlock
+  access set a `fs.write` grant receives (`write_access`) adds `MAKE_SYM` and `REFER`: an
+  ordinary writable-path workflow (an unpack, `npm`, a build, an editor's atomic save) can
+  create symlinks and `rename`/`link` files between directories within the writable subtree.
+  Previously both failed (`EACCES` on symlink, `EXDEV` on cross-directory rename). Landlock
+  still re-checks a symlink's target on access and forbids a REFER move into a
+  broader-rights directory, so neither escalates beyond the granted subtree.
 
 ### Internal / supply chain
 
