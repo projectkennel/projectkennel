@@ -87,8 +87,10 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   carrying `[spawn]` is installed, each template it names in `[spawn.allow]` is refused if it (1)
   carries `[spawn]` itself (depth-1, §7.12.8 — fail-closed before any instantiation can reach it),
   or (2) fails to declare its own lifecycle bound (`max_lifetime`/reaper TTL), its resource ceilings
-  (memory + pids + CPU), and its mutable-field manifest. (The gate runs at the spawner's install, not
-  the target's — a template cannot know which future policy will name it.) *Instantiation is a manifest diff, not value synthesis.* All
+  (memory + pids + CPU), and its mutable-field manifest — whose worst-case patch (every `pool` at its
+  `max`) must fit the binder transaction buffer, so an oversized manifest fails at install, not as a
+  runtime transport error. (The gate runs at the spawner's install, not the target's — a template
+  cannot know which future policy will name it.) *Instantiation is a manifest diff, not value synthesis.* All
   compiler-side — out of `cargo tree -p kenneld`.
 
 - **W4 · Template `[[mutable]]` manifest grammar + instantiation-time patch validator.** **[dep] M.**

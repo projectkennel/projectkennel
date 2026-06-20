@@ -216,7 +216,9 @@ the one `cgroup.freeze`/`cgroup.kill` plumbing.
 
 - **Soft reaper (data plane).** When the requester is done it `close()`s its local channel ends; the
   spawned tool receives `EOF` on stdin / `SIGPIPE` on stdout and exits, and `kennel-bin-init` tears the
-  kennel down. The graceful path.
+  kennel down. The graceful path — but it depends on the tool *exiting*: a tool that dumps more than a
+  pipe buffer to `stderr` while the requester drains only stdout blocks in `write(2)` and never exits,
+  stalling this path. The self-reaper below is the backstop that breaks that deadlock.
 - **Hard reaper (control plane).** `kenneld` tracks the binder session that issued the `SPAWN`. If that
   session drops — requester crash, OOM, the *requester's* TTL expiry — `kenneld` issues a `cgroup.kill`
   to the spawned kennel, terminating it regardless of whether the tool honoured `EOF`. The backstop for
@@ -273,7 +275,10 @@ stale install-time pass — a TOCTOU. Two things close it, both at `SPAWN`. The 
 instantiated are the bytes the install gate actually checked. And `kenneld` **re-runs the eligibility
 check on the resolved template** regardless, cheap defense-in-depth that holds even if a pin is ever
 mis-recorded. The install gate is authoring-time feedback; the pin-plus-recheck is what makes the runtime
-instantiation safe against a mutable trust store.
+instantiation safe against a mutable trust store. The pin carries the standard supply-chain cost: a
+spawn-target template cannot be patched transparently — re-signing it in place changes its hash, so every
+spawner that names it fails the pin closed at `SPAWN` until recompiled (no global hot-swap; the deliberate
+trade of byte-exact integrity over convenience, recorded in 02-10's operational constraints).
 
 ## 7.12.9 Security posture — what holds, what is waived
 

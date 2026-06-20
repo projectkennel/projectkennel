@@ -289,6 +289,31 @@ a filesystem-capable tool can bridge their channels and reconstitute the lethal 
 kennels, not mechanically closed (it would put cross-kennel information-flow reasoning in the
 daemon), mitigated by scoping `[[spawn.allow]]` to the templates an agent actually needs.
 
+## Operational constraints and known limits
+
+None of these is an isolation failure — the system fails closed in each — but operators and implementers
+must know them.
+
+- **Template pins eliminate transparent updates for spawn targets (§7.12.8).** A spawner content-pins
+  each template it names, so re-signing `net-fetch@v1` in place changes its hash and every spawner that
+  delegates to it fails the pin closed at the next `SPAWN` until recompiled. Patching a widely-delegated
+  tool means recompiling every spawner that uses it — no global hot-swap. This is the project's standard
+  fail-closed-on-content-change discipline, surfacing at `SPAWN` rather than the next run: the deliberate
+  trade of byte-exact integrity over operational convenience.
+- **`stderr` backpressure can stall the soft reaper (§7.12.7).** If the tool writes more than a pipe
+  buffer (~64 KiB) to `stderr` and the requester drains only stdout, the tool blocks in `write(2)` and
+  never exits — the soft reaper, which waits on the tool exiting, stalls. The `max_lifetime` self-reaper
+  is the guaranteed backstop that breaks the deadlock (one more reason it is a mandatory eligibility
+  declaration). Requester agents must `poll`/`select` across **both** the JSON-RPC socket and the stderr
+  pipe.
+- **The patch is bounded by the binder transaction buffer.** The mutable-writes patch rides the `SPAWN`
+  transaction, so its serialised size is capped by the node-0 mapping (`MAP_SIZE` minus header overhead).
+  A manifest whose *worst-case* patch — every `pool` filled to its `max` — could exceed that buffer is
+  rejected at **template install** (alongside the other eligibility checks), turning a confusing runtime
+  `BR_FAILED_REPLY` into a clean authoring-time failure. A patch that still overflows at runtime fails
+  closed as a transport error *without* a `kennel.spawn` / `outcome: Deny` audit event — kenneld never
+  received it, so the operator sees a transport failure, not a policy denial.
+
 ## What this chapter does not cover
 
 - **MCP semantics** — tool allow-listing and call audit live in the opt-in in-kennel **interposer**
