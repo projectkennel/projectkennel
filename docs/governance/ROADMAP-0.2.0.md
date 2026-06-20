@@ -1,16 +1,17 @@
 # Project Kennel — 0.2.0 plan
 
-Status: **building — 14 of 15 original workstreams landed** (2026-06-19); **W15** (as-built prose pass) open; **W16** (facade-client poll-elimination) added post-plan from the delegate/facade audit; **Thrust 5 / W17–W19** (OCI substrate execution) added post-plan (2026-06-20), design + T3.8 landed, build sequenced · Drafted: 2026-06-18 · Targets: 0.2.0
+Status: **building — 14 of 15 original workstreams landed** (2026-06-19); **W15** (as-built prose pass) open; **W16** (facade-client poll-elimination → inbound mirror push) **built + merged** (2026-06-20); **Thrust 5 / W17–W19** (OCI substrate execution) added post-plan (2026-06-20), design + T3.8 landed, build sequenced · Drafted: 2026-06-18 · Targets: 0.2.0
 Baseline: 0.1.0 (first versioned cut, 2026-06-18)
 
 > **Progress (2026-06-19).** W1+W2 (persistence), W8 (D-Bus), W9 (fragments), W10 (IDE schema),
 > W11 (terminal filter → CLI), W12 (TCB accounting), W13 (operator-prompt channel), and W14
 > (`essential_etc` cascade) are **built + merged**; each is marked inline below. The one remaining
 > workstream is **W15** (strip history/apology prose + purge never-built mechanisms). **W16**
-> (`facade-client` poll-elimination) was added post-plan from the delegate/facade DoS audit — a
-> follow-up to the shipped facade-only mitigation, gated on a kenneld-side design decision (see
-> Thrust 4). The per-workstream prose is kept as the plan-of-record; the as-built truth lives in the
-> design corpus and `CHANGELOG.md`.
+> (`facade-client` poll-elimination) was added post-plan from the delegate/facade DoS audit and is
+> now **built + merged** — resolved by reversing the inbound mirror to push (the facade sleeps on a
+> callback node; kenneld pushes each conduit), which dissolved the parked-looper pool-exhaustion
+> decision the parked-poll variant was gated on. The per-workstream prose is kept as the
+> plan-of-record; the as-built truth lives in the design corpus and `CHANGELOG.md`.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -302,21 +303,21 @@ layer on top:
   itself the apology pattern. A grep gate (`xdg-dbus-proxy`, `IGpgAgent`, `per-kennel ssh-agent`) keeps
   them out once removed. Touches ~15 corpus files; do it as one pass, not per-edit drive-bys.
 
-- **W16 · `facade-client` poll-elimination — parked/blocking `BIND_INET`.** *(→ §7.5.7,
-  `07-1-binder.md`, [[ipc-inventory-binder-is-sole-in-kennel-core]])* **S–M.** **NEW — surfaced by
-  the W8-era delegate/facade DoS audit; the facade-only mitigation already shipped, so this is a
-  follow-up, not a 0.2.0 blocker (target: maintainer's call).** `facade-client` services each
-  mirrored inbound port by *polling* `BIND_INET` and re-arming on `AGAIN`; the kennel-cleanup PR
-  reduced the cost (one reused binder connection + geometric idle backoff 50 ms → 1 s) but the model
-  is still a poll. The complete fix is to **park** the `BIND_INET` transaction in kenneld until a
-  conduit actually arrives (the `DBUS_RECV` long-poll pattern — condvar demux off the
-  `InboundRuntime` queue), eliminating idle wakeups and first-connection-after-idle latency
-  together. **The design decision that gates it:** parking one looper per mirrored port interacts
-  with the serving pool (`POOL_MAX_THREADS = 8`) — a kennel mirroring >8 ports would exhaust it. So
-  W16 must first settle one of: parked recvs not counting against the serving pool, a per-port
-  eventfd the facade waits on (no parked looper), or a pool bump tied to the mirror-port count. A
-  kenneld change ([[tcb-only-shrinks]] — keep it transport-only, no new parser), so it needs
-  maintainer sign-off before build.
+- **W16 · `facade-client` poll-elimination — inbound mirror pull→push.** *(→ §7.5.7,
+  `07-1-binder.md`, [[ipc-inventory-binder-is-sole-in-kennel-core]], [[binder-fd-passing-safety-verdict]])*
+  **S–M.** **✅ Built + merged + hardware-proven (2026-06-20).** Surfaced by the W8-era
+  delegate/facade DoS audit (`facade-client` polled `BIND_INET` and re-armed on `AGAIN` — a
+  geometric 50 ms → 1 s idle wake that scaled with ports × kennels, plus up-to-1 s
+  first-connection latency). Resolved by **reversing the data direction to push** rather than the
+  parked-poll the item first proposed: the facade registers a binder callback node per mirrored port
+  (`REGISTER_MIRROR`) and **sleeps** in a server loop (zero CPU); kenneld pushes each accepted
+  conduit with a **one-way `DELIVER_INET`** on the context-manager connection. This dissolves the
+  design decision that gated the parked-poll variant — push **parks nothing**, so the
+  `POOL_MAX_THREADS` exhaustion concern (one parked looper per mirrored port) simply does not arise.
+  Three guards keep it bounded (death-notify lifecycle, one-way + per-port bounce buffer, port-gated
+  registration); the fd-passing verdict is intact (the conduit fd still flows out of the TCB). Kept
+  transport-only ([[tcb-only-shrinks]] — no new parser in the daemon closure). Proven by the full
+  policy suite (`net-bind-mirror` push delivery + `net-bind-deny-wins` ACL gating).
 
 ### Thrust 5 — OCI substrate execution
 
