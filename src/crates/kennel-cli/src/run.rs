@@ -1,0 +1,694 @@
+//! `kennel run` (foreground confined run, incl. the in-memory compile of a source policy) and
+//! `kennel attach`, plus the interactive PTY proxy machinery they share. Split out of `main.rs`.
+//!
+//! The in-memory compile reuses the policy/compile machinery, which lives in the crate root for
+//! now (`build_settled`, `FsTemplateSource`, `TempSettled`, `mint_ssh_keys`, …); the trust-manifest
+//! and exclusive-bind helpers live in `review`.
+
+use std::io::{self, IsTerminal as _};
+use std::os::fd::{AsFd as _, BorrowedFd};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use kennel_lib_control::control::{self, Request, Response, StartRequest};
+
+use crate::review;
+use crate::{
+    add_default_template_dirs, add_system_trust_dirs, build_settled, connect, default_signing_key,
+    exit_code, is_source_policy, load_signing_key, load_trust_store, mint_ssh_keys, print_warnings,
+    resolve_policy, send, FsTemplateSource, TempSettled,
+};
+
+/// `kennel run <policy> <name> [--key K] [--template-dir D]... [--trust-dir D]... -- <argv...>`
+///
+/// `<policy>` is either a pre-compiled **settled** artefact (used as-is, the
+/// production path) or a **source** policy (template/leaf), which is compiled and
+/// signed *in memory* before the run — the §9.10 local-dev loop, so an author need
+/// not run `kennel compile` between edits. The in-memory build needs `--key` (kenneld
+/// verifies the settled signature against its trust store); the settled bytes are
+/// written to a short-lived temp file that is removed when the run returns.
+// allow(too_many_lines): one cohesive arg-parse → resolve → (maybe compile+sign) → start
+// sequence for the `run` subcommand; the lexopt CLI overhaul folds this into the shared
+// parser table.
+#[allow(clippy::too_many_lines)]
+pub fn run(args: &[String]) -> Result<ExitCode, String> {
+    // <head...> optionally then "--" then the command. The `--` is OPTIONAL: with no
+    // command the daemon runs the policy's embedded [workload] (§7.4); with a command it
+    // overrides the policy workload (unless pinned — then --force is required).
+    let (head, command) = args
+        .iter()
+        .position(|a| a == "--")
+        .map_or((args, &[][..]), |sep| {
+            (
+                args.get(..sep).unwrap_or(&[]),
+                args.get(sep.saturating_add(1)..).unwrap_or(&[]),
+            )
+        });
+
+    let mut policy_arg: Option<&str> = None;
+    let mut name_arg: Option<&str> = None;
+    let mut key_path: Option<&str> = None;
+    let mut force = false;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut it = head.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--force" => force = true,
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if policy_arg.is_none() => policy_arg = Some(v),
+            v if name_arg.is_none() => name_arg = Some(v),
+            _ => return Err("unexpected extra argument before `--`".to_owned()),
+        }
+    }
+    let policy_arg = policy_arg.ok_or(
+        "usage: kennel run <policy> [<name>] [--key K] [--force] [--template-dir D]... [-- <cmd...>]",
+    )?;
+    // `<policy>` is a literal path if it exists, else a **name** resolved from the
+    // `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`,
+    // preferring the settled artefact). The kennel instance `<name>` is optional and
+    // defaults to the resolved policy name (`07-paths`, resolve-by-name).
+    let (policy_file, default_name) = resolve_policy(policy_arg, true)?;
+    let name = name_arg.map_or(default_name, str::to_owned);
+
+    // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
+    // artefact is passed straight through. `_temp` keeps the on-disk settled file
+    // alive for the daemon to read, and removes it when this function returns.
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    // Held only for its `Drop` (removes the temp settled file when the run returns);
+    // never read, hence the allow.
+    #[allow(clippy::collection_is_never_read)]
+    let _temp;
+    let effective_policy: PathBuf = if is_source_policy(&bytes) {
+        // A source leaf is compiled-and-signed in memory (the §9.10 dev loop). That
+        // needs a *signing* (private) key; with `--key` omitted we default to the
+        // sole key in the user key dir. A pre-compiled settled artefact takes the
+        // `else` branch and needs no key at all (the daemon verifies its signature).
+        let key_path: PathBuf = match key_path {
+            Some(p) => PathBuf::from(p),
+            None => default_signing_key()?,
+        };
+        add_default_template_dirs(&mut template_dirs);
+        add_system_trust_dirs(&mut trust_dirs);
+        let source = FsTemplateSource {
+            dirs: template_dirs,
+        };
+        let keys = load_trust_store(&trust_dirs)?;
+        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
+        print_warnings(&compiled.warnings);
+        print_warnings(&kennel_lib_policy::resolve_settled_loaders(
+            &mut compiled.policy,
+        ));
+        // Mint/reuse the SSH synthetic keypairs beside the source policy (its dir), pinning
+        // the public halves into the settled grants before signing — same as the `compile`
+        // verb, so an in-memory `kennel run` of an `[ssh]` policy is signed over its keys too.
+        let ssh_dir = policy_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("ssh");
+        let minted = mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
+        let key = load_signing_key(&key_path)?;
+        let doc = kennel_lib_policy::sign_settled(&compiled.policy, &key)
+            .map_err(|e| format!("signing: {e}"))?;
+        let out = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
+        // When SSH keys were minted, the daemon resolves them at `<settled>.parent()/ssh`,
+        // so the temp settled MUST sit beside that `ssh/` dir (the source policy's dir).
+        // Without SSH there is no such coupling — stage under the runtime dir as usual.
+        let temp = if minted {
+            TempSettled::write_in(
+                policy_file.parent().unwrap_or_else(|| Path::new(".")),
+                &name,
+                &out,
+            )?
+        } else {
+            TempSettled::write(&name, &out)?
+        };
+        let path = temp.path().to_path_buf();
+        eprintln!(
+            "kennel: compiled `{}` in memory for this run",
+            policy_file.display()
+        );
+        _temp = Some(temp);
+        path
+    } else {
+        _temp = None;
+        policy_file
+    };
+
+    // Pre-flight: ensure a `.trust-manifest.json` at each writable workspace root before
+    // the kennel boots (mirrors SSH-key provisioning). The kennel will mask the manifest
+    // invisible, so the agent cannot forge the integrity pins host tooling trusts (T2.8).
+    // Read from the settled bytes we hold; host-side, never contacts kenneld.
+    let settled_bytes = std::fs::read(&effective_policy)
+        .map_err(|e| format!("reading {} for pre-flight: {e}", effective_policy.display()))?;
+    ensure_workspace_manifests(&settled_bytes);
+    // An exclusive bind blind-mounts the host side with the privhelper's privilege (§2.7); refuse
+    // early if the operator does not own a host path it would shadow (the privhelper refuses too).
+    review::verify_exclusive_ownership(&settled_bytes)?;
+    // Resolve the host paths kenneld's live tripwire should watch (§2.5) — computed here,
+    // CLI-side, because the catalogue lives in this crate; the daemon just watches the list.
+    let watch_paths = workspace_watch_paths(&settled_bytes);
+
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    let request = Request::Start(StartRequest {
+        policy: effective_policy,
+        kennel: name.clone(),
+        argv: command.to_vec(),
+        cwd,
+        // Forward the caller's terminal type so an interactive workload renders; the
+        // rest of the workload env is synthesised by the daemon, not inherited.
+        term: std::env::var("TERM").unwrap_or_default(),
+        // Interactive when stdin is a terminal: the seal allocates the workload's own
+        // pty (job control) and hands its master back for us to proxy.
+        interactive: io::stdin().is_terminal(),
+        // Force an override of a pinned policy [workload] (only meaningful with a `--` cmd).
+        force,
+        watch_paths,
+    });
+
+    let mut conn = connect()?;
+    if io::stdin().is_terminal() {
+        return run_interactive(conn, &request, &name);
+    }
+    // Non-interactive (piped/redirected): pass our stdio straight through.
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    let fds: [BorrowedFd<'_>; 3] = [stdin.as_fd(), stdout.as_fd(), stderr.as_fd()];
+    send(&conn, &request, &fds)?;
+
+    // First the daemon confirms the launch, then (when the workload exits) the code.
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        // Non-interactive (piped) launch: stdio passes straight through, no proxied
+        // terminal, so `filter_escapes` does not apply here.
+        Response::Started { ctx, pid, .. } => {
+            eprintln!("kennel `{name}` started (ctx {ctx}, pid {pid})");
+        }
+        Response::Error(message) => return Err(message),
+        other => return Err(format!("unexpected response: {other:?}")),
+    }
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Exited { code } => Ok(exit_code(code)),
+        Response::Error(message) => Err(message),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+/// Ensure a masked-workspace manifest at the root of each writable host path the settled
+/// policy grants (§7.4, T2.8) — the CLI pre-flight half of the feature. Best-effort: a
+/// parse or generation failure warns and is skipped (it must never block a run; the worst
+/// case is a missing manifest, which the host IDE simply treats as "no trust marker").
+///
+/// Reads `fs.write` from the settled policy, expands the home prefix (`~`/`$HOME` → the
+/// operator's real home — the same expansion the spawn does to get the bind *source*),
+/// strips any `/**` glob, and for each existing directory writes a baseline manifest if
+/// one is absent. An existing manifest is left untouched — refreshing pins is the explicit
+/// `kennel review` step, never an implicit side effect of `run` (else it would launder an
+/// agent's edits).
+fn ensure_workspace_manifests(settled_bytes: &[u8]) {
+    let policy = match kennel_lib_policy::parse_settled_unverified(settled_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("kennel: skipping workspace manifests (cannot read settled policy: {e})");
+            return;
+        }
+    };
+    if !policy.effective_policy.trust.manifest {
+        return; // [trust].manifest = false: the operator opted out.
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        eprintln!("kennel: skipping workspace manifests (HOME is not set)");
+        return;
+    };
+    // No compiled-in default (§2.6): the trigger set lives entirely in the config cascade. An
+    // empty catalogue with `[trust].manifest = on` is almost always a missing vendor file, not a
+    // deliberate choice — warn loudly rather than silently watch nothing (T2.8).
+    let catalogue = kennel_lib_manifest::Catalogue::load();
+    if catalogue.is_empty() {
+        eprintln!(
+            "kennel: warning: the trust-trigger catalogue is empty — no `triggers.catalog` found \
+             under /usr/lib/kennel, /etc/kennel, or ~/.config/kennel. Execution triggers will not \
+             be pinned or watched (T2.8). Install the package default or set `[trust].manifest = \
+             false` to opt out explicitly."
+        );
+    }
+    let generator = format!("kennel {}", env!("CARGO_PKG_VERSION"));
+    for entry in &policy.effective_policy.fs.write {
+        let Some(root) = review::writable_root(entry, &home) else {
+            continue; // not a home-or-absolute path we can resolve to a host dir
+        };
+        if !root.is_dir() {
+            continue; // a writable file (not a workspace dir) gets no manifest
+        }
+        let path = kennel_lib_manifest::manifest_path(&root);
+        if path.exists() {
+            continue; // leave it — refresh is `kennel review`, not `run`
+        }
+        let (manifest, errors) = kennel_lib_manifest::generate(&root, &generator, &catalogue);
+        for e in &errors {
+            eprintln!(
+                "kennel: manifest trigger skipped under {}: {e}",
+                root.display()
+            );
+        }
+        match manifest.to_json() {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("kennel: could not write {}: {e}", path.display());
+                } else {
+                    eprintln!("kennel: wrote trust manifest {}", path.display());
+                }
+            }
+            Err(e) => eprintln!("kennel: could not serialise {}: {e}", path.display()),
+        }
+    }
+}
+
+/// Resolve the host paths kenneld's live tripwire should watch (§2.5): each writable
+/// workspace root's existing catalogue trigger files plus its existing trigger directories.
+///
+/// Host paths — the writable bind maps them to the same inodes the workload writes, so an
+/// inotify on the host catches the workload's writes; watching the trigger directories
+/// catches a freshly planted hook. Empty when `[trust].manifest = false`.
+fn workspace_watch_paths(settled_bytes: &[u8]) -> Vec<PathBuf> {
+    let Ok(policy) = kennel_lib_policy::parse_settled_unverified(settled_bytes) else {
+        return Vec::new();
+    };
+    if !policy.effective_policy.trust.manifest {
+        return Vec::new();
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let catalogue = kennel_lib_manifest::Catalogue::load();
+    let mut paths = Vec::new();
+    for entry in &policy.effective_policy.fs.write {
+        let Some(root) = review::writable_root(entry, &home) else {
+            continue;
+        };
+        if !root.is_dir() {
+            continue;
+        }
+        for rel in kennel_lib_manifest::enumerate_triggers(&root, &catalogue) {
+            paths.push(root.join(rel));
+        }
+        for dir in &catalogue.dirs {
+            let abs = root.join(dir);
+            if abs.is_dir() {
+                paths.push(abs);
+            }
+        }
+    }
+    paths
+}
+
+/// Restores the terminal to its saved (pre-raw) settings when dropped — on every
+/// return path of an interactive run, including errors and `?` early-returns.
+struct RawGuard {
+    prev: kennel_lib_syscall::pty::Termios,
+}
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = kennel_lib_syscall::pty::restore(io::stdin().as_fd(), &self.prev);
+    }
+}
+
+/// Interactive `kennel run`: kenneld owns the workload's controlling pty (allocated by
+/// the spawn seal inside the kennel's own devpts, so `ttyname(3)`/`tty` resolve it) and
+/// brokers it to us. We pass one connected socket; the daemon's PTY broker fans the
+/// kennel's filtered output to it and forwards our input to the master. We put this
+/// terminal in raw mode and proxy bytes both ways. `Ctrl-\ d` **detaches** without
+/// ending the workload (reattach with `kennel attach <name>`); the terminal is restored
+/// on detach and on exit.
+fn run_interactive(
+    mut conn: UnixStream,
+    request: &Request,
+    name: &str,
+) -> Result<ExitCode, String> {
+    use kennel_lib_syscall::pty;
+    let real_in = io::stdin();
+    // Raw mode now; the guard restores the terminal on every return below.
+    let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
+    let _restore = RawGuard { prev };
+    let _ = pty::block_winch();
+
+    // One socket pair: the daemon's broker proxies the kennel's pty over `theirs`; we
+    // keep `ours`. (Before, the seal sent the *master* fd to us; now the master stays in
+    // kenneld and only bytes cross.)
+    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    send(&conn, request, &[theirs.as_fd()])?;
+    drop(theirs);
+
+    // The daemon confirms the launch (or reports a bring-up failure) and tells us whether
+    // to filter the workload's terminal escapes client-side (§4.8 — the broker routes raw).
+    let filter_escapes =
+        match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+            Response::Started { filter_escapes, .. } => filter_escapes,
+            Response::Error(message) => return Err(message),
+            other => return Err(format!("unexpected response: {other:?}")),
+        };
+    proxy_session(conn, ours, name, filter_escapes)
+}
+
+/// `kennel attach <name>`: reconnect a terminal to a still-running kennel's pty. The
+/// daemon's broker takes over from any current client (the prior terminal gets a clean
+/// "detached: another client attached"). Same raw-mode proxy and `Ctrl-\ d` detach as
+/// an interactive `run`.
+pub fn attach(args: &[String]) -> Result<ExitCode, String> {
+    use kennel_lib_syscall::pty;
+    let [name] = args else {
+        return Err("usage: kennel attach <name>".to_owned());
+    };
+    if !io::stdin().is_terminal() {
+        return Err("kennel attach needs a terminal on stdin".to_owned());
+    }
+    let real_in = io::stdin();
+    let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
+    let _restore = RawGuard { prev };
+    let _ = pty::block_winch();
+
+    let mut conn = connect()?;
+    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    send(
+        &conn,
+        &Request::Attach {
+            kennel: name.clone(),
+        },
+        &[theirs.as_fd()],
+    )?;
+    drop(theirs);
+    let filter_escapes =
+        match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+            Response::Attached { filter_escapes, .. } => filter_escapes,
+            Response::Error(message) => return Err(message),
+            other => return Err(format!("unexpected response: {other:?}")),
+        };
+    proxy_session(conn, ours, name, filter_escapes)
+}
+
+/// `Ctrl-\` (FS, `0x1c`) then `d`: the detach sequence (rarer in shell use than
+/// docker's `Ctrl-p Ctrl-q`). Watched in the stdin path before bytes reach the broker.
+const DETACH_LEAD: u8 = 0x1c;
+const DETACH_KEY: u8 = b'd';
+
+/// How a proxied terminal session ended.
+enum SessionEnd {
+    /// The operator pressed the detach key (`Ctrl-\ d`) — the workload keeps running.
+    Detached,
+    /// The control-connection reader received the daemon's final word and resolved the
+    /// session to an exit code (or an error).
+    Outcome(Result<ExitCode, String>),
+}
+
+/// Read the control connection for the whole session (§9.7): handle an operator-prompt
+/// [`Response::Prompt`] inline — surface it on the now-quiet terminal (the workload is
+/// frozen while a prompt is outstanding), capture the operator's single-key answer from the
+/// stdin pump, and reply — then deliver the daemon's final `Exited`/`Detached`/`Error` as a
+/// [`SessionEnd::Outcome`]. The sole reader and writer of `conn`, so prompt replies never
+/// race the main thread.
+// Runs as a `'static` thread body, so it must own its channel ends and the flag — the
+// `Receiver` in particular cannot be borrowed across the thread boundary.
+#[allow(clippy::needless_pass_by_value)]
+fn control_reader(
+    mut conn: UnixStream,
+    mut term: std::fs::File,
+    prompt_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    answer_rx: std::sync::mpsc::Receiver<u8>,
+    tx: std::sync::mpsc::Sender<SessionEnd>,
+) {
+    use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+    let outcome = loop {
+        match control::recv_response(&mut conn) {
+            Ok(Response::Prompt { id, prompt }) => {
+                let _ = write!(term, "\r\n{prompt} ");
+                let _ = term.flush();
+                prompt_active.store(true, Ordering::SeqCst);
+                // The stdin pump diverts the next keypress here; a closed channel (pump
+                // gone) reads as a decline.
+                let key = answer_rx.recv().unwrap_or(b'n');
+                let affirmative = key == b'y' || key == b'Y';
+                let answer = if affirmative { "y" } else { "n" };
+                let _ = write!(term, "{answer}\r\n");
+                let _ = term.flush();
+                let _ = control::send_request(
+                    &mut conn,
+                    &Request::PromptReply {
+                        id,
+                        answer: answer.to_owned(),
+                    },
+                );
+            }
+            Ok(Response::Exited { code }) => break Ok(exit_code(code)),
+            Ok(Response::Detached { reason }) => {
+                let _ = write!(term, "\r\ndetached: {reason}\r\n");
+                break Ok(ExitCode::SUCCESS);
+            }
+            Ok(Response::Error(message)) => break Err(message),
+            Ok(other) => break Err(format!("unexpected response: {other:?}")),
+            Err(e) => break Err(format!("daemon: {e}")),
+        }
+    };
+    let _ = tx.send(SessionEnd::Outcome(outcome));
+}
+
+/// Proxy this terminal to the kennel over the broker socket `ours` until detach or the
+/// workload ends. Three background pumps: stdin → broker (scanning for the detach
+/// sequence), broker → stdout, and a `SIGWINCH` → [`Request::Resize`] relay (the broker
+/// holds the master, so we relay the size rather than `ioctl` it). On a local detach we
+/// restore the terminal and exit 0; on a remote end we read the daemon's final
+/// `Exited`/`Detached` over `conn`.
+///
+/// When `filter_escapes` is set (the `[tty]` policy decision the daemon conveyed in
+/// `Response::Started`/`Attached`), the broker → stdout pump runs the workload's output
+/// through the `kennel-lib-term` escape filter **here** — the daemon broker is a raw
+/// router and keeps the `vte` parser of workload-controlled bytes out of its TCB (§4.8).
+/// The detach-key scan stays on the *input* path: those are operator-controlled bytes,
+/// not workload output, so no workload-controlled parser runs CLI-side either way.
+fn proxy_session(
+    conn: UnixStream,
+    ours: UnixStream,
+    name: &str,
+    filter_escapes: bool,
+) -> Result<ExitCode, String> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{mpsc, Arc};
+    // Tell the broker our initial size, then relay every later SIGWINCH.
+    send_resize(name);
+    let (tx, rx) = mpsc::channel::<SessionEnd>();
+    // Set by the control reader while an operator prompt (§9.7) is outstanding; the stdin
+    // pump then diverts the next keypress to `answer_tx` as the answer instead of the broker.
+    let prompt_active = Arc::new(AtomicBool::new(false));
+    let (answer_tx, answer_rx) = mpsc::channel::<u8>();
+
+    // stdin → broker, watching for the `Ctrl-\ d` detach sequence and renew answers.
+    let in_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
+    let stdin_dup = io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("stdin dup: {e}"))?;
+    let tx_in = tx.clone();
+    let pa_in = Arc::clone(&prompt_active);
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        let mut r = std::fs::File::from(stdin_dup);
+        let mut w = in_sock;
+        let mut buf = [0u8; 4096];
+        // `armed` means we forwarded nothing yet for a held DETACH_LEAD byte and are
+        // awaiting the next byte: DETACH_KEY → detach; anything else → emit the held
+        // lead then the byte. A lead at end-of-read stays held into the next read.
+        let mut armed = false;
+        loop {
+            use std::io::{Read as _, Write as _};
+            let n = match r.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut out: Vec<u8> = Vec::with_capacity(n.saturating_add(1));
+            let mut detached = false;
+            for &b in buf.get(..n).unwrap_or(&[]) {
+                if pa_in.swap(false, Ordering::SeqCst) {
+                    // A prompt is outstanding: this keypress is the answer, not workload
+                    // input. Divert it and do not forward it.
+                    let _ = answer_tx.send(b);
+                } else if armed {
+                    armed = false;
+                    if b == DETACH_KEY {
+                        detached = true;
+                        break;
+                    }
+                    out.push(DETACH_LEAD); // the held lead was literal
+                    out.push(b);
+                } else if b == DETACH_LEAD {
+                    armed = true; // hold it back, decide on the next byte
+                } else {
+                    out.push(b);
+                }
+            }
+            if !out.is_empty() && w.write_all(&out).is_err() {
+                break;
+            }
+            if detached {
+                let _ = tx_in.send(SessionEnd::Detached);
+                return;
+            }
+        }
+    });
+
+    // broker → stdout. Write to a `File` over the raw stdout fd, NOT `io::stdout()`: the
+    // latter is a `LineWriter` against a terminal, which holds any bytes after the last
+    // newline — so a shell prompt (`$ `, no trailing newline) would sit buffered until the
+    // next newline echoed, making every prompt invisible until you hit Enter. A `File` is
+    // unbuffered, so each chunk the broker sends reaches the terminal immediately.
+    let stdout_dup = io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("stdout dup: {e}"))?;
+    let out_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
+    std::thread::spawn(move || {
+        output_pump(out_sock, std::fs::File::from(stdout_dup), filter_escapes);
+    });
+
+    // Control connection reader: handles operator prompts inline and resolves the outcome.
+    let term_dup = io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("stdout dup: {e}"))?;
+    std::thread::spawn(move || {
+        control_reader(
+            conn,
+            std::fs::File::from(term_dup),
+            prompt_active,
+            answer_rx,
+            tx,
+        );
+    });
+
+    // SIGWINCH → Resize relay.
+    let resize_name = name.to_owned();
+    std::thread::spawn(move || winch_resize_relay(&resize_name));
+
+    // Whichever of the detach pump or the control reader resolves first ends the session.
+    match rx.recv() {
+        Ok(SessionEnd::Detached) => {
+            // Close our end so the broker drops us; the workload keeps running.
+            drop(ours);
+            eprintln!("\r\ndetached from `{name}` (workload still running; `kennel attach {name}` to reconnect)");
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(SessionEnd::Outcome(res)) => {
+            drop(ours);
+            res
+        }
+        Err(_) => {
+            drop(ours);
+            Err("session ended without an outcome".to_owned())
+        }
+    }
+}
+
+/// The broker → terminal pump: copy the kennel's output socket to the real terminal
+/// (`out`), filtering dangerous escapes client-side when `filter_escapes` is set.
+///
+/// The daemon's broker is a raw-byte router (§4.8) — it never parses workload output —
+/// so the `kennel-lib-term` `vte` filter runs here, keeping that parser of
+/// workload-controlled bytes out of the daemon TCB. One `Filter` spans the whole received
+/// stream (ring replay + live), so a sequence split across reads, or truncated at the
+/// replayed ring head, is tracked by the parser state machine (an incomplete escape is
+/// dropped). Without filtering it is a plain raw copy.
+fn output_pump<W: std::io::Write>(mut out_sock: UnixStream, mut out: W, filter_escapes: bool) {
+    use std::io::Read as _;
+    if !filter_escapes {
+        let _ = std::io::copy(&mut out_sock, &mut out);
+        return;
+    }
+    let mut filter = kennel_lib_term::Filter::new(kennel_lib_term::FilterPolicy::default());
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match out_sock.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let filtered = filter.feed(buf.get(..n).unwrap_or_default());
+        if !filtered.is_empty() && out.write_all(&filtered).is_err() {
+            break;
+        }
+    }
+}
+
+/// Relay terminal-resize events to the daemon: `sigwait` `SIGWINCH`, read this
+/// terminal's new size, and send a [`Request::Resize`] for `name`. Runs after
+/// `block_winch`; returns on a `sigwait` error.
+fn winch_resize_relay(name: &str) {
+    while kennel_lib_syscall::pty::wait_winch().is_ok() {
+        send_resize(name);
+    }
+}
+
+/// Read this terminal's window size and send it to the daemon as a [`Request::Resize`]
+/// on a throwaway control connection (fire-and-forget; the broker `ioctl`s the master).
+fn send_resize(name: &str) {
+    use kennel_lib_syscall::pty;
+    let Ok(ws) = pty::get_winsize(io::stdin().as_fd()) else {
+        return;
+    };
+    let Ok(conn) = connect() else { return };
+    let _ = send(
+        &conn,
+        &Request::Resize {
+            kennel: name.to_owned(),
+            rows: ws.ws_row,
+            cols: ws.ws_col,
+        },
+        &[],
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive `output_pump` over a socketpair: buffer `input` on the broker end and close
+    /// it, then run the pump (to EOF) on this thread into a `Vec` writer and return what
+    /// reached the "terminal". `filter_escapes` selects the filtering vs raw-copy path.
+    fn pump_through(input: &[u8], filter_escapes: bool) -> Vec<u8> {
+        let (broker_end, client_end) = UnixStream::pair().expect("socketpair");
+        {
+            use std::io::Write as _;
+            let mut w = broker_end;
+            w.write_all(input).expect("write input");
+            // Drop closes the socket so the pump reads the buffered bytes then sees EOF.
+        }
+        let mut got = Vec::new();
+        output_pump(client_end, &mut got, filter_escapes);
+        got
+    }
+
+    #[test]
+    fn output_pump_filters_escapes_client_side() {
+        // The dangerous OSC-52 clipboard write is dropped on the way to the terminal; the
+        // surrounding benign bytes survive. This is the client-side half of the W11 cut —
+        // the daemon broker routes raw and never runs this parser (§4.8).
+        let got = pump_through(b"hi\x1b]52;c;cGF5bG9hZA==\x07bye", true);
+        let text = String::from_utf8_lossy(&got);
+        assert!(text.contains("hi") && text.contains("bye"), "{text:?}");
+        assert!(!text.contains("52;"), "clipboard escape dropped: {text:?}");
+    }
+
+    #[test]
+    fn output_pump_passes_raw_when_filtering_disabled() {
+        // `[tty].filter_terminal_escapes = false` ⇒ the daemon sends filter_escapes=false
+        // and the pump is a verbatim copy (the operator opted out, footgun-warn-not-forbid).
+        let raw = b"hi\x1b]52;c;cGF5bG9hZA==\x07bye";
+        assert_eq!(pump_through(raw, false).as_slice(), raw);
+    }
+}
