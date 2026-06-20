@@ -127,7 +127,7 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     (
         "oci",
         "build and run an OCI image as a confined kennel substrate (§7.11)",
-        "oci <build|run> <name> [--image <ref>] [--force] [-- <cmd...>]",
+        "oci <build|run> <name> [--image <ref>] [--key K] [--force] [-- <cmd...>]",
     ),
 ];
 
@@ -301,7 +301,7 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
                 summary: SYNC_COMMANDS[10].1,
                 options: &[
                     ("build <name> --image <ref>", "Provision a named image store entry: record the provenance digest and scaffold a run policy."),
-                    ("run <name> [-- <cmd...>]", "Boot a built store entry under its signed policy (the digest is checked against [rootfs].image)."),
+                    ("run <name> [--key K] [-- <cmd...>]", "Boot a built store entry under its signed policy (the digest is checked against [rootfs].image)."),
                     ("--force", "Overwrite an existing entry (build) or override a pinned [workload] (run)."),
                 ],
             },

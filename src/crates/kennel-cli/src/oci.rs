@@ -339,16 +339,19 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
             )
         });
     let mut name: Option<&str> = None;
+    let mut key_path: Option<&str> = None;
     let mut force = false;
-    for arg in head {
+    let mut it = head.iter();
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "--force" => force = true,
+            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             v if name.is_none() => name = Some(v),
             _ => return Err("unexpected extra argument before `--`".to_owned()),
         }
     }
-    let name = name.ok_or("usage: kennel oci run <name> [--force] [-- <cmd...>]")?;
+    let name = name.ok_or("usage: kennel oci run <name> [--key K] [--force] [-- <cmd...>]")?;
 
     let store = Store::open()?;
     let entry = store.entry(name)?;
@@ -364,7 +367,7 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
         name,
         command,
         force,
-        None,
+        key_path,
         Vec::new(),
         Vec::new(),
         Some(&digest),

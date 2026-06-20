@@ -110,7 +110,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "oci",
         summary: "build and run an OCI image as a confined kennel substrate (§7.11)",
-        usage: "oci <build|run> <name> [--image <ref>] [--force] [-- <cmd...>]",
+        usage: "oci <build|run> <name> [--image <ref>] [--key K] [--force] [-- <cmd...>]",
     },
 ];
 
