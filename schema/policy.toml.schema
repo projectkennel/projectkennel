@@ -481,6 +481,15 @@
         "reason": {
           "description": "Why this substrate is trusted (required; the substrate-trust waiver is loud).",
           "type": "string"
+        },
+        "persistence": {
+          "description": "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper) | `readonly` (no upper, immutable) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from).",
+          "type": "string",
+          "enum": [
+            "discard",
+            "readonly",
+            "persist"
+          ]
         }
       },
       "required": [

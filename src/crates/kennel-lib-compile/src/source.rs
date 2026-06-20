@@ -160,6 +160,10 @@ pub struct RootfsSection {
     /// Why this substrate is trusted (required; the substrate-trust waiver is loud).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Rootfs persistence (§7.11.4a): `"discard"` (default) | `"readonly"` | `"persist"`.
+    /// `"persist"` is a loud value the risk engine derives an exposure from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<String>,
 }
 
 /// Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).

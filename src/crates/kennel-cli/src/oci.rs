@@ -205,12 +205,14 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str) -> String {
          image  = \"{image}\"\n\
          reason = \"TODO: why this image is trusted as the kennel substrate\"\n\
          \n\
+         # persistence = \"discard\"  # discard (default) | readonly | persist\n\
+         \n\
          # Additive grants bind on top of the image, e.g.:\n\
          # [fs]\n\
          # write = [\"~/code/{name}/**\"]\n\
          \n\
-         # No [workload]: the entrypoint comes from the image config via the launcher.\n\
-         # (Add an explicit argv + sha256 to override and pin it instead.)\n",
+         # Entrypoint comes from the image config via the launcher.\n\
+         # [workload] is not valid in an OCI policy — the digest is the provenance anchor.\n",
         name = name,
         path = rootfs_path.display(),
         image = image,

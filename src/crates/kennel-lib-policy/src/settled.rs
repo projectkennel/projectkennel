@@ -1214,6 +1214,11 @@ pub struct RootfsRuntime {
     /// entry's recorded `digest`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub image: String,
+    /// Rootfs persistence (§7.11.4a): `"discard"` (default) | `"readonly"` | `"persist"`. Empty in
+    /// the settled form means the default `discard`, so an OCI policy that does not set it signs
+    /// unchanged; the spawn path reads empty as `discard`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub persistence: String,
 }
 
 impl RootfsRuntime {

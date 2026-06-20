@@ -248,6 +248,7 @@ fn fold_rootfs(p: &RootfsSection, c: &RootfsSection) -> RootfsSection {
         path: or(&c.path, &p.path),
         image: or(&c.image, &p.image),
         reason: or(&c.reason, &p.reason),
+        persistence: or(&c.persistence, &p.persistence),
     }
 }
 

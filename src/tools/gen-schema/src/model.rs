@@ -224,6 +224,7 @@ pub static TABLES: &[Table] = &[
             req("path", Ty::Str, "The unpacked image rootfs (the store entry's `rootfs/`). Its presence marks the policy OCI-model."),
             req("image", Ty::Str, "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store entry's recorded digest."),
             req("reason", Ty::Str, "Why this substrate is trusted (required; the substrate-trust waiver is loud)."),
+            f("persistence", Ty::Enum(&["discard", "readonly", "persist"]), "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper) | `readonly` (no upper, immutable) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from)."),
         ],
     },
     Table {

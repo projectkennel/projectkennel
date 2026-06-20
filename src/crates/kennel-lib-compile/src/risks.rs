@@ -280,6 +280,17 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
             label("[rootfs]", rootfs.image.as_deref()),
             rootfs.reason.clone(),
         ));
+        // `persistence = "persist"` adds a distinct exposure: the managed overlay upper
+        // accumulates divergence outside the integrity ladder (§7.11.4a), surfaced against the
+        // same `[rootfs]` reason.
+        if rootfs.persistence.as_deref() == Some("persist") {
+            out.push((
+                "T3.8".to_owned(),
+                "[rootfs].persistence = persist (managed upper diverges from the pinned image)"
+                    .to_owned(),
+                rootfs.reason.clone(),
+            ));
+        }
     }
 
     out

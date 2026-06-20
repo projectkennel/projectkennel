@@ -188,6 +188,10 @@ fn translate_rootfs_runtime(src: &SourcePolicy, deferred: &mut BTreeSet<String>)
             .map(|p| subst(p, deferred))
             .unwrap_or_default(),
         image: r.image.clone().unwrap_or_default(),
+        // Empty (unset) stays empty in the settled form — the spawn path reads it as `discard`
+        // — so an OCI policy that does not set persistence signs unchanged. `validate_rootfs`
+        // has already rejected any value outside the three.
+        persistence: r.persistence.clone().unwrap_or_default(),
     }
 }
 
@@ -462,7 +466,26 @@ fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
     };
     need("path", &rootfs.path)?;
     need("image", &rootfs.image)?;
-    need("reason", &rootfs.reason)
+    need("reason", &rootfs.reason)?;
+    // Grammar partition (§7.11.2): `[rootfs]` and `[workload]` are mutually exclusive — an OCI
+    // policy runs the image entrypoint via the launcher and has no per-binary pin, so a
+    // `[workload]` block is a category error, not a silently-ignored field.
+    if src.workload.is_some() {
+        return Err(translation(
+            "[rootfs] and [workload] are mutually exclusive: an OCI-model policy runs the image \
+             entrypoint via the launcher (use `kennel oci run … -- <cmd>` for a Cmd override)"
+                .to_owned(),
+        ));
+    }
+    // Persistence is one of the three modes; empty (unset) means the default `discard`.
+    if let Some(p) = rootfs.persistence.as_deref() {
+        if !matches!(p, "discard" | "readonly" | "persist") {
+            return Err(translation(format!(
+                "[rootfs].persistence must be `discard`, `readonly`, or `persist`, got `{p}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_name(field: &str, name: &str) -> Result<(), PolicyError> {
@@ -1231,6 +1254,38 @@ mod tests {
         assert!(validate_rootfs(&ok).is_ok());
         // No [rootfs] at all ⇒ not OCI-model, nothing to validate.
         assert!(validate_rootfs(&parse(b"name = \"x\"\n").expect("parse")).is_ok());
+    }
+
+    #[test]
+    fn rootfs_and_workload_are_mutually_exclusive() {
+        // An OCI policy carrying a [workload] is a category error (§7.11.2 grammar partition).
+        let both = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+              image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\n\
+              [workload]\nargv = [\"/bin/sh\"]\n",
+        )
+        .expect("parse");
+        let err = validate_rootfs(&both).expect_err("rootfs + workload");
+        assert!(format!("{err}").contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn rootfs_persistence_is_one_of_three_modes() {
+        let mk = |mode: &str| {
+            parse(
+                format!(
+                    "name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+                     image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\npersistence = \"{mode}\"\n"
+                )
+                .as_bytes(),
+            )
+            .expect("parse")
+        };
+        for ok in ["discard", "readonly", "persist"] {
+            assert!(validate_rootfs(&mk(ok)).is_ok(), "{ok} should validate");
+        }
+        let err = validate_rootfs(&mk("forever")).expect_err("bad mode");
+        assert!(format!("{err}").contains("persistence"), "{err}");
     }
 
     #[test]
