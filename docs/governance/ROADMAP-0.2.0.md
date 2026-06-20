@@ -351,10 +351,14 @@ never in `cargo tree -p kenneld`.
   a **binary `persistence`** upper (`discard` tmpfs / `persist` managed under the store; always an
   upper). `/etc` is writable-through (no ro-bind); the constructed-home chown keys on the home's own
   `st_dev` + ownership. Adds **closure-lock** (the DAC-resurrection): the unprivileged build flattens
-  every inode to the persona uid, so `[rootfs].readonly`/`writable` Landlock deny-write re-imposes the
-  executable boundary (build-derived from `config.User`, signed in the policy) — holding against in-ns
-  root where DAC cannot. Scaffold built in the staging tmpfs; adds `oci revert`/`update`.
-  **Remaining:** the policy-suite e2e case that boots a real image ([[policy-test-suite-is-the-e2e]]).
+  every inode to the persona uid, so `[rootfs].readonly`/`writable` re-impose the executable boundary
+  as **read-only mounts** (Landlock rights are additive — a `/` write can't be subtracted at `/usr`;
+  the persona workload can't remount, `mount` seccomp-blocked), build-derived from `config.User` and
+  signed in the policy. Scaffold built in the staging tmpfs; adds `oci revert`/`update`. **PROVEN on
+  hardware** by the `oci-substrate` policy-suite case ([[policy-test-suite-is-the-e2e]]): a real
+  busybox image with a non-root `config.User` boots as an overlay root and self-checks that the
+  persona uid is imposed, `/usr` is read-only (still executable), `/tmp` writable, Kennel's `/etc`
+  wins.
 
 - **W19 · OCI integrity ladder (opt-in, behind the floor).** *(→ §7.11.8)* **M.** Rung 1
   (content-addressed store entry, verified before pivot — record-and-verify, the entry keeps its

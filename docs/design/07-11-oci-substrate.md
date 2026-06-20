@@ -165,19 +165,27 @@ binaries included**. Absent re-imposition, the OCI substrate is *strictly more p
 same image under Docker*, where the app uid cannot write root-owned `/usr`.
 
 **Closure-lock** restores the one load-bearing boundary the flatten destroyed: the executable surface
-is not self-writable. It is **Landlock**, not a DAC scheme, because after the flatten DAC has nothing
-left to deny. The build collapses every inode to the single persona uid, so the workload is the sole
-owner of the entire tree — and an owner may write its own files, or `chmod` them writable first, no
-matter its uid or capabilities. Ownership-based permission is structurally vacuous here; it is not
-that DAC is bypassed but that there is no longer a foreign owner for it to protect. Landlock denies
-by path regardless of owner, so it re-imposes a boundary the uid model can no longer express. This is
-map-independent — it holds whether the workload runs as in-namespace root or the persona uid — which
-is why the lock does not rely on, and is not weakened by, the runtime uid choice (residual C). The
-lock is expressed as two `[rootfs]` lists over existing rootfs paths, longest-prefix wins:
+is not self-writable. It is not a DAC scheme, because after the flatten DAC has nothing left to deny —
+the build collapses every inode to the single persona uid, so the workload is the sole owner of the
+entire tree, and an owner may write its own files (or `chmod` them writable first) no matter its uid
+or capabilities. Ownership-based permission is structurally vacuous here; there is no foreign owner
+left for it to protect.
+
+The lock is enforced at the **mount** layer: each `readonly` path is a **read-only mount** over the
+merged root, so a write fails `EROFS` regardless of owner — map-independent, holding whether the
+workload runs as in-namespace root or the persona uid (residual C). It is *not* Landlock, despite
+that being the natural first reach, for a concrete reason proven on hardware: **Landlock access
+rights are additive**, so a broad `/` write grant cannot be subtracted at `/usr` — "default-writable
+except the closure" is not expressible by a Landlock sub-path rule. (Landlock still grants the broad
+writable substrate; the read-only *mounts* are what lock the closure.) A read-only mount is robust
+here because the persona workload holds no `CAP_SYS_ADMIN` in its userns — it is **not** in-namespace
+root, the sole-ownership model — and `mount` is seccomp-blocked, so it cannot remount the closure
+read-write. The lock is expressed as two `[rootfs]` lists over existing rootfs paths, longest-prefix
+wins (a `writable` carve-out is a read-write mount nested in its read-only ancestor):
 
 ```toml
 [rootfs]
-readonly = ["/usr", "/lib"]            # Landlock deny-write (read + execute kept)
+readonly = ["/usr", "/lib"]            # read-only mount (read + execute kept; write ⇒ EROFS)
 writable = ["/usr/lib/python3.12"]     # carve a hole back out; loud, derived risk
 ```
 
@@ -334,9 +342,9 @@ is derived from `mode = host` (no `threats.reinstated` field; the shape of the g
   costs such images their closure-lock (§7.11.4c). `config.User` is read at build, for the lock
   decision; the same field, a different consumer, no conflict.
 - **Closure-tampering is closed for a non-root image, by build-derived closure-lock** (§7.11.4c): the
-  executable surface (the FHS closure) equals the pinned image throughout the session, enforced by
-  Landlock against in-namespace root. For an all-root image there is no lock — but that is the image's
-  own posture (Docker parity), not a Kennel gap. Two derivation gaps remain (`gosu`/`su-exec`
+  executable surface (the FHS closure) equals the pinned image throughout the session, enforced as
+  read-only mounts the persona workload cannot remount. For an all-root image there is no lock — but
+  that is the image's own posture (Docker parity), not a Kennel gap. Two derivation gaps remain (`gosu`/`su-exec`
   drop-privilege images read as all-root; app code outside `/usr|/lib` stays writable); a `persist`
   upper additionally diverges *data* outside the integrity ladder, and each `writable` carve-out is
   its own derived risk line. `fs.execute` coarseness is unchanged.
