@@ -42,8 +42,8 @@ use kennel_lib_policy::settled::{
     AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy,
     DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
     IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
-    ProcVisibility, Protocol, ProxyListen, SeccompAction, SeccompPolicy, SshGrant, SshRuntime,
-    TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    ProcVisibility, Protocol, ProxyListen, RootfsRuntime, SeccompAction, SeccompPolicy, SshGrant,
+    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use kennel_lib_policy::PolicyError;
 use std::collections::BTreeSet;
@@ -72,6 +72,8 @@ pub struct Translated {
     pub ulimits: UlimitsRuntime,
     /// The workload to run (§7.4) — argv, cwd, pin, and optional sha256.
     pub workload: WorkloadRuntime,
+    /// The per-kennel OCI substrate (§7.11) — the image root the daemon boots, when OCI-model.
+    pub rootfs: RootfsRuntime,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -141,6 +143,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let env = translate_env(effective, &mut deferred);
     let ulimits = translate_ulimits(effective)?;
     let workload = translate_workload(effective, &mut deferred)?;
+    let rootfs = translate_rootfs_runtime(effective, &mut deferred);
 
     Ok(Translated {
         effective_policy: EffectivePolicy {
@@ -163,8 +166,29 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         env,
         ulimits,
         workload,
+        rootfs,
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Translate `[rootfs]` into the settled [`RootfsRuntime`] (§7.11). Carries the substrate `path`
+/// (`subst`-resolved for `~`/`<home>` like other in-view paths) and the provenance `image`. The
+/// loud-grant well-formedness (path/image/reason all present) is already enforced by
+/// [`validate_rootfs`] at the top of [`translate`], so this only shapes the runtime; `reason`
+/// stays in source (the risk surface), never the settled artefact. Absent ⇒ an empty runtime,
+/// omitted from the canonical form, so a non-OCI policy signs exactly as before.
+fn translate_rootfs_runtime(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> RootfsRuntime {
+    let Some(r) = src.rootfs.as_ref() else {
+        return RootfsRuntime::default();
+    };
+    RootfsRuntime {
+        path: r
+            .path
+            .as_deref()
+            .map(|p| subst(p, deferred))
+            .unwrap_or_default(),
+        image: r.image.clone().unwrap_or_default(),
+    }
 }
 
 /// Translate `[workload]` into the settled [`WorkloadRuntime`] (§7.4). `argv` carries
@@ -1210,6 +1234,23 @@ mod tests {
     }
 
     #[test]
+    fn rootfs_runtime_carries_path_and_image_subst_resolved() {
+        let p = parse(
+            b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
+              image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\n",
+        )
+        .expect("parse");
+        let mut d = BTreeSet::new();
+        let rt = translate_rootfs_runtime(&p, &mut d);
+        assert_eq!(rt.image, "ghcr.io/o/a@sha256:abc");
+        assert!(rt.path.contains("img/rootfs"), "path: {}", rt.path);
+        assert!(!rt.is_empty());
+        // No [rootfs] ⇒ empty runtime, omitted from the canonical form.
+        let none = translate_rootfs_runtime(&parse(b"name = \"x\"\n").expect("parse"), &mut d);
+        assert!(none.is_empty());
+    }
+
+    #[test]
     fn dbus_translates_only_enabled_buses() {
         // session enabled with rules; system present but disabled ⇒ omitted.
         let src = parse(
@@ -1911,6 +1952,7 @@ mod tests {
             env: t.env,
             ulimits: t.ulimits,
             workload: t.workload,
+            rootfs: t.rootfs,
         };
         kennel_lib_policy::invariant::validate(&policy).expect("framework invariants must hold");
     }

@@ -1198,6 +1198,32 @@ impl WorkloadRuntime {
     }
 }
 
+/// The per-kennel OCI substrate runtime (§7.11): the unpacked image `kenneld` boots as the kennel
+/// root, plus the provenance digest the runner must match.
+///
+/// Like [`SshRuntime`]/[`WorkloadRuntime`] a *service* input `kenneld` realises (the
+/// view-construction branch), not part of the enforcement core; omitted from the canonical form
+/// when empty, so a non-OCI policy signs exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootfsRuntime {
+    /// The unpacked image rootfs (the store entry's `rootfs/`), `subst`-resolved.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store
+    /// entry's recorded `digest`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub image: String,
+}
+
+impl RootfsRuntime {
+    /// Whether no OCI substrate is declared (the policy is not OCI-model).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.path.is_empty()
+    }
+}
+
 /// The settled policy body (everything the signature covers).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1260,6 +1286,11 @@ pub struct SettledPolicy {
     /// signs exactly as before.
     #[serde(default, skip_serializing_if = "WorkloadRuntime::is_empty")]
     pub workload: WorkloadRuntime,
+    /// The per-kennel OCI substrate (§7.11): the image root the daemon boots. A table like
+    /// [`workload`](Self::workload) and declared last; omitted from the canonical form when
+    /// empty, so a non-OCI policy signs exactly as before.
+    #[serde(default, skip_serializing_if = "RootfsRuntime::is_empty")]
+    pub rootfs: RootfsRuntime,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.
