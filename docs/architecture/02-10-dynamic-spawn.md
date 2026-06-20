@@ -97,10 +97,13 @@ not in the agent's write set. Single-leg is enforced once, at the floor; the man
 underneath it. The unit of mutation is the leaf field (or an explicitly scoped subtree), so a
 manifest opening `net.allow` cannot be used to rewrite `net.mode` beside it.
 
-**Depth-1** (§7.12.8) is **not** re-checked here: it is enforced transitively at template *install*
-time (a template named in any `[[spawn.allow]]` is refused if it carries `[spawn]`), so by the time
-a `SPAWN` arrives the target is already known not to be a spawner. The reaper accounting below relies
-on it (the hard-reaper coupling is a single hop because no spawned kennel can itself spawn).
+**Spawn-eligibility** (§7.12.8) is **not** re-checked here. Every template a `[[spawn.allow]]` names is
+validated at the *spawner's* install: it carries no `[spawn]` of its own (depth-1), and it declares its
+`max_lifetime`, its resource ceilings (memory/pids/CPU), and its `[[mutable]]` manifest. The gate runs
+at the spawner's install, not the target's — a template cannot know at its own install which future
+policy will name it, and depth-1 means there is no chain to walk. So by the time a `SPAWN` arrives the
+target is already known eligible: a non-spawner, single-hop, bounded in lifetime and resources, with a
+fenced write surface.
 
 ## The `SPAWN` transaction
 
@@ -193,7 +196,9 @@ namespace clone, `pivot_root`, init exec) proceeds off the binder looper. Ration
 
 1. Requester mints `socketpair()` + `pipe()`; keeps the local socketpair end and the pipe read end.
 2. Requester sends `SPAWN(template@version, mutable-writes, [socketpair-remote, pipe-write])` to Node 0.
-3. `kenneld` validates the `[spawn]` grant and the manifest diff (deny → reply + audit, fds dropped).
+3. `kenneld` validates the `[spawn]` grant and the manifest diff, and **atomically claims a
+   `max_instances` slot** under the Node 0 accounting lock (§7.12.7) — deny, or ceiling full → reply +
+   audit, fds dropped.
 4. `kenneld` accepts the two descriptors, resolves the template in memory, replies `spawn-<uuid>`.
 5. `kenneld` enqueues construction; the privhelper factory clones namespaces and injects the fds
    into the supervision plan at the new fixed slots.
@@ -210,13 +215,21 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
   `EOF` on stdin / `SIGPIPE` on stdout and exits; `kennel-bin-init` tears the kennel down. The
   graceful path, and the path a construction failure also takes.
 - **Hard reaper (control plane).** `kenneld` tracks the **binder session** that issued the `SPAWN`
-  (the requester's Node 0 connection). If that session drops — requester crash, OOM, TTL expiry —
-  `kenneld` issues a `cgroup.kill` to the spawned kennel, reusing the TTL freeze/kill plumbing
-  ([`05-state-and-supervision.md`](05-state-and-supervision.md)). The backstop for a tool that
+  (the requester's Node 0 connection). If that session drops — requester crash, OOM, the *requester's*
+  TTL expiry — `kenneld` issues a `cgroup.kill` to the spawned kennel, reusing the TTL freeze/kill
+  plumbing ([`05-state-and-supervision.md`](05-state-and-supervision.md)). The backstop for a tool that
   ignores `EOF`.
-- **Accounting.** The reaper that kills **decrements `max_instances`**, so a flapping requester
-  cannot leak slots across teardown races. `max_instances` is the concurrent-spawn ceiling (the
-  fork-bomb bound); depth-1 keeps it a global ceiling rather than a per-node one.
+- **Self-reap (the spawned kennel's own lifetime, §7.12.7).** Independent of the requester: the spawned
+  kennel inherits the template's declared `max_lifetime` (a spawn-eligibility precondition, §7.12.8), and
+  the standard TTL reaper applies it directly — so the tool cannot run past its declared life even if the
+  requester holds its session open forever. Same `cgroup.freeze`/`cgroup.kill` plumbing.
+- **Slot accounting — claim, not check (§7.12.7).** `max_instances` is enforced by an **atomic
+  check-and-claim**: a single Node 0 accounting-lock operation validates the ceiling *and* increments the
+  live count, taken at validation (step 3) **before** the reply and the asynchronous construction enqueue.
+  Deferring the check to construction would let two concurrent `SPAWN`s on different loopers both pass a
+  ceiling they jointly exceed; under the lock the second sees the first's claim. The slot is held from
+  claim until a reaper releases it; a kill-path release decrements, so a flapping requester cannot leak
+  slots across teardown races. `max_instances` is global (depth-1 keeps it so, not per-node).
 
 ## Ephemerality and identity
 
@@ -224,9 +237,10 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
 - **Transient identity** — spawned kennels take `spawn-<uuid>` names; they consume no operator
   registry namespace and cannot collide with an operator-named kennel.
 - **No persistence** — the root is an ephemeral `tmpfs`, or an OCI image at `persistence = "discard"`
-  ([`02-9-oci.md`](02-9-oci.md), §7.11.4a). A spawn-target template **must declare a memory
-  ceiling**: artifacts pass in memory as `memfd`s charged to the spawned kennel's memory cgroup, and
-  without a ceiling an oversized artifact is an unbounded-memory DoS rather than a bounded transfer.
+  ([`02-9-oci.md`](02-9-oci.md), §7.11.4a). The spawned kennel's **resource ceilings** (memory/pids/CPU)
+  are a spawn-eligibility precondition checked at the spawner's install (§7.12.8), independent of any
+  artifact path; the `memfd` artifact transfer below is one consumer of the memory bound, not its reason
+  for existing.
 
 > **`memfd` artifact transfer is roadmap, not first-build.** The stdio channel + control handoff
 > above is the W6–W8 core. The in-memory `memfd` artifact path (§7.12.6) is net-new plumbing with no
@@ -271,8 +285,9 @@ daemon), mitigated by scoping `[[spawn.allow]]` to the templates an agent actual
 ## Open questions
 
 - **`max_instances` default** — the concurrent-spawn ceiling when a `[spawn]` grant omits it.
-- **The spawn-target memory ceiling** — a fixed framework floor, or always author-declared per
-  template (the §7.12.6 requirement makes it mandatory; the question is the default).
+- **Spawn-eligibility defaults** — the resource ceilings (memory/pids/CPU) and `max_lifetime` are
+  mandatory spawn-eligibility declarations (§7.12.8); the open question is whether each carries a
+  framework default when a template omits it, or eligibility hard-requires an explicit value.
 - **Manifest-diff canonicalisation** — the diff `candidate ∖ manifest == template ∖ manifest` is
   computed over the resolved policy's leaf fields; the open detail is the canonical form the leaf
   comparison runs on (list-ordering for pool appends, subtree scoping) so that a semantically-empty

@@ -47,7 +47,7 @@ Standing constraints that shape the mix:
   template's *mutable-field manifest* opens. No new policy is authored, so no new signature is
   needed; those manifest writes are the entire agent-controlled attack surface (§7.12.3).
 - **Depth-1 is a hard rule** (§7.12.8). A spawn-target template may not carry `[spawn]`,
-  refused transitively at install. This is a fork-bomb prohibition, not a deferred feature;
+  refused at the spawner's install. This is a fork-bomb prohibition, not a deferred feature;
   there is no depth-N roadmap item.
 
 ## Workstreams
@@ -83,11 +83,12 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   `[spawn]` in `schema/policy.toml.schema` and `kennel-lib-compile`: the `max_instances`
   ceiling (fork-bomb bound), the `[[spawn.allow]]` template grant (+ optional per-requester
   `mutable` narrowing), and the T3.9 risk
-  derivation. The compiler enforces **spawn-eligibility transitively at install time**: a
-  template named in any `[spawn.allow]` is refused if it (1) carries `[spawn]` itself (depth-1,
-  §7.12.8 — fail-closed before any instantiation can reach it), or (2) fails to declare its own
-  lifecycle bound (`max_lifetime`/reaper TTL), its resource ceilings (memory + pids + CPU), and
-  its mutable-field manifest. *Instantiation is a manifest diff, not value synthesis.* All
+  derivation. The compiler enforces **spawn-eligibility at the spawner's install**: when a policy
+  carrying `[spawn]` is installed, each template it names in `[spawn.allow]` is refused if it (1)
+  carries `[spawn]` itself (depth-1, §7.12.8 — fail-closed before any instantiation can reach it),
+  or (2) fails to declare its own lifecycle bound (`max_lifetime`/reaper TTL), its resource ceilings
+  (memory + pids + CPU), and its mutable-field manifest. (The gate runs at the spawner's install, not
+  the target's — a template cannot know which future policy will name it.) *Instantiation is a manifest diff, not value synthesis.* All
   compiler-side — out of `cargo tree -p kenneld`.
 
 - **W4 · Template `[[mutable]]` manifest grammar + instantiation-time diff validator.** **[dep] M.**
@@ -276,7 +277,7 @@ CODING-STANDARDS §13/§14.
 1. **Request, don't author.** A workload names a signed template and writes only the fields its
    `[[mutable]]` manifest opens; it cannot introduce policy at runtime (§7.12.1). The capability
    floor of every spawn is the signed template's, full stop.
-2. **Depth-1 by hard rule, refused transitively at install** (§7.12.8). Not a deferred feature;
+2. **Depth-1 by hard rule, refused at the spawner's install** (§7.12.8). Not a deferred feature;
    there is no depth-N roadmap item.
 3. **Kennel does not understand MCP** (§7.12.5). The `SPAWN`/FD primitive is a generic
    confined-stdio-service transport; MCP is an unparsed convention on top. Application-semantic

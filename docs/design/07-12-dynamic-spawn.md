@@ -181,22 +181,40 @@ A spawned kennel leaves no host trace, and that property is independent of the t
   operator registry namespace and cannot collide with an operator-named kennel.
 - **No persistence.** The root is an ephemeral `tmpfs`, or an OCI image at `persistence = "discard"`
   (§7.11.4a). The spawned kennel cannot write host disk. Artifacts pass in memory as `memfd`s over the
-  channel, and a `memfd` is charged to the spawned kennel's memory cgroup — so a template used as a
-  spawn target **must declare a memory ceiling**, or an oversized artifact is an unbounded-memory DoS
-  rather than a bounded transfer. The memory limit is part of what makes a template spawn-safe.
+  channel, charged to the spawned kennel's memory cgroup. The **memory ceiling** that bounds them is not
+  a `memfd` detail: it is one of the spawn-eligibility preconditions every spawn-target template declares
+  (§7.12.8), so the cgroup is bounded whether or not any artifact is ever transferred. The `memfd` path
+  is one consumer of that bound, not its reason for existing.
 
-## 7.12.7 Fate-sharing: the double reaper
+## 7.12.7 Fate-sharing, self-reap, and slot accounting
 
-A spawned kennel must not outlive its purpose, and the coupling is `kenneld`-brokered, not parental.
+A spawned kennel must not outlive its purpose. Two triggers couple it to the requester
+(`kenneld`-brokered, not parental — the double reaper); a third bounds it on its own; all three run on
+the one `cgroup.freeze`/`cgroup.kill` plumbing.
 
 - **Soft reaper (data plane).** When the requester is done it `close()`s its local channel ends; the
   spawned tool receives `EOF` on stdin / `SIGPIPE` on stdout and exits, and `kennel-bin-init` tears the
   kennel down. The graceful path.
 - **Hard reaper (control plane).** `kenneld` tracks the binder session that issued the `SPAWN`. If that
-  session drops — requester crash, OOM, TTL expiry — `kenneld` issues a `cgroup.kill` to the spawned
-  kennel, terminating it regardless of whether the tool honoured `EOF`. The backstop for a hung tool.
+  session drops — requester crash, OOM, the *requester's* TTL expiry — `kenneld` issues a `cgroup.kill`
+  to the spawned kennel, terminating it regardless of whether the tool honoured `EOF`. The backstop for
+  a hung tool.
+- **Self-reap (the spawned kennel's own lifetime).** Independent of the requester: every spawn-target
+  template declares a `max_lifetime` (a spawn-eligibility precondition, §7.12.8), and the standard TTL
+  reaper applies it to the spawned kennel directly. An agent that spawns a tool and holds its session
+  open forever still cannot run the tool past its declared life — the spawned kennel reaps itself at its
+  own TTL, regardless of the requester's session.
 
-## 7.12.8 Depth-1 is a hard rule
+**Slot accounting is a claim, not a check.** `max_instances` is enforced by an atomic *check-and-claim*:
+validating the ceiling and incrementing the live count are a single indivisible operation under a Node 0
+accounting lock, taken *before* the spawn is enqueued for construction. Because the `SPAWN` reply is
+asynchronous to the build (§7.12.4), the check cannot be deferred to when construction completes — two
+concurrent `SPAWN`s on different loopers would otherwise both pass a ceiling they jointly exceed. Under
+the lock, the second to acquire it sees the first's claim. A slot is held from claim until a reaper
+releases it on teardown; a kill-path release decrements the count, so a flapping requester cannot leak
+slots across teardown races.
+
+## 7.12.8 Depth-1 and spawn-eligibility
 
 Spawning is **depth-1, by rule, not by default**: a template reachable as a spawn target may not
 carry `[spawn]`. This is a fork-bomb prohibition, not a deferred feature. Recursion would turn
@@ -205,13 +223,21 @@ carry `[spawn]`. This is a fork-bomb prohibition, not a deferred feature. Recurs
 a single hop (the requester's session, never a chain a cascade would have to walk). There is no
 depth-N roadmap item; multi-level delegation is out of the model.
 
-The check is **transitive and at install time**: a template named in any `[spawn.allow]` is refused
-at install if it carries `[spawn]`, rather than discovered at instantiation. If A spawns B, B is a
-spawn target and B with `[spawn]` is rejected when B is installed — fail-closed, before any
-instantiation can reach it.
+Depth-1 is one clause of **spawn-eligibility**, the preconditions a template must satisfy to be
+nameable as a spawn target. A spawn-eligible template:
 
-The reaper that kills decrements `max_instances`, so a flapping requester cannot leak slots across
-teardown races.
+- carries no `[spawn]` of its own (depth-1, above);
+- declares its own **lifetime bound** (`max_lifetime` — the §7.12.7 self-reap);
+- declares its **resource ceilings** (memory, pids, CPU — the cgroup limits that keep a spawn bounded,
+  independent of any artifact path); and
+- declares its **`[[mutable]]` manifest** (§7.12.3), so the agent's write surface is the fenced one.
+
+Eligibility is checked **at the spawner's install, not the target's**. When a policy carrying `[spawn]`
+is installed or compiled, every template it names in `[[spawn.allow]]` is validated against the
+preconditions above — fail-closed, before any instantiation can reach it. The direction matters: the
+gate cannot run at the target's install, because a template cannot know, when it is installed, which
+future policy will name it; and depth-1 means there is no chain, so there is nothing transitive to walk.
+If A names B, the check runs when A is installed and rejects A if B is ineligible.
 
 ## 7.12.9 Security posture — what holds, what is waived
 
@@ -258,9 +284,10 @@ the tools it is permitted to spawn.
 >
 > *Mitigations in place.* Request-don't-author (the capability floor is the signed template, not
 > agent-supplied policy); a frozen template plus a mutable-field manifest, the candidate diffed against
-> the template and accepted only if it differs within the manifest, each field within its bound (§7.12.3); depth-1 by hard rule, refused transitively at install
-> (§7.12.8); the `max_instances` ceiling and the double-reaper fate-sharing (§7.12.7); ephemerality,
-> no host persistence (§7.12.6).
+> the template and accepted only if it differs within the manifest, each field within its bound (§7.12.3);
+> depth-1 and spawn-eligibility (lifetime, ceilings, manifest) checked at the spawner's install (§7.12.8);
+> the `max_instances` ceiling enforced by atomic check-and-claim, the fate-sharing double reaper, and the
+> spawned kennel's own-lifetime self-reap (§7.12.7); ephemerality, no host persistence (§7.12.6).
 >
 > *Residuals.*
 > - **R1 — mutable-field surface.** The boundary is exactly as strong as the template's per-field
@@ -298,8 +325,9 @@ that is already served, badly enough to discourage, by an existing verb.
 
 1. `[spawn]` in `schema/policy.toml.schema` and `kennel-lib-compile`, with the `max_instances` ceiling,
    the `[[spawn.allow]]` template grant (+ optional per-requester `mutable` narrowing), and the T3.9 risk
-   derivation; the compiler refuses, at install time and transitively, any spawn-target template that
-   carries `[spawn]` (depth-1, §7.12.8).
+   derivation; the compiler refuses, **at the spawner's install**, any template a `[[spawn.allow]]` names
+   that is not spawn-eligible — carries `[spawn]` (depth-1), or fails to declare its `max_lifetime`,
+   its resource ceilings, or its `[[mutable]]` manifest (§7.12.8).
 2. Template `[[mutable]]` manifest grammar (the three bound kinds: pool+`max`, `oneof`, predicate) and
    the instantiation-time diff validator (`candidate ∖ manifest == template ∖ manifest`, each field within
    its bound, writes outside the manifest hard-rejected) — the §7.12.3 attack surface.
@@ -307,6 +335,7 @@ that is already served, badly enough to discourage, by an existing verb.
    in-memory template resolution, FD translation and injection.
 4. `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init` `dup2`s
    them before `execve`.
-5. Binder-session tracking for the hard reaper, and the kill-decrements-`max_instances` accounting.
+5. Binder-session tracking for the hard reaper, the spawned-kennel `max_lifetime` self-reap, and the
+   atomic check-and-claim `max_instances` accounting (the Node 0 accounting lock).
 6. The T3.9 THREATS entry (mutable-field surface + delegated-composition residuals) and the
    compliance-table mapping.
