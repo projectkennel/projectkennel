@@ -97,7 +97,7 @@ fn node_ptr(port: u16) -> u64 {
     0x1000_0000 | u64::from(port)
 }
 
-/// Register a callback node for `port` with node 0 ([`REGISTER_MIRROR`]). The node is flagged
+/// Register a callback node for `port` with node 0 ([`REGISTER_MIRROR`](verb::REGISTER_MIRROR)). The node is flagged
 /// `ACCEPTS_FDS` so kenneld may push the conduit fd to it. kenneld replies [`status::OK`] (or
 /// [`status::DENIED`] for a port outside the policy mirror set).
 fn register(conn: &Connection, port: u16) -> io::Result<()> {
