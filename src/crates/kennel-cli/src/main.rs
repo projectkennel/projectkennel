@@ -28,6 +28,7 @@ use std::process::ExitCode;
 use kennel_lib_control::control::{self, Request, Response};
 use kennel_lib_control::socket;
 
+mod oci;
 mod policy;
 mod review;
 mod run;
@@ -105,6 +106,11 @@ const COMMANDS: &[CommandSpec] = &[
         name: "audit",
         summary: "show a kennel's audit log",
         usage: "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
+    },
+    CommandSpec {
+        name: "oci",
+        summary: "build and run an OCI image as a confined kennel substrate (§7.11)",
+        usage: "oci <build|run> <name> [--image <ref>] [--force] [-- <cmd...>]",
     },
 ];
 
@@ -218,6 +224,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "attach" => run::attach(rest),
         "review" => review::review(rest),
         "release" => review::release(rest),
+        "oci" => oci::dispatch(rest),
         "stop" => stop(rest),
         "list" => list(),
         "policy" => dispatch_policy(rest),

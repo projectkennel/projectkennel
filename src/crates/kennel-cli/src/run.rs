@@ -78,7 +78,42 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
     // defaults to the resolved policy name (`07-paths`, resolve-by-name).
     let (policy_file, default_name) = resolve_policy(policy_arg, true)?;
     let name = name_arg.map_or(default_name, str::to_owned);
+    launch(
+        policy_file,
+        &name,
+        command,
+        force,
+        key_path,
+        template_dirs,
+        trust_dirs,
+        None,
+        policy_arg,
+    )
+}
 
+/// The shared launch core for `kennel run` and `kennel oci run`: compile-or-pass-through the
+/// policy, run the host-side pre-flights, and drive the daemon to the workload's exit.
+///
+/// `oci_digest` is the [grammar partition](crate::oci) gate: `kennel run` passes `None` and
+/// refuses an `[rootfs]` policy; `kennel oci run` passes `Some(<recorded digest>)` (it has
+/// resolved the named store entry), which both permits `[rootfs]` and asserts the signed
+/// `[rootfs].image` equals that digest before boot. `display` is the operator-facing name of
+/// the policy for diagnostics (a path or a store `<name>`).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn launch(
+    policy_file: PathBuf,
+    name: &str,
+    command: &[String],
+    force: bool,
+    key_path: Option<&str>,
+    template_dirs: Vec<PathBuf>,
+    trust_dirs: Vec<PathBuf>,
+    oci_digest: Option<&str>,
+    display: &str,
+) -> Result<ExitCode, String> {
+    let allow_oci = oci_digest.is_some();
+    let mut template_dirs = template_dirs;
+    let mut trust_dirs = trust_dirs;
     // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
     // artefact is passed straight through. `_temp` keeps the on-disk settled file
     // alive for the daemon to read, and removes it when this function returns.
@@ -128,11 +163,11 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
         let temp = if minted {
             TempSettled::write_in(
                 policy_file.parent().unwrap_or_else(|| Path::new(".")),
-                &name,
+                name,
                 &out,
             )?
         } else {
-            TempSettled::write(&name, &out)?
+            TempSettled::write(name, &out)?
         };
         let path = temp.path().to_path_buf();
         eprintln!(
@@ -152,6 +187,27 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
     // Read from the settled bytes we hold; host-side, never contacts kenneld.
     let settled_bytes = std::fs::read(&effective_policy)
         .map_err(|e| format!("reading {} for pre-flight: {e}", effective_policy.display()))?;
+    // Grammar partition (§7.11 / arch 02-9): `[rootfs]` is the OCI substrate model and is
+    // valid only under `kennel oci run`, which resolves the named store entry and verifies
+    // `[rootfs].image` against the recorded digest. `kennel run` refuses it rather than boot
+    // an image without that provenance check.
+    if !allow_oci && crate::oci::policy_is_oci(&settled_bytes) {
+        return Err(format!(
+            "`{display}` is an OCI-model policy ([rootfs] set); run it with `kennel oci run <name>`"
+        ));
+    }
+    if let Some(expected) = oci_digest {
+        // Provenance check (§7.11): the signed `[rootfs].image` must equal the digest the
+        // build recorded for this store entry, so a swapped image is refused even with a
+        // valid signature on the policy. The signature is verified daemon-side at Start.
+        let declared = crate::oci::policy_image(&settled_bytes);
+        if declared.as_deref() != Some(expected) {
+            return Err(format!(
+                "image mismatch for `{display}`: policy [rootfs].image is {}, store digest is `{expected}`",
+                declared.map_or_else(|| "absent".to_owned(), |d| format!("`{d}`"))
+            ));
+        }
+    }
     ensure_workspace_manifests(&settled_bytes);
     // An exclusive bind blind-mounts the host side with the privhelper's privilege (§2.7); refuse
     // early if the operator does not own a host path it would shadow (the privhelper refuses too).
@@ -163,7 +219,7 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let request = Request::Start(StartRequest {
         policy: effective_policy,
-        kennel: name.clone(),
+        kennel: name.to_owned(),
         argv: command.to_vec(),
         cwd,
         // Forward the caller's terminal type so an interactive workload renders; the
@@ -179,7 +235,7 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
 
     let mut conn = connect()?;
     if io::stdin().is_terminal() {
-        return run_interactive(conn, &request, &name);
+        return run_interactive(conn, &request, name);
     }
     // Non-interactive (piped/redirected): pass our stdio straight through.
     let stdin = io::stdin();

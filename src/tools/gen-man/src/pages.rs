@@ -124,6 +124,11 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "show a kennel's audit log",
         "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
     ),
+    (
+        "oci",
+        "build and run an OCI image as a confined kennel substrate (§7.11)",
+        "oci <build|run> <name> [--image <ref>] [--force] [-- <cmd...>]",
+    ),
 ];
 
 /// `kennel policy` sub-verbs, mirrored from `POLICY_VERBS`.
@@ -289,6 +294,15 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
                     ("--novel-only", "Suppress events seen in a prior run (new events only)."),
                     ("--follow", "Stream new events as they arrive."),
                     ("--print-journalctl-command", "Print the equivalent journalctl invocation and exit."),
+                ],
+            },
+            Command {
+                usage: SYNC_COMMANDS[10].2,
+                summary: SYNC_COMMANDS[10].1,
+                options: &[
+                    ("build <name> --image <ref>", "Provision a named image store entry: record the provenance digest and scaffold a run policy."),
+                    ("run <name> [-- <cmd...>]", "Boot a built store entry under its signed policy (the digest is checked against [rootfs].image)."),
+                    ("--force", "Overwrite an existing entry (build) or override a pinned [workload] (run)."),
                 ],
             },
         ],

@@ -29,7 +29,9 @@ pub fn store_root() -> Result<PathBuf, String> {
     }
     let home = std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
-        .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set; cannot locate the image store".to_owned())?;
+        .ok_or_else(|| {
+            "neither XDG_DATA_HOME nor HOME is set; cannot locate the image store".to_owned()
+        })?;
     Ok(PathBuf::from(home).join(".local/share/kennel/images"))
 }
 
@@ -48,13 +50,17 @@ pub fn validate_name(name: &str) -> Result<(), String> {
         return Err(format!("image name `{name}` is not a valid entry"));
     }
     if name.contains('/') || name.contains('\\') {
-        return Err(format!("image name `{name}` must be a single path component (no `/`)"));
+        return Err(format!(
+            "image name `{name}` must be a single path component (no `/`)"
+        ));
     }
     if name
         .chars()
         .any(|c| c.is_control() || c.is_whitespace() || c == '\0')
     {
-        return Err(format!("image name `{name}` contains control or whitespace characters"));
+        return Err(format!(
+            "image name `{name}` contains control or whitespace characters"
+        ));
     }
     // A leading dot would hide the entry and risks colliding with dotfiles; disallow.
     if name.starts_with('.') {
@@ -84,6 +90,9 @@ impl StoreEntry {
     }
 
     /// The image runtime config (`<entry>/config.json`).
+    // Read by the daemon launcher binding (bound at `/run/kennel/oci-config.json`); part of the
+    // store-layout contract today, consumed once that wiring lands.
+    #[allow(dead_code)]
     #[must_use]
     pub fn config(&self) -> PathBuf {
         self.dir.join("config.json")
@@ -119,7 +128,8 @@ impl StoreEntry {
     ///
     /// Fails if the entry directory cannot be created or the file cannot be written.
     pub fn write_digest(&self, image: &str) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir).map_err(|e| format!("creating {}: {e}", self.dir.display()))?;
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| format!("creating {}: {e}", self.dir.display()))?;
         let p = self.digest_path();
         std::fs::write(&p, format!("{}\n", image.trim()))
             .map_err(|e| format!("writing {}: {e}", p.display()))
@@ -151,12 +161,14 @@ impl Store {
     }
 
     /// Open a store at an explicit root (for tests and `--store` overrides).
+    #[allow(dead_code)] // test + future `--store`; the production path uses `open()`
     #[must_use]
-    pub fn at(root: PathBuf) -> Self {
+    pub const fn at(root: PathBuf) -> Self {
         Self { root }
     }
 
     /// The store root directory.
+    #[allow(dead_code)] // store-API surface; not yet read on the production path
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -205,13 +217,170 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str) -> String {
     )
 }
 
+/// Whether settled-policy bytes are the OCI substrate model: a non-empty `[rootfs].path`.
+/// The grammar partition (§7.11) keys on this — `kennel run` refuses it, `kennel oci run`
+/// requires it. A parse failure is treated as not-OCI (the daemon rejects a bad policy anyway).
+#[must_use]
+pub fn policy_is_oci(settled_bytes: &[u8]) -> bool {
+    kennel_lib_policy::parse_settled_unverified(settled_bytes)
+        .is_ok_and(|p| !p.rootfs.path.is_empty())
+}
+
+/// The signed `[rootfs].image` provenance string, if the policy is OCI-model. Compared against
+/// the store entry's recorded `digest` before boot (`kennel oci run`).
+#[must_use]
+pub fn policy_image(settled_bytes: &[u8]) -> Option<String> {
+    kennel_lib_policy::parse_settled_unverified(settled_bytes)
+        .ok()
+        .map(|p| p.rootfs.image)
+        .filter(|s| !s.is_empty())
+}
+
+/// `kennel oci <build|run> …` — the OCI substrate verb group (§7.11). A noun group like
+/// `kennel policy`, kept distinct from `kennel run` so `[rootfs]` is valid under exactly one
+/// verb (the grammar partition) and the run path always does the digest provenance check.
+///
+/// # Errors
+///
+/// Returns a usage or operational error message (the caller prints it).
+pub fn dispatch(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let (verb, rest) = args
+        .split_first()
+        .ok_or("usage: kennel oci <build|run> <name> [...]")?;
+    match verb.as_str() {
+        "build" => build(rest),
+        "run" => run(rest),
+        other => Err(format!(
+            "unknown `kennel oci` verb `{other}` (expected build|run)"
+        )),
+    }
+}
+
+/// `kennel oci build <name> --image <ref>` — provision a named store entry's metadata: record
+/// the provenance digest and scaffold the run policy the operator completes and signs.
+///
+/// The confined fetch+unpack of `rootfs/` + `config.json` (running `skopeo`/`umoci` under the
+/// Kennel-shipped vetted fetch policy, §7.11.7) is W17c; until it lands, this prepares the entry
+/// and reports the remaining step. Populating `rootfs/`/`config.json` out of band (e.g. a test
+/// harness) is supported — the entry layout is the contract.
+///
+/// # Errors
+///
+/// Returns an error if the name is invalid, `--image` is missing, or the entry cannot be written.
+pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let mut name: Option<&str> = None;
+    let mut image: Option<&str> = None;
+    let mut force = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--image" => image = Some(it.next().ok_or("--image needs a value")?),
+            "--force" => force = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if name.is_none() => name = Some(v),
+            _ => return Err("unexpected extra argument".to_owned()),
+        }
+    }
+    let name = name.ok_or("usage: kennel oci build <name> --image <ref> [--force]")?;
+    let image = image.ok_or("`kennel oci build` needs --image <ref> (the image@sha256 to pin)")?;
+
+    let store = Store::open()?;
+    let entry = store.entry(name)?;
+    if entry.exists() && !force {
+        return Err(format!(
+            "store entry `{name}` already exists at {}; pass --force to overwrite",
+            entry.dir().display()
+        ));
+    }
+    std::fs::create_dir_all(entry.rootfs())
+        .map_err(|e| format!("creating {}: {e}", entry.rootfs().display()))?;
+    entry.write_digest(image)?;
+    let policy = entry.policy();
+    if !policy.exists() || force {
+        std::fs::write(&policy, scaffold_policy(name, &entry.rootfs(), image))
+            .map_err(|e| format!("writing {}: {e}", policy.display()))?;
+    }
+    eprintln!(
+        "kennel: prepared store entry `{name}` at {}",
+        entry.dir().display()
+    );
+    eprintln!("  digest: {image}");
+    eprintln!(
+        "  policy: {} (complete `reason`, then `kennel policy sign`)",
+        policy.display()
+    );
+    eprintln!(
+        "  rootfs: {} — populate via the confined fetch (W17c) or a local unpack",
+        entry.rootfs().display()
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// `kennel oci run <name> [-- <cmd...>]` — boot a named store entry under its signed policy.
+///
+/// Resolves `<name>`, asserts the entry is populated, then drives the standard run path with
+/// the recorded digest as the provenance gate: [`crate::run::launch`] permits `[rootfs]` and
+/// refuses unless the signed `[rootfs].image` equals the digest. The daemon's OCI spawn-path
+/// branch (W18) boots the image as an overlay root. A `-- <cmd>` override pins an explicit
+/// in-root argv; with no override the image entrypoint is used (via the launcher).
+///
+/// # Errors
+///
+/// Returns an error if the name is invalid, the entry is not built, the digest is unreadable,
+/// or the run fails.
+pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let (head, command) = args
+        .iter()
+        .position(|a| a == "--")
+        .map_or((args, &[][..]), |sep| {
+            (
+                args.get(..sep).unwrap_or(&[]),
+                args.get(sep.saturating_add(1)..).unwrap_or(&[]),
+            )
+        });
+    let mut name: Option<&str> = None;
+    let mut force = false;
+    for arg in head {
+        match arg.as_str() {
+            "--force" => force = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if name.is_none() => name = Some(v),
+            _ => return Err("unexpected extra argument before `--`".to_owned()),
+        }
+    }
+    let name = name.ok_or("usage: kennel oci run <name> [--force] [-- <cmd...>]")?;
+
+    let store = Store::open()?;
+    let entry = store.entry(name)?;
+    if !entry.exists() {
+        return Err(format!(
+            "store entry `{name}` is not built (no rootfs at {}); run `kennel oci build {name} …` first",
+            entry.rootfs().display()
+        ));
+    }
+    let digest = entry.read_digest()?;
+    crate::run::launch(
+        entry.policy(),
+        name,
+        command,
+        force,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Some(&digest),
+        name,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn names_must_be_safe_single_components() {
-        for bad in ["", ".", "..", "a/b", "a\\b", "/abs", ".hidden", "x\ty", "x y", "a\nb"] {
+        for bad in [
+            "", ".", "..", "a/b", "a\\b", "/abs", ".hidden", "x\ty", "x y", "a\nb",
+        ] {
             assert!(validate_name(bad).is_err(), "`{bad}` should be rejected");
         }
         for ok in ["my-app", "app_1", "node20", "a.b.c"] {
@@ -248,7 +417,11 @@ mod tests {
 
     #[test]
     fn scaffold_contains_the_loud_grant_fields() {
-        let p = scaffold_policy("my-app", Path::new("/store/my-app/rootfs"), "ghcr.io/o/a@sha256:abc");
+        let p = scaffold_policy(
+            "my-app",
+            Path::new("/store/my-app/rootfs"),
+            "ghcr.io/o/a@sha256:abc",
+        );
         assert!(p.contains("[rootfs]"));
         assert!(p.contains("/store/my-app/rootfs"));
         assert!(p.contains("ghcr.io/o/a@sha256:abc"));
