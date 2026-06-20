@@ -35,8 +35,8 @@ use kennel_lib_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_lib_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 
 pub use plan::{
-    AuxProcess, BindMount, ConstructionHalf, LoopbackAddr, Plan, ProxyEndpoint, ShimView,
-    Supervision,
+    AuxProcess, BindMount, ConstructionHalf, ImageRoot, LoopbackAddr, Persistence, Plan,
+    ProxyEndpoint, ShimView, Supervision,
 };
 
 /// The per-instance values the runtime fills into a settled policy's deferred
@@ -325,11 +325,11 @@ pub fn build_view_and_pivot(
 ) -> io::Result<()> {
     use kennel_lib_syscall::mount;
 
-    // OCI substrate root (§7.11 / T3.8): boot the read-only image as an overlay
-    // lowerdir instead of a constructed tmpfs. Distinct head (no host-closure
-    // mirror, image-seeded /etc), shared seal tail.
-    if let Some(image) = &view.image_lower {
-        return build_image_view_and_pivot(view, new_root, image, file_binds);
+    // OCI substrate root (§7.11.4a / T3.8): boot the image as a layered overlay
+    // (kennel-etc : image : scaffold) instead of a constructed tmpfs. Distinct head
+    // (no host-closure mirror, /etc wins by layer precedence), shared seal tail.
+    if let Some(img) = &view.image {
+        return build_image_view_and_pivot(view, new_root, img, file_binds);
     }
 
     // Map an absolute in-kennel path to its staging location under `new_root`.
@@ -385,71 +385,138 @@ pub fn build_view_and_pivot(
     seal_view_tail(view, new_root)
 }
 
-/// The OCI substrate variant of [`build_view_and_pivot`] (§7.11 / T3.8): the
-/// read-only image `rootfs/` is the `overlay` lowerdir and an ephemeral `tmpfs`
-/// (under the kenneld-provided `staging` dir) is the upper, so **nothing is written
-/// to the image** — the integrity-ladder hash/verity is never invalidated by the
-/// runner's own writes, and `<store>/<name>/rootfs/` is shared read-only across runs.
+/// The Kennel-shipped scaffold lower (§7.11.4a): empty mountpoint dirs the seal mounts over
+/// and (for `readonly`) `pivot_root`'s `put_old`, plus empty `/etc` placeholders. Fixed
+/// content, so it is built in the staging tmpfs per spawn rather than shipped as an artifact.
+const SCAFFOLD_DIRS: &[&str] = &[
+    "proc",
+    "dev",
+    "tmp",
+    "sys",
+    "run",
+    "run/kennel",
+    "etc",
+    "home",
+    ".kennel-oldroot",
+];
+/// The `/etc` files `kennel-etc` provides; the scaffold ships empty placeholders so the
+/// `readonly` ro-bind has a target even on a scratch image, and `kennel-etc` outranks them.
+const KENNEL_ETC_FILES: &[&str] = &[
+    "resolv.conf",
+    "hostname",
+    "hosts",
+    "passwd",
+    "group",
+    "nsswitch.conf",
+];
+
+/// The OCI substrate variant of [`build_view_and_pivot`] (§7.11.4a / T3.8): the view is a
+/// three-lower `overlay` — `kennel-etc : image : scaffold` (leftmost wins) — with the
+/// persistence tri-state choosing the upper. **Nothing is ever written to the image** (it is a
+/// read-only lower, never an upper), so the integrity-ladder hash/verity is never invalidated by
+/// the runner's writes and `<store>/<name>/rootfs/` is shared read-only across runs.
 ///
-/// Two deliberate departures from the constructed view:
-/// - **No host-closure mirror.** The merged-usr symlink mirror is skipped — the image
-///   carries its own `/usr` layout (it may be musl/busybox, not the host's).
-/// - **Image-seeded /etc.** The image's `/etc` shows through the overlay; rather than
-///   synthesising `/etc`, only Kennel's network/hostname/uid hooks (`file_binds`) are
-///   written on top, **unlink-then-create** so a crafted image symlink (e.g.
-///   `resolv.conf → ../../<host>`) is replaced rather than followed, and the write
-///   lands in the overlay upper (the image's own `/etc` inode is untouched).
+/// Departures from the constructed view: no merged-usr mirror (the image carries its own layout);
+/// `/etc` is not synthesised — Kennel's `resolv.conf`/`hostname`/`passwd`/`group`/`hosts`/
+/// `nsswitch.conf` win by *layer precedence* (the `kennel-etc` top lower built from `file_binds`),
+/// so a Kennel regular file outranks an image symlink at the same path with no unlink-replace and
+/// no dereference.
 fn build_image_view_and_pivot(
     view: &ShimView,
     staging: &Path,
-    image: &Path,
+    img: &crate::plan::ImageRoot,
     file_binds: &[(PathBuf, PathBuf)],
 ) -> io::Result<()> {
+    use crate::plan::Persistence;
     use kennel_lib_syscall::mount;
 
-    // 1. A tmpfs backing under the kenneld-provided staging dir holds the overlay's
-    //    ephemeral upper + work, plus the `merged` mountpoint we build into and pivot to.
+    // 1. A tmpfs backing under the kenneld staging dir holds the two Kennel-built lowers
+    //    (`kennel-etc`, `scaffold`), the ephemeral upper+work (discard), and the `merged`
+    //    mountpoint we build into and pivot to.
     mount::mount_tmpfs(staging, None, Some("0755"), false).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("mount tmpfs overlay backing {}: {e}", staging.display()),
         )
     })?;
-    let upper = staging.join("upper");
-    let work = staging.join("work");
+    let kennel_etc = staging.join("kennel-etc");
+    let scaffold = staging.join("scaffold");
     let root = staging.join("merged");
-    for d in [&upper, &work, &root] {
-        std::fs::create_dir_all(d)?;
-    }
+    std::fs::create_dir_all(&root)?;
 
-    // 2. The overlay: the image is the inert read-only lower; every write lands in `upper`.
-    mount::mount_overlay(image, &upper, &work, &root).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("mount overlay (lower {}): {e}", image.display()),
-        )
-    })?;
-
-    // From here `root` is the merged tree we build into and pivot to.
-    let under = |abs: &Path| root.join(abs.strip_prefix("/").unwrap_or(abs));
-
-    // 3. Bind the granted ~/ + host paths in (over the overlay upper).
-    materialize_binds(&view.binds, &under)?;
-
-    // 4. Targeted /etc (§7.2): write only Kennel's hooks over the image's /etc,
-    //    unlink-then-create (never follow an image symlink).
-    let etc = under(Path::new("/etc"));
-    std::fs::create_dir_all(&etc)?;
+    // 2. Build the `kennel-etc` top lower from the synthetic /etc (`file_binds`): each
+    //    invariant file copied verbatim under `kennel-etc/<target>`. Highest precedence.
+    let ketc = kennel_etc.join("etc");
+    std::fs::create_dir_all(&ketc)?;
     for (source, target) in file_binds {
-        let dest = under(target);
+        let dest = kennel_etc.join(target.strip_prefix("/").unwrap_or(target));
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let _ = std::fs::remove_file(&dest);
         std::fs::copy(source, &dest)?;
     }
 
-    // 5–8. The seal tail, identical to the constructed view, on the merged root.
+    // 3. Build the `scaffold` bottom lower: empty mountpoint dirs + empty /etc placeholders.
+    for d in SCAFFOLD_DIRS {
+        std::fs::create_dir_all(scaffold.join(d))?;
+    }
+    for f in KENNEL_ETC_FILES {
+        let _ = std::fs::File::create(scaffold.join("etc").join(f))?;
+    }
+
+    // 4. The overlay: kennel-etc : image : scaffold (read-only lowers, leftmost wins), with the
+    //    persistence tri-state upper. The image is never an upper.
+    let lowers: [&Path; 3] = [&kennel_etc, &img.image, &scaffold];
+    let upper_work: Option<(PathBuf, PathBuf)> = match img.persistence {
+        Persistence::Discard => {
+            let upper = staging.join("upper");
+            let work = staging.join("work");
+            std::fs::create_dir_all(&upper)?;
+            std::fs::create_dir_all(&work)?;
+            Some((upper, work))
+        }
+        Persistence::Readonly => None,
+        Persistence::Persist => {
+            // kenneld validated/created these under the store entry; overlay requires `work`
+            // empty and on the same fs as `upper`.
+            let (upper, work) = img.store_upper.clone().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "persistence = persist but no store upper/work was provided",
+                )
+            })?;
+            Some((upper, work))
+        }
+    };
+    let uw_ref = upper_work.as_ref().map(|(u, w)| (u.as_path(), w.as_path()));
+    mount::mount_overlay(&lowers, uw_ref, &root).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("mount overlay (image {}): {e}", img.image.display()),
+        )
+    })?;
+
+    // 5. A writable, ephemeral $HOME independent of the rootfs persistence axis: a tmpfs at
+    //    `/home` (the scaffold supplies the mountpoint), so the persona home works even under
+    //    `readonly`. `[fs.home].persist` paths bind on top via `view.binds`.
+    let under = |abs: &Path| root.join(abs.strip_prefix("/").unwrap_or(abs));
+    let home = under(Path::new("/home"));
+    mount::mount_tmpfs(&home, None, Some("0755"), false)?;
+
+    // 6. Assembly (§7.11.4a): bind the granted ~/ + launcher + config + additive binds, then
+    //    ro-bind resolv.conf + hostname over their merged paths so a writable upper cannot
+    //    copy-up-shadow them (passwd/group stay writable-through for a runtime `useradd`).
+    materialize_binds(&view.binds, &under)?;
+    for f in ["resolv.conf", "hostname"] {
+        let target = under(Path::new("/etc").join(f).as_path());
+        if target.exists() {
+            mount::bind(&target, &target, false)
+                .and_then(|()| mount::remount_readonly(&target))
+                .map_err(|e| io::Error::new(e.kind(), format!("ro-bind /etc/{f}: {e}")))?;
+        }
+    }
+
+    // 7. The seal tail (constructed /dev, binderfs, /proc, /tmp, home dir, masks, pivot).
     seal_view_tail(view, &root)
 }
 
@@ -611,8 +678,11 @@ fn materialize_masks(
     if mask_paths.is_empty() {
         return Ok(());
     }
-    // One shared empty source file in the scaffold tmpfs.
-    let mask_src = new_root.join(".kennel-mask");
+    // One shared empty source file in the view's private /tmp (a fresh tmpfs, writable in every
+    // mode — including an OCI `readonly` root whose merged tree is immutable). The bind over each
+    // target references this inode, so the source path is irrelevant once the overmount is up.
+    let _ = new_root;
+    let mask_src = under(Path::new("/tmp/.kennel-mask"));
     std::fs::File::create(&mask_src)?;
     for path in mask_paths {
         let dest = under(path);
@@ -658,7 +728,9 @@ fn materialize_dir_masks(
     if mask_dir_paths.is_empty() {
         return Ok(());
     }
-    let mask_src = new_root.join(".kennel-mask-d");
+    // In the view's private /tmp tmpfs (writable in every mode); see [`materialize_masks`].
+    let _ = new_root;
+    let mask_src = under(Path::new("/tmp/.kennel-mask-d"));
     std::fs::create_dir_all(&mask_src)?;
     for path in mask_dir_paths {
         let dest = under(path);

@@ -398,14 +398,56 @@ pub struct ShimView {
     /// (a `revert` baseline / diff source) nor write into — or create — the host store. Empty
     /// when `[trust].manifest = false` or there are no writable binds.
     pub mask_dir_paths: Vec<PathBuf>,
-    /// OCI substrate root (§7.11 / T3.8): the read-only unpacked image `rootfs/` to
-    /// boot as the kennel root, used as the **`overlay` lowerdir** with an ephemeral
-    /// `tmpfs` upper — so the image is never written and the rest of the view
-    /// (binds, `/etc` hooks, `/dev`, `/proc`, `/tmp`, home) layers on top. `None` is
-    /// the ordinary constructed view (a fresh `tmpfs` new-root). When `Some`, the
-    /// host system closure is *not* mirrored (the image carries its own `/usr`
-    /// layout) and `/etc` is seeded from the image, not synthesised.
-    pub image_lower: Option<PathBuf>,
+    /// OCI substrate root (§7.11.4a / T3.8): the layered overlay's inputs, or `None` for
+    /// the ordinary constructed view (a fresh `tmpfs` new-root). When `Some`, the view is a
+    /// three-lower `overlay` (`kennel-etc : image : scaffold`) with the persistence tri-state
+    /// choosing the upper; the host system closure is *not* mirrored (the image carries its
+    /// own `/usr` layout) and `/etc` wins by layer precedence, not by a synthesised copy.
+    pub image: Option<ImageRoot>,
+}
+
+/// Rootfs persistence mode (§7.11.4a): which upper the OCI overlay gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Persistence {
+    /// An ephemeral `tmpfs` upper (under the kenneld staging dir), gone at teardown.
+    #[default]
+    Discard,
+    /// No upper — the merged root is immutable (the scaffold supplies the mountpoints).
+    Readonly,
+    /// A Kennel-managed upper under the store entry; accumulates divergence (the loud value).
+    Persist,
+}
+
+impl Persistence {
+    /// Parse the settled `[rootfs].persistence` string; empty (unset) ⇒ the default `Discard`.
+    /// An unrecognised value never reaches here (the compiler validates it), so it maps to the
+    /// safe default.
+    #[must_use]
+    pub fn from_settled(s: &str) -> Self {
+        match s {
+            "readonly" => Self::Readonly,
+            "persist" => Self::Persist,
+            _ => Self::Discard,
+        }
+    }
+}
+
+/// The OCI substrate root (§7.11.4a): the inputs the construction child assembles the overlay from.
+///
+/// `image` + `persistence` are policy-derived; `store_upper` is a kenneld runtime input filled at
+/// bring-up (like the view staging dir), so the struct is complete before it crosses to the
+/// privileged construction child. The other two lowers are built in the staging tmpfs per spawn:
+/// `kennel-etc` from the synthetic `/etc` (`file_binds`), and the `scaffold` of empty mountpoint
+/// dirs + `/etc` placeholders (fixed content, so it needs no shipped artifact).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRoot {
+    /// The unpacked image `rootfs/` — the overlay's read-only middle lower. **Never an upper.**
+    pub image: PathBuf,
+    /// The persistence mode for the upper.
+    pub persistence: Persistence,
+    /// The managed `(upper, work)` dirs under the store entry — `Some` iff `persistence` is
+    /// `Persist`. Filled (and validated/created) by kenneld; `None` for `Discard`/`Readonly`.
+    pub store_upper: Option<(PathBuf, PathBuf)>,
 }
 
 /// Remap a granted host path to where it appears inside the kennel: a path under
@@ -977,11 +1019,15 @@ impl Plan {
             binder: true,
             mask_paths,
             mask_dir_paths,
-            // OCI-model policy (§7.11): a non-empty `[rootfs].path` boots the image as
-            // the overlay lowerdir. The translate step has already subst-resolved it to
-            // an absolute host path; empty means an ordinary constructed view.
-            image_lower: (!policy.rootfs.path.is_empty())
-                .then(|| PathBuf::from(&policy.rootfs.path)),
+            // OCI-model policy (§7.11.4a): a non-empty `[rootfs].path` boots the image as the
+            // overlay's middle lower. The translate step subst-resolved it to an absolute host
+            // path; empty means an ordinary constructed view. `scaffold`/`store_upper` are
+            // kenneld runtime inputs filled at bring-up (the staging dir is set the same way).
+            image: (!policy.rootfs.path.is_empty()).then(|| ImageRoot {
+                image: PathBuf::from(&policy.rootfs.path),
+                persistence: Persistence::from_settled(&policy.rootfs.persistence),
+                store_upper: None,
+            }),
         });
 
         // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the

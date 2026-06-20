@@ -612,22 +612,26 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
 /// (persisted home paths: the operator's own real host inodes), `/dev`, `/proc`, `/tmp`, and
 /// binderfs must NEVER be touched.
 ///
-/// The discriminator is the device id: the view root (`/`, post-pivot) is the constructed
-/// tmpfs; every bind/special mount has a different device. So we chown only inodes whose
-/// device matches `/`, skipping any sub-mount — and if `$HOME` *itself* is a bind (the
-/// whole-home-persist case) it is on a different device and we touch nothing under it (it is
-/// already the operator's own data). Symlinks are skipped entirely (ownership is irrelevant
-/// for them and it avoids any follow), so no `lchown` dance is needed.
+/// The discriminator is the **home's own device** plus ownership: the constructed home and its
+/// contents share `$HOME`'s device (the view-root tmpfs for a constructed view, or the dedicated
+/// `/home` tmpfs for an OCI overlay root — the merged overlay's `/` has a *different* device, so
+/// `/` is the wrong reference there); every writable bind / special mount under it has a different
+/// device and is skipped. If `$HOME` *itself* is a writable whole-home bind it already resolves to
+/// the operator's own (operator-owned) inode — not ours to touch — so we skip when the home root is
+/// already operator-owned. Symlinks are skipped entirely (ownership is irrelevant and it avoids any
+/// follow), so no `lchown` dance is needed.
 fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
-    // The constructed view root: only its inodes are ours to chown.
-    let root_dev = std::fs::symlink_metadata("/")?.dev();
     let Ok(home) = std::fs::symlink_metadata(shim_root) else {
         return Ok(()); // no constructed home (e.g. the fallback path)
     };
-    if home.file_type().is_symlink() || home.dev() != root_dev {
-        return Ok(()); // $HOME is a bind (persisted) or a symlink — not ours to chown
+    // A whole-home bind resolves to the operator's own inode (already operator-owned); a symlink
+    // is not ours to chown. The constructed home is built by the kennel's uid 0 (root-owned).
+    if home.file_type().is_symlink() || home.uid() == uid {
+        return Ok(());
     }
+    // Only inodes on the home's own mount are constructed; sub-mounts (writable binds) differ.
+    let home_dev = home.dev();
     kennel_lib_syscall::unistd::chown_to(shim_root, uid, gid)?;
     let mut stack = vec![shim_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -640,8 +644,8 @@ fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io
                 continue;
             };
             // Skip symlinks (don't chown, don't follow) and anything on another mount
-            // (a writable bind / special fs) — chown only constructed view-root inodes.
-            if meta.file_type().is_symlink() || meta.dev() != root_dev {
+            // (a writable bind / special fs) — chown only constructed home-mount inodes.
+            if meta.file_type().is_symlink() || meta.dev() != home_dev {
                 continue;
             }
             kennel_lib_syscall::unistd::chown_to(&path, uid, gid)?;

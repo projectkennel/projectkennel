@@ -956,7 +956,7 @@ fn bring_up<P: Privileged + Sync>(
     // An OCI substrate view (§7.11) seeds its own `/etc` from the image, so the
     // host TLS/linker subtrees must not be bound over it; everything else (the ssh
     // dialer, the HOME env) applies the same.
-    let oci_view = plan.view.as_ref().is_some_and(|v| v.image_lower.is_some());
+    let oci_view = plan.view.as_ref().is_some_and(|v| v.image.is_some());
     if view_root.is_some() {
         if let Some(view) = plan.view.as_mut() {
             if !oci_view {

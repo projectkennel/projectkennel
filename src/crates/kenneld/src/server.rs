@@ -832,11 +832,7 @@ pub fn run_kennel<P, L>(
     // launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
     // binds both into the view; any `kennel oci run … -- <cmd>` tokens follow as a Cmd override
     // the launcher applies (keeping the image Entrypoint + Env), no policy impact.
-    let oci_image = loaded
-        .plan
-        .view
-        .as_ref()
-        .is_some_and(|v| v.image_lower.is_some());
+    let oci_image = loaded.plan.view.as_ref().is_some_and(|v| v.image.is_some());
     let mut oci_prep = crate::OciPrep::default();
     // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
     // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
@@ -887,6 +883,49 @@ pub fn run_kennel<P, L>(
         "run_kennel: effective workload argv={argv:?} cwd={}",
         cwd.display()
     ));
+    // Persist-mode rootfs (§7.11.4a): the managed overlay upper lives under the store entry
+    // (the `config.json`'s dir). Create `upper/` + `work/` and fill them into the plan so the
+    // construction child mounts the overlay with a persisted upper. The store fs must carry
+    // `user.*` xattrs for the userxattr whiteouts — if it does not, the overlay mount in the
+    // construction child fails with a clear error (the refusal the spec calls for).
+    if oci_image {
+        if let Some(img) = loaded
+            .plan
+            .view
+            .as_mut()
+            .and_then(|v| v.image.as_mut())
+            .filter(|i| i.persistence == kennel_lib_spawn::Persistence::Persist)
+        {
+            let Some(entry) = req.oci_config.as_deref().and_then(std::path::Path::parent) else {
+                return fail(
+                    shared,
+                    &req.kennel,
+                    ctx,
+                    conn,
+                    "oci persist",
+                    "persistence = persist needs the store entry path (config.json)".to_owned(),
+                );
+            };
+            let upper = entry.join("upper");
+            let work = entry.join("work");
+            if let Err(e) =
+                std::fs::create_dir_all(&upper).and_then(|()| std::fs::create_dir_all(&work))
+            {
+                return fail(
+                    shared,
+                    &req.kennel,
+                    ctx,
+                    conn,
+                    "oci persist",
+                    format!(
+                        "creating the managed overlay upper under {}: {e}",
+                        entry.display()
+                    ),
+                );
+            }
+            img.store_upper = Some((upper, work));
+        }
+    }
     // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
     // decision made here, on the host, before the kennel is built: kennel-bin-init is a
     // dumb executor and gets no say. Applies only when the policy embedded a pin AND we

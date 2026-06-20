@@ -142,31 +142,46 @@ pub fn mount_tmpfs(
 
 /// Mount an `overlay` filesystem at `target` with `nosuid,nodev`.
 ///
-/// `lower` (read-only) shows through, every write lands in `upper`, with `work` as
-/// overlayfs's scratch (same filesystem as `upper`, must be empty).
+/// `lowers` are the read-only layers in overlayfs order — **leftmost wins**; they show
+/// through wherever a higher layer does not provide the path. `upper_work` is
+/// `Some((upper, work))` for a writable overlay (writes land in `upper`, with `work` as
+/// overlayfs's scratch on the same filesystem, which must be empty), or `None` for a
+/// **read-only** overlay (lowers only — the merged tree is immutable).
 ///
-/// Used by the OCI substrate root (§7.11): the unpacked image is the inert
-/// `lower`, an ephemeral `tmpfs` is the `upper`, so the image is never written and
-/// the integrity-ladder hash/verity is never invalidated by the runner's own
-/// writes. overlayfs is unprivileged-userns-mountable (kernel ≥ 5.11), so this
-/// mounts in the kennel's own userns with no real privilege.
+/// Used by the OCI substrate root (§7.11.4a): the three-lower stack
+/// `kennel-etc : image : scaffold`, with the persistence tri-state choosing the upper (an
+/// ephemeral `tmpfs`, a managed store upper, or none). overlayfs is
+/// unprivileged-userns-mountable (kernel ≥ 5.11), so this mounts in the kennel's own userns
+/// with no real privilege; the kernel applies `userxattr` whiteouts there, so the upper
+/// filesystem must carry `user.*` xattrs (tmpfs ≥ 6.6; ext4/btrfs/xfs always).
 ///
-/// The three paths flow into overlayfs's comma-separated option string, so a path
-/// containing a literal `,` or `:` would split an option — callers pass only
-/// kennel-runtime (`$XDG_RUNTIME_DIR`) and validated-name store paths, neither of
-/// which carries those bytes.
+/// The paths flow into overlayfs's comma-separated option string, so a path containing a
+/// literal `,` or `:` would split an option — callers pass only kennel-runtime
+/// (`$XDG_RUNTIME_DIR`), validated-name store, and shipped libexec paths, none of which
+/// carries those bytes.
 ///
 /// # Errors
 ///
-/// Returns the OS error if the mount fails (e.g. `work` non-empty, `upper`/`work`
-/// on different filesystems, or the kernel lacks unprivileged overlay support).
-pub fn mount_overlay(lower: &Path, upper: &Path, work: &Path, target: &Path) -> io::Result<()> {
-    let data = format!(
-        "lowerdir={},upperdir={},workdir={}",
-        lower.display(),
-        upper.display(),
-        work.display()
-    );
+/// Returns the OS error if the mount fails (e.g. `work` non-empty, `upper`/`work` on
+/// different filesystems, `lowers` empty, or the kernel lacks unprivileged overlay).
+pub fn mount_overlay(
+    lowers: &[&Path],
+    upper_work: Option<(&Path, &Path)>,
+    target: &Path,
+) -> io::Result<()> {
+    let lowerdir = lowers
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    let data = match upper_work {
+        Some((upper, work)) => format!(
+            "lowerdir={lowerdir},upperdir={},workdir={}",
+            upper.display(),
+            work.display()
+        ),
+        None => format!("lowerdir={lowerdir}"),
+    };
     nix::mount::mount(
         Some("overlay"),
         target,
