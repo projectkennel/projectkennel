@@ -6,6 +6,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-20
+
+Persistence safety (the trust-manifest review/revert family), the authoring experience
+(`policy diff`/`risks`/fragments/IDE schema), the D-Bus mediation membrane, the inbound-BIND
+push, OCI substrate execution (boot a vendor image as a confined kennel root, with a confined
+`oci build` fetch), and a TCB-shrinking CLI/compiler crate split. Verified on Linux 6.17
+(Landlock ABI 7); the policy test suite runs 16 self-checking cases against the installed stack.
+
 ### CLI changes
 
 - `kennel policy diff <policy> [<other>]` — the interpreted grant delta between two
