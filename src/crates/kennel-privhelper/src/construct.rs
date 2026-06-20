@@ -583,6 +583,15 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         // and any in-kennel tool run as the OPERATOR and must read (0600 ~/.ssh keys) and
         // write (bind sockets) there. Hand the operator only the inodes we constructed.
         chown_constructed_home(&view.shim_root, op_uid, op_gid)?;
+        // Hand the constructed /tmp to the operator. It is the workload's private scratch — a
+        // fresh tmpfs the construction child built as the kennel's uid 0 — but the workload runs
+        // as the OPERATOR, so without this the persona cannot write it (mktemp, build scratch, even
+        // `touch` all EACCES despite the Landlock /tmp grant; the grant is necessary, not
+        // sufficient, against DAC). Chown the tmpfs root only — it is empty here — so the mode
+        // (0700 by default) stands and /tmp is the persona's *private* tmp, not world-writable.
+        // (A view always mounts /tmp; with `fs.tmp.private = false` there is simply no Landlock
+        // grant, so this chown is inert there.)
+        kennel_lib_syscall::unistd::chown_to(std::path::Path::new("/tmp"), op_uid, op_gid)?;
         // Hand the binderfs device to the operator: it is created mode 0600 owned by uid 0 of
         // the (now real) userns, but every binder client — kennel-bin-init, the af-unix proxy,
         // kenneld via /proc/<init>/root — acts as the operator. The mount-root dir is 0755
