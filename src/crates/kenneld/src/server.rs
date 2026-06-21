@@ -717,7 +717,10 @@ where
         std::thread::spawn(move || {
             // Hold the max_instances slot for the spawned kennel's whole life: run_kennel blocks
             // until the workload exits (then tears down), so `slot` releases on that exit or on any
-            // early construction failure (§7.12.7).
+            // early construction failure (§7.12.7). The requester-liveness flag rides with it, so
+            // run_kennel can self-terminate this sibling if the requester died mid-build (the
+            // async-reaper race close, §7.12.7).
+            let parent_alive = Some(slot.parent_liveness());
             let _slot = slot;
             // The spawn has no operator on a control socket, so run_kennel's status responses go to a
             // throwaway socketpair whose peer we hold for the build's life — written-but-unread, never
@@ -746,6 +749,7 @@ where
                 &mut sink,
                 Some(instance),
                 &crate::spawn::noop_constructor(),
+                parent_alive.as_deref(),
             );
         });
     }
@@ -774,7 +778,7 @@ pub fn dispatch_request<P, L>(
 {
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
-            Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor),
+            Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor, None),
             Err(e) => {
                 eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
                 Response::Error(e)
@@ -883,6 +887,7 @@ pub fn run_kennel<P, L>(
     conn: &mut UnixStream,
     preloaded: Option<kennel_lib_policy::SettledPolicy>,
     constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
+    parent_alive: Option<&std::sync::atomic::AtomicBool>,
 ) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
@@ -1357,7 +1362,7 @@ pub fn run_kennel<P, L>(
     }
 
     tr.step("run_kennel: bring-up — building view, egress, factory construct, boot-sync");
-    let kennel = match start(&audited, spec, &mut command) {
+    let mut kennel = match start(&audited, spec, &mut command) {
         Ok(kennel) => kennel,
         Err(e) => {
             // A bring-up failure after the egress step may have left BPF pins behind
@@ -1377,6 +1382,20 @@ pub fn run_kennel<P, L>(
     let pid = kennel.id();
     tr.step(&format!("run_kennel: workload running, pid={pid}"));
     shared.set_pid(&req.kennel, pid);
+    // Hard-reaper race close (§7.12.7): a spawned sibling's construction is async to the SPAWN reply,
+    // so the requester can die — and its `reap_children` run — while this build is still in flight,
+    // before the cgroup exists for the reaper to `cgroup.kill`. The requester's `SpawnRuntime::Drop`
+    // flips `parent_alive` false ahead of that reap; now that the cgroup is live and registered, the
+    // two checks interlock: either the reaper sees this cgroup, or this re-check sees the requester
+    // gone. If gone, terminate at once — never leave a sibling that outlives the agent that asked for
+    // it (which the `max_instances` ceiling alone could not bound across requester restarts). `None`
+    // for a top-level `kennel run`, which has no requester to outlive.
+    if let Some(alive) = parent_alive {
+        if !alive.load(std::sync::atomic::Ordering::Acquire) {
+            tr.step("run_kennel: requester gone during async construct — terminating the orphan");
+            let _ = kennel.terminate();
+        }
+    }
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::kennel_start(pid, ctx));
     }
