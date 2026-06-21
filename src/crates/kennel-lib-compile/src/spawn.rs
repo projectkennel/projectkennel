@@ -82,12 +82,20 @@ pub fn resolve_grant(
                  complete signed template (§7.12.8)"
             ))
         })?;
-        // Read the settled signature envelope (the content-pin) and, when the trust store has keys,
-        // verify the signature cryptographically — the daemon re-verifies this exact commitment at
-        // SPAWN ([`kennel_lib_policy::verify_pinned`]).
+        // Read the settled signature envelope (the content-pin). Verify it cryptographically when the
+        // artefact is signed and a trust store is present; require a signature only when the trust
+        // context demands it (the daemon re-verifies this exact commitment at SPAWN —
+        // [`kennel_lib_policy::verify_pinned`]).
         let doc = kennel_lib_policy::parse_signed_settled_unverified(&bytes)?;
-        if let Some(keys) = trust.keys() {
-            kennel_lib_policy::verify_settled(&bytes, keys)?;
+        if doc.signature.algorithm == "ed25519" {
+            if let Some(keys) = trust.keys() {
+                kennel_lib_policy::verify_settled(&bytes, keys)?;
+            }
+        } else if trust.requires_signatures() {
+            return Err(PolicyError::Resolution(format!(
+                "[[spawn.allow]] template = \"{reference}\": its settled artefact is unsigned, but \
+                 this compile requires signatures — sign it (`kennel policy compile --key …`)"
+            )));
         }
         // Re-run spawn-eligibility on the SETTLED form — the same verify-half gate the daemon runs.
         kennel_lib_policy::spawn_eligible(&doc.policy)?;

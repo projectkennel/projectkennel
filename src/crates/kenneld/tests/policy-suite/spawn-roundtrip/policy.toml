@@ -1,0 +1,46 @@
+# ============================================================================
+# Suite case: spawn-roundtrip — dynamic spawn, end to end (§7.12).
+#
+# Proves the whole SPAWN path: a confined requester (this kennel) holds a [spawn]
+# grant for the signed `echo-tool@v1` template but NO network and NO second
+# capability of its own. Its workload — `facade-spawn-probe`, the in-kennel SPAWN
+# client — transacts verb::SPAWN on node 0, receives the two channel ends kenneld
+# mints, writes a probe to the socketpair, and reads it back: the spawned sibling
+# (echo-tool = `/bin/cat`) echoes its stdin to its stdout over that same end.
+#
+# Exit 0 ⇒ the requester instantiated a real, scoped sibling kennel and the
+# kernel-to-kernel channel reached it. kenneld validated the grant, re-verified
+# echo-tool's content-pin, re-ran spawn-eligibility, minted the channel, and
+# constructed the sibling — all with no compiler and no JSON in the daemon.
+#
+# setup.sh compiles + signs echo-tool to its settled form with the suite key (the
+# daemon trusts it) before this requester runs.
+# ============================================================================
+
+name = "spawn-roundtrip"
+template_base = "base-confined@v1"
+
+# The requester reaches nothing itself — the whole point of delegated spawn.
+[net]
+mode = "none"
+
+# Read the system dirs the (static) probe and the spawned `cat` resolve from.
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+# Execute only the in-kennel SPAWN probe (+ /bin/sh for the framework shell check).
+[exec]
+allow = ["/usr/libexec/kennel/facade-spawn-probe", "/bin/sh"]
+
+# The workload IS the SPAWN client: it spawns echo-tool@v1 and round-trips the channel.
+[workload]
+argv = ["/usr/libexec/kennel/facade-spawn-probe", "echo-tool@v1"]
+pinned = true
+
+# The delegated-spawn grant (§7.12.2): may instantiate echo-tool, bounded to 4 concurrent.
+[spawn]
+max_instances = 4
+reason = "spawn-roundtrip e2e: instantiate the signed echo tool and prove the channel reaches it"
+
+[[spawn.allow]]
+template = "echo-tool@v1"
