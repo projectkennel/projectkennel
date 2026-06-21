@@ -45,6 +45,7 @@ use kennel_lib_policy::settled::{
     ProcVisibility, Protocol, ProxyListen, RootfsRuntime, SeccompAction, SeccompPolicy, SshGrant,
     SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
+use kennel_lib_policy::variant::{Manifest, Variant};
 use kennel_lib_policy::PolicyError;
 use std::collections::BTreeSet;
 
@@ -74,6 +75,9 @@ pub struct Translated {
     pub workload: WorkloadRuntime,
     /// The per-kennel OCI substrate (§7.11) — the image root the daemon boots, when OCI-model.
     pub rootfs: RootfsRuntime,
+    /// The mutable-field manifest (§7.12.3) — the signed variant constraints, present only on a
+    /// spawn-target template. Empty otherwise.
+    pub manifest: Manifest,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
     pub deferred_substitutions: Vec<String>,
 }
@@ -169,8 +173,29 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         ulimits,
         workload,
         rootfs,
+        manifest: translate_manifest(effective),
         deferred_substitutions: deferred.into_iter().collect(),
     })
+}
+
+/// Map the source `[[mutable]]` manifest (§7.12.3) into the settled [`Variant`] form carried on the
+/// signed template. The source well-formedness (exactly one constraint kind, etc.) is enforced by
+/// [`validate_mutable_manifest`]; here we shape each entry into its settled variant. The settled
+/// `Variant` is flat (the constraint kind is which fields are set), mirroring the source.
+fn translate_manifest(src: &SourcePolicy) -> Manifest {
+    src.mutable
+        .iter()
+        .map(|m| Variant {
+            field: m.field.clone().unwrap_or_default(),
+            one_of: m.oneof.clone().unwrap_or_default(),
+            pool: m.from.clone().unwrap_or_default(),
+            pool_max: m.max.unwrap_or(0),
+            pattern: m.match_.clone().unwrap_or_default(),
+            relpath_under: m.under.clone().unwrap_or_default(),
+            freeform: m.freeform.unwrap_or(false),
+            reason: m.reason.clone().unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// Translate `[rootfs]` into the settled [`RootfsRuntime`] (§7.11). Carries the substrate `path`
@@ -602,77 +627,7 @@ fn validate_mutable_manifest(src: &SourcePolicy) -> Result<(), PolicyError> {
                 "[[mutable]] field = \"{field}\" is declared twice; each field opens once"
             )));
         }
-        let is_pool = m.from.is_some() || m.max.is_some();
-        let is_oneof = m.oneof.is_some();
-        let is_pred = m.type_.is_some() || m.under.is_some();
-        let kinds = [is_pool, is_oneof, is_pred]
-            .into_iter()
-            .filter(|b| *b)
-            .count();
-        if kinds != 1 {
-            return Err(translation(format!(
-                "[[mutable]] field = \"{field}\" must carry exactly one bound kind — pool \
-                 (`from`+`max`), `oneof`, or predicate (`type`+`under`); found {kinds}"
-            )));
-        }
-        // A `(field, value)` pair costs a length-prefix + the field path, plus a length-prefix +
-        // the value, all saturating (a pathological manifest is rejected, never overflows).
-        let field_cost = WIRE_LEN_PREFIX.saturating_add(field.len());
-        let value_worst = if is_pool {
-            let from = m.from.as_deref().unwrap_or_default();
-            if from.is_empty() {
-                return Err(translation(format!(
-                    "[[mutable]] field = \"{field}\" is a pool bound and requires a non-empty `from`"
-                )));
-            }
-            let max = m.max.ok_or_else(|| {
-                translation(format!(
-                    "[[mutable]] field = \"{field}\" is a pool bound and requires `max`"
-                ))
-            })?;
-            if max == 0 {
-                return Err(translation(format!(
-                    "[[mutable]] field = \"{field}\": pool `max` must be at least 1"
-                )));
-            }
-            let longest = from.iter().map(String::len).max().unwrap_or(0);
-            // up to `max` appended values, each a `(field, value)` pair drawn from `from`
-            let per_value = field_cost
-                .saturating_add(WIRE_LEN_PREFIX)
-                .saturating_add(longest);
-            usize::try_from(max)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(per_value)
-        } else if is_oneof {
-            let oneof = m.oneof.as_deref().unwrap_or_default();
-            if oneof.is_empty() {
-                return Err(translation(format!(
-                    "[[mutable]] field = \"{field}\" is a oneof bound and requires a non-empty \
-                     `oneof` list"
-                )));
-            }
-            let longest = oneof.iter().map(String::len).max().unwrap_or(0);
-            field_cost
-                .saturating_add(WIRE_LEN_PREFIX)
-                .saturating_add(longest)
-        } else {
-            let ty = m.type_.as_deref().unwrap_or("");
-            if ty != "relpath" {
-                return Err(translation(format!(
-                    "[[mutable]] field = \"{field}\": predicate `type` must be `relpath` (got \
-                     `{ty}`)"
-                )));
-            }
-            if m.under.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(translation(format!(
-                    "[[mutable]] field = \"{field}\": predicate requires a non-empty `under` root"
-                )));
-            }
-            field_cost
-                .saturating_add(WIRE_LEN_PREFIX)
-                .saturating_add(SPAWN_PRED_VALUE_MAX)
-        };
-        worst_case = worst_case.saturating_add(value_worst);
+        worst_case = worst_case.saturating_add(variant_worst_case(m, field)?);
     }
     if worst_case > SPAWN_PATCH_MAX_BYTES {
         return Err(translation(format!(
@@ -682,6 +637,107 @@ fn validate_mutable_manifest(src: &SourcePolicy) -> Result<(), PolicyError> {
         )));
     }
     Ok(())
+}
+
+/// Validate one `[[mutable]]` variant carries exactly one well-formed constraint, returning its
+/// worst-case contribution to the patch size. A `(field, value)` pair costs a length-prefix + the
+/// field path plus a length-prefix + the value (saturating; a pathological manifest is rejected,
+/// never overflows). The *open* constraints (pattern/predicate/freeform) have no sign-time count
+/// bound, so each contributes one capped value as a floor; the runtime applicator enforces the true
+/// `SPAWN_PATCH_MAX_BYTES` total over the actual patch.
+fn variant_worst_case(m: &crate::source::MutableField, field: &str) -> Result<usize, PolicyError> {
+    let is_pool = m.from.is_some() || m.max.is_some();
+    let is_oneof = m.oneof.is_some();
+    let is_pattern = m.match_.is_some();
+    let is_pred = m.type_.is_some() || m.under.is_some();
+    let is_freeform = m.freeform == Some(true);
+    let kinds = [is_pool, is_oneof, is_pattern, is_pred, is_freeform]
+        .into_iter()
+        .filter(|b| *b)
+        .count();
+    if kinds != 1 {
+        return Err(translation(format!(
+            "[[mutable]] field = \"{field}\" must carry exactly one constraint — pool \
+             (`from`+`max`), `oneof`, `match` (pattern), predicate (`type`+`under`), or \
+             `freeform`; found {kinds}"
+        )));
+    }
+    let field_cost = WIRE_LEN_PREFIX.saturating_add(field.len());
+    let open_value = || {
+        field_cost
+            .saturating_add(WIRE_LEN_PREFIX)
+            .saturating_add(SPAWN_PRED_VALUE_MAX)
+    };
+    let value_cost = |longest: usize| {
+        field_cost
+            .saturating_add(WIRE_LEN_PREFIX)
+            .saturating_add(longest)
+    };
+    if is_pool {
+        let from = m.from.as_deref().unwrap_or_default();
+        if from.is_empty() {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\" is a pool bound and requires a non-empty `from`"
+            )));
+        }
+        let max = m.max.ok_or_else(|| {
+            translation(format!(
+                "[[mutable]] field = \"{field}\" is a pool bound and requires `max`"
+            ))
+        })?;
+        if max == 0 {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\": pool `max` must be at least 1"
+            )));
+        }
+        let longest = from.iter().map(String::len).max().unwrap_or(0);
+        Ok(usize::try_from(max)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(value_cost(longest)))
+    } else if is_oneof {
+        let oneof = m.oneof.as_deref().unwrap_or_default();
+        if oneof.is_empty() {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\" is a oneof bound and requires a non-empty `oneof` list"
+            )));
+        }
+        Ok(value_cost(oneof.iter().map(String::len).max().unwrap_or(0)))
+    } else if is_pattern {
+        let pats = m.match_.as_deref().unwrap_or_default();
+        if pats.is_empty() {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\" is a pattern bound and requires a non-empty `match` list"
+            )));
+        }
+        // Each pattern must be a well-formed net-destination shape — validated by the verify half's
+        // matcher so the compiler and the daemon agree on the grammar.
+        for p in pats {
+            kennel_lib_policy::variant::DestPattern::parse(p)
+                .map_err(|e| translation(format!("[[mutable]] field = \"{field}\": {e}")))?;
+        }
+        Ok(open_value())
+    } else if is_freeform {
+        if m.reason.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\" is `freeform` and requires a non-empty `reason` \
+                 (the loud rule)"
+            )));
+        }
+        Ok(open_value())
+    } else {
+        let ty = m.type_.as_deref().unwrap_or("");
+        if ty != "relpath" {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\": predicate `type` must be `relpath` (got `{ty}`)"
+            )));
+        }
+        if m.under.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\": predicate requires a non-empty `under` root"
+            )));
+        }
+        Ok(open_value())
+    }
 }
 
 fn validate_name(field: &str, name: &str) -> Result<(), PolicyError> {
@@ -1522,7 +1578,7 @@ mod tests {
             "{}",
             validate_mutable_manifest(&no_bound).expect_err("no bound")
         )
-        .contains("exactly one bound"));
+        .contains("exactly one constraint"));
 
         // Two bound kinds (pool + oneof) on one field is rejected.
         let two_bounds = parse(
@@ -1567,6 +1623,41 @@ mod tests {
         let p = parse(toml.as_bytes()).expect("parse");
         let err = validate_mutable_manifest(&p).expect_err("oversized");
         assert!(format!("{err}").contains("worst-case patch"));
+    }
+
+    #[test]
+    fn pattern_and_freeform_validate_and_translate_to_settled_variants() {
+        // pattern: validates, and translate maps it onto a settled variant carrying the shapes.
+        let p = parse(
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nmatch = [\"*.pypi.org:443\"]\n",
+        )
+        .expect("parse");
+        assert!(validate_mutable_manifest(&p).is_ok());
+        let manifest = translate_manifest(&p);
+        let v = manifest.first().expect("one variant");
+        assert_eq!(v.field, "net.allow");
+        assert_eq!(v.pattern, vec!["*.pypi.org:443".to_owned()]);
+        v.resolve().expect("resolves to a constraint");
+
+        // A malformed pattern (interior wildcard) is rejected at compile, agreeing with the matcher.
+        let bad =
+            parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nmatch = [\"a.*.b:443\"]\n")
+                .expect("parse");
+        assert!(validate_mutable_manifest(&bad).is_err());
+
+        // freeform: a `reason` is mandatory; present, it validates and maps.
+        let nofr = parse(b"name = \"t\"\n[[mutable]]\nfield = \"env.X\"\nfreeform = true\n")
+            .expect("parse");
+        assert!(validate_mutable_manifest(&nofr).is_err());
+        let ok = parse(
+            b"name = \"t\"\n[[mutable]]\nfield = \"env.X\"\nfreeform = true\nreason = \"varies\"\n",
+        )
+        .expect("parse");
+        assert!(validate_mutable_manifest(&ok).is_ok());
+        let manifest_f = translate_manifest(&ok);
+        let vf = manifest_f.first().expect("one variant");
+        assert!(vf.freeform);
+        assert_eq!(vf.reason, "varies");
     }
 
     #[test]
@@ -2334,6 +2425,7 @@ mod tests {
             ulimits: t.ulimits,
             workload: t.workload,
             rootfs: t.rootfs,
+            manifest: t.manifest,
         };
         kennel_lib_policy::invariant::validate(&policy).expect("framework invariants must hold");
     }

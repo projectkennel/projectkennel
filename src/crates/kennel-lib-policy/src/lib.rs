@@ -238,6 +238,7 @@ mod tests {
                 tty: TtyPolicy::default(),
                 trust: TrustPolicy::default(),
             },
+            manifest: Vec::new(),
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),
                 schema_version: 1,

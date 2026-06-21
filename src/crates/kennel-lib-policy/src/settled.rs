@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::variant::Manifest;
+
 /// The reserved binder service namespace `kenneld` owns (`07-1-binder.md` §Naming).
 ///
 /// User-defined services may not begin with it. It lives in the runtime crate
@@ -1305,6 +1307,14 @@ pub struct SettledPolicy {
     /// empty, so a non-OCI policy signs exactly as before.
     #[serde(default, skip_serializing_if = "RootfsRuntime::is_empty")]
     pub rootfs: RootfsRuntime,
+    /// The mutable-field manifest (§7.12.3) — present only on a **spawn-target template**, where it is
+    /// the signed statement of how far an in-memory instance may diverge from this template (the
+    /// [`variant`](crate::variant) constraints). An array-of-tables, declared last so the canonical
+    /// TOML emits it after every scalar/table field; omitted from the canonical form when empty, so a
+    /// policy that is not a spawn target signs exactly as before. The instantiated policy carries none
+    /// (the variants have been applied and it is never re-signed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manifest: Manifest,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.
