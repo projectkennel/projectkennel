@@ -736,9 +736,16 @@ fn bring_up<P: Privileged + Sync>(
     // aliases are only ADDED for the proxied modes, which run a SOCKS facade on them. `none`
     // and `open` add no alias (own empty netns / host netns direct).
     let proxied = matches!(net.mode, NetMode::Constrained | NetMode::Unconstrained);
+    // W9 "do less" — the egress proxy lives on the kennel's OWN loopback (`127.0.0.1`/`::1`, which
+    // the kernel hands `lo` once it is up, isolated by the kennel's net-ns), so the facade, the
+    // BPF proxy-reach stamp, and resolv all use it. A per-kennel address is needed ONLY when an
+    // inbound bind mirror consumes it (§7.5.7): `[net.bind]`-bound services bind their distinct
+    // address so `host-inetd` can expose it host-side. So provision addresses only when there is a
+    // bind — the empty-bind-list path (100% of ephemeral tool spawns) gets no address at all.
+    let mirror_ports = mirror_bind_ports(net);
     let mut loopback: Vec<kennel_lib_spawn::LoopbackAddr> = Vec::new();
-    let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
-    if proxied {
+    if proxied && !mirror_ports.is_empty() {
+        let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
         if let Ok(c) = u8::try_from(ctx) {
             let addr = loopback_v4(scope.tag(), c, offset);
             loopback.push(kennel_lib_spawn::LoopbackAddr {
@@ -765,9 +772,11 @@ fn bring_up<P: Privileged + Sync>(
     // only. This adds the flagged allow-entry that lets the workload reach its proxy (and
     // records the proxy in kennel_meta); without it the BPF would deny the proxy too.
     if proxy.is_some() && !no_network {
+        // The facade listens on the kennel's own loopback (`127.0.0.1`/`::1`), so the BPF must
+        // permit the workload to reach it there — not a per-kennel address (W9).
         plan.stamp_proxy(&ProxyEndpoint {
-            v4: state.v4,
-            v6: addr6,
+            v4: Some(std::net::Ipv4Addr::LOCALHOST),
+            v6: std::net::Ipv6Addr::LOCALHOST,
             port,
         });
     }
@@ -832,7 +841,6 @@ fn bring_up<P: Privileged + Sync>(
     //     is the registration gate (guard 3), seeded here — before binder::spawn serves the pool —
     //     so a REGISTER_MIRROR can never race an unset gate.
     let inbound_runtime = std::sync::Arc::new(crate::inbound::InboundRuntime::new());
-    let mirror_ports = mirror_bind_ports(net);
     inbound_runtime.allow_ports(mirror_ports.iter().copied());
 
     // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
@@ -848,8 +856,11 @@ fn bring_up<P: Privileged + Sync>(
             home: &etc.home,
             groups: &etc.groups,
             shell: &etc.shell,
+            // The kennel's `localhost` maps to its per-kennel address only when it has one (a bind);
+            // otherwise to the standard loopback (W9) — a no-bind kennel reaches its own services on
+            // `127.0.0.1`/`::1` like any host.
             v4: state.v4,
-            v6: addr6,
+            v6: state.v6.unwrap_or(std::net::Ipv6Addr::LOCALHOST),
         };
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
 
@@ -926,7 +937,9 @@ fn bring_up<P: Privileged + Sync>(
     let net_pivoting = view_root.is_some() && plan.view.is_some();
     if net_pivoting && command_socket.is_some() {
         if let Some(setup) = proxy {
-            let listen = SocketAddr::new(state.v4.map_or_else(|| addr6.into(), IpAddr::from), port);
+            // The facade listens on the kennel's own loopback (W9): `127.0.0.1`, isolated by the
+            // kennel's net-ns, needs no per-kennel address.
+            let listen = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
             apply_socks5(plan, &setup.socks5, listen, command);
             // 3c-inbound. The in-kennel inbound facade (§7.5.7): when the policy mirrors any bind
             //     ports, bind facade-client into the view and launch it on those ports. It pulls
@@ -1067,12 +1080,16 @@ fn bring_up<P: Privileged + Sync>(
         loopback.len(),
         egress_bytes.len()
     ));
+    // Bring the in-ns `lo` up for proxied modes so the facade's `127.0.0.1`/`::1` are reachable —
+    // independent of whether any per-kennel address is added (W9). `none`/`host` keep lo as-is.
+    let lo_up = plan.namespaces.contains(Namespaces::NET) && proxied;
     let (mut child, init_pid, sync, supervision_bytes) = construct_via_factory(
         privileged,
         plan,
         command,
         ctx,
         &loopback,
+        lo_up,
         &egress_bytes,
         tracer.level_u8(),
         state,
@@ -1232,6 +1249,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     command: &Command,
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
+    lo_up: bool,
     egress_bytes: &[u8],
     log_level: u8,
     state: &mut Provision,
@@ -1239,7 +1257,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
-    let construction = construction_half_from(plan, ctx, loopback);
+    let construction = construction_half_from(plan, ctx, loopback, lo_up);
     let supervision = supervision_from(plan, command, drop_uid, drop_gid, log_level);
     let half_bytes = kennel_lib_spawn::wire::encode_construction(&construction);
     let supervision_bytes = kennel_lib_spawn::wire::encode_supervision(&supervision);
@@ -1270,6 +1288,7 @@ fn construction_half_from(
     plan: &Plan,
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
+    lo_up: bool,
 ) -> kennel_lib_spawn::ConstructionHalf {
     kennel_lib_spawn::ConstructionHalf {
         namespaces: plan.namespaces,
@@ -1281,9 +1300,11 @@ fn construction_half_from(
         // The granted supplementary gids feed the gid_map after the 0 0 1 + operator
         // lines (the factory adds those); empty ⇒ default drop-all-groups.
         granted_gids: plan.supplementary_groups.clone().unwrap_or_default(),
-        // Bring up the in-namespace `lo` (+ the kennel's own addresses) iff the kennel has its own
-        // net-ns and loopback addresses — the §7.3 mirror of the host-lo alias the factory adds.
-        lo: plan.namespaces.contains(Namespaces::NET) && !loopback.is_empty(),
+        // Bring the in-namespace `lo` UP for any proxied kennel so the kernel's `127.0.0.1`/`::1`
+        // are reachable for the egress facade (W9) — decoupled from addresses: the per-kennel
+        // address (if any, bind-only) is added on top, but `lo` is up regardless so a no-bind
+        // kennel still has working loopback.
+        lo: lo_up,
         ctx,
         loopback: loopback.to_vec(),
         // Tell the factory which inherited fds accompany the datagram (sent pty-then-workload),

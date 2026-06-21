@@ -97,9 +97,10 @@ impl EtcParams<'_> {
 pub fn hosts(p: &EtcParams<'_>) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
-    if let Some(v4) = p.v4 {
-        let _ = writeln!(s, "{v4}\tlocalhost {}", p.hostname);
-    }
+    // The kennel reaches its own services on its per-kennel address when it has one (a bind), else
+    // the standard `127.0.0.1`/`::1` — a no-bind kennel has no per-kennel address at all (W9).
+    let v4 = p.v4.unwrap_or(std::net::Ipv4Addr::LOCALHOST);
+    let _ = writeln!(s, "{v4}\tlocalhost {}", p.hostname);
     let _ = writeln!(
         s,
         "{}\tlocalhost ip6-localhost ip6-loopback {}",
