@@ -627,6 +627,16 @@ fn validate_mutable_manifest(src: &SourcePolicy) -> Result<(), PolicyError> {
                 "[[mutable]] field = \"{field}\" is declared twice; each field opens once"
             )));
         }
+        // A variant opens an EXISTING, registered policy leaf — never a coined field. The applicator's
+        // registry (the verify half) is the authority; an unknown field cannot be applied at spawn, so
+        // reject it here at the spawner's compile (§7.12.3).
+        if !kennel_lib_policy::patch::is_mutable_field(field) {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\" is not a mutable policy leaf (must be one the schema \
+                 defines and the spawn applicator supports, e.g. `net.proxy.allow`, `fs.read`, \
+                 `fs.write`, `rootfs.writable`)"
+            )));
+        }
         worst_case = worst_case.saturating_add(variant_worst_case(m, field)?);
     }
     if worst_case > SPAWN_PATCH_MAX_BYTES {
@@ -1563,9 +1573,9 @@ mod tests {
     fn mutable_manifest_requires_exactly_one_well_formed_bound() {
         // Each of the three bound kinds validates on its own.
         let ok = parse(
-            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nfrom = [\"pypi.org\"]\nmax = 4\n\
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\nfrom = [\"pypi.org\"]\nmax = 4\n\
               [[mutable]]\nfield = \"rootfs.writable\"\noneof = [\"/opt/cache\"]\n\
-              [[mutable]]\nfield = \"fs.workspace\"\ntype = \"relpath\"\nunder = \"workspace\"\n",
+              [[mutable]]\nfield = \"fs.write\"\ntype = \"relpath\"\nunder = \"workspace\"\n",
         )
         .expect("parse");
         assert!(validate_mutable_manifest(&ok).is_ok());
@@ -1573,7 +1583,8 @@ mod tests {
         assert!(validate_mutable_manifest(&parse(b"name = \"t\"\n").expect("parse")).is_ok());
 
         // Zero bound kinds is rejected.
-        let no_bound = parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\n").expect("parse");
+        let no_bound =
+            parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\n").expect("parse");
         assert!(format!(
             "{}",
             validate_mutable_manifest(&no_bound).expect_err("no bound")
@@ -1582,7 +1593,7 @@ mod tests {
 
         // Two bound kinds (pool + oneof) on one field is rejected.
         let two_bounds = parse(
-            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nfrom = [\"a\"]\nmax = 1\n\
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\nfrom = [\"a\"]\nmax = 1\n\
               oneof = [\"b\"]\n",
         )
         .expect("parse");
@@ -1590,11 +1601,11 @@ mod tests {
 
         // A pool without `max`, and a predicate with the wrong `type`, are rejected.
         let pool_no_max =
-            parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nfrom = [\"a\"]\n")
+            parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\nfrom = [\"a\"]\n")
                 .expect("parse");
         assert!(validate_mutable_manifest(&pool_no_max).is_err());
         let bad_pred = parse(
-            b"name = \"t\"\n[[mutable]]\nfield = \"fs.x\"\ntype = \"abspath\"\nunder = \"w\"\n",
+            b"name = \"t\"\n[[mutable]]\nfield = \"fs.read\"\ntype = \"abspath\"\nunder = \"w\"\n",
         )
         .expect("parse");
         assert!(format!(
@@ -1605,8 +1616,8 @@ mod tests {
 
         // A field declared twice is rejected.
         let dup = parse(
-            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\noneof = [\"a\"]\n\
-              [[mutable]]\nfield = \"net.allow\"\noneof = [\"b\"]\n",
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\noneof = [\"a\"]\n\
+              [[mutable]]\nfield = \"net.proxy.allow\"\noneof = [\"b\"]\n",
         )
         .expect("parse");
         assert!(format!("{}", validate_mutable_manifest(&dup).expect_err("dup")).contains("twice"));
@@ -1618,7 +1629,7 @@ mod tests {
         // rejected at install, not as a runtime transport error.
         let huge_value = "x".repeat(2048);
         let toml = format!(
-            "name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nmax = 100\nfrom = [\"{huge_value}\"]\n"
+            "name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\nmax = 100\nfrom = [\"{huge_value}\"]\n"
         );
         let p = parse(toml.as_bytes()).expect("parse");
         let err = validate_mutable_manifest(&p).expect_err("oversized");
@@ -1629,28 +1640,29 @@ mod tests {
     fn pattern_and_freeform_validate_and_translate_to_settled_variants() {
         // pattern: validates, and translate maps it onto a settled variant carrying the shapes.
         let p = parse(
-            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nmatch = [\"*.pypi.org:443\"]\n",
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\nmatch = [\"*.pypi.org:443\"]\n",
         )
         .expect("parse");
         assert!(validate_mutable_manifest(&p).is_ok());
         let manifest = translate_manifest(&p);
         let v = manifest.first().expect("one variant");
-        assert_eq!(v.field, "net.allow");
+        assert_eq!(v.field, "net.proxy.allow");
         assert_eq!(v.pattern, vec!["*.pypi.org:443".to_owned()]);
         v.resolve().expect("resolves to a constraint");
 
         // A malformed pattern (interior wildcard) is rejected at compile, agreeing with the matcher.
-        let bad =
-            parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nmatch = [\"a.*.b:443\"]\n")
-                .expect("parse");
+        let bad = parse(
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.proxy.allow\"\nmatch = [\"a.*.b:443\"]\n",
+        )
+        .expect("parse");
         assert!(validate_mutable_manifest(&bad).is_err());
 
         // freeform: a `reason` is mandatory; present, it validates and maps.
-        let nofr = parse(b"name = \"t\"\n[[mutable]]\nfield = \"env.X\"\nfreeform = true\n")
+        let nofr = parse(b"name = \"t\"\n[[mutable]]\nfield = \"fs.write\"\nfreeform = true\n")
             .expect("parse");
         assert!(validate_mutable_manifest(&nofr).is_err());
         let ok = parse(
-            b"name = \"t\"\n[[mutable]]\nfield = \"env.X\"\nfreeform = true\nreason = \"varies\"\n",
+            b"name = \"t\"\n[[mutable]]\nfield = \"fs.write\"\nfreeform = true\nreason = \"varies\"\n",
         )
         .expect("parse");
         assert!(validate_mutable_manifest(&ok).is_ok());
@@ -1658,6 +1670,24 @@ mod tests {
         let vf = manifest_f.first().expect("one variant");
         assert!(vf.freeform);
         assert_eq!(vf.reason, "varies");
+    }
+
+    #[test]
+    fn a_variant_field_must_be_an_existing_registered_leaf() {
+        // The variant system opens EXISTING schema leaves only — a coined or non-mutable field is a
+        // hard compile reject (the structural guard against inventing schema).
+        let invented =
+            parse(b"name = \"t\"\n[[mutable]]\nfield = \"fs.workspace\"\noneof = [\"/x\"]\n")
+                .expect("parse");
+        assert!(format!(
+            "{}",
+            validate_mutable_manifest(&invented).expect_err("invented field")
+        )
+        .contains("not a mutable policy leaf"));
+        // `net.bpf.allow` is a real schema area but a SEPARATE mechanism, not mutable via a variant.
+        let bpf = parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.bpf.allow\"\noneof = [\"x\"]\n")
+            .expect("parse");
+        assert!(validate_mutable_manifest(&bpf).is_err());
     }
 
     #[test]

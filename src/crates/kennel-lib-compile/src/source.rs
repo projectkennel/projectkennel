@@ -230,7 +230,7 @@ pub struct SpawnAllow {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MutableField {
-    /// The dotted leaf-field path this entry opens (`net.allow`, `rootfs.writable`, `fs.workspace`).
+    /// The dotted leaf-field path this entry opens (`net.proxy.allow`, `rootfs.writable`, `fs.write`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     /// Pool bound: the fixed set a spawn may append values from.

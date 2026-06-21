@@ -38,7 +38,9 @@ pub type Manifest = Vec<Variant>;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Variant {
-    /// The dotted leaf-field path this variant opens (`net.allow`, `fs.read`, `fs.workspace`).
+    /// The dotted path of the **existing** policy-schema leaf this variant opens (`net.proxy.allow`,
+    /// `fs.read`, `fs.write`). A variant never coins a field — it names one the schema already has,
+    /// and the applicator's registry (the authority on which leaves are mutable) validates it.
     pub field: String,
     /// `oneof` constraint: the enumerated member set the value must belong to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -220,6 +222,19 @@ impl Constraint {
             Self::Pattern(_) | Self::Relpath { .. } | Self::Freeform { .. }
         )
     }
+
+    /// The maximum number of patch entries this constraint admits for its field, or `None` for no
+    /// per-constraint cap. `pool` allows up to its `max`; `oneof`/`relpath`/`freeform` are
+    /// single-value picks (one entry); `pattern` is uncapped here — the agent may add several admitted
+    /// destinations, bounded by the overall `SPAWN_PATCH_MAX_BYTES` transaction cap the wire enforces.
+    #[must_use]
+    pub const fn max_entries(&self) -> Option<u32> {
+        match self {
+            Self::Pool { max, .. } => Some(*max),
+            Self::OneOf(_) | Self::Relpath { .. } | Self::Freeform { .. } => Some(1),
+            Self::Pattern(_) => None,
+        }
+    }
 }
 
 fn member(value: &str, set: &[String], kind: &str) -> Result<(), Denied> {
@@ -254,17 +269,27 @@ fn admit_relpath(value: &str) -> Result<(), Denied> {
 }
 
 /// A net-destination value the agent supplied — a host plus an exact port.
+///
+/// Shared by the pattern matcher (which checks it) and the applicator (which builds a proxy rule from
+/// it), so both agree on the `host:port` grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Destination {
-    host: String,
-    port: u16,
+pub struct Destination {
+    /// The destination host (a name or an IPv4 literal).
+    pub host: String,
+    /// The exact destination port.
+    pub port: u16,
 }
 
 impl Destination {
     /// Parse `host:port`. The host is everything before the final `:`; the port is an exact `u16`.
     /// (IPv6 bracket syntax is out of scope for the pattern constraint — net patterns are names and
     /// IPv4.)
-    fn parse(value: &str) -> Result<Self, String> {
+    ///
+    /// # Errors
+    ///
+    /// A reason string if there is no `:port`, the host is empty or contains `:` (IPv6), or the port
+    /// is not a non-zero `u16`.
+    pub fn parse(value: &str) -> Result<Self, String> {
         let (host, port) = value
             .rsplit_once(':')
             .ok_or_else(|| "missing `:port`".to_owned())?;
@@ -418,8 +443,8 @@ mod tests {
         for toml in [
             "field = \"rootfs.writable\"\none_of = [\"/a\", \"/b\"]\n",
             "field = \"fs.read\"\npool = [\"/a\"]\npool_max = 4\n",
-            "field = \"net.allow\"\npattern = [\"*.x.com:443\"]\n",
-            "field = \"fs.workspace\"\nrelpath_under = \"workspace\"\n",
+            "field = \"net.proxy.allow\"\npattern = [\"*.x.com:443\"]\n",
+            "field = \"fs.write\"\nrelpath_under = \"workspace\"\n",
             "field = \"env.X\"\nfreeform = true\nreason = \"varies per run\"\n",
         ] {
             let v = variant_toml(toml);

@@ -12,8 +12,7 @@ skip a step; do not improvise past one.
 
 2. **Substrate second — for *what does the kernel actually do*.** For binder, namespaces,
    Landlock, seccomp, cgroups: check in this sub-order —
-   a. **the existing repo's usage** (how Kennel already drives this subsystem — it encodes
-      what the kernel actually honors),
+   a. **the existing repo's usage and its test suite** (how Kennel already drives this subsystem — it encodes what the kernel actually honors),
    b. **the kernel source**,
    c. **the kernel documentation** *last*.
    Docs describe the intended contract and mislead on the details that matter (e.g. a flag

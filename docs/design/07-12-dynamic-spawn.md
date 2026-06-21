@@ -107,7 +107,7 @@ grant through by finding a value that technically passes — the field it would 
 frozen, not in its write set.
 
 Each variant carries its own **constraint** describing *how* its field may move; "mutable" means
-writable *within that constraint*, never free. A mutable `net.allow` that accepts `0.0.0.0/0` defeats
+writable *within that constraint*, never free. A mutable proxy allow that accepts `0.0.0.0/0` defeats
 the purpose, so the constraint is part of the signed declaration. The constraint is one of an **open
 family — not a fixed taxonomy**: each member describes a different *way* a variant may diverge, and a
 new way to bound a divergence can be added as a new member without disturbing the others. The ones in
@@ -115,13 +115,15 @@ play:
 
 ```toml
 # net-fetch@v1 (operator-signed): a full policy with [net].mode = "constrained" frozen
-# and net.allow empty, plus the manifest naming what may move —
+# and the proxy allowlist empty, plus the manifest naming what may move —
 
 [[mutable]]
-field = "net.allow"          # pattern: OPEN destinations, bounded by a pre-baked shape —
+field = "net.proxy.allow"    # pattern: OPEN destinations, bounded by a pre-baked shape —
 match = ["*.pypi.org:443", "ghcr.io:443", "10.0.0.*:443"]
 # the agent supplies a concrete destination nobody enumerated at sign time; it is admitted
 # only if it matches one signed pattern (subdomain `*.suffix`, final-label `prefix.*`), exact port.
+# This governs the per-kennel egress PROXY filter only — an admitted destination joins the proxy
+# allowlist. The cgroup BPF ACL is a separate mechanism (`[net.bpf]`), never touched here.
 
 [[mutable]]
 field = "rootfs.writable"    # oneof: the agent picks from an enumerated member list
@@ -133,18 +135,19 @@ from  = ["/opt/data", "/opt/models"]
 max   = 8
 
 [[mutable]]
-field = "fs.workspace"       # predicate: the runtime-relative escape hatch (below)
+field = "fs.write"           # predicate: a runtime-relative writable subpath (existing fs.write leaf)
 type  = "relpath"            # traversal-free, RESOLVE_IN_ROOT at instantiation
 under = "workspace"
 
-[[mutable]]
-field = "env.EXTRA_INDEX"    # freeform: no shape at all — the loud, last-resort escape hatch
-freeform = true
-reason = "vendor index URL varies per run and cannot be enumerated or shaped"
+# The fifth member, freeform, takes no shape at all and applies to any of these fields:
+#   field = "fs.write"   freeform = true   reason = "…"   (loud, last-resort — see below)
 ```
 
-The five shown are members, not the whole family — a new way to bound (or refuse to bound) a divergence
-can join without disturbing the rest. They form a **loudness gradient from closed to open**. **pool** and
+Every `field` above is an **existing** policy-schema leaf (`net.proxy.allow`, `fs.read`, `fs.write`,
+`rootfs.writable`) — a variant never coins a field, it constrains one the schema already has, and the
+applicator's registry is the authority on which leaves are mutable (an unknown field is a compile
+reject). The five constraint *members* are not the whole family — a new way to bound (or refuse to
+bound) a divergence can join without disturbing the rest. They form a **loudness gradient from closed to open**. **pool** and
 **oneof** are *closed* — the agent selects from a set fixed at sign time, zero free text. **pattern** is
 the *shaped-open* case `net.allow` needs: the value is not pre-baked (no operator enumerates every
 destination an agent may reach), but a wildcard is admitted only when it conforms to a signed shape — a

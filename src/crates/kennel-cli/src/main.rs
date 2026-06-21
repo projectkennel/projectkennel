@@ -1044,7 +1044,8 @@ const fn policy_error_code(err: &kennel_lib_policy::PolicyError) -> u8 {
         | E::SourceValidation(_)
         | E::Resolution(_)
         | E::Translation(_)
-        | E::IncludeConflict(_) => 3,
+        | E::IncludeConflict(_)
+        | E::Patch(_) => 3,
     }
 }
 
