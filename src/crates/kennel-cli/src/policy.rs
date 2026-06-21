@@ -42,6 +42,21 @@ impl TemplateSource for FsTemplateSource {
         }
         None
     }
+
+    fn fetch_settled(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        for dir in &self.dirs {
+            // The installed flat layout, then the in-tree `<name>/<name>.settled.toml` beside source.
+            let flat = dir.join(format!("{name}@{version}.settled.toml"));
+            if let Ok(bytes) = std::fs::read(&flat) {
+                return Some(bytes);
+            }
+            let nested = dir.join(name).join(format!("{name}.settled.toml"));
+            if let Ok(bytes) = std::fs::read(&nested) {
+                return Some(bytes);
+            }
+        }
+        None
+    }
 }
 
 /// `kennel compile <policy> [--output P] [--key K] [--unsigned] [--template-dir D]...`

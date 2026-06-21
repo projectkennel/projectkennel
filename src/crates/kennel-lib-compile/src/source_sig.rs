@@ -118,6 +118,14 @@ impl<'a> Trust<'a> {
         matches!(self.mode, SignatureMode::Require)
     }
 
+    /// The trust store's keys, when one is configured — for verifying a **settled** spawn-target
+    /// template (`verify_settled`) rather than a source ancestor. `None` in development
+    /// ([`Self::dev`]) or an unsigned-allowed context with no store.
+    #[must_use]
+    pub const fn keys(&self) -> Option<&'a KeySet> {
+        self.keys
+    }
+
     /// Verify a [`Signable`] artefact (a template ancestor or an included fragment)
     /// against this trust context, returning the verified signing-key id (if a
     /// signature was checked).

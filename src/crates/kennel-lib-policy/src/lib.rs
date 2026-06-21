@@ -139,6 +139,20 @@ fn verify_doc(doc: SignedSettledPolicy, keys: &KeySet) -> Result<SettledPolicy, 
 /// [`PolicyError::Parse`] if the bytes are not a well-formed settled artefact, or
 /// [`PolicyError::UnsupportedSchemaVersion`] if its schema is too new.
 pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyError> {
+    Ok(parse_signed_settled_unverified(bytes)?.policy)
+}
+
+/// Parse a settled artefact into its **full document** — the body and its `[signature]` envelope —
+/// **without** verifying the signature.
+///
+/// For the spawn compiler, which records a target template's signature commitment (the content-pin)
+/// at the spawner's compile: it needs the envelope's `key_id`/`signature`, not just the body. The
+/// daemon re-verifies that commitment at `SPAWN` ([`verify_pinned`]); this is the authoring-side read.
+///
+/// # Errors
+/// [`PolicyError::Parse`] if the bytes are not a well-formed settled artefact, or
+/// [`PolicyError::UnsupportedSchemaVersion`] if its schema is too new.
+pub fn parse_signed_settled_unverified(bytes: &[u8]) -> Result<SignedSettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
         basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
     if doc.policy.settled_schema_version > SETTLED_SCHEMA_VERSION {
@@ -147,7 +161,7 @@ pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyErr
             max: SETTLED_SCHEMA_VERSION,
         });
     }
-    Ok(doc.policy)
+    Ok(doc)
 }
 
 /// Resolve and fill the settled policy's dynamic-loader `EXECUTE` grant set.

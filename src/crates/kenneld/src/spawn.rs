@@ -278,12 +278,17 @@ fn validate_and_mint(
     Ok((instance, requester_ends, channel, slot))
 }
 
-/// Resolve `name@version` to the signed template bytes from the first trust-store directory that
-/// holds `<dir>/<name>/policy.toml` (the layout the compiler resolves at install — `05-templates`).
+/// Resolve `name@version` to the signed **settled** template bytes — the complete, chain-folded
+/// policy a spawn instantiates (`<dir>/<name>/<name>.settled.toml`), beside the source the compiler
+/// folds. A spawn target is load-verified and instantiated as-is; the daemon never compiles it.
 fn resolve_template(dirs: &[PathBuf], reference: &str) -> Option<Vec<u8>> {
-    let name = reference.split('@').next().unwrap_or(reference);
-    dirs.iter()
-        .find_map(|dir| std::fs::read(dir.join(name).join("policy.toml")).ok())
+    let (name, version) = reference.split_once('@').unwrap_or((reference, "v1"));
+    dirs.iter().find_map(|dir| {
+        // The installed flat layout, then the in-tree `<name>/<name>.settled.toml` beside source.
+        std::fs::read(dir.join(format!("{name}@{version}.settled.toml")))
+            .or_else(|_| std::fs::read(dir.join(name).join(format!("{name}.settled.toml"))))
+            .ok()
+    })
 }
 
 /// Build the typed patch from the request pairs, enforcing this requester's manifest narrowing.
@@ -368,7 +373,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kennel-spawn-resolve-{}", std::process::id()));
         let tdir = dir.join("net-fetch");
         std::fs::create_dir_all(&tdir).expect("mkdir");
-        std::fs::write(tdir.join("policy.toml"), b"BYTES").expect("write");
+        std::fs::write(tdir.join("net-fetch.settled.toml"), b"BYTES").expect("write");
         let got = resolve_template(std::slice::from_ref(&dir), "net-fetch@v1");
         assert_eq!(got.as_deref(), Some(b"BYTES".as_slice()));
         assert!(resolve_template(std::slice::from_ref(&dir), "absent@v1").is_none());
