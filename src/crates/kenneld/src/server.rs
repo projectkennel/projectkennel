@@ -98,6 +98,11 @@ pub struct Loaded {
     /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
     /// request's argv (the request wins unless `pinned`); see `effective_workload`.
     pub workload: kennel_lib_policy::WorkloadRuntime,
+    /// The `[spawn]` delegated-instantiation grant (§7.12.2): the templates this kennel may
+    /// instantiate, each content-pinned, plus `max_instances`. `None` for a kennel with no
+    /// `[spawn]`. Drives the node-0 `SPAWN` handler; `kenneld` holds it in the per-kennel binder
+    /// runtime from construction.
+    pub spawn: Option<kennel_lib_policy::SpawnGrant>,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -112,6 +117,15 @@ pub trait PolicyLoader {
     /// A human-readable reason if the policy cannot be loaded, fails
     /// verification, or leaves a placeholder unresolved.
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String>;
+
+    /// A snapshot of the current trust-store keys, for runtime template re-verification at `SPAWN`
+    /// (§7.12.8) — `kenneld` re-resolves a named template and verifies its signature against these.
+    ///
+    /// Best-effort: an unreadable store yields an empty set (every template signature then fails
+    /// closed). The default is no keys — a loader with no trust store cannot honour a `SPAWN`.
+    fn trust_keys(&self) -> kennel_lib_policy::KeySet {
+        kennel_lib_policy::KeySet::new()
+    }
 }
 
 /// The identity and resources of the user this daemon serves.
@@ -1889,6 +1903,7 @@ mod tests {
                 workload: kennel_lib_policy::WorkloadRuntime::default(),
                 tty_filter: true,
                 on_change: kennel_lib_policy::OnChangeAction::Warn,
+                spawn: None,
             })
         }
     }

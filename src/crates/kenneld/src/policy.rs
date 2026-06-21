@@ -148,6 +148,10 @@ impl TrustStoreLoader {
 }
 
 impl PolicyLoader for TrustStoreLoader {
+    fn trust_keys(&self) -> kennel_lib_policy::KeySet {
+        self.current_keys().unwrap_or_else(|_| KeySet::new())
+    }
+
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
         let bytes = std::fs::read(path)
             .map_err(|e| format!("cannot read policy {}: {e}", path.display()))?;
@@ -211,6 +215,7 @@ impl PolicyLoader for TrustStoreLoader {
             tty_filter,
             on_change,
             workload: substituted.workload,
+            spawn: substituted.spawn,
         })
     }
 }
