@@ -41,6 +41,7 @@ pub mod libresolve;
 pub mod patch;
 pub mod settled;
 pub mod signature;
+pub mod spawn;
 pub mod variant;
 
 pub use audit::parse_audit_defaults;
@@ -57,6 +58,7 @@ pub use settled::{
     UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
+pub use spawn::spawn_eligible;
 
 /// The newest `settled_schema_version` this build accepts.
 pub const SETTLED_SCHEMA_VERSION: u32 = 1;
