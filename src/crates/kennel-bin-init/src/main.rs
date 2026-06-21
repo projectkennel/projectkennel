@@ -258,7 +258,9 @@ fn spawn_all(
         // adopt stdin.
         if interactive {
             kennel_lib_syscall::pty::setup_view_pty(kennel_lib_syscall::pty::PTY_RETURN_FD)?;
-        } else {
+        } else if !sup.stdio_injected {
+            // Injected-stdio (non-interactive) runs speak over the raw channel, not a tty — the
+            // fds are placed onto 0/1/2 as the final step below, so no controlling tty is adopted.
             kennel_lib_syscall::pty::adopt_stdin_as_controlling_tty();
         }
         set_no_new_privs()?;
@@ -272,6 +274,12 @@ fn spawn_all(
         // Resource limits last, so lowering RLIMIT_NOFILE cannot starve the rule opens.
         for (resource, soft, hard) in &sup.ulimits {
             set_rlimit(*resource, *soft, *hard)?;
+        }
+        // FINAL pre-exec step (`02-10` §7.12): place the injected stdio fds onto 0/1/2. Done after
+        // the seal so init's own diagnostics rode the host fds throughout, never the channel; the
+        // spawn-template seccomp must therefore permit `dup3` (and the closing `execve`).
+        if sup.stdio_injected {
+            kennel_lib_syscall::boot::place_injected_stdio()?;
         }
         Ok(())
     };
@@ -617,6 +625,7 @@ mod tests {
             aux: Vec::new(),
             interactive: false,
             workload_fd_pinned: false,
+            stdio_injected: false,
             ttl_seconds: None,
             log_level: 0,
         };

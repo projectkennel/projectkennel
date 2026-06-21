@@ -159,6 +159,8 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let pty_fd: Option<OwnedFd> = pop_flagged_fd(&mut wire_fds, half.pty_fd_present, "pty")?;
     let workload_fd: Option<OwnedFd> =
         pop_flagged_fd(&mut wire_fds, half.workload_fd_present, "workload")?;
+    // The three injected-stdio fds (a non-interactive run), placed last in the fixed order.
+    let stdio_fds: Option<[OwnedFd; 3]> = pop_stdio_fds(&mut wire_fds, half.stdio_present)?;
 
     // 1a. Provision the kennel's host-side network resources — folded into this one op (the
     //     former separate `add-addr`/`setup-egress` privhelper invocations are gone). Runs as
@@ -325,14 +327,22 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // workload), returning the init-binary fd to exec.
         let pty_ref = pty_fd.as_ref().map(AsFd::as_fd);
         let workload_ref = workload_fd.as_ref().map(AsFd::as_fd);
-        let init_file =
-            match place_handoff_fds(init_file.as_fd(), init_sync.as_fd(), pty_ref, workload_ref) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("kennel-privhelper: construction child: place_handoff_fds: {e}");
-                    return;
-                }
-            };
+        let stdio_ref = stdio_fds
+            .as_ref()
+            .map(|[i, o, e]| [i.as_fd(), o.as_fd(), e.as_fd()]);
+        let init_file = match place_handoff_fds(
+            init_file.as_fd(),
+            init_sync.as_fd(),
+            pty_ref,
+            workload_ref,
+            stdio_ref,
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("kennel-privhelper: construction child: place_handoff_fds: {e}");
+                return;
+            }
+        };
         // Hand off to the trusted `kennel-bin-init` (resolved from root-owned config, not the
         // wire) **as the kennel's uid 0** (no drop): PID 1 must NOT share the operator uid, or
         // the operator-uid workload/facades could signal or ptrace it (07-2 §7.2.5).
@@ -496,21 +506,40 @@ fn place_handoff_fds(
     init_sync: BorrowedFd<'_>,
     pty_fd: Option<BorrowedFd<'_>>,
     workload_fd: Option<BorrowedFd<'_>>,
+    stdio_fds: Option<[BorrowedFd<'_>; 3]>,
 ) -> io::Result<OwnedFd> {
-    use kennel_lib_syscall::boot::WORKLOAD_FD;
+    use kennel_lib_syscall::boot::{
+        INJECT_STDERR_FD, INJECT_STDIN_FD, INJECT_STDOUT_FD, WORKLOAD_FD,
+    };
     use kennel_lib_syscall::fd::dup_above;
     // Lift every fd we still need ABOVE the fixed target range first, so `dup2`-ing onto the
-    // low fixed numbers cannot clobber one of them. The range now spans BOOT_SYNC_FD,
-    // PTY_RETURN_FD, and WORKLOAD_FD.
-    let base = [PTY_RETURN_FD, BOOT_SYNC_FD, WORKLOAD_FD]
-        .into_iter()
-        .max()
-        .unwrap_or(BOOT_SYNC_FD)
-        .saturating_add(1);
+    // low fixed numbers cannot clobber one of them. The range spans BOOT_SYNC_FD, PTY_RETURN_FD,
+    // WORKLOAD_FD, and the three INJECT_STD* slots.
+    let base = [
+        PTY_RETURN_FD,
+        BOOT_SYNC_FD,
+        WORKLOAD_FD,
+        INJECT_STDIN_FD,
+        INJECT_STDOUT_FD,
+        INJECT_STDERR_FD,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(BOOT_SYNC_FD)
+    .saturating_add(1);
     let init_file = dup_above(init_file, base)?;
     let init_sync = dup_above(init_sync, base)?;
     let pty_hi = pty_fd.map(|p| dup_above(p, base)).transpose()?;
     let workload_hi = workload_fd.map(|w| dup_above(w, base)).transpose()?;
+    let stdio_hi = stdio_fds
+        .map(|[i, o, e]| -> io::Result<[OwnedFd; 3]> {
+            Ok([
+                dup_above(i, base)?,
+                dup_above(o, base)?,
+                dup_above(e, base)?,
+            ])
+        })
+        .transpose()?;
     dup_onto(init_sync.as_fd(), BOOT_SYNC_FD)?;
     if let Some(pty) = &pty_hi {
         dup_onto(pty.as_fd(), PTY_RETURN_FD)?;
@@ -518,7 +547,29 @@ fn place_handoff_fds(
     if let Some(workload) = &workload_hi {
         dup_onto(workload.as_fd(), WORKLOAD_FD)?;
     }
+    if let Some([i, o, e]) = &stdio_hi {
+        dup_onto(i.as_fd(), INJECT_STDIN_FD)?;
+        dup_onto(o.as_fd(), INJECT_STDOUT_FD)?;
+        dup_onto(e.as_fd(), INJECT_STDERR_FD)?;
+    }
     Ok(init_file)
+}
+
+/// Pop the three injected-stdio fds from the received SCM fds when `present`, preserving order
+/// (stdin, stdout, stderr). A flag set but fewer than three fds is a malformed datagram.
+fn pop_stdio_fds(fds: &mut Vec<OwnedFd>, present: bool) -> io::Result<Option<[OwnedFd; 3]>> {
+    if !present {
+        return Ok(None);
+    }
+    let mut next = || -> io::Result<OwnedFd> {
+        if fds.is_empty() {
+            return Err(io::Error::other(
+                "stdio_present set but an injected-stdio fd is missing",
+            ));
+        }
+        Ok(fds.remove(0))
+    };
+    Ok(Some([next()?, next()?, next()?]))
 }
 
 /// Validate each loopback address against the caller's reserved `scope`, then add it on `lo`

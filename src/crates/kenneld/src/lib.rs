@@ -147,6 +147,7 @@ pub trait Privileged {
         _egress: Option<&[u8]>,
         _pty_fd: Option<std::os::fd::RawFd>,
         _workload_fd: Option<std::os::fd::RawFd>,
+        _stdio_fds: Option<[std::os::fd::RawFd; 3]>,
     ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -204,6 +205,7 @@ impl Privileged for HelperClient {
         egress: Option<&[u8]>,
         pty_fd: Option<std::os::fd::RawFd>,
         workload_fd: Option<std::os::fd::RawFd>,
+        stdio_fds: Option<[std::os::fd::RawFd; 3]>,
     ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
         kennel_privhelper::client::construct_kennel(
             &self.helper,
@@ -211,6 +213,7 @@ impl Privileged for HelperClient {
             egress,
             pty_fd,
             workload_fd,
+            stdio_fds,
         )
     }
 }
@@ -1301,6 +1304,7 @@ fn construct_via_factory<P: Privileged + Sync>(
         Some(egress_bytes),
         plan.interactive_return_fd,
         plan.workload_fd,
+        plan.stdio_fds,
     )?;
     state.factory = true;
 
@@ -1338,6 +1342,7 @@ fn construction_half_from(
         // mirrored here.
         pty_fd_present: plan.interactive_return_fd.is_some(),
         workload_fd_present: plan.workload_fd.is_some(),
+        stdio_present: plan.stdio_fds.is_some(),
     }
 }
 
@@ -1386,6 +1391,9 @@ fn supervision_from(
         // Set when kenneld opened+hashed the workload binary and passes its fd at WORKLOAD_FD
         // (the sha256 fd-pin); init then fexecves the fd rather than resolving a path.
         workload_fd_pinned: plan.workload_fd.is_some(),
+        // Non-interactive run: the three workload stdio fds ride at INJECT_STD*_FD and init dup2s
+        // them onto 0/1/2 instead of adopting a controlling tty.
+        stdio_injected: plan.stdio_fds.is_some(),
         // kennel-bin-init runs this timer and, at expiry, makes the blocking NOTIFY_TTL_EXPIRED
         // call to kenneld (which freezes + decides). The action is decided kenneld-side.
         ttl_seconds: plan.ttl_seconds,

@@ -46,6 +46,22 @@ pub const BOOT_SYNC_FD: RawFd = 4;
 /// [`crate::pty::PTY_RETURN_FD`].
 pub const WORKLOAD_FD: RawFd = 5;
 
+/// The fixed descriptors for **injected workload stdio** (`02-10` §7.12, the non-interactive
+/// counterpart of [`crate::pty::PTY_RETURN_FD`]).
+///
+/// For a non-interactive run, the workload's stdin/stdout/stderr are passed fds — the controller's
+/// three stdio fds for a piped `kennel run`, or the spawned-kennel ends of a `SPAWN` channel (the
+/// JSON-RPC socketpair, duplicated for stdin+stdout, and the stderr pipe). kenneld passes them
+/// through the construction channel; the factory places them here, inherited across the `fexecve`;
+/// `kennel-bin-init` `dup2`s them onto 0/1/2 as the final pre-exec step (after the seal, so init's
+/// own diagnostics never ride the channel). A pty would impose terminal semantics the byte channel
+/// must not have, so this is raw, not a pty. Absent for the interactive (pty) path.
+pub const INJECT_STDIN_FD: RawFd = 6;
+/// See [`INJECT_STDIN_FD`].
+pub const INJECT_STDOUT_FD: RawFd = 7;
+/// See [`INJECT_STDIN_FD`].
+pub const INJECT_STDERR_FD: RawFd = 8;
+
 /// `kennel-bin-init` → `kenneld`: "I have `fexecve`'d; my binderfs is reachable via `/proc/<me>/root`."
 const READY: u8 = 1;
 /// `kenneld` → `kennel-bin-init`: "node 0 is claimed and serving — pull now."
@@ -112,4 +128,34 @@ fn read_byte(fd: BorrowedFd<'_>) -> io::Result<Option<u8>> {
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+/// Place the injected-stdio fds onto the workload's 0/1/2.
+///
+/// The three fds parked at [`INJECT_STDIN_FD`]/[`INJECT_STDOUT_FD`]/[`INJECT_STDERR_FD`] by the
+/// factory are `dup3`'d onto 0/1/2, then the source slots are closed so the workload inherits no
+/// duplicate channel ends.
+///
+/// `kennel-bin-init`'s final pre-exec step for a **non-interactive** run — the raw-channel
+/// counterpart of the interactive pty setup (`02-10` §7.12). The spawn-template seccomp must permit
+/// the `dup3` this performs.
+///
+/// # Errors
+///
+/// The OS error if a `dup3` fails.
+pub fn place_injected_stdio() -> io::Result<()> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    for (slot, target) in [
+        (INJECT_STDIN_FD, 0),
+        (INJECT_STDOUT_FD, 1),
+        (INJECT_STDERR_FD, 2),
+    ] {
+        crate::fd::dup_onto(borrow(slot), target)?;
+    }
+    for slot in [INJECT_STDIN_FD, INJECT_STDOUT_FD, INJECT_STDERR_FD] {
+        // SAFETY: the factory placed a live fd at `slot` with no other owner in this process; take
+        // ownership to close it (the workload keeps only the 0/1/2 copies). Dropping closes it.
+        drop(unsafe { OwnedFd::from_raw_fd(slot) });
+    }
+    Ok(())
 }

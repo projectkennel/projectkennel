@@ -601,6 +601,18 @@ pub struct Plan {
     ///
     /// [`WORKLOAD_FD`]: kennel_lib_syscall::boot::WORKLOAD_FD
     pub workload_fd: Option<RawFd>,
+    /// The workload's injected stdin/stdout/stderr fds for a **non-interactive** run (`02-10` §7.12):
+    /// a piped `kennel run`'s three controller fds, or a `SPAWN` channel's spawned ends. kenneld
+    /// passes them through construction; the factory places them at
+    /// [`INJECT_STDIN_FD`]/[`INJECT_STDOUT_FD`]/[`INJECT_STDERR_FD`] and `kennel-bin-init` `dup2`s
+    /// them onto 0/1/2 after the seal. `None` (the default) keeps the inherit-controller-stdio path;
+    /// mutually exclusive with [`interactive_return_fd`](Self::interactive_return_fd) (the pty path).
+    /// Not policy-derived — kenneld sets it at bring-up.
+    ///
+    /// [`INJECT_STDIN_FD`]: kennel_lib_syscall::boot::INJECT_STDIN_FD
+    /// [`INJECT_STDOUT_FD`]: kennel_lib_syscall::boot::INJECT_STDOUT_FD
+    /// [`INJECT_STDERR_FD`]: kennel_lib_syscall::boot::INJECT_STDERR_FD
+    pub stdio_fds: Option<[RawFd; 3]>,
     /// Auxiliary processes to launch inside the kennel, in the seal after Landlock and
     /// before the workload `execve`, so they inherit the confined environment and die
     /// with the kennel's PID namespace (`07-1` §7.1.5). Used for the in-kennel proxies
@@ -687,6 +699,12 @@ pub struct Supervision {
     ///
     /// [`WORKLOAD_FD`]: kennel_lib_syscall::boot::WORKLOAD_FD
     pub workload_fd_pinned: bool,
+    /// Whether the workload's stdio is **injected** (a non-interactive run, `02-10` §7.12): three fds
+    /// ride out of band at `INJECT_STDIN_FD`/`INJECT_STDOUT_FD`/`INJECT_STDERR_FD`, and
+    /// `kennel-bin-init` `dup2`s them onto 0/1/2 as the final pre-exec step instead of adopting the
+    /// inherited stdin as a controlling tty. Mutually exclusive with [`interactive`](Self::interactive)
+    /// (the pty path). This is the presence flag; the fds are out of band.
+    pub stdio_injected: bool,
     /// The kennel's TTL in seconds (`None` ⇒ none). `kennel-bin-init` runs this timer and, at
     /// expiry, makes a blocking `NOTIFY_TTL_EXPIRED` binder call to kenneld, which freezes the
     /// cgroup and decides whether to resume or terminate (§9.7). The action itself is decided
@@ -772,6 +790,10 @@ pub struct ConstructionHalf {
     ///
     /// [`WORKLOAD_FD`]: kennel_lib_syscall::boot::WORKLOAD_FD
     pub workload_fd_present: bool,
+    /// Whether three **injected-stdio** fds accompany the datagram, to be placed at
+    /// `INJECT_STDIN_FD`/`INJECT_STDOUT_FD`/`INJECT_STDERR_FD` for `kennel-bin-init` to `dup2` onto
+    /// 0/1/2 (`02-10` §7.12). They travel last in the fixed fd order: pty, workload, then stdio×3.
+    pub stdio_present: bool,
 }
 
 /// A per-kennel loopback address for the factory to add on host `lo` (§7.3).
@@ -1149,6 +1171,7 @@ impl Plan {
             ulimits,
             interactive_return_fd: None,
             workload_fd: None,
+            stdio_fds: None,
             aux: Vec::new(),
             ttl_seconds: ep.lifecycle.ttl_seconds,
             ttl_action: ep.lifecycle.ttl_action,

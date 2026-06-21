@@ -1078,6 +1078,11 @@ pub fn run_kennel<P, L>(
     let mut return_sock: Option<OwnedFd> = None;
     let mut client_sock: Option<OwnedFd> = None;
     let mut master_recv: Option<OwnedFd> = None;
+    // A non-interactive run injects the three workload stdio fds (a piped `kennel run`'s controller
+    // fds, or a SPAWN channel's spawned ends) onto the workload's 0/1/2 — the raw-channel sibling of
+    // the interactive pty path. The fds stay alive in `command` (as its stdin/stdout/stderr) through
+    // construction, so these raw numbers are valid when the factory sends them.
+    let mut stdio_raw: Option<[std::os::fd::RawFd; 3]> = None;
     let mut command = if req.interactive {
         client_sock = fds.into_iter().next();
         match UnixStream::pair() {
@@ -1101,11 +1106,15 @@ pub fn run_kennel<P, L>(
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     } else {
+        if let [stdin, stdout, stderr, ..] = fds.as_slice() {
+            stdio_raw = Some([stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()]);
+        }
         match command_for(&argv, &cwd, fds) {
             Ok(command) => command,
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     };
+    loaded.plan.stdio_fds = stdio_raw;
     // Prepare SSH egress (§7.10): stage the compile-time synthetic keys, register the
     // edges with the per-user bastion, and build the synthetic ~/.ssh for the view. The
     // ~/.ssh is rooted at the constructed-view HOME (the plan's shim root) when there is
@@ -1986,6 +1995,7 @@ mod tests {
                 ulimits: Vec::new(),
                 interactive_return_fd: None,
                 workload_fd: None,
+                stdio_fds: None,
                 aux: Vec::new(),
                 ttl_seconds: None,
                 ttl_action: kennel_lib_policy::TtlAction::Exit,
