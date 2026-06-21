@@ -1,6 +1,6 @@
 # Project Kennel — 0.3.0 plan
 
-Status: **in flight** · Drafted: 2026-06-20 · Updated: 2026-06-21 · Targets: 0.3.0
+Status: **in flight** · Drafted: 2026-06-20 · Updated: 2026-06-22 · Targets: 0.3.0
 Baseline: 0.2.0 (2026-06-20)
 
 **Progress (2026-06-21).** Thrust 1 (W1–W2), Thrust 2 (W3–W5), **Thrust 3 (W6–W8)**, and **Thrust 4
@@ -189,7 +189,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   empty-bind-list path is 100% of ephemeral tool spawns, so this eliminates address provisioning
   from the hot path entirely. Independent of the spawn build itself; lands in parallel.
 
-- **W10 · Spawn-latency profiling harness.** **[dep] L.** · ✅ **done** (in flight: PR)
+- **W10 · Spawn-latency profiling harness.** **[dep] L.** · ✅ **done** (#64)
   Profile setup latency end-to-end across the five privilege-domain boundaries (kennel →
   kenneld → privhelper → bin-init → workload → teardown). *Built:* the spawn-path tracer
   (`kennel_lib_config::Tracer`) stamps every milestone with a wall-clock `[t=<nanos>]`
@@ -233,12 +233,6 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 ### Thrust 5 — OCI completion and the shared persistence store
 
-- **W12 · First-party static in-kennel OCI unpacker.** **[dep] L.**
-  Replace the `umoci` host dependency (the 0.2.0 interim) with a first-party static in-kennel
-  unpacker over a vetted `tar` crate — no host prereq. In-kennel ⇒ static-linked
-  ([[in-kennel-binaries-must-be-static]]); the unpack is adversarial-input parsing, so it runs
-  at workload authority, never in the daemon closure. Completes the OCI fetch surface.
-
 - **W13 · OCI carve-out preservation + the userns-map contract sentence.** **[debt] S.**
   `oci update` re-derives the base closure while preserving the operator's
   `[rootfs].readonly`/`writable` carve-out, surfacing the diff at re-sign. Plus the missing
@@ -249,13 +243,6 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   consumer**: `oci revert` is defined as the
   *total* case of the store's selective revert (pin / diff-against-pin / restore-from-pin). One
   mechanism, two callers.
-
-- **W15 · OCI integrity ladder + per-inode closure-derivation walk.** **[opt] M.**
-  Rung 1 (content-addressed store entry, verified before pivot) and Rung 2 (fs-verity over
-  `rootfs/` + `config.json`), opt-in behind the digest-pinned floor. Plus the per-inode
-  closure-derivation walk that closes the two named gaps (gosu/su-exec reading as all-root; app
-  code outside `/usr`|`/lib` staying writable). **May slip to 0.4** (the digest-pinned floor is
-  the 0.3.0 minimum).
 
 ### Thrust 6 — Hygiene and descope
 
@@ -288,12 +275,6 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   A `kennel ps`-equivalent including ephemeral spawns and what-spawned-what — operating a fleet
   of agent-spawned workers is unmanageable without it, so it ships with the spawn set.
 
-- **W21 · MCP interposer.** **[dep] M.**
-  The in-kennel tool-filter/audit kennel from §7.12.5 — a small MCP-aware kennel the operator
-  wires between requester and tool, parsing JSON-RPC *because it is confined and disposable, not
-  because the daemon does*. The application-semantic mediation half of the spawn/MCP surface;
-  operator-opt-in to *wire*, but shipped, not deferred.
-
 ## Sequencing
 
 1. **Design lock first — W1 (promote design, this PR) + W2 (T3.9 catalogue).** W3's risk
@@ -309,14 +290,14 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
    of Thrust 3** — the boundary harness lands against the existing construction path so it is the
    instrument that lands the spawn runtime, then re-measures the SPAWN verb once it exists; **W11
    only if W10's profile dictates.**
-5. **OCI / persistence — W12–W15**, independent of spawn; slot against capacity. W14
-   (`.trust-manifest.d`) pairs with W12 (`oci revert` is its total-revert case). W15 is opt and
-   may slip.
+5. **OCI / persistence — W13–W14**, independent of spawn; slot against capacity. W14
+   (`.trust-manifest.d`) is the persistence store whose total-revert case is `oci revert`. (W12
+   first-party unpacker and W15 integrity ladder are deferred — see "Deferred from 0.3.0".)
 6. **Hygiene — W16–W18 any time.** Do W16 (X11 removal) early to shrink the surface before the
    red-team pass reads it.
 7. **Pre-ship — W19 last and gating**, after the whole spawn surface (W3–W9) exists. **W20
-   (topology) and W21 (interposer) ship with the spawn/MCP set** — both are spawn-target/observer
-   kennels that need the spawn runtime (W8), so they sequence after it; neither is optional.
+   (topology) ships with the spawn set** — a spawn-observer kennel that needs the spawn runtime
+   (W8), so it sequences after it. (W21 MCP interposer is deferred — see "Deferred from 0.3.0".)
 
 ## Exit criteria
 
@@ -329,9 +310,12 @@ tested (W5); `02-10-dynamic-spawn.md` is written as-built (W1); per-kennel addre
 is gated on inbound bind (W9); the latency harness reports the five-boundary spawn profile and
 the teardown span (W10); X11 is removed and the ABI4/BPF decision is recorded (W16/W17); and the
 spawn-surface red-team pass is complete with the R2 composition residual explicitly
-accepted-and-tagged (W19); and the **complete spawn/MCP agent-to-worker surface ships** — the
-live-topology surface and the MCP interposer included (W20/W21), nothing in the set fenced or
-deferred. CHANGELOG records every stable-surface change — the `[spawn]` / `[[mutable]]` policy
+accepted-and-tagged (W19); and the **spawn agent-to-worker surface ships** — the spawn transport,
+capability model, and the live-topology surface (W20) complete, with the application-layer **MCP
+interposer (W21) and the first-party OCI unpacker (W12) deliberately deferred to backlog**, and the
+**OCI integrity ladder (W15) to 0.4.0** (see "Deferred from 0.3.0"). The deferrals are scope calls,
+not fences: the spawn headline and its policy/transport surface ship complete. CHANGELOG records
+every stable-surface change — the `[spawn]` / `[[mutable]]` policy
 schema, any CLI surface, the `SPAWN` IPC verb, and the T3.9 threat-catalogue addition — per
 CODING-STANDARDS §13/§14.
 
@@ -351,16 +335,35 @@ CODING-STANDARDS §13/§14.
 
 ## Open decisions for the maintainer
 
-- **OCI first-party unpacker (W12): 0.3.0 `[dep]` or slip to 0.4 as `[opt]`?** 0.2.0 shipped
-  `umoci` as the interim and flagged the first-party unpacker as a 0.3 follow-up. Listed here as
-  `[dep]` (it completes the OCI surface), but it is the natural cut line if 0.3.0 gets tight —
-  `umoci` works as the interim.
-- **OCI integrity rungs (W15): in-scope or 0.4?** Marked `[opt]`/may-slip, as in 0.2.0 — the
-  digest-pinned floor is the minimum.
 - **W11 (skip constrained-mode BPF egress attach):** worth the defence-in-depth loss for the
   latency? Profile-gated — surface only if W10 dictates.
 - **Defaults:** the `max_instances` default value; whether the spawn-target memory-ceiling floor
   is a fixed default or must always be author-declared.
+
+## Deferred from 0.3.0 (2026-06-22)
+
+Cut deliberately to keep 0.3.0 the dynamic-spawn release, not to fence a promise. The designs stand
+(design docs carry no build status); these are the build-schedule calls.
+
+- **W12 · First-party static in-kennel OCI unpacker → backlog.** The security argument for
+  first-party (the unpack is adversarial-input parsing) is **already met by confinement**: since
+  W17c the unpack runs `skopeo`+`umoci` inside the signed `oci-fetch@v1` view, at workload
+  authority, never in the daemon closure. First-party then buys only supply-chain hygiene (drop the
+  `umoci` dependency) and deployment convenience (no host prereq) — real, but not a 0.3.0 blocker,
+  and W13/W14 operate on the unpacked rootfs regardless of which unpacker produced it. The
+  `umoci`-confined path is the shipped 0.3.0 state, not an interim.
+
+- **W15 · OCI integrity ladder (fs-verity) + per-inode closure-derivation walk → 0.4.0.** The
+  digest-pinned floor verifies image content at the trust boundary and the rootfs is RO-mounted, so
+  fs-verity's marginal value is narrow runtime defence-in-depth (offline tampering of the *cached*
+  unpacked rootfs by a separate local attacker). Worth evaluating against that residual before
+  committing the mechanism — a 0.4.0 question. The digest-pinned floor remains the 0.3.0 minimum.
+
+- **W21 · MCP interposer → backlog.** The spawn capability ships and is usable without in-kennel
+  MCP mediation (the interposer is operator-opt-in application-semantic filtering, §7.12.5). W19's
+  **R2 composition residual is already accepted-and-tagged, not closed**, so backlogging W21 changes
+  no ship posture — it makes "no in-kennel MCP mediation in 0.3.0" explicit. The application-layer
+  half of the spawn/MCP surface lands in a later release.
 
 ## Non-goals (explicitly out of scope)
 
@@ -377,10 +380,11 @@ CODING-STANDARDS §13/§14.
 
 ## Fenced to 0.4+
 
-> The complete spawn/MCP agent-to-worker surface (§7.12) ships in 0.3.0 — the SPAWN verb, the
-> template/var grant model, the reaper, the topology surface, and the MCP interposer (W3–W8,
-> W20, W21). Nothing in that set is fenced; the dynamic-spawn model is bounded to single-hop
-> kennel-to-kennel by design (§7.12.10), not by deferral.
+> The dynamic-spawn agent-to-worker surface (§7.12) ships in 0.3.0 — the SPAWN verb, the
+> template/var grant model, the reaper, and the topology surface (W3–W8, W20). The application-layer
+> **MCP interposer (W21) is deferred to backlog**: the SPAWN/FD transport it rides ships now; the
+> interposer is opt-in semantic mediation on top, not the headline. The dynamic-spawn model itself is
+> bounded to single-hop kennel-to-kennel **by design** (§7.12.10), not by deferral.
 
 - **Reproducible double-build + release image**; **multi-kernel BPF verifier matrix** —
   release-pipeline and kernel-matrix infra, deferred from prior releases.
