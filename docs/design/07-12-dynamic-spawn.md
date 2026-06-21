@@ -311,50 +311,12 @@ at T3.8), derived from the `[spawn]` grant the way T1.6 derives from `mode = hos
 The posture claim is confinement and consented delegation, not control over what the agent does with
 the tools it is permitted to spawn.
 
-> **Provisional T3.9 catalogue entry** — drafted here pending the THREATS pass; migrates verbatim to
-> `THREATS.md` when the catalogue entry lands, at which point this block is replaced by a cross-reference.
->
-> **T3.9 — Delegated spawning.** A workload holding `[spawn]` instantiates ephemeral sibling kennels
-> from operator-signed templates, each handed a `kenneld`-minted channel (§7.12). The capability delegates
-> *instantiation* to a workload that, for an AI agent, is itself untrusted and prompt-injectable. The
-> exposure is **derived** from the `[spawn]` grant — `kennel policy risks` reports it with the grant as
-> carrier and the operator's `reason`, the path `mode = host` uses for T1.6 — with no stored
-> `threats.reinstated` field; the grant is the tag. Workload-class family, sibling to T3.8.
->
-> *Adversary.* A compromised or prompt-injected spawning workload. It cannot author policy or invent
-> capability — every spawn floors at the signed template (§7.12.1), and the install-time compiler denies
-> any capability the template does not grant. It controls two inputs only: the mutable-field writes it
-> supplies, and the composition of the tools it is permitted to spawn.
->
-> *Mitigations in place.* Request-don't-author (the capability floor is the signed template, not
-> agent-supplied policy); a frozen template plus a mutable-field manifest, the agent's writes applied as a
-> patch and accepted only for fields the manifest opens, each within its bound (§7.12.3);
-> depth-1 and spawn-eligibility (lifetime, ceilings, manifest) checked at the spawner's install (§7.12.8);
-> the `max_instances` ceiling enforced by atomic check-and-claim, the fate-sharing double reaper, and the
-> spawned kennel's own-lifetime self-reap (§7.12.7); ephemerality, no host persistence (§7.12.6).
->
-> *Residuals.*
-> - **R1 — mutable-field surface.** The boundary is exactly as strong as the template's per-field
->   bounds; an under-bounded mutable field (a `net.allow` whose pool is too wide, a predicate field that
->   admits traversal) is the residual's edge. Pure pool/oneof manifests reduce this to closed-set
->   selection — the agent writes no free text; a predicate field is the loud exception that reintroduces
->   an open value, and the bound (typed, traversal-free, `RESOLVE_IN_ROOT`) is what holds it.
->   Operator-owned: signing a manifest signs its per-field bounds as load-bearing.
-> - **R2 — delegated composition.** Kennel bounds each spawned kennel to its template but does not
->   bound what an agent composes across several; an agent permitted to spawn a network-capable tool and
->   a filesystem-capable tool can bridge their channels and reconstitute the lethal trifecta across two
->   kennels though no single kennel holds both legs. **Not mechanically closed** — closing it would put
->   cross-kennel information-flow reasoning in the daemon, a different and larger project. Mitigated, not
->   eliminated, by scoping `[spawn.allow]` to the templates an agent actually needs. This is the line
->   that carries the residual's weight.
->
-> *ATT&CK (tactic-level, best-effort).* The control contains Execution (TA0002) to the template's grant
-> and resists Privilege Escalation via the depth-1/no-author rules; the unclosed R2 maps to Exfiltration
-> (TA0010, T1041 — over an agent-bridged channel). Refine to technique level in the catalogue pass.
->
-> *Compliance (to confirm in the mapping pass).* NIS2 21(2)(i) access control / least privilege (the
-> `[spawn.allow]` scoping is the least-privilege control); NIS2 21(2)(d) supply chain where templates
-> are third-party; DORA Art. 9 (prevention) and Art. 28 (third-party) by the same reading as T3.8.
+> **Catalogued as T3.9 — Delegated spawning.** The full entry — adversary, mitigations, the R1
+> mutable-field and R2 delegated-composition residuals, and the ATT&CK and compliance mappings — lives in
+> `docs/design/THREATS.md` (T3.9), with the machine form in `dist/threats/catalogue.toml`. The exposure is
+> **derived** from the `[spawn]` grant: `kennel policy risks` reports it with the grant as carrier and the
+> operator's `reason`, the path `mode = host` uses for T1.6 — no stored `threats.reinstated` field, the
+> grant is the tag. Workload-class family, sibling to T3.8.
 
 ## 7.12.10 Scope: kennel-to-kennel by definition
 
