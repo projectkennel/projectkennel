@@ -596,15 +596,37 @@ impl Connection {
         data: &[u8],
         fd: Option<BorrowedFd<'_>>,
     ) -> io::Result<()> {
+        fd.map_or_else(
+            || self.reply_with_data_and_fds(incoming, data, &[]),
+            |fd| self.reply_with_data_and_fds(incoming, data, &[fd]),
+        )
+    }
+
+    /// Reply with a length-prefixed payload and **zero or more** `BINDER_TYPE_FD` objects — the
+    /// multi-fd generalisation of [`Self::reply_with_data_and_fd`] (the `SPAWN` reply: the
+    /// `spawn-<uuid>`/status bytes plus the requester's two channel ends — `02-10` §7.12). Each fd
+    /// object sits at an 8-byte boundary and is named by one transaction offset; with zero fds this
+    /// is byte-identical to a no-fd `reply_with_data_and_fd`. Then free the inbound buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails, or [`io::ErrorKind::InvalidInput`]
+    /// if the payload length does not fit the wire encoding.
+    pub fn reply_with_data_and_fds(
+        &self,
+        incoming: &Incoming,
+        data: &[u8],
+        fds: &[BorrowedFd<'_>],
+    ) -> io::Result<()> {
         let data_len = u32::try_from(data.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "payload too large"))?;
         let mut buf = Vec::new();
         buf.extend_from_slice(&data_len.to_le_bytes());
         buf.extend_from_slice(data);
 
-        let mut offsets: Vec<u64> = Vec::new();
-        if let Some(fd) = fd {
-            // The fd object must sit at an 8-byte boundary within the buffer.
+        let mut offsets: Vec<u64> = Vec::with_capacity(fds.len());
+        for fd in fds {
+            // Each fd object must sit at an 8-byte boundary within the buffer.
             let obj_off = buf.len().next_multiple_of(8);
             buf.resize(obj_off, 0);
             buf.extend_from_slice(&proto::flat_binder_object_fd(fd.as_raw_fd()));

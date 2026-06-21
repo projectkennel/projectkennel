@@ -1194,12 +1194,25 @@ pub fn run_kennel<P, L>(
         } else {
             None
         };
+        // The [spawn] runtime (§7.12): pair the grant with a trust-key snapshot (to verify a
+        // re-resolved template against) and the template cascade kenneld resolves `name@version`
+        // from. Built only for a kennel that carries a grant; a SPAWN from any other is denied.
+        let spawn = loaded.spawn.map(|grant| {
+            std::sync::Arc::new(crate::spawn::SpawnRuntime::new(
+                grant,
+                shared.loader.trust_keys(),
+                kennel_lib_config::User::load()
+                    .unwrap_or_default()
+                    .template_dirs(),
+            ))
+        });
         spec.binder = Some(crate::BinderPrep {
             policy: loaded.binder,
             unix: facade_unix,
             writer,
             init_bin: shared.identity.init_bin.clone(),
             prompt,
+            spawn,
         });
     }
 

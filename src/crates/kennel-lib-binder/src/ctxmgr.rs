@@ -12,7 +12,7 @@
 //! blocking forever in `BINDER_WRITE_READ`.
 
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -68,6 +68,11 @@ pub enum Reply {
     /// (the supervision-half bytes plus the controlling-pty fd — `07-2` §7.2.3). The
     /// receiver decodes it with [`Connection::transact_with_fd`].
     DataAndFd(Vec<u8>, Option<OwnedFd>),
+    /// Reply with a length-prefixed payload and **zero or more** `BINDER_TYPE_FD` objects — the
+    /// `SPAWN` reply (the `spawn-<uuid>`/status bytes plus the requester's two channel ends: the
+    /// socketpair local end and the stderr pipe read end — `02-10` §7.12). The multi-fd
+    /// generalisation of [`Self::DataAndFd`]; the kernel translates each fd into the caller's table.
+    DataAndFds(Vec<u8>, Vec<OwnedFd>),
 }
 
 /// A context-manager endpoint owning node 0 of one binder instance.
@@ -153,6 +158,11 @@ impl ContextManager {
             Reply::DataAndFd(data, fd) => {
                 self.conn
                     .reply_with_data_and_fd(incoming, &data, fd.as_ref().map(AsFd::as_fd))
+            }
+            Reply::DataAndFds(data, fds) => {
+                let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
+                self.conn
+                    .reply_with_data_and_fds(incoming, &data, &borrowed)
             }
         }
     }

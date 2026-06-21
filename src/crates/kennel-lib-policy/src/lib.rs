@@ -77,6 +77,45 @@ pub const SETTLED_SCHEMA_VERSION: u32 = 1;
 pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
         basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    verify_doc(doc, keys)
+}
+
+/// Verify a settled-policy document **and** confirm it is the exact artefact a `[spawn]` grant
+/// pinned (the content-pin, §7.12.8).
+///
+/// `kenneld` calls this at `SPAWN` on a template it re-resolved from the *mutable* trust store: the
+/// document's `[signature]` must carry the `expected_key_id`/`expected_signature` the spawner
+/// recorded at its compile, **and** verify cryptographically against `keys`. A deterministic ed25519
+/// signature over canonical content is the content commitment, so a re-signed-in-place template
+/// resolves to a different signature and is caught here — fail-closed against a mutable trust store,
+/// no `sha2`. The pin equality is checked first, so tampering reads as a clear pin mismatch rather
+/// than a generic signature failure.
+///
+/// # Errors
+///
+/// [`PolicyError::Spawn`] on a pin mismatch; otherwise the same errors as [`verify_settled`]
+/// (parse, schema version, signature, invariants).
+pub fn verify_pinned(
+    bytes: &[u8],
+    keys: &KeySet,
+    expected_key_id: &str,
+    expected_signature: &str,
+) -> Result<SettledPolicy, PolicyError> {
+    let doc: SignedSettledPolicy =
+        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    if doc.signature.key_id != expected_key_id || doc.signature.signature != expected_signature {
+        return Err(PolicyError::Spawn(
+            "template content-pin mismatch — the trust store resolved a different signed artefact \
+             than the spawner pinned (re-signed in place?); fail-closed (§7.12.8)"
+                .to_owned(),
+        ));
+    }
+    verify_doc(doc, keys)
+}
+
+/// The shared tail of [`verify_settled`] / [`verify_pinned`]: schema-version gate, signature
+/// verification over the canonical body, and framework-invariant re-assertion.
+fn verify_doc(doc: SignedSettledPolicy, keys: &KeySet) -> Result<SettledPolicy, PolicyError> {
     if doc.policy.settled_schema_version > SETTLED_SCHEMA_VERSION {
         return Err(PolicyError::UnsupportedSchemaVersion {
             found: doc.policy.settled_schema_version,
@@ -214,6 +253,25 @@ mod tests {
         let canon =
             String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
         assert!(canon.contains("[spawn]") && canon.contains("[[spawn.allow]]"));
+    }
+
+    #[test]
+    fn verify_pinned_accepts_the_committed_signature_and_rejects_a_mismatch() {
+        let key = signing_key();
+        let doc = sign_settled(&sample_policy(), &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let keys = keyset_for(&key);
+        // The recorded pin = the artefact's own signature → verifies and returns the body.
+        let ok = verify_pinned(
+            &bytes,
+            &keys,
+            &doc.signature.key_id,
+            &doc.signature.signature,
+        );
+        assert_eq!(ok.expect("pinned verify"), sample_policy());
+        // A pin naming a different signature is a fail-closed mismatch (the re-signed-in-place case).
+        let bad = verify_pinned(&bytes, &keys, &doc.signature.key_id, "AAAA");
+        assert!(matches!(bad, Err(PolicyError::Spawn(_))));
     }
 
     #[test]

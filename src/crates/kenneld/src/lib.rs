@@ -37,6 +37,7 @@ pub mod prompt;
 pub mod proxy;
 pub mod pty_broker;
 pub mod server;
+pub mod spawn;
 pub mod ssh;
 pub mod sshd;
 pub mod tripwire;
@@ -291,6 +292,10 @@ pub struct BinderPrep {
     /// The operator-prompt channel (§9.7): a clone of the control connection the TTL `renew`
     /// action prompts over. `None` for a non-interactive run (no operator to ask).
     pub prompt: Option<crate::prompt::PromptPort>,
+    /// The `[spawn]` runtime (§7.12): the grant, the trust keys, and the template cascade the node-0
+    /// `SPAWN` handler validates against. `None` for a kennel with no `[spawn]` grant (a `SPAWN` from
+    /// it is denied). An `Arc` so the binder looper pool shares one immutable copy.
+    pub spawn: Option<std::sync::Arc<crate::spawn::SpawnRuntime>>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -1430,6 +1435,7 @@ fn acquire_binder_node0(
         inbound,
         dbus,
         std::sync::Arc::clone(&prep.writer),
+        prep.spawn.clone(),
     )
 }
 
