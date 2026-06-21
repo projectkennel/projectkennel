@@ -40,6 +40,7 @@ pub mod keys;
 pub mod libresolve;
 pub mod settled;
 pub mod signature;
+pub mod variant;
 
 pub use audit::parse_audit_defaults;
 pub use error::PolicyError;
