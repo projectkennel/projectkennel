@@ -21,6 +21,25 @@ user's leaf policy is a short delta from a template (typically 5–15 lines with
 Each template directory carries `policy.toml` (the template's policy), `meta.toml`
 (identity + signing reference), and `README.md` (the threat-model summary).
 
+## Spawn targets (§7.12)
+
+A second, distinct set: **single-leg SPAWN targets** an agent holding `[spawn]` may
+instantiate as ephemeral sibling kennels (`docs/design/07-12-dynamic-spawn.md`). Each holds
+**at most one** trifecta leg, declares a self-reaping TTL + memory/pids/CPU ceilings (a
+spawn-target must, §7.12.8), carries no `[spawn]` of its own (depth-1), and opens its mutable
+surface through a signed `[[mutable]]` manifest (§7.12.3). Composing two is a visible, signed
+operator act.
+
+| Spawn target | Leg | Mutable surface | Reaches |
+|---|---|---|---|
+| [`pure-compute`](pure-compute/) | execution | none (most-fenced) | nothing — no net, no fs write |
+| [`net-fetch`](net-fetch/) | network | `net.proxy.allow` (pattern — shaped destinations) | the proxy egress filter only |
+| [`scratch-fs`](scratch-fs/) | filesystem | `fs.write` (oneof — a working dir) | a writable scratch area, no net |
+
+The entrypoints (`[workload].argv`) are constructed-view paths the spawned image provides; the
+templates govern the **policy**, not the tool binaries. Gated in CI by
+`kennel-lib-compile/tests/spawn_templates.rs` (signature + compile + spawn-eligibility + manifest).
+
 ## Enforcement status
 
 > Templates are **source policies**: `kennel compile` resolves the template/include
