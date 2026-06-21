@@ -9,9 +9,13 @@ eligibility, the `[[mutable]]` constraint family + patch validator, the signed s
 set) plus address provisioning gated on inbound bind. Thrust 4 · W10 (spawn-latency
 harness) is built and pulled ahead of Thrust 3 deliberately — the always-on boundary profile of the
 *existing* construction path is the instrument that lands the spawn runtime, and re-measures it once
-the SPAWN verb is in. Its first payoff: it surfaced a 170 ms binder-teardown poll-out limiter, fixed
-with an eventfd waker (teardown 170 ms → 0.4 ms, spawn rate 3.2 → 7.3/sec). Next: **Thrust 3 · W6–W8**
-(the spawn runtime path). Per-workstream status is marked on each item below.
+the SPAWN verb is in. Its payoffs so far — two real bring-up costs found and fixed: (1) a 170 ms
+binder-teardown poll-out limiter, fixed with an eventfd waker (teardown 170 ms → 0.4 ms); and (2) the
+dominant *construction* cost — the kennel's `cgroup.procs` task-migration write blocking ~13 ms on a
+`cgroup_threadgroup_rwsem` RCU grace period (found by `strace -f`, not the trace spans, which the
+journald sink perturbs) — fixed by birthing the kennel directly in its cgroup via
+`clone3(CLONE_INTO_CGROUP)`. Net: spawn rate 3.2 → 7.3/sec, end-to-end `kennel run` 63 ms → 47 ms.
+Next: **Thrust 3 · W6–W8** (the spawn runtime path). Per-workstream status is marked on each item below.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
