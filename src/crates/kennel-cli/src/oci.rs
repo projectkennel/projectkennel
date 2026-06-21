@@ -426,21 +426,24 @@ pub fn revert(args: &[String]) -> Result<std::process::ExitCode, String> {
     Ok(std::process::ExitCode::SUCCESS)
 }
 
-/// `kennel oci update <name> -- <new-image-ref>` — replace the assured (image) layer.
+/// `kennel oci update <name> [--keep-state] [--no-fetch] [--key K] -- <new-image-ref>` — replace
+/// the assured (image) layer (§7.11.4b).
 ///
-/// Records the new provenance digest and discards the managed upper by default (a stale copy-up
-/// over the old image would shadow the new one's patched binaries); `--keep-state` preserves it.
-/// Refused while running; refuses an absent `<name>` (as `build` refuses a present one).
-///
-/// The confined fetch + unpack of the new `rootfs/`/`config.json`, the `[rootfs].image` bump, and
-/// the signature-clear (so the operator re-signs — `update` never auto-signs) land with the vetted
-/// builder path (W17c); until then this records the digest and prepares the entry, reporting the
-/// remaining step.
+/// Fetches and unpacks the new image **confined** (the same vetted builder path as `build`), swaps
+/// `rootfs/`/`config.json`/`digest`, bumps `[rootfs].image`, and **re-derives the base closure lock**
+/// from the new image while **preserving the operator's hand-added carve-outs** — the `writable` list
+/// verbatim and any `readonly` entry the old base did not derive — then surfaces the before/after diff
+/// (§7.11.4c, `02-9`). It **clears the `[signature]`** (the policy was signed against the old digest),
+/// leaving the entry in the operator-reviews-and-re-signs state a fresh build does: a fetch silently
+/// changing what a signed policy authorises is exactly what the signature prevents. The managed upper
+/// is **discarded by default** (a copy-up over the old image would shadow the new one's patched
+/// binaries); `--keep-state` preserves it with a rebase-hazard note. `--no-fetch` records the ref and
+/// re-derives against the already-swapped entry (out-of-band population / tests). Refused while running.
 ///
 /// # Errors
 ///
-/// Returns an error if the name is invalid, `<new-image-ref>` is missing, the entry is absent, the
-/// kennel is running, or the store cannot be written.
+/// Returns an error if the name is invalid, `<new-image-ref>` is missing, the entry is absent or has
+/// no readable `[rootfs]` policy, the kennel is running, the fetch fails, or the store cannot be written.
 pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
     let (head, tail) = args
         .iter()
@@ -453,9 +456,20 @@ pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
         });
     let mut name: Option<&str> = None;
     let mut keep_state = false;
-    for arg in head {
+    let mut no_fetch = false;
+    let mut key_path: Option<&str> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut it = head.iter();
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "--keep-state" => keep_state = true,
+            "--no-fetch" => no_fetch = true,
+            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--template-dir" => {
+                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            }
+            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             v if name.is_none() => name = Some(v),
             _ => return Err("unexpected extra argument before `--`".to_owned()),
@@ -474,8 +488,123 @@ pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
         ));
     }
     refuse_if_running(name)?;
-    entry.write_digest(new_ref)?;
-    if !keep_state {
+
+    // 1. Capture the closure baseline BEFORE the fetch overwrites config.json: the current policy's
+    //    `[rootfs]` carve-outs and the base the *old* image derived (so we can tell operator-added
+    //    `readonly` entries from build-derived ones — §7.11.4c).
+    let policy_path = entry.policy();
+    let policy_text = std::fs::read_to_string(&policy_path)
+        .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
+    let source = kennel_lib_compile::parse_source(policy_text.as_bytes())
+        .map_err(|e| format!("parsing {}: {e}", policy_path.display()))?;
+    let rootfs = source.rootfs.ok_or_else(|| {
+        format!(
+            "{} has no [rootfs] — not an OCI entry",
+            policy_path.display()
+        )
+    })?;
+    let old_image = rootfs.image.unwrap_or_default();
+    let old_readonly = rootfs.readonly.unwrap_or_default();
+    let writable = rootfs.writable.unwrap_or_default(); // preserved verbatim
+    let reason = rootfs.reason;
+    let persistence = rootfs.persistence;
+    let path = rootfs
+        .path
+        .unwrap_or_else(|| entry.rootfs().display().to_string());
+    let old_base = derive_closure_readonly(read_image_user(&entry.config()).as_deref());
+
+    // 2. Fetch the new image confined (or trust an out-of-band swap with `--no-fetch`).
+    if no_fetch {
+        entry.write_digest(new_ref)?;
+    } else {
+        let opts = FetchOpts {
+            key: key_path,
+            template_dirs,
+            trust_dirs,
+        };
+        confined_fetch(name, &entry, new_ref, &opts)?;
+    }
+    let recorded = entry.read_digest().unwrap_or_else(|_| new_ref.to_owned());
+
+    let baseline = Baseline {
+        old_image,
+        old_readonly,
+        writable,
+        reason,
+        persistence,
+        path,
+        old_base,
+    };
+    finish_update(
+        &entry,
+        name,
+        &policy_path,
+        &policy_text,
+        &baseline,
+        &recorded,
+        keep_state,
+    )
+}
+
+/// The pre-update `[rootfs]` state captured before the fetch overwrites `config.json`: the operator's
+/// carve-outs and the base the *old* image derived (to tell operator-added `readonly` from build-derived).
+struct Baseline {
+    old_image: String,
+    old_readonly: Vec<String>,
+    writable: Vec<String>,
+    reason: Option<String>,
+    persistence: Option<String>,
+    path: String,
+    old_base: Vec<String>,
+}
+
+/// The re-derived closure lock (§7.11.4c): the new image's base plus the operator's hand-added
+/// `readonly` entries (those the old base did not derive), in base-then-carve-out order. The `writable`
+/// list is preserved verbatim by the caller; this is the `readonly` half.
+fn preserve_closure(
+    old_readonly: &[String],
+    old_base: &[String],
+    new_base: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = new_base.to_vec();
+    for p in old_readonly {
+        if !old_base.contains(p) && !out.contains(p) {
+            out.push(p.clone());
+        }
+    }
+    out
+}
+
+/// Finish an `update` once the new image is in place: re-derive the base closure, preserve the
+/// operator's carve-outs, rewrite the policy (clearing the signature), handle the managed upper, and
+/// surface the diff the re-sign reviews (§7.11.4b/c).
+fn finish_update(
+    entry: &StoreEntry,
+    name: &str,
+    policy_path: &Path,
+    policy_text: &str,
+    base: &Baseline,
+    recorded: &str,
+    keep_state: bool,
+) -> Result<std::process::ExitCode, String> {
+    let new_base = derive_closure_readonly(read_image_user(&entry.config()).as_deref());
+    let new_readonly = preserve_closure(&base.old_readonly, &base.old_base, &new_base);
+
+    let render = RootfsRender {
+        path: base.path.clone(),
+        image: recorded.to_owned(),
+        reason: base.reason.clone(),
+        persistence: base.persistence.clone(),
+        readonly: new_readonly.clone(),
+        writable: base.writable.clone(),
+    };
+    let new_text = rewrite_oci_policy(policy_text, &render)?;
+    std::fs::write(policy_path, new_text)
+        .map_err(|e| format!("writing {}: {e}", policy_path.display()))?;
+
+    if keep_state {
+        eprintln!("kennel: kept the persisted upper for `{name}` — review for a rebase hazard against the new image");
+    } else {
         for d in [entry.dir().join("upper"), entry.dir().join("work")] {
             if d.exists() {
                 std::fs::remove_dir_all(&d)
@@ -483,18 +612,197 @@ pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
             }
         }
     }
-    let state_note = if keep_state {
-        " (kept the persisted upper — review for a rebase hazard against the new image)"
-    } else {
-        " (discarded the persisted upper)"
-    };
-    eprintln!("kennel: recorded `{new_ref}` for `{name}`{state_note}");
+
+    print_update_diff(
+        name,
+        &base.old_image,
+        recorded,
+        &base.old_readonly,
+        &new_readonly,
+        &base.writable,
+    );
+    eprintln!("  signature CLEARED — review the policy and re-sign:");
     eprintln!(
-        "  remaining (W17c): re-fetch rootfs/ + config.json confined, bump [rootfs].image, and \
-         clear the policy signature so you re-sign ({})",
-        entry.policy().display()
+        "    kennel policy sign {} --key <key>",
+        policy_path.display()
     );
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// The fields a regenerated `[rootfs]` block carries: the build-managed `image`/`readonly` (recomputed
+/// on update) plus the operator-owned `path`/`reason`/`persistence`/`writable` (preserved as data).
+struct RootfsRender {
+    path: String,
+    image: String,
+    reason: Option<String>,
+    persistence: Option<String>,
+    readonly: Vec<String>,
+    writable: Vec<String>,
+}
+
+/// Escape a string for a double-quoted TOML value (`\` and `"`); the policy values here are paths and
+/// operator reason text, never control bytes.
+fn toml_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Render a `[rootfs]` table from [`RootfsRender`]. The build-managed `image`/`readonly` are emitted
+/// fresh; `path`/`reason`/`persistence`/`writable` are the operator's, preserved verbatim.
+fn render_rootfs_block(r: &RootfsRender) -> String {
+    use std::fmt::Write as _;
+    let quoted_list = |v: &[String]| {
+        v.iter()
+            .map(|p| toml_quote(p))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = String::from(
+        "[rootfs]\n\
+         # Regenerated by `kennel oci update`: closure-lock re-derived from the new image, operator\n\
+         # carve-outs preserved (§7.11.4c). Review the diff, then re-sign.\n",
+    );
+    let reason = r
+        .reason
+        .as_deref()
+        .unwrap_or("TODO: why this image is trusted");
+    // `write!` to a String is infallible.
+    let _ = writeln!(out, "path   = {}", toml_quote(&r.path));
+    let _ = writeln!(out, "image  = {}", toml_quote(&r.image));
+    let _ = writeln!(out, "reason = {}", toml_quote(reason));
+    if r.readonly.is_empty() {
+        out.push_str("# readonly = []   # closure-lock: build-derived none (all-root image)\n");
+    } else {
+        let _ = writeln!(
+            out,
+            "readonly = [{}]   # closure-lock (build-derived + preserved carve-outs, §7.11.4c)",
+            quoted_list(&r.readonly)
+        );
+    }
+    if let Some(p) = r.persistence.as_deref().filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "persistence = {}", toml_quote(p));
+    }
+    if !r.writable.is_empty() {
+        let _ = writeln!(
+            out,
+            "writable = [{}]   # operator carve-out, preserved",
+            quoted_list(&r.writable)
+        );
+    }
+    out
+}
+
+/// Rewrite an OCI run policy for `update`: replace the build-managed `[rootfs]` table in place and drop
+/// any `[signature]` block, preserving every other section (and the operator's comments) byte-for-byte.
+///
+/// Section boundaries are top-level `[header]` lines at column 0 — the form `oci build`'s scaffold and
+/// `policy sign` emit. `[rootfs]` is replaced with [`render_rootfs_block`]; `[signature]` (always the
+/// trailing appended block) is excised so the entry returns to the unsigned, operator-reviews state.
+///
+/// # Errors
+///
+/// Returns an error if the policy has no `[rootfs]` table to rewrite.
+fn rewrite_oci_policy(text: &str, render: &RootfsRender) -> Result<String, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let is_header = |l: &str| l.starts_with('[') && !l.starts_with("[[");
+    let rootfs_start = lines
+        .iter()
+        .position(|l| l.trim_end() == "[rootfs]")
+        .ok_or("the policy has no [rootfs] table to rewrite")?;
+    let after_rootfs = rootfs_start.saturating_add(1);
+    let next_header = lines
+        .iter()
+        .enumerate()
+        .skip(after_rootfs)
+        .find(|(_, l)| is_header(l))
+        .map_or(lines.len(), |(i, _)| i);
+    // End the rewrite at the table's last assignment, not the next header — so trailing comments and
+    // blank lines (a comment ahead of the next table belongs to *it*, not `[rootfs]`) are preserved.
+    let mut content_end = after_rootfs;
+    for (i, line) in lines
+        .iter()
+        .enumerate()
+        .take(next_header)
+        .skip(after_rootfs)
+    {
+        let t = line.trim_start();
+        if !t.is_empty() && !t.starts_with('#') && t.contains('=') {
+            content_end = i.saturating_add(1);
+        }
+    }
+
+    let mut out_lines: Vec<String> = Vec::with_capacity(lines.len());
+    out_lines.extend(
+        lines
+            .get(..rootfs_start)
+            .unwrap_or_default()
+            .iter()
+            .map(|s| (*s).to_owned()),
+    );
+    out_lines.extend(render_rootfs_block(render).lines().map(str::to_owned));
+    out_lines.extend(
+        lines
+            .get(content_end..)
+            .unwrap_or_default()
+            .iter()
+            .map(|s| (*s).to_owned()),
+    );
+
+    // Excise a `[signature]` block (header → next header or EOF), wherever it sits.
+    if let Some(sig_start) = out_lines.iter().position(|l| l.trim_end() == "[signature]") {
+        let sig_end = out_lines
+            .iter()
+            .enumerate()
+            .skip(sig_start.saturating_add(1))
+            .find(|(_, l)| is_header(l))
+            .map_or(out_lines.len(), |(i, _)| i);
+        out_lines.drain(sig_start..sig_end);
+        // Trim a trailing blank line left where the signature was.
+        while out_lines.last().is_some_and(|l| l.trim().is_empty()) {
+            out_lines.pop();
+        }
+    }
+
+    let mut out = out_lines.join("\n");
+    out.push('\n');
+    Ok(out)
+}
+
+/// Print the before/after diff `update` re-signs against (§7.11.4c): the image bump, and the
+/// closure-lock entries added (the new image's base) or removed (the old base, gone), with operator
+/// carve-outs noted as preserved.
+fn print_update_diff(
+    name: &str,
+    old_image: &str,
+    new_image: &str,
+    old_readonly: &[String],
+    new_readonly: &[String],
+    writable: &[String],
+) {
+    eprintln!("kennel: updated `{name}`");
+    eprintln!("  image:  {old_image}");
+    eprintln!("       -> {new_image}");
+    let added: Vec<&String> = new_readonly
+        .iter()
+        .filter(|p| !old_readonly.contains(p))
+        .collect();
+    let removed: Vec<&String> = old_readonly
+        .iter()
+        .filter(|p| !new_readonly.contains(p))
+        .collect();
+    if added.is_empty() && removed.is_empty() {
+        eprintln!("  closure-lock (readonly): unchanged");
+    } else {
+        eprintln!("  closure-lock (readonly):");
+        for p in &added {
+            eprintln!("    + {p}");
+        }
+        for p in &removed {
+            eprintln!("    - {p}");
+        }
+    }
+    if !writable.is_empty() {
+        eprintln!("  writable carve-outs preserved: {}", writable.join(", "));
+    }
 }
 
 /// Parse a lone `<name>` argument for a single-arg verb.
@@ -869,5 +1177,87 @@ mod tests {
             !p.contains("\nreadonly ="),
             "all-root scaffold must not emit a live lock"
         );
+    }
+
+    /// A signed OCI policy with a `[rootfs]`, an operator-edited `[env]` section (with a comment), and
+    /// an appended `[signature]` — the shape `update` rewrites.
+    const SIGNED_OCI_POLICY: &str = "\
+name = \"my-app\"
+template_base = \"base-confined@v1\"
+
+[rootfs]
+path   = \"/store/my-app/rootfs\"
+image  = \"ghcr.io/o/a@sha256:OLD\"
+reason = \"vendored app image\"
+readonly = [\"/usr\", \"/lib\", \"/opt/app\"]
+writable = [\"/usr/lib/python3.12\"]
+
+# operator note: this app needs egress to the model API
+[env]
+deny = [\"LD_*\"]
+
+[signature]
+algorithm = \"ed25519\"
+key_id = \"kennel-maint-2026\"
+signature = \"abc123\"
+";
+
+    #[test]
+    fn update_rewrite_preserves_carveouts_other_sections_and_clears_signature() {
+        // Old base was the FHS closure (non-root image); the operator hand-added `/opt/app` to
+        // readonly and a `/usr/lib/python3.12` writable hole. The new image is all-root (base empties).
+        let render = RootfsRender {
+            path: "/store/my-app/rootfs".to_owned(),
+            image: "ghcr.io/o/a@sha256:NEW".to_owned(),
+            reason: Some("vendored app image".to_owned()),
+            persistence: None,
+            // base (none) ∪ operator-added (`/opt/app`) — `/usr`,`/lib` (old base) drop out.
+            readonly: vec!["/opt/app".to_owned()],
+            writable: vec!["/usr/lib/python3.12".to_owned()],
+        };
+        let out = rewrite_oci_policy(SIGNED_OCI_POLICY, &render).expect("rewrite");
+
+        // New image recorded; old image gone.
+        assert!(out.contains("ghcr.io/o/a@sha256:NEW"));
+        assert!(!out.contains("sha256:OLD"));
+        // Signature cleared entirely.
+        assert!(!out.contains("[signature]"), "signature must be cleared");
+        assert!(!out.contains("kennel-maint-2026"));
+        // Operator carve-outs preserved.
+        assert!(out.contains("\"/opt/app\""), "operator readonly preserved");
+        assert!(
+            out.contains("\"/usr/lib/python3.12\""),
+            "writable preserved"
+        );
+        // The old build-derived base dropped (new image is all-root).
+        assert!(!out.contains("\"/usr\""), "old base /usr re-derived away");
+        // The operator's OTHER section + its comment preserved byte-for-byte.
+        assert!(out.contains("# operator note: this app needs egress to the model API"));
+        assert!(out.contains("[env]\ndeny = [\"LD_*\"]"));
+        // Still parses as a source policy (and now carries no signature).
+        let reparsed = kennel_lib_compile::parse_source(out.as_bytes()).expect("reparse");
+        assert!(reparsed.signature.is_none());
+        let rf = reparsed.rootfs.expect("rootfs");
+        assert_eq!(rf.image.as_deref(), Some("ghcr.io/o/a@sha256:NEW"));
+        assert_eq!(rf.readonly.as_deref(), Some(&["/opt/app".to_owned()][..]));
+        assert_eq!(
+            rf.writable.as_deref(),
+            Some(&["/usr/lib/python3.12".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn update_rewrite_all_root_image_emits_commented_lock() {
+        let render = RootfsRender {
+            path: "/s/a/rootfs".to_owned(),
+            image: "img@sha256:x".to_owned(),
+            reason: None,
+            persistence: None,
+            readonly: Vec::new(), // no base, no operator carve-out
+            writable: Vec::new(),
+        };
+        let block = render_rootfs_block(&render);
+        assert!(block.contains("# readonly ="), "all-root ⇒ commented hint");
+        assert!(!block.contains("\nreadonly ="), "no live lock line");
     }
 }
