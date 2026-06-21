@@ -26,13 +26,40 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
 use kennel_lib_binder::client::Incoming;
 use kennel_lib_binder::ctxmgr::Reply;
 use kennel_lib_binder::service::{spawn as spawn_wire, status};
 use kennel_lib_policy::patch::PatchEntry;
-use kennel_lib_policy::{KeySet, SpawnGrant, SpawnTemplate};
+use kennel_lib_policy::{KeySet, SettledPolicy, SpawnGrant, SpawnTemplate};
+
+/// Constructs a validated spawn instance asynchronously.
+///
+/// The daemon's construction machinery, behind a non-generic handle so the binder layer (which knows
+/// neither `Privileged` nor the policy loader) can hand off the build without becoming generic.
+pub trait SpawnConstructor: Send + Sync {
+    /// Reserve a context for `name`, build the kennel from the in-memory `instance`, wire the three
+    /// `stdio` fds (the spawned ends of the minted channel) to its workload, and supervise it — off
+    /// the binder looper, asynchronously to the `SPAWN` reply (`02-10` §"Construction is asynchronous
+    /// to the reply"). The instance is never written to disk (§7.12.6).
+    fn enqueue(&self, instance: SettledPolicy, stdio: [OwnedFd; 3], name: String);
+}
+
+/// A constructor that drops every job — for paths that never spawn: a depth-1 instance's own
+/// construction (a spawn target carries no `[spawn]` grant, so it never reaches the handler) and tests.
+pub struct NoopConstructor;
+
+impl SpawnConstructor for NoopConstructor {
+    fn enqueue(&self, _instance: SettledPolicy, _stdio: [OwnedFd; 3], _name: String) {}
+}
+
+/// A shared [`NoopConstructor`] handle.
+#[must_use]
+pub fn noop_constructor() -> Arc<dyn SpawnConstructor> {
+    Arc::new(NoopConstructor)
+}
 
 /// The per-kennel `[spawn]` runtime captured in the node-0 handler.
 ///
@@ -44,33 +71,33 @@ pub struct SpawnRuntime {
     grant: SpawnGrant,
     keys: KeySet,
     template_dirs: Vec<PathBuf>,
+    constructor: Arc<dyn SpawnConstructor>,
 }
 
 impl SpawnRuntime {
-    /// Assemble the runtime from the kennel's grant, a trust-key snapshot, and the template cascade.
+    /// Assemble the runtime from the kennel's grant, a trust-key snapshot, the template cascade, and
+    /// the construction handle a validated instance is built through.
     #[must_use]
-    pub const fn new(grant: SpawnGrant, keys: KeySet, template_dirs: Vec<PathBuf>) -> Self {
+    pub fn new(
+        grant: SpawnGrant,
+        keys: KeySet,
+        template_dirs: Vec<PathBuf>,
+        constructor: Arc<dyn SpawnConstructor>,
+    ) -> Self {
         Self {
             grant,
             keys,
             template_dirs,
+            constructor,
         }
     }
 }
 
-/// The spawned kennel's ends of the minted channel — what W6.3 injects into construction.
-///
-/// Held (not yet consumed) so the validated instance can be constructed; in W6.2 it is dropped at the
-/// end of the handler, closing both ends, so the requester sees `EOF`/`SIGPIPE` (the same signal a
-/// construction failure surfaces — `02-10` §"Construction is asynchronous to the reply").
-#[expect(
-    dead_code,
-    reason = "the spawned ends are consumed by the W6.3 construction enqueue"
-)]
+/// The spawned kennel's ends of the minted channel — wired to its stdio at construction.
 struct Channel {
-    /// The spawned kennel's socketpair end (bin-init `dup2`s it onto stdin+stdout).
+    /// The spawned kennel's socketpair end (serves stdin + stdout, the bidirectional JSON-RPC).
     spawned_rpc: OwnedFd,
-    /// The spawned kennel's `stderr` pipe write end (bin-init `dup2`s it onto stderr).
+    /// The spawned kennel's `stderr` pipe write end.
     spawned_stderr: OwnedFd,
 }
 
@@ -109,9 +136,17 @@ pub fn handle_spawn(
         return Reply::Data(spawn_wire::encode_reply(status::DENIED, ""));
     };
     match validate_and_mint(rt, incoming) {
-        Ok((uuid, requester_ends, _channel)) => {
-            // W6.2: `_channel` (the spawned ends) is dropped here, so the requester gets its ends
-            // then EOF. W6.3 enqueues construction with `_channel` and claims the max_instances slot.
+        Ok((instance, uuid, requester_ends, channel)) => {
+            // The spawned kennel's stdio: the socketpair end serves both stdin and stdout
+            // (bidirectional JSON-RPC), so it is duplicated for the two; the pipe write end is stderr.
+            let Ok(stdout) = channel.spawned_rpc.try_clone() else {
+                emit(writer, ctx, incoming, Outcome::Deny, "stdio dup failed");
+                return Reply::Data(spawn_wire::encode_reply(status::DENIED, ""));
+            };
+            let stdio = [channel.spawned_rpc, stdout, channel.spawned_stderr];
+            // Hand the validated instance to construction, off the looper (async to this reply); the
+            // requester writes into its socketpair end, which buffers until the tool reads (§7.12).
+            rt.constructor.enqueue(instance, stdio, uuid.clone());
             emit(writer, ctx, incoming, Outcome::Allow, &uuid);
             Reply::DataAndFds(spawn_wire::encode_reply(status::OK, &uuid), requester_ends)
         }
@@ -122,11 +157,13 @@ pub fn handle_spawn(
     }
 }
 
-/// The validation pipeline: decode → grant → pin → eligibility → patch → mint.
+/// The validation pipeline: decode → grant → pin → eligibility → patch → mint. On success returns the
+/// validated in-memory instance (for construction), the `spawn-<uuid>`, the requester's channel ends,
+/// and the spawned kennel's channel ends.
 fn validate_and_mint(
     rt: &SpawnRuntime,
     incoming: &Incoming,
-) -> Result<(String, Vec<OwnedFd>, Channel), Deny> {
+) -> Result<(SettledPolicy, String, Vec<OwnedFd>, Channel), Deny> {
     // 1. Decode the untrusted request.
     let (template_ref, patch_pairs) = spawn_wire::decode_request(&incoming.data)
         .ok_or_else(|| deny(status::BAD_REQUEST, "malformed SPAWN request"))?;
@@ -161,14 +198,16 @@ fn validate_and_mint(
     kennel_lib_policy::spawn_eligible(&template)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
 
-    // 6. Apply the manifest patch (narrowed per requester) onto the resolved template. The instance
-    //    is validated here (proving the patch applies); W6.3 hands it to construction.
+    // 6. Apply the manifest patch (narrowed per requester) onto the resolved template, producing the
+    //    in-memory instance construction runs (never written to disk — §7.12.6).
     let entries = build_patch(pin, &patch_pairs).map_err(|e| deny(status::DENIED, e))?;
-    let _instance = kennel_lib_policy::patch::instantiate(&template, &entries)
+    let instance = kennel_lib_policy::patch::instantiate(&template, &entries)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
 
-    // 7. Mint the channel and return the requester's ends.
-    mint().map_err(|e| deny(status::DENIED, format!("channel mint failed: {e}")))
+    // 7. Mint the channel; return the instance plus the requester's and spawned ends.
+    let (uuid, requester_ends, channel) =
+        mint().map_err(|e| deny(status::DENIED, format!("channel mint failed: {e}")))?;
+    Ok((instance, uuid, requester_ends, channel))
 }
 
 /// Resolve `name@version` to the signed template bytes from the first trust-store directory that

@@ -646,16 +646,73 @@ where
 
 /// Read one request (and any stdio fds) from `conn` and dispatch it. `Start`
 /// blocks here until the workload exits; `Stop`/`List` return at once.
-fn handle_connection<P, L>(shared: &Shared<P, L>, conn: &mut UnixStream)
+fn handle_connection<P, L>(shared: &Arc<Shared<P, L>>, conn: &mut UnixStream)
 where
-    P: Privileged + Clone + Sync,
-    L: PolicyLoader,
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
 {
     // A malformed/closed connection is just dropped.
     let Ok((request, fds)) = recv_request_with_fds(conn) else {
         return;
     };
-    dispatch_request(shared, request, fds, conn);
+    // The dynamic-spawn construction handle (§7.12): a SPAWN handler hands a validated instance here
+    // to be built off the binder looper. Holds an `Arc<Shared>` so the build runs the same path as a
+    // CLI `kennel run`. Non-generic (`Arc<dyn ..>`) so it can ride into the binder layer.
+    let constructor: Arc<dyn crate::spawn::SpawnConstructor> = Arc::new(Constructor {
+        shared: Arc::clone(shared),
+    });
+    dispatch_request(shared, request, fds, conn, &constructor);
+}
+
+/// The daemon-side [`crate::spawn::SpawnConstructor`]: builds a validated spawn instance by driving
+/// the same [`run_kennel`] path a CLI run does, on a fresh thread (async to the `SPAWN` reply).
+struct Constructor<P: Privileged, L: PolicyLoader> {
+    shared: Arc<Shared<P, L>>,
+}
+
+impl<P, L> crate::spawn::SpawnConstructor for Constructor<P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    fn enqueue(
+        &self,
+        instance: kennel_lib_policy::SettledPolicy,
+        stdio: [OwnedFd; 3],
+        name: String,
+    ) {
+        let shared = Arc::clone(&self.shared);
+        std::thread::spawn(move || {
+            // The spawn has no operator on a control socket, so run_kennel's status responses go to a
+            // throwaway socketpair whose peer we hold for the build's life — written-but-unread, never
+            // EPIPE. A non-interactive run: the three stdio fds are the spawned ends of the channel.
+            let Ok((mut sink, _peer)) = UnixStream::pair() else {
+                eprintln!("kenneld: spawn `{name}`: could not make a construction sink");
+                return;
+            };
+            let req = StartRequest {
+                policy: PathBuf::new(),
+                kennel: name,
+                argv: Vec::new(),
+                cwd: PathBuf::from("/"),
+                term: String::new(),
+                interactive: false,
+                force: false,
+                watch_paths: Vec::new(),
+                oci_config: None,
+            };
+            // A spawn target is depth-1 (no `[spawn]` of its own), so its own construction never
+            // spawns — a no-op constructor suffices for the nested run.
+            run_kennel(
+                &shared,
+                &req,
+                Vec::from(stdio),
+                &mut sink,
+                Some(instance),
+                &crate::spawn::noop_constructor(),
+            );
+        });
+    }
 }
 
 /// Validate and dispatch one decoded control request on `conn` (with its passed `fds`).
@@ -674,13 +731,14 @@ pub fn dispatch_request<P, L>(
     request: Request,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
+    constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
 ) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
 {
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
-            Ok(()) => return run_kennel(shared, &req, fds, conn),
+            Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor),
             Err(e) => {
                 eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
                 Response::Error(e)
@@ -787,6 +845,8 @@ pub fn run_kennel<P, L>(
     req: &StartRequest,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
+    preloaded: Option<kennel_lib_policy::SettledPolicy>,
+    constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
 ) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
@@ -824,13 +884,22 @@ pub fn run_kennel<P, L>(
         ula_gid: shared.identity.scope.ula_gid(),
     };
 
-    tr.step(&format!(
-        "run_kennel: loading policy {}",
-        req.policy.display()
-    ));
-    let mut loaded = match shared.loader.load(&req.policy, &subst) {
-        Ok(loaded) => loaded,
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
+    // A dynamic-spawn instance arrives pre-built in memory (patched, never signed — §7.12.6); a
+    // normal run loads and verifies the signed policy from disk. Either way `subst` is now applied.
+    let mut loaded = if let Some(instance) = preloaded {
+        match crate::policy::loaded_from_settled(&instance, &subst) {
+            Ok(loaded) => loaded,
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "spawn instance", reason),
+        }
+    } else {
+        tr.step(&format!(
+            "run_kennel: loading policy {}",
+            req.policy.display()
+        ));
+        match shared.loader.load(&req.policy, &subst) {
+            Ok(loaded) => loaded,
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
+        }
     };
     if tr.on() {
         tr.step(&format!(
@@ -1204,6 +1273,7 @@ pub fn run_kennel<P, L>(
                 kennel_lib_config::User::load()
                     .unwrap_or_default()
                     .template_dirs(),
+                std::sync::Arc::clone(constructor),
             ))
         });
         spec.binder = Some(crate::BinderPrep {
