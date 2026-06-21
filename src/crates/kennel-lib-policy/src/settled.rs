@@ -908,10 +908,13 @@ pub struct ResolvedArtifact {
     pub name: String,
     /// Resolved version (e.g. `v4`, `v2.33.2`).
     pub version: String,
-    /// SHA-256 of the artefact's canonical form (hex), lifted from the lockfile.
-    pub content_sha256: String,
     /// The `key_id` that signed this artefact.
     pub signing_key_id: String,
+    /// The artefact's ed25519 signature (base64) — the content commitment lifted from the lockfile.
+    /// A deterministic signature over the canonical form *is* the content pin (no `sha2`); empty for
+    /// an unsigned development artefact.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
 }
 
 /// Provenance: every input that produced this settled policy.
@@ -924,11 +927,8 @@ pub struct Provenance {
     pub schema_version: u32,
     /// The THREATS.md catalogue version the templates were authored against.
     pub threat_catalogue_version: String,
-    /// SHA-256 (hex) of the leaf policy's canonical form.
-    pub leaf_policy_sha256: String,
-    /// SHA-256 (hex) of the invariant set enforced at compile time.
-    pub invariant_set_sha256: String,
-    /// The resolved templates/fragments, from the lockfile.
+    /// The resolved templates/fragments, each pinned to its signing key and signature (the
+    /// deterministic ed25519 commitment over its canonical form — no separate hash).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_artifacts: Vec<ResolvedArtifact>,
 }
@@ -1310,14 +1310,63 @@ pub struct SettledPolicy {
     /// empty, so a non-OCI policy signs exactly as before.
     #[serde(default, skip_serializing_if = "RootfsRuntime::is_empty")]
     pub rootfs: RootfsRuntime,
+    /// The `[spawn]` delegated-instantiation grant (§7.12.2) — present only on a policy that may
+    /// instantiate siblings (a **requester**), the mirror of [`manifest`](Self::manifest) (the
+    /// spawn-*target* side; the two never coexist — a target is depth-1). Omitted from the canonical
+    /// form when absent, so a non-spawner policy signs exactly as before. Carried into the settled
+    /// policy so `kenneld` holds the requester's ACL in its runtime record from construction and
+    /// validates a `SPAWN` against it in the **verify half**, never a compiler (`tcb-only-shrinks`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<SpawnGrant>,
     /// The mutable-field manifest (§7.12.3) — present only on a **spawn-target template**, where it is
     /// the signed statement of how far an in-memory instance may diverge from this template (the
     /// [`variant`](crate::variant) constraints). An array-of-tables, declared last so the canonical
     /// TOML emits it after every scalar/table field; omitted from the canonical form when empty, so a
     /// policy that is not a spawn target signs exactly as before. The instantiated policy carries none
     /// (the variants have been applied and it is never re-signed).
+    ///
+    /// Declared after [`spawn`](Self::spawn) so the canonical TOML emits this array-of-tables last,
+    /// after every scalar/table field (TOML cannot place a table after an array-of-tables).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub manifest: Manifest,
+}
+
+/// The `[spawn]` grant (§7.12.2) carried into a settled policy — the requester-side ACL `kenneld`
+/// validates a `SPAWN` against. Present only on a policy that carries `[spawn]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnGrant {
+    /// Concurrent-instance ceiling across this grant's spawns — the fork-bomb bound (§7.12.7),
+    /// enforced by an atomic check-and-claim at `SPAWN`.
+    pub max_instances: u32,
+    /// The templates this grant may instantiate (`[[spawn.allow]]`), each pinned to the signature
+    /// commitment recorded at this policy's compile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<SpawnTemplate>,
+}
+
+/// One template a `[spawn]` grant may instantiate, pinned to its signature commitment (§7.12.8).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnTemplate {
+    /// The exact `name@version` trust-store reference.
+    pub template: String,
+    /// The `key_id` the template's signature verified against at this policy's compile.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signing_key_id: String,
+    /// The template's ed25519 signature (Base64) recorded at this policy's compile — the
+    /// **content-pin**. A deterministic ed25519 signature over the canonical template *is* its
+    /// content commitment (the lockfile idiom — no `sha2`): at `SPAWN`, `kenneld` re-resolves the
+    /// named `name@version` from the *mutable* trust store and fails closed unless the re-verified
+    /// signature matches this, defeating a re-signed-in-place TOCTOU (§7.12.8). Empty only when the
+    /// template resolved unsigned (local-development `AllowUnsigned`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
+    /// Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields
+    /// this requester may write (empty ⇒ the template's full manifest). Narrows, never widens
+    /// (§7.12.2/§7.12.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutable_narrow: Vec<String>,
 }
 
 /// A settled policy plus its signature envelope — the on-disk document.
@@ -1334,6 +1383,7 @@ pub struct SignedSettledPolicy {
 /// patch applicator). The single fixture so every test shares one shape.
 #[cfg(test)]
 #[must_use]
+#[allow(clippy::too_many_lines)] // one cohesive struct-literal fixture; splitting it obscures it.
 pub(crate) fn sample_settled() -> SettledPolicy {
     SettledPolicy {
         settled_schema_version: 1,
@@ -1410,18 +1460,17 @@ pub(crate) fn sample_settled() -> SettledPolicy {
             tty: TtyPolicy::default(),
             trust: TrustPolicy::default(),
         },
+        spawn: None,
         manifest: Vec::new(),
         provenance: Provenance {
             compiler_version: "0.0.0".to_owned(),
             schema_version: 1,
             threat_catalogue_version: "0.1".to_owned(),
-            leaf_policy_sha256: "00".to_owned(),
-            invariant_set_sha256: "00".to_owned(),
             resolved_artifacts: vec![ResolvedArtifact {
                 name: "base-confined".to_owned(),
                 version: "v3".to_owned(),
-                content_sha256: "ab".to_owned(),
                 signing_key_id: "kennel-maint-2026-01".to_owned(),
+                signature: "c2ln".to_owned(),
             }],
         },
         ssh: SshRuntime::default(),

@@ -330,6 +330,8 @@ pub fn encode_plan(p: &Plan) -> Vec<u8> {
 
     // interactive_return_fd: presence flag only
     w.bool(p.interactive_return_fd.is_some());
+    // stdio_fds: presence flag only (the three fds ride out of band)
+    w.bool(p.stdio_fds.is_some());
 
     // aux: Vec<AuxProcess>
     w.count(p.aux.len());
@@ -499,6 +501,8 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
     }
 
     let interactive = r.bool()?;
+    // stdio presence: the three fds ride out of band, so the decoded plan carries `None`.
+    let _stdio_present = r.bool()?;
 
     let mut aux = Vec::new();
     for _ in 0..r.count()? {
@@ -542,6 +546,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         ulimits,
         interactive_return_fd: None,
         workload_fd: None,
+        stdio_fds: None,
         aux,
         ttl_seconds,
         ttl_action,
@@ -776,6 +781,7 @@ pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
 
     w.bool(s.interactive);
     w.bool(s.workload_fd_pinned);
+    w.bool(s.stdio_injected);
 
     match s.ttl_seconds {
         None => w.bool(false),
@@ -866,6 +872,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
 
     let interactive = r.bool()?;
     let workload_fd_pinned = r.bool()?;
+    let stdio_injected = r.bool()?;
     let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
     let log_level = r.u8()?;
 
@@ -889,6 +896,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         aux,
         interactive,
         workload_fd_pinned,
+        stdio_injected,
         ttl_seconds,
         log_level,
     })
@@ -947,6 +955,7 @@ pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {
     }
     w.bool(c.pty_fd_present);
     w.bool(c.workload_fd_present);
+    w.bool(c.stdio_present);
     w.buf
 }
 
@@ -996,6 +1005,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
     }
     let pty_fd_present = r.bool()?;
     let workload_fd_present = r.bool()?;
+    let stdio_present = r.bool()?;
     if r.pos != buf.len() {
         return Err(PlanWireError::TooLarge); // trailing garbage
     }
@@ -1012,6 +1022,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         loopback,
         pty_fd_present,
         workload_fd_present,
+        stdio_present,
     })
 }
 
@@ -1109,6 +1120,7 @@ mod tests {
             ],
             interactive_return_fd: None,
             workload_fd: None,
+            stdio_fds: None,
             aux: vec![AuxProcess {
                 path: PathBuf::from("/usr/libexec/kennel/facade-afunix"),
                 args: vec![
@@ -1156,6 +1168,7 @@ mod tests {
             ulimits: Vec::new(),
             interactive_return_fd: None,
             workload_fd: None,
+            stdio_fds: None,
             aux: Vec::new(),
             ttl_seconds: None,
             ttl_action: kennel_lib_policy::TtlAction::Exit,
@@ -1210,6 +1223,7 @@ mod tests {
             }],
             interactive: true,
             workload_fd_pinned: false,
+            stdio_injected: false,
             ttl_seconds: Some(3600),
             log_level: 0,
         }
@@ -1243,6 +1257,7 @@ mod tests {
             aux: Vec::new(),
             interactive: false,
             workload_fd_pinned: false,
+            stdio_injected: false,
             ttl_seconds: None,
             log_level: 0,
         };
@@ -1291,6 +1306,7 @@ mod tests {
             ],
             pty_fd_present: true,
             workload_fd_present: true,
+            stdio_present: true,
         }
     }
 
@@ -1319,6 +1335,7 @@ mod tests {
             loopback: Vec::new(),
             pty_fd_present: false,
             workload_fd_present: false,
+            stdio_present: false,
         };
         let back = decode_construction(&encode_construction(&c)).expect("decode");
         assert_eq!(back, c);

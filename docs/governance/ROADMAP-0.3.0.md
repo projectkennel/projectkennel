@@ -3,7 +3,17 @@
 Status: **in flight** · Drafted: 2026-06-20 · Updated: 2026-06-21 · Targets: 0.3.0
 Baseline: 0.2.0 (2026-06-20)
 
-**Progress (2026-06-21).** Thrust 1 (W1–W2), Thrust 2 (W3–W5), and **Thrust 4 (W9–W11) complete** —
+**Progress (2026-06-21).** Thrust 1 (W1–W2), Thrust 2 (W3–W5), **Thrust 3 (W6–W8)**, and **Thrust 4
+(W9–W11) complete** — dynamic spawn is built end-to-end. A confined workload transacts `SPAWN` on
+Node 0; `kenneld` validates the grant, re-verifies the template content-pin (the ed25519 signature
+commitment — no `sha2`), re-runs spawn-eligibility, applies the manifest patch, atomically claims a
+`max_instances` slot, mints the stdio channel, returns the requester's ends, and constructs the
+validated in-memory instance as a running sibling — its stdio injected onto 0/1/2 by `kennel-bin-init`
+(W7, the non-interactive sibling of the pty path). Fate-sharing is the slot claim + the soft reaper (channel `EOF`)
++ the template-TTL self-reap + the hard reaper (`spawn-<parent-ctx>-*` cgroup-killed on requester
+teardown). The verify half never pulls a compiler into the daemon ([[tcb-only-shrinks]]); fds flow
+out of node 0 only ([[binder-fd-passing-safety-verdict]]). The remaining 0.3.0 spawn item is the
+`memfd` artifact transfer (§7.12.6, roadmap). Earlier:
 the whole spawn *policy/schema* surface (design + threat catalogue, the `[spawn]` grant +
 eligibility, the `[[mutable]]` constraint family + patch validator, the signed single-leg template
 set) plus the "do less" latency discipline. W10's spawn-latency harness (pulled ahead of Thrust 3 —
@@ -15,8 +25,8 @@ not the trace spans, which the journald sink perturbs) → birth the kennel in i
 `clone3(CLONE_INTO_CGROUP)`; and (3, W11) the ~7–10 ms constrained-mode BPF `PROG_LOAD` verifier →
 attach the egress BPF only in `host` mode (the net-ns is the boundary elsewhere). Net: spawn rate
 3.2 → 7.3/sec, `kennel run` wall 63 → 47 ms, and the isolation floor measured at single-digit-ms
-construction (a `/bin/true` kennel in ~18 ms wall; native-vs-kennel python startup ~2×). Next:
-**Thrust 3 · W6–W8** (the spawn runtime path). Per-workstream status is marked on each item below.
+construction (a `/bin/true` kennel in ~18 ms wall; native-vs-kennel python startup ~2×).
+Per-workstream status is marked on each item below.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -138,7 +148,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 ### Thrust 3 — Spawn runtime path (daemon, binder, init)
 
-- **W6 · The `SPAWN` transaction verb on Node 0.** **[dep] L.** The keystone.
+- **W6 · The `SPAWN` transaction verb on Node 0.** **[dep] L.** The keystone. · ✅ **done**
   In `kenneld/src/binder.rs`: grant + template pin/eligibility re-check + manifest-patch validation
   (W3/W4, all in the verify half — no `kennel-lib-compile` in the daemon), in-memory instantiation, and
   the channel handoff. **`kenneld` mints** the `socketpair()` (JSON-RPC) + `pipe()` (`stderr`), injects
@@ -148,19 +158,29 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   daemon mounts nothing beyond the template's own view, parses no JSON, routes no traffic. (02-10 carries
   the outbound-only safety argument.)
 
-- **W7 · Injected-stdio supervision + `kennel-bin-init` dup2.** **[dep] M.**
-  `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init`
-  `dup2`s them onto the spawned kennel's stdio before `execve`ing the template's entrypoint
-  (for MCP, a stdio JSON-RPC server). Init stays a dumb executor ([[init-is-dumb-executor]]) —
-  every policy decision was made by `kenneld` pre-handoff.
+- **W7 · Injected-stdio supervision.** **[dep] M.** · ✅ **done**
+  The non-interactive **sibling of the pty path**, wired where `kennel-bin-init` already owns workload
+  stdio. A piped `kennel run`'s three controller fds — or a `SPAWN` channel's spawned ends (the
+  socketpair duplicated for stdin+stdout, the pipe write end for stderr) — ride out of band at three
+  fixed slots (`INJECT_STDIN/OUT/ERR_FD`, after `PTY_RETURN_FD`); init `dup2`s them onto 0/1/2 as the
+  **final pre-exec step, after the seal**, so init's own diagnostics never touch the channel. Carried
+  by `Plan.stdio_fds` + the `Supervision.stdio_injected` / `ConstructionHalf.stdio_present` flags
+  through the wire codec and the factory's fixed SCM order. Init stays a dumb executor
+  ([[init-is-dumb-executor]]). *(The "rides the existing run path, no new schema" shortcut was wrong —
+  the construction extracts only argv/env/cwd from the `Command`, silently dropping its stdio; the
+  machine proved it. The proper wiring also fixes a piped `kennel run` producing no stdout.)*
 
-- **W8 · Fate-sharing: the double reaper + `max_instances` accounting.** **[dep] M.**
-  Soft reaper (data plane): requester `close()`s its channel ends → spawned tool gets `EOF`/
-  `SIGPIPE` and exits → `kennel-bin-init` tears down. Hard reaper (control plane): `kenneld`
-  tracks the binder session that issued the `SPAWN`; if it drops (requester crash/OOM/TTL),
-  `kenneld` issues a `cgroup.kill` to the spawned kennel (reusing the TTL freeze/kill plumbing).
-  The reaper that kills **decrements `max_instances`**, so a flapping requester cannot leak
-  slots across teardown races.
+- **W8 · Fate-sharing: the reapers + `max_instances` accounting.** **[dep] M.** · ✅ **done**
+  As built: an **atomic `max_instances` claim** (a per-grant `AtomicU32` check-and-claim, held by an
+  RAII `SlotGuard` the construction thread carries, released on the spawned kennel's exit or any build
+  abort — no leak). **Soft reaper:** the requester closes its channel end → the tool's stdin `EOF`s →
+  it exits → the blocking `run_kennel` tears it down (releasing the slot). **Self-reap:** the
+  template's TTL via the existing lifecycle reaper — the guaranteed backstop. **Hard reaper:** spawned
+  kennels are named `spawn-<parent-ctx>-*`, and `Shared::reap_children` `cgroup.kill`s them when the
+  requester tears down (explicit `stop` or its own workload exit), so a tool that ignores `EOF` still
+  dies with the agent. *(The contract's "track the binder session" became "track the requester
+  kennel's lifecycle" — kenneld observes the requester kennel's teardown directly, no node-death
+  notification on an inbound client; 02-10 carries the as-built.)*
 
 ### Thrust 4 — "Do less": over-allocation and latency (the discipline spawn forces)
 
@@ -188,7 +208,15 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   binder looper pool winding down only on its `POLL_MS=200` poll-out, `max` over 8 threads. An
   eventfd **`Waker`** added to the looper poll set (signalled on `stop`) cut teardown to **0.4 ms**
   and lifted the net-none spawn rate from **3.2 → 7.3 constructions/sec**; all 16 policy-suite cases
-  stay green. *Follow-on increments (not gating):* off-CPU **stack** attribution (bpftrace
+  stay green. *SPAWN-verb re-measure (Thrust 3 landed):* `tools/spawn-spinup.sh` profiles the
+  SPAWN-driven construction **one layer down** — one control kennel runs a payload N× directly
+  (`fork`/`exec`) vs as an ephemeral SPAWN sibling, so the delta is purely the isolation-wrapper cost
+  with no per-run CLI launch or policy compile. Result: a **fresh, fully isolated kennel constructs to
+  workload `execve` in ~3.5 ms** (workload-independent — the construct span ends before the payload's
+  own `fexecve`; pinned governor), the in-daemon **SPAWN handler** (grant → pin → eligibility → patch →
+  mint) is **~0.3 ms**, and **teardown ~0.3 ms** (PID 1 dies → the kernel collapses the namespaces;
+  only the binder-pool stop + cgroup `rmdir` remain in userspace). See architecture 02-10
+  §"Construction latency". *Follow-on increments (not gating):* off-CPU **stack** attribution (bpftrace
   `offcputime` flamegraphs) for the within-boundary waits, and per-boundary tagging by tmpfs-vs-OCI
   root in one run.
 

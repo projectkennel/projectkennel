@@ -117,11 +117,11 @@ The validator rejects out-of-scope requests with a stable numeric refusal code c
 - The `signed_fields` list must cover every top-level field of the artefact except `[signature]` itself — including `template_base` and `include`, so the artefact's own dependency declarations are signed. An artefact that signs only a subset of its fields is rejected; the rule is about the schema, not the instance.
 - The canonical-form serialisation of `signed_fields` is computed deterministically (`kennel-lib-policy::canonical`); the signature is verified against it.
 - The signing key must be in the configured key set, identified by `key_id`.
-- The SHA-256 of the canonical-form content is checked against the lockfile entry for this `(name, version)`. On first resolution the entry is recorded; on subsequent resolution a mismatch is rejected. This is the byte-pin: version pinning alone constrains *which* artefact is named, the lockfile constrains *what bytes* are composed (the same reasoning as CODING-STANDARDS.md §5.5 for Rust crates).
+- The artefact's ed25519 signature is checked against the lockfile entry for this `(name, version)`. On first resolution the entry is recorded; on subsequent resolution a changed signature is rejected. This is the byte-pin: version pinning alone constrains *which* artefact is named, the lockfile constrains *what bytes* are composed (the signature is deterministic and bound to the exact canonical bytes, so it *is* the content commitment — the same reasoning as CODING-STANDARDS.md §5.5 for Rust crates).
 
-An artefact that fails signature verification, or whose content hash does not match a present lockfile entry, is rejected; its content is not composed, regardless of which fields the unverified portion contains.
+An artefact that fails signature verification, or whose signature does not match a present lockfile entry, is rejected; its content is not composed, regardless of which fields the unverified portion contains.
 
-**Failure mode.** `PolicyError::SignatureFailure` (with `key_id` if recognised) or `PolicyError::LockMismatch` (naming the reference and both hashes). The artefact is not loaded; any policy that depends on it cannot be resolved. The only sanctioned way to change a locked entry is `kennel policy upgrade`, which surfaces the content change for review.
+**Failure mode.** `PolicyError::SignatureFailure` (with `key_id` if recognised) or `PolicyError::LockMismatch` (naming the reference). The artefact is not loaded; any policy that depends on it cannot be resolved. The only sanctioned way to change a locked entry is `kennel policy upgrade`, which surfaces the change for review.
 
 **Threat IDs addressed.** T2.5 (template tampering: a re-signed or re-tagged artefact under the same version is caught by the lockfile byte-pin; an artefact signed by an untrusted key is refused), and the supply-chain class generally — a versioned reference is a pin to signed bytes, not a name lookup against whatever sits at that name today.
 
@@ -310,7 +310,7 @@ If an operator's policy explicitly grants the workload read access to its audit 
 
 **Failure mode.** The signature, schema-version, and invariant checks live in `kennel_lib_policy::verify_settled`; their failures surface as `SpawnError::Policy` wrapping the underlying `PolicyError` — `PolicyError::Signature(..)` for a bad signature, `PolicyError::UnsupportedSchemaVersion { .. }` for an out-of-range `settled_schema_version`, and `PolicyError::InvariantViolations(..)` (carrying the violated invariant names) for a framework-invariant failure. An unresolved placeholder is the distinct `SpawnError::UnsubstitutedPlaceholder { field, value }` (naming the field and value). The spawn is refused; no workload runs.
 
-**Threat IDs addressed.** T2.5 and T2.6 at runtime (a tampered or invariant-weakening settled policy is refused by signature check and invariant re-assertion respectively); supports the attestation capability (the workstation enforces exactly the signed artefact, identified by content hash, with no live resolution that could diverge).
+**Threat IDs addressed.** T2.5 and T2.6 at runtime (a tampered or invariant-weakening settled policy is refused by signature check and invariant re-assertion respectively); supports the attestation capability (the workstation enforces exactly the signed artefact, identified by its signature — the deterministic ed25519 commitment — with no live resolution that could diverge).
 
 ---
 

@@ -171,13 +171,12 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             tty: kennel_lib_policy::TtyPolicy::default(),
             trust: kennel_lib_policy::TrustPolicy::default(),
         },
+        spawn: None,
         manifest: Vec::new(),
         provenance: Provenance {
             compiler_version: "0.0.0".to_owned(),
             schema_version: 1,
             threat_catalogue_version: "0.1".to_owned(),
-            leaf_policy_sha256: "00".to_owned(),
-            invariant_set_sha256: "00".to_owned(),
             resolved_artifacts: Vec::new(),
         },
         ssh: kennel_lib_policy::SshRuntime::default(),
@@ -263,6 +262,7 @@ fn no_ipc_policy(home: &Path) -> SettledPolicy {
 /// that a plain kennel actually constructs + runs via the factory. The broader
 /// constructed-view scenarios (fs, identity, net modes, the `AF_UNIX` facade) live in the
 /// `kennel run`-driven policy suite (`tests/policy-suite/`, run by `src/tools/policy-e2e.sh`).
+#[allow(clippy::too_many_lines)] // +1 line from the spawn-constructor arg tipped it over.
 #[test]
 fn no_ipc_kennel_runs_through_the_factory() {
     use kenneld::control::{recv_response, Response, StartRequest};
@@ -360,7 +360,14 @@ fn no_ipc_kennel_runs_through_the_factory() {
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
-    run_kennel(&shared, &req, Vec::new(), &mut server);
+    run_kennel(
+        &shared,
+        &req,
+        Vec::new(),
+        &mut server,
+        None,
+        &kenneld::spawn::noop_constructor(),
+    );
 
     if bring_up_skipped(&recv_response(&mut client).expect("a first response")) {
         return;
@@ -499,7 +506,14 @@ fn trust_manifest_is_masked_inside_the_kennel() {
     };
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
-    run_kennel(&shared, &req, Vec::new(), &mut server);
+    run_kennel(
+        &shared,
+        &req,
+        Vec::new(),
+        &mut server,
+        None,
+        &kenneld::spawn::noop_constructor(),
+    );
 
     if bring_up_skipped(&recv_response(&mut client).expect("a first response")) {
         let _ = std::fs::remove_dir_all(&proj);
@@ -644,7 +658,16 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
     let mut shadow_seen = false;
     let mut workload_code = None;
     std::thread::scope(|s| {
-        let handle = s.spawn(|| run_kennel(&shared, &req, Vec::new(), &mut server));
+        let handle = s.spawn(|| {
+            run_kennel(
+                &shared,
+                &req,
+                Vec::new(),
+                &mut server,
+                None,
+                &kenneld::spawn::noop_constructor(),
+            );
+        });
         let first = recv_response(&mut client).expect("a first response");
         if bring_up_skipped(&first) {
             handle.join().expect("join");
@@ -694,6 +717,7 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
 /// `(elapsed, exit_code)` — or `None` to skip on an under-privileged runner. Proves the §9.7
 /// path end to end: `kennel-bin-init`'s timer → the blocking `NOTIFY_TTL_EXPIRED` call → kenneld
 /// freezes the cgroup and, per `action`, kills it (`exit`) or thaws + replies RESUME (`warn`).
+#[allow(clippy::too_many_lines)] // +1 line from the spawn-constructor arg tipped it over.
 fn run_ttl_kennel(
     name: &str,
     action: kennel_lib_policy::TtlAction,
@@ -788,7 +812,14 @@ fn run_ttl_kennel(
 
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
     let started_at = std::time::Instant::now();
-    run_kennel(&shared, &req, Vec::new(), &mut server);
+    run_kennel(
+        &shared,
+        &req,
+        Vec::new(),
+        &mut server,
+        None,
+        &kenneld::spawn::noop_constructor(),
+    );
     let elapsed = started_at.elapsed();
 
     if bring_up_skipped(&recv_response(&mut client).expect("a first response")) {
@@ -1024,7 +1055,14 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
             let _ = sock.read_to_end(&mut out);
             out
         });
-        run_kennel(&h.shared, &req, vec![OwnedFd::from(child)], &mut server);
+        run_kennel(
+            &h.shared,
+            &req,
+            vec![OwnedFd::from(child)],
+            &mut server,
+            None,
+            &kenneld::spawn::noop_constructor(),
+        );
         reader.join().expect("pty reader thread")
     });
 
@@ -1109,6 +1147,8 @@ fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
             &req,
             vec![OwnedFd::from(client1_peer)],
             &mut server1,
+            None,
+            &kenneld::spawn::noop_constructor(),
         );
         drop(run_shared);
     });
@@ -1161,6 +1201,7 @@ fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
             },
             vec![OwnedFd::from(client2_peer)],
             &mut server2,
+            &kenneld::spawn::noop_constructor(),
         );
     });
 

@@ -35,28 +35,39 @@
 
 use std::collections::BTreeSet;
 
-use kennel_lib_policy::PolicyError;
+use kennel_lib_policy::{PolicyError, SettledPolicy, SpawnGrant, SpawnTemplate};
 
 use crate::resolve::{split_reference, TemplateSource};
 use crate::source::{SourcePolicy, SpawnAllow};
 use crate::source_sig::Trust;
 
-/// Validate every `[[spawn.allow]]` target named by `effective`'s `[spawn]` grant against the
-/// spawn-eligibility preconditions (§7.12.8). A no-op when the policy carries no `[spawn]`.
+/// Validate the `[spawn]` grant's targets and resolve it into the settled-policy form.
+///
+/// Each `[[spawn.allow]]` target is the **settled, signed** template a spawn instantiates — the
+/// complete, chain-folded policy ([`TemplateSource::fetch_settled`]), not the source leaf. The grant
+/// is resolved into the form `kenneld` holds at runtime: each template pinned to its signature
+/// commitment (the content-pin) and verified spawn-eligible. A no-op (`None`) without a `[spawn]`.
+///
+/// The content-pin is the settled artefact's own ed25519 `[signature]`: a deterministic signature
+/// over canonical content *is* the commitment (the lockfile idiom — no `sha2`), so a re-signed
+/// template resolves to a different signature and `kenneld` catches it at `SPAWN` ([`verify_pinned`]).
+///
+/// [`verify_pinned`]: kennel_lib_policy::verify_pinned
 ///
 /// # Errors
 ///
-/// Returns [`PolicyError`] if a named template is missing from the trust store, fails signature
-/// verification or resolution, is not spawn-eligible, or a `mutable` narrowing names a field the
-/// target's manifest does not declare.
-pub fn validate(
+/// Returns [`PolicyError`] if a named template has no settled artefact in the trust store, fails
+/// signature verification, is not spawn-eligible, or a `mutable` narrowing names a field the
+/// template's manifest does not declare.
+pub fn resolve_grant(
     effective: &SourcePolicy,
     source: &dyn TemplateSource,
     trust: &Trust<'_>,
-) -> Result<(), PolicyError> {
+) -> Result<Option<SpawnGrant>, PolicyError> {
     let Some(spawn) = &effective.spawn else {
-        return Ok(());
+        return Ok(None);
     };
+    let mut allow = Vec::with_capacity(spawn.allow.len());
     for entry in &spawn.allow {
         // A missing `template` is already rejected by `translate::validate_spawn`; skip rather than
         // double-report.
@@ -64,74 +75,60 @@ pub fn validate(
             continue;
         };
         let (name, version) = split_reference(reference)?;
-        let bytes = source.fetch(&name, &version).ok_or_else(|| {
+        let bytes = source.fetch_settled(&name, &version).ok_or_else(|| {
             PolicyError::Resolution(format!(
-                "[[spawn.allow]] template = \"{reference}\" is not in the trust store \
-                 (spawn-eligibility is checked at this policy's compile, §7.12.8)"
+                "[[spawn.allow]] template = \"{reference}\" has no settled artefact in the trust \
+                 store — compile and sign it (`kennel policy compile`) so a spawn instantiates the \
+                 complete signed template (§7.12.8)"
             ))
         })?;
-        // Resolves the target's chain and verifies its signature against the trust store.
-        let target = crate::compile::effective_source(&bytes, source, trust)?;
-        check_eligible(reference, &target)?;
-        check_narrowing(reference, entry, &target)?;
-    }
-    Ok(())
-}
-
-/// Check one resolved target against the eligibility preconditions.
-fn check_eligible(reference: &str, target: &SourcePolicy) -> Result<(), PolicyError> {
-    let ineligible = |why: &str| {
-        PolicyError::Translation(format!(
-            "[[spawn.allow]] template = \"{reference}\" is not spawn-eligible: {why} (§7.12.8)"
-        ))
-    };
-    // Depth-1: a spawn target may not itself spawn.
-    if target.spawn.is_some() {
-        return Err(ineligible(
-            "it carries its own `[spawn]` grant — spawning is depth-1, a target may not spawn",
-        ));
-    }
-    // Lifetime bound: the self-reap TTL (§7.12.7).
-    let has_ttl = target
-        .lifecycle
-        .as_ref()
-        .and_then(|l| l.ttl.as_deref())
-        .is_some_and(|t| !t.trim().is_empty());
-    if !has_ttl {
-        return Err(ineligible(
-            "it declares no `[lifecycle].ttl` (the mandatory self-reap lifetime bound, §7.12.7)",
-        ));
-    }
-    // Resource ceilings: memory + pids + CPU, each an explicit `[ulimits]` declaration.
-    let ulimits = target.ulimits.as_ref();
-    for (key, what) in [("as", "memory"), ("nproc", "pids"), ("cpu", "CPU")] {
-        if !ulimits.is_some_and(|u| u.contains_key(key)) {
-            return Err(ineligible(&format!(
-                "it declares no `[ulimits].{key}` ({what} ceiling); a spawn target must bound \
-                 memory, pids, and CPU"
+        // Read the settled signature envelope (the content-pin). Verify it cryptographically when the
+        // artefact is signed and a trust store is present; require a signature only when the trust
+        // context demands it (the daemon re-verifies this exact commitment at SPAWN —
+        // [`kennel_lib_policy::verify_pinned`]).
+        let doc = kennel_lib_policy::parse_signed_settled_unverified(&bytes)?;
+        if doc.signature.algorithm == "ed25519" {
+            if let Some(keys) = trust.keys() {
+                kennel_lib_policy::verify_settled(&bytes, keys)?;
+            }
+        } else if trust.requires_signatures() {
+            return Err(PolicyError::Resolution(format!(
+                "[[spawn.allow]] template = \"{reference}\": its settled artefact is unsigned, but \
+                 this compile requires signatures — sign it (`kennel policy compile --key …`)"
             )));
         }
+        // Re-run spawn-eligibility on the SETTLED form — the same verify-half gate the daemon runs.
+        kennel_lib_policy::spawn_eligible(&doc.policy)?;
+        check_narrowing(reference, entry, &doc.policy)?;
+        allow.push(SpawnTemplate {
+            template: reference.to_owned(),
+            signing_key_id: doc.signature.key_id,
+            signature: doc.signature.signature,
+            mutable_narrow: entry.mutable.clone().unwrap_or_default(),
+        });
     }
-    Ok(())
+    // `max_instances` is guaranteed `Some(>= 1)` once `translate::validate_spawn` runs (next in the
+    // compile pipeline); an unset value here only survives onto an error path that never assembles.
+    Ok(Some(SpawnGrant {
+        max_instances: spawn.max_instances.unwrap_or(0),
+        allow,
+    }))
 }
 
-/// Check a per-requester `mutable` narrowing selects only fields the target's manifest declares.
+/// Check a per-requester `mutable` narrowing selects only fields the settled template's `[[mutable]]`
+/// manifest declares (narrowing selects from the manifest, it cannot add fields — §7.12.2).
 fn check_narrowing(
     reference: &str,
     entry: &SpawnAllow,
-    target: &SourcePolicy,
+    target: &SettledPolicy,
 ) -> Result<(), PolicyError> {
     let Some(narrow) = &entry.mutable else {
         return Ok(());
     };
-    let declared: BTreeSet<&str> = target
-        .mutable
-        .iter()
-        .filter_map(|m| m.field.as_deref())
-        .collect();
+    let declared: BTreeSet<&str> = target.manifest.iter().map(|v| v.field.as_str()).collect();
     for field in narrow {
         if !declared.contains(field.as_str()) {
-            return Err(PolicyError::Translation(format!(
+            return Err(PolicyError::Spawn(format!(
                 "[[spawn.allow]] template = \"{reference}\": `mutable` narrowing names `{field}`, \
                  which the template's manifest does not declare — narrowing selects from the \
                  manifest, it cannot add fields (§7.12.2)"
@@ -146,67 +143,149 @@ mod tests {
     use super::*;
 
     fn parse(toml: &str) -> SourcePolicy {
-        crate::source::parse(toml.as_bytes()).expect("parse target")
+        crate::source::parse(toml.as_bytes()).expect("parse spawner")
     }
 
-    /// A minimal eligible spawn-target template: no `[spawn]`, a TTL, and memory/pids/CPU ceilings.
-    fn eligible_target() -> String {
-        "template_name = \"net-fetch\"\n[lifecycle]\nttl = \"5m\"\n\
-         [ulimits]\nas = \"512M\"\nnproc = \"64\"\ncpu = \"30\"\n"
-            .to_owned()
+    /// The in-tree `templates/` source (for `base-confined`, the security foundation every target
+    /// inherits — a self-contained policy would have to declare every required section by hand).
+    struct RealTemplates;
+    impl TemplateSource for RealTemplates {
+        fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../templates");
+            std::fs::read(root.join(name).join("policy.toml")).ok()
+        }
     }
 
-    #[test]
-    fn a_well_formed_target_is_eligible() {
-        assert!(check_eligible("net-fetch@v1", &parse(&eligible_target())).is_ok());
-    }
-
-    #[test]
-    fn a_target_that_itself_spawns_is_rejected_depth_1() {
-        let toml = format!(
-            "{}[spawn]\nmax_instances = 1\nreason = \"r\"\n[[spawn.allow]]\ntemplate = \"x@v1\"\n",
-            eligible_target()
+    /// The **settled** bytes of a minimal eligible spawn target: inherits `base-confined`, no
+    /// `[spawn]`, a TTL, memory/pids/CPU ceilings, and an optional `[[mutable]]` field — sealed
+    /// **unsigned**, as `fetch_settled` would return. A spawn target *is* a complete (here
+    /// unsigned-dev) settled policy, not a source leaf.
+    fn settled_target(manifest_field: Option<&str>) -> Vec<u8> {
+        let manifest = manifest_field
+            .map(|f| format!("[[mutable]]\nfield = \"{f}\"\noneof = [\"a\"]\n"))
+            .unwrap_or_default();
+        let src = format!(
+            "template_base = \"base-confined@v1\"\ntemplate_name = \"net-fetch\"\n\
+             [net]\nmode = \"none\"\n[lifecycle]\nttl = \"5m\"\nttl_action = \"exit\"\n\
+             [ulimits]\nas = \"512M\"\nnproc = \"64\"\ncpu = \"30\"\n{manifest}"
         );
-        let err = check_eligible("net-fetch@v1", &parse(&toml)).expect_err("depth-1");
+        let compiled =
+            crate::compile::compile(&parse(&src), &RealTemplates, &Trust::dev(), "0.0.0")
+                .expect("compile settled target");
+        kennel_lib_policy::to_bytes(&crate::compile::seal_unsigned(&compiled.policy))
+            .expect("serialise settled target")
+    }
+
+    /// A source serving one named target's **settled** bytes via `fetch_settled`.
+    struct OneSettled(Vec<u8>);
+    impl TemplateSource for OneSettled {
+        fn fetch(&self, _name: &str, _version: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn fetch_settled(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+            (name == "net-fetch").then(|| self.0.clone())
+        }
+    }
+
+    /// Resolves `base-confined` (the real templates) for chain-folding AND serves `net-fetch`'s
+    /// settled form — for compiling a depth>1 target that itself names a spawn allow-target.
+    struct BothSources(Vec<u8>);
+    impl TemplateSource for BothSources {
+        fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+            RealTemplates.fetch(name, version)
+        }
+        fn fetch_settled(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+            (name == "net-fetch").then(|| self.0.clone())
+        }
+    }
+
+    fn spawner(extra_allow: &str) -> SourcePolicy {
+        parse(&format!(
+            "name = \"s\"\n[spawn]\nmax_instances = 3\nreason = \"r\"\n\
+             [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n{extra_allow}"
+        ))
+    }
+
+    #[test]
+    fn resolve_grant_is_none_without_a_spawn_grant() {
+        let p = parse("name = \"s\"\n");
+        assert!(resolve_grant(&p, &RealTemplates, &Trust::dev())
+            .expect("ok")
+            .is_none());
+    }
+
+    #[test]
+    fn resolve_grant_requires_a_settled_artefact() {
+        // `fetch_settled` returns None ⇒ the target was never compiled+signed to its settled form.
+        let err =
+            resolve_grant(&spawner(""), &RealTemplates, &Trust::dev()).expect_err("no settled");
+        assert!(format!("{err}").contains("settled artefact"));
+    }
+
+    #[test]
+    fn resolve_grant_pins_an_unsigned_settled_target() {
+        let grant = resolve_grant(
+            &spawner(""),
+            &OneSettled(settled_target(None)),
+            &Trust::dev(),
+        )
+        .expect("resolve")
+        .expect("grant");
+        assert_eq!(grant.max_instances, 3, "max_instances carried verbatim");
+        let pinned = grant.allow.first().expect("one target");
+        assert_eq!(pinned.template, "net-fetch@v1");
+        // Sealed unsigned (dev), so the commitment is empty — kenneld accepts it only when it likewise
+        // resolves the target unsigned.
+        assert!(pinned.signature.is_empty() && pinned.signing_key_id.is_empty());
+    }
+
+    #[test]
+    fn resolve_grant_rejects_an_ineligible_settled_target() {
+        // A settled target that itself carries `[spawn]` is not depth-1 — caught by spawn_eligible on
+        // the settled form. (It also names a settled allow-target, so its own grant resolves; that is
+        // beside the point — what fails is that *this* target may not be spawned.)
+        let src =
+            "template_base = \"base-confined@v1\"\ntemplate_name = \"x\"\n[net]\nmode = \"none\"\n\
+                   [lifecycle]\nttl = \"5m\"\nttl_action = \"exit\"\n\
+                   [ulimits]\nas = \"512M\"\nnproc = \"64\"\ncpu = \"30\"\n\
+                   [spawn]\nmax_instances = 1\nreason = \"r\"\n\
+                   [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n";
+        let compiled = crate::compile::compile(
+            &parse(src),
+            &BothSources(settled_target(None)),
+            &Trust::dev(),
+            "0.0.0",
+        )
+        .expect("compile depth>1 target");
+        let bytes = kennel_lib_policy::to_bytes(&crate::compile::seal_unsigned(&compiled.policy))
+            .expect("bytes");
+        let err =
+            resolve_grant(&spawner(""), &OneSettled(bytes), &Trust::dev()).expect_err("ineligible");
         assert!(format!("{err}").contains("depth-1"));
     }
 
     #[test]
-    fn a_target_without_a_ttl_is_rejected() {
-        let t = parse(
-            "template_name = \"x\"\n[ulimits]\nas = \"512M\"\nnproc = \"64\"\ncpu = \"30\"\n",
-        );
-        assert!(format!("{}", check_eligible("x@v1", &t).expect_err("no ttl")).contains("ttl"));
-    }
-
-    #[test]
-    fn a_target_missing_a_resource_ceiling_is_rejected() {
-        // memory + CPU present, pids (`nproc`) missing.
-        let t = parse(
-            "template_name = \"x\"\n[lifecycle]\nttl = \"5m\"\n[ulimits]\nas = \"512M\"\ncpu = \"30\"\n",
-        );
-        assert!(format!("{}", check_eligible("x@v1", &t).expect_err("no nproc")).contains("nproc"));
-    }
-
-    #[test]
-    fn narrowing_must_select_from_the_targets_manifest() {
-        let target = parse(&format!(
-            "{}[[mutable]]\nfield = \"net.allow\"\noneof = [\"a\"]\n",
-            eligible_target()
-        ));
-        let ok = SpawnAllow {
-            template: Some("net-fetch@v1".to_owned()),
-            mutable: Some(vec!["net.allow".to_owned()]),
-        };
-        assert!(check_narrowing("net-fetch@v1", &ok, &target).is_ok());
-        let bad = SpawnAllow {
-            template: Some("net-fetch@v1".to_owned()),
-            mutable: Some(vec!["fs.write".to_owned()]),
-        };
-        assert!(format!(
-            "{}",
-            check_narrowing("net-fetch@v1", &bad, &target).expect_err("undeclared")
+    fn resolve_grant_carries_and_checks_a_per_requester_narrowing() {
+        let target = OneSettled(settled_target(Some("fs.write")));
+        // A narrowing that selects a declared field is carried.
+        let grant = resolve_grant(
+            &spawner("mutable = [\"fs.write\"]\n"),
+            &target,
+            &Trust::dev(),
         )
-        .contains("does not declare"));
+        .expect("resolve")
+        .expect("grant");
+        assert_eq!(
+            grant.allow.first().expect("target").mutable_narrow,
+            vec!["fs.write".to_owned()]
+        );
+        // A narrowing naming an undeclared field is rejected.
+        let err = resolve_grant(
+            &spawner("mutable = [\"net.proxy.allow\"]\n"),
+            &OneSettled(settled_target(Some("fs.write"))),
+            &Trust::dev(),
+        )
+        .expect_err("undeclared narrowing");
+        assert!(format!("{err}").contains("does not declare"));
     }
 }

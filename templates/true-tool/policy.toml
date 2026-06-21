@@ -1,0 +1,58 @@
+# ============================================================================
+# Spawn template: true-tool  (v1)
+# Inherits: base-confined@v1
+# Threat catalogue: THREATS.md v0.3
+#
+# The empty-workload SPAWN target (§7.12): `/bin/true` — start, do nothing,
+# exit 0. It reaches NOTHING (`net.mode = "none"`, no fs write, no second
+# capability), so it measures the pure construction floor: how fast a scoped
+# sibling can be born and reaped with no workload cost of its own. The W10
+# spinup profile uses it as the isolation-floor datum (`/bin/true` kennel),
+# now measured one layer down — as an ephemeral SPAWN sibling.
+#
+# Spawn-eligible by construction (§7.12.8): no `[spawn]` of its own (depth-1),
+# a self-reaping TTL, explicit memory/pids/CPU ceilings, no `[[mutable]]`.
+# ============================================================================
+
+template_base = "base-confined@v1"
+template_name = "true-tool"
+template_version = "1"
+
+
+# --- Network: frozen off. No egress leg. ------------------------------------
+[net]
+mode = "none"
+
+
+# --- Execution: just `/bin/true`. The compiler resolves its dynamic loader
+#     (PT_INTERP) and grants EXECUTE on both. --------------------------------
+[exec]
+# `/bin/sh` satisfies the framework's "the shell must be executable" check
+# (base-confined's default `[exec].shell`); the workload itself is `/bin/true`.
+allow = ["/bin/true", "/usr/bin/true", "/bin/sh"]
+
+
+# --- Filesystem: read the system dirs `/bin/true` and its libc resolve from. -
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+
+# --- Workload: the fixed entrypoint; the agent cannot override it ------------
+[workload]
+argv = ["/bin/true"]
+pinned = true
+
+
+# --- Lifecycle: a self-reaping TTL (§7.12.7) --------------------------------
+[lifecycle]
+ttl = "5m"
+ttl_action = "exit"
+
+
+# --- Resource ceilings: mandatory for a spawn target (§7.12.8) --------------
+[ulimits]
+as = "128M"      # address space (memory)
+nproc = "16"     # processes / threads
+cpu = "10"       # CPU-seconds
+
+# No [[mutable]] manifest: true-tool opens nothing.

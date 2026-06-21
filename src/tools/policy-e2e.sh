@@ -251,9 +251,11 @@ for name in "${CASES[@]}"; do
         fi
     fi
     # Distinct instance name per case; </dev/null = non-interactive. A timeout bounds a
-    # wedged spawn. The workload exit code is the run status.
+    # wedged spawn. The workload exit code is the run status. Templates resolve from the STANDARD
+    # installed cascade (install.sh ships them to /usr/lib/kennel/templates) — never the source tree,
+    # so the daemon resolves a spawn target the same way the requester compiled against it.
     timeout 90 "$KENNEL" run "$run_pol" "$name" --key "$SUITE_KEY" \
-        --template-dir "$REPO_ROOT/templates" --trust-dir "$KEY_DIR" </dev/null \
+        --trust-dir "$KEY_DIR" </dev/null \
         >"/tmp/kennel-suite-$name.log" 2>&1
     rc=$?
     [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true

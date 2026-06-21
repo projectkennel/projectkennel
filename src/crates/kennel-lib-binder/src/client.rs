@@ -496,6 +496,26 @@ impl Connection {
         code: u32,
         data: &[u8],
     ) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
+        let (payload, fds) = self.transact_with_fds(handle, code, data)?;
+        Ok((payload, fds.into_iter().next()))
+    }
+
+    /// Send a synchronous transaction and decode a reply carrying a length-prefixed payload and
+    /// **zero or more** `BINDER_TYPE_FD` objects — the multi-fd form of [`Self::transact_with_fd`],
+    /// the consumer side of [`Self::reply_with_data_and_fds`]. The requester issues `SPAWN` this way to
+    /// receive its two channel ends. `TF_ACCEPT_FDS` is set so the kernel may translate the reply's
+    /// fds into the caller's table.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transact`], plus [`io::ErrorKind::InvalidData`] if the reply is shorter than its own
+    /// length prefix or an fd object is malformed.
+    pub fn transact_with_fds(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &[u8],
+    ) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
         let td = TransactionData {
             target: u64::from(handle),
             code,
@@ -513,7 +533,7 @@ impl Connection {
             self.ack_refcounts(&brs)?;
             for br in brs {
                 match br {
-                    Br::Reply(reply) => return self.take_data_and_fd(reply),
+                    Br::Reply(reply) => return self.take_data_and_fds(reply),
                     Br::Failed => {
                         let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
                         return Err(io::Error::other(format!(
@@ -596,15 +616,37 @@ impl Connection {
         data: &[u8],
         fd: Option<BorrowedFd<'_>>,
     ) -> io::Result<()> {
+        fd.map_or_else(
+            || self.reply_with_data_and_fds(incoming, data, &[]),
+            |fd| self.reply_with_data_and_fds(incoming, data, &[fd]),
+        )
+    }
+
+    /// Reply with a length-prefixed payload and **zero or more** `BINDER_TYPE_FD` objects — the
+    /// multi-fd generalisation of [`Self::reply_with_data_and_fd`] (the `SPAWN` reply: the
+    /// `spawn-<uuid>`/status bytes plus the requester's two channel ends — `02-10` §7.12). Each fd
+    /// object sits at an 8-byte boundary and is named by one transaction offset; with zero fds this
+    /// is byte-identical to a no-fd `reply_with_data_and_fd`. Then free the inbound buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails, or [`io::ErrorKind::InvalidInput`]
+    /// if the payload length does not fit the wire encoding.
+    pub fn reply_with_data_and_fds(
+        &self,
+        incoming: &Incoming,
+        data: &[u8],
+        fds: &[BorrowedFd<'_>],
+    ) -> io::Result<()> {
         let data_len = u32::try_from(data.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "payload too large"))?;
         let mut buf = Vec::new();
         buf.extend_from_slice(&data_len.to_le_bytes());
         buf.extend_from_slice(data);
 
-        let mut offsets: Vec<u64> = Vec::new();
-        if let Some(fd) = fd {
-            // The fd object must sit at an 8-byte boundary within the buffer.
+        let mut offsets: Vec<u64> = Vec::with_capacity(fds.len());
+        for fd in fds {
+            // Each fd object must sit at an 8-byte boundary within the buffer.
             let obj_off = buf.len().next_multiple_of(8);
             buf.resize(obj_off, 0);
             buf.extend_from_slice(&proto::flat_binder_object_fd(fd.as_raw_fd()));
@@ -627,7 +669,11 @@ impl Connection {
 
     /// Extract the length-prefixed payload and the optional fd from a data-and-fd
     /// reply (the [`Self::transact_with_fd`] format), then free the reply buffer.
-    fn take_data_and_fd(&self, reply: TransactionData) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
+    /// Extract the length-prefixed payload and **every** `BINDER_TYPE_FD` object from a reply (the
+    /// multi-fd [`Self::transact_with_fds`] format — the `SPAWN` reply's two channel ends), then free
+    /// the reply buffer. Each transaction offset names one fd object the driver already installed
+    /// into us, in offset order.
+    fn take_data_and_fds(&self, reply: TransactionData) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
         let guard = BufferGuard::new(self, reply.buffer);
         let total = usize::try_from(reply.data_size).unwrap_or(0);
         let buf = self
@@ -652,12 +698,19 @@ impl Connection {
             })?
             .to_vec();
 
-        // An fd rides only when the reply declared at least one offset (its object
-        // position). The offsets array is a native-order u64 array (kernel convention).
-        let fd = if reply.offsets_size >= 8 {
+        // The offsets array is a native-order u64 array (kernel convention), one entry per fd object.
+        let count = usize::try_from(reply.offsets_size)
+            .unwrap_or(0)
+            .checked_div(8)
+            .unwrap_or(0);
+        let mut fds = Vec::with_capacity(count);
+        for i in 0..count {
+            let at = reply
+                .offsets
+                .wrapping_add(u64::try_from(i).unwrap_or(0).wrapping_mul(8));
             let off_bytes = self
                 .map
-                .read_at(reply.offsets, 8)
+                .read_at(at, 8)
                 .and_then(|s| <[u8; 8]>::try_from(s).ok())
                 .ok_or_else(|| io::Error::other("reply offsets out of range"))?;
             let obj_off = u64::from_ne_bytes(off_bytes);
@@ -676,15 +729,13 @@ impl Connection {
                         "reply carried no valid fd object",
                     )
                 })?;
-            // SAFETY: `raw` is a fd the binder driver just transferred to us, filtered `>= 0`
-            // above — a valid fd we solely own.
-            Some(unsafe { sys::own_fd(raw) })
-        } else {
-            None
-        };
+            // SAFETY: `raw` is a fd the binder driver just transferred to us, filtered `>= 0` above —
+            // a valid fd we solely own.
+            fds.push(unsafe { sys::own_fd(raw) });
+        }
 
         guard.free()?;
-        Ok((payload, fd))
+        Ok((payload, fds))
     }
 
     /// Receive any transactions delivered in one cycle (after `poll` signalled

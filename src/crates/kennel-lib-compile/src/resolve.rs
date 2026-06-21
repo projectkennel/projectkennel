@@ -67,6 +67,15 @@ pub trait TemplateSource {
     /// Return the raw TOML bytes for `<name>@<version>`, or `None` if not found.
     /// `version` carries its leading `v` (e.g. `"v1"`, `"v2.33.2"`).
     fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>>;
+
+    /// Return the **settled, signed** form of `<name>@<version>` — the complete, chain-folded policy
+    /// a spawn instantiates, beside the source (`<name>/<name>.settled.toml`). Distinct from
+    /// [`Self::fetch`] (the source leaf the chain-folder composes): a spawn target is load-verified and
+    /// instantiated as-is, never compiled in the daemon. `None` if no settled form is present (the
+    /// default; an in-memory test source may not provide one).
+    fn fetch_settled(&self, _name: &str, _version: &str) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// One resolved link in the inheritance chain, recorded for provenance.

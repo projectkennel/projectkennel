@@ -46,6 +46,7 @@ pub fn construct_kennel(
     egress: Option<&[u8]>,
     pty_fd: Option<RawFd>,
     workload_fd: Option<RawFd>,
+    stdio_fds: Option<[RawFd; 3]>,
 ) -> io::Result<(Child, i32, OwnedFd)> {
     let (ours, theirs) = seqpacket_pair()?;
     let child = Command::new(helper)
@@ -70,9 +71,14 @@ pub fn construct_kennel(
     if let Some(eg) = egress {
         data.extend_from_slice(eg);
     }
+    // FIXED order: pty (if any), workload (if any), then the three injected-stdio fds (if any) —
+    // the `pty_fd_present`/`workload_fd_present`/`stdio_present` flags tell the factory which is which.
     let mut fds: Vec<RawFd> = Vec::new();
     fds.extend(pty_fd);
     fds.extend(workload_fd);
+    if let Some(s) = stdio_fds {
+        fds.extend(s);
+    }
     send_with_raw_fds(ours.as_fd(), &data, &fds)?;
 
     // The reply is the 4-byte init pid plus the kenneld end of the boot-sync socket as the sole

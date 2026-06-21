@@ -1,0 +1,59 @@
+# ============================================================================
+# Spawn template: echo-tool  (v1)
+# Inherits: base-confined@v1
+# Threat catalogue: THREATS.md v0.3
+#
+# The minimal demonstrable SPAWN target (§7.12): a single-leg tool that echoes
+# its stdin to its stdout via `/bin/cat`. It reaches NOTHING — `net.mode = "none"`
+# (no egress leg), no filesystem write grant (no fs leg) — so an agent that spawns
+# it gets a pure data-conduit sibling and no new capability. The spawn-roundtrip
+# policy-suite case spawns this and proves the channel reaches a running sibling
+# by writing a probe and reading the echo back.
+#
+# Spawn-eligible by construction (§7.12.8): no `[spawn]` of its own (depth-1), a
+# self-reaping TTL, and explicit memory/pids/CPU ceilings. It opens NO mutable
+# fields (the most fenced target), so an agent spawns it exactly as signed.
+# ============================================================================
+
+template_base = "base-confined@v1"
+template_name = "echo-tool"
+template_version = "1"
+
+
+# --- Network: frozen off. No egress leg. ------------------------------------
+[net]
+mode = "none"
+
+
+# --- Execution: just `cat` (echoes stdin→stdout). The compiler resolves its
+#     dynamic loader (PT_INTERP) and grants EXECUTE on both. ------------------
+[exec]
+# `/bin/sh` satisfies the framework's "the shell must be executable" check (base-confined's
+# default `[exec].shell`); the workload itself is only ever `/bin/cat`.
+allow = ["/bin/cat", "/usr/bin/cat", "/bin/sh"]
+
+
+# --- Filesystem: read the system dirs `cat` and its libc resolve from. -------
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+
+# --- Workload: the fixed entrypoint; the agent cannot override it ------------
+[workload]
+argv = ["/bin/cat"]
+pinned = true
+
+
+# --- Lifecycle: a self-reaping TTL (§7.12.7) --------------------------------
+[lifecycle]
+ttl = "5m"
+ttl_action = "exit"
+
+
+# --- Resource ceilings: mandatory for a spawn target (§7.12.8) --------------
+[ulimits]
+as = "128M"      # address space (memory)
+nproc = "16"     # processes / threads
+cpu = "10"       # CPU-seconds
+
+# No [[mutable]] manifest: echo-tool opens nothing — the most fenced target.

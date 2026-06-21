@@ -87,6 +87,7 @@ fn run_manager() {
         std::sync::Arc::new(kenneld::inbound::InboundRuntime::new()),
         None,
         writer,
+        None,
     )
     .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");

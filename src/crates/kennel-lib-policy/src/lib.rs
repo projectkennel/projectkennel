@@ -41,6 +41,7 @@ pub mod libresolve;
 pub mod patch;
 pub mod settled;
 pub mod signature;
+pub mod spawn;
 pub mod variant;
 
 pub use audit::parse_audit_defaults;
@@ -52,11 +53,12 @@ pub use settled::{
     BinderRuntime, CapPolicy, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
     ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule,
     OnChangeAction, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
-    ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant,
-    SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime,
-    UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
+    ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SpawnGrant,
+    SpawnTemplate, SshGrant, SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy,
+    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
+pub use spawn::spawn_eligible;
 
 /// The newest `settled_schema_version` this build accepts.
 pub const SETTLED_SCHEMA_VERSION: u32 = 1;
@@ -75,6 +77,45 @@ pub const SETTLED_SCHEMA_VERSION: u32 = 1;
 pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
         basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    verify_doc(doc, keys)
+}
+
+/// Verify a settled-policy document **and** confirm it is the exact artefact a `[spawn]` grant
+/// pinned (the content-pin, §7.12.8).
+///
+/// `kenneld` calls this at `SPAWN` on a template it re-resolved from the *mutable* trust store: the
+/// document's `[signature]` must carry the `expected_key_id`/`expected_signature` the spawner
+/// recorded at its compile, **and** verify cryptographically against `keys`. A deterministic ed25519
+/// signature over canonical content is the content commitment, so a re-signed-in-place template
+/// resolves to a different signature and is caught here — fail-closed against a mutable trust store,
+/// no `sha2`. The pin equality is checked first, so tampering reads as a clear pin mismatch rather
+/// than a generic signature failure.
+///
+/// # Errors
+///
+/// [`PolicyError::Spawn`] on a pin mismatch; otherwise the same errors as [`verify_settled`]
+/// (parse, schema version, signature, invariants).
+pub fn verify_pinned(
+    bytes: &[u8],
+    keys: &KeySet,
+    expected_key_id: &str,
+    expected_signature: &str,
+) -> Result<SettledPolicy, PolicyError> {
+    let doc: SignedSettledPolicy =
+        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    if doc.signature.key_id != expected_key_id || doc.signature.signature != expected_signature {
+        return Err(PolicyError::Spawn(
+            "template content-pin mismatch — the trust store resolved a different signed artefact \
+             than the spawner pinned (re-signed in place?); fail-closed (§7.12.8)"
+                .to_owned(),
+        ));
+    }
+    verify_doc(doc, keys)
+}
+
+/// The shared tail of [`verify_settled`] / [`verify_pinned`]: schema-version gate, signature
+/// verification over the canonical body, and framework-invariant re-assertion.
+fn verify_doc(doc: SignedSettledPolicy, keys: &KeySet) -> Result<SettledPolicy, PolicyError> {
     if doc.policy.settled_schema_version > SETTLED_SCHEMA_VERSION {
         return Err(PolicyError::UnsupportedSchemaVersion {
             found: doc.policy.settled_schema_version,
@@ -98,6 +139,20 @@ pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, Poli
 /// [`PolicyError::Parse`] if the bytes are not a well-formed settled artefact, or
 /// [`PolicyError::UnsupportedSchemaVersion`] if its schema is too new.
 pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyError> {
+    Ok(parse_signed_settled_unverified(bytes)?.policy)
+}
+
+/// Parse a settled artefact into its **full document** — the body and its `[signature]` envelope —
+/// **without** verifying the signature.
+///
+/// For the spawn compiler, which records a target template's signature commitment (the content-pin)
+/// at the spawner's compile: it needs the envelope's `key_id`/`signature`, not just the body. The
+/// daemon re-verifies that commitment at `SPAWN` ([`verify_pinned`]); this is the authoring-side read.
+///
+/// # Errors
+/// [`PolicyError::Parse`] if the bytes are not a well-formed settled artefact, or
+/// [`PolicyError::UnsupportedSchemaVersion`] if its schema is too new.
+pub fn parse_signed_settled_unverified(bytes: &[u8]) -> Result<SignedSettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
         basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
     if doc.policy.settled_schema_version > SETTLED_SCHEMA_VERSION {
@@ -106,7 +161,7 @@ pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyErr
             max: SETTLED_SCHEMA_VERSION,
         });
     }
-    Ok(doc.policy)
+    Ok(doc)
 }
 
 /// Resolve and fill the settled policy's dynamic-loader `EXECUTE` grant set.
@@ -185,6 +240,52 @@ mod tests {
         let bytes = to_bytes(&doc).expect("serialise");
         let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
         assert_eq!(verified, sample_policy());
+    }
+
+    #[test]
+    fn a_spawn_grant_round_trips_and_is_signature_bound() {
+        let key = signing_key();
+        let mut policy = sample_policy();
+        policy.spawn = Some(settled::SpawnGrant {
+            max_instances: 8,
+            allow: vec![settled::SpawnTemplate {
+                template: "net-fetch@v1".to_owned(),
+                signing_key_id: "kennel-maint-2026".to_owned(),
+                signature: "Zm9vYmFy".to_owned(),
+                mutable_narrow: vec!["net.proxy.allow".to_owned()],
+            }],
+        });
+
+        // The grant survives sign → serialise → verify (the `[spawn]`/`[[spawn.allow]]` tables
+        // serialise before the trailing `manifest` array-of-tables — the canonical-form ordering).
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert_eq!(verified.spawn, policy.spawn);
+
+        // …and it is inside the signed canonical form (tampering breaks it).
+        let canon =
+            String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(canon.contains("[spawn]") && canon.contains("[[spawn.allow]]"));
+    }
+
+    #[test]
+    fn verify_pinned_accepts_the_committed_signature_and_rejects_a_mismatch() {
+        let key = signing_key();
+        let doc = sign_settled(&sample_policy(), &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let keys = keyset_for(&key);
+        // The recorded pin = the artefact's own signature → verifies and returns the body.
+        let ok = verify_pinned(
+            &bytes,
+            &keys,
+            &doc.signature.key_id,
+            &doc.signature.signature,
+        );
+        assert_eq!(ok.expect("pinned verify"), sample_policy());
+        // A pin naming a different signature is a fail-closed mismatch (the re-signed-in-place case).
+        let bad = verify_pinned(&bytes, &keys, &doc.signature.key_id, "AAAA");
+        assert!(matches!(bad, Err(PolicyError::Spawn(_))));
     }
 
     #[test]

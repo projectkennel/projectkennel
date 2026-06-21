@@ -208,6 +208,7 @@ pub fn spawn(
     inbound: Arc<crate::inbound::InboundRuntime>,
     dbus: Option<Arc<DbusRelay>>,
     writer: Arc<Writer>,
+    spawn: Option<Arc<crate::spawn::SpawnRuntime>>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
     let stop = Arc::new(AtomicBool::new(false));
@@ -233,6 +234,7 @@ pub fn spawn(
             &inbound,
             &lifecycle,
             dbus.as_deref(),
+            spawn.as_deref(),
             incoming,
             conn,
             ctx,
@@ -268,6 +270,7 @@ fn handle(
     inbound: &crate::inbound::InboundRuntime,
     lifecycle: &Lifecycle,
     dbus: Option<&DbusRelay>,
+    spawn: Option<&crate::spawn::SpawnRuntime>,
     incoming: &Incoming,
     conn: &Connection,
     ctx: u16,
@@ -277,6 +280,12 @@ fn handle(
     // on its kernel-stamped identity — handled before the registry/af-unix dispatch.
     if incoming.code >= lifecycle::GET_SANDBOX_PLAN {
         return lifecycle_handle(lifecycle, incoming, ctx, writer);
+    }
+    // Dynamic spawn (§7.12): the requester workload asks kenneld to instantiate a signed-template
+    // sibling. A facade-class verb (no registry lock): the validation is verify-half and the only fd
+    // movement is the outbound reply ([[binder-fd-passing-safety-verdict]]).
+    if incoming.code == verb::SPAWN {
+        return crate::spawn::handle_spawn(spawn, incoming, ctx, writer);
     }
     // The af-unix and INet facades dial host I/O (blocking) and return a descriptor, so they are
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the

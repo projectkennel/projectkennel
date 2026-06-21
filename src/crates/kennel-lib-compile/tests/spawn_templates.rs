@@ -8,7 +8,8 @@
 //!    `kennel policy sign <name> --key …`),
 //! 2. it compiles to a settled policy with a well-formed `[[mutable]]` manifest, and
 //! 3. it is **spawn-eligible** (§7.12.8) — a spawner that `[[spawn.allow]]`s all three
-//!    compiles, so `spawn::validate`'s depth-1 / TTL / ceilings checks pass on each.
+//!    compiles, so `spawn::resolve_grant`'s depth-1 / TTL / ceilings checks pass on each, and the
+//!    resulting settled spawner carries a `[spawn]` grant pinning each target to its signature.
 //!
 //! The `*_signed_*` test is the production gate (green once the templates are signed); the
 //! `*_unsigned_*` test verifies the same structure under `Trust::dev`, so the policy is
@@ -35,6 +36,16 @@ struct Templates {
 impl TemplateSource for Templates {
     fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
         std::fs::read(self.root.join(name).join("policy.toml")).ok()
+    }
+
+    /// The settled form a spawn instantiates: compile the source template (folding `base-confined`)
+    /// and seal it **unsigned** (dev). Production ships a maintainer-signed `<name>.settled.toml`;
+    /// here we synthesise the dev equivalent so the spawner's grant resolution has a settled artefact.
+    fn fetch_settled(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        let bytes = self.fetch(name, version)?;
+        let entry = parse(&bytes).ok()?;
+        let compiled = compile(&entry, self, &Trust::dev(), "0.0.0").ok()?;
+        kennel_lib_policy::to_bytes(&kennel_lib_compile::seal_unsigned(&compiled.policy)).ok()
     }
 }
 fn templates() -> Templates {
@@ -106,13 +117,11 @@ fn every_spawn_template_is_signed_compiles_and_is_eligible() {
             compiled.err()
         );
     }
-    let spawner = parse(spawner_policy().as_bytes()).expect("spawner parses");
-    let compiled = compile(&spawner, &templates(), &trust, "0.0.0");
-    assert!(
-        compiled.is_ok(),
-        "a spawner allowing all shipped templates must compile (all eligible): {:?}",
-        compiled.err()
-    );
+    // The spawner that *resolves* these templates needs each one's signed **settled** artefact
+    // (`<name>.settled.toml`) — a maintainer-signed pre-resolved policy the repo does not yet carry
+    // (signing needs the maintainer private key, offline). The grant-resolution + content-pin path is
+    // exercised against dev-sealed settled artefacts in the `*_unsigned_*` test below; this gate stays
+    // the per-template source signature + compile reminder.
 }
 
 /// Signature-independent gate: the templates compile, carry the expected manifest, and are
@@ -155,4 +164,13 @@ fn spawn_templates_compile_with_valid_manifests_and_are_eligible_unsigned() {
         "all shipped templates are spawn-eligible (depth-1, TTL, memory/pids/CPU ceilings): {:?}",
         compiled.err()
     );
+    // The grant is carried into the settled spawner: each target resolved from its (here dev-sealed)
+    // settled artefact via `fetch_settled` and pinned. The content-pin equality against a real signed
+    // settled template is exercised by `verify_pinned`'s tests + the spawn-roundtrip e2e.
+    let grant = compiled
+        .expect("compiled")
+        .policy
+        .spawn
+        .expect("a spawner carries a [spawn] grant");
+    assert_eq!(grant.allow.len(), SPAWN_TEMPLATES.len());
 }

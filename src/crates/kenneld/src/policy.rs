@@ -148,6 +148,10 @@ impl TrustStoreLoader {
 }
 
 impl PolicyLoader for TrustStoreLoader {
+    fn trust_keys(&self) -> kennel_lib_policy::KeySet {
+        self.current_keys().unwrap_or_else(|_| KeySet::new())
+    }
+
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
         let bytes = std::fs::read(path)
             .map_err(|e| format!("cannot read policy {}: {e}", path.display()))?;
@@ -161,58 +165,66 @@ impl PolicyLoader for TrustStoreLoader {
         // section is available to configure the egress proxy).
         let verified =
             kennel_lib_policy::verify_settled(&bytes, &keys).map_err(|e| e.to_string())?;
-        let substituted =
-            kennel_lib_spawn::substitute(&verified, subst).map_err(|e| e.to_string())?;
-        let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
-            .map_err(|e| e.to_string())?;
-        // Resolve the policy's supplementary groups to GIDs and membership-check them
-        // (§7.4): kenneld runs as the operator, so a group the operator is not in is
-        // refused — the privileged seal could otherwise over-grant. The kennel always
-        // drops to exactly this set (empty ⇒ no supplementary groups at all).
-        let groups = resolve_groups(&substituted.identity.groups)?;
-        plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
-        // Re-derive the exec.deny footgun warnings at load (§7.3.4): a deny that falls
-        // inside an allowed directory, or that is set without any allow, cannot be
-        // enforced by the allow-only Landlock LSM. The `kennel compile` step already
-        // warned, but an operator running a pre-compiled artefact never saw it — emit
-        // it here too. Advisory, never fatal.
-        for w in substituted.effective_policy.exec.deny_warnings() {
-            eprintln!("kenneld: warning: {w}");
-        }
-        let exec_path = substituted.effective_policy.exec.path.clone();
-        let shell = substituted.effective_policy.exec.shell.clone();
-        let home_persist = substituted.effective_policy.fs.home_persist.clone();
-        let lifecycle = substituted.effective_policy.lifecycle.clone();
-        let tty_filter = substituted.effective_policy.tty.filter_terminal_escapes;
-        let on_change = substituted.effective_policy.trust.on_change;
-        let net = substituted.effective_policy.net;
-        let ssh = substituted.ssh;
-        let unix = substituted.unix;
-        let binder = substituted.binder;
-        let dbus = substituted.dbus;
-        let audit = substituted.audit;
-        let env = substituted.env;
-        Ok(Loaded {
-            plan,
-            account: substituted.identity.user,
-            account_group: substituted.identity.group,
-            net,
-            ssh,
-            unix,
-            binder,
-            dbus,
-            groups,
-            audit,
-            env,
-            exec_path,
-            shell,
-            home_persist,
-            lifecycle,
-            tty_filter,
-            on_change,
-            workload: substituted.workload,
-        })
+        loaded_from_settled(&verified, subst)
     }
+}
+
+/// Derive the daemon-side [`Loaded`] runtime from an already-verified settled policy.
+///
+/// The post-verification half of [`TrustStoreLoader::load`], shared with the dynamic-spawn
+/// construction path (§7.12): a `SPAWN` instance is patched in memory and never signed — its
+/// integrity is the verified template plus the patch validator, so it carries no signature to verify
+/// — but it still substitutes its `<ctx>`/`<uid>` placeholders, builds the kernel-enforcement plan,
+/// and membership-checks its supplementary groups exactly as a path-loaded policy does.
+///
+/// # Errors
+///
+/// A human-readable reason if substitution leaves a placeholder unresolved, the plan cannot be
+/// built, or a supplementary group is not one the operator holds.
+pub fn loaded_from_settled(
+    verified: &kennel_lib_policy::SettledPolicy,
+    subst: &RuntimeSubstitutions,
+) -> Result<Loaded, String> {
+    let substituted = kennel_lib_spawn::substitute(verified, subst).map_err(|e| e.to_string())?;
+    let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
+        .map_err(|e| e.to_string())?;
+    // Resolve the policy's supplementary groups to GIDs and membership-check them (§7.4): kenneld
+    // runs as the operator, so a group the operator is not in is refused — the privileged seal could
+    // otherwise over-grant. The kennel always drops to exactly this set (empty ⇒ none at all).
+    let groups = resolve_groups(&substituted.identity.groups)?;
+    plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
+    // Re-derive the exec.deny footgun warnings (§7.3.4): a deny that falls inside an allowed
+    // directory, or is set with no allow, cannot be enforced by the allow-only Landlock LSM.
+    for w in substituted.effective_policy.exec.deny_warnings() {
+        eprintln!("kenneld: warning: {w}");
+    }
+    let exec_path = substituted.effective_policy.exec.path.clone();
+    let shell = substituted.effective_policy.exec.shell.clone();
+    let home_persist = substituted.effective_policy.fs.home_persist.clone();
+    let lifecycle = substituted.effective_policy.lifecycle.clone();
+    let tty_filter = substituted.effective_policy.tty.filter_terminal_escapes;
+    let on_change = substituted.effective_policy.trust.on_change;
+    Ok(Loaded {
+        plan,
+        account: substituted.identity.user,
+        account_group: substituted.identity.group,
+        net: substituted.effective_policy.net,
+        ssh: substituted.ssh,
+        unix: substituted.unix,
+        binder: substituted.binder,
+        dbus: substituted.dbus,
+        groups,
+        audit: substituted.audit,
+        env: substituted.env,
+        exec_path,
+        shell,
+        home_persist,
+        lifecycle,
+        tty_filter,
+        on_change,
+        workload: substituted.workload,
+        spawn: substituted.spawn,
+    })
 }
 
 /// Resolve the policy's supplementary group names to `(name, gid)` pairs, refusing

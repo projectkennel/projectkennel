@@ -98,6 +98,11 @@ pub struct Loaded {
     /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
     /// request's argv (the request wins unless `pinned`); see `effective_workload`.
     pub workload: kennel_lib_policy::WorkloadRuntime,
+    /// The `[spawn]` delegated-instantiation grant (§7.12.2): the templates this kennel may
+    /// instantiate, each content-pinned, plus `max_instances`. `None` for a kennel with no
+    /// `[spawn]`. Drives the node-0 `SPAWN` handler; `kenneld` holds it in the per-kennel binder
+    /// runtime from construction.
+    pub spawn: Option<kennel_lib_policy::SpawnGrant>,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -112,6 +117,15 @@ pub trait PolicyLoader {
     /// A human-readable reason if the policy cannot be loaded, fails
     /// verification, or leaves a placeholder unresolved.
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String>;
+
+    /// A snapshot of the current trust-store keys, for runtime template re-verification at `SPAWN`
+    /// (§7.12.8) — `kenneld` re-resolves a named template and verifies its signature against these.
+    ///
+    /// Best-effort: an unreadable store yields an empty set (every template signature then fails
+    /// closed). The default is no keys — a loader with no trust store cannot honour a `SPAWN`.
+    fn trust_keys(&self) -> kennel_lib_policy::KeySet {
+        kennel_lib_policy::KeySet::new()
+    }
 }
 
 /// The identity and resources of the user this daemon serves.
@@ -542,10 +556,41 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         // recorded handle is the intermediate init — `cgroup.kill` reaches the whole
         // kennel (init + workload + descendants). The owning thread then reaps the
         // init and tears the kennel down.
+        // Hard reaper (§7.12.7): a stopped requester takes its spawned siblings with it, so a
+        // network-capable tool cannot outlive the agent that asked for it.
+        self.reap_children(ctx);
         let cgroup = cgroup::kennel_cgroup(&self.identity.cgroup_base, ctx);
         match cgroup::kill_cgroup(&cgroup) {
             Ok(()) => Response::Stopped,
             Err(e) => Response::Error(format!("could not stop `{name}`: {e}")),
+        }
+    }
+
+    /// The hard reaper (§7.12.7): `cgroup.kill` every kennel this requester spawned.
+    ///
+    /// Spawned kennels are named `spawn-<parent-ctx>-<id>` (see [`crate::spawn::spawn_name`]), so the
+    /// requester's children are exactly the live registry entries under that prefix. Called when the
+    /// requester tears down — explicit `stop`, or its own workload exit / TTL — so a tool that ignores
+    /// the soft-reaper `EOF` still dies with the agent that spawned it (the template's TTL is the
+    /// independent backstop for the requester-holds-its-session-forever case).
+    fn reap_children(&self, parent_ctx: u16) {
+        let prefix = crate::spawn::child_name_prefix(parent_ctx);
+        let children: Vec<u16> = {
+            let reg = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            reg.kennels
+                .iter()
+                .filter(|(name, _)| name.starts_with(&prefix))
+                .map(|(_, meta)| meta.ctx)
+                .collect()
+        };
+        for child_ctx in children {
+            let cgroup = cgroup::kennel_cgroup(&self.identity.cgroup_base, child_ctx);
+            if let Err(e) = cgroup::kill_cgroup(&cgroup) {
+                eprintln!("kenneld: hard reaper: could not kill spawned ctx {child_ctx}: {e}");
+            }
         }
     }
 
@@ -632,16 +677,78 @@ where
 
 /// Read one request (and any stdio fds) from `conn` and dispatch it. `Start`
 /// blocks here until the workload exits; `Stop`/`List` return at once.
-fn handle_connection<P, L>(shared: &Shared<P, L>, conn: &mut UnixStream)
+fn handle_connection<P, L>(shared: &Arc<Shared<P, L>>, conn: &mut UnixStream)
 where
-    P: Privileged + Clone + Sync,
-    L: PolicyLoader,
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
 {
     // A malformed/closed connection is just dropped.
     let Ok((request, fds)) = recv_request_with_fds(conn) else {
         return;
     };
-    dispatch_request(shared, request, fds, conn);
+    // The dynamic-spawn construction handle (§7.12): a SPAWN handler hands a validated instance here
+    // to be built off the binder looper. Holds an `Arc<Shared>` so the build runs the same path as a
+    // CLI `kennel run`. Non-generic (`Arc<dyn ..>`) so it can ride into the binder layer.
+    let constructor: Arc<dyn crate::spawn::SpawnConstructor> = Arc::new(Constructor {
+        shared: Arc::clone(shared),
+    });
+    dispatch_request(shared, request, fds, conn, &constructor);
+}
+
+/// The daemon-side [`crate::spawn::SpawnConstructor`]: builds a validated spawn instance by driving
+/// the same [`run_kennel`] path a CLI run does, on a fresh thread (async to the `SPAWN` reply).
+struct Constructor<P: Privileged, L: PolicyLoader> {
+    shared: Arc<Shared<P, L>>,
+}
+
+impl<P, L> crate::spawn::SpawnConstructor for Constructor<P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    fn enqueue(
+        &self,
+        instance: kennel_lib_policy::SettledPolicy,
+        stdio: [OwnedFd; 3],
+        name: String,
+        slot: crate::spawn::SlotGuard,
+    ) {
+        let shared = Arc::clone(&self.shared);
+        std::thread::spawn(move || {
+            // Hold the max_instances slot for the spawned kennel's whole life: run_kennel blocks
+            // until the workload exits (then tears down), so `slot` releases on that exit or on any
+            // early construction failure (§7.12.7).
+            let _slot = slot;
+            // The spawn has no operator on a control socket, so run_kennel's status responses go to a
+            // throwaway socketpair whose peer we hold for the build's life — written-but-unread, never
+            // EPIPE. A non-interactive run: the three stdio fds are the spawned ends of the channel.
+            let Ok((mut sink, _peer)) = UnixStream::pair() else {
+                eprintln!("kenneld: spawn `{name}`: could not make a construction sink");
+                return;
+            };
+            let req = StartRequest {
+                policy: PathBuf::new(),
+                kennel: name,
+                argv: Vec::new(),
+                cwd: PathBuf::from("/"),
+                term: String::new(),
+                interactive: false,
+                force: false,
+                watch_paths: Vec::new(),
+                oci_config: None,
+            };
+            // A spawn target is depth-1 (no `[spawn]` of its own), so its own construction never
+            // spawns — a no-op constructor suffices for the nested run.
+            run_kennel(
+                &shared,
+                &req,
+                Vec::from(stdio),
+                &mut sink,
+                Some(instance),
+                &crate::spawn::noop_constructor(),
+            );
+        });
+    }
 }
 
 /// Validate and dispatch one decoded control request on `conn` (with its passed `fds`).
@@ -660,13 +767,14 @@ pub fn dispatch_request<P, L>(
     request: Request,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
+    constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
 ) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
 {
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
-            Ok(()) => return run_kennel(shared, &req, fds, conn),
+            Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor),
             Err(e) => {
                 eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
                 Response::Error(e)
@@ -773,6 +881,8 @@ pub fn run_kennel<P, L>(
     req: &StartRequest,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
+    preloaded: Option<kennel_lib_policy::SettledPolicy>,
+    constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
 ) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
@@ -810,13 +920,22 @@ pub fn run_kennel<P, L>(
         ula_gid: shared.identity.scope.ula_gid(),
     };
 
-    tr.step(&format!(
-        "run_kennel: loading policy {}",
-        req.policy.display()
-    ));
-    let mut loaded = match shared.loader.load(&req.policy, &subst) {
-        Ok(loaded) => loaded,
-        Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
+    // A dynamic-spawn instance arrives pre-built in memory (patched, never signed — §7.12.6); a
+    // normal run loads and verifies the signed policy from disk. Either way `subst` is now applied.
+    let mut loaded = if let Some(instance) = preloaded {
+        match crate::policy::loaded_from_settled(&instance, &subst) {
+            Ok(loaded) => loaded,
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "spawn instance", reason),
+        }
+    } else {
+        tr.step(&format!(
+            "run_kennel: loading policy {}",
+            req.policy.display()
+        ));
+        match shared.loader.load(&req.policy, &subst) {
+            Ok(loaded) => loaded,
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
+        }
     };
     if tr.on() {
         tr.step(&format!(
@@ -959,6 +1078,11 @@ pub fn run_kennel<P, L>(
     let mut return_sock: Option<OwnedFd> = None;
     let mut client_sock: Option<OwnedFd> = None;
     let mut master_recv: Option<OwnedFd> = None;
+    // A non-interactive run injects the three workload stdio fds (a piped `kennel run`'s controller
+    // fds, or a SPAWN channel's spawned ends) onto the workload's 0/1/2 — the raw-channel sibling of
+    // the interactive pty path. The fds stay alive in `command` (as its stdin/stdout/stderr) through
+    // construction, so these raw numbers are valid when the factory sends them.
+    let mut stdio_raw: Option<[std::os::fd::RawFd; 3]> = None;
     let mut command = if req.interactive {
         client_sock = fds.into_iter().next();
         match UnixStream::pair() {
@@ -982,11 +1106,15 @@ pub fn run_kennel<P, L>(
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     } else {
+        if let [stdin, stdout, stderr, ..] = fds.as_slice() {
+            stdio_raw = Some([stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()]);
+        }
         match command_for(&argv, &cwd, fds) {
             Ok(command) => command,
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
         }
     };
+    loaded.plan.stdio_fds = stdio_raw;
     // Prepare SSH egress (§7.10): stage the compile-time synthetic keys, register the
     // edges with the per-user bastion, and build the synthetic ~/.ssh for the view. The
     // ~/.ssh is rooted at the constructed-view HOME (the plan's shim root) when there is
@@ -1180,12 +1308,27 @@ pub fn run_kennel<P, L>(
         } else {
             None
         };
+        // The [spawn] runtime (§7.12): pair the grant with a trust-key snapshot (to verify a
+        // re-resolved template against) and the template cascade kenneld resolves `name@version`
+        // from. Built only for a kennel that carries a grant; a SPAWN from any other is denied.
+        let spawn = loaded.spawn.map(|grant| {
+            std::sync::Arc::new(crate::spawn::SpawnRuntime::new(
+                grant,
+                shared.loader.trust_keys(),
+                kennel_lib_config::User::load()
+                    .unwrap_or_default()
+                    .template_dirs(),
+                std::sync::Arc::clone(constructor),
+                shared.identity.tracer,
+            ))
+        });
         spec.binder = Some(crate::BinderPrep {
             policy: loaded.binder,
             unix: facade_unix,
             writer,
             init_bin: shared.identity.init_bin.clone(),
             prompt,
+            spawn,
         });
     }
 
@@ -1313,6 +1456,11 @@ pub fn run_kennel<P, L>(
     // handler services (freeze + decide; the `ttl-warn`/`ttl-terminate` audit events come from
     // there). So this is a plain wait — on `exit` the handler kills the frozen cgroup, and this
     // wait returns the resulting status. The audited privileged records the teardown too.
+    // `stop` blocks until the workload exits — delivering its answer (the spawned kennel's stdio
+    // closes) — then reclaims: it stamps `teardown: workload exited` at that exit point, stops the
+    // binder looper pool, and removes the cgroup. The spinup harness reads the span from that
+    // milestone to `teardown complete` below as the teardown cost, distinct from the answer latency
+    // the requester observes (`02-10` §7.12.7, W10).
     let status = kennel.stop(&audited);
     // The workload exited: stop the tripwire watcher thread (best-effort join).
     if let Some(tripwire) = tripwire {
@@ -1345,8 +1493,16 @@ pub fn run_kennel<P, L>(
     if let Some(drain) = drain {
         drain.stop();
     }
+    // Hard reaper (§7.12.7): the requester's workload exited, so reap any siblings it spawned — a
+    // tool that ignored the soft-reaper EOF dies with the agent (a no-op for a kennel that spawned
+    // nothing, including every spawned kennel itself, which is depth-1).
+    shared.reap_children(ctx);
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
+    // Reclaim complete: the cgroup is gone and the registry entry released. For a spawned sibling the
+    // `max_instances` slot frees microseconds later when this `run_kennel` returns and the constructor
+    // thread drops its `SlotGuard` — so this milestone marks the kennel fully torn down (§7.12.7).
+    tr.step(&format!("run_kennel: teardown complete `{}`", req.kennel));
     let _ = control::send_response(
         conn,
         &Response::Exited {
@@ -1849,6 +2005,7 @@ mod tests {
                 ulimits: Vec::new(),
                 interactive_return_fd: None,
                 workload_fd: None,
+                stdio_fds: None,
                 aux: Vec::new(),
                 ttl_seconds: None,
                 ttl_action: kennel_lib_policy::TtlAction::Exit,
@@ -1889,6 +2046,7 @@ mod tests {
                 workload: kennel_lib_policy::WorkloadRuntime::default(),
                 tty_filter: true,
                 on_change: kennel_lib_policy::OnChangeAction::Warn,
+                spawn: None,
             })
         }
     }

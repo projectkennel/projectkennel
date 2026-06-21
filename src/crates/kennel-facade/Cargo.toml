@@ -32,6 +32,18 @@ path = "src/bin/facade-ssh.rs"
 name = "facade-dbus"
 path = "src/bin/facade-dbus.rs"
 
+# The in-kennel SPAWN round-trip probe — the reference workload-side spawn client and the
+# `spawn-roundtrip` policy-suite case's requester workload (`02-10` §7.12).
+[[bin]]
+name = "facade-spawn-probe"
+path = "src/bin/facade-spawn-probe.rs"
+
+# The in-kennel sequential SPAWN bench driver — the ephemeral half of the W10 spinup profile
+# (`tools/spawn-spinup.sh`): drives N back-to-back constructions to time the in-daemon SPAWN path.
+[[bin]]
+name = "facade-spawn-bench"
+path = "src/bin/facade-spawn-bench.rs"
+
 [dependencies]
 # The binder client transaction surface every facade uses to reach node 0.
 kennel-lib-binder = { path = "../kennel-lib-binder" }

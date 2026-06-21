@@ -45,7 +45,7 @@ User configuration. Created by the CLI on first use if absent.
 
 Owner: user. Mode: directory `0700`, files `0600`.
 
-A run policy is a **folder** `policies/<name>/`, where `<name>` matches the policy's `name = "<name>"` field. Inside it: `policy.toml` is the source leaf; `<name>.settled.toml` is the compiled, signed settled policy — what `kennel run` actually enforces (`02-2-config-schema.md` §The settled policy); and `<name>.lock` records the signed content hash of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). `kennel run <name>` resolves the policy **by name** across the cascade (§Run-policy resolution) without a path; `kennel compile` writes the settled artefact and lockfile back into the folder. Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
+A run policy is a **folder** `policies/<name>/`, where `<name>` matches the policy's `name = "<name>"` field. Inside it: `policy.toml` is the source leaf; `<name>.settled.toml` is the compiled, signed settled policy — what `kennel run` actually enforces (`02-2-config-schema.md` §The settled policy); and `<name>.lock` records the ed25519 signature of every template and fragment the policy resolves (`02-2-config-schema.md` §The lockfile). `kennel run <name>` resolves the policy **by name** across the cascade (§Run-policy resolution) without a path; `kennel compile` writes the settled artefact and lockfile back into the folder. Templates and fragments are stored one file per `<name>@<version>`, so multiple versions of one name coexist; the resolver requires the exact pinned version and does not fall back to another.
 
 ### `~/.local/state/kennel/<kennel>/`
 
@@ -270,7 +270,7 @@ A versioned reference (`<name>@<version>`, `02-2-config-schema.md`) resolves aga
 2. `/etc/kennel/templates/<name>@<version>.toml` (system-installed).
 3. Built-in templates compiled into the `kennel` binary (`base-confined` only, at present).
 
-The resolver requires the *exact* `<name>@<version>`; it does not fall back to a different version of the same name, since that would defeat the pin. A given `<name>@<version>` at a higher-priority location shadows the identical reference at lower priority; the shadowing is logged at policy-load time so the operator can detect surprises. The resolved artefact's signature is verified and its content hash checked against the leaf policy's lockfile before composition (`04-trust-boundaries.md` boundary 3).
+The resolver requires the *exact* `<name>@<version>`; it does not fall back to a different version of the same name, since that would defeat the pin. A given `<name>@<version>` at a higher-priority location shadows the identical reference at lower priority; the shadowing is logged at policy-load time so the operator can detect surprises. The resolved artefact's signature is verified and that signature checked against the leaf policy's lockfile before composition (`04-trust-boundaries.md` boundary 3).
 
 ---
 

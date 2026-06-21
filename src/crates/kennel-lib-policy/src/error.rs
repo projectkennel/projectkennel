@@ -39,6 +39,10 @@ pub enum PolicyError {
     /// A spawn-time mutable-field patch was rejected (`§7.12.3`): a field outside the template's
     /// manifest, a value its constraint refuses, or more entries than the constraint admits.
     Patch(String),
+    /// A `SPAWN` was denied at a gate other than the patch (`§7.12.8`): the requester's grant does
+    /// not allow the template, the content-pin no longer matches the resolved bytes, or the resolved
+    /// template is not spawn-eligible. The `kennel.spawn` / `outcome: Deny` cause.
+    Spawn(String),
 }
 
 impl core::fmt::Display for PolicyError {
@@ -72,6 +76,7 @@ impl core::fmt::Display for PolicyError {
             Self::LockMismatch(m) => write!(f, "lockfile mismatch: {m}"),
             Self::IncludeConflict(m) => write!(f, "include conflict: {m}"),
             Self::Patch(m) => write!(f, "spawn patch rejected: {m}"),
+            Self::Spawn(m) => write!(f, "spawn denied: {m}"),
         }
     }
 }
