@@ -47,8 +47,8 @@ use crate::source::{
     self, BinderSection, BoundaryAcl, CapSection, DbusAudit, DbusBus, DbusRules, DbusSection,
     EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
     LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny,
-    NetSection, RootfsSection, SeccompSection, SourcePolicy, SshSection, TrustSection, TtySection,
-    UnixSection, UnsafeSection, WorkloadSection,
+    NetSection, RootfsSection, SeccompSection, SourcePolicy, SpawnSection, SshSection,
+    TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use kennel_lib_policy::audit::{
@@ -237,6 +237,30 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         trust: merge(&parent.trust, &child.trust, fold_trust),
         dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
         rootfs: merge(&parent.rootfs, &child.rootfs, fold_rootfs),
+        spawn: merge(&parent.spawn, &child.spawn, fold_spawn),
+        // The `[[mutable]]` manifest folds like a bare list (the SSH set model): a child's
+        // non-empty manifest replaces the inherited one, an absent one inherits. In practice the
+        // manifest lives on the leaf spawn-target template.
+        mutable: if child.mutable.is_empty() {
+            parent.mutable.clone()
+        } else {
+            child.mutable.clone()
+        },
+    }
+}
+
+/// Fold `[spawn]` down the chain: `max_instances` and `reason` are scalar-wins (child overriding);
+/// the `[[spawn.allow]]` set follows the SSH bare-list model — a child's non-empty list replaces
+/// the inherited one, an absent one inherits.
+fn fold_spawn(p: &SpawnSection, c: &SpawnSection) -> SpawnSection {
+    SpawnSection {
+        max_instances: or(&c.max_instances, &p.max_instances),
+        reason: or(&c.reason, &p.reason),
+        allow: if c.allow.is_empty() {
+            p.allow.clone()
+        } else {
+            c.allow.clone()
+        },
     }
 }
 

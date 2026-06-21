@@ -144,6 +144,17 @@ pub struct SourcePolicy {
     /// it. A loud substrate-trust grant (T3.8); the `reason` is mandatory (validated at compile).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<RootfsSection>,
+    /// Dynamic-spawn grant (`[spawn]`, §7.12.2) — the templates this workload may instantiate as
+    /// ephemeral sibling kennels. A loud delegated-instantiation capability (T3.9); the `reason` is
+    /// mandatory, and eligibility of each named template is checked at *this* policy's compile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<SpawnSection>,
+    /// Mutable-field manifest (`[[mutable]]`, §7.12.3) — present on a *spawn-target template*, it
+    /// names which leaf fields a spawn of this template may write and the bound each write must
+    /// satisfy. Everything outside the manifest is frozen and inherited verbatim; absent on a
+    /// non-target policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutable: Vec<MutableField>,
 }
 
 /// `[rootfs]` (§7.11) — an OCI image unpacked as the kennel's root filesystem.
@@ -173,6 +184,70 @@ pub struct RootfsSection {
     /// (longest-prefix wins). Each carve-out derives its own risk line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writable: Option<Vec<String>>,
+}
+
+/// `[spawn]` (§7.12.2) — the delegated-instantiation grant.
+///
+/// A workload carrying this may ask `kenneld` to instantiate ephemeral sibling kennels from the
+/// operator-signed templates it names in `[[spawn.allow]]`. A loud capability (T3.9), derived the way
+/// `mode = host` derives T1.6. It names *which* templates, never capabilities — those live in the
+/// (frozen, signed) templates; the agent only writes manifest fields (§7.12.3).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnSection {
+    /// Concurrent-instance ceiling across this grant's spawns — the fork-bomb bound (§7.12.7).
+    /// Mandatory: an unbounded grant is a fork bomb (validated at compile).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instances: Option<u32>,
+    /// Why this delegation is extended (required; the spawn waiver is loud, validated at compile).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The templates this grant may instantiate (`[[spawn.allow]]`), each optionally narrowed to a
+    /// subset of its manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<SpawnAllow>,
+}
+
+/// One `[[spawn.allow]]` entry — a single signed template this grant may instantiate.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnAllow {
+    /// The exact, versioned trust-store template name (`net-fetch@v1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields
+    /// this requester may write (default: the template's full manifest). Narrows, never widens
+    /// (§7.12.2/§7.12.3) — every entry must name a field the template's manifest declares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutable: Option<Vec<String>>,
+}
+
+/// One `[[mutable]]` manifest entry (§7.12.3) — a leaf field a spawn of this template may write.
+///
+/// Each entry carries the **bound** that write must satisfy — exactly one bound kind: `pool`
+/// (`from` + `max` — append from a fixed set), `oneof` (pick from an enumerated list), or
+/// `predicate` (`type` + `under` — the loud traversal-free runtime-relative escape hatch).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MutableField {
+    /// The dotted leaf-field path this entry opens (`net.allow`, `rootfs.writable`, `fs.workspace`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Pool bound: the fixed set a spawn may append values from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Vec<String>>,
+    /// Pool bound: the maximum number of appended entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+    /// Oneof bound: the enumerated member list a spawn selects from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oneof: Option<Vec<String>>,
+    /// Predicate bound: the value type (currently `relpath`).
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+    /// Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<String>,
 }
 
 /// Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).

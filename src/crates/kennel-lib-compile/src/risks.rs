@@ -304,6 +304,24 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
         }
     }
 
+    // `[spawn]` delegates instantiation to the workload — it may spawn ephemeral sibling kennels
+    // from the operator-signed templates it names. The delegated-spawning residual (T3.9) is derived
+    // from the grant the way T1.6 is derived from `mode = host` (design §7.12.9). The carrier names
+    // the templates the grant reaches, so the report shows the delegation's actual breadth.
+    if let Some(spawn) = &p.spawn {
+        let templates: Vec<&str> = spawn
+            .allow
+            .iter()
+            .filter_map(|a| a.template.as_deref())
+            .collect();
+        let carrier = if templates.is_empty() {
+            "[spawn]".to_owned()
+        } else {
+            format!("[spawn.allow] {}", templates.join(", "))
+        };
+        out.push(("T3.9".to_owned(), carrier, spawn.reason.clone()));
+    }
+
     out
 }
 
@@ -364,6 +382,26 @@ mod tests {
         assert_eq!(f.origin, Origin::Derived);
         assert_eq!(f.reason.as_deref(), Some("vendor image"));
         assert!(f.carrier.contains("ghcr.io/org/app"));
+        assert!(f.title.is_some());
+        assert!(!f.residual.is_empty());
+    }
+
+    #[test]
+    fn spawn_derives_t3_9_delegated_spawning_exposure() {
+        let p = parse(
+            "name = \"x\"\n[spawn]\nmax_instances = 4\nreason = \"agent spawns tools\"\n\
+             [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n",
+        );
+        let r = evaluate(&p, &cat());
+        let f = r
+            .exposures
+            .iter()
+            .find(|f| f.threat_id == "T3.9")
+            .expect("T3.9 derived");
+        assert_eq!(f.origin, Origin::Derived);
+        assert_eq!(f.reason.as_deref(), Some("agent spawns tools"));
+        // The carrier names the templates the grant reaches, so the report shows its breadth.
+        assert!(f.carrier.contains("net-fetch@v1"));
         assert!(f.title.is_some());
         assert!(!f.residual.is_empty());
     }
