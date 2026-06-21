@@ -35,28 +35,37 @@
 
 use std::collections::BTreeSet;
 
-use kennel_lib_policy::PolicyError;
+use kennel_lib_policy::{PolicyError, SpawnGrant, SpawnTemplate};
 
 use crate::resolve::{split_reference, TemplateSource};
 use crate::source::{SourcePolicy, SpawnAllow};
 use crate::source_sig::Trust;
 
-/// Validate every `[[spawn.allow]]` target named by `effective`'s `[spawn]` grant against the
-/// spawn-eligibility preconditions (§7.12.8). A no-op when the policy carries no `[spawn]`.
+/// Validate the `[spawn]` grant's targets and resolve it into the settled-policy form.
+///
+/// Every `[[spawn.allow]]` target named by `effective`'s `[spawn]` grant is checked against the
+/// spawn-eligibility preconditions (§7.12.8), and the grant is resolved into the form `kenneld` holds
+/// at runtime — each allowed template pinned to its signature commitment (the content-pin, §7.12.8).
+/// A no-op (`None`) when the policy carries no `[spawn]`.
+///
+/// The content-pin is the target artefact's own ed25519 `[signature]`: a deterministic signature
+/// over canonical content *is* the content commitment (the lockfile idiom — no `sha2`), so a
+/// re-signed-in-place template resolves to a different signature and `kenneld` catches it at `SPAWN`.
 ///
 /// # Errors
 ///
 /// Returns [`PolicyError`] if a named template is missing from the trust store, fails signature
 /// verification or resolution, is not spawn-eligible, or a `mutable` narrowing names a field the
 /// target's manifest does not declare.
-pub fn validate(
+pub fn resolve_grant(
     effective: &SourcePolicy,
     source: &dyn TemplateSource,
     trust: &Trust<'_>,
-) -> Result<(), PolicyError> {
+) -> Result<Option<SpawnGrant>, PolicyError> {
     let Some(spawn) = &effective.spawn else {
-        return Ok(());
+        return Ok(None);
     };
+    let mut allow = Vec::with_capacity(spawn.allow.len());
     for entry in &spawn.allow {
         // A missing `template` is already rejected by `translate::validate_spawn`; skip rather than
         // double-report.
@@ -70,12 +79,29 @@ pub fn validate(
                  (spawn-eligibility is checked at this policy's compile, §7.12.8)"
             ))
         })?;
+        // The content-pin (§7.12.8): a spawn target is signed pre-resolved, so the fetched
+        // artefact's own `[signature]` is the commitment `kenneld` re-verifies at `SPAWN`.
+        let (signing_key_id, signature) = crate::source::parse(&bytes)?
+            .signature
+            .map(|e| (e.key_id, e.signature))
+            .unwrap_or_default();
         // Resolves the target's chain and verifies its signature against the trust store.
         let target = crate::compile::effective_source(&bytes, source, trust)?;
         check_eligible(reference, &target)?;
         check_narrowing(reference, entry, &target)?;
+        allow.push(SpawnTemplate {
+            template: reference.to_owned(),
+            signing_key_id,
+            signature,
+            mutable_narrow: entry.mutable.clone().unwrap_or_default(),
+        });
     }
-    Ok(())
+    // `max_instances` is guaranteed `Some(>= 1)` once `translate::validate_spawn` runs (next in the
+    // compile pipeline); an unset value here only survives onto an error path that never assembles.
+    Ok(Some(SpawnGrant {
+        max_instances: spawn.max_instances.unwrap_or(0),
+        allow,
+    }))
 }
 
 /// Check one resolved target against the eligibility preconditions.
@@ -208,5 +234,65 @@ mod tests {
             check_narrowing("net-fetch@v1", &bad, &target).expect_err("undeclared")
         )
         .contains("does not declare"));
+    }
+
+    /// A source serving a single named target's bytes.
+    struct OneTarget(Vec<u8>);
+    impl TemplateSource for OneTarget {
+        fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+            (name == "net-fetch").then(|| self.0.clone())
+        }
+    }
+
+    #[test]
+    fn resolve_grant_is_none_without_a_spawn_grant() {
+        let p = parse(&eligible_target());
+        let grant = resolve_grant(&p, &OneTarget(Vec::new()), &Trust::dev()).expect("ok");
+        assert!(
+            grant.is_none(),
+            "a policy with no [spawn] resolves no grant"
+        );
+    }
+
+    #[test]
+    fn resolve_grant_pins_an_unsigned_target_to_an_empty_commitment() {
+        // The target is unsigned, so its content-pin is empty — kenneld will accept it only when it
+        // likewise resolves the target unsigned (the `AllowUnsigned`/dev path).
+        let spawner = parse(
+            "name = \"s\"\n[spawn]\nmax_instances = 3\nreason = \"r\"\n\
+             [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n",
+        );
+        let grant = resolve_grant(
+            &spawner,
+            &OneTarget(eligible_target().into_bytes()),
+            &Trust::dev(),
+        )
+        .expect("resolve")
+        .expect("grant present");
+        assert_eq!(grant.max_instances, 3, "max_instances carried verbatim");
+        assert_eq!(grant.allow.len(), 1);
+        let pinned = grant.allow.first().expect("one allowed target");
+        assert_eq!(pinned.template, "net-fetch@v1");
+        assert!(
+            pinned.signature.is_empty() && pinned.signing_key_id.is_empty(),
+            "an unsigned target carries no signature commitment"
+        );
+    }
+
+    #[test]
+    fn resolve_grant_carries_a_per_requester_narrowing() {
+        let target = format!(
+            "{}[[mutable]]\nfield = \"fs.write\"\noneof = [\"/w\"]\n",
+            eligible_target()
+        );
+        let spawner = parse(
+            "name = \"s\"\n[spawn]\nmax_instances = 1\nreason = \"r\"\n\
+             [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\nmutable = [\"fs.write\"]\n",
+        );
+        let grant = resolve_grant(&spawner, &OneTarget(target.into_bytes()), &Trust::dev())
+            .expect("resolve")
+            .expect("grant");
+        let pinned = grant.allow.first().expect("one allowed target");
+        assert_eq!(pinned.mutable_narrow, vec!["fs.write".to_owned()]);
     }
 }

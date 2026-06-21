@@ -115,12 +115,20 @@ pub fn compile(
     warnings.extend(crate::binder::validate(&effective)?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
-    crate::spawn::validate(&effective, source, trust)?;
+    let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
     warnings.extend(spawn_manifest_warnings(&effective));
-    assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
+    assemble(
+        name,
+        &translated,
+        &chain,
+        &tcv,
+        compiler_version,
+        warnings,
+        spawn_grant,
+    )
 }
 
 /// Resolve, apply a leaf's deltas, translate, and assemble a settled policy.
@@ -178,12 +186,20 @@ pub fn compile_leaf(
     warnings.extend(crate::binder::validate(&effective)?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
-    crate::spawn::validate(&effective, source, trust)?;
+    let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
     warnings.extend(spawn_manifest_warnings(&effective));
-    assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
+    assemble(
+        name,
+        &translated,
+        &chain,
+        &tcv,
+        compiler_version,
+        warnings,
+        spawn_grant,
+    )
 }
 
 /// Resolve a policy's folded **effective source**, stopping *before* translation
@@ -383,6 +399,7 @@ fn assemble(
     threat_catalogue_version: &str,
     compiler_version: &str,
     warnings: Vec<String>,
+    spawn: Option<kennel_lib_policy::SpawnGrant>,
 ) -> Result<Compiled, PolicyError> {
     let resolved_artifacts = chain
         .iter()
@@ -416,6 +433,7 @@ fn assemble(
         ulimits: translated.ulimits.clone(),
         workload: translated.workload.clone(),
         rootfs: translated.rootfs.clone(),
+        spawn,
         manifest: translated.manifest.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),

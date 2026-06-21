@@ -8,7 +8,8 @@
 //!    `kennel policy sign <name> --key …`),
 //! 2. it compiles to a settled policy with a well-formed `[[mutable]]` manifest, and
 //! 3. it is **spawn-eligible** (§7.12.8) — a spawner that `[[spawn.allow]]`s all three
-//!    compiles, so `spawn::validate`'s depth-1 / TTL / ceilings checks pass on each.
+//!    compiles, so `spawn::resolve_grant`'s depth-1 / TTL / ceilings checks pass on each, and the
+//!    resulting settled spawner carries a `[spawn]` grant pinning each target to its signature.
 //!
 //! The `*_signed_*` test is the production gate (green once the templates are signed); the
 //! `*_unsigned_*` test verifies the same structure under `Trust::dev`, so the policy is
@@ -113,6 +114,26 @@ fn every_spawn_template_is_signed_compiles_and_is_eligible() {
         "a spawner allowing all shipped templates must compile (all eligible): {:?}",
         compiled.err()
     );
+    // The grant is carried into the settled spawner, each target pinned to its signature commitment
+    // (the content-pin kenneld re-verifies at SPAWN — §7.12.8).
+    let grant = compiled
+        .expect("compiled")
+        .policy
+        .spawn
+        .expect("a spawner carries a [spawn] grant in its settled policy");
+    assert_eq!(grant.max_instances, 4, "max_instances is carried verbatim");
+    assert_eq!(
+        grant.allow.len(),
+        SPAWN_TEMPLATES.len(),
+        "every allowed template is recorded in the grant"
+    );
+    for t in &grant.allow {
+        assert!(
+            !t.signature.is_empty() && !t.signing_key_id.is_empty(),
+            "signed spawn target `{}` must carry its signature commitment (the content-pin)",
+            t.template
+        );
+    }
 }
 
 /// Signature-independent gate: the templates compile, carry the expected manifest, and are
@@ -155,4 +176,13 @@ fn spawn_templates_compile_with_valid_manifests_and_are_eligible_unsigned() {
         "all shipped templates are spawn-eligible (depth-1, TTL, memory/pids/CPU ceilings): {:?}",
         compiled.err()
     );
+    // The grant is carried into the settled spawner under `Trust::dev` too (the shipped templates
+    // are committed-signed, so the content-pin records their on-disk signature). The empty-commitment
+    // path for a genuinely unsigned target is covered by `spawn::resolve_grant`'s unit tests.
+    let grant = compiled
+        .expect("compiled")
+        .policy
+        .spawn
+        .expect("a spawner carries a [spawn] grant");
+    assert_eq!(grant.allow.len(), SPAWN_TEMPLATES.len());
 }

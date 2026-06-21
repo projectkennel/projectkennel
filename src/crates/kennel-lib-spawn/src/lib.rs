@@ -973,6 +973,7 @@ mod tests {
                 tty: kennel_lib_policy::TtyPolicy::default(),
                 trust: kennel_lib_policy::TrustPolicy::default(),
             },
+            spawn: None,
             manifest: Vec::new(),
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),

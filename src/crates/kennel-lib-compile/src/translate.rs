@@ -2455,6 +2455,7 @@ mod tests {
             ulimits: t.ulimits,
             workload: t.workload,
             rootfs: t.rootfs,
+            spawn: None,
             manifest: t.manifest,
         };
         kennel_lib_policy::invariant::validate(&policy).expect("framework invariants must hold");

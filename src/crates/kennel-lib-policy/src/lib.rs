@@ -52,9 +52,9 @@ pub use settled::{
     BinderRuntime, CapPolicy, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
     ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule,
     OnChangeAction, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
-    ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SshGrant,
-    SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime,
-    UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
+    ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SpawnGrant,
+    SpawnTemplate, SshGrant, SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy,
+    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 
@@ -185,6 +185,33 @@ mod tests {
         let bytes = to_bytes(&doc).expect("serialise");
         let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
         assert_eq!(verified, sample_policy());
+    }
+
+    #[test]
+    fn a_spawn_grant_round_trips_and_is_signature_bound() {
+        let key = signing_key();
+        let mut policy = sample_policy();
+        policy.spawn = Some(settled::SpawnGrant {
+            max_instances: 8,
+            allow: vec![settled::SpawnTemplate {
+                template: "net-fetch@v1".to_owned(),
+                signing_key_id: "kennel-maint-2026".to_owned(),
+                signature: "Zm9vYmFy".to_owned(),
+                mutable_narrow: vec!["net.proxy.allow".to_owned()],
+            }],
+        });
+
+        // The grant survives sign → serialise → verify (the `[spawn]`/`[[spawn.allow]]` tables
+        // serialise before the trailing `manifest` array-of-tables — the canonical-form ordering).
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert_eq!(verified.spawn, policy.spawn);
+
+        // …and it is inside the signed canonical form (tampering breaks it).
+        let canon =
+            String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(canon.contains("[spawn]") && canon.contains("[[spawn.allow]]"));
     }
 
     #[test]
