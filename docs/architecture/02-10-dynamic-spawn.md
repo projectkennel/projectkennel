@@ -218,6 +218,43 @@ Rationale:
   **EOF on the channel** (the soft-reaper path below) plus a `kennel.spawn` / `outcome: Deny` audit
   event — the same way a tool that exits surfaces.
 
+## Construction latency
+
+Dynamic spawn is on the interactive path — an agent mints a sibling, waits for its answer, and
+discards it — so construction cost is a first-class property. The `tools/spawn-spinup.sh` harness
+measures it against the real installed daemon: one long-lived **control kennel** runs a fixed payload
+N times two ways — `fork`/`exec`ed directly (the process floor) versus instantiated as an ephemeral
+`SPAWN` sibling — so the delta is exactly the cost of the isolation wrapper, with no per-run CLI launch
+or policy compile in the way. `kennel_lib_config::Tracer` stamps each in-daemon milestone with a
+shared-clock `[t=<nanos>]`; the bench times each whole run on its own monotonic clock.
+
+On the reference host, constructing a **fresh, fully isolated kennel** — new user/PID/mount/net
+namespaces, a cgroup, the seal, a private binder bus — and reaching the workload `execve` takes
+**~3.5 ms**, and it is **workload-independent**: the `run_kennel: workload running` milestone is
+stamped when `kenneld` has the pid back, *before* the payload's own `fexecve`, so the payload's
+startup never enters the construct span. The pieces around it are each **sub-millisecond**:
+
+- **SPAWN handler** (grant → content-pin verify → eligibility re-check → manifest patch → slot claim →
+  channel mint): ~0.3 ms. The verify-half validation the top-level path never runs adds almost nothing.
+- **Teardown** (workload exit → fully reclaimed, slot freed): ~0.3 ms. PID 1 dies, the kernel
+  collapses the namespaces and reaps the tree as garbage collection; only the binder looper-pool stop
+  ([[binder-serving-threadpool-not-cookie-worker]], W10's eventfd waker) and the cgroup `rmdir` remain
+  in userspace.
+
+So an agent gets a scoped sibling's result in single-digit milliseconds and the kennel is fully
+reclaimed a fraction of a millisecond later — wrapping a single operation in its own kennel is not a
+cost to budget against. The dominant term is the construction, which dynamic spawn **shares** with the
+top-level `kennel run` path (same `run_kennel`); the W10 bring-up fixes that landed it there —
+`clone3(CLONE_INTO_CGROUP)` to skip the cgroup-migration RCU stall, the egress-BPF attach gated to
+`host` mode, the binder-teardown eventfd waker — apply identically to a spawned sibling.
+
+Two measurement caveats the harness records. The in-daemon sub-spans ride the journald sink (a
+blocking write that perturbs absolutes — the direct/ephemeral walls use the bench's monotonic clock and
+do not). And construction is only a fair *cross-workload* comparison with the CPU governor pinned:
+`powersave`/`schedutil` lets a heavy payload's direct loop ramp the cores to turbo before its spawn
+loop, so an unpinned box can read a heavy payload (python) as *constructing faster* than a trivial one
+(`/bin/true`) — an artifact of clock state, not a property of the kennel.
+
 ## Spawn sequencing
 
 1. Requester sends `SPAWN(template@version, mutable-patch)` to Node 0, carrying **no fds**, with

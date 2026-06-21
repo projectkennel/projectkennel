@@ -208,7 +208,15 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   binder looper pool winding down only on its `POLL_MS=200` poll-out, `max` over 8 threads. An
   eventfd **`Waker`** added to the looper poll set (signalled on `stop`) cut teardown to **0.4 ms**
   and lifted the net-none spawn rate from **3.2 → 7.3 constructions/sec**; all 16 policy-suite cases
-  stay green. *Follow-on increments (not gating):* off-CPU **stack** attribution (bpftrace
+  stay green. *SPAWN-verb re-measure (Thrust 3 landed):* `tools/spawn-spinup.sh` profiles the
+  SPAWN-driven construction **one layer down** — one control kennel runs a payload N× directly
+  (`fork`/`exec`) vs as an ephemeral SPAWN sibling, so the delta is purely the isolation-wrapper cost
+  with no per-run CLI launch or policy compile. Result: a **fresh, fully isolated kennel constructs to
+  workload `execve` in ~3.5 ms** (workload-independent — the construct span ends before the payload's
+  own `fexecve`; pinned governor), the in-daemon **SPAWN handler** (grant → pin → eligibility → patch →
+  mint) is **~0.3 ms**, and **teardown ~0.3 ms** (PID 1 dies → the kernel collapses the namespaces;
+  only the binder-pool stop + cgroup `rmdir` remain in userspace). See architecture 02-10
+  §"Construction latency". *Follow-on increments (not gating):* off-CPU **stack** attribution (bpftrace
   `offcputime` flamegraphs) for the within-boundary waits, and per-boundary tagging by tmpfs-vs-OCI
   root in one run.
 
