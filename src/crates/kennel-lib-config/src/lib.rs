@@ -207,18 +207,33 @@ impl Tracer {
     }
 
     /// Emit a `Debug`-level step line (a spawn-path milestone). No-op at `Info`.
+    ///
+    /// Each line carries a wall-clock `[t=<nanos>]` stamp (`CLOCK_REALTIME`, comparable across the
+    /// spawn-path processes on one host: `kenneld`, the privhelper, `kennel-bin-init`). The latency
+    /// harness (`tools/spawn-latency.sh`, ROADMAP W10) parses these milestones to time each
+    /// privilege-domain boundary; `step` calls *are* the spans. Off at `Info`, so zero hot-path cost
+    /// when not profiling.
     pub fn step(self, msg: &str) {
         if self.level >= LogLevel::Debug {
-            eprintln!("{}: [debug] {msg}", self.component);
+            eprintln!("{}: [debug] [t={}] {msg}", self.component, now_nanos());
         }
     }
 
     /// Emit a `Trace`-level detail line (per-step parameters). No-op below `Trace`.
     pub fn detail(self, msg: &str) {
         if self.level >= LogLevel::Trace {
-            eprintln!("{}: [trace] {msg}", self.component);
+            eprintln!("{}: [trace] [t={}] {msg}", self.component, now_nanos());
         }
     }
+}
+
+/// Wall-clock nanoseconds since the Unix epoch — the span timestamp on each trace line. `CLOCK_REALTIME`
+/// is comparable across the spawn-path processes (they share the host clock); the harness computes
+/// boundary deltas from it. Saturates to 0 if the clock is before the epoch (never, in practice).
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
 }
 
 #[derive(Debug, Default, serde::Deserialize)]

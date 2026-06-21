@@ -167,12 +167,16 @@ pub struct Lifecycle {
 pub struct Manager {
     stop: Arc<AtomicBool>,
     loopers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    waker: kennel_lib_binder::ctxmgr::Waker,
 }
 
 impl Manager {
     /// Signal the looper pool to finish and join every thread. Best-effort.
     pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
+        // Break every looper out of its `poll` now, so teardown does not wait out a `POLL_MS`
+        // cycle per thread (the W10 profile's dominant teardown cost).
+        self.waker.wake();
         let drained: Vec<JoinHandle<()>> = {
             let mut guard = self
                 .loopers
@@ -240,8 +244,13 @@ pub fn spawn(
         inbound_for_death.drop_dead(conn, cookie);
     });
 
+    let waker = cm.waker();
     let loopers = cm.serve_pool(POOL_MAX_THREADS, POLL_MS, &stop, &handler, &death)?;
-    Ok(Manager { stop, loopers })
+    Ok(Manager {
+        stop,
+        loopers,
+        waker,
+    })
 }
 
 /// Decode one node-0 transaction, apply the policy decision, emit an audit event, and

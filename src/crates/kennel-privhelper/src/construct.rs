@@ -35,11 +35,11 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use kennel_lib_spawn::wire::decode_construction;
-use kennel_lib_spawn::{build_view_and_pivot, join_cgroup, ConstructionHalf, LoopbackAddr};
+use kennel_lib_spawn::{build_view_and_pivot, ConstructionHalf, LoopbackAddr};
 use kennel_lib_syscall::boot::BOOT_SYNC_FD;
 use kennel_lib_syscall::fd::dup_onto;
 use kennel_lib_syscall::handshake::{pipe_cloexec, recv_ack, send_ack, ACK_PROCEED};
-use kennel_lib_syscall::namespace::clone_pid1;
+use kennel_lib_syscall::namespace::{clone_pid1, clone_pid1_in_cgroup};
 use kennel_lib_syscall::pty::PTY_RETURN_FD;
 use kennel_lib_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
 use kennel_lib_syscall::spawn::fexecve;
@@ -284,6 +284,8 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
                 .map(|b| b.source.clone())
                 .collect()
         });
+    // Captured before the child closure moves `half`: the cgroup to birth the child into.
+    let cgroup_path = half.cgroup_join.then(|| half.cgroup.clone());
     let child = move || {
         // Each early return trips clone_pid1's `_exit(127)` backstop. Name the failing step on
         // stderr first (inherited from the factory, so it reaches kenneld's journal): a silent
@@ -341,6 +343,17 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // fexecve returned ⇒ failure; name it, then fall through to the _exit(127) backstop.
         eprintln!("kennel-privhelper: construction child: fexecve kennel-bin-init: {err}");
     };
+    // Open the kennel's cgroup (operator-owned, in kenneld's delegated subtree) so the child is
+    // BORN in it via `clone3(CLONE_INTO_CGROUP)` — skipping the ~10–14 ms `cgroup.procs` migration
+    // (a `cgroup_threadgroup_rwsem` RCU-grace-period wait), the dominant bring-up cost. Opened here
+    // as root, before the euid drop; the fd outlives it and is CLOEXEC'd at the child's `fexecve`.
+    let cgroup_dir = cgroup_path
+        .as_deref()
+        .map(|p| {
+            std::fs::File::open(p)
+                .map_err(|e| io::Error::new(e.kind(), format!("open cgroup {}: {e}", p.display())))
+        })
+        .transpose()?;
     // Drop the *effective* uid to the operator so the clone's `CLONE_NEWUSER` records the
     // operator as the userns owner (see step 3); real/saved stay (operator, 0) so the parent
     // restores euid 0 below to write the maps. A no-op when the operator already is root.
@@ -348,7 +361,10 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         kennel_lib_syscall::unistd::set_euid(op_uid)
             .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid({op_uid}): {e}")))?;
     }
-    let init_pid = clone_pid1(namespaces, child)?;
+    let init_pid = match &cgroup_dir {
+        Some(dir) => clone_pid1_in_cgroup(namespaces, dir.as_fd(), child)?,
+        None => clone_pid1(namespaces, child)?,
+    };
     tracer.step(&format!(
         "construct: cloned PID 1 (host pid {init_pid}); writing identity maps"
     ));
@@ -549,10 +565,8 @@ fn add_loopback_addresses(
 fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result<()> {
     use kennel_lib_syscall::mount;
 
-    if half.cgroup_join {
-        join_cgroup(&half.cgroup)
-            .map_err(|e| io::Error::new(e.kind(), format!("join_cgroup: {e}")))?;
-    }
+    // The kennel cgroup is joined at birth (`clone3(CLONE_INTO_CGROUP)` in `construct`), not here —
+    // a post-clone `cgroup.procs` migration is the dominant bring-up cost (an RCU-grace-period wait).
     // In-namespace loopback (§7.5.6): a proxied kennel runs in its OWN net-ns (`half.lo` is set
     // only when the plan unshared NEWNET and the kennel has addresses — i.e. constrained/
     // unconstrained; `none` has no addresses, `host` shares the host stack). A fresh net-ns

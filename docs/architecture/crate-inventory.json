@@ -1,12 +1,12 @@
 {
   "crate_count": 24,
-  "total_sloc": 29802,
+  "total_sloc": 29940,
   "tcb_crate_count": 16,
-  "tcb_sloc": 18489,
+  "tcb_sloc": 18627,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 5753,
+      "sloc": 5769,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -36,7 +36,7 @@
     },
     {
       "name": "kennel-lib-spawn",
-      "sloc": 1933,
+      "sloc": 1929,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -46,7 +46,7 @@
     },
     {
       "name": "kennel-lib-binder",
-      "sloc": 1852,
+      "sloc": 1917,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -66,7 +66,7 @@
     },
     {
       "name": "kennel-privhelper",
-      "sloc": 1536,
+      "sloc": 1543,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-privhelper"],
@@ -96,7 +96,7 @@
     },
     {
       "name": "kennel-lib-syscall",
-      "sloc": 994,
+      "sloc": 1043,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -166,7 +166,7 @@
     },
     {
       "name": "kennel-lib-config",
-      "sloc": 380,
+      "sloc": 385,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],

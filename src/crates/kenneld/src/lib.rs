@@ -487,6 +487,10 @@ pub struct Kennel {
     /// thread is stopped at teardown (its node-0 fd and mapping go with it; the
     /// binderfs instance itself died with the workload's mount namespace).
     binder: Option<crate::binder::Manager>,
+    /// The spawn-path tracer, carried from bring-up so `stop` stamps the teardown
+    /// span with the same `[t=<nanos>]` milestones (ROADMAP W10 — teardown is a
+    /// first-class span; a slow reclaim makes spawn rates teardown-limited).
+    tracer: kennel_lib_config::Tracer,
 }
 
 impl Kennel {
@@ -550,10 +554,13 @@ impl Kennel {
     /// An OS error if waiting on the workload fails.
     pub fn stop<P: Privileged>(mut self, privileged: &P) -> io::Result<i32> {
         let status = kennel_lib_syscall::process::wait_pid(self.init_pid)?;
+        self.tracer
+            .step("teardown: workload exited; stopping binder + reclaiming resources");
         if let Some(manager) = self.binder.take() {
             manager.stop();
         }
         teardown(
+            self.tracer,
             privileged,
             self.ctx,
             Some(self.cgroup.as_path()),
@@ -662,12 +669,14 @@ pub fn start<P: Privileged + Sync>(
             dbus: state.dbus,
             view_root: state.view_root,
             binder: state.binder,
+            tracer,
         }),
         Err(e) => {
             if let Some(manager) = state.binder.take() {
                 manager.stop();
             }
             teardown(
+                tracer,
                 privileged,
                 ctx,
                 state.made_cgroup.then_some(cgroup.as_path()),
@@ -1798,6 +1807,7 @@ fn connect_host_dbus(socket: &Path) -> io::Result<UnixStream> {
 /// does not skip the rest.
 #[allow(clippy::too_many_arguments)] // the reverse-of-bring-up unwind inputs, one per resource
 fn teardown<P: Privileged>(
+    tracer: kennel_lib_config::Tracer,
     privileged: &P,
     ctx: u16,
     cgroup: Option<&Path>,
@@ -1813,6 +1823,7 @@ fn teardown<P: Privileged>(
     for child in dbus {
         reap_proxy(Some(child)); // host-dbus delegates; kenneld's pipe reader threads end with them
     }
+    tracer.step("teardown: proxies + delegates reaped; releasing addresses");
     if let Some(addr) = v6 {
         let _ = privileged.del_address(ctx, LOOPBACK, addr.into(), V6_PREFIX);
     }
@@ -1827,4 +1838,5 @@ fn teardown<P: Privileged>(
     if let Some(vr) = view_root {
         let _ = std::fs::remove_dir(vr);
     }
+    tracer.step("teardown: complete — addresses, cgroup, view reclaimed");
 }

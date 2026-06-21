@@ -792,24 +792,6 @@ fn create_bind_target(source: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Join the current process into `cgroup` by writing its own pid to
-/// `<cgroup>/cgroup.procs`.
-///
-/// Called in the forked child's seal (and the privhelper factory's construction child).
-/// The kernel resolves the written pid in the writer's pid namespace, so writing
-/// `getpid()` is correct even after the PID namespace has been unshared (the child is
-/// pid 1 of the new namespace and the kernel maps it back). The migration is permitted
-/// because the destination is a descendant of kenneld's own delegated cgroup subtree.
-///
-/// # Errors
-///
-/// Returns the OS error if the `cgroup.procs` write fails (e.g. the subtree is not
-/// delegated, or the cgroup was removed).
-pub fn join_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
-    let procs = cgroup.join("cgroup.procs");
-    std::fs::write(procs, std::process::id().to_string())
-}
-
 /// Load the given BPF programs, populate their egress maps, and attach to a cgroup.
 ///
 /// Populates each program's maps from `plan` and attaches it to `cgroup`. Returns

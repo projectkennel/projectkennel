@@ -6,6 +6,7 @@
 //! API and not on nix's `CloneFlags` directly. No `unsafe` of ours.
 
 use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 use bitflags::bitflags;
 use nix::sched::CloneFlags;
@@ -137,6 +138,91 @@ where
         // A clone-returned pid is a real, small process id and always fits in pid_t.
         pid => libc::pid_t::try_from(pid)
             .map_err(|_| io::Error::other("clone returned an out-of-range pid")),
+    }
+}
+
+/// `struct clone_args` — the `clone3(2)` argument (the `CLONE_ARGS_SIZE_VER2` layout, so the
+/// `cgroup` field is present). All fields are `__aligned_u64`; the kernel reads exactly
+/// `size_of` bytes and retains no pointer.
+#[repr(C)]
+#[derive(Default)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+
+/// Like [`clone_pid1`], but the child is created **directly inside** the cgroup-v2 directory
+/// `cgroup_fd` (`clone3(2)` with `CLONE_INTO_CGROUP`, Linux 5.7+) rather than migrated in afterwards.
+///
+/// Migrating a task into a cgroup — a write to `cgroup.procs` — takes the global
+/// `cgroup_threadgroup_rwsem`, whose write side waits a full RCU grace period; measured at ~10–14 ms
+/// and the dominant kennel bring-up cost. Being *born* in the target cgroup skips the migration
+/// entirely. `cgroup_fd` is an `O_RDONLY` fd of the target cgroup directory; the caller must have
+/// write access to it (kenneld's delegated subtree is operator-owned, and the factory opens it
+/// before dropping to the operator).
+///
+/// All of [`clone_pid1`]'s contract — PID 1 of a fresh namespace set, the map-write handshake, the
+/// must-not-return child closure — applies unchanged.
+///
+/// # Errors
+///
+/// The OS error if `clone3` fails (`ENOSYS` on a pre-5.7 kernel, `EPERM`/`EBUSY` if the cgroup
+/// cannot be joined, or a refused namespace). The child never returns to the caller.
+pub fn clone_pid1_in_cgroup<F>(
+    ns: Namespaces,
+    cgroup_fd: BorrowedFd<'_>,
+    child: F,
+) -> io::Result<libc::pid_t>
+where
+    F: FnOnce(),
+{
+    // `CLONE_INTO_CGROUP` (`1 << 33`) — defined here as `u64` because libc's binding mis-types it as
+    // `i32`, which would truncate the bit to 0. clone3 carries the exit signal in its own field (not
+    // OR'd into the flags as raw clone does); the namespace bits and this flag go in `flags`.
+    const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+    let flags = u64::from(to_clone_flags(ns).bits().unsigned_abs()) | CLONE_INTO_CGROUP;
+    let mut args = CloneArgs {
+        flags,
+        exit_signal: u64::from(libc::SIGCHLD.unsigned_abs()),
+        cgroup: u64::from(cgroup_fd.as_raw_fd().unsigned_abs()),
+        ..CloneArgs::default()
+    };
+    // SAFETY: `clone3` with a NULL stack (stack = stack_size = 0) and all-zero tid/tls/set_tid
+    // fields is fork-like — the child returns 0 on a copy-on-write copy of the parent's stack, the
+    // parent gets the child pid. `args` is a live, correctly sized `clone_args` (VER2, the `cgroup`
+    // field present) and `size` matches; the kernel reads exactly those bytes and retains no
+    // pointer. The child branch runs `child` under the same post-clone discipline as `clone_pid1`
+    // (async-signal-safe, must not return) and `_exit`s.
+    //
+    // INVARIANTS UPHELD: exactly one child is created, inside the cgroup behind `cgroup_fd`.
+    //
+    // FAILURE MODE: -1 + errno (no child exists); a child closure that wrongly returns is
+    // terminated `_exit(127)` rather than continuing as a second copy of the parent.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            std::ptr::from_mut(&mut args),
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    match ret {
+        -1 => Err(io::Error::last_os_error()),
+        0 => {
+            child();
+            // SAFETY: _exit ends the child without unwinding the parent's shared state.
+            unsafe { libc::_exit(127) }
+        }
+        pid => libc::pid_t::try_from(pid)
+            .map_err(|_| io::Error::other("clone3 returned an out-of-range pid")),
     }
 }
 

@@ -20,6 +20,23 @@ use std::thread::JoinHandle;
 use crate::client::{Connection, Incoming};
 use crate::sys;
 
+/// Breaks the looper pool out of its `poll` so a set stop flag is observed at once.
+///
+/// Without it, each looper winds down only on its next `poll_ms` timeout, so teardown waits out
+/// `max` over the pool of each looper's remaining poll — the W10 profile's dominant teardown cost.
+/// Held by the pool's owner; call [`Waker::wake`] right after setting the stop flag, then join.
+/// Cloneable and cheap (an `Arc`).
+#[derive(Clone, Debug)]
+pub struct Waker(Arc<OwnedFd>);
+
+impl Waker {
+    /// Signal every looper to return from `poll` now. Best-effort (a failed write leaves the
+    /// loopers to wind down on the next `poll_ms` timeout, the prior behaviour).
+    pub fn wake(&self) {
+        let _ = sys::signal_wake(self.0.as_fd());
+    }
+}
+
 /// A node-0 transaction handler shared across the looper pool.
 ///
 /// `Fn + Send + Sync` because every looper thread calls it concurrently; any state it mutates
@@ -56,6 +73,9 @@ pub enum Reply {
 /// A context-manager endpoint owning node 0 of one binder instance.
 pub struct ContextManager {
     conn: Connection,
+    /// Wake eventfd polled alongside the device fd, so [`Waker::wake`] breaks the loopers out of
+    /// `poll` at teardown. Shared (an `Arc`) with the [`Waker`] the owner holds.
+    wake: Arc<OwnedFd>,
 }
 
 impl ContextManager {
@@ -65,13 +85,28 @@ impl ContextManager {
     ///
     /// Returns the OS error if the version/`mmap` open fails, the
     /// `BINDER_SET_CONTEXT_MGR` is refused (another manager already holds the
-    /// instance, `EBUSY`), or entering the looper fails.
+    /// instance, `EBUSY`), the wake eventfd cannot be made, or entering the looper fails.
     pub fn new(device_fd: OwnedFd, map_size: usize) -> io::Result<Self> {
         let conn = Connection::open(device_fd, map_size)?;
         sys::set_context_mgr(conn.fd())?;
         // Looper registration (BC_ENTER_LOOPER / BC_REGISTER_LOOPER) happens on each serve
         // thread, not here — the driver registers the *calling* thread.
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            wake: Arc::new(sys::make_wake_eventfd()?),
+        })
+    }
+
+    /// A [`Waker`] for this manager's looper pool — the owner holds it and calls
+    /// [`Waker::wake`] after setting the stop flag, so teardown does not wait out a `poll_ms`.
+    #[must_use]
+    pub fn waker(&self) -> Waker {
+        Waker(Arc::clone(&self.wake))
+    }
+
+    /// Poll the device fd for inbound work, returning early when the wake eventfd fires.
+    fn poll_serving(&self, poll_ms: i32) -> io::Result<bool> {
+        sys::poll_in_or_wake(self.conn.fd(), self.wake.as_fd(), poll_ms)
     }
 
     /// Borrow the underlying connection (for tests / advanced drivers).
@@ -98,7 +133,7 @@ impl ContextManager {
     ) -> io::Result<()> {
         self.conn.enter_looper()?;
         while !stop.load(Ordering::Acquire) {
-            if !self.conn.poll(poll_ms)? {
+            if !self.poll_serving(poll_ms)? {
                 continue;
             }
             for incoming in self.conn.recv()? {
@@ -225,7 +260,7 @@ impl ContextManager {
         death: &DeathHandler,
     ) {
         while !stop.load(Ordering::Acquire) {
-            match self.conn.poll(poll_ms) {
+            match self.poll_serving(poll_ms) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(_) => break,
