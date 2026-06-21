@@ -391,25 +391,69 @@ fn refuse_if_running(name: &str) -> Result<(), String> {
     }
 }
 
-/// `kennel oci revert <name>` — obliterate the managed overlay upper (and its workdir) so the
-/// next run's merged root is the lowers plus a clean layer. A no-op for a `discard`/`readonly`
-/// entry (no managed upper exists). Refused while the entry is running; the image lower is never
-/// touched (revert returns the *mutable* state to empty, it does not re-attest the image).
+/// `kennel oci revert <name> [--list] [-- <path>…]` — restore the managed overlay upper toward the
+/// image lower (§7.11.4b). The image lower is the **pin** (content-addressed by its `digest`), the
+/// upper's copy-ups and whiteouts are the **diff against the pin**, and removing an upper entry is
+/// **restore-from-pin** (the lower shows back through) — the OCI instantiation of the same pin /
+/// diff-against-pin / restore-from-pin mechanism as the trust-manifest store (§7.4, `02-9`):
+///
+/// - **`--list`** prints the diff against the pin: each persisted change (`M` a copy-up/added file,
+///   `D` a whiteout deleting a lower file). Read-only; allowed even while running.
+/// - **`-- <path>…`** is **selective** restore: each named in-image path's upper entry is removed, so
+///   the lower shows through. Refused while running.
+/// - **no `--list` / no paths** is the **total** case: obliterate the whole upper (and workdir) — the
+///   blunt end of selective revert. A no-op for a `discard`/`readonly` entry. Refused while running.
+///
+/// The image lower is never touched; revert returns the *mutable* state toward the pin, it does not
+/// re-attest the image (the integrity ladder's job).
 ///
 /// # Errors
 ///
-/// Returns an error if the name is invalid, the entry is not built, the kennel is running, or the
-/// upper cannot be removed.
+/// Returns an error if the name is invalid, the entry is not built, a path escapes the upper, the
+/// kennel is running (for a mutating mode), or the upper cannot be read/removed.
 pub fn revert(args: &[String]) -> Result<std::process::ExitCode, String> {
-    let name = single_name(args, "revert")?;
+    let (head, tail) = args
+        .iter()
+        .position(|a| a == "--")
+        .map_or((args, &[][..]), |sep| {
+            (
+                args.get(..sep).unwrap_or(&[]),
+                args.get(sep.saturating_add(1)..).unwrap_or(&[]),
+            )
+        });
+    let mut name: Option<&str> = None;
+    let mut list = false;
+    for arg in head {
+        match arg.as_str() {
+            "--list" => list = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if name.is_none() => name = Some(v),
+            _ => return Err("unexpected extra argument before `--`".to_owned()),
+        }
+    }
+    let name = name.ok_or("usage: kennel oci revert <name> [--list] [-- <path>…]")?;
     let store = Store::open()?;
     let entry = store.entry(name)?;
     if !entry.exists() {
         return Err(format!("store entry `{name}` is not built"));
     }
-    refuse_if_running(name)?;
     let upper = entry.dir().join("upper");
-    let work = entry.dir().join("work");
+
+    if list {
+        return list_upper(name, &upper); // read-only inspection
+    }
+    refuse_if_running(name)?; // the mutating modes below
+    if !tail.is_empty() {
+        return revert_paths(name, &upper, tail);
+    }
+    revert_total(name, entry.dir())
+}
+
+/// The total revert: obliterate the whole managed upper (and workdir) so the next run's merged root
+/// is the lowers plus a clean layer — the blunt end of selective revert.
+fn revert_total(name: &str, entry_dir: &Path) -> Result<std::process::ExitCode, String> {
+    let upper = entry_dir.join("upper");
+    let work = entry_dir.join("work");
     let had = upper.exists() || work.exists();
     for d in [&upper, &work] {
         if d.exists() {
@@ -418,12 +462,127 @@ pub fn revert(args: &[String]) -> Result<std::process::ExitCode, String> {
     }
     if had {
         eprintln!(
-            "kennel: reverted the persisted overlay upper for `{name}` (mutable state cleared)"
+            "kennel: reverted the entire persisted upper for `{name}` (mutable state cleared)"
         );
     } else {
         eprintln!("kennel: `{name}` has no persisted upper (discard/readonly) — nothing to revert");
     }
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Print the diff against the pin: every persisted change in the upper (`M` a copy-up/added file,
+/// `D` a whiteout deleting a lower file). Container directories holding only copy-ups are not listed.
+fn list_upper(name: &str, upper: &Path) -> Result<std::process::ExitCode, String> {
+    if !upper.exists() {
+        eprintln!("kennel: `{name}` has no persisted upper (discard/readonly) — nothing persisted");
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+    let mut changes: Vec<(String, char)> = Vec::new();
+    walk_upper(upper, upper, &mut changes)?;
+    if changes.is_empty() {
+        eprintln!("kennel: `{name}` upper is empty — the merged root equals the image");
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+    changes.sort();
+    eprintln!("kennel: persisted changes in `{name}` (the diff against the image pin):");
+    for (path, marker) in &changes {
+        eprintln!("  {marker} {path}");
+    }
+    eprintln!(
+        "  restore some: kennel oci revert {name} -- <path>…    all: kennel oci revert {name}"
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Recursively collect the upper's deviations from the lower. A whiteout (overlayfs marks a deleted
+/// lower file as a `char` device `0:0`) is `D`; a regular/other file is `M`; a directory is recursed
+/// (a plain container for copy-ups is not itself a change).
+fn walk_upper(root: &Path, dir: &Path, out: &mut Vec<(String, char)>) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    for ent in rd {
+        let ent = ent.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        let path = ent.path();
+        let ft = ent
+            .file_type()
+            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        let in_image = format!("/{}", rel.display());
+        if ft.is_char_device() {
+            let rdev = std::fs::symlink_metadata(&path).map_or(0, |m| m.rdev());
+            // overlayfs whiteout = char device 0:0; a copied-up real device is rare and shown as `M`.
+            out.push((in_image, if rdev == 0 { 'D' } else { 'M' }));
+        } else if ft.is_dir() {
+            walk_upper(root, &path, out)?;
+        } else {
+            out.push((in_image, 'M'));
+        }
+    }
+    Ok(())
+}
+
+/// Selective restore: remove each named in-image path's upper entry so the lower shows through. A
+/// path not in the upper is already at the image and skipped; a `..`/escape is refused.
+fn revert_paths(
+    name: &str,
+    upper: &Path,
+    paths: &[String],
+) -> Result<std::process::ExitCode, String> {
+    if !upper.exists() {
+        return Err(format!(
+            "`{name}` has no persisted upper (discard/readonly) — nothing to revert"
+        ));
+    }
+    let mut restored = 0_u32;
+    for raw in paths {
+        let rel = sanitize_rel(raw)?;
+        let target = upper.join(&rel);
+        // Defence in depth against a symlinked component: the resolved target must stay under upper.
+        if !target.starts_with(upper) {
+            return Err(format!("`{raw}` escapes the upper"));
+        }
+        match std::fs::symlink_metadata(&target) {
+            Ok(md) => {
+                if md.is_dir() {
+                    std::fs::remove_dir_all(&target)
+                        .map_err(|e| format!("removing {}: {e}", target.display()))?;
+                } else {
+                    std::fs::remove_file(&target)
+                        .map_err(|e| format!("removing {}: {e}", target.display()))?;
+                }
+                eprintln!("  restored /{} to the image", rel.display());
+                restored = restored.saturating_add(1);
+            }
+            Err(_) => eprintln!(
+                "  /{} is not persisted (already at the image) — skipped",
+                rel.display()
+            ),
+        }
+    }
+    eprintln!("kennel: reverted {restored} path(s) in `{name}` toward the image pin");
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Normalise an operator-given in-image path to a safe relative path under the upper: strip a leading
+/// `/`, drop `.`, and **refuse** `..` (no escape out of the upper).
+///
+/// # Errors
+///
+/// Returns an error if the path contains a `..` component or normalises to empty.
+fn sanitize_rel(raw: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+    let mut rel = PathBuf::new();
+    for c in Path::new(raw).components() {
+        match c {
+            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
+            Component::Normal(s) => rel.push(s),
+            Component::ParentDir => return Err(format!("`{raw}` must not contain `..`")),
+        }
+    }
+    if rel.as_os_str().is_empty() {
+        return Err(format!("`{raw}` is not a path within the image"));
+    }
+    Ok(rel)
 }
 
 /// `kennel oci update <name> [--keep-state] [--no-fetch] [--key K] -- <new-image-ref>` — replace
@@ -802,14 +961,6 @@ fn print_update_diff(
     }
     if !writable.is_empty() {
         eprintln!("  writable carve-outs preserved: {}", writable.join(", "));
-    }
-}
-
-/// Parse a lone `<name>` argument for a single-arg verb.
-fn single_name<'a>(args: &'a [String], verb: &str) -> Result<&'a str, String> {
-    match args {
-        [name] if !name.starts_with('-') => Ok(name),
-        _ => Err(format!("usage: kennel oci {verb} <name>")),
     }
 }
 
@@ -1244,6 +1395,58 @@ signature = \"abc123\"
             rf.writable.as_deref(),
             Some(&["/usr/lib/python3.12".to_owned()][..])
         );
+    }
+
+    #[test]
+    fn sanitize_rel_strips_root_and_refuses_escape() {
+        // Leading `/` and `.` are stripped; the path is relative under the upper.
+        assert_eq!(
+            sanitize_rel("/etc/hostname").expect("test setup"),
+            PathBuf::from("etc/hostname")
+        );
+        assert_eq!(
+            sanitize_rel("etc/./hostname").expect("test setup"),
+            PathBuf::from("etc/hostname")
+        );
+        // `..` in any position is refused — no escape out of the upper.
+        for bad in ["../x", "/etc/../../x", "a/../../b", ".."] {
+            assert!(sanitize_rel(bad).is_err(), "`{bad}` must be refused");
+        }
+        // An empty / root-only path normalises to nothing — refused.
+        for empty in ["/", "", "."] {
+            assert!(sanitize_rel(empty).is_err(), "`{empty}` must be refused");
+        }
+    }
+
+    #[test]
+    fn walk_upper_classifies_copyups_and_whiteouts() {
+        use std::os::unix::fs::symlink;
+        let upper = std::env::temp_dir().join(format!("kennel-oci-upper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&upper);
+        std::fs::create_dir_all(upper.join("etc")).expect("test setup");
+        std::fs::create_dir_all(upper.join("opt/app")).expect("test setup");
+        // A copy-up / added file (M) nested under a container dir.
+        std::fs::write(upper.join("etc/hostname"), b"box\n").expect("test setup");
+        std::fs::write(upper.join("opt/app/data"), b"x").expect("test setup");
+        // A symlink is an "other" file → M (we cannot mknod a 0:0 whiteout without privilege in a
+        // unit test, so whiteout *rdev* classification is covered by the rdev==0 branch directly).
+        symlink("/bin/sh", upper.join("etc/alias")).expect("test setup");
+
+        let mut changes = Vec::new();
+        walk_upper(&upper, &upper, &mut changes).expect("test setup");
+        changes.sort();
+        let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&"/etc/hostname"),
+            "copy-up listed: {paths:?}"
+        );
+        assert!(paths.contains(&"/opt/app/data"), "nested copy-up listed");
+        assert!(paths.contains(&"/etc/alias"), "symlink listed");
+        // Container dirs are not themselves changes.
+        assert!(!paths.contains(&"/etc"), "container dir not listed");
+        assert!(!paths.contains(&"/opt"), "container dir not listed");
+        assert!(changes.iter().all(|(_, m)| *m == 'M'), "no whiteouts here");
+        let _ = std::fs::remove_dir_all(&upper);
     }
 
     #[test]
