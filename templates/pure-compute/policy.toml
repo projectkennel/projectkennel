@@ -52,3 +52,8 @@ nproc = "64"     # processes / threads
 cpu = "30"       # CPU-seconds
 
 # No [[mutable]] manifest: pure-compute opens nothing — the most fenced target.
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "RVLyZP4tedAfrBb//NTqEJupTazSiIv7tq8UcC7y/1G2cGDS25JZBufJkXtqonKKcLtoB8t1qN2m7Lt6X+wzDg=="

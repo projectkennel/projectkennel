@@ -66,3 +66,8 @@ match = [
     "crates.io:443", "static.crates.io:443",
     "github.com:443", "*.githubusercontent.com:443", "ghcr.io:443",
 ]
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "agz0etYmgjpofXGza63LbQo8Q3WSvt2/hGirW/CYcepUNONX0q+go/C+wiDhtvrbhWg8jftHj3JcHDByqKBRBQ=="

@@ -68,8 +68,9 @@ fn maintainer_keys() -> KeySet {
 }
 
 /// A spawner policy that allows all three templates — compiling it runs `spawn::validate`
-/// (eligibility) on each named target. Expressed as a source policy (`[spawn]` is not yet a
-/// `LeafPolicy` field — a real-world spawner-as-leaf needs that, tracked for W6).
+/// (eligibility) on each named target. A spawner is a **source/template** policy: `[spawn]` is a
+/// template-level grant by design (depth-1 / N-1, no grandchildren — §7.12.8), inherited through the
+/// chain, not authored on a leaf.
 fn spawner_policy() -> String {
     let mut allows = String::new();
     for t in SPAWN_TEMPLATES {
