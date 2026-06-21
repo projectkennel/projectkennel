@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 #
 # Per-case fixture for spawn-roundtrip: compile + SIGN the `echo-tool` spawn target to its settled
-# form with the suite key the daemon trusts, beside its source (`templates/echo-tool/`). A spawn
-# target is the complete signed *settled* policy the daemon load-verifies and instantiates as-is
-# (§7.12) — the requester's grant pins its signature at compile, and kenneld re-verifies that exact
-# commitment at SPAWN. Prints the requester policy path on the last stdout line (the runner runs it).
+# form with the suite key the daemon trusts, and install it into the **standard** user template
+# cascade (`~/.config/kennel/templates`). A spawn target is the complete signed *settled* policy the
+# daemon load-verifies and instantiates as-is (§7.12); the requester's grant pins its signature at
+# compile and kenneld re-verifies that exact commitment at SPAWN — both resolving the one artefact
+# from the standard path, never the source tree. Prints the requester policy on the last stdout line.
 #
-#   $1 = the case dir (this script's dir)   $2 = a scratch dir (unused here)
+#   $1 = the case dir (this script's dir)   $2 = scratch (unused)
 set -euo pipefail
 
 CASE_DIR="$1"
-REPO_ROOT="$(cd "$(dirname "$0")/../../../../../.." && pwd)"
 KENNEL="/usr/libexec/kennel/kennel"
-KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
-SUITE_KEY="$KEY_DIR/kennel-suite.key"
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
+SUITE_KEY="$CFG/keys/kennel-suite.key"
+SRC="/usr/lib/kennel/templates/echo-tool/policy.toml"   # the installed reference-template source
+OUT="$CFG/templates/echo-tool/echo-tool.settled.toml"   # the standard user template path
 
-[ -x "$KENNEL" ] || { echo "no installed kennel at $KENNEL (run policy-e2e.sh without --no-install)" >&2; exit 2; }
+[ -x "$KENNEL" ]    || { echo "no installed kennel at $KENNEL (run policy-e2e.sh without --no-install)" >&2; exit 2; }
 [ -f "$SUITE_KEY" ] || { echo "no suite key at $SUITE_KEY" >&2; exit 2; }
+[ -f "$SRC" ]       || { echo "echo-tool not installed at $SRC (install.sh ships the reference templates)" >&2; exit 2; }
 
-# The settled, suite-signed echo-tool the daemon resolves at SPAWN (beside its committed source).
-"$KENNEL" policy compile "$REPO_ROOT/templates/echo-tool/policy.toml" \
-    --template-dir "$REPO_ROOT/templates" --trust-dir "$KEY_DIR" --key "$SUITE_KEY" --no-lock \
-    --output "$REPO_ROOT/templates/echo-tool/echo-tool.settled.toml" >&2
+mkdir -p "$(dirname "$OUT")"
+# Compile the installed source; base-confined resolves from the standard template cascade.
+"$KENNEL" policy compile "$SRC" --key "$SUITE_KEY" --trust-dir "$CFG/keys" --no-lock --output "$OUT" >&2
 
-# The runner runs the requester (which spawns echo-tool@v1 and round-trips the channel).
 echo "$CASE_DIR/policy.toml"

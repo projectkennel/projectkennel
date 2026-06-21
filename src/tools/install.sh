@@ -165,6 +165,22 @@ install_config() {
 	# search dir always exists (kennel-lib-config 3-layer cascade; 07-paths). No
 	# reference policies are shipped — policies are user/org content.
 	run install -d -m 0755 "$vendor_dir/keys" "$vendor_dir/templates" "$vendor_dir/policies"
+	# Ship the reference templates (base-confined — the security foundation policies inherit — and
+	# the spawn targets agents instantiate) into the vendor template cascade, so the daemon and the
+	# CLI resolve them at the standard path (07-paths), never the source tree. Source `policy.toml`
+	# + meta; a spawn target's signed `<name>.settled.toml` is produced by `kennel policy compile`
+	# (the maintainer signs the reference set; the operator their own).
+	if [ -d "$repo_root/templates" ]; then
+		for tdir in "$repo_root"/templates/*/; do
+			[ -d "$tdir" ] || continue
+			tname="$(basename "$tdir")"
+			run install -d -m 0755 "$vendor_dir/templates/$tname"
+			for f in "$tdir"*; do
+				[ -f "$f" ] || continue
+				run install -m 0644 "$f" "$vendor_dir/templates/$tname/$(basename "$f")"
+			done
+		done
+	fi
 	run install -m 0644 "$repo_root/dist/config/system.toml" "$vendor_dir/system.toml"
 	run install -m 0644 "$repo_root/dist/config/config.toml" "$vendor_dir/config.toml"
 	# The machine-readable threat catalogue `kennel policy risks` reads (the CLI
