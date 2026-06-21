@@ -15,17 +15,19 @@
 //!    ([`patch::instantiate`](kennel_lib_policy::patch::instantiate)), bounded by the template's
 //!    manifest and this requester's narrowing — never a re-parse, never a coined field.
 //!
-//! On success `kenneld` **mints** the stdio channel (a socketpair for bidirectional JSON-RPC + a pipe
-//! for `stderr`) and returns the requester's two ends in the reply; node 0 stays fd-free inbound, so
-//! the only fd movement is this outbound reply ([[binder-fd-passing-safety-verdict]]). Construction
-//! of the spawned kennel from the validated instance — and the `max_instances` claim — is W6.3; here
-//! the spawned-kennel ends are dropped, so a requester sees its ends then `EOF`.
+//! On success `kenneld` **claims** a `max_instances` slot (the fork-bomb bound), **mints** the stdio
+//! channel (a socketpair for bidirectional JSON-RPC + a pipe for `stderr`), returns the requester's
+//! two ends in the reply, and hands the validated instance + the claimed slot to the
+//! [`SpawnConstructor`] — which builds it into a running sibling kennel off the looper, the channel's
+//! spawned ends wired to its stdio. Node 0 stays fd-free inbound, so the only fd movement is the
+//! outbound reply ([[binder-fd-passing-safety-verdict]]). The slot releases when the spawned kennel
+//! terminates (soft `EOF`, the template's TTL self-reap, or a build abort — §7.12.7).
 
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
@@ -43,8 +45,49 @@ pub trait SpawnConstructor: Send + Sync {
     /// Reserve a context for `name`, build the kennel from the in-memory `instance`, wire the three
     /// `stdio` fds (the spawned ends of the minted channel) to its workload, and supervise it — off
     /// the binder looper, asynchronously to the `SPAWN` reply (`02-10` §"Construction is asynchronous
-    /// to the reply"). The instance is never written to disk (§7.12.6).
-    fn enqueue(&self, instance: SettledPolicy, stdio: [OwnedFd; 3], name: String);
+    /// to the reply"). The instance is never written to disk (§7.12.6). `slot` is the claimed
+    /// `max_instances` slot — held across the build so it releases (on drop) only when the spawned
+    /// kennel terminates or the build aborts (§7.12.7).
+    fn enqueue(&self, instance: SettledPolicy, stdio: [OwnedFd; 3], name: String, slot: SlotGuard);
+}
+
+/// An RAII claim on a `max_instances` slot.
+///
+/// The live count is decremented on drop — on the construction thread when the spawned kennel
+/// terminates, or at once if the build aborts (§7.12.7). A boot failure cannot leak a slot, and a
+/// flapping requester cannot leak across teardown races.
+pub struct SlotGuard {
+    live: Arc<AtomicU32>,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.live.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Atomically claim a slot if the live count is below `max` (§7.12.7) — a single check-and-claim, so
+/// two concurrent `SPAWN`s on different loopers cannot jointly exceed the ceiling. `None` if full.
+fn claim_slot(live: &Arc<AtomicU32>, max: u32) -> Option<SlotGuard> {
+    let mut cur = live.load(Ordering::Acquire);
+    loop {
+        if cur >= max {
+            return None;
+        }
+        match live.compare_exchange_weak(
+            cur,
+            cur.saturating_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                return Some(SlotGuard {
+                    live: Arc::clone(live),
+                })
+            }
+            Err(actual) => cur = actual,
+        }
+    }
 }
 
 /// A constructor that drops every job — for paths that never spawn: a depth-1 instance's own
@@ -52,7 +95,14 @@ pub trait SpawnConstructor: Send + Sync {
 pub struct NoopConstructor;
 
 impl SpawnConstructor for NoopConstructor {
-    fn enqueue(&self, _instance: SettledPolicy, _stdio: [OwnedFd; 3], _name: String) {}
+    fn enqueue(
+        &self,
+        _instance: SettledPolicy,
+        _stdio: [OwnedFd; 3],
+        _name: String,
+        _slot: SlotGuard,
+    ) {
+    }
 }
 
 /// A shared [`NoopConstructor`] handle.
@@ -72,6 +122,9 @@ pub struct SpawnRuntime {
     keys: KeySet,
     template_dirs: Vec<PathBuf>,
     constructor: Arc<dyn SpawnConstructor>,
+    /// Live spawn count for this grant — the `max_instances` accounting (§7.12.7). Shared across the
+    /// looper pool so the check-and-claim is atomic; a [`SlotGuard`] holds one unit until teardown.
+    live: Arc<AtomicU32>,
 }
 
 impl SpawnRuntime {
@@ -89,6 +142,7 @@ impl SpawnRuntime {
             keys,
             template_dirs,
             constructor,
+            live: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -136,7 +190,7 @@ pub fn handle_spawn(
         return Reply::Data(spawn_wire::encode_reply(status::DENIED, ""));
     };
     match validate_and_mint(rt, incoming) {
-        Ok((instance, uuid, requester_ends, channel)) => {
+        Ok((instance, uuid, requester_ends, channel, slot)) => {
             // The spawned kennel's stdio: the socketpair end serves both stdin and stdout
             // (bidirectional JSON-RPC), so it is duplicated for the two; the pipe write end is stderr.
             let Ok(stdout) = channel.spawned_rpc.try_clone() else {
@@ -144,9 +198,10 @@ pub fn handle_spawn(
                 return Reply::Data(spawn_wire::encode_reply(status::DENIED, ""));
             };
             let stdio = [channel.spawned_rpc, stdout, channel.spawned_stderr];
-            // Hand the validated instance to construction, off the looper (async to this reply); the
-            // requester writes into its socketpair end, which buffers until the tool reads (§7.12).
-            rt.constructor.enqueue(instance, stdio, uuid.clone());
+            // Hand the validated instance + its claimed slot to construction, off the looper (async to
+            // this reply); the requester writes into its socketpair end, which buffers until the tool
+            // reads (§7.12). The slot rides with the build and releases when the spawned kennel exits.
+            rt.constructor.enqueue(instance, stdio, uuid.clone(), slot);
             emit(writer, ctx, incoming, Outcome::Allow, &uuid);
             Reply::DataAndFds(spawn_wire::encode_reply(status::OK, &uuid), requester_ends)
         }
@@ -157,13 +212,13 @@ pub fn handle_spawn(
     }
 }
 
-/// The validation pipeline: decode → grant → pin → eligibility → patch → mint. On success returns the
-/// validated in-memory instance (for construction), the `spawn-<uuid>`, the requester's channel ends,
-/// and the spawned kennel's channel ends.
+/// The validation pipeline: decode → grant → pin → eligibility → patch → claim → mint. On success
+/// returns the validated in-memory instance (for construction), the `spawn-<uuid>`, the requester's
+/// channel ends, the spawned kennel's channel ends, and the claimed `max_instances` slot.
 fn validate_and_mint(
     rt: &SpawnRuntime,
     incoming: &Incoming,
-) -> Result<(SettledPolicy, String, Vec<OwnedFd>, Channel), Deny> {
+) -> Result<(SettledPolicy, String, Vec<OwnedFd>, Channel, SlotGuard), Deny> {
     // 1. Decode the untrusted request.
     let (template_ref, patch_pairs) = spawn_wire::decode_request(&incoming.data)
         .ok_or_else(|| deny(status::BAD_REQUEST, "malformed SPAWN request"))?;
@@ -204,10 +259,20 @@ fn validate_and_mint(
     let instance = kennel_lib_policy::patch::instantiate(&template, &entries)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
 
-    // 7. Mint the channel; return the instance plus the requester's and spawned ends.
+    // 7. Atomically claim a max_instances slot (§7.12.7) — the fork-bomb bound. Held until the
+    //    spawned kennel terminates (the construction thread holds the guard); full ⇒ a clean refusal.
+    let max = rt.grant.max_instances;
+    let slot = claim_slot(&rt.live, max).ok_or_else(|| {
+        deny(
+            status::CEILING_FULL,
+            format!("max_instances ceiling ({max}) is full"),
+        )
+    })?;
+
+    // 8. Mint the channel; return the instance plus the requester's and spawned ends and the slot.
     let (uuid, requester_ends, channel) =
         mint().map_err(|e| deny(status::DENIED, format!("channel mint failed: {e}")))?;
-    Ok((instance, uuid, requester_ends, channel))
+    Ok((instance, uuid, requester_ends, channel, slot))
 }
 
 /// Resolve `name@version` to the signed template bytes from the first trust-store directory that
@@ -309,6 +374,23 @@ mod tests {
         assert!(build_patch(&narrow, &[("net.proxy.allow", "h:443")]).is_ok());
         let err = build_patch(&narrow, &[("fs.write", "/w")]).expect_err("narrowed out");
         assert!(err.contains("narrowed manifest"));
+    }
+
+    #[test]
+    fn claim_slot_bounds_the_ceiling_and_releases_on_drop() {
+        let live = Arc::new(AtomicU32::new(0));
+        let g1 = claim_slot(&live, 2).expect("slot 1");
+        let g2 = claim_slot(&live, 2).expect("slot 2");
+        assert!(claim_slot(&live, 2).is_none(), "the ceiling is full");
+        drop(g1);
+        let g3 = claim_slot(&live, 2).expect("a freed slot is re-claimable");
+        assert_eq!(live.load(Ordering::Acquire), 2);
+        drop((g2, g3));
+        assert_eq!(
+            live.load(Ordering::Acquire),
+            0,
+            "every slot released on drop"
+        );
     }
 
     #[test]

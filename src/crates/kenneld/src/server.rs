@@ -680,9 +680,14 @@ where
         instance: kennel_lib_policy::SettledPolicy,
         stdio: [OwnedFd; 3],
         name: String,
+        slot: crate::spawn::SlotGuard,
     ) {
         let shared = Arc::clone(&self.shared);
         std::thread::spawn(move || {
+            // Hold the max_instances slot for the spawned kennel's whole life: run_kennel blocks
+            // until the workload exits (then tears down), so `slot` releases on that exit or on any
+            // early construction failure (§7.12.7).
+            let _slot = slot;
             // The spawn has no operator on a control socket, so run_kennel's status responses go to a
             // throwaway socketpair whose peer we hold for the build's life — written-but-unread, never
             // EPIPE. A non-interactive run: the three stdio fds are the spawned ends of the channel.
