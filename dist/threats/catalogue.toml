@@ -210,6 +210,13 @@ scope = "in"
 title = "Substrate trust: the image-supplied runtime closure is unvetted"
 residual = "Confinement holds over an image root, but not content integrity: the entrypoint is provenance-pinned not per-binary hashed, the dynamic closure is unpinned, image env is sanitised-then-merged, image User is not honored (EACCES, no subuid). Derived from the [rootfs] grant; opt-in integrity ladder closes the at-rest gap."
 
+[[threat]]
+id = "T3.9"
+family = 3
+scope = "in"
+title = "Delegated spawning: a workload instantiates sibling kennels"
+residual = "Each spawn floors at a signed, pre-resolved template; residuals are R1 the agent-written mutable-field surface (only as strong as the template's per-field bounds) and R2 cross-kennel composition (an agent bridging two spawned channels reconstitutes the trifecta — not mechanically closed, scoped by [[spawn.allow]]). Derived from the [spawn] grant."
+
 # ── Family 5 — Framework attack surface ─────────────────────────────────────
 
 [[threat]]

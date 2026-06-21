@@ -2,7 +2,7 @@
 
 Companion artefact to Project Kennel. Standalone, citable, intended to be referenced independently of any specific runtime.
 
-Version 0.3 · 2026-06-03
+Version 0.3 · 2026-06-21
 
 Threat IDs are family-prefixed as of 0.3: `T<family>.<index>` within each in-scope family (e.g. T1.1, T2.8, T3.7), so a family's threats carry a self-contained sequence rather than one consecutive run across all families (the former T1–T26). Out-of-scope threats keep their `X1`–`X11` numbering. The mapping from the former IDs: T1–T11→T1.1–T1.11, T12–T18→T2.1–T2.7, T26→T2.8, T19–T25→T3.1–T3.7.
 
@@ -517,6 +517,22 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **MITRE ATT&CK.** T1610 (Deploy Container), T1525 (Implant Internal Image), T1195.002 (Compromise Software Supply Chain).
 
+## T3.9 — Delegated spawning: a workload instantiates sibling kennels
+
+**Definition.** A workload holding the `[spawn]` grant asks `kenneld` to instantiate an ephemeral sibling kennel from an operator-signed template and receives a `kenneld`-minted stdio channel to it (design §7.12). The capability delegates *instantiation* — normally an operator action — to the workload. For an AI agent that workload is itself untrusted and prompt-injectable (T3.7): the spawner can be steered into spawning. No spawn authors policy or invents capability — every spawn floors at the signed template's grant — but the agent controls two inputs, the mutable-field writes it supplies and the composition of the tools it may spawn, and those are the residual surface.
+
+**Workload class.** AI-agent / orchestrator-specific (a workload that instantiates workloads). Sibling to T3.8: both are workload-class residuals *derived* from a loud grant, not framework escapes.
+
+**Observed instances.** The MCP (Model Context Protocol) agent-to-tool topology is the live driver: an agent process spawns tool-server subprocesses and speaks JSON-RPC over their stdio. In the unconfined form this is ambient — the agent runs arbitrary `command`/`args` from its MCP configuration at its own authority, and a prompt-injected agent (the T3.7 pattern; the Mindgard Cline docstring-injection research, October 2025) spawns whatever the injection directs. Kennel's `[spawn]` replaces that ambient `exec` with a floored, template-bounded request; the residual catalogued here is what remains after the replacement.
+
+**Attack pattern.** A compromised or prompt-injected spawning workload cannot author policy or invent capability: each spawn floors at the signed template (design §7.12.1), and the install-time compiler denies any capability the template does not grant. It controls two inputs. First, the **mutable-field writes**: where a template's `[[mutable]]` manifest opens a field, the agent supplies the value, and an under-bounded field (a `net.allow` pool too wide, a predicate field admitting path traversal) is a hole the operator signed. Second, the **composition** of the tools it may spawn: an agent permitted to spawn a network-capable tool *and* a filesystem-capable tool can bridge their two channels itself and reconstitute the lethal trifecta across two kennels, though no single kennel holds both legs.
+
+**Mitigation in Project Kennel.** Request-don't-author: the capability floor is the signed template, never agent-supplied policy (design §7.12.1). The agent's writes apply as a typed patch over a frozen, pre-resolved template and are accepted only for fields the `[[mutable]]` manifest opens, each within its declared bound — pool membership, `oneof` set, or a typed traversal-free predicate (design §7.12.3). No TOML round-trip and no policy compiler runs at spawn: the daemon TCB grows only by the bounded patch-validator in the verify half (`kennel-lib-policy`), never `kennel-lib-compile`. Spawn-eligibility (depth-1, `max_lifetime`, resource ceilings, manifest well-formedness) is checked at the spawner's *install* and re-checked authoritatively at the `SPAWN` verb (design §7.12.8); the template is content-pinned by byte-hash, closing the TOCTOU between install-check and spawn. The `max_instances` ceiling is enforced by atomic check-and-claim slot accounting; a double reaper (soft EOF, hard requester-session-drop) plus the spawned kennel's own `max_lifetime` self-reap bound its life (design §7.12.7); the kennel is ephemeral, with no host persistence (design §7.12.6). The spawned kennel receives no ambient authority from the requester — `kenneld` mints the channel, mounts nothing, parses no JSON, and routes no bytes; the requester holds neither `ptrace` nor signal reach into the sibling (design §7.12.9). The grant is **loud**: `[spawn]` requires a `reason`, and the exposure is *derived* from the grant and surfaced by `kennel policy risks` with the grant as carrier — the mechanism by which `mode = host` derives T1.6 — with no stored `threats.reinstated` field.
+
+**Residuals.** Two, both narrowed and neither eliminated. **R1 — the mutable-field surface is agent-controlled.** The boundary is exactly as strong as the template's per-field bounds; pure pool/`oneof` manifests reduce the agent's input to closed-set selection with zero free text, while a predicate field is the loud exception that reintroduces an open value (held by a typed, traversal-free, `RESOLVE_IN_ROOT` bound). Operator-owned: signing a manifest signs its per-field bounds as load-bearing. **R2 — delegated composition is the requester's to compose.** Kennel bounds each spawned kennel to its template but does not reason about what an agent composes across several; an agent permitted to spawn a network-capable tool and a filesystem-capable tool can bridge their channels and reconstitute the lethal trifecta across two kennels though no single kennel holds both legs. This is **not mechanically closed** — closing it would put cross-kennel information-flow analysis in the daemon, a larger and different project. It is mitigated, not eliminated, by scoping `[[spawn.allow]]` to the templates a given agent actually needs: the composition surface shrinks with the grant. The same in-band shape as T1.8 and T5.2, between kennels rather than to an external API. The posture claim is confinement and consented delegation, not control over what the agent does with the tools it is permitted to spawn.
+
+**MITRE ATT&CK.** T1610 (Deploy Container — the spawn analogue, contained to the template's grant), T1559 (Inter-Process Communication — the minted stdio channel and the agent-bridged cross-kennel composition), T1041 (Exfiltration Over C2 Channel — the unclosed R2, over an agent-bridged channel).
+
 ---
 
 # Family 5 — Framework attack surface (T5.1–T5.4)
@@ -748,6 +764,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T2.2, T2.4 | CC8.1 (change management); CC7.1 (detection of system anomalies) |
 | T3.2–T3.5 | CC6.6, CC8.1 (boundary controls; change management) |
 | T3.6, T3.7 | CC8.1, CC7.1 (change management; detection) |
+| T3.8, T3.9 | CC6.1, CC6.3 (least-privilege logical access); CC9.2 (vendor and business-partner risk: third-party images and templates) |
 
 ## ISO/IEC 27001:2022 (selected controls)
 
@@ -760,6 +777,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T2.2, T2.4 | A.8.28 (Secure coding); A.8.29 (Security testing in development and acceptance) |
 | T3.2–T3.5 | A.8.22 (Segregation of networks); A.8.23 (Web filtering) |
 | T3.6, T3.7 | A.5.7 (Threat intelligence); A.8.28 (Secure coding) |
+| T3.8, T3.9 | A.8.2 (Privileged access rights); A.8.3 (Information access restriction); A.5.19, A.5.21 (Supplier relationships; managing ICT supply chain) |
 
 ## NIS2 (Directive (EU) 2022/2555, Article 21 measures)
 
@@ -768,6 +786,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T1.1–T1.11 | Article 21(2)(d): supply chain security; Article 21(2)(e): security in acquisition, development, and maintenance |
 | T2.1–T2.8 | Article 21(2)(a): policies on risk analysis and information system security; Article 21(2)(g): basic cyber hygiene practices and training |
 | T3.1–T3.7 | Article 21(2)(d): supply chain security; Article 21(2)(j): use of multi-factor authentication and secured communications |
+| T3.8, T3.9 | Article 21(2)(i): access control policies and least privilege; Article 21(2)(d): supply chain security (third-party images and templates) |
 | T5.1–T5.4 | Article 21(2)(e): security in acquisition, development, and maintenance; Article 21(2)(i): human resources security, access control policies and asset management |
 
 ## DORA (Regulation (EU) 2022/2554, for financial entities)
@@ -777,6 +796,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T1.1–T1.11 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
 | T2.1–T2.8 | Article 9; Article 16 (ICT-related incidents); Article 17 (ICT-related incident reporting) |
 | T3.1–T3.7 | Article 9; Article 28 (third-party risk) |
+| T3.8, T3.9 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
 | T5.1–T5.4 | Article 9 (ICT risk management framework); Article 16 (ICT-related incidents) |
 
 These mappings are first-pass starting points for compliance teams. Specific control-objective mapping requires organisation-specific analysis.
