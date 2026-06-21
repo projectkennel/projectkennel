@@ -130,8 +130,8 @@ Resolving one versioned reference:
 1. Locate the artefact for the exact `(name, version)` in the search path (§File location).
 2. Parse it (the same parse/validate discipline as any policy file).
 3. Verify its `[signature]` envelope against the trust store (§Signatures). A reference whose artefact fails signature verification is refused; the content is not composed.
-4. Compute the SHA-256 of the artefact's canonical-form content.
-5. Check the hash against the lockfile (§The lockfile). On first resolution, record it; on subsequent resolution, a mismatch is a hard error.
+4. Record the artefact's ed25519 signature (the deterministic commitment over its canonical-form content).
+5. Check the signature against the lockfile (§The lockfile). On first resolution, record it; on subsequent resolution, a changed signature for the same `(name, version)` is a hard error.
 
 Steps 3–5 are what make a reference a supply-chain control rather than a name lookup. Version pinning alone constrains *which* artefact is named; the signature and the lockfile constrain *what bytes* are composed. This is the same reasoning the dependency policy applies to Rust crates (CODING-STANDARDS.md §5.5).
 
@@ -143,17 +143,17 @@ Steps 3–5 are what make a reference a supply-chain control rather than a name 
 [[locked]]
 name = "ai-coding-strict"
 version = "v4"
-content_sha256 = "e8d3...<full hex>"
 signing_key_id = "kennel-maint-2026-01"
+signature = "BASE64..."   # the artefact's ed25519 signature
 
 [[locked]]
 name = "corp-egress-allowlist"
 version = "v2.33.2"
-content_sha256 = "91af...<full hex>"
 signing_key_id = "corp-policy-2026"
+signature = "BASE64..."
 ```
 
-On load, the resolver recomputes each artefact's `content_sha256` and compares against the lockfile. A mismatch — same `(name, version)`, different bytes — is `PolicyError::LockMismatch`, naming the reference. The only sanctioned way to change a locked entry is `kennel policy upgrade`, which surfaces the content change for review before rewriting the lockfile.
+On load, the resolver re-verifies each reference and compares its recorded `signature` against the lockfile. A mismatch — same `(name, version)`, different signature — is `PolicyError::LockMismatch`, naming the reference. Because an ed25519 signature is deterministic (RFC 8032) and bound to the exact canonical bytes it covers, the signature *is* the content commitment: re-tagging a version to different bytes, even re-signed by another trusted key, changes the recorded signature and is caught. There is no separate content hash and the project takes no `sha2` dependency for it. The only sanctioned way to change a locked entry is `kennel policy upgrade`, which surfaces the change for review before rewriting the lockfile.
 
 A policy committed to source control alongside its `kennel.lock` is a reproducible specification: resolving it against the same trust store yields byte-identical effective policy or a hard failure. A missing lockfile triggers first-resolution recording (trust-on-first-use); production deployments may require a present, matching lockfile via system configuration.
 
@@ -259,7 +259,7 @@ signature = "BASE64..."
 # signed_fields is optional advisory metadata; the in-tree templates omit it.
 ```
 
-The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-8-internal-api.md` under `kennel-lib-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The `content_sha256` recorded in the lockfile (§The lockfile) is the SHA-256 of this same canonical-form content, so the lockfile pins precisely the bytes the signature covered.
+The signature is over the canonical-form serialisation of the whole artefact minus the `[signature]` block, computed by the procedure documented in `02-8-internal-api.md` under `kennel-lib-policy::canonical`. The canonical form pins field order, normalises whitespace, and excludes the `[signature]` block itself. The lockfile (§The lockfile) records this same signature over the canonical form; because ed25519 is deterministic and bound to the exact canonical bytes, pinning the signature already pins precisely the bytes it covered, so no separate hash is needed.
 
 Signature verification rules:
 
@@ -389,9 +389,7 @@ framework_invariants_asserted = [ "cap.no_new_privs", "..." ]  # ids the compile
 # ...flat resolved policy, every section, final values...
 
 [provenance]
-leaf_policy_sha256 = "..."
 schema_version = 1
-invariant_set_sha256 = "..."
 threat_catalogue_version = "0.3"
 compiler_version = "0.4.2"
 
@@ -402,14 +400,14 @@ ula_gid = "..."
 [[provenance.resolved_artifacts]]
 name = "base-confined"
 version = "v3"
-content_sha256 = "..."
 signing_key_id = "kennel-maint-2026-01"
+signature = "BASE64..."   # the artefact's ed25519 signature commitment
 
 [[provenance.resolved_artifacts]]
 name = "corp-egress-allowlist"
 version = "v2.33.2"
-content_sha256 = "..."
 signing_key_id = "corp-policy-2026"
+signature = "BASE64..."
 
 [signature]
 algorithm = "ed25519"
@@ -420,7 +418,7 @@ signature = "BASE64..."
 - `effective_policy` is the resolved policy: no `template_base`, no `include`, no delta operators (`.add`/`.remove`/`.override`/`.invariant`), only final rule sets. Installation-constant variables (`<tag>`, `<gid>`) are already substituted.
 - `deferred_substitutions` lists the per-instance placeholders the runtime must fill. The runtime substitutes exactly these and refuses to spawn if any *other* unsubstituted placeholder is found in `effective_policy`.
 - `framework_invariants_asserted` records which framework invariants the compiler validated. The runtime re-asserts them regardless (defence in depth, §below); the list is for audit, not for the runtime to trust.
-- `provenance` makes the artefact self-describing: every input that produced it, by hash. `resolved_artifacts` embeds the relevant lockfile entries, so the settled policy records exactly which signed source bytes were composed, without those sources needing to be present at runtime.
+- `provenance` makes the artefact self-describing: every input that produced it, by its signing key and signature commitment. `resolved_artifacts` embeds the relevant lockfile entries, so the settled policy records exactly which signed source bytes were composed (the deterministic ed25519 signature pins those bytes), without those sources needing to be present at runtime.
 - `signature` is over the canonical-form serialisation of every field except `signature` itself, by the compiling authority's key (`kennel-lib-policy::canonical`, the same procedure as source signatures).
 
 ### Runtime consumption
@@ -441,7 +439,7 @@ This is the one place the runtime deliberately repeats compile-time work, and it
 
 ### Two modes
 
-- **Local development.** `kennel run` of a source policy auto-compiles in memory when no fresh settled artefact exists, seals the result by content hash plus lockfile, marks it a dev build, and runs it. Staleness is detected by comparing the settled policy's `provenance` hashes against the current source inputs; a mismatch triggers recompilation. `kennel compile` may also be run explicitly.
+- **Local development.** `kennel run` of a source policy auto-compiles in memory when no fresh settled artefact exists, seals the result unsigned (`algorithm = "none"`, content-complete) plus the lockfile, marks it a dev build, and runs it. Staleness is detected by comparing the settled policy's `provenance` against the current source inputs; a mismatch triggers recompilation. `kennel compile` may also be run explicitly.
 - **Fleet / attested.** The organisation compiles centrally and pushes only signed settled policies. The workstation need not hold the templates, fragments, lockfile, or exercise the resolver. The runtime trust surface is one signature verification plus the framework-invariant re-assertion.
 
 ### On-disk

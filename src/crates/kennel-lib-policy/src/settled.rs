@@ -908,10 +908,13 @@ pub struct ResolvedArtifact {
     pub name: String,
     /// Resolved version (e.g. `v4`, `v2.33.2`).
     pub version: String,
-    /// SHA-256 of the artefact's canonical form (hex), lifted from the lockfile.
-    pub content_sha256: String,
     /// The `key_id` that signed this artefact.
     pub signing_key_id: String,
+    /// The artefact's ed25519 signature (base64) — the content commitment lifted from the lockfile.
+    /// A deterministic signature over the canonical form *is* the content pin (no `sha2`); empty for
+    /// an unsigned development artefact.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
 }
 
 /// Provenance: every input that produced this settled policy.
@@ -924,11 +927,8 @@ pub struct Provenance {
     pub schema_version: u32,
     /// The THREATS.md catalogue version the templates were authored against.
     pub threat_catalogue_version: String,
-    /// SHA-256 (hex) of the leaf policy's canonical form.
-    pub leaf_policy_sha256: String,
-    /// SHA-256 (hex) of the invariant set enforced at compile time.
-    pub invariant_set_sha256: String,
-    /// The resolved templates/fragments, from the lockfile.
+    /// The resolved templates/fragments, each pinned to its signing key and signature (the
+    /// deterministic ed25519 commitment over its canonical form — no separate hash).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_artifacts: Vec<ResolvedArtifact>,
 }
@@ -1466,13 +1466,11 @@ pub(crate) fn sample_settled() -> SettledPolicy {
             compiler_version: "0.0.0".to_owned(),
             schema_version: 1,
             threat_catalogue_version: "0.1".to_owned(),
-            leaf_policy_sha256: "00".to_owned(),
-            invariant_set_sha256: "00".to_owned(),
             resolved_artifacts: vec![ResolvedArtifact {
                 name: "base-confined".to_owned(),
                 version: "v3".to_owned(),
-                content_sha256: "ab".to_owned(),
                 signing_key_id: "kennel-maint-2026-01".to_owned(),
+                signature: "c2ln".to_owned(),
             }],
         },
         ssh: SshRuntime::default(),

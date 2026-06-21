@@ -2441,8 +2441,6 @@ mod tests {
                 compiler_version: "0.0.0".to_owned(),
                 schema_version: 1,
                 threat_catalogue_version: "0.1".to_owned(),
-                leaf_policy_sha256: "00".to_owned(),
-                invariant_set_sha256: "00".to_owned(),
                 resolved_artifacts: Vec::<ResolvedArtifact>::new(),
             },
             ssh: t.ssh,

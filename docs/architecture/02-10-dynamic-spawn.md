@@ -1,11 +1,15 @@
 # Dynamic spawn — the `SPAWN` transaction and the confined-stdio handoff
 
-> **Status: designed, not yet built.** This chapter is the implementation contract for the
-> dynamic-spawn feature designed in [`../design/07-12-dynamic-spawn.md`](../design/07-12-dynamic-spawn.md)
-> (§7.12). It is the as-built target for roadmap workstreams W3–W8
-> ([`../governance/ROADMAP-0.3.0.md`](../governance/ROADMAP-0.3.0.md)); it is written as a forward
-> contract and reconciled to as-built truth as those workstreams land. Where this contract and the
-> code diverge once built, the divergence is owed to the code.
+> **Status: built through construction; the reaper and the slot claim remain.** This chapter is the
+> implementation contract for the dynamic-spawn feature designed in
+> [`../design/07-12-dynamic-spawn.md`](../design/07-12-dynamic-spawn.md) (§7.12), the as-built target
+> for roadmap workstreams W3–W8 ([`../governance/ROADMAP-0.3.0.md`](../governance/ROADMAP-0.3.0.md)).
+> As built: the `[spawn]` grant carries into the settled policy (W3) and the `SPAWN` Node 0 verb is
+> served (W6) — `kenneld` validates the grant, re-verifies the content-pin, re-runs spawn-eligibility,
+> applies the manifest patch, mints the stdio channel, returns the requester's ends, and drives
+> construction of the validated instance as a running sibling (the injected stdio rides the existing
+> non-interactive run path). **Not yet built:** the atomic `max_instances` claim and the fate-sharing
+> reaper (W8). Where this contract and the code diverge, the divergence is owed to the code.
 
 A confined workload asks `kenneld` to instantiate a constrained, ephemeral **sibling** kennel from
 an operator-signed template and wires a stdio channel to it. `kenneld` validates an ACL, brokers
@@ -74,6 +78,11 @@ no policy compiler enters `cargo tree -p kenneld` ([[tcb-only-shrinks]]):
 2. **Template pin + eligibility.** `kenneld` resolves the named template from the (mutable) trust
    store and verifies it against the **content-pin** the spawner's compiled policy recorded for it
    (fail-closed on mismatch), then **re-runs spawn-eligibility** (§7.12.8) on the resolved template.
+   The content-pin is the template's **ed25519 signature commitment** — the spawner records the
+   signed artefact's `signing_key_id` + signature at its compile; at `SPAWN` the re-resolved template
+   must carry that same signature *and* verify against the trust keys. A deterministic signature over
+   canonical content is itself the content commitment (the lockfile idiom), so a re-signed-in-place
+   target resolves to a different signature and is caught — no `sha2` enters the daemon.
    The install-time eligibility pass is fail-fast authoring feedback; *this* is the authoritative gate,
    because the trust store is mutable and a re-signed entry must not slip an ineligible target past a
    stale install-time result (a TOCTOU).
