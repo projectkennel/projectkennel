@@ -256,8 +256,11 @@ pub static TABLES: &[Table] = &[
             f("from", Ty::StrArray, "Pool bound: the fixed set a spawn may append values from (with `max`)."),
             f("max", Ty::Int, "Pool bound: the maximum number of appended entries (with `from`)."),
             f("oneof", Ty::StrArray, "Oneof bound: the enumerated member list a spawn selects from."),
+            f("match", Ty::StrArray, "Pattern bound: the pre-baked net-destination shapes an open value must match (`*.suffix:port` subdomain wildcard, `prefix.*:port` final-label/IPv4-/24 wildcard, or exact `host:port`). The agent supplies a destination not enumerated at sign time; admitted only if it fits one signed shape."),
             f("type", Ty::Str, "Predicate bound: the value type (currently `relpath`), with `under`."),
             f("under", Ty::Str, "Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free), with `type`."),
+            f("freeform", Ty::Bool, "Freeform bound: no shape at all — any value accepted. The loud last-resort footgun; requires `reason` and is warned at compile. Prefer a closed (oneof/pool) or shaped (pattern) constraint."),
+            f("reason", Ty::Str, "The justification a `freeform` variant requires (the loud rule)."),
         ],
     },
     Table {

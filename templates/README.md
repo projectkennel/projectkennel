@@ -33,7 +33,7 @@ Each template directory carries `policy.toml` (the template's policy), `meta.tom
 | Section | Enforced today? |
 |---|---|
 | `fs.read`/`write`/`deny`, `fs.home` (constructed `$HOME` view), `fs.tmp`, `fs.dev`, `fs.proc` | **Yes** — `pivot_root` view + Landlock + private `/tmp` + constructed `/dev` + `hidepid` (§7.2). |
-| `net.mode`, `net.allow` (by-CIDR → BPF+proxy; by-name → proxy), `net.deny.invariant` | **Yes** — cgroup BPF (deny-first, fail-closed) + per-kennel `host-netproxy` (dual-stack). |
+| `net.mode`, `net.proxy.allow` (by-CIDR **and** by-name → the egress proxy), `net.proxy.deny`, `[net.bpf]` (CIDR connect/bind ACL) | **Yes** — `host-netproxy` enforces the `[net.proxy]` allow/deny per destination (dual-stack); the cgroup BPF is the deny-first floor (a direct `connect()` reaches only the proxy) and is the egress *allow* gate only in `mode = host` via `[net.bpf]`. A `net.proxy.allow` rule never populates the BPF allow map. |
 | `exec.allow`, `exec.deny_setuid`/`setgid`/`setcap`/`deny_writable` | **Yes** — Landlock `EXECUTE` allowlist + the BPF/settled invariants + seccomp. |
 | `proc`, `cap.no_new_privs`, `seccomp` | **Yes**. |
 | `unix.abstract = "deny"`, signal isolation | **Yes, natively** — Landlock ABI-6 scoping (supersedes the AppArmor/seccomp fallback; design §7.4/§7.7). |

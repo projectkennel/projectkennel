@@ -38,8 +38,10 @@ pub mod error;
 pub mod invariant;
 pub mod keys;
 pub mod libresolve;
+pub mod patch;
 pub mod settled;
 pub mod signature;
+pub mod variant;
 
 pub use audit::parse_audit_defaults;
 pub use error::PolicyError;
@@ -162,105 +164,7 @@ mod tests {
     use super::*;
 
     fn sample_policy() -> SettledPolicy {
-        SettledPolicy {
-            settled_schema_version: 1,
-            name: "ai-coding".to_owned(),
-            deferred_substitutions: vec!["<ctx>".to_owned(), "<uid>".to_owned()],
-            framework_invariants_asserted: vec!["cap.no_new_privs".to_owned()],
-            effective_policy: EffectivePolicy {
-                net: NetPolicy {
-                    mode: NetMode::Constrained,
-                    proxy: ProxyListen::default(),
-                    allow: vec![NetRule {
-                        cidr: "93.184.216.0".to_owned(),
-                        prefix_len: 24,
-                        port_min: 443,
-                        port_max: 443,
-                        protocol: Protocol::Tcp,
-                    }],
-                    allow_names: Vec::new(),
-                    deny_invariant: vec![NetRule {
-                        cidr: "169.254.169.254".to_owned(),
-                        prefix_len: 32,
-                        port_min: 0,
-                        port_max: 65535,
-                        protocol: Protocol::Any,
-                    }],
-                    bind_port_min: 0,
-                    bind_allowed_ports: Vec::new(),
-                    deny_author: Vec::new(),
-                    bpf_connect_allow: Vec::new(),
-                    bpf_connect_deny: Vec::new(),
-                    bpf_bind_allow: Vec::new(),
-                    bpf_bind_deny: Vec::new(),
-                },
-                fs: FsPolicy {
-                    home_shadow: true,
-                    read: vec!["/usr".to_owned()],
-                    write: vec!["/run/kennel/ai-coding/home".to_owned()],
-                    exclusive: Vec::new(),
-                    home_persist: Vec::new(),
-                    home_readonly: false,
-                    tmp: TmpPolicy {
-                        private: true,
-                        size_mib: 512,
-                        mode: "0700".to_owned(),
-                    },
-                    dev: DevPolicy {
-                        allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
-                    },
-                },
-                exec: ExecPolicy {
-                    deny_setuid: true,
-                    deny_setgid: true,
-                    deny_setcap: true,
-                    deny_writable: true,
-                    allow: vec!["/usr/bin/python3".to_owned()],
-                    deny: Vec::new(),
-                    path: vec!["/usr/bin".to_owned()],
-                    shell: settled::default_shell(),
-                    loaders: Vec::new(),
-                },
-                proc: ProcPolicy {
-                    visibility: ProcVisibility::SelfOnly,
-                    hidepid: true,
-                },
-                cap: CapPolicy { no_new_privs: true },
-                seccomp: SeccompPolicy {
-                    deny_action: SeccompAction::Errno,
-                    deny: vec!["bpf".to_owned()],
-                },
-                lifecycle: LifecyclePolicy {
-                    ttl_seconds: Some(3600),
-                    ttl_action: TtlAction::Exit,
-                },
-                tty: TtyPolicy::default(),
-                trust: TrustPolicy::default(),
-            },
-            provenance: Provenance {
-                compiler_version: "0.0.0".to_owned(),
-                schema_version: 1,
-                threat_catalogue_version: "0.1".to_owned(),
-                leaf_policy_sha256: "00".to_owned(),
-                invariant_set_sha256: "00".to_owned(),
-                resolved_artifacts: vec![ResolvedArtifact {
-                    name: "base-confined".to_owned(),
-                    version: "v3".to_owned(),
-                    content_sha256: "ab".to_owned(),
-                    signing_key_id: "kennel-maint-2026-01".to_owned(),
-                }],
-            },
-            ssh: settled::SshRuntime::default(),
-            unix: settled::UnixRuntime::default(),
-            identity: settled::IdentityRuntime::default(),
-            binder: settled::BinderRuntime::default(),
-            dbus: settled::DbusRuntime::default(),
-            audit: settled::AuditRuntime::default(),
-            env: settled::EnvRuntime::default(),
-            ulimits: settled::UlimitsRuntime::default(),
-            workload: settled::WorkloadRuntime::default(),
-            rootfs: settled::RootfsRuntime::default(),
-        }
+        settled::sample_settled()
     }
 
     fn signing_key() -> SigningKey {

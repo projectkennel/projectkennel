@@ -36,6 +36,9 @@ pub enum PolicyError {
     /// Two included fragments contribute conflicting entries for the same unique key
     /// (the author must reconcile them; resolution is not last-wins).
     IncludeConflict(String),
+    /// A spawn-time mutable-field patch was rejected (`§7.12.3`): a field outside the template's
+    /// manifest, a value its constraint refuses, or more entries than the constraint admits.
+    Patch(String),
 }
 
 impl core::fmt::Display for PolicyError {
@@ -68,6 +71,7 @@ impl core::fmt::Display for PolicyError {
             Self::Translation(m) => write!(f, "settled-policy translation failed: {m}"),
             Self::LockMismatch(m) => write!(f, "lockfile mismatch: {m}"),
             Self::IncludeConflict(m) => write!(f, "include conflict: {m}"),
+            Self::Patch(m) => write!(f, "spawn patch rejected: {m}"),
         }
     }
 }

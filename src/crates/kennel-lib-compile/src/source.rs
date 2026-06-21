@@ -230,7 +230,7 @@ pub struct SpawnAllow {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MutableField {
-    /// The dotted leaf-field path this entry opens (`net.allow`, `rootfs.writable`, `fs.workspace`).
+    /// The dotted leaf-field path this entry opens (`net.proxy.allow`, `rootfs.writable`, `fs.write`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     /// Pool bound: the fixed set a spawn may append values from.
@@ -242,12 +242,24 @@ pub struct MutableField {
     /// Oneof bound: the enumerated member list a spawn selects from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oneof: Option<Vec<String>>,
+    /// Pattern bound: the pre-baked net-destination shapes an open value must match
+    /// (`*.suffix:port`, `prefix.*:port`, exact). The agent supplies a destination not enumerated at
+    /// sign time; it is admitted only if it fits one signed shape.
+    #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
+    pub match_: Option<Vec<String>>,
     /// Predicate bound: the value type (currently `relpath`).
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_: Option<String>,
     /// Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub under: Option<String>,
+    /// Freeform bound: no shape at all — the loud, last-resort footgun. Any value is accepted; a
+    /// `reason` is mandatory and the variant is warned at compile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<bool>,
+    /// The justification a `freeform` variant requires (the loud rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).

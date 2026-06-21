@@ -119,6 +119,7 @@ pub fn compile(
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
+    warnings.extend(spawn_manifest_warnings(&effective));
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
@@ -181,6 +182,7 @@ pub fn compile_leaf(
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
+    warnings.extend(spawn_manifest_warnings(&effective));
     assemble(name, &translated, &chain, &tcv, compiler_version, warnings)
 }
 
@@ -264,6 +266,27 @@ fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
         )
     })
     .collect()
+}
+
+/// Warn loudly about each `freeform` variant in a spawn-target template's `[[mutable]]` manifest
+/// (§7.12.3). Freeform is the open footgun — any value the agent supplies is accepted — so it is
+/// warned at compile (warn, never forbid — `footgun-warn-dont-forbid`); the mandatory `reason` is
+/// surfaced so the operator sees what they signed off.
+fn spawn_manifest_warnings(effective: &SourcePolicy) -> Vec<String> {
+    effective
+        .mutable
+        .iter()
+        .filter(|m| m.freeform == Some(true))
+        .map(|m| {
+            let field = m.field.as_deref().unwrap_or("?");
+            let reason = m.reason.as_deref().unwrap_or("");
+            format!(
+                "[[mutable]] field = \"{field}\" is FREEFORM — a spawn may write any value to it, \
+                 the loudest mutable surface (reason: {reason}). Prefer a closed (oneof/pool) or \
+                 shaped (pattern) constraint unless nothing narrower can express the need."
+            )
+        })
+        .collect()
 }
 
 /// Resolve and apply included fragments additively, in listed order.
@@ -393,6 +416,7 @@ fn assemble(
         ulimits: translated.ulimits.clone(),
         workload: translated.workload.clone(),
         rootfs: translated.rootfs.clone(),
+        manifest: translated.manifest.clone(),
         provenance: Provenance {
             compiler_version: compiler_version.to_owned(),
             schema_version: SETTLED_SCHEMA_VERSION,

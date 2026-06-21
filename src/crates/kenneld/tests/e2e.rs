@@ -92,6 +92,7 @@ fn own_cgroup_base() -> Option<PathBuf> {
 /// (read+exec), the constructed `/etc`, and one granted `~` subdir
 /// (`<home>/kennel-e2e/granted`, which remaps beneath the shim root). A sibling
 /// `~/kennel-e2e/secret` is deliberately NOT granted, so its name must be absent.
+#[allow(clippy::too_many_lines)] // a flat settled-policy fixture; cohesive, not decomposable.
 fn minimal_policy(home: &Path) -> SettledPolicy {
     SettledPolicy {
         settled_schema_version: 1,
@@ -170,6 +171,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             tty: kennel_lib_policy::TtyPolicy::default(),
             trust: kennel_lib_policy::TrustPolicy::default(),
         },
+        manifest: Vec::new(),
         provenance: Provenance {
             compiler_version: "0.0.0".to_owned(),
             schema_version: 1,

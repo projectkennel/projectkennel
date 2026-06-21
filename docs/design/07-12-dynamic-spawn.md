@@ -89,6 +89,15 @@ verify-and-load half the daemon already carries. The write is a **typed mutation
 policy, never a TOML re-serialise and re-parse** — that round-trip would smuggle the parser back into the
 daemon, so it is the parser, not only the compiler, that `SPAWN` keeps out.
 
+**The instantiated policy is never itself signed.** The signed artefact is the *template* plus its
+manifest of variants; the instance an agent spawns — the template with its patch applied — exists only
+in `kenneld`'s memory for the spawn's lifetime and is handed straight to construction. There is no
+settled artefact on disk for the instance and nothing to re-sign. Its integrity rests not on a
+signature of its own but on the chain that produced it: the verified template signature, the signed
+per-field constraints, and the in-TCB validator that can only move a field the manifest opens, within
+the bound it declares. The manifest *is* the signed statement of how far an instance may legally
+diverge from the template.
+
 This inverts the surface from *synthesis* to *selection*, which is the single most useful thing for
 making agent-generated policy tractable. The agent does not author a policy the validator then
 checks; it fills a few labelled, fenced blanks in a sealed document, and the patch validator proves it
@@ -97,35 +106,62 @@ check than satisfaction of a predicate over an open value space, and an LLM cann
 grant through by finding a value that technically passes — the field it would need to write is
 frozen, not in its write set.
 
-Each manifest field carries its own **bound**; "mutable" means writable *within that bound*, never
-free. A mutable `net.allow` that accepts `0.0.0.0/0` defeats the purpose, so the bound is part of
-the signed declaration. Three bound kinds cover the cases, and they are one mechanism, not three:
+Each variant carries its own **constraint** describing *how* its field may move; "mutable" means
+writable *within that constraint*, never free. A mutable proxy allow that accepts `0.0.0.0/0` defeats
+the purpose, so the constraint is part of the signed declaration. The constraint is one of an **open
+family — not a fixed taxonomy**: each member describes a different *way* a variant may diverge, and a
+new way to bound a divergence can be added as a new member without disturbing the others. The ones in
+play:
 
 ```toml
 # net-fetch@v1 (operator-signed): a full policy with [net].mode = "constrained" frozen
-# and net.allow empty, plus the manifest naming what may move —
+# and the proxy allowlist empty, plus the manifest naming what may move —
 
 [[mutable]]
-field = "net.allow"          # pool + max: the agent appends, drawn from a fixed pool
-from  = ["10.0.0.0/8", "ghcr.io", "pypi.org"]
-max   = 16
+field = "net.proxy.allow"    # pattern: OPEN destinations, bounded by a pre-baked shape —
+match = ["*.pypi.org:443", "ghcr.io:443", "10.0.0.*:443"]
+# the agent supplies a concrete destination nobody enumerated at sign time; it is admitted
+# only if it matches one signed pattern (subdomain `*.suffix`, final-label `prefix.*`), exact port.
+# This governs the per-kennel egress PROXY filter only — an admitted destination joins the proxy
+# allowlist. The cgroup BPF ACL is a separate mechanism (`[net.bpf]`), never touched here.
 
 [[mutable]]
 field = "rootfs.writable"    # oneof: the agent picks from an enumerated member list
 oneof = ["/usr/lib/python3.12", "/opt/app/cache"]
 
 [[mutable]]
-field = "fs.workspace"       # predicate: the runtime-relative escape hatch (below)
+field = "fs.read"            # pool + max: append up to `max`, each drawn from a fixed pool
+from  = ["/opt/data", "/opt/models"]
+max   = 8
+
+[[mutable]]
+field = "fs.write"           # predicate: a runtime-relative writable subpath (existing fs.write leaf)
 type  = "relpath"            # traversal-free, RESOLVE_IN_ROOT at instantiation
 under = "workspace"
+
+# The fifth member, freeform, takes no shape at all and applies to any of these fields:
+#   field = "fs.write"   freeform = true   reason = "…"   (loud, last-resort — see below)
 ```
 
-The **predicate** kind is the old free-variable case, demoted to what it is — the minority escape
-hatch for a value that genuinely cannot be enumerated or pooled at sign time, such as the agent's
-actual working subpath. It is the loud one: most templates are pure pool/oneof selection and carry
-*zero* agent-authored free text, so the open-value residual (R1, §7.12.9) attaches only to templates
-that declare a predicate field, not to instantiation in general. The recommendation is variants and
-allowlists by default, a predicate field by exception and with justification.
+Every `field` above is an **existing** policy-schema leaf (`net.proxy.allow`, `fs.read`, `fs.write`,
+`rootfs.writable`) — a variant never coins a field, it constrains one the schema already has, and the
+applicator's registry is the authority on which leaves are mutable (an unknown field is a compile
+reject). The five constraint *members* are not the whole family — a new way to bound (or refuse to
+bound) a divergence can join without disturbing the rest. They form a **loudness gradient from closed to open**. **pool** and
+**oneof** are *closed* — the agent selects from a set fixed at sign time, zero free text. **pattern** is
+the *shaped-open* case `net.allow` needs: the value is not pre-baked (no operator enumerates every
+destination an agent may reach), but a wildcard is admitted only when it conforms to a signed shape — a
+subdomain wildcard `*.suffix`, a final-label wildcard `prefix.*` (the IPv4 `/24` form), each with an
+exact port — so the freedom is real but its shape is bounded by the signature. **predicate** is the
+typed escape hatch (a traversal-free `RESOLVE_IN_ROOT` relpath) for a value that cannot be enumerated or
+shaped, such as the agent's actual working subpath. **freeform** is the floor: *no* constraint, any
+value accepted — so it is the loudest, governed by the footgun rule (warn, never forbid, §11.x): it
+**requires a `reason`** and is flagged with big warnings at compile, at `validate`, and at every
+instantiation, because a freeform variant is an operator handing an agent an open value by choice. The
+open-value residual (R1, §7.12.9) attaches to the open constraints and grows along the gradient — bounded
+under *pattern*, wider under *predicate*, maximal under *freeform*. The recommendation is closed
+constraints by default, an open one by exception with justification, and *freeform* only when nothing
+narrower can express the need.
 
 The frozen set is what carries the invariants. The single-leg property (§7.12.2), the resource
 ceilings, and the TTL live in frozen fields — `net.mode`, the absence of an `[fs]` root grant, the

@@ -201,7 +201,7 @@ mod tests {
         assert!(check_narrowing("net-fetch@v1", &ok, &target).is_ok());
         let bad = SpawnAllow {
             template: Some("net-fetch@v1".to_owned()),
-            mutable: Some(vec!["fs.workspace".to_owned()]),
+            mutable: Some(vec!["fs.write".to_owned()]),
         };
         assert!(format!(
             "{}",

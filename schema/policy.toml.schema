@@ -602,12 +602,27 @@
             "type": "string"
           }
         },
+        "match": {
+          "description": "Pattern bound: the pre-baked net-destination shapes an open value must match (`*.suffix:port` subdomain wildcard, `prefix.*:port` final-label/IPv4-/24 wildcard, or exact `host:port`). The agent supplies a destination not enumerated at sign time; admitted only if it fits one signed shape.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "type": {
           "description": "Predicate bound: the value type (currently `relpath`), with `under`.",
           "type": "string"
         },
         "under": {
           "description": "Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free), with `type`.",
+          "type": "string"
+        },
+        "freeform": {
+          "description": "Freeform bound: no shape at all — any value accepted. The loud last-resort footgun; requires `reason` and is warned at compile. Prefer a closed (oneof/pool) or shaped (pattern) constraint.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "The justification a `freeform` variant requires (the loud rule).",
           "type": "string"
         }
       },
