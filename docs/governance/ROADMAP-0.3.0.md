@@ -3,12 +3,14 @@
 Status: **in flight** · Drafted: 2026-06-20 · Updated: 2026-06-21 · Targets: 0.3.0
 Baseline: 0.2.0 (2026-06-20)
 
-**Progress (2026-06-21).** Thrust 1 (W1–W2) and Thrust 2 (W3–W5) are merged — the whole
-spawn *policy/schema* surface: the design + threat catalogue, the `[spawn]` grant + eligibility,
-the `[[mutable]]` constraint family + patch validator, and the signed single-leg template set.
-In flight: **Thrust 4 · W9** (address provisioning — independent of the spawn build). Next:
-**Thrust 3 · W6–W8** (the spawn runtime path); W10/W11 are gated on it. Per-workstream status
-is marked on each item below.
+**Progress (2026-06-21).** Thrust 1 (W1–W2), Thrust 2 (W3–W5), and Thrust 4 · W9 are merged —
+the whole spawn *policy/schema* surface (design + threat catalogue, the `[spawn]` grant +
+eligibility, the `[[mutable]]` constraint family + patch validator, the signed single-leg template
+set) plus address provisioning gated on inbound bind. In flight: **Thrust 4 · W10** (spawn-latency
+harness), pulled ahead of Thrust 3 deliberately — the always-on boundary profile of the *existing*
+construction path is the instrument that lands the spawn runtime, and re-measures it once the SPAWN
+verb is in. Next: **Thrust 3 · W6–W8** (the spawn runtime path). Per-workstream status is marked
+on each item below.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -156,22 +158,27 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 ### Thrust 4 — "Do less": over-allocation and latency (the discipline spawn forces)
 
-- **W9 · Provision per-kennel addresses only where an inbound bind consumes them.** **[dep] M.**
+- **W9 · Provision per-kennel addresses only where an inbound bind consumes them.** **[dep] M.** · ✅ **done** (#61)
   The trigger is **bind-list presence, not mode**: no bind list → an address-less net-ns. The
   empty-bind-list path is 100% of ephemeral tool spawns, so this eliminates address provisioning
   from the hot path entirely. Independent of the spawn build itself; lands in parallel.
 
-- **W10 · Spawn-latency profiling harness.** **[dep] L.**
+- **W10 · Spawn-latency profiling harness.** **[dep] L.** · ✅ **boundary harness done** (in flight: PR)
   Profile setup latency end-to-end across the five privilege-domain boundaries (kennel →
-  kenneld → privhelper → bin-init → workload → teardown). *Methodology:* off-CPU for the
-  cross-process hops, on-CPU only inside compute leaves; tag spans by root kind (tmpfs vs OCI);
-  measure **spawn-rate-under-load**, not a single cold spawn; treat **teardown as a first-class
-  span** (a slow teardown makes spawn rates teardown-limited). Carry the **TCB latency delta as
-  a runtime-behavioural signal** (a structural addition to the hot path shifts the path's
-  internal proportions even when it doesn't move absolute numbers), and a high-res
-  function-level dev build via LLVM **XRay** (`-Z instrument-xray`: all sleds for dev deep-dives,
-  boundary sleds only for always-on release-path instrumentation). Lands once the spawn path
-  exists (after W8) so the numbers measure the real hot path.
+  kenneld → privhelper → bin-init → workload → teardown). *Built:* the spawn-path tracer
+  (`kennel_lib_config::Tracer`) stamps every milestone with a wall-clock `[t=<nanos>]`
+  (`CLOCK_REALTIME`, shared across the spawn-path processes), and `tools/spawn-latency.sh`
+  drives N constructions of a policy-suite case against the **real installed** `kennel run`,
+  parses the milestone deltas into a **per-boundary breakdown** (median + p90 span, slowest-first
+  boundaries) and **spawn-rate-under-load**. Pulled ahead of Thrust 3 by maintainer call: the
+  boundary profile of the existing construction path is the instrument that lands the spawn
+  runtime — and re-runs against the SPAWN verb once it exists, carrying the **TCB latency delta as
+  a runtime-behavioural signal** (a structural addition to the hot path shifts the path's internal
+  proportions even when it doesn't move absolute numbers). *Follow-on increments:* off-CPU hop
+  profiling (perf sched / bpftrace offcputime) for the cross-process waits; root-kind span tagging
+  (tmpfs vs OCI); teardown as a first-class span; and the high-res function-level dev build via
+  LLVM **XRay** (`-Z instrument-xray`, nightly — a local dev deep-dive only, never on the stable
+  release path).
 
 - **W11 · Skip the constrained-mode BPF egress attach.** **[opt] S.**
   In constrained mode the proxy already default-denies, so `[net.bpf]` egress is
@@ -252,8 +259,10 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
    W3+W4.
 3. **Spawn runtime — W6 → W7 → W8.** The daemon path. W6 is the keystone; W7/W8 hang off its
    FD-injection and session model. `02-10` (W1) is written as-built here.
-4. **"Do less" — W9 in parallel** with the spawn build (independent net-ns change); **W10 after
-   W8** so the latency numbers measure the real hot path; **W11 only if W10's profile dictates.**
+4. **"Do less" — W9 in parallel** with the spawn build (independent net-ns change); **W10 ahead
+   of Thrust 3** — the boundary harness lands against the existing construction path so it is the
+   instrument that lands the spawn runtime, then re-measures the SPAWN verb once it exists; **W11
+   only if W10's profile dictates.**
 5. **OCI / persistence — W12–W15**, independent of spawn; slot against capacity. W14
    (`.trust-manifest.d`) pairs with W12 (`oci revert` is its total-revert case). W15 is opt and
    may slip.
