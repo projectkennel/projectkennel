@@ -1319,6 +1319,7 @@ pub fn run_kennel<P, L>(
                     .unwrap_or_default()
                     .template_dirs(),
                 std::sync::Arc::clone(constructor),
+                shared.identity.tracer,
             ))
         });
         spec.binder = Some(crate::BinderPrep {
@@ -1455,6 +1456,11 @@ pub fn run_kennel<P, L>(
     // handler services (freeze + decide; the `ttl-warn`/`ttl-terminate` audit events come from
     // there). So this is a plain wait — on `exit` the handler kills the frozen cgroup, and this
     // wait returns the resulting status. The audited privileged records the teardown too.
+    // `stop` blocks until the workload exits — delivering its answer (the spawned kennel's stdio
+    // closes) — then reclaims: it stamps `teardown: workload exited` at that exit point, stops the
+    // binder looper pool, and removes the cgroup. The spinup harness reads the span from that
+    // milestone to `teardown complete` below as the teardown cost, distinct from the answer latency
+    // the requester observes (`02-10` §7.12.7, W10).
     let status = kennel.stop(&audited);
     // The workload exited: stop the tripwire watcher thread (best-effort join).
     if let Some(tripwire) = tripwire {
@@ -1493,6 +1499,10 @@ pub fn run_kennel<P, L>(
     shared.reap_children(ctx);
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
+    // Reclaim complete: the cgroup is gone and the registry entry released. For a spawned sibling the
+    // `max_instances` slot frees microseconds later when this `run_kennel` returns and the constructor
+    // thread drops its `SlotGuard` — so this milestone marks the kennel fully torn down (§7.12.7).
+    tr.step(&format!("run_kennel: teardown complete `{}`", req.kennel));
     let _ = control::send_response(
         conn,
         &Response::Exited {

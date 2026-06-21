@@ -125,6 +125,11 @@ pub struct SpawnRuntime {
     /// Live spawn count for this grant — the `max_instances` accounting (§7.12.7). Shared across the
     /// looper pool so the check-and-claim is atomic; a [`SlotGuard`] holds one unit until teardown.
     live: Arc<AtomicU32>,
+    /// Spawn-path tracer (the `log_level` knob): stamps each validate→mint milestone with a
+    /// wall-clock `[t=<nanos>]` in the same `CLOCK_REALTIME` stream as `run_kennel`, so the
+    /// spinup harness (`tools/spawn-spinup.sh`) can time the in-daemon SPAWN handler — the
+    /// "one layer down" phase that precedes the construction the requester observes.
+    tracer: kennel_lib_config::Tracer,
 }
 
 impl SpawnRuntime {
@@ -136,6 +141,7 @@ impl SpawnRuntime {
         keys: KeySet,
         template_dirs: Vec<PathBuf>,
         constructor: Arc<dyn SpawnConstructor>,
+        tracer: kennel_lib_config::Tracer,
     ) -> Self {
         Self {
             grant,
@@ -143,6 +149,7 @@ impl SpawnRuntime {
             template_dirs,
             constructor,
             live: Arc::new(AtomicU32::new(0)),
+            tracer,
         }
     }
 }
@@ -189,6 +196,8 @@ pub fn handle_spawn(
         );
         return Reply::Data(spawn_wire::encode_reply(status::DENIED, ""));
     };
+    rt.tracer
+        .step(&format!("spawn: SPAWN received on node 0, ctx={ctx}"));
     match validate_and_mint(rt, incoming) {
         Ok((instance, requester_ends, channel, slot)) => {
             // The spawned kennel's stdio: the socketpair end serves both stdin and stdout
@@ -204,6 +213,9 @@ pub fn handle_spawn(
             // Hand the validated instance + its claimed slot to construction, off the looper (async to
             // this reply); the requester writes into its socketpair end, which buffers until the tool
             // reads (§7.12). The slot rides with the build and releases when the spawned kennel exits.
+            rt.tracer.step(&format!(
+                "spawn: validated + minted, enqueue construct `{name}`"
+            ));
             rt.constructor.enqueue(instance, stdio, name.clone(), slot);
             emit(writer, ctx, incoming, Outcome::Allow, &name);
             Reply::DataAndFds(spawn_wire::encode_reply(status::OK, &name), requester_ends)
@@ -222,9 +234,13 @@ fn validate_and_mint(
     rt: &SpawnRuntime,
     incoming: &Incoming,
 ) -> Result<(SettledPolicy, Vec<OwnedFd>, Channel, SlotGuard), Deny> {
+    let tr = rt.tracer;
     // 1. Decode the untrusted request.
     let (template_ref, patch_pairs) = spawn_wire::decode_request(&incoming.data)
         .ok_or_else(|| deny(status::BAD_REQUEST, "malformed SPAWN request"))?;
+    tr.step(&format!(
+        "spawn: decoded request, template `{template_ref}`"
+    ));
 
     // 2. Grant: the template must be in this kennel's [spawn.allow].
     let pin = rt
@@ -246,21 +262,25 @@ fn validate_and_mint(
             format!("template `{template_ref}` was not found in the trust store"),
         )
     })?;
+    tr.step("spawn: grant ok, template resolved from trust store");
 
     // 4. Content-pin + cryptographic verify against the trust keys (§7.12.8).
     let template =
         kennel_lib_policy::verify_pinned(&bytes, &rt.keys, &pin.signing_key_id, &pin.signature)
             .map_err(|e| deny(status::DENIED, e.to_string()))?;
+    tr.step("spawn: content-pin + signature verified");
 
     // 5. Re-run spawn-eligibility on the resolved bytes (the authoritative gate).
     kennel_lib_policy::spawn_eligible(&template)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
+    tr.step("spawn: eligibility re-check ok");
 
     // 6. Apply the manifest patch (narrowed per requester) onto the resolved template, producing the
     //    in-memory instance construction runs (never written to disk — §7.12.6).
     let entries = build_patch(pin, &patch_pairs).map_err(|e| deny(status::DENIED, e))?;
     let instance = kennel_lib_policy::patch::instantiate(&template, &entries)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
+    tr.step("spawn: manifest patch applied");
 
     // 7. Atomically claim a max_instances slot (§7.12.7) — the fork-bomb bound. Held until the
     //    spawned kennel terminates (the construction thread holds the guard); full ⇒ a clean refusal.

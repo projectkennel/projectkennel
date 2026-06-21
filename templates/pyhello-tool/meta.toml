@@ -1,0 +1,8 @@
+# Template identity + signing metadata (docs/design/05-templates.md §5.2, §5.10).
+name = "pyhello-tool"
+version = "1"
+template_base = "base-confined@v1"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.3"
+last_reviewed = "2026-06-21"
+description = "Interpreter-startup SPAWN target: python3 -c print('hello') (reaches nothing). The native-vs-kennel python datum for the W10 spinup profile, measured as an ephemeral SPAWN sibling."
