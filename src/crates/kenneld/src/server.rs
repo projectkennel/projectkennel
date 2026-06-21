@@ -556,10 +556,41 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         // recorded handle is the intermediate init — `cgroup.kill` reaches the whole
         // kennel (init + workload + descendants). The owning thread then reaps the
         // init and tears the kennel down.
+        // Hard reaper (§7.12.7): a stopped requester takes its spawned siblings with it, so a
+        // network-capable tool cannot outlive the agent that asked for it.
+        self.reap_children(ctx);
         let cgroup = cgroup::kennel_cgroup(&self.identity.cgroup_base, ctx);
         match cgroup::kill_cgroup(&cgroup) {
             Ok(()) => Response::Stopped,
             Err(e) => Response::Error(format!("could not stop `{name}`: {e}")),
+        }
+    }
+
+    /// The hard reaper (§7.12.7): `cgroup.kill` every kennel this requester spawned.
+    ///
+    /// Spawned kennels are named `spawn-<parent-ctx>-<id>` (see [`crate::spawn::spawn_name`]), so the
+    /// requester's children are exactly the live registry entries under that prefix. Called when the
+    /// requester tears down — explicit `stop`, or its own workload exit / TTL — so a tool that ignores
+    /// the soft-reaper `EOF` still dies with the agent that spawned it (the template's TTL is the
+    /// independent backstop for the requester-holds-its-session-forever case).
+    fn reap_children(&self, parent_ctx: u16) {
+        let prefix = crate::spawn::child_name_prefix(parent_ctx);
+        let children: Vec<u16> = {
+            let reg = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            reg.kennels
+                .iter()
+                .filter(|(name, _)| name.starts_with(&prefix))
+                .map(|(_, meta)| meta.ctx)
+                .collect()
+        };
+        for child_ctx in children {
+            let cgroup = cgroup::kennel_cgroup(&self.identity.cgroup_base, child_ctx);
+            if let Err(e) = cgroup::kill_cgroup(&cgroup) {
+                eprintln!("kenneld: hard reaper: could not kill spawned ctx {child_ctx}: {e}");
+            }
         }
     }
 
@@ -1447,6 +1478,10 @@ pub fn run_kennel<P, L>(
     if let Some(drain) = drain {
         drain.stop();
     }
+    // Hard reaper (§7.12.7): the requester's workload exited, so reap any siblings it spawned — a
+    // tool that ignored the soft-reaper EOF dies with the agent (a no-op for a kennel that spawned
+    // nothing, including every spawned kennel itself, which is depth-1).
+    shared.reap_children(ctx);
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
     let _ = control::send_response(

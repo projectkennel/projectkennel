@@ -190,7 +190,7 @@ pub fn handle_spawn(
         return Reply::Data(spawn_wire::encode_reply(status::DENIED, ""));
     };
     match validate_and_mint(rt, incoming) {
-        Ok((instance, uuid, requester_ends, channel, slot)) => {
+        Ok((instance, requester_ends, channel, slot)) => {
             // The spawned kennel's stdio: the socketpair end serves both stdin and stdout
             // (bidirectional JSON-RPC), so it is duplicated for the two; the pipe write end is stderr.
             let Ok(stdout) = channel.spawned_rpc.try_clone() else {
@@ -198,12 +198,15 @@ pub fn handle_spawn(
                 return Reply::Data(spawn_wire::encode_reply(status::DENIED, ""));
             };
             let stdio = [channel.spawned_rpc, stdout, channel.spawned_stderr];
+            // The transient name encodes the requester's ctx, so the hard reaper can find and kill
+            // this kennel when the requester tears down (§7.12.7) — a registry scan for `spawn-<ctx>-*`.
+            let name = spawn_name(ctx);
             // Hand the validated instance + its claimed slot to construction, off the looper (async to
             // this reply); the requester writes into its socketpair end, which buffers until the tool
             // reads (§7.12). The slot rides with the build and releases when the spawned kennel exits.
-            rt.constructor.enqueue(instance, stdio, uuid.clone(), slot);
-            emit(writer, ctx, incoming, Outcome::Allow, &uuid);
-            Reply::DataAndFds(spawn_wire::encode_reply(status::OK, &uuid), requester_ends)
+            rt.constructor.enqueue(instance, stdio, name.clone(), slot);
+            emit(writer, ctx, incoming, Outcome::Allow, &name);
+            Reply::DataAndFds(spawn_wire::encode_reply(status::OK, &name), requester_ends)
         }
         Err(d) => {
             emit(writer, ctx, incoming, Outcome::Deny, &d.reason);
@@ -213,12 +216,12 @@ pub fn handle_spawn(
 }
 
 /// The validation pipeline: decode → grant → pin → eligibility → patch → claim → mint. On success
-/// returns the validated in-memory instance (for construction), the `spawn-<uuid>`, the requester's
-/// channel ends, the spawned kennel's channel ends, and the claimed `max_instances` slot.
+/// returns the validated in-memory instance (for construction), the requester's channel ends, the
+/// spawned kennel's channel ends, and the claimed `max_instances` slot.
 fn validate_and_mint(
     rt: &SpawnRuntime,
     incoming: &Incoming,
-) -> Result<(SettledPolicy, String, Vec<OwnedFd>, Channel, SlotGuard), Deny> {
+) -> Result<(SettledPolicy, Vec<OwnedFd>, Channel, SlotGuard), Deny> {
     // 1. Decode the untrusted request.
     let (template_ref, patch_pairs) = spawn_wire::decode_request(&incoming.data)
         .ok_or_else(|| deny(status::BAD_REQUEST, "malformed SPAWN request"))?;
@@ -270,9 +273,9 @@ fn validate_and_mint(
     })?;
 
     // 8. Mint the channel; return the instance plus the requester's and spawned ends and the slot.
-    let (uuid, requester_ends, channel) =
+    let (requester_ends, channel) =
         mint().map_err(|e| deny(status::DENIED, format!("channel mint failed: {e}")))?;
-    Ok((instance, uuid, requester_ends, channel, slot))
+    Ok((instance, requester_ends, channel, slot))
 }
 
 /// Resolve `name@version` to the signed template bytes from the first trust-store directory that
@@ -305,9 +308,9 @@ fn build_patch(pin: &SpawnTemplate, pairs: &[(&str, &str)]) -> Result<Vec<PatchE
 }
 
 /// Mint the stdio channel: a socketpair (bidirectional JSON-RPC) and a `stderr` pipe. Returns the
-/// `spawn-<uuid>`, the requester's two ends (socketpair local + pipe read), and the spawned kennel's
-/// ends (socketpair remote + pipe write) for construction.
-fn mint() -> io::Result<(String, Vec<OwnedFd>, Channel)> {
+/// requester's two ends (socketpair local + pipe read) and the spawned kennel's ends (socketpair
+/// remote + pipe write) for construction.
+fn mint() -> io::Result<(Vec<OwnedFd>, Channel)> {
     let (requester_rpc, spawned_rpc) = UnixStream::pair()?;
     let (stderr_read, stderr_write) = std::io::pipe()?;
     let requester_ends = vec![OwnedFd::from(requester_rpc), OwnedFd::from(stderr_read)];
@@ -315,15 +318,26 @@ fn mint() -> io::Result<(String, Vec<OwnedFd>, Channel)> {
         spawned_rpc: OwnedFd::from(spawned_rpc),
         spawned_stderr: OwnedFd::from(stderr_write),
     };
-    Ok((spawn_uuid(), requester_ends, channel))
+    Ok((requester_ends, channel))
 }
 
-/// A transient `spawn-<id>` name. A process-global monotonic counter — `Math::random`/clocks are
-/// unavailable in this build, and a counter is collision-free within a daemon's life (which is all a
-/// transient spawn name needs; it consumes no operator registry namespace — `02-10` §Ephemerality).
-fn spawn_uuid() -> String {
+/// A transient `spawn-<parent-ctx>-<id>` name (§7.12.7): the requester's ctx is encoded so the hard
+/// reaper can find every child of a requester by registry prefix. The id is a process-global
+/// monotonic counter — clocks/`Math::random` are unavailable in this build, and a counter is
+/// collision-free within a daemon's life (all a transient name needs — `02-10` §Ephemerality).
+fn spawn_name(parent_ctx: u16) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!("spawn-{:012x}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "spawn-{parent_ctx}-{:012x}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// The registry-name prefix for every kennel spawned by the requester at `parent_ctx` — the hard
+/// reaper's lookup key (§7.12.7).
+#[must_use]
+pub fn child_name_prefix(parent_ctx: u16) -> String {
+    format!("spawn-{parent_ctx}-")
 }
 
 /// Emit a `kennel.spawn` audit event (`02-10` §Audit events).
@@ -394,11 +408,23 @@ mod tests {
     }
 
     #[test]
-    fn mint_yields_distinct_uuids_and_two_requester_ends() {
-        let (u1, ends, _ch) = mint().expect("mint");
+    fn mint_yields_two_requester_ends() {
+        let (ends, _ch) = mint().expect("mint");
         assert_eq!(ends.len(), 2, "socketpair local + stderr read");
-        let (u2, _e, _c) = mint().expect("mint");
-        assert_ne!(u1, u2, "uuids are unique");
-        assert!(u1.starts_with("spawn-"));
+    }
+
+    #[test]
+    fn spawn_name_encodes_the_parent_ctx_and_is_unique() {
+        let n1 = spawn_name(7);
+        let n2 = spawn_name(7);
+        assert_ne!(n1, n2, "names are unique");
+        assert!(
+            n1.starts_with(&child_name_prefix(7)),
+            "encodes the parent ctx"
+        );
+        assert!(
+            !n1.starts_with(&child_name_prefix(8)),
+            "distinguishes parents"
+        );
     }
 }
