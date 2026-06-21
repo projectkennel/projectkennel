@@ -1,7 +1,14 @@
 # Project Kennel — 0.3.0 plan
 
-Status: **planning** · Drafted: 2026-06-20 · Targets: 0.3.0
+Status: **in flight** · Drafted: 2026-06-20 · Updated: 2026-06-21 · Targets: 0.3.0
 Baseline: 0.2.0 (2026-06-20)
+
+**Progress (2026-06-21).** Thrust 1 (W1–W2) and Thrust 2 (W3–W5) are merged — the whole
+spawn *policy/schema* surface: the design + threat catalogue, the `[spawn]` grant + eligibility,
+the `[[mutable]]` constraint family + patch validator, and the signed single-leg template set.
+In flight: **Thrust 4 · W9** (address provisioning — independent of the spawn build). Next:
+**Thrust 3 · W6–W8** (the spawn runtime path); W10/W11 are gated on it. Per-workstream status
+is marked on each item below.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -58,7 +65,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 ### Thrust 1 — Design lock and threat catalogue (the foundation)
 
-- **W1 · Promote the dynamic-spawn design + author the architecture contract.** **[dep] M.**
+- **W1 · Promote the dynamic-spawn design + author the architecture contract.** **[dep] M.** · ✅ **done** (#56; `02-10` keeps growing as-built across W6–W8)
   The §7.12 design chapter is **promoted** into `docs/design/` (this plan's PR). The
   architecture/implementation contract **`02-10-dynamic-spawn.md`** — the `SPAWN` transaction,
   the FD-injection sequence, the manifest-diff validation point, the double reaper — is written
@@ -66,7 +73,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   truth, so it grows with the code, not ahead of it). The thesis blockquote in §7.12 already
   points to it.
 
-- **W2 · T3.9 lands in the catalogue, with the risk derivation.** **[dep] M.**
+- **W2 · T3.9 lands in the catalogue, with the risk derivation.** **[dep] M.** · ✅ **done** (#57)
   Migrate the provisional §7.12.9 block into `THREATS.md` as **T3.9 — Delegated spawning**
   (workload-class, sibling to T3.8), add the machine entry to `dist/threats/catalogue.toml`
   (kept in sync by `src/tools/tests/threats-catalogue.sh`), and wire the **derivation**: the
@@ -79,7 +86,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
 
 ### Thrust 2 — Spawn policy surface (compiler, out of the TCB)
 
-- **W3 · The `[spawn]` grant + spawn-eligibility rules.** **[dep] L.**
+- **W3 · The `[spawn]` grant + spawn-eligibility rules.** **[dep] L.** · ✅ **done** (#58)
   `[spawn]` in `schema/policy.toml.schema` and `kennel-lib-compile`: the `max_instances`
   ceiling (fork-bomb bound), the `[[spawn.allow]]` template grant (+ optional per-requester
   `mutable` narrowing), and the T3.9 risk
@@ -93,7 +100,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   cannot know which future policy will name it.) *Instantiation is a manifest diff, not value synthesis.* All
   compiler-side — out of `cargo tree -p kenneld`.
 
-- **W4 · Template `[[mutable]]` manifest grammar + instantiation-time patch validator.** **[dep] M.**
+- **W4 · Template `[[mutable]]` manifest grammar + instantiation-time patch validator.** **[dep] M.** · ✅ **done** (#59)
   The §7.12.3 attack surface — *selection, not synthesis*. The signed template is a complete
   runnable policy plus a `[[mutable]]` manifest naming which leaf fields may move, each with a
   **bound**: pool (`from` + `max` — append from a fixed set), `oneof` (pick from an enumerated
@@ -106,7 +113,7 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   trifecta leg. Policy validation in the existing compiler — **not
   a new parser in the TCB**.
 
-- **W5 · Signed single-leg template set + per-template tests.** **[dep] M.**
+- **W5 · Signed single-leg template set + per-template tests.** **[dep] M.** · ✅ **done** (#60)
   A small Kennel-shipped set of spawn templates, each holding **at most one** trifecta leg, so
   composing them is a visible, signed operator act. Starting set:
   - `pure-compute` — code execution; `[net].mode = "none"` frozen; ephemeral tmpfs root; TTL +
