@@ -27,7 +27,7 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
@@ -56,8 +56,24 @@ pub trait SpawnConstructor: Send + Sync {
 /// The live count is decremented on drop — on the construction thread when the spawned kennel
 /// terminates, or at once if the build aborts (§7.12.7). A boot failure cannot leak a slot, and a
 /// flapping requester cannot leak across teardown races.
+///
+/// It also carries the requester's [`parent_alive`](SpawnRuntime) flag so the construction thread can
+/// re-check it once the sibling's cgroup exists — the hard-reaper race close (§7.12.7): construction is
+/// async to the `SPAWN` reply, so a requester can die (and its `reap_children` run) *before* this
+/// sibling's cgroup exists for the reaper to kill. The reaper flips the flag false before it scans; the
+/// construction thread re-checks after the cgroup is live, so a sibling cannot orphan past its requester.
 pub struct SlotGuard {
     live: Arc<AtomicU32>,
+    parent_alive: Arc<AtomicBool>,
+}
+
+impl SlotGuard {
+    /// The requester's liveness flag (false once its `SpawnRuntime` has dropped). A spawned kennel's
+    /// construction re-checks this once its cgroup is live, to self-terminate if the requester is gone.
+    #[must_use]
+    pub fn parent_liveness(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.parent_alive)
+    }
 }
 
 impl Drop for SlotGuard {
@@ -67,8 +83,13 @@ impl Drop for SlotGuard {
 }
 
 /// Atomically claim a slot if the live count is below `max` (§7.12.7) — a single check-and-claim, so
-/// two concurrent `SPAWN`s on different loopers cannot jointly exceed the ceiling. `None` if full.
-fn claim_slot(live: &Arc<AtomicU32>, max: u32) -> Option<SlotGuard> {
+/// two concurrent `SPAWN`s on different loopers cannot jointly exceed the ceiling. `None` if full. The
+/// claimed guard carries `parent_alive` for the construction thread's post-cgroup liveness re-check.
+fn claim_slot(
+    live: &Arc<AtomicU32>,
+    max: u32,
+    parent_alive: &Arc<AtomicBool>,
+) -> Option<SlotGuard> {
     let mut cur = live.load(Ordering::Acquire);
     loop {
         if cur >= max {
@@ -83,6 +104,7 @@ fn claim_slot(live: &Arc<AtomicU32>, max: u32) -> Option<SlotGuard> {
             Ok(_) => {
                 return Some(SlotGuard {
                     live: Arc::clone(live),
+                    parent_alive: Arc::clone(parent_alive),
                 })
             }
             Err(actual) => cur = actual,
@@ -130,6 +152,20 @@ pub struct SpawnRuntime {
     /// spinup harness (`tools/spawn-spinup.sh`) can time the in-daemon SPAWN handler — the
     /// "one layer down" phase that precedes the construction the requester observes.
     tracer: kennel_lib_config::Tracer,
+    /// Requester liveness, flipped false on [`Drop`] (when this kennel's node-0 server stops — ahead of
+    /// its `reap_children`). A clone rides each [`SlotGuard`] to the construction thread, which re-checks
+    /// it once the spawned cgroup is live, closing the async-reaper race (§7.12.7).
+    parent_alive: Arc<AtomicBool>,
+}
+
+impl Drop for SpawnRuntime {
+    fn drop(&mut self) {
+        // The requester is tearing down: signal in-flight constructions to self-terminate if the hard
+        // reaper's registry scan missed them (their cgroup did not yet exist). This Drop runs when the
+        // node-0 server releases the last `Arc<SpawnRuntime>` — inside `Kennel::stop`'s `manager.stop()`,
+        // before `run_kennel` calls `reap_children` — so the flag is false ahead of the reap.
+        self.parent_alive.store(false, Ordering::Release);
+    }
 }
 
 impl SpawnRuntime {
@@ -150,6 +186,7 @@ impl SpawnRuntime {
             constructor,
             live: Arc::new(AtomicU32::new(0)),
             tracer,
+            parent_alive: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -285,7 +322,7 @@ fn validate_and_mint(
     // 7. Atomically claim a max_instances slot (§7.12.7) — the fork-bomb bound. Held until the
     //    spawned kennel terminates (the construction thread holds the guard); full ⇒ a clean refusal.
     let max = rt.grant.max_instances;
-    let slot = claim_slot(&rt.live, max).ok_or_else(|| {
+    let slot = claim_slot(&rt.live, max, &rt.parent_alive).ok_or_else(|| {
         deny(
             status::CEILING_FULL,
             format!("max_instances ceiling ({max}) is full"),
@@ -418,17 +455,42 @@ mod tests {
     #[test]
     fn claim_slot_bounds_the_ceiling_and_releases_on_drop() {
         let live = Arc::new(AtomicU32::new(0));
-        let g1 = claim_slot(&live, 2).expect("slot 1");
-        let g2 = claim_slot(&live, 2).expect("slot 2");
-        assert!(claim_slot(&live, 2).is_none(), "the ceiling is full");
+        let alive = Arc::new(AtomicBool::new(true));
+        let g1 = claim_slot(&live, 2, &alive).expect("slot 1");
+        let g2 = claim_slot(&live, 2, &alive).expect("slot 2");
+        assert!(
+            claim_slot(&live, 2, &alive).is_none(),
+            "the ceiling is full"
+        );
         drop(g1);
-        let g3 = claim_slot(&live, 2).expect("a freed slot is re-claimable");
+        let g3 = claim_slot(&live, 2, &alive).expect("a freed slot is re-claimable");
         assert_eq!(live.load(Ordering::Acquire), 2);
         drop((g2, g3));
         assert_eq!(
             live.load(Ordering::Acquire),
             0,
             "every slot released on drop"
+        );
+    }
+
+    #[test]
+    fn slot_carries_requester_liveness_for_the_reaper_race() {
+        // The construction thread re-checks this once the spawned cgroup is live (§7.12.7): a guard
+        // claimed while the requester is alive must observe the flag flip false when the requester's
+        // SpawnRuntime drops, so an in-flight sibling whose cgroup the hard reaper missed self-terminates.
+        let live = Arc::new(AtomicU32::new(0));
+        let alive = Arc::new(AtomicBool::new(true));
+        let slot = claim_slot(&live, 1, &alive).expect("slot");
+        let liveness = slot.parent_liveness();
+        assert!(
+            liveness.load(Ordering::Acquire),
+            "alive while the requester lives"
+        );
+        // SpawnRuntime::Drop is what flips it in production; emulate that store here.
+        alive.store(false, Ordering::Release);
+        assert!(
+            !liveness.load(Ordering::Acquire),
+            "the construction thread sees the requester gone"
         );
     }
 

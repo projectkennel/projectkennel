@@ -516,11 +516,14 @@ pub struct Plan {
     pub namespaces: Namespaces,
     /// The per-kennel cgroup the workload joins and the BPF programs attach to.
     pub cgroup: PathBuf,
-    /// Whether the workload joins [`cgroup`](Self::cgroup) (writes its own pid to
-    /// `cgroup.procs`) in the seal, before the irreversible confinement. True for
-    /// policy-derived plans; the migration succeeds because kenneld and the
-    /// workload share kenneld's delegated `user@<uid>` subtree, of which the
-    /// kennel cgroup is a descendant (`08-enforcement-architecture.md` §8.5).
+    /// Whether to **birth** the kennel into [`cgroup`](Self::cgroup): the privhelper factory passes the
+    /// cgroup fd to `clone3(CLONE_INTO_CGROUP)`, so the kennel's PID 1 is created *already inside* the
+    /// cgroup — no post-clone `cgroup.procs` migration, which would block on the
+    /// `cgroup_threadgroup_rwsem` RCU grace period (the ~13 ms construction cost W10 removed). The
+    /// factory selects the birth path on this flag (`kennel-privhelper::construct`: `Some(cgroup) →
+    /// clone_pid1_in_cgroup`, `None → clone_pid1` with no cgroup). True for policy-derived plans; it
+    /// works because the kennel cgroup is a descendant of kenneld's delegated `user@<uid>` subtree
+    /// (`08-enforcement-architecture.md` §8.5).
     pub cgroup_join: bool,
     /// The constructed-`$HOME` view (§7.4.5) the mount seal builds before
     /// `pivot_root`, or `None` for the escape-hatch path that does not unshare a
