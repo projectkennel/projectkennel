@@ -1,15 +1,16 @@
 # Dynamic spawn — the `SPAWN` transaction and the confined-stdio handoff
 
-> **Status: built through construction; the reaper and the slot claim remain.** This chapter is the
-> implementation contract for the dynamic-spawn feature designed in
-> [`../design/07-12-dynamic-spawn.md`](../design/07-12-dynamic-spawn.md) (§7.12), the as-built target
-> for roadmap workstreams W3–W8 ([`../governance/ROADMAP-0.3.0.md`](../governance/ROADMAP-0.3.0.md)).
-> As built: the `[spawn]` grant carries into the settled policy (W3) and the `SPAWN` Node 0 verb is
+> **Status: built (W3–W8).** This chapter is the implementation contract for the dynamic-spawn
+> feature designed in [`../design/07-12-dynamic-spawn.md`](../design/07-12-dynamic-spawn.md) (§7.12).
+> As built: the `[spawn]` grant carries into the settled policy (W3); the `SPAWN` Node 0 verb is
 > served (W6) — `kenneld` validates the grant, re-verifies the content-pin, re-runs spawn-eligibility,
-> applies the manifest patch, mints the stdio channel, returns the requester's ends, and drives
-> construction of the validated instance as a running sibling (the injected stdio rides the existing
-> non-interactive run path). **Not yet built:** the atomic `max_instances` claim and the fate-sharing
-> reaper (W8). Where this contract and the code diverge, the divergence is owed to the code.
+> applies the manifest patch, atomically claims a `max_instances` slot, mints the stdio channel,
+> returns the requester's ends, and drives construction of the validated instance as a running sibling
+> (the injected stdio rides the existing non-interactive run path — W7); and fate-sharing (W8) is the
+> claimed slot (released on teardown), the soft reaper (channel-close `EOF`), the template-TTL
+> self-reap, and the hard reaper (`spawn-<parent-ctx>-*` cgroup-killed when the requester tears down).
+> The `memfd` artifact transfer (§7.12.6) remains roadmap. Where this contract and the code diverge,
+> the divergence is owed to the code.
 
 A confined workload asks `kenneld` to instantiate a constrained, ephemeral **sibling** kennel from
 an operator-signed template and wires a stdio channel to it. `kenneld` validates an ACL, brokers
