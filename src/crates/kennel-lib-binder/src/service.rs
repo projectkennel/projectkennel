@@ -85,6 +85,17 @@ pub mod verb {
     /// blocks on the facade. The facade `connect`s its native listener at `<kennel-ip>:<port>` and
     /// splices.
     pub const DELIVER_INET: u32 = 13;
+    /// Instantiate an ephemeral sibling kennel from an operator-signed template (dynamic spawn).
+    ///
+    /// `02-10` §7.12. A facade-class verb (no registry lock): the **requester workload** transacts
+    /// `[template name@version | manifest-field patch]` (see [`crate::service::spawn`]) with
+    /// `TF_ACCEPT_FDS` and carries **no** fds inbound. kenneld validates the grant, the content-pin,
+    /// spawn-eligibility, and the patch (all verify-half), mints the stdio channel, and returns the
+    /// requester's two ends ([`crate::ctxmgr::Reply::DataAndFds`]: the socketpair local end and the
+    /// stderr pipe read end) with the `spawn-<uuid>`; construction proceeds asynchronously. Node 0
+    /// keeps `accepts_fds` unset, so the only fd movement is this outbound reply
+    /// (`binder-fd-passing-safety-verdict`).
+    pub const SPAWN: u32 = 14;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
@@ -377,4 +388,129 @@ pub mod status {
     /// for the port; `facade-client` re-arms after a short backoff. Lets the inbound handler return
     /// promptly instead of parking a binder looper (§7.5.7).
     pub const AGAIN: u8 = 5;
+    /// A [`crate::service::verb::SPAWN`] was refused because the requester's `max_instances`
+    /// concurrent-spawn ceiling is full (§7.12.7).
+    ///
+    /// Distinct from [`DENIED`] (a grant/pin/eligibility refusal) so a requester can tell "try again
+    /// later" from "never".
+    pub const CEILING_FULL: u8 = 6;
+}
+
+/// The [`verb::SPAWN`] request and reply wire (`02-10` §7.12).
+///
+/// **Request** (the requester is an untrusted workload, so kenneld decodes defensively): a
+/// length-prefixed template `name@version`, then a count-prefixed list of `(field-path, value)`
+/// manifest-patch pairs — `[tlen:u16be | template | n:u16be | (flen:u16be | field | vlen:u16be |
+/// value) × n]`. Every length is `u16` big-endian; the whole patch is bounded to
+/// `SPAWN_PATCH_MAX_BYTES` (64 KiB) at the spawner's compile, well under one `u16` per leaf.
+///
+/// **Reply**: a [`status`] byte, then — on [`status::OK`] — the `spawn-<uuid>` name. The two channel
+/// fds ride the binder object table ([`crate::ctxmgr::Reply::DataAndFds`]), not these bytes.
+pub mod spawn {
+    /// Frame a `u16`-big-endian length-prefixed string.
+    fn put_str(out: &mut Vec<u8>, s: &str) {
+        let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
+    }
+
+    /// Advance `data` past `n` bytes, returning the consumed head (or `None` if short).
+    fn take<'a>(data: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        let (head, tail) = data.split_at_checked(n)?;
+        *data = tail;
+        Some(head)
+    }
+
+    /// Read one length-prefixed UTF-8 string off the cursor.
+    fn take_str<'a>(data: &mut &'a [u8]) -> Option<&'a str> {
+        let len = u16::from_be_bytes(take(data, 2)?.try_into().ok()?);
+        core::str::from_utf8(take(data, usize::from(len))?).ok()
+    }
+
+    /// Encode a `SPAWN` request: the template ref and the manifest-field patch.
+    #[must_use]
+    pub fn encode_request(template: &str, patch: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_str(&mut out, template);
+        out.extend_from_slice(&u16::try_from(patch.len()).unwrap_or(u16::MAX).to_be_bytes());
+        for (field, value) in patch {
+            put_str(&mut out, field);
+            put_str(&mut out, value);
+        }
+        out
+    }
+
+    /// Decode a `SPAWN` request into `(template, patch)`.
+    ///
+    /// `None` for any malformed input — a short buffer, a non-UTF-8 or empty template/field, or
+    /// trailing bytes after a well-formed request (all untrusted, all fail closed).
+    #[must_use]
+    pub fn decode_request(data: &[u8]) -> Option<(&str, Vec<(&str, &str)>)> {
+        let mut cur = data;
+        let template = take_str(&mut cur)?;
+        if template.is_empty() {
+            return None;
+        }
+        let count = u16::from_be_bytes(take(&mut cur, 2)?.try_into().ok()?);
+        let mut patch = Vec::new();
+        for _ in 0..count {
+            let field = take_str(&mut cur)?;
+            let value = take_str(&mut cur)?;
+            if field.is_empty() {
+                return None;
+            }
+            patch.push((field, value));
+        }
+        // A well-formed request is fully consumed; trailing bytes are malformed.
+        cur.is_empty().then_some((template, patch))
+    }
+
+    /// Encode a `SPAWN` reply body: a [`super::status`] byte, then (on [`super::status::OK`]) the
+    /// `spawn-<uuid>` name. The channel fds are carried as binder objects, not in this payload.
+    #[must_use]
+    pub fn encode_reply(status: u8, uuid: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(uuid.len().saturating_add(1));
+        out.push(status);
+        out.extend_from_slice(uuid.as_bytes());
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn request_round_trips() {
+            let patch = [("net.proxy.allow", "example.com:443"), ("fs.write", "/w")];
+            let bytes = encode_request("net-fetch@v1", &patch);
+            let (template, got) = decode_request(&bytes).expect("decode");
+            assert_eq!(template, "net-fetch@v1");
+            assert_eq!(
+                got,
+                vec![("net.proxy.allow", "example.com:443"), ("fs.write", "/w")]
+            );
+        }
+
+        #[test]
+        fn an_empty_patch_round_trips() {
+            let bytes = encode_request("pure-compute@v1", &[]);
+            let (template, got) = decode_request(&bytes).expect("decode");
+            assert_eq!(template, "pure-compute@v1");
+            assert!(got.is_empty());
+        }
+
+        #[test]
+        fn trailing_garbage_is_rejected() {
+            let mut bytes = encode_request("net-fetch@v1", &[]);
+            bytes.push(0xff);
+            assert!(decode_request(&bytes).is_none());
+        }
+
+        #[test]
+        fn a_short_buffer_and_empty_template_are_rejected() {
+            assert!(decode_request(&[]).is_none());
+            assert!(decode_request(&[0, 1]).is_none()); // claims 1 byte, none follows
+            assert!(decode_request(&encode_request("", &[])).is_none()); // empty template
+        }
+    }
 }
