@@ -328,12 +328,27 @@ must know them.
   another kennel's already-running service), outside the dynamic-spawn model (§7.12.10). Dynamic
   spawn hands over a direct fd, so it needs no standing inter-kennel service registry.
 
+## Resolved at W3 (the `[spawn]`/`[[mutable]]` compiler surface)
+
+- **No `max_instances` default — it is mandatory.** A `[spawn]` grant without `max_instances` is
+  rejected at compile (`translate::validate_spawn`): an unbounded concurrent-spawn ceiling is a fork
+  bomb, so the bound is required, not defaulted. `max_instances = 0` is likewise rejected (it grants
+  nothing — drop `[spawn]` instead).
+- **Spawn-eligibility ceilings are hard-required, not defaulted (fail-closed).** A spawn-target
+  template is ineligible unless it declares its own `[lifecycle].ttl` (the self-reap lifetime bound)
+  and an explicit memory, pids, and CPU ceiling (`[ulimits].as` / `.nproc` / `.cpu`). The
+  framework supplies no default — so no spawn can inherit an unbounded ambient ceiling, and the
+  decision is visible in the signed target. Checked at the spawner's compile (`spawn::validate`,
+  §7.12.8) and re-checked authoritatively on the content-pinned bytes at `SPAWN`.
+- **The mutable-patch bound is an install-time compiler constant.** A spawn-target's `[[mutable]]`
+  manifest is rejected at compile if its worst-case patch (every `pool` at its `max`, longest pool
+  member per value, a `PATH_MAX` predicate value) exceeds `SPAWN_PATCH_MAX_BYTES` (64 KiB) — well
+  under the binder transaction buffer that also carries the template ref, uuid, and framing. The
+  `SPAWN` wire codec (W6) asserts the same bound on the live patch; the compiler is the fail-fast
+  authoring gate so an oversized manifest never reaches the transport as an opaque error.
+
 ## Open questions
 
-- **`max_instances` default** — the concurrent-spawn ceiling when a `[spawn]` grant omits it.
-- **Spawn-eligibility defaults** — the resource ceilings (memory/pids/CPU) and `max_lifetime` are
-  mandatory spawn-eligibility declarations (§7.12.8); the open question is whether each carries a
-  framework default when a template omits it, or eligibility hard-requires an explicit value.
 - **Per-field value normalisation** — patch key-membership removes the whole-tree-diff canonicalisation
   concern; the residual is normalising each patched *value* before its bound check (CIDR/host canonical
   form for a `pool` membership test, path normalisation for a `predicate`), so an

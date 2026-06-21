@@ -115,6 +115,7 @@ pub fn compile(
     warnings.extend(crate::binder::validate(&effective)?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
+    crate::spawn::validate(&effective, source, trust)?;
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
@@ -176,6 +177,7 @@ pub fn compile_leaf(
     warnings.extend(crate::binder::validate(&effective)?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
+    crate::spawn::validate(&effective, source, trust)?;
     let translated = translate(&effective)?;
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));

@@ -125,6 +125,8 @@ pub static TABLES: &[Table] = &[
             f("trust", Ty::Obj("trust"), "The masked workspace trust manifest (T2.8)."),
             f("dbus", Ty::Obj("dbus"), "D-Bus mediation via the IDBus facade (§7.7)."),
             f("rootfs", Ty::Obj("rootfs"), "`[rootfs]` — boot an unpacked OCI image as the kennel root (OCI run model only; §7.11). A loud substrate-trust grant: rejected by `kennel run`, required by `kennel oci run`."),
+            f("spawn", Ty::Obj("spawn"), "`[spawn]` — delegated-instantiation grant (§7.12.2): the operator-signed templates this workload may instantiate as ephemeral sibling kennels. A loud capability (T3.9); `reason` + `max_instances` are mandatory and each named template's spawn-eligibility is checked at compile."),
+            f("mutable", Ty::ObjArray("mutable"), "`[[mutable]]` — mutable-field manifest (§7.12.3) on a spawn-target template: which leaf fields a spawn may write, each with its bound (pool/oneof/predicate). Everything outside the manifest is frozen and inherited verbatim."),
         ],
     },
     Table {
@@ -227,6 +229,35 @@ pub static TABLES: &[Table] = &[
             f("persistence", Ty::Enum(&["discard", "persist"]), "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper, gone at teardown) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from)."),
             f("readonly", Ty::StrArray, "Closure-lock (§7.11.4c): rootfs paths Landlock denies writes to (the executable-closure boundary the DAC-flatten erased; the FHS closure is build-derived for a non-root image). `[\"/\"]` is whole-tree-immutable. Longest-prefix wins with `writable`."),
             f("writable", Ty::StrArray, "Closure-lock holes (§7.11.4c): rootfs paths to keep writable, carved back out of `readonly` (longest-prefix wins). Loud — each carve-out derives its own risk line."),
+        ],
+    },
+    Table {
+        name: "spawn",
+        title: "`[spawn]` — the delegated-instantiation grant (§7.12.2). Names which operator-signed templates this workload may instantiate as ephemeral sibling kennels; it never names capabilities — those live in the frozen, signed templates, and a spawn only writes manifest fields (§7.12.3). A loud capability (T3.9), derived into `kennel policy risks` the way `mode = host` derives T1.6.",
+        fields: &[
+            req("max_instances", Ty::Int, "Concurrent-instance ceiling across this grant's spawns — the fork-bomb bound (§7.12.7). Mandatory (must be ≥ 1)."),
+            req("reason", Ty::Str, "Why this delegation is extended (required; the spawn waiver is loud)."),
+            f("allow", Ty::ObjArray("spawn_allow"), "`[[spawn.allow]]` — the signed templates this grant may instantiate, each optionally narrowed to a subset of its manifest."),
+        ],
+    },
+    Table {
+        name: "spawn_allow",
+        title: "One `[[spawn.allow]]` entry — a single signed template a `[spawn]` grant may instantiate. The template's spawn-eligibility (depth-1, lifetime, ceilings) is checked at the spawner's compile (§7.12.8).",
+        fields: &[
+            req("template", Ty::Str, "The exact, versioned trust-store template name (`net-fetch@v1`)."),
+            f("mutable", Ty::StrArray, "Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields this requester may write (default: the full manifest). Narrows, never widens (§7.12.2) — every entry must name a field the template's manifest declares."),
+        ],
+    },
+    Table {
+        name: "mutable",
+        title: "One `[[mutable]]` manifest entry (§7.12.3) on a spawn-target template — names a leaf field a spawn may write, plus the **bound** that write must satisfy. Exactly one bound kind per entry: pool (`from` + `max`), `oneof`, or predicate (`type` + `under`). \"Mutable\" is writable *within* the bound, never free.",
+        fields: &[
+            req("field", Ty::Str, "The dotted leaf-field path this entry opens (`net.allow`, `rootfs.writable`, `fs.workspace`)."),
+            f("from", Ty::StrArray, "Pool bound: the fixed set a spawn may append values from (with `max`)."),
+            f("max", Ty::Int, "Pool bound: the maximum number of appended entries (with `from`)."),
+            f("oneof", Ty::StrArray, "Oneof bound: the enumerated member list a spawn selects from."),
+            f("type", Ty::Str, "Predicate bound: the value type (currently `relpath`), with `under`."),
+            f("under", Ty::Str, "Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free), with `type`."),
         ],
     },
     Table {

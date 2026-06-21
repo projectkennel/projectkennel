@@ -47,6 +47,7 @@ pub mod resolve;
 pub mod risks;
 pub mod source;
 pub mod source_sig;
+pub mod spawn;
 pub mod ssh;
 pub mod threats;
 pub mod translate;

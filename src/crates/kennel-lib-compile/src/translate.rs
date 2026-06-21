@@ -90,6 +90,8 @@ pub struct Translated {
 pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let mut deferred = BTreeSet::new();
     validate_rootfs(effective)?;
+    validate_spawn(effective)?;
+    validate_mutable_manifest(effective)?;
     let net = translate_net(effective, &mut deferred)?;
     let fs = translate_fs(effective, &mut deferred)?;
     let exec = translate_exec(effective, &mut deferred)?;
@@ -499,6 +501,185 @@ fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
              managed upper could never be written — drop one"
                 .to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// Install-time ceiling on a spawn's mutable-field patch (§7.12.3; 02-10 "the patch is bounded by
+/// the binder transaction buffer"). The patch rides one binder transaction (a ~1 MiB shared buffer
+/// that also carries the template ref, the spawn uuid, and framing); a field-selection patch
+/// approaching this is already pathological. Bounding the manifest's *worst case* here turns an
+/// opaque runtime transport failure into a fail-fast install error on the spawn-target template.
+const SPAWN_PATCH_MAX_BYTES: usize = 64 * 1024;
+
+/// Worst-case encoded length of a single predicate value — a traversal-free `RESOLVE_IN_ROOT`
+/// relpath, bounded by `PATH_MAX`.
+const SPAWN_PRED_VALUE_MAX: usize = 4096;
+
+/// A length-prefixed wire field costs a 4-byte count plus its bytes.
+const WIRE_LEN_PREFIX: usize = 4;
+
+/// Validate `[spawn]` (§7.12.2) local well-formedness: the delegated-instantiation grant is loud and
+/// bounded. Cross-template eligibility of each named target (depth-1, ceilings, manifest) is the
+/// *spawner's* compile-time gate in [`crate::compile`], which can resolve the targets; here we check
+/// only what the grant's own bytes settle.
+fn validate_spawn(src: &SourcePolicy) -> Result<(), PolicyError> {
+    let Some(spawn) = &src.spawn else {
+        return Ok(());
+    };
+    if spawn.reason.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(translation(
+            "[spawn] is a delegated-instantiation grant and requires a non-empty `reason`"
+                .to_owned(),
+        ));
+    }
+    match spawn.max_instances {
+        None => {
+            return Err(translation(
+                "[spawn] requires `max_instances` (the concurrent fork-bomb ceiling, §7.12.7)"
+                    .to_owned(),
+            ));
+        }
+        Some(0) => {
+            return Err(translation(
+                "[spawn].max_instances must be at least 1 (0 grants nothing — drop [spawn] instead)"
+                    .to_owned(),
+            ));
+        }
+        Some(_) => {}
+    }
+    if spawn.allow.is_empty() {
+        return Err(translation(
+            "[spawn] grants nothing without at least one [[spawn.allow]] template".to_owned(),
+        ));
+    }
+    for entry in &spawn.allow {
+        let Some(template) = entry.template.as_deref() else {
+            return Err(translation(
+                "[[spawn.allow]] requires a `template` (an exact `name@version` trust-store ref)"
+                    .to_owned(),
+            ));
+        };
+        crate::source::validate_reference(template)
+            .map_err(|d| translation(format!("[[spawn.allow]] template = \"{template}\": {d}")))?;
+        if let Some(narrow) = &entry.mutable {
+            if narrow.iter().any(|f| f.trim().is_empty()) {
+                return Err(translation(format!(
+                    "[[spawn.allow]] template = \"{template}\": `mutable` narrowing names an empty \
+                     field"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `[[mutable]]` manifest (§7.12.3) on a spawn-target template: each entry names a
+/// `field` and carries exactly one well-formed bound — pool (`from` + `max`), `oneof`, or predicate
+/// (`type` + `under`) — and the manifest's worst-case patch fits the spawn transaction bound (so an
+/// oversized manifest fails here, not as a runtime transport error). "Mutable" is writable *within*
+/// the bound, never free; the bound is part of the signed declaration.
+fn validate_mutable_manifest(src: &SourcePolicy) -> Result<(), PolicyError> {
+    if src.mutable.is_empty() {
+        return Ok(());
+    }
+    let mut worst_case = WIRE_LEN_PREFIX; // the patch's overall count prefix
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for m in &src.mutable {
+        let field = m
+            .field
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .ok_or_else(|| {
+                translation(
+                    "[[mutable]] requires a non-empty `field` (the leaf-field path it opens)"
+                        .to_owned(),
+                )
+            })?;
+        if !seen.insert(field) {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\" is declared twice; each field opens once"
+            )));
+        }
+        let is_pool = m.from.is_some() || m.max.is_some();
+        let is_oneof = m.oneof.is_some();
+        let is_pred = m.type_.is_some() || m.under.is_some();
+        let kinds = [is_pool, is_oneof, is_pred]
+            .into_iter()
+            .filter(|b| *b)
+            .count();
+        if kinds != 1 {
+            return Err(translation(format!(
+                "[[mutable]] field = \"{field}\" must carry exactly one bound kind — pool \
+                 (`from`+`max`), `oneof`, or predicate (`type`+`under`); found {kinds}"
+            )));
+        }
+        // A `(field, value)` pair costs a length-prefix + the field path, plus a length-prefix +
+        // the value, all saturating (a pathological manifest is rejected, never overflows).
+        let field_cost = WIRE_LEN_PREFIX.saturating_add(field.len());
+        let value_worst = if is_pool {
+            let from = m.from.as_deref().unwrap_or_default();
+            if from.is_empty() {
+                return Err(translation(format!(
+                    "[[mutable]] field = \"{field}\" is a pool bound and requires a non-empty `from`"
+                )));
+            }
+            let max = m.max.ok_or_else(|| {
+                translation(format!(
+                    "[[mutable]] field = \"{field}\" is a pool bound and requires `max`"
+                ))
+            })?;
+            if max == 0 {
+                return Err(translation(format!(
+                    "[[mutable]] field = \"{field}\": pool `max` must be at least 1"
+                )));
+            }
+            let longest = from.iter().map(String::len).max().unwrap_or(0);
+            // up to `max` appended values, each a `(field, value)` pair drawn from `from`
+            let per_value = field_cost
+                .saturating_add(WIRE_LEN_PREFIX)
+                .saturating_add(longest);
+            usize::try_from(max)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(per_value)
+        } else if is_oneof {
+            let oneof = m.oneof.as_deref().unwrap_or_default();
+            if oneof.is_empty() {
+                return Err(translation(format!(
+                    "[[mutable]] field = \"{field}\" is a oneof bound and requires a non-empty \
+                     `oneof` list"
+                )));
+            }
+            let longest = oneof.iter().map(String::len).max().unwrap_or(0);
+            field_cost
+                .saturating_add(WIRE_LEN_PREFIX)
+                .saturating_add(longest)
+        } else {
+            let ty = m.type_.as_deref().unwrap_or("");
+            if ty != "relpath" {
+                return Err(translation(format!(
+                    "[[mutable]] field = \"{field}\": predicate `type` must be `relpath` (got \
+                     `{ty}`)"
+                )));
+            }
+            if m.under.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(translation(format!(
+                    "[[mutable]] field = \"{field}\": predicate requires a non-empty `under` root"
+                )));
+            }
+            field_cost
+                .saturating_add(WIRE_LEN_PREFIX)
+                .saturating_add(SPAWN_PRED_VALUE_MAX)
+        };
+        worst_case = worst_case.saturating_add(value_worst);
+    }
+    if worst_case > SPAWN_PATCH_MAX_BYTES {
+        return Err(translation(format!(
+            "[[mutable]] manifest worst-case patch is {worst_case} bytes, over the \
+             {SPAWN_PATCH_MAX_BYTES}-byte spawn transaction bound (§7.12.3); reduce a pool `max` \
+             or shorten the pools"
+        )));
     }
     Ok(())
 }
@@ -1269,6 +1450,123 @@ mod tests {
         assert!(validate_rootfs(&ok).is_ok());
         // No [rootfs] at all ⇒ not OCI-model, nothing to validate.
         assert!(validate_rootfs(&parse(b"name = \"x\"\n").expect("parse")).is_ok());
+    }
+
+    #[test]
+    fn spawn_grant_is_loud_and_bounded() {
+        // A well-formed grant validates.
+        let ok = parse(
+            b"name = \"x\"\n[spawn]\nmax_instances = 8\nreason = \"agent spawns tools\"\n\
+              [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n",
+        )
+        .expect("parse");
+        assert!(validate_spawn(&ok).is_ok());
+        // No [spawn] ⇒ nothing to validate.
+        assert!(validate_spawn(&parse(b"name = \"x\"\n").expect("parse")).is_ok());
+
+        // reason is mandatory (the waiver is loud).
+        let no_reason = parse(
+            b"name = \"x\"\n[spawn]\nmax_instances = 8\n[[spawn.allow]]\ntemplate = \"t@v1\"\n",
+        )
+        .expect("parse");
+        assert!(
+            format!("{}", validate_spawn(&no_reason).expect_err("no reason")).contains("reason")
+        );
+
+        // max_instances is mandatory and must be ≥ 1 (the fork-bomb ceiling).
+        let no_max =
+            parse(b"name = \"x\"\n[spawn]\nreason = \"r\"\n[[spawn.allow]]\ntemplate = \"t@v1\"\n")
+                .expect("parse");
+        assert!(
+            format!("{}", validate_spawn(&no_max).expect_err("no max")).contains("max_instances")
+        );
+        let zero_max = parse(
+            b"name = \"x\"\n[spawn]\nmax_instances = 0\nreason = \"r\"\n[[spawn.allow]]\n\
+              template = \"t@v1\"\n",
+        )
+        .expect("parse");
+        assert!(validate_spawn(&zero_max).is_err());
+
+        // An empty allow set grants nothing.
+        let no_allow =
+            parse(b"name = \"x\"\n[spawn]\nmax_instances = 8\nreason = \"r\"\n").expect("parse");
+        assert!(
+            format!("{}", validate_spawn(&no_allow).expect_err("no allow")).contains("spawn.allow")
+        );
+
+        // A malformed template ref is rejected.
+        let bad_ref = parse(
+            b"name = \"x\"\n[spawn]\nmax_instances = 8\nreason = \"r\"\n[[spawn.allow]]\n\
+              template = \"no-version\"\n",
+        )
+        .expect("parse");
+        assert!(validate_spawn(&bad_ref).is_err());
+    }
+
+    #[test]
+    fn mutable_manifest_requires_exactly_one_well_formed_bound() {
+        // Each of the three bound kinds validates on its own.
+        let ok = parse(
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nfrom = [\"pypi.org\"]\nmax = 4\n\
+              [[mutable]]\nfield = \"rootfs.writable\"\noneof = [\"/opt/cache\"]\n\
+              [[mutable]]\nfield = \"fs.workspace\"\ntype = \"relpath\"\nunder = \"workspace\"\n",
+        )
+        .expect("parse");
+        assert!(validate_mutable_manifest(&ok).is_ok());
+        // No manifest ⇒ nothing to validate (the most-fenced template).
+        assert!(validate_mutable_manifest(&parse(b"name = \"t\"\n").expect("parse")).is_ok());
+
+        // Zero bound kinds is rejected.
+        let no_bound = parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\n").expect("parse");
+        assert!(format!(
+            "{}",
+            validate_mutable_manifest(&no_bound).expect_err("no bound")
+        )
+        .contains("exactly one bound"));
+
+        // Two bound kinds (pool + oneof) on one field is rejected.
+        let two_bounds = parse(
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nfrom = [\"a\"]\nmax = 1\n\
+              oneof = [\"b\"]\n",
+        )
+        .expect("parse");
+        assert!(validate_mutable_manifest(&two_bounds).is_err());
+
+        // A pool without `max`, and a predicate with the wrong `type`, are rejected.
+        let pool_no_max =
+            parse(b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nfrom = [\"a\"]\n")
+                .expect("parse");
+        assert!(validate_mutable_manifest(&pool_no_max).is_err());
+        let bad_pred = parse(
+            b"name = \"t\"\n[[mutable]]\nfield = \"fs.x\"\ntype = \"abspath\"\nunder = \"w\"\n",
+        )
+        .expect("parse");
+        assert!(format!(
+            "{}",
+            validate_mutable_manifest(&bad_pred).expect_err("bad pred")
+        )
+        .contains("relpath"));
+
+        // A field declared twice is rejected.
+        let dup = parse(
+            b"name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\noneof = [\"a\"]\n\
+              [[mutable]]\nfield = \"net.allow\"\noneof = [\"b\"]\n",
+        )
+        .expect("parse");
+        assert!(format!("{}", validate_mutable_manifest(&dup).expect_err("dup")).contains("twice"));
+    }
+
+    #[test]
+    fn oversized_mutable_manifest_fails_the_patch_bound() {
+        // A pool whose worst-case patch (max × longest member) blows the transaction bound is
+        // rejected at install, not as a runtime transport error.
+        let huge_value = "x".repeat(2048);
+        let toml = format!(
+            "name = \"t\"\n[[mutable]]\nfield = \"net.allow\"\nmax = 100\nfrom = [\"{huge_value}\"]\n"
+        );
+        let p = parse(toml.as_bytes()).expect("parse");
+        let err = validate_mutable_manifest(&p).expect_err("oversized");
+        assert!(format!("{err}").contains("worst-case patch"));
     }
 
     #[test]
