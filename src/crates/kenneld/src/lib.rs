@@ -777,6 +777,16 @@ fn bring_up<P: Privileged + Sync>(
     // `egress_bytes` tells the factory to attach no programs.
     let no_network = net.mode == NetMode::None;
 
+    // The cgroup egress BPF is the PRIMARY egress gate ONLY in `host` mode (shared host stack, no
+    // proxy — `07-5` §"cgroup BPF connect"). In `none`/`constrained`/`unconstrained` the per-kennel
+    // net-ns IS the boundary: the empty/loopback-only stack already denies every non-shim
+    // destination, the inbound mirror is binder-driven (not BPF), and egress audit comes from
+    // kenneld's INet path — so the BPF there is pure (optional) defence-in-depth. We skip its attach
+    // outside `host`: it costs ~7–10 ms/spawn (almost all of it the `BPF_PROG_LOAD` verifier), and
+    // agent spawns never use `host` mode, so they never pay it (W11). `bpf_audit::spawn` no-ops on
+    // the now-absent pin.
+    let bpf_egress = net.mode == NetMode::Host;
+
     // Stamp the egress proxy into the plan before deriving the BPF payload — proxied modes
     // only. This adds the flagged allow-entry that lets the workload reach its proxy (and
     // records the proxy in kennel_meta); without it the BPF would deny the proxy too.
@@ -793,11 +803,10 @@ fn bring_up<P: Privileged + Sync>(
     // 3. egress BPF. The factory attaches it (folded into the one construct op); here we just
     //    build and encode the payload to ride the construction datagram. The helper pins this
     //    kennel's maps under the owner's `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can
-    //    drain the audit ringbuf and the owner can inspect the maps (§02-7). `none` ships an
-    //    EMPTY payload — no programs to load or attach.
-    let egress_bytes = if no_network {
-        Vec::new()
-    } else {
+    //    drain the audit ringbuf and the owner can inspect the maps (§02-7). Only `host` mode ships
+    //    a payload — every other mode (`none`/`constrained`/`unconstrained`) ships an EMPTY one, so
+    //    the factory loads + attaches no programs (the net-ns is the boundary, see `bpf_egress`).
+    let egress_bytes = if bpf_egress {
         EgressPayload {
             meta: plan.bpf_meta,
             allow_v4: plan.bpf_allow_v4.clone(),
@@ -812,6 +821,8 @@ fn bring_up<P: Privileged + Sync>(
             pin_id: id.to_owned(),
         }
         .encode()
+    } else {
+        Vec::new()
     };
 
     // 3b. The per-kennel egress: the dial delegate's command socket + kenneld's decision runtime.
