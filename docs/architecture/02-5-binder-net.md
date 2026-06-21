@@ -350,8 +350,8 @@ dependency (binder stays confined to kenneld and the shim). The config schema ch
 
 ## BPF policy enforcement
 
-For `unconstrained` and `host` mode kennels, cgroup BPF programs enforce the
-`[net.bpf]` policy at the socket level. The BPF programs gate:
+The cgroup egress BPF is **attached only in `host` mode** — the one mode without a
+per-kennel net-ns, where it is the *primary* enforcement primitive. There it gates:
 
 - `socket(family, type, protocol)` — against `[net.bpf.families]`,
   `[net.bpf.types]`, `[net.bpf.protocols]`
@@ -359,14 +359,14 @@ For `unconstrained` and `host` mode kennels, cgroup BPF programs enforce the
 - `connect(addr, port)` — against `[[net.bpf.allow]]` and `[[net.bpf.deny]]`
 - Connection count and rate — against `[net.bpf.limits]`
 
-For `constrained` kennels, `[net.bpf]` is optional. When present, the BPF programs
-run as defence-in-depth; the net-ns boundary is the enforcement primitive.
-
-For `host` mode kennels, BPF is the primary enforcement primitive — no net-ns
-boundary exists. The proxy remains mandatory to preserve the audit trail.
-
-For `mode = none` kennels, no BPF network programs are loaded. There is no network
-surface to gate.
+For `none`/`constrained`/`unconstrained` kennels the **per-kennel net-ns is the
+enforcement primitive**, so the BPF is *not attached* — it would be pure
+defence-in-depth (the empty/loopback-only stack already denies every non-shim
+destination, the inbound mirror is binder-driven, and egress audit comes from
+kenneld's INet path). Skipping it removes the `BPF_PROG_LOAD` verifier from the
+spawn hot path (~7–10 ms; design §7.5 "cgroup BPF connect"). A `[net.bpf]` block in
+a non-host policy therefore shapes nothing at runtime — the net-ns already does —
+and `mode = none` has no network surface to gate at all.
 
 ---
 

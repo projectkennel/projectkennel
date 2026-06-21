@@ -3,19 +3,20 @@
 Status: **in flight** · Drafted: 2026-06-20 · Updated: 2026-06-21 · Targets: 0.3.0
 Baseline: 0.2.0 (2026-06-20)
 
-**Progress (2026-06-21).** Thrust 1 (W1–W2), Thrust 2 (W3–W5), and Thrust 4 · W9 are merged —
+**Progress (2026-06-21).** Thrust 1 (W1–W2), Thrust 2 (W3–W5), and **Thrust 4 (W9–W11) complete** —
 the whole spawn *policy/schema* surface (design + threat catalogue, the `[spawn]` grant +
 eligibility, the `[[mutable]]` constraint family + patch validator, the signed single-leg template
-set) plus address provisioning gated on inbound bind. Thrust 4 · W10 (spawn-latency
-harness) is built and pulled ahead of Thrust 3 deliberately — the always-on boundary profile of the
-*existing* construction path is the instrument that lands the spawn runtime, and re-measures it once
-the SPAWN verb is in. Its payoffs so far — two real bring-up costs found and fixed: (1) a 170 ms
-binder-teardown poll-out limiter, fixed with an eventfd waker (teardown 170 ms → 0.4 ms); and (2) the
-dominant *construction* cost — the kennel's `cgroup.procs` task-migration write blocking ~13 ms on a
-`cgroup_threadgroup_rwsem` RCU grace period (found by `strace -f`, not the trace spans, which the
-journald sink perturbs) — fixed by birthing the kennel directly in its cgroup via
-`clone3(CLONE_INTO_CGROUP)`. Net: spawn rate 3.2 → 7.3/sec, end-to-end `kennel run` 63 ms → 47 ms.
-Next: **Thrust 3 · W6–W8** (the spawn runtime path). Per-workstream status is marked on each item below.
+set) plus the "do less" latency discipline. W10's spawn-latency harness (pulled ahead of Thrust 3 —
+the boundary profile of the *existing* construction path is the instrument that lands the spawn
+runtime) found and fixed **three** bring-up costs: (1) a 170 ms binder-teardown poll-out limiter →
+eventfd waker (170 ms → 0.4 ms); (2) the dominant *construction* cost — the kennel's `cgroup.procs`
+task-migration blocking ~13 ms on a `cgroup_threadgroup_rwsem` RCU grace period (found by `strace -f`,
+not the trace spans, which the journald sink perturbs) → birth the kennel in its cgroup via
+`clone3(CLONE_INTO_CGROUP)`; and (3, W11) the ~7–10 ms constrained-mode BPF `PROG_LOAD` verifier →
+attach the egress BPF only in `host` mode (the net-ns is the boundary elsewhere). Net: spawn rate
+3.2 → 7.3/sec, `kennel run` wall 63 → 47 ms, and the isolation floor measured at single-digit-ms
+construction (a `/bin/true` kennel in ~18 ms wall; native-vs-kennel python startup ~2×). Next:
+**Thrust 3 · W6–W8** (the spawn runtime path). Per-workstream status is marked on each item below.
 
 > This is a planning artefact, not a design or as-built document. The design corpus
 > (`docs/design/`) and the as-built notes (`docs/architecture/08-as-built-notes.md`
@@ -191,10 +192,16 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   `offcputime` flamegraphs) for the within-boundary waits, and per-boundary tagging by tmpfs-vs-OCI
   root in one run.
 
-- **W11 · Skip the constrained-mode BPF egress attach.** **[opt] S.**
-  In constrained mode the proxy already default-denies, so `[net.bpf]` egress is
-  belt-and-suspenders; dropping it skips the privhelper BPF attach entirely. **Profile-gated:**
-  surface only if W10 dictates; **do not bundle into W9** (address cleanup).
+- **W11 · Skip the egress BPF attach outside `host` mode.** **[opt] S.** · ✅ **done**
+  W10 dictated it: the constrained-mode BPF attach costs ~7–10 ms/spawn, almost all of it the
+  `BPF_PROG_LOAD` verifier (`strace`-confirmed). The egress BPF is the *primary* egress gate only in
+  `host` mode (no net-ns); in `none`/`constrained`/`unconstrained` the per-kennel net-ns is the
+  boundary, the inbound mirror is binder-driven, and egress audit is kenneld's INet path — so the BPF
+  is pure defence-in-depth there and is no longer attached (`kenneld::run` gates `egress_bytes` on
+  `mode == host`). Verified: host construction ships a 284-byte payload, constrained ships 0; all 16
+  policy-suite cases pass (host cases enforce via BPF, constrained via the net-ns); `bpf_audit::spawn`
+  no-ops on the absent pin. Agent spawns never use `host`, so they never pay it. Architecture (02-5,
+  01-process-model) reconciled to as-built; design §7.5 already framed it as optional defence-in-depth.
 
 ### Thrust 5 — OCI completion and the shared persistence store
 
