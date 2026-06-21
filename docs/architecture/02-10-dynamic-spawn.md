@@ -6,7 +6,8 @@
 > served (W6) — `kenneld` validates the grant, re-verifies the content-pin, re-runs spawn-eligibility,
 > applies the manifest patch, atomically claims a `max_instances` slot, mints the stdio channel,
 > returns the requester's ends, and drives construction of the validated instance as a running sibling
-> (the injected stdio rides the existing non-interactive run path — W7); and fate-sharing (W8) is the
+> (its stdio injected onto 0/1/2 by `kennel-bin-init` at fixed handoff slots, the non-interactive
+> sibling of the pty path — W7); and fate-sharing (W8) is the
 > claimed slot (released on teardown), the soft reaper (channel-close `EOF`), the template-TTL
 > self-reap, and the hard reaper (`spawn-<parent-ctx>-*` cgroup-killed when the requester tears down).
 > The `memfd` artifact transfer (§7.12.6) remains roadmap. Where this contract and the code diverge,

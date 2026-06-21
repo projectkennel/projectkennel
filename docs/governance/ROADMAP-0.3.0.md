@@ -8,8 +8,8 @@ Baseline: 0.2.0 (2026-06-20)
 Node 0; `kenneld` validates the grant, re-verifies the template content-pin (the ed25519 signature
 commitment — no `sha2`), re-runs spawn-eligibility, applies the manifest patch, atomically claims a
 `max_instances` slot, mints the stdio channel, returns the requester's ends, and constructs the
-validated in-memory instance as a running sibling (injected stdio over the existing non-interactive
-run path — W7 needed no new schema). Fate-sharing is the slot claim + the soft reaper (channel `EOF`)
+validated in-memory instance as a running sibling — its stdio injected onto 0/1/2 by `kennel-bin-init`
+(W7, the non-interactive sibling of the pty path). Fate-sharing is the slot claim + the soft reaper (channel `EOF`)
 + the template-TTL self-reap + the hard reaper (`spawn-<parent-ctx>-*` cgroup-killed on requester
 teardown). The verify half never pulls a compiler into the daemon ([[tcb-only-shrinks]]); fds flow
 out of node 0 only ([[binder-fd-passing-safety-verdict]]). The remaining 0.3.0 spawn item is the
@@ -158,12 +158,17 @@ rots if untracked), **[opt]** (real, cuttable to 0.4.0), **[non-goal]** (explici
   daemon mounts nothing beyond the template's own view, parses no JSON, routes no traffic. (02-10 carries
   the outbound-only safety argument.)
 
-- **W7 · Injected-stdio supervision.** **[dep] M.** · ✅ **done** (folded into W6.3)
-  As built, the injected stdio rides the **existing non-interactive run path**: the daemon's
-  `command_for` already sets the three passed fds as the workload's stdin/stdout/stderr, so the
-  spawned ends of the minted channel (the socketpair end duplicated for stdin+stdout, the pipe write
-  end for stderr) wire straight through `run_kennel` — no new `Supervision` schema or `dup2` in init
-  was needed. Init stays a dumb executor ([[init-is-dumb-executor]]).
+- **W7 · Injected-stdio supervision.** **[dep] M.** · ✅ **done**
+  The non-interactive **sibling of the pty path**, wired where `kennel-bin-init` already owns workload
+  stdio. A piped `kennel run`'s three controller fds — or a `SPAWN` channel's spawned ends (the
+  socketpair duplicated for stdin+stdout, the pipe write end for stderr) — ride out of band at three
+  fixed slots (`INJECT_STDIN/OUT/ERR_FD`, after `PTY_RETURN_FD`); init `dup2`s them onto 0/1/2 as the
+  **final pre-exec step, after the seal**, so init's own diagnostics never touch the channel. Carried
+  by `Plan.stdio_fds` + the `Supervision.stdio_injected` / `ConstructionHalf.stdio_present` flags
+  through the wire codec and the factory's fixed SCM order. Init stays a dumb executor
+  ([[init-is-dumb-executor]]). *(The "rides the existing run path, no new schema" shortcut was wrong —
+  the construction extracts only argv/env/cwd from the `Command`, silently dropping its stdio; the
+  machine proved it. The proper wiring also fixes a piped `kennel run` producing no stdout.)*
 
 - **W8 · Fate-sharing: the reapers + `max_instances` accounting.** **[dep] M.** · ✅ **done**
   As built: an **atomic `max_instances` claim** (a per-grant `AtomicU32` check-and-claim, held by an
