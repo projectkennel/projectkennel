@@ -7,11 +7,16 @@
 //!   `name@version` templates it may instantiate, the mutable manifest fields it may write (narrowed to
 //!   this requester) and their bounds, and the `max_instances`/live ceiling. So the workload discovers
 //!   *what it may ask for* instead of probing `SPAWN` by trial.
-//! - **`facade-spawn run <template> [field=value]…`** transacts `verb::SPAWN` for the chosen template,
-//!   applying the given mutable-field writes, then wires **this process's stdio to the sibling's
-//!   channel** — our stdin → the tool's stdin, the tool's stdout → our stdout, the tool's stderr → our
-//!   stderr — so the operator/agent talks to the spawned tool directly. `kenneld` brokers the fds and
-//!   steps out of the byte path; no host privilege, no JSON in the daemon.
+//! - **`facade-spawn run <template> [field=value]… [-- <argv>…]`** transacts `verb::SPAWN` for the
+//!   chosen template, applying the given mutable-field writes, then wires **this process's stdio to the
+//!   sibling's channel** — our stdin → the tool's stdin, the tool's stdout → our stdout, the tool's
+//!   stderr → our stderr — so the operator/agent talks to the spawned tool directly. `kenneld` brokers
+//!   the fds and steps out of the byte path; no host privilege, no JSON in the daemon.
+//!
+//!   Everything after `--` is the command line, sent as the `workload.argv` mutable field: the template
+//!   says *what may run* (its `[exec].allow` floor — Landlock gates `argv[0]` — and a `[[mutable]]`
+//!   `workload.argv` variant), and the caller says *what to run* within it. A template that does not open
+//!   `workload.argv` runs its own fixed entrypoint and rejects a `--` command.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -34,7 +39,9 @@ fn main() -> ExitCode {
         Some("caps") => caps(),
         Some("run") => run(args.get(1..).unwrap_or(&[])),
         _ => {
-            eprintln!("usage: facade-spawn <caps | run <template@version> [field=value]…>");
+            eprintln!(
+                "usage: facade-spawn <caps | run <template@version> [field=value]… [-- <argv>…]>"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -74,14 +81,28 @@ fn caps() -> io::Result<ExitCode> {
 /// this process's stdio to the sibling's channel.
 fn run(args: &[String]) -> io::Result<ExitCode> {
     let (template, rest) = args.split_first().ok_or_else(|| {
-        io::Error::other("usage: facade-spawn run <template@version> [field=value]…")
+        io::Error::other("usage: facade-spawn run <template@version> [field=value]… [-- <argv>…]")
     })?;
-    let mut patch: Vec<(&str, &str)> = Vec::with_capacity(rest.len());
-    for a in rest {
+    // Split at the first `--`: before it, `field=value` mutable-field writes; after it, the command
+    // line, sent as `workload.argv` tokens (one patch entry per token, in order).
+    let mut parts = rest.splitn(2, |a| a == "--");
+    let fields = parts.next().unwrap_or(&[]);
+    let cmd = parts.next();
+    let cmd_tokens = cmd.unwrap_or(&[]);
+
+    let mut patch: Vec<(&str, &str)> =
+        Vec::with_capacity(fields.len().saturating_add(cmd_tokens.len()));
+    for a in fields {
         let pair = a
             .split_once('=')
             .ok_or_else(|| io::Error::other(format!("`{a}` is not field=value")))?;
         patch.push(pair);
+    }
+    if cmd.is_some() && cmd_tokens.is_empty() {
+        return Err(io::Error::other("`--` needs a command after it"));
+    }
+    for token in cmd_tokens {
+        patch.push(("workload.argv", token));
     }
     let request = spawn::encode_request(template, &patch);
 

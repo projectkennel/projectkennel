@@ -1,0 +1,70 @@
+# ============================================================================
+# Spawn template: argv-tool  (v1)
+# Inherits: base-confined@v1
+# Threat catalogue: THREATS.md v0.3
+#
+# A SPAWN target (§7.12) that delegates *what runs* to the caller. The template
+# fixes the cage — `net.mode = "none"` (no egress leg), no filesystem write grant,
+# a self-reaping TTL, explicit ceilings — and the `[exec].allow` floor names the
+# only programs that may run. `[workload].argv` is a mutable field, so the agent
+# supplies the command line (`facade-spawn run argv-tool@v1 -- /bin/echo hi`); the
+# default `/bin/true` runs when no command is given. `argv[0]` is gated by
+# `[exec].allow` under Landlock execve default-deny regardless of what is written,
+# so the caller chooses the command WITHOUT widening what the sibling can reach.
+#
+# The mutable surface (§7.12.3) is `workload.argv` under a FREEFORM bound: the
+# arguments are unconstrained because the cage, not the argument shape, is the
+# containment. The residual is T3.9 R1 (the open value), bounded here by the
+# `[exec].allow` program floor.
+#
+# Spawn-eligible by construction (§7.12.8): no `[spawn]` of its own (depth-1), a
+# self-reaping TTL, and explicit memory/pids/CPU ceilings.
+# ============================================================================
+
+template_base = "base-confined@v1"
+template_name = "argv-tool"
+template_version = "1"
+
+
+# --- Network: frozen off. No egress leg, whatever the caller runs. -----------
+[net]
+mode = "none"
+
+
+# --- Execution: the program floor — the only binaries that may run. This is
+#     the real gate on `argv[0]`; Landlock denies execve of anything not here. -
+[exec]
+allow = ["/bin/echo", "/usr/bin/echo", "/bin/cat", "/usr/bin/cat", "/bin/true", "/usr/bin/true", "/bin/sh"]
+
+
+# --- Filesystem: read the system dirs the allowed programs resolve from. ------
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+
+# --- Workload: the default command when the caller gives none. Not pinned —
+#     the manifest below opens `workload.argv` for the caller to replace. ------
+[workload]
+argv = ["/bin/true"]
+
+
+# --- Lifecycle: a self-reaping TTL (§7.12.7) --------------------------------
+[lifecycle]
+ttl = "5m"
+ttl_action = "exit"
+
+
+# --- Resource ceilings: mandatory for a spawn target (§7.12.8) --------------
+[ulimits]
+as = "128M"      # address space (memory)
+nproc = "16"     # processes / threads
+cpu = "10"       # CPU-seconds
+
+
+# --- Mutable surface: the caller supplies the command line. Freeform — the
+#     cage (net/fs/exec floor, ttl, ceilings) is the containment, not the
+#     argument shape; `argv[0]` is still bound by `[exec].allow` above. --------
+[[mutable]]
+field = "workload.argv"
+freeform = true
+reason = "the caller chooses the command to run within the [exec].allow floor; the cage contains it"
