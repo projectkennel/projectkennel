@@ -72,71 +72,49 @@ pub struct SshdParams<'a> {
     pub auth: AuthSource,
 }
 
-/// Render the bastion's hardened `sshd_config` (§7.10.6).
+/// The leaf filename of the surfaced bastion `sshd_config` template in the root-owned cascade.
+pub const SSHD_CONFIG_LEAF: &str = "kennel-sshd.conf";
+
+/// The compiled-in default bastion `sshd_config` template — byte-identical to the vendor file
+/// `install.sh` ships (`dist/kennel-sshd.conf` → `/usr/lib/kennel/kennel-sshd.conf`), so the daemon
+/// renders the same hardened config even before anything is installed. The cascade override
+/// (`/etc/kennel/...` then `/usr/lib/kennel/...`) takes precedence when present.
+const DEFAULT_SSHD_TEMPLATE: &str = include_str!("../../../../dist/kennel-sshd.conf");
+
+/// Render the bastion's hardened `sshd_config` (§7.10.6) from the surfaced template (W18).
+///
+/// The template is resolved from the **root-owned** cascade — `/etc/kennel/kennel-sshd.conf` (admin
+/// override) over `/usr/lib/kennel/kennel-sshd.conf` (vendor) — with the compiled-in default as the
+/// fallback. There is no user layer: the lockdown must not be weakenable by an unprivileged
+/// workload (it reads a root-owned file or the baked-in default; it cannot write `/etc/kennel`). The
+/// per-bastion values are substituted into the template's `@PLACEHOLDER@` lines.
 #[must_use]
 pub fn sshd_config(p: &SshdParams<'_>) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::from(
-        "# kennel-sshd — per-kennel SSH re-origination bastion (generated, read-only).\n\
-         # Denies everything but a publickey login running the forced command with a\n\
-         # pty; SFTP/scp/forwarding are out of scope by construction (07-10-ssh.md §7.10.6).\n",
-    );
-    let _ = write!(
-        s,
-        "\nListenAddress {listen}\n\
-         Port {port}\n\
-         HostKey {host_key}\n\
-         PidFile {pid}\n",
-        listen = p.listen,
-        port = p.port,
-        host_key = p.host_key.display(),
-        pid = p.pid_file.display(),
-    );
-    // Expose which (synthetic) key authenticated to the forced command.
-    s.push_str("\nExposeAuthInfo yes\n");
-    // No agent is handed to the forced command: the outbound `ssh` runs as the operator
-    // and signs with whatever the operator's own `options` (`-i …`) name from their own
-    // host-side key store. An exposed agent socket would be the destination-blind signing
-    // oracle the bastion exists to prevent (§7.10.1) — so there is deliberately no
-    // `SetEnv SSH_AUTH_SOCK` here.
-    // Publickey only.
-    s.push_str(
-        "\nPubkeyAuthentication yes\n\
-         PasswordAuthentication no\n\
-         KbdInteractiveAuthentication no\n\
-         PermitRootLogin no\n\
-         PermitEmptyPasswords no\n\
-         UsePAM no\n",
-    );
-    match &p.auth {
-        AuthSource::File(path) => {
-            let _ = write!(s, "\nAuthorizedKeysFile {}\n", path.display());
-        }
-        AuthSource::Command { command, user } => {
-            // Hand the helper the offered key as `%t %k` (type + base64 blob); it asks
-            // kenneld for that key's forced-command line. The helper is root-owned (the
-            // safe-path finding); the bindings live in the daemon, not a file.
-            let _ = write!(
-                s,
-                "\nAuthorizedKeysFile none\n\
-                 AuthorizedKeysCommand {} %t %k\n\
-                 AuthorizedKeysCommandUser {user}\n",
-                command.display(),
-            );
-        }
-    }
-    // Lock the session down to the forced command + a pty (§7.10.6).
-    s.push_str(
-        "\nAllowTcpForwarding no\n\
-         X11Forwarding no\n\
-         AllowAgentForwarding no\n\
-         PermitTunnel no\n\
-         GatewayPorts no\n\
-         PermitOpen none\n\
-         AllowStreamLocalForwarding no\n\
-         Subsystem sftp /bin/false\n",
-    );
-    s
+    let template = kennel_lib_config::read_system_config(SSHD_CONFIG_LEAF)
+        .unwrap_or_else(|| DEFAULT_SSHD_TEMPLATE.to_owned());
+    render_sshd_config(&template, p)
+}
+
+/// Substitute the per-bastion values into a resolved `sshd_config` template. Pure (testable); the
+/// substituted values are kenneld-derived (loopback address, port, runtime-dir paths, the AKC),
+/// never workload input, so a placeholder cannot be forged from the kennel.
+#[must_use]
+fn render_sshd_config(template: &str, p: &SshdParams<'_>) -> String {
+    let auth = match &p.auth {
+        AuthSource::File(path) => format!("AuthorizedKeysFile {}", path.display()),
+        // Hand the helper the offered key as `%t %k` (type + base64 blob); it asks kenneld for that
+        // key's forced-command line. The helper is root-owned (the safe-path finding).
+        AuthSource::Command { command, user } => format!(
+            "AuthorizedKeysFile none\nAuthorizedKeysCommand {} %t %k\nAuthorizedKeysCommandUser {user}",
+            command.display(),
+        ),
+    };
+    template
+        .replace("@LISTEN@", &p.listen.to_string())
+        .replace("@PORT@", &p.port.to_string())
+        .replace("@HOST_KEY@", &p.host_key.display().to_string())
+        .replace("@PID_FILE@", &p.pid_file.display().to_string())
+        .replace("@AUTHORIZED_KEYS@", &auth)
 }
 
 /// Build one `authorized_keys` line binding `synthetic_pubkey` to a forced command that
@@ -287,6 +265,44 @@ mod tests {
             "PermitRootLogin no",
         ] {
             assert!(c.contains(denied), "config must contain `{denied}`");
+        }
+    }
+
+    #[test]
+    fn render_uses_the_surfaced_template_verbatim() {
+        // The config is the TEMPLATE's, not hardcoded: an admin override (a different cascade file)
+        // renders as written, with only the @PLACEHOLDER@ lines substituted (W18 surfacing).
+        let custom = "Port @PORT@\nListenAddress @LISTEN@\nHostKey @HOST_KEY@\n\
+                      PidFile @PID_FILE@\n@AUTHORIZED_KEYS@\n# admin tuned: MaxStartups 3\n";
+        let out = render_sshd_config(
+            custom,
+            &params(AuthSource::File(PathBuf::from("/safe/keys"))),
+        );
+        assert_eq!(
+            out,
+            "Port 7022\nListenAddress 127.0.42.1\nHostKey /run/kennel/bastion/host_key\n\
+             PidFile /run/kennel/bastion/sshd.pid\nAuthorizedKeysFile /safe/keys\n\
+             # admin tuned: MaxStartups 3\n"
+        );
+    }
+
+    #[test]
+    fn compiled_default_template_is_the_shipped_vendor_file() {
+        // The fallback baked into the daemon is byte-identical to dist/kennel-sshd.conf (what
+        // install.sh ships to the vendor dir), so the surfaced file is the single source of truth.
+        assert_eq!(
+            DEFAULT_SSHD_TEMPLATE,
+            include_str!("../../../../dist/kennel-sshd.conf")
+        );
+        // It is a real template (carries the placeholders the renderer fills).
+        for ph in [
+            "@LISTEN@",
+            "@PORT@",
+            "@HOST_KEY@",
+            "@PID_FILE@",
+            "@AUTHORIZED_KEYS@",
+        ] {
+            assert!(DEFAULT_SSHD_TEMPLATE.contains(ph), "template needs {ph}");
         }
     }
 
