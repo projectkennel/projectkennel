@@ -155,7 +155,18 @@ pub fn instantiate(
             }
         }
 
-        apply_field(&mut instance, &entry.field, &entry.value)?;
+        // A `relpath` constraint confines the value UNDER its signed `under` root: join the
+        // (traversal-free, admit_relpath-checked) relative value beneath the root so the instantiated
+        // policy never carries a path outside it. Without this the `under` root is inert and the agent
+        // writes any relative path — a widening past the signed manifest. (Symlink-following within the
+        // root is the runtime bind's RESOLVE_IN_ROOT concern, tracked separately.)
+        let applied = match &constraint {
+            crate::variant::Constraint::Relpath { under } => {
+                std::borrow::Cow::Owned(format!("{}/{}", under.trim_end_matches('/'), entry.value))
+            }
+            _ => std::borrow::Cow::Borrowed(entry.value.as_str()),
+        };
+        apply_field(&mut instance, &entry.field, &applied)?;
     }
 
     // The manifest is consumed: the instance is the concrete policy, never itself signed.
@@ -253,6 +264,28 @@ mod tests {
         assert!(net.bpf_connect_allow.is_empty(), "BPF is never touched");
         // A destination matching no pattern is refused.
         assert!(instantiate(&t, &[entry("net.proxy.allow", "evil.com:443")]).is_err());
+    }
+
+    #[test]
+    fn relpath_value_is_confined_under_its_signed_root() {
+        let t = template_with(vec![Variant {
+            field: "fs.write".to_owned(),
+            relpath_under: "~/workspace".to_owned(),
+            ..Variant::default()
+        }]);
+        // A traversal-free relpath lands JOINED under the signed root, never as a bare relative path.
+        let inst = instantiate(&t, &[entry("fs.write", "sub/dir/file")]).expect("relpath applies");
+        assert!(
+            inst.effective_policy
+                .fs
+                .write
+                .contains(&"~/workspace/sub/dir/file".to_owned()),
+            "value confined under the root: {:?}",
+            inst.effective_policy.fs.write
+        );
+        // `..`/absolute are refused at admit, so the joined value cannot escape the root.
+        assert!(instantiate(&t, &[entry("fs.write", "../escape")]).is_err());
+        assert!(instantiate(&t, &[entry("fs.write", "/abs")]).is_err());
     }
 
     #[test]

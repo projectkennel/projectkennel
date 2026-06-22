@@ -102,10 +102,22 @@ pub fn mount_special(fstype: &str, target: &Path) -> io::Result<()> {
 }
 
 /// Mount a fresh `tmpfs` at `target` with `nosuid` (and `nodev` unless
-/// `allow_dev`), an optional `size_mib` cap (mebibytes) and octal `mode`.
+/// `allow_dev`, and `noexec` when `noexec`), an optional `size_mib` cap
+/// (mebibytes) and octal `mode`.
 ///
 /// `allow_dev` exists for the constructed `/dev`, whose bind-mounted device nodes
 /// must function; every other tmpfs (`/tmp`, the new root) forbids devices.
+///
+/// `noexec` is set for the **workload-writable** tmpfs (the constructed `$HOME`,
+/// `/tmp`): execve of a file there is already denied (it is never on `exec.allow`,
+/// which `deny_writable` keeps disjoint from writable paths), but Landlock has no
+/// `mmap` hook — so without `MS_NOEXEC` an in-cage process can `PROT_EXEC`-`mmap`
+/// an attacker `.so` it dropped there (e.g. via `/usr/bin/env LD_PRELOAD=…`) and
+/// run native code the execute gate never sees. `MS_NOEXEC` closes that path,
+/// extending the "writable is never executable" rule from execve to mmap.
+/// Anonymous `PROT_EXEC` mappings (JITs) are unaffected — only file-backed
+/// execute mappings from this mount are refused.
+///
 /// `mode` must be octal digits — the caller validates it (it flows into the
 /// comma-separated mount data string, so a stray comma would inject an option).
 ///
@@ -117,6 +129,7 @@ pub fn mount_tmpfs(
     size_mib: Option<u32>,
     mode: Option<&str>,
     allow_dev: bool,
+    noexec: bool,
 ) -> io::Result<()> {
     let mut opts: Vec<String> = Vec::new();
     if let Some(s) = size_mib {
@@ -129,6 +142,9 @@ pub fn mount_tmpfs(
     let mut flags = MsFlags::MS_NOSUID;
     if !allow_dev {
         flags |= MsFlags::MS_NODEV;
+    }
+    if noexec {
+        flags |= MsFlags::MS_NOEXEC;
     }
     nix::mount::mount(
         Some("tmpfs"),
@@ -393,7 +409,7 @@ mod root_tests {
             if std::fs::create_dir_all(dir).is_err() {
                 return 1;
             }
-            if mount_tmpfs(dir, Some(8), Some("0700"), false).is_err() {
+            if mount_tmpfs(dir, Some(8), Some("0700"), false, false).is_err() {
                 return 2;
             }
             if std::fs::write(dir.join("probe"), b"x").is_err() {

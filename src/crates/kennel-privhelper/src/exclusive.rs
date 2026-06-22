@@ -40,7 +40,7 @@ pub fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), String> {
     check_owned_dir(host, owner_uid)?;
     // A small, nosuid+nodev tmpfs shadows the real dir; mode 0755 so the operator can see the
     // sentinel (the kennel keeps the real inode through its own already-built view).
-    mount::mount_tmpfs(host, Some(1), Some("0755"), false)
+    mount::mount_tmpfs(host, Some(1), Some("0755"), false, false)
         .map_err(|e| format!("exclusive over-mount of {} failed: {e}", host.display()))?;
     // Drop the sentinel, then seal the over-mount read-only (best-effort — the shadow itself is
     // the control; the read-only remount is hardening).

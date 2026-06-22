@@ -417,6 +417,14 @@ pub mod status {
 /// **Reply**: a [`status`] byte, then — on [`status::OK`] — the `spawn-<uuid>` name. The two channel
 /// fds ride the binder object table ([`crate::ctxmgr::Reply::DataAndFds`]), not these bytes.
 pub mod spawn {
+    /// The hard upper bound on a decoded `SPAWN` request (template + manifest patch).
+    ///
+    /// Enforced at [`decode_request`]. 64 KiB is far above any legitimate patch (the manifest is a
+    /// handful of fields) while bounding an untrusted requester's transaction; the binder transaction
+    /// buffer caps it further upstream, but the decoder asserts it directly so the stated invariant is
+    /// real, not incidental.
+    pub const SPAWN_PATCH_MAX_BYTES: usize = 64 * 1024;
+
     /// Frame a `u16`-big-endian length-prefixed string.
     fn put_str(out: &mut Vec<u8>, s: &str) {
         let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
@@ -456,6 +464,9 @@ pub mod spawn {
     /// trailing bytes after a well-formed request (all untrusted, all fail closed).
     #[must_use]
     pub fn decode_request(data: &[u8]) -> Option<(&str, Vec<(&str, &str)>)> {
+        if data.len() > SPAWN_PATCH_MAX_BYTES {
+            return None; // over the stated bound — fail closed before allocating the patch
+        }
         let mut cur = data;
         let template = take_str(&mut cur)?;
         if template.is_empty() {
@@ -521,6 +532,14 @@ pub mod spawn {
             assert!(decode_request(&[]).is_none());
             assert!(decode_request(&[0, 1]).is_none()); // claims 1 byte, none follows
             assert!(decode_request(&encode_request("", &[])).is_none()); // empty template
+        }
+
+        #[test]
+        fn an_oversized_request_is_rejected_at_the_stated_bound() {
+            // A request over SPAWN_PATCH_MAX_BYTES fails closed before the patch is walked — the
+            // decoder enforces the bound the doc asserts, not merely the upstream buffer size.
+            let big = vec![0u8; super::SPAWN_PATCH_MAX_BYTES + 1];
+            assert!(decode_request(&big).is_none());
         }
     }
 }
