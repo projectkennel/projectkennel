@@ -59,27 +59,19 @@ documentation sweep.
 
 ## Candidate (promote-if-needed, not a workstream)
 
-- **Generalise policy-pinned-to-bundled-binaries.** The GUI kennel's version-pinning becomes a
-  reusable service-kennel build mechanism the moment a second binary-bundling service kennel needs it.
-  Reuse, not new surface; promote on demand, no scheduled work.
+- **Generalise policy-pinned-to-bundled-binaries.** A reusable service-kennel build mechanism for the
+  moment a binary-bundling service kennel needs it. *(It lost its first presumed consumer: confined GUI no
+  longer bundles version-pinned Flatpak proxy/portal binaries — the nested compositor runs unmodified, with
+  no version-pin-to-mimicry premise. So this reverts to a clean promote-if-needed candidate with no current
+  consumer.)* Reuse, not new surface; promote on demand, no scheduled work.
 
-- **`wl-proxy`-based render-leg fallback for compositors without `security-context-v1`.** The confined-GUI
-  render leg enforces via the compositor's `security-context-v1` protocol — broadly available on KDE/KWin
-  and the wlroots family since ~2024, but **GNOME/Mutter only from 49** (late 2025), so **Ubuntu 24.04 LTS
-  (GNOME 46, supported to 2029) has no render enforcement**. The compositor-independent fallback is a
-  filtering Wayland proxy built on the `mahkoh/wl-proxy` *library* (MIT/Apache; the repo's apps are
-  GPL-3.0 — invoke as a separate confined binary, or build our own filter on the lib), run **confined inside
-  the GUI-service kennel** the way Kennel already confines untrusted upstream components (`skopeo`/`umoci`
-  in `oci-fetch`, stock OpenSSH in the SSH bastion) — its compromise contained to that kennel.
-  **Declined as built work now, for reasons that are likely to expire:** it puts a Kennel-authored,
-  security-critical Wayland-protocol parser in the byte path (`wl-proxy` is a young toolkit, not a hardened
-  purpose-built sandbox proxy — it fails the "an existing battle-tested component Kennel does not write" bar
-  that `skopeo`/`umoci` and stock OpenSSH meet), and the gap it covers is closing on its own as GNOME ≥49
-  propagates (Ubuntu 26.04 LTS+). It also
-  does not block the **primary CLI workload** ([[primary-workload-is-claude-code]]), which has no Wayland leg.
-  **Promote only if** supporting desktop-GUI tenants on GNOME ≤48 / Ubuntu 24.04 LTS becomes a real,
-  named deployment requirement. Until then: ship confined GUI on a `security-context-v1`-capable compositor
-  and state the matrix.
+- **`wl-proxy`-based render-leg filtering proxy — RETIRED, superseded (not promotable).** Briefly considered
+  as the compositor-independent fallback for hosts without `security-context-v1` (notably GNOME, which W0
+  verified lacks it through Mutter 50.1). Superseded outright by W7's **per-kennel nested inner compositor**,
+  which is host-independent (proven on stock GNOME), construction-by-absence rather than data-path filtering,
+  and carries **no Kennel-authored Wayland parser** — strictly better on every axis the proxy was meant to
+  buy. Recorded here only so the idea is not re-proposed: the nested compositor *is* the cross-host render
+  mechanism; there is no filtering-proxy fallback to build.
 
 ## Fenced to a later release
 
