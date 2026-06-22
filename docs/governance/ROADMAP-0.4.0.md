@@ -97,9 +97,10 @@ Wayland proxy" premise and replaced it with the compositor-enforced `security-co
 Both are detailed in `07-14-confined-gui.md`; both gate the headline.
 
 - **W0 · GUI substrate confirms.** **[gating] S.** **Status: confirm A's mechanism settled; confirm B's
-  premise corrected (the render mechanism is `security-context-v1`, not a proxy — the design is *better*
-  for it); the new compositor-support confirm is OPEN and negative on the maintainer's own host; confirm
-  A's interactive half remains open — the gate is not clear.** First pass run 2026-06-22.
+  premise corrected (render mechanism is `security-context-v1`, not a proxy — the design is *better* for it)
+  and its compositor-support landscape mapped (broad on KDE/wlroots since ~2024; GNOME only ≥49, so Ubuntu
+  24.04 LTS lacks it → scope softened to "capable compositor + `wl-proxy` fallback"); the interactive e2e
+  remains to run on a capable host — the gate is narrowed, not yet fully clear.** First pass run 2026-06-22.
 
   - **Confirm A — portal identity through the bwrap-mimicked view.** *Mechanism: SETTLED from substrate.*
     On a representative host (`xdg-desktop-portal` **1.18.4** — the version the roadmap's `gui-services@1.18.x`
@@ -138,23 +139,27 @@ Both are detailed in `07-14-confined-gui.md`; both gate the headline.
     `~whynothugo/way-secure`; spec `wayland.app/protocols/security-context-v1`. **This is folded into W7's
     render leg; `07-14-confined-gui.md` must be rewritten off the proxy framing onto this.**
     - **New gating confirm (replaces "proxy deployment shape"): does the target compositor implement
-      `security-context-v1`?** Verified on the substrate: **Mutter 46.2 — the maintainer's own GNOME host —
-      does NOT** (no security-context globals in `libmutter-14`, while every other staging `wp_*_v1` global
-      is present, so the probe is sound). sway implements it; Mutter 47+ and KWin status to confirm against
-      current versions. **Consequence, stated not hidden:** where the compositor lacks the protocol there is
-      **no render-leg enforcement**, so confined GUI carries a hard requirement — *a `security-context-v1`-
-      capable compositor* — and on GNOME ≤ 46 it is unavailable today. This is now the open, host-gated half
-      of confirm B; its e2e (a tagged socket under a constructed view, privileged globals denied) needs such
-      a compositor, which this host's GNOME 46 is not.
+      `security-context-v1`?** Landscape per `wayland.app/protocols/security-context-v1`: **KDE/KWin 6.6, the
+      wlroots family (sway 1.11, Hyprland 0.52, wayfire, river, labwc), Weston 14, COSMIC, niri, Mir, Cage**
+      have had it since ~2024; **GNOME/Mutter only since 49** (late 2025). Verified on the substrate:
+      **Mutter 46.2 — the maintainer's own GNOME host — does NOT** (no security-context globals in
+      `libmutter-14`, while every other staging `wp_*_v1` global is present, so the probe is sound). So
+      **Ubuntu 24.04 LTS / GNOME 46 (through 48) lacks render enforcement**, and that cohort is supported to
+      2029. **Consequence, scoped not hidden:** the gap hits the *desktop-GUI* use case only — the primary
+      Claude Code tenant is CLI with no Wayland leg — so W7 ships on a security-context-capable compositor
+      (KDE / wlroots / GNOME ≥49) and states the matrix; the GNOME ≤48 case is the documented `wl-proxy`
+      promote-on-demand fallback (BACKLOG), not a hard gate. The e2e (a tagged socket under a constructed
+      view, privileged globals denied) needs a capable compositor, which this host's GNOME 46 is not.
 
-  - **W0 exit:** both confirms fully clean. Confirm A's mechanism is green and already feeds the model
-    (seal `/.flatpak-info`); **confirm B has corrected a load-bearing premise to a smaller, better
-    mechanism (`security-context-v1`) and owes a `07-14` rewrite; the new compositor-support confirm is
-    open and negative on the maintainer's own GNOME 46, and confirm A's interactive half remains to run on
-    a `security-context-v1`-capable graphical host. W7 stays unscheduled until both come back clean.** The
-    first pass has already paid for itself twice: it killed the proxy-premise error before any GUI code was
-    written, and it surfaced the compositor-support requirement as a stated dependency rather than a silent
-    runtime gap.
+  - **W0 exit:** confirm A green and feeding the model (seal `/.flatpak-info`); confirm B's mechanism
+    settled (`security-context-v1`) with the support matrix mapped and the scope softened — **ship on a
+    capable compositor (KDE / wlroots / GNOME ≥49), state the matrix, `wl-proxy` as the documented GNOME-≤48
+    fallback.** Remaining before W7 is scheduled: a `07-14` rewrite onto this model, plus the *interactive*
+    e2e (confirm A's permission-store persistence and the render-leg privileged-global denial) run once on a
+    `security-context-v1`-capable graphical host — the maintainer's GNOME 46 cannot host it; a KDE / sway /
+    GNOME-49 host can. The first pass paid for itself twice: it killed the proxy-premise error before any
+    GUI code was written, and it mapped the compositor landscape into a scoped, stated dependency rather than
+    a silent runtime gap.
 
 ### Thrust 1 — Contracts first (schema + API, test-first, no daemon)
 
@@ -266,12 +271,21 @@ Self-contained and testable with no broker and no runtime — the contract every
 
   **The tagged residual shrinks:** the host-compositor reach is now the engine's *setup-time* connection
   to register the tagged listener (control-plane), not a filtering proxy standing in the session-long data
-  path. **The new gating substrate confirm (W0):** the target compositor must implement
-  `security-context-v1` — sway does; **Mutter 46.2 (the maintainer's own host) does not** (verified: no
-  security-context globals in `libmutter-14`), Mutter 47+/KWin to confirm. Where the compositor lacks it
-  there is **no render enforcement**, and the honest answer is a stated requirement — *confined GUI needs a
-  `security-context-v1`-capable compositor* — not a silent gap. The forcing function; completes the 0.3.0
-  X11 removal. Full design: `07-14-confined-gui.md`.
+  path.
+
+  **Compositor-support landscape (W0), and the consequence for scope.** `security-context-v1` enforcement
+  lives in the compositor, so it is a feature-availability fact, not a Kennel limitation. Per
+  `wayland.app/protocols/security-context-v1`: **KDE/KWin (6.6), the wlroots family (sway 1.11, Hyprland
+  0.52, wayfire, river, labwc), Weston 14, COSMIC, niri, Mir, Cage** have had it since ~2024; **GNOME/Mutter
+  only since 49** (late 2025) — so **Ubuntu 24.04 LTS / GNOME 46 lacks it** (verified directly: no
+  security-context globals in this host's `libmutter-14`), through GNOME 48. The mitigating fact: the
+  **primary workload (Claude Code) is a CLI tenant with no Wayland connection at all** ([[primary-workload-is-claude-code]]),
+  so the gap limits the *desktop-GUI* use case, not the core. So W7 **ships on a security-context-capable
+  compositor** (KDE / wlroots / GNOME ≥49) and **states the matrix plainly**; the GNOME ≤48 desktop-GUI case
+  is the documented **`mahkoh/wl-proxy` fallback** (compositor-independent, promote-on-demand, *not built
+  now* — see BACKLOG), reached for only if supporting LTS-GNOME GUI tenants becomes a real requirement.
+  This is a softened requirement, not a hard gate, and not a silent gap. The forcing function; completes the
+  0.3.0 X11 removal. Full design: `07-14-confined-gui.md`.
 
 ### Thrust 3 — One `kennel` binary, context-aware (the spawn facade, harmonised)
 
