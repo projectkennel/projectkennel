@@ -102,7 +102,6 @@ runs as the bastion user to reach the per-user control socket).
 
 Project Kennel does not reimplement well-trodden tools where they exist. The following are invoked as subprocesses when policy enables them:
 
-- **`Xwayland`** or **`Xephyr`** — X11 server isolation, per kennel (only for the `x11-isolated-dev` template family; not used by `ai-coding-strict`).
 Project Kennel performs the namespace/mount setup phase directly via `kennel-lib-syscall` (bubblewrap-style, in an identity-mapped user namespace); it does not compose `bubblewrap` as a subprocess.
 
 These are dependencies, not source. Their versions are pinned in the build environment per `BUILD-ENV.md` and audited under §5 of the coding standards.

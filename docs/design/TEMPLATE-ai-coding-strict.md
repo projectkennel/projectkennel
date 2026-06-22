@@ -757,24 +757,14 @@ system.enabled = false
 
 
 # ============================================================================
-# 6. X11 / WAYLAND POLICY
+# 6. DISPLAY POLICY
 #
-# The agent has no direct display server access. Workflows that need X11
-# use a different template (x11-isolated-dev) that spawns Xwayland-isolated
-# or Xephyr-isolated per kennel.
-#
-# This template covers the common case: an AI coding agent operating
-# from a terminal, with no GUI needs.
-#
-# Implementation: no /tmp/.X11-unix/ in the shim view, no $DISPLAY in
-# the environment, no $WAYLAND_DISPLAY. The agent has no path to reach
-# a display server even if it wanted to.
+# The agent has no display server access — it operates from a terminal with
+# no GUI needs. X11 is a non-goal (§7.8): there is no [x11] config section,
+# and X11 cannot be granted. The view exposes no /tmp/.X11-unix/ socket and
+# the synthesised environment carries no $DISPLAY or $WAYLAND_DISPLAY (see
+# env.deny), so the agent has no path to a display server even if it wanted one.
 # ============================================================================
-
-[x11]
-xwayland_isolated = false
-xephyr_isolated = false
-# DISPLAY and WAYLAND_DISPLAY are stripped from env (see env.deny).
 
 
 # ============================================================================
@@ -889,7 +879,7 @@ deny = [
     "*_API_KEY",
     "*_APIKEY",
     "*_PRIVATE_KEY",
-    # Display server access vars — stripped because x11.* is disabled
+    # Display server access vars — stripped (no display access; X11 is a non-goal, §7.8)
     "DISPLAY",
     "WAYLAND_DISPLAY",
     "XAUTHORITY",
@@ -1108,7 +1098,7 @@ It is worth being explicit about what `ai-coding-strict` does not cover, so that
 
 **Multi-project workflows.** A developer working on three projects simultaneously needs three contexts, each derived from this template with a different project path. Project Kennel supports this directly; the policy author writes one leaf policy per kennel.
 
-**Workflows requiring GUI tooling.** An AI agent that needs to spawn a browser, an Electron app, or any X11/Wayland client needs the `x11-isolated-dev` template instead. This template does not provision a display server.
+**Workflows requiring GUI tooling.** X11 is a non-goal (§7.8) — there is no display-bearing template, and this template provisions no display server. A Wayland-bearing workload would need the mediated `IWayland` facade (§7.6); X11 is not offered.
 
 **Workflows requiring docker, kubernetes, or systemd-user operations.** The `containerised-dev` template covers Docker; equivalent templates cover Kubernetes (`k8s-coding`) and systemd (`systemd-coding`). Each documents the threat-impact of the additional capabilities granted.
 

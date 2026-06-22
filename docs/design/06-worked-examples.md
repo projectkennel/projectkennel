@@ -329,45 +329,7 @@ threats.exposed = ["T1.6"]
 
 The diff is the artefact that goes to the user's security reviewer in CI.
 
-## 6.8 Workflow needing X11 (legacy app)
-
-The user has to run a legacy GUI tool (some Java Swing app from 2008). It only works on X11.
-
-**Policy** (`~/.config/kennel/kennels/legacy-gui.toml`):
-
-```toml
-# The X11 isolation (Xwayland/Xephyr) and the no-network posture are template
-# work — an x11-isolated template carries net.mode = "none" and the X server
-# wiring. A leaf has no [net].mode field. The leaf adds the data + the tool.
-template_base = "ai-coding-strict@v1"
-name = "legacy-gui"
-
-[[fs.read.add]]
-path = "~/legacy-data/**"
-reason = "input data for the legacy tool"
-
-[[fs.write.add]]
-path = "~/legacy-data/output/**"
-reason = "tool's output"
-
-[[exec.allow.add]]
-path = "/usr/bin/java"
-reason = "the legacy tool's JVM runtime"
-
-[[exec.allow.add]]
-path = "/opt/legacy-tool/bin/legacy-tool"
-reason = "the legacy tool"
-```
-
-**What's enforced.** With an X11-isolated template the tool runs in a dedicated Xwayland (Wayland host) or Xephyr (X11 host) instance and gets no network. The leaf adds read on the input data, write on the output dir, and exec on the JVM + the tool binary. The user sees the tool's window in their normal session; the tool sees only itself in its X server.
-
-**Residuals.**
-- **No copy-paste between host and tool.** The user accepts this in exchange for the isolation. Copy-paste within the tool works normally.
-- **Performance.** Xephyr is software-rendered; if the legacy tool is graphics-heavy, may be slow.
-
-**Startup.** Cold: ~2s (Xephyr launch takes ~500ms).
-
-## 6.9 Common shape
+## 6.8 Common shape
 
 Each example is 10–30 lines of user-authored policy. Each is composed against a vetted template. Each surfaces its residuals and threat exposures explicitly. Each is reviewable in a 30-second skim.
 

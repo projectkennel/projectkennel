@@ -59,7 +59,6 @@ Failures during kennel setup:
 | Cannot allocate IPv6 ULA (no privileged helper) | Disable IPv6 for kennel, warn; continue with IPv4 |
 | Cannot launch SOCKS5 proxy | Refuse; report why (port conflict, bin missing) |
 | Cannot launch dbus-proxy | If dbus policy is non-empty: refuse; else: continue without |
-| Cannot launch Xwayland/Xephyr | Refuse if X11 isolation needed; otherwise continue |
 | Cannot create mount namespace | Refuse (essentially impossible on modern Linux) |
 | Privileged helper unavailable | Refuse if helper is needed (IPv6, cgroup creation on non-delegated systems); otherwise continue |
 | BPF program load fails (kernel reports error) | Refuse; report BPF error (this indicates a Project Kennel bug, file it) |
@@ -72,11 +71,9 @@ Mid-kennel failures:
 |---|---|
 | SOCKS5 proxy crashes | All outbound traffic blocked (BPF rules still in place). Supervisor restarts proxy. Kennel's connections to the proxy fail with ECONNREFUSED during the gap. |
 | dbus-proxy crashes | Bus calls fail. Supervisor restarts. Active D-Bus connections are dropped; clients reconnect. |
-| Xwayland/Xephyr crashes | X11 apps inside die. Supervisor restarts the server; user's open applications are lost. |
 | SSH egress bastion (`kennel-sshd`) crashes | SSH from kennels fails (no route out — direct `:22` stays denied). `kenneld` restarts it and regenerates its key state from the live kennels; no keys to re-add (the bastion holds none — §7.10). |
 | Audit log writer fails | Audit events queued in memory; if queue fills, Project Kennel chooses: drop new events (logged loudly) or block kennel (configurable per template). |
 | Real D-Bus daemon restarts on host | dbus-proxy reconnects; kennel's bus connections briefly stall. |
-| Real Wayland compositor restarts | Xwayland in the kennel loses its connection; Xwayland exits; supervisor restarts. User's X apps in the kennel are lost. |
 | Kernel evicts BPF program (rare) | Project Kennel should detect; behaviour TBD (possibly: refuse to continue kennel, kill its processes). |
 
 The supervisor's restart policy is configurable. Defaults are conservative: restart on crash, with exponential backoff, give up after some number of failures.

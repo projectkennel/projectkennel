@@ -14,9 +14,11 @@ narration is kept here; the chapter named is the source of truth.
 
 ### Not built yet
 
-- **X11 isolation** (`07-8-x11.md`) — designed, not built. The `[x11]` config surface
-  (`xwayland_isolated`/`xephyr_isolated`) has been **removed from the schema** (rejected at
-  parse); the design stands as roadmap.
+- **X11** (`07-8-x11.md`) — **descoped to a non-goal** (W16), not "not built yet": the isolated-X11
+  paths (`xwayland_isolated`/`xephyr_isolated`) are removed from the roadmap, and the `[x11]` config
+  surface is **not in the schema** (an `[x11]` block is an unknown-section error at parse). What
+  stands is the enforced position — X11 cannot be granted (no per-client confinement), the host
+  display socket is not exposed by the view, and `DISPLAY` is not synthesised.
 - **`fs.scrub` / `fs.home.sanitise`** (`07-4-filesystem.md` §7.4.5) — designed, not built. Both
   config surfaces have been **removed from the schema** (rejected at parse) rather than parsed +
   dropped at translate; the design stands as roadmap.

@@ -33,7 +33,7 @@ These are distinguishable by capitalisation and context throughout. The full glo
 
 **Threat IDs** are family-prefixed `T<family>.<index>` (T1.1, T1.2, …, T2.1, …): the integer before the dot is the threat family, so each family carries its own sequence. They cross-link `THREATS.md`, the chapters, the templates, and the audit log. The catalogue is at v0.3 (the family-prefix scheme landed in 0.3, replacing the former consecutive T1–T26). **Out-of-scope IDs** (X1, X2, …) identify explicit non-goals.
 
-**Resource classes** in §7 follow a consistent prefix convention: `exec.*`, `fs.*`, `net.*`, `unix.*`, `dbus.*`, `x11.*`, `proc.*`, `env.*`, `cap.*`.
+**Resource classes** in §7 follow a consistent prefix convention: `exec.*`, `fs.*`, `net.*`, `unix.*`, `dbus.*`, `proc.*`, `env.*`, `cap.*`. (There is no `x11.*` class — X11 is a non-goal, §7.8.)
 
 **Cross-references** use the chapter number — "see §7.5" — and subsection numbers within a chapter. Each chapter is a separate file (`NN-chapter-name.md`, or `NN-N-` for §7 subsections) so chapters revise in parallel without merge conflicts. Numbering is stable; chapters added later take a suffix rather than renumbering downstream.
 
