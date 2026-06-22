@@ -1,13 +1,13 @@
 # Dynamic spawn — the `SPAWN` transaction and the confined-stdio handoff
 
-> **Status: built (W3–W8).** This chapter is the implementation contract for the dynamic-spawn
+> **Status: built.** This chapter is the implementation contract for the dynamic-spawn
 > feature designed in [`../design/07-12-dynamic-spawn.md`](../design/07-12-dynamic-spawn.md) (§7.12).
-> As built: the `[spawn]` grant carries into the settled policy (W3); the `SPAWN` Node 0 verb is
-> served (W6) — `kenneld` validates the grant, re-verifies the content-pin, re-runs spawn-eligibility,
+> As built: the `[spawn]` grant carries into the settled policy; the `SPAWN` Node 0 verb is
+> served — `kenneld` validates the grant, re-verifies the content-pin, re-runs spawn-eligibility,
 > applies the manifest patch, atomically claims a `max_instances` slot, mints the stdio channel,
 > returns the requester's ends, and drives construction of the validated instance as a running sibling
 > (its stdio injected onto 0/1/2 by `kennel-bin-init` at fixed handoff slots, the non-interactive
-> sibling of the pty path — W7); and fate-sharing (W8) is the
+> sibling of the pty path); and fate-sharing is the
 > claimed slot (released on teardown), the soft reaper (channel-close `EOF`), the template-TTL
 > self-reap, and the hard reaper (`spawn-<parent-ctx>-*` cgroup-killed when the requester tears down).
 > The `memfd` artifact transfer (§7.12.6) remains roadmap. Where this contract and the code diverge,
@@ -189,7 +189,7 @@ On a validated `SPAWN`, `kenneld`:
    sha256-pinned-workload descriptors. Three new presence flags are added (`stdin`/`stdout`/`stderr`
    injected), and three new fixed descriptor slots follow the existing `pty=3` / `boot-sync=4` /
    `workload=5` assignment. The privhelper pops the flagged fds in order and `dup_onto`s them to
-   their slots before `fexecve`. *(W7. Adding required fields to the settled `Supervision` /
+   their slots before `fexecve`. *(Adding required fields to the settled `Supervision` /
    `ConstructionHalf` structs touches every plan fixture across crates — a single coordinated
    commit, per the §8.3 settled-schema gotcha.)*
 3. **`kennel-bin-init` places the injected slots onto stdin/stdout/stderr as the final step before
@@ -212,7 +212,7 @@ Rationale:
 
 - The Node 0 looper pool is bounded (`POOL_MAX_THREADS`); holding a looper for a full kennel
   construction would let concurrent spawns exhaust it. Returning early keeps `kenneld`
-  control-plane and decouples looper occupancy from construction latency (a W10 concern).
+  control-plane and decouples looper occupancy from construction latency (a latency concern).
 - The requester does not need to block on boot: it writes into its local socketpair end, which
   buffers until the spawned tool reads. A construction *failure* surfaces to the requester as
   **EOF on the channel** (the soft-reaper path below) plus a `kennel.spawn` / `outcome: Deny` audit
@@ -238,13 +238,13 @@ startup never enters the construct span. The pieces around it are each **sub-mil
   channel mint): ~0.3 ms. The verify-half validation the top-level path never runs adds almost nothing.
 - **Teardown** (workload exit → fully reclaimed, slot freed): ~0.3 ms. PID 1 dies, the kernel
   collapses the namespaces and reaps the tree as garbage collection; only the binder looper-pool stop
-  ([[binder-serving-threadpool-not-cookie-worker]], W10's eventfd waker) and the cgroup `rmdir` remain
+  ([[binder-serving-threadpool-not-cookie-worker]], the eventfd waker) and the cgroup `rmdir` remain
   in userspace.
 
 So an agent gets a scoped sibling's result in single-digit milliseconds and the kennel is fully
 reclaimed a fraction of a millisecond later — wrapping a single operation in its own kennel is not a
 cost to budget against. The dominant term is the construction, which dynamic spawn **shares** with the
-top-level `kennel run` path (same `run_kennel`); the W10 bring-up fixes that landed it there —
+top-level `kennel run` path (same `run_kennel`); the bring-up fixes that landed it there —
 `clone3(CLONE_INTO_CGROUP)` to skip the cgroup-migration RCU stall, the egress-BPF attach gated to
 `host` mode, the binder-teardown eventfd waker — apply identically to a spawned sibling.
 
@@ -311,7 +311,7 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
   for existing.
 
 > **`memfd` artifact transfer is roadmap, not first-build.** The stdio channel + control handoff
-> above is the W6–W8 core. The in-memory `memfd` artifact path (§7.12.6) is net-new plumbing with no
+> above is the spawn core. The in-memory `memfd` artifact path (§7.12.6) is net-new plumbing with no
 > existing analogue in the spawn path; it is specified and built after the stdio core proves out.
 
 ## Audit events
@@ -325,7 +325,7 @@ A spawned kennel must not outlive its purpose; the coupling is `kenneld`-brokere
 ## Threat bearing
 
 Defends the dynamic-spawn delegation as **T3.9 — Delegated spawning** (workload-class, derived from
-the `[spawn]` grant the way `mode = host` derives T1.6; W2). What holds: the capability floor of
+the `[spawn]` grant the way `mode = host` derives T1.6). What holds: the capability floor of
 every spawn is the signed template's; the requester holds no `ptrace`/signal reach; `kenneld` brokers
 fds outbound and parses no JSON; the TCB grows only by the bounded verify-half `SPAWN` validation and the
 channel mint — never a compiler or MCP parser (§7.12.9). The waived residuals: **R1** — the mutable-field
@@ -365,10 +365,10 @@ must know them.
 ## What this chapter does not cover
 
 - **MCP semantics** — tool allow-listing and call audit live in the opt-in in-kennel **interposer**
-  (W21, §7.12.5), a confined disposable kennel the operator wires between requester and tool;
+  (§7.12.5), a confined disposable kennel the operator wires between requester and tool;
   `kenneld` does not understand MCP.
 - **Fleet observability** — `kennel ps` over ephemeral spawns and what-spawned-what is the
-  live-topology surface (W20).
+  live-topology surface.
 - **The `[spawn]` / `[[mutable]]` policy schema** — [`02-2-config-schema.md`](02-2-config-schema.md).
 - **Node 0 mechanics** — binderfs lifecycle, the verb dispatch, fd translation:
   [`02-4-binder.md`](02-4-binder.md).
@@ -376,7 +376,7 @@ must know them.
   another kennel's already-running service), outside the dynamic-spawn model (§7.12.10). Dynamic
   spawn hands over a direct fd, so it needs no standing inter-kennel service registry.
 
-## Resolved at W3 (the `[spawn]`/`[[mutable]]` compiler surface)
+## Resolved: the `[spawn]`/`[[mutable]]` compiler surface
 
 - **No `max_instances` default — it is mandatory.** A `[spawn]` grant without `max_instances` is
   rejected at compile (`translate::validate_spawn`): an unbounded concurrent-spawn ceiling is a fork
@@ -392,7 +392,7 @@ must know them.
   manifest is rejected at compile if its worst-case patch (every `pool` at its `max`, longest pool
   member per value, a `PATH_MAX` predicate value) exceeds `SPAWN_PATCH_MAX_BYTES` (64 KiB) — well
   under the binder transaction buffer that also carries the template ref, uuid, and framing. The
-  `SPAWN` wire codec (W6) asserts the same bound on the live patch; the compiler is the fail-fast
+  `SPAWN` wire codec asserts the same bound on the live patch; the compiler is the fail-fast
   authoring gate so an oversized manifest never reaches the transport as an opaque error.
 
 ## Open questions

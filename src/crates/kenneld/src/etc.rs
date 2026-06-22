@@ -98,7 +98,7 @@ pub fn hosts(p: &EtcParams<'_>) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     // The kennel reaches its own services on its per-kennel address when it has one (a bind), else
-    // the standard `127.0.0.1`/`::1` — a no-bind kennel has no per-kennel address at all (W9).
+    // the standard `127.0.0.1`/`::1` — a no-bind kennel has no per-kennel address at all.
     let v4 = p.v4.unwrap_or(std::net::Ipv4Addr::LOCALHOST);
     let _ = writeln!(s, "{v4}\tlocalhost {}", p.hostname);
     let _ = writeln!(
@@ -360,7 +360,7 @@ pub fn materialize_home_dotfiles(
     Ok(binds)
 }
 
-/// The catalogue filename on the etc-binds cascade (W14).
+/// The catalogue filename on the etc-binds cascade.
 const ETC_BINDS_FILENAME: &str = "etc-binds.catalog";
 
 /// The vanilla TLS + dynamic-linker `/etc` subtrees that exist on this host.

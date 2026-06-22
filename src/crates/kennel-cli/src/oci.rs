@@ -1186,7 +1186,7 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
 /// Resolves `<name>`, asserts the entry is populated, then drives the standard run path with
 /// the recorded digest as the provenance gate: [`crate::run::launch`] permits `[rootfs]` and
 /// refuses unless the signed `[rootfs].image` equals the digest. The daemon's OCI spawn-path
-/// branch (W18) boots the image as an overlay root. A `-- <cmd>` override pins an explicit
+/// branch boots the image as an overlay root. A `-- <cmd>` override pins an explicit
 /// in-root argv; with no override the image entrypoint is used (via the launcher).
 ///
 /// # Errors

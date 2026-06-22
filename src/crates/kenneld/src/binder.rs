@@ -175,7 +175,7 @@ impl Manager {
     pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
         // Break every looper out of its `poll` now, so teardown does not wait out a `POLL_MS`
-        // cycle per thread (the W10 profile's dominant teardown cost).
+        // cycle per thread (the latency profile's dominant teardown cost).
         self.waker.wake();
         let drained: Vec<JoinHandle<()>> = {
             let mut guard = self

@@ -10,7 +10,7 @@
 //!
 //! The single caller today is the TTL `renew` prompt: when a kennel hits its deadline the
 //! handler freezes the cgroup, asks the operator "renew?", and re-arms / terminates / falls
-//! back on the answer. The `interactive` teardown disposition (W1/W2) will reuse the same
+//! back on the answer. The `interactive` teardown disposition will reuse the same
 //! port unchanged.
 //!
 //! **Write-safety.** The port writes `Prompt` on the *same* socket `run_kennel` uses for

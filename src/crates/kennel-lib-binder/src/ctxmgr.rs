@@ -23,7 +23,7 @@ use crate::sys;
 /// Breaks the looper pool out of its `poll` so a set stop flag is observed at once.
 ///
 /// Without it, each looper winds down only on its next `poll_ms` timeout, so teardown waits out
-/// `max` over the pool of each looper's remaining poll — the W10 profile's dominant teardown cost.
+/// `max` over the pool of each looper's remaining poll — the latency profile's dominant teardown cost.
 /// Held by the pool's owner; call [`Waker::wake`] right after setting the stop flag, then join.
 /// Cloneable and cheap (an `Arc`).
 #[derive(Clone, Debug)]
