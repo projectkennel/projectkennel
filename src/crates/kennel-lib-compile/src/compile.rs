@@ -489,11 +489,19 @@ mod tests {
         }
     }
     fn src() -> MapSource {
-        MapSource(vec![(
+        let mut entries = vec![(
             "base-confined".to_owned(),
             "v1".to_owned(),
             BASE_CONFINED.as_bytes().to_vec(),
-        )])
+        )];
+        for (name, body) in crate::TEST_FRAGMENTS {
+            entries.push((
+                (*name).to_owned(),
+                "v1".to_owned(),
+                body.as_bytes().to_vec(),
+            ));
+        }
+        MapSource(entries)
     }
     fn compile_ai() -> SettledPolicy {
         let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
@@ -575,7 +583,10 @@ mod tests {
             signed_bytes,
         )]);
 
-        let entry = parse(AI_CODING_STRICT.as_bytes()).expect("parse");
+        // A minimal template deriving the signed ancestor (no catalogue includes — this test is about
+        // the signed-ancestor provenance/lockfile flow, not a specific template's content).
+        let entry = parse(b"template_name = \"min\"\ntemplate_base = \"base-confined@v1\"\n")
+            .expect("parse");
         let compiled = compile(&entry, &source, &Trust::require(&ks), "v")
             .expect("compile with signed ancestor");
         assert!(
@@ -625,6 +636,14 @@ mod tests {
                 AI_CODING_STRICT.as_bytes().to_vec(),
             ),
         ];
+        // ai-coding-strict composes the catalogue fragments, so serve them too.
+        for (name, body) in crate::TEST_FRAGMENTS {
+            v.push((
+                (*name).to_owned(),
+                "v1".to_owned(),
+                body.as_bytes().to_vec(),
+            ));
+        }
         for (name, body) in frags {
             v.push((
                 (*name).to_owned(),
@@ -767,15 +786,12 @@ mod tests {
                 "v1".to_owned(),
                 to_bytes(&parse(BASE_CONFINED.as_bytes()).expect("p")),
             ),
-            (
-                "ai-coding-strict".to_owned(),
-                "v1".to_owned(),
-                to_bytes(&parse(AI_CODING_STRICT.as_bytes()).expect("p")),
-            ),
             ("corp-egress".to_owned(), "v1".to_owned(), signed_frag),
         ]);
+        // Derive the signed ancestor directly and include the signed fragment — this test is about a
+        // signed include verifying and lock-pinning under require, not a specific template's content.
         let leaf = crate::leaf::parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
+            b"name = \"p\"\ntemplate_base = \"base-confined@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
         let compiled = compile_leaf(&leaf, &source, &Trust::require(&ks), "v")

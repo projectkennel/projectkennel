@@ -20,6 +20,11 @@ template_base = "base-confined@v1"
 template_name = "inspect-only"
 template_version = "1"
 
+# Exec floor composed from the fragment catalogue (05-templates.md §5.10):
+# the shells + POSIX userland + capability bundles, instead of hand-listing them.
+include = ["core-shell@v1", "core-coreutils@v1"]
+
+
 
 # --- Network: OFF -----------------------------------------------------------
 [net]
@@ -33,15 +38,13 @@ mode = "none"
 # tool, or package manager. `exec.shell` must appear in this allowlist (else the
 # kennel could not launch its own login shell), so `/bin/sh` is listed explicitly.
 [exec]
+# Only the binaries no fragment provides stay inline here; the shell, the POSIX
+# userland, and the toolchains come from the `include` above.
 allow = [
-    "/bin/sh", "/usr/bin/bash",
-    "/usr/bin/cat", "/usr/bin/less", "/usr/bin/more",
-    "/usr/bin/head", "/usr/bin/tail",
-    "/usr/bin/grep", "/usr/bin/egrep", "/usr/bin/fgrep",
-    "/usr/bin/find", "/usr/bin/tree", "/usr/bin/ls",
-    "/usr/bin/file", "/usr/bin/strings", "/usr/bin/xxd", "/usr/bin/hexdump",
-    "/usr/bin/wc", "/usr/bin/sort", "/usr/bin/uniq", "/usr/bin/cut",
-    "/usr/bin/diff", "/usr/bin/stat", "/usr/bin/readlink", "/usr/bin/realpath",
+    "/usr/bin/hexdump",
+    "/usr/bin/strings",
+    "/usr/bin/tree",
+    "/usr/bin/xxd",
 ]
 
 
@@ -50,7 +53,8 @@ allow = [
 ttl = "2h"
 ttl_action = "warn"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "9ew9xHba5gCRSZFKm42u2MAMnDTgZuP6sLDCsy57NOgTE/6Q4J8bbL0cR1K/4YERqTboxlwZYmJGGHa1kX/4DQ=="
+signature = "cdljAAuLqMLAWOUO+WrXuPy0X0DiCvx0Y8cI9d4wwXgek94WjnJxZuRSFq20EHVDyuKPX47R9xpSxNPYBlO7Bw=="

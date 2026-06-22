@@ -1,0 +1,55 @@
+# ============================================================================
+# Fragment: core-archive  (Archive + compression)
+#
+# A composable capability bundle (05-templates.md §5.10): Tar and the common compressors/archivers — unpack a source tarball, compress an artifact.
+#
+#   include = ["core-archive@v1"]
+#
+# Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
+# this widens the program menu only; `argv[0]` stays gated by the resolved
+# `[exec].allow` under Landlock execve default-deny, and the cage (net/fs/ttl/
+# ceilings) is untouched.
+# ============================================================================
+
+name = "core-archive"
+
+[[exec.allow.add]]
+path = "/usr/bin/tar"
+reason = "tape archiver"
+
+[[exec.allow.add]]
+path = "/usr/bin/gzip"
+reason = "gzip compress"
+
+[[exec.allow.add]]
+path = "/usr/bin/gunzip"
+reason = "gzip decompress"
+
+[[exec.allow.add]]
+path = "/usr/bin/zcat"
+reason = "stream a gzip file"
+
+[[exec.allow.add]]
+path = "/usr/bin/xz"
+reason = "xz (de)compress"
+
+[[exec.allow.add]]
+path = "/usr/bin/bzip2"
+reason = "bzip2 (de)compress"
+
+[[exec.allow.add]]
+path = "/usr/bin/zip"
+reason = "zip archiver"
+
+[[exec.allow.add]]
+path = "/usr/bin/unzip"
+reason = "zip extractor"
+
+[[exec.allow.add]]
+path = "/usr/bin/zstd"
+reason = "zstandard (de)compress"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "xihDojilAkczbgw3Ln1CPbxCENFwZiQsLMAyOHuXO7iT+/peZzX2rxdRe8Rel3m1KXgTWxD1TVgkcZfZ8s85Dw=="

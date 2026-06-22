@@ -22,31 +22,29 @@ template_base = "base-confined@v1"
 template_name = "ai-coding-strict"
 template_version = "1"
 
+# Exec floor composed from the fragment catalogue (05-templates.md §5.10):
+# the shells + POSIX userland + capability bundles, instead of hand-listing them.
+include = ["core-shell@v1", "core-coreutils@v1", "core-file-mutation@v1", "core-archive@v1", "net-clients@v1", "toolchain-c@v1", "vcs-git@v1"]
+
+
 
 # --- Execution: the agent's toolchain (extends base-confined's allowlist) ----
 [exec]
+# Only the binaries no fragment provides stay inline here; the shell, the POSIX
+# userland, and the toolchains come from the `include` above.
 allow = [
-    # Interpreters
-    "/usr/bin/python3", "/usr/bin/node", "/usr/bin/bash", "/bin/sh", "/usr/bin/dash",
-    # Build tools
-    "/usr/bin/make", "/usr/bin/cmake", "/usr/bin/gcc", "/usr/bin/g++",
-    "/usr/bin/cc", "/usr/bin/ld",
-    # Package managers
-    "/usr/bin/npm", "/usr/bin/npx", "/usr/bin/pip", "/usr/bin/pip3",
-    "/usr/bin/yarn", "/usr/bin/pnpm",
-    # Source control + the SSH client (git-over-SSH transport to allowlisted hosts)
-    "/usr/bin/git", "/usr/lib/git-core/**", "/usr/bin/ssh", "/usr/bin/ssh-add",
-    # Standard userland the agent reaches for
-    "/usr/bin/cat", "/usr/bin/ls", "/usr/bin/find", "/usr/bin/grep",
-    "/usr/bin/sed", "/usr/bin/awk", "/usr/bin/head", "/usr/bin/tail",
-    "/usr/bin/sort", "/usr/bin/uniq", "/usr/bin/wc", "/usr/bin/cut",
-    "/usr/bin/tr", "/usr/bin/diff", "/usr/bin/patch",
-    "/usr/bin/mkdir", "/usr/bin/touch", "/usr/bin/cp", "/usr/bin/mv",
-    "/usr/bin/rm", "/usr/bin/ln", "/usr/bin/chmod",
-    "/usr/bin/echo", "/usr/bin/printf", "/usr/bin/test", "/usr/bin/env",
-    "/usr/bin/which", "/usr/bin/file", "/usr/bin/tar", "/usr/bin/gzip",
-    # curl/wget: the net policy still constrains WHERE they may connect.
-    "/usr/bin/curl", "/usr/bin/wget",
+    "/usr/bin/cmake",
+    "/usr/bin/node",
+    "/usr/bin/npm",
+    "/usr/bin/npx",
+    "/usr/bin/patch",
+    "/usr/bin/pip",
+    "/usr/bin/pip3",
+    "/usr/bin/pnpm",
+    "/usr/bin/python3",
+    "/usr/bin/ssh",
+    "/usr/bin/ssh-add",
+    "/usr/bin/yarn",
 ]
 
 
@@ -110,7 +108,8 @@ threats.exposed = ["T1.9"]
 ttl = "8h"
 ttl_action = "warn"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "Nkiiem0UZznGkfwrEbcZLptm7HnwmZOSxeFhvIZtzDAW8SKOsa6gUIQDk3O2vlFaPvBWSuOmp45mhphEs1NHAg=="
+signature = "6H3Q9rIXaox333WOK410Wljai7OYu05W3p8a+SBTZj3D5XDAROqmjRwHuh9V3UjdCONssG8M3M+7YZcB04AuCw=="

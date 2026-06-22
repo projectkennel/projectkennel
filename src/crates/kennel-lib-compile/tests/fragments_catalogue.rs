@@ -48,6 +48,26 @@ const CATALOGUE: &[Expect] = &[
         fragment: "net-permissive",
         grants: &["crates.io", "github.com", "ghcr.io"],
     },
+    Expect {
+        fragment: "core-shell",
+        grants: &["/usr/bin/dash", "/usr/bin/bash"],
+    },
+    Expect {
+        fragment: "core-coreutils",
+        grants: &["/usr/bin/grep", "/usr/bin/awk", "/usr/bin/sed"],
+    },
+    Expect {
+        fragment: "core-file-mutation",
+        grants: &["/usr/bin/cp", "/usr/bin/rm", "/usr/bin/mkdir"],
+    },
+    Expect {
+        fragment: "core-archive",
+        grants: &["/usr/bin/tar", "/usr/bin/gzip", "/usr/bin/xz"],
+    },
+    Expect {
+        fragment: "net-clients",
+        grants: &["/usr/bin/curl", "/usr/bin/wget"],
+    },
 ];
 
 fn repo_root() -> PathBuf {
