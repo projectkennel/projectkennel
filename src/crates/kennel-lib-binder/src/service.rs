@@ -96,6 +96,16 @@ pub mod verb {
     /// keeps `accepts_fds` unset, so the only fd movement is this outbound reply
     /// (`binder-fd-passing-safety-verdict`).
     pub const SPAWN: u32 = 14;
+
+    /// `kenneld` ← requester: **interrogate this kennel's `[spawn]` grant** (`02-10` §7.12).
+    ///
+    /// A read-only, fd-free facade-class verb carrying no request payload: the grant identifies the
+    /// caller. `kenneld` replies (`[status | UTF-8 listing]`, the [`crate::service::spawn::encode_reply`]
+    /// shape) with the allowed `name@version` templates, each with its per-requester-narrowed
+    /// mutable-field manifest and the `max_instances`/live counts — so a workload can discover *what it
+    /// may ask `SPAWN` for* rather than probe by trial. It exposes only the caller's own granted
+    /// authority (nothing it could not learn by trying every `SPAWN`), and spawns nothing.
+    pub const SPAWN_QUERY: u32 = 15;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;

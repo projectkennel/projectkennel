@@ -264,6 +264,104 @@ pub fn handle_spawn(
     }
 }
 
+/// Handle one `verb::SPAWN_QUERY`: render this kennel's `[spawn]` grant as a readable listing.
+///
+/// So a workload can discover **what it may ask `SPAWN` for** (`02-10` §7.12) rather than probe by
+/// trial. Read-only — it resolves and content-pin-verifies each allowed template (flagging any that no
+/// longer resolve or whose pin no longer matches), but spawns nothing and exposes only the caller's
+/// own granted authority (nothing it could not learn by attempting every `SPAWN`).
+pub fn handle_spawn_query(
+    rt: Option<&SpawnRuntime>,
+    incoming: &Incoming,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
+    let Some(rt) = rt else {
+        emit(
+            writer,
+            ctx,
+            incoming,
+            Outcome::Deny,
+            "this kennel holds no [spawn] grant",
+        );
+        return Reply::Data(spawn_wire::encode_reply(
+            status::DENIED,
+            "this kennel holds no [spawn] grant — nothing to spawn",
+        ));
+    };
+    let listing = render_caps(rt);
+    emit(
+        writer,
+        ctx,
+        incoming,
+        Outcome::Allow,
+        "spawn grant interrogated",
+    );
+    Reply::Data(spawn_wire::encode_reply(status::OK, &listing))
+}
+
+/// Render the grant as text: the `max_instances`/live ceiling, then each allowed template with its
+/// per-requester-narrowed mutable fields (or "no mutable fields"), or an `unavailable` note if the
+/// template no longer resolves from the trust store / its content-pin no longer matches.
+fn render_caps(rt: &SpawnRuntime) -> String {
+    use std::fmt::Write as _;
+    let live = rt.live.load(Ordering::Acquire);
+    let mut s = format!(
+        "spawn grant: max_instances {}, live {}\n",
+        rt.grant.max_instances, live
+    );
+    if rt.grant.allow.is_empty() {
+        s.push_str("  (no templates allowed)\n");
+        return s;
+    }
+    for pin in &rt.grant.allow {
+        let Some(bytes) = resolve_template(&rt.template_dirs, &pin.template) else {
+            let _ = writeln!(
+                s,
+                "  {}  (unavailable: not in the trust store)",
+                pin.template
+            );
+            continue;
+        };
+        let Ok(tpl) =
+            kennel_lib_policy::verify_pinned(&bytes, &rt.keys, &pin.signing_key_id, &pin.signature)
+        else {
+            let _ = writeln!(s, "  {}  (unavailable: content-pin mismatch)", pin.template);
+            continue;
+        };
+        let _ = writeln!(s, "  {}", pin.template);
+        // The fields this requester may write: the template's manifest, narrowed if the grant narrows it.
+        let narrowed = !pin.mutable_narrow.is_empty();
+        let mut any = false;
+        for v in &tpl.manifest {
+            if narrowed && !pin.mutable_narrow.iter().any(|f| f == &v.field) {
+                continue;
+            }
+            any = true;
+            let _ = writeln!(s, "    {}  {}", v.field, describe_constraint(v));
+        }
+        if !any {
+            s.push_str("    (no mutable fields — spawned exactly as signed)\n");
+        }
+    }
+    s
+}
+
+/// One-line description of a manifest variant's bound, for the caps listing.
+fn describe_constraint(v: &kennel_lib_policy::variant::Variant) -> String {
+    use kennel_lib_policy::variant::Constraint;
+    match v.resolve() {
+        Ok(Constraint::OneOf(set)) => format!("oneof {{{}}}", set.join(", ")),
+        Ok(Constraint::Pool { from, max }) => {
+            format!("pool: append \u{2264}{max} from {{{}}}", from.join(", "))
+        }
+        Ok(Constraint::Pattern(_)) => format!("pattern {{{}}}", v.pattern.join(", ")),
+        Ok(Constraint::Relpath { under }) => format!("relpath under {under}"),
+        Ok(Constraint::Freeform { .. }) => "freeform (any value \u{2014} loud)".to_owned(),
+        Err(_) => "(malformed constraint)".to_owned(),
+    }
+}
+
 /// The validation pipeline: decode → grant → pin → eligibility → patch → claim → mint. On success
 /// returns the validated in-memory instance (for construction), the requester's channel ends, the
 /// spawned kennel's channel ends, and the claimed `max_instances` slot.
@@ -423,6 +521,43 @@ mod tests {
             signature: "s".to_owned(),
             mutable_narrow: narrow.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn describe_constraint_summarises_each_bound() {
+        use kennel_lib_policy::variant::Variant;
+        let field = |f: &str| f.to_owned();
+        let oneof = Variant {
+            field: field("net.mode"),
+            one_of: vec!["none".to_owned(), "constrained".to_owned()],
+            ..Variant::default()
+        };
+        assert_eq!(describe_constraint(&oneof), "oneof {none, constrained}");
+        let pool = Variant {
+            field: field("net.proxy.allow"),
+            pool: vec!["api.x.com".to_owned(), "api.y.com".to_owned()],
+            pool_max: 2,
+            ..Variant::default()
+        };
+        assert_eq!(
+            describe_constraint(&pool),
+            "pool: append \u{2264}2 from {api.x.com, api.y.com}"
+        );
+        let relpath = Variant {
+            field: field("fs.write"),
+            relpath_under: "~/work".to_owned(),
+            ..Variant::default()
+        };
+        assert_eq!(describe_constraint(&relpath), "relpath under ~/work");
+        // A malformed variant (two kinds populated) is flagged, never panics.
+        let bad = Variant {
+            field: field("x"),
+            one_of: vec!["a".to_owned()],
+            pool: vec!["b".to_owned()],
+            pool_max: 1,
+            ..Variant::default()
+        };
+        assert_eq!(describe_constraint(&bad), "(malformed constraint)");
     }
 
     #[test]

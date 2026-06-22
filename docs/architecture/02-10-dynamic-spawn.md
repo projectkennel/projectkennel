@@ -174,6 +174,46 @@ buffer (`MAP_SIZE`) and `RLIMIT_NOFILE`, not by the two `SPAWN` needs. Minting i
 surface outright. The cost paid instead is the bounded one §7.12.9 names — the channel mint and the
 verify-half `SPAWN` validation — in the daemon, where it is reasoned about, not at an inbound-fd boundary.
 
+## Grant interrogation — the `SPAWN_QUERY` verb
+
+Before a requester can usefully call `SPAWN` it must know *what it may ask for* — which templates its
+grant allows, which manifest fields it may write and within what bounds, and how many instances remain.
+`SPAWN_QUERY` is the read-only companion to `SPAWN`: a Node 0 facade-class verb that carries **no request
+payload** (the grant identifies the caller) and returns a plain text listing of this kennel's own
+`[spawn]` grant.
+
+| Field | Direction | Encoding |
+|---|---|---|
+| `code` | req | `SPAWN_QUERY` (facade range, next free verb code after `SPAWN`) |
+| body | req | none — the caller's grant *is* the query |
+| flags | req | none; the reply carries no fds |
+| reply | rep | `status` byte + UTF-8 listing (a plain `Reply::Data`, **no** descriptors) |
+
+The reply is **text, not a serialized structure** — keeping any serializer out of the daemon's
+[[tcb-only-shrinks]] closure. `kenneld` renders one line per allowed `name@version` template, each
+followed by its mutable-field manifest **narrowed to this requester** (`mutable_narrow`): for each
+writable field a one-line bound summary — `oneof {…}`, `pool: append ≤N from {…}`, `pattern {…}`,
+`relpath under …`, or `freeform (any value — loud)` — or `(no mutable fields — spawned exactly as
+signed)` when the requester may only instantiate the template verbatim. The header carries the
+`max_instances` ceiling and the live count. A template named in the grant whose body is absent from the
+trust store, or whose signature no longer verifies, is listed as unavailable rather than omitted.
+
+`SPAWN_QUERY` exposes **only the caller's own grant** — authority it already holds — so it leaks nothing
+across the trust boundary: no other kennel's grant, no template body, no signing key. It is the natural
+read-side of the same capability `SPAWN` exercises on the write side.
+
+### `facade-spawn` — the usable client
+
+`facade-spawn` is the in-kennel binary a confined workload (an agent) actually drives, distinct from the
+fixed `facade-spawn-probe`/`-bench` test drivers:
+
+- **`facade-spawn caps`** issues `SPAWN_QUERY` and prints the grant listing — the workload discovers its
+  delegated-spawn surface instead of probing `SPAWN` by trial.
+- **`facade-spawn run <template@version> [field=value]…`** issues `SPAWN` with the given mutable-field
+  patch, then splices **this process's stdio onto the sibling's channel** (our stdin → the tool's stdin,
+  the tool's stdout → our stdout, its stderr → our stderr). `kenneld` brokers the fds and steps out of
+  the byte path.
+
 ## The capability handoff (construction)
 
 On a validated `SPAWN`, `kenneld`:

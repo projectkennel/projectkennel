@@ -603,12 +603,13 @@ fn system_search_dirs(leaf: &str) -> Vec<PathBuf> {
     ]
 }
 
-/// Read a **root-owned** config file from the system→vendor cascade: the first existing of
-/// `/etc/kennel/<leaf>` (admin override) then `/usr/lib/kennel/<leaf>` (vendor), or `None` if
-/// neither exists. For security-critical config that must not be user-overridable — there is **no**
-/// user/XDG layer, so an unprivileged workload (which cannot write `/etc/kennel` or `/usr/lib/kennel`)
-/// cannot weaken it. The caller supplies a compiled-in default so a missing file never breaks the
-/// daemon (`07-paths.md`; the no-hardcoded-paths config cascade).
+/// Read a **root-owned** config file from the system→vendor cascade.
+///
+/// The first existing of `/etc/kennel/<leaf>` (admin override) then `/usr/lib/kennel/<leaf>` (vendor),
+/// or `None` if neither exists. For security-critical config that must not be user-overridable — there
+/// is **no** user/XDG layer, so an unprivileged workload (which cannot write `/etc/kennel` or
+/// `/usr/lib/kennel`) cannot weaken it. The caller supplies a compiled-in default so a missing file
+/// never breaks the daemon (`07-paths.md`; the no-hardcoded-paths config cascade).
 #[must_use]
 pub fn read_system_config(leaf: &str) -> Option<String> {
     system_search_dirs(leaf)

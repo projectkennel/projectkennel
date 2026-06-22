@@ -68,6 +68,15 @@ denies any capability the template does not grant, and the agent writes only the
 fields the manifest opens. The capability floor of every spawn is the signed
 template's, full stop.
 
+A grant is only useful if its holder can *read* it. An agent need not — and should not — discover its
+spawn surface by trial, firing speculative `SPAWN` calls to learn which template names and field writes
+the daemon will accept. The grant is **interrogable**: a confined workload can ask `kenneld` for its own
+`[spawn]` grant and receive back the allowed `name@version` templates, each template's mutable fields
+*narrowed to that requester* with their bounds, and the `max_instances`/live ceiling. This is the
+read-side of *request, don't author* (§7.12.1) — the agent learns the shape of the fenced blanks before
+it fills them. The query returns only the caller's own grant — authority it already holds — so it crosses
+no trust boundary and reveals no other kennel's grant, template body, or key.
+
 ## 7.12.3 The mutable-field surface
 
 A template is not a constraint over values authored by the agent. It is a **complete, signed,
