@@ -1,5 +1,5 @@
-//! The signed spawn-target template set (`docs/design/07-12-dynamic-spawn.md` §7.12,
-//! ROADMAP-0.3.0 W5) — per-template gate, mirroring `fragments_catalogue.rs`.
+//! The signed spawn-target template set (`docs/design/07-12-dynamic-spawn.md` §7.12)
+//! — per-template gate, mirroring `fragments_catalogue.rs`.
 //!
 //! Each `templates/<name>/policy.toml` in [`SPAWN_TEMPLATES`] is a single-leg SPAWN target.
 //! This gate asserts, for every one:

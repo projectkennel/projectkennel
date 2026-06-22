@@ -496,7 +496,7 @@ pub struct Kennel {
     /// binderfs instance itself died with the workload's mount namespace).
     binder: Option<crate::binder::Manager>,
     /// The spawn-path tracer, carried from bring-up so `stop` stamps the teardown
-    /// span with the same `[t=<nanos>]` milestones (ROADMAP W10 — teardown is a
+    /// span with the same `[t=<nanos>]` milestones (teardown is a
     /// first-class span; a slow reclaim makes spawn rates teardown-limited).
     tracer: kennel_lib_config::Tracer,
 }
@@ -753,7 +753,7 @@ fn bring_up<P: Privileged + Sync>(
     // aliases are only ADDED for the proxied modes, which run a SOCKS facade on them. `none`
     // and `open` add no alias (own empty netns / host netns direct).
     let proxied = matches!(net.mode, NetMode::Constrained | NetMode::Unconstrained);
-    // W9 "do less" — the egress proxy lives on the kennel's OWN loopback (`127.0.0.1`/`::1`, which
+    // The "do less" provisioning — the egress proxy lives on the kennel's OWN loopback (`127.0.0.1`/`::1`, which
     // the kernel hands `lo` once it is up, isolated by the kennel's net-ns), so the facade, the
     // BPF proxy-reach stamp, and resolv all use it. A per-kennel address is needed ONLY when an
     // inbound bind mirror consumes it (§7.5.7): `[net.bind]`-bound services bind their distinct
@@ -791,7 +791,7 @@ fn bring_up<P: Privileged + Sync>(
     // destination, the inbound mirror is binder-driven (not BPF), and egress audit comes from
     // kenneld's INet path — so the BPF there is pure (optional) defence-in-depth. We skip its attach
     // outside `host`: it costs ~7–10 ms/spawn (almost all of it the `BPF_PROG_LOAD` verifier), and
-    // agent spawns never use `host` mode, so they never pay it (W11). `bpf_audit::spawn` no-ops on
+    // agent spawns never use `host` mode, so they never pay it. `bpf_audit::spawn` no-ops on
     // the now-absent pin.
     let bpf_egress = net.mode == NetMode::Host;
 
@@ -800,7 +800,7 @@ fn bring_up<P: Privileged + Sync>(
     // records the proxy in kennel_meta); without it the BPF would deny the proxy too.
     if proxy.is_some() && !no_network {
         // The facade listens on the kennel's own loopback (`127.0.0.1`/`::1`), so the BPF must
-        // permit the workload to reach it there — not a per-kennel address (W9).
+        // permit the workload to reach it there — not a per-kennel address.
         plan.stamp_proxy(&ProxyEndpoint {
             v4: Some(std::net::Ipv4Addr::LOCALHOST),
             v6: std::net::Ipv6Addr::LOCALHOST,
@@ -885,7 +885,7 @@ fn bring_up<P: Privileged + Sync>(
             groups: &etc.groups,
             shell: &etc.shell,
             // The kennel's `localhost` maps to its per-kennel address only when it has one (a bind);
-            // otherwise to the standard loopback (W9) — a no-bind kennel reaches its own services on
+            // otherwise to the standard loopback — a no-bind kennel reaches its own services on
             // `127.0.0.1`/`::1` like any host.
             v4: state.v4,
             v6: state.v6.unwrap_or(std::net::Ipv6Addr::LOCALHOST),
@@ -965,7 +965,7 @@ fn bring_up<P: Privileged + Sync>(
     let net_pivoting = view_root.is_some() && plan.view.is_some();
     if net_pivoting && command_socket.is_some() {
         if let Some(setup) = proxy {
-            // The facade listens on the kennel's own loopback (W9): `127.0.0.1`, isolated by the
+            // The facade listens on the kennel's own loopback: `127.0.0.1`, isolated by the
             // kennel's net-ns, needs no per-kennel address.
             let listen = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
             apply_socks5(plan, &setup.socks5, listen, command);
@@ -1109,7 +1109,7 @@ fn bring_up<P: Privileged + Sync>(
         egress_bytes.len()
     ));
     // Bring the in-ns `lo` up for proxied modes so the facade's `127.0.0.1`/`::1` are reachable —
-    // independent of whether any per-kennel address is added (W9). `none`/`host` keep lo as-is.
+    // independent of whether any per-kennel address is added. `none`/`host` keep lo as-is.
     let lo_up = plan.namespaces.contains(Namespaces::NET) && proxied;
     let (mut child, init_pid, sync, supervision_bytes) = construct_via_factory(
         privileged,
@@ -1330,7 +1330,7 @@ fn construction_half_from(
         // lines (the factory adds those); empty ⇒ default drop-all-groups.
         granted_gids: plan.supplementary_groups.clone().unwrap_or_default(),
         // Bring the in-namespace `lo` UP for any proxied kennel so the kernel's `127.0.0.1`/`::1`
-        // are reachable for the egress facade (W9) — decoupled from addresses: the per-kennel
+        // are reachable for the egress facade — decoupled from addresses: the per-kennel
         // address (if any, bind-only) is added on top, but `lo` is up regardless so a no-bind
         // kennel still has working loopback.
         lo: lo_up,

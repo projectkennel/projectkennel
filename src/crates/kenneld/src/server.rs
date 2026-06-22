@@ -1479,7 +1479,7 @@ pub fn run_kennel<P, L>(
     // closes) — then reclaims: it stamps `teardown: workload exited` at that exit point, stops the
     // binder looper pool, and removes the cgroup. The spinup harness reads the span from that
     // milestone to `teardown complete` below as the teardown cost, distinct from the answer latency
-    // the requester observes (`02-10` §7.12.7, W10).
+    // the requester observes (`02-10` §7.12.7).
     let status = kennel.stop(&audited);
     // The workload exited: stop the tripwire watcher thread (best-effort join).
     if let Some(tripwire) = tripwire {
