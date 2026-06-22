@@ -210,7 +210,7 @@ impl Tracer {
     ///
     /// Each line carries a wall-clock `[t=<nanos>]` stamp (`CLOCK_REALTIME`, comparable across the
     /// spawn-path processes on one host: `kenneld`, the privhelper, `kennel-bin-init`). The latency
-    /// harness (`tools/spawn-latency.sh`, ROADMAP W10) parses these milestones to time each
+    /// harness (`tools/spawn-latency.sh`) parses these milestones to time each
     /// privilege-domain boundary; `step` calls *are* the spans. Off at `Info`, so zero hot-path cost
     /// when not profiling.
     pub fn step(self, msg: &str) {
