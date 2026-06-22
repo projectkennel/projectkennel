@@ -20,8 +20,8 @@ little reward. They move onto a roadmap only if the specific condition named is 
   the daemon (§7.12.5) — relocated into a kennel Kennel now writes and maintains, new adversarial-input
   parsing surface, to mediate a protocol the system chose not to understand. That violates *how can I
   do less*. **The only version that survives the principle is one Kennel does not write**: an *existing*
-  MCP proxy/filter, dropped into a service kennel the way `xdg-dbus-proxy` is — their code,
-  their maintenance, Kennel only brokers it. Promote **only** if such a tool exists and is sound; until
+  MCP proxy/filter, dropped into a confined service kennel the way `oci-fetch` drops in `skopeo`/`umoci` —
+  their code, their maintenance, Kennel only brokers it. Promote **only** if such a tool exists and is sound; until
   then the seam stays at the operator and R2 (delegated composition) remains accepted-and-tagged. No
   first-party interposer is built.
 
@@ -69,11 +69,13 @@ documentation sweep.
   (GNOME 46, supported to 2029) has no render enforcement**. The compositor-independent fallback is a
   filtering Wayland proxy built on the `mahkoh/wl-proxy` *library* (MIT/Apache; the repo's apps are
   GPL-3.0 — invoke as a separate confined binary, or build our own filter on the lib), run **confined inside
-  the GUI-service kennel** exactly as `xdg-dbus-proxy` is for D-Bus — same shape, compromise contained.
+  the GUI-service kennel** the way Kennel already confines untrusted upstream components (`skopeo`/`umoci`
+  in `oci-fetch`, stock OpenSSH in the SSH bastion) — its compromise contained to that kennel.
   **Declined as built work now, for reasons that are likely to expire:** it puts a Kennel-authored,
   security-critical Wayland-protocol parser in the byte path (`wl-proxy` is a young toolkit, not a hardened
-  purpose-built sandbox proxy — it fails the "an existing component Kennel does not write" bar `xdg-dbus-proxy`
-  meets), and the gap it covers is closing on its own as GNOME ≥49 propagates (Ubuntu 26.04 LTS+). It also
+  purpose-built sandbox proxy — it fails the "an existing battle-tested component Kennel does not write" bar
+  that `skopeo`/`umoci` and stock OpenSSH meet), and the gap it covers is closing on its own as GNOME ≥49
+  propagates (Ubuntu 26.04 LTS+). It also
   does not block the **primary CLI workload** ([[primary-workload-is-claude-code]]), which has no Wayland leg.
   **Promote only if** supporting desktop-GUI tenants on GNOME ≤48 / Ubuntu 24.04 LTS becomes a real,
   named deployment requirement. Until then: ship confined GUI on a `security-context-v1`-capable compositor

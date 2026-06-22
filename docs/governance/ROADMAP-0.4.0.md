@@ -127,7 +127,7 @@ Both are detailed in `07-14-confined-gui.md`; both gate the headline.
   - **Confirm B — the render-leg mechanism.** *Original premise FALSIFIED; corrected to a better one.*
     The premise "vendor **Flatpak's filtering Wayland proxy**" is wrong about Flatpak: with flatpak **1.14.6**
     installed, no `*wayland*proxy*` binary exists anywhere on the system, and flatpak filters only **D-Bus**
-    (via `xdg-dbus-proxy`) while Wayland is *passed through* ("Allowing wayland access" — bind the socket
+    (via its D-Bus proxy) while Wayland is *passed through* ("Allowing wayland access" — bind the socket
     in, no filtering). Flatpak relies on Wayland's built-in client isolation, not a proxy. The *correct*
     mechanism is the `wayland-protocols` staging protocol **`security-context-v1`** (≥ 1.32, mid-2023):
     the sandbox engine creates a **tagged** Wayland socket and **the compositor enforces** the
@@ -263,11 +263,12 @@ Self-contained and testable with no broker and no runtime — the contract every
     the data path (kenneld-brokers-doesn't-hold, delivered by the protocol). Reference engine: Flatpak's
     merged support (Aug 2023) and the minimal `~whynothugo/way-secure` CLI; spec at
     `wayland.app/protocols/security-context-v1`.
-  - **Host-services leg — `xdg-dbus-proxy` + `xdg-desktop-portal` (this half stood as written).** The
-    D-Bus filtering proxy `xdg-dbus-proxy` *is* real and Flatpak-shipped; the portal rides it, app-id via
-    the `/.flatpak-info` mechanism W0 confirm A settled (the kennel owns and **seals** that file). This leg
-    keeps the version-pinned, run-unpatched, bwrap-shaped-view framing; the render leg drops it (no binary
-    to pin — the enforcement is the compositor's).
+  - **Host-services leg — `xdg-desktop-portal` over Kennel's own `IDBus` D-Bus facade (§7.7).** The portal
+    is reached as `dev.kennel.dbus` — Kennel's *existing, already-built* per-method D-Bus interposition, not
+    a vendored proxy (Kennel mediates D-Bus with the `IDBus` facade, never Flatpak's D-Bus proxy). App-id
+    via the `/.flatpak-info` mechanism W0 confirm A settled (the kennel owns and **seals** that file). The
+    portal binary keeps the version-pinned, run-unpatched, bwrap-shaped-view framing; the render leg drops
+    that (no binary to pin — the enforcement is the compositor's).
 
   **The tagged residual shrinks:** the host-compositor reach is now the engine's *setup-time* connection
   to register the tagged listener (control-plane), not a filtering proxy standing in the session-long data
@@ -442,7 +443,7 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   host-control-socket rule** (does the endpoint-not-path-string resolution actually hold under a
   cascade-relocated mount; does it over-catch the kennel's own Node 0, W10); and the GUI legs (the
   host-compositor setup leg; whether `security-context-v1` actually denies the privileged globals on the
-  target compositor, and the `xdg-dbus-proxy`/portal filter coverage). Standing services
+  target compositor, and the `IDBus` facade / portal filter coverage). Standing services
   are a longer-lived attack surface than ephemeral spawn, and two of these are new structural refusals
   whose bug-class is escalation — the review bar rises accordingly.
 
