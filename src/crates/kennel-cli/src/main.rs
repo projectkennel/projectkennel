@@ -319,7 +319,7 @@ fn spawn_parent_ctx(name: &str) -> Option<u16> {
 /// nested), and whether it is an orphan spawn (a spawn whose requester has already torn down).
 type Row<'a> = (&'a control::KennelInfo, &'static str, bool);
 
-/// Order the running kennels as a **what-spawned-what** tree (W20): top-level kennels at the root
+/// Order the running kennels as a **what-spawned-what** tree: top-level kennels at the root
 /// (sorted by ctx), each ephemeral SPAWN sibling nested under the kennel that spawned it. Spawns are
 /// depth-1 (a spawn target holds no `[spawn]` grant), so the tree is two levels; an orphan spawn whose
 /// parent has already torn down renders at the root, flagged. Pure (testable); the caller prints it.
@@ -353,7 +353,7 @@ fn topology_rows(kennels: &[control::KennelInfo]) -> Vec<Row<'_>> {
     rows
 }
 
-/// Render the running kennels as the what-spawned-what tree (W20).
+/// Render the running kennels as the what-spawned-what tree.
 fn print_topology(kennels: &[control::KennelInfo]) {
     println!(
         "{:<32} {:>5} {:>8}  {:<8} CLIENT",
