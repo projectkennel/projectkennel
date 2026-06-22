@@ -394,7 +394,7 @@ network access is kept as the coarse **port floor** — the `Ruleset` always han
 so every TCP port is denied except those granted ([[landlock-always-handles-net]]) — a
 companion to the BPF ACL, not a replacement for it. (Orthogonally, the BPF is *attached*
 only in `host` mode, where it is the primary gate; elsewhere the per-kennel net-ns is the
-primary boundary and the attach is skipped for spawn latency, W11 — but the *mechanism*
+primary boundary and the attach is skipped for spawn latency — but the *mechanism*
 stays, because no kernel LSM can express CIDR egress.)
 
 **Consequence.** A "Landlock-only egress" posture is not achievable for Kennel's

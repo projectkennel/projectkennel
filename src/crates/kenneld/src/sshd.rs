@@ -81,7 +81,7 @@ pub const SSHD_CONFIG_LEAF: &str = "kennel-sshd.conf";
 /// (`/etc/kennel/...` then `/usr/lib/kennel/...`) takes precedence when present.
 const DEFAULT_SSHD_TEMPLATE: &str = include_str!("../../../../dist/kennel-sshd.conf");
 
-/// Render the bastion's hardened `sshd_config` (§7.10.6) from the surfaced template (W18).
+/// Render the bastion's hardened `sshd_config` (§7.10.6) from the surfaced template.
 ///
 /// The template is resolved from the **root-owned** cascade — `/etc/kennel/kennel-sshd.conf` (admin
 /// override) over `/usr/lib/kennel/kennel-sshd.conf` (vendor) — with the compiled-in default as the
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn render_uses_the_surfaced_template_verbatim() {
         // The config is the TEMPLATE's, not hardcoded: an admin override (a different cascade file)
-        // renders as written, with only the @PLACEHOLDER@ lines substituted (W18 surfacing).
+        // renders as written, with only the @PLACEHOLDER@ lines substituted.
         let custom = "Port @PORT@\nListenAddress @LISTEN@\nHostKey @HOST_KEY@\n\
                       PidFile @PID_FILE@\n@AUTHORIZED_KEYS@\n# admin tuned: MaxStartups 3\n";
         let out = render_sshd_config(
