@@ -87,16 +87,19 @@ consumers in parallel and reconciling their assumptions afterward.
 
 ### Thrust 0 — Substrate confirms (gating, run FIRST)
 
-The two assumptions about **external packages the project does not control** that the GUI headline (W7)
-rides on. They test whether Flatpak's filtering Wayland proxy and the freedesktop portal behave as the
-design needs *under a constructed view they were never built for*, and they run **first** — ahead of
-committing the GUI scope, not merely ahead of scheduling W7 — because a dirty result should inform
-whether confined GUI is a 0.4.0 ship item or the design forcing-function for a 0.4.0 mesh foundation it
-later rides on. Both are detailed in `07-14-confined-gui.md`; both gate the headline.
+The assumptions about **external substrate the project does not control** that the GUI headline (W7)
+rides on. They test whether the render mechanism (Wayland) and the host-services mechanism (the portal
+over D-Bus) behave as the design needs *under a constructed view they were never built for*, and they run
+**first** — ahead of committing the GUI scope, not merely ahead of scheduling W7 — because a dirty result
+should inform whether confined GUI is a 0.4.0 ship item or the design forcing-function for a 0.4.0 mesh
+foundation it later rides on. The first pass already earned its keep: it falsified the "vendor Flatpak's
+Wayland proxy" premise and replaced it with the compositor-enforced `security-context-v1` model (below).
+Both are detailed in `07-14-confined-gui.md`; both gate the headline.
 
 - **W0 · GUI substrate confirms.** **[gating] S.** **Status: confirm A's mechanism settled; confirm B's
-  *premise* fails as written (a corpus correction, below); confirm A's interactive half and confirm B's
-  e2e remain open — the gate is not clear.** First pass run 2026-06-22.
+  premise corrected (the render mechanism is `security-context-v1`, not a proxy — the design is *better*
+  for it); the new compositor-support confirm is OPEN and negative on the maintainer's own host; confirm
+  A's interactive half remains open — the gate is not clear.** First pass run 2026-06-22.
 
   - **Confirm A — portal identity through the bwrap-mimicked view.** *Mechanism: SETTLED from substrate.*
     On a representative host (`xdg-desktop-portal` **1.18.4** — the version the roadmap's `gui-services@1.18.x`
@@ -120,28 +123,38 @@ later rides on. Both are detailed in `07-14-confined-gui.md`; both gate the head
       and the box's live GNOME session was deliberately **not** perturbed (exercising a real desktop's
       portal writes permission state and pops dialogs in the maintainer's session).
 
-  - **Confirm B — Wayland proxy deployment shape.** *Premise FAILS as written — a corpus correction, not
-    a deployment-shape result.* With flatpak **1.14.6** installed, the substrate shows there is **no
-    "Flatpak filtering Wayland proxy" to integrate**: no `*wayland*proxy*` binary exists anywhere on the
-    system, and flatpak's own surface filters **D-Bus** (`xdg-dbus-proxy`, the session/a11y bus proxies)
-    while Wayland is *passed through* ("Allowing wayland access" — bind the socket in, no message
-    filtering). Flatpak's Wayland confinement boundary is the **compositor's**, via the `security-context-v1`
-    Wayland protocol (compositor-side client labelling), not a proxy Flatpak ships. So the render-leg
-    design premise — "reuse Flatpak's filtering Wayland proxy" — does not hold; a genuine filtering proxy
-    is a *separate third-party tool* (e.g. `wayland-proxy-virtwl`), or the render boundary moves to
-    compositor-side `security-context-v1` (needs a supporting compositor; the host's `wayland-protocols`
-    did not carry the protocol file, so even that is version-gated). **This weakens W7's "inherit upstream
-    hardening" argument for the render leg and changes its integration target — it must be reconciled into
-    `07-14-confined-gui.md` before W7 is scoped.** The *e2e* deployment-shape test (a real filtering proxy
-    under a constructed view, reaching a compositor over the AF_UNIX leg) still needs a compositor, which
-    this headless host lacks — but it is now a test of a *different, correctly-named* component.
+  - **Confirm B — the render-leg mechanism.** *Original premise FALSIFIED; corrected to a better one.*
+    The premise "vendor **Flatpak's filtering Wayland proxy**" is wrong about Flatpak: with flatpak **1.14.6**
+    installed, no `*wayland*proxy*` binary exists anywhere on the system, and flatpak filters only **D-Bus**
+    (via `xdg-dbus-proxy`) while Wayland is *passed through* ("Allowing wayland access" — bind the socket
+    in, no filtering). Flatpak relies on Wayland's built-in client isolation, not a proxy. The *correct*
+    mechanism is the `wayland-protocols` staging protocol **`security-context-v1`** (≥ 1.32, mid-2023):
+    the sandbox engine creates a **tagged** Wayland socket and **the compositor enforces** the
+    privileged-protocol denial (screencopy / input / layer-shell). This is *better than the proxy the
+    premise assumed* — no proxy binary, no filtering code in the byte path, no proxy kennel to compromise;
+    enforcement lives in the compositor, already trusted to draw the screen — and it natively gives the
+    control-plane-only property (engine touches the compositor at setup, the cage talks to the compositor
+    direct over the tagged socket). Flatpak merged engine support Aug 2023; minimal engine example
+    `~whynothugo/way-secure`; spec `wayland.app/protocols/security-context-v1`. **This is folded into W7's
+    render leg; `07-14-confined-gui.md` must be rewritten off the proxy framing onto this.**
+    - **New gating confirm (replaces "proxy deployment shape"): does the target compositor implement
+      `security-context-v1`?** Verified on the substrate: **Mutter 46.2 — the maintainer's own GNOME host —
+      does NOT** (no security-context globals in `libmutter-14`, while every other staging `wp_*_v1` global
+      is present, so the probe is sound). sway implements it; Mutter 47+ and KWin status to confirm against
+      current versions. **Consequence, stated not hidden:** where the compositor lacks the protocol there is
+      **no render-leg enforcement**, so confined GUI carries a hard requirement — *a `security-context-v1`-
+      capable compositor* — and on GNOME ≤ 46 it is unavailable today. This is now the open, host-gated half
+      of confirm B; its e2e (a tagged socket under a constructed view, privileged globals denied) needs such
+      a compositor, which this host's GNOME 46 is not.
 
   - **W0 exit:** both confirms fully clean. Confirm A's mechanism is green and already feeds the model
-    (seal `/.flatpak-info`); **confirm B has corrected a load-bearing design premise and now owes a
-    `07-14` reconciliation plus a re-scoped integration target; confirm A's interactive half and confirm
-    B's e2e remain to run on a graphical host with a real Wayland filtering proxy. W7 stays unscheduled
-    until they do.** This is the gate, and the first pass has already paid for itself by catching the
-    proxy-premise error before any GUI code was written.
+    (seal `/.flatpak-info`); **confirm B has corrected a load-bearing premise to a smaller, better
+    mechanism (`security-context-v1`) and owes a `07-14` rewrite; the new compositor-support confirm is
+    open and negative on the maintainer's own GNOME 46, and confirm A's interactive half remains to run on
+    a `security-context-v1`-capable graphical host. W7 stays unscheduled until both come back clean.** The
+    first pass has already paid for itself twice: it killed the proxy-premise error before any GUI code was
+    written, and it surfaced the compositor-support requirement as a stated dependency rather than a silent
+    runtime gap.
 
 ### Thrust 1 — Contracts first (schema + API, test-first, no daemon)
 
@@ -226,13 +239,39 @@ Self-contained and testable with no broker and no runtime — the contract every
   declared-but-failed (one mechanism, not two). Supervision state ephemeral, re-derived from signed
   declaration on daemon restart. Full design: `07-13-service-catalog.md`.
 
-- **W7 · Confined GUI: Wayland proxy + portals as a service kennel.** **[dep] L.**
-  A sidecar that `[provides]` Wayland + portals (against the W1 schema), integrating Flatpak's
-  filtering Wayland proxy and the freedesktop `xdg-desktop-portal` as a single **version-pinned**
-  service kennel (policy version bound to bundled binary version, build-enforced), run **unpatched**
-  against a **bwrap-shaped constructed view**. One tagged residual: the **AF_UNIX host-compositor leg**
-  behind the filtering proxy. The forcing function; completes the 0.3.0 W16 X11 removal. Full design:
-  `07-14-confined-gui.md`.
+- **W7 · Confined GUI: `security-context-v1` Wayland + portals as a service kennel.** **[dep] L.**
+  A sidecar that `[provides]` GUI capability against the W1 schema, in **two legs that use two different,
+  correctly-named mechanisms** (W0 confirm B corrected the original "vendor Flatpak's Wayland proxy"
+  premise — no such proxy exists):
+
+  - **Render leg — `security-context-v1`, compositor-enforced (no proxy in the path).** There is no
+    filtering Wayland proxy to vendor; the right mechanism is the `wayland-protocols` staging protocol
+    **`security-context-v1`** (wayland-protocols ≥ 1.32). The GUI service kennel acts as a *security-context
+    sandbox engine*: it creates a tagged Wayland listening socket via the compositor's
+    `security_context_manager_v1`, stamps it with the sandbox-engine / app-id / instance-id metadata, and
+    hands the socket into the cage; **the compositor itself** then denies the privileged globals
+    (screencopy, input injection, layer-shell) to connections on that socket. This is *strictly less* than
+    a proxy — no proxy binary, no filtering code in the byte path, no proxy kennel to compromise — and it
+    is natively the property we want: the engine touches the host compositor only at setup (register the
+    listener), the cage's Wayland traffic goes **direct to the compositor** over the tagged socket, and the
+    protocol's close-FD lifecycle tears the context down when the app exits, so the engine need not stay in
+    the data path (kenneld-brokers-doesn't-hold, delivered by the protocol). Reference engine: Flatpak's
+    merged support (Aug 2023) and the minimal `~whynothugo/way-secure` CLI; spec at
+    `wayland.app/protocols/security-context-v1`.
+  - **Host-services leg — `xdg-dbus-proxy` + `xdg-desktop-portal` (this half stood as written).** The
+    D-Bus filtering proxy `xdg-dbus-proxy` *is* real and Flatpak-shipped; the portal rides it, app-id via
+    the `/.flatpak-info` mechanism W0 confirm A settled (the kennel owns and **seals** that file). This leg
+    keeps the version-pinned, run-unpatched, bwrap-shaped-view framing; the render leg drops it (no binary
+    to pin — the enforcement is the compositor's).
+
+  **The tagged residual shrinks:** the host-compositor reach is now the engine's *setup-time* connection
+  to register the tagged listener (control-plane), not a filtering proxy standing in the session-long data
+  path. **The new gating substrate confirm (W0):** the target compositor must implement
+  `security-context-v1` — sway does; **Mutter 46.2 (the maintainer's own host) does not** (verified: no
+  security-context globals in `libmutter-14`), Mutter 47+/KWin to confirm. Where the compositor lacks it
+  there is **no render enforcement**, and the honest answer is a stated requirement — *confined GUI needs a
+  `security-context-v1`-capable compositor* — not a silent gap. The forcing function; completes the 0.3.0
+  X11 removal. Full design: `07-14-confined-gui.md`.
 
 ### Thrust 3 — One `kennel` binary, context-aware (the spawn facade, harmonised)
 
@@ -347,9 +386,10 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 - **W12 · THREATS entries + compliance mapping.** **[dep] M.**
   New residuals into `THREATS.md` and `dist/threats/catalogue.toml`, derived-from-grant the way
   T3.8/T3.9 are: a **standing-service delegation residual** (longer-lived attack surface than
-  ephemeral spawn; the cross-kennel brokering channel) and the **GUI AF_UNIX host-compositor leg**
-  (a T1.6-equivalent — one scoped passthrough behind a filtering proxy in a confined kennel, required
-  `reason`). Plus the compliance-table mapping.
+  ephemeral spawn; the cross-kennel brokering channel) and the **GUI host-compositor leg**
+  (a T1.6-equivalent — the engine's setup-time connection to the host compositor to register a
+  `security-context-v1` tagged socket; scoped, in a confined kennel, required `reason`, with
+  privileged-protocol denial enforced compositor-side). Plus the compliance-table mapping.
 
 - **W13 · Documentation sweep: "authentication, never attestation."** **[dep] S–M.**
   Land the principle solidly across the corpus, not as a buried backlog note. The mesh provides
@@ -387,7 +427,8 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   and have a consumer brokered to the impostor — provider-name spoofing, W1); the **ungrantable
   host-control-socket rule** (does the endpoint-not-path-string resolution actually hold under a
   cascade-relocated mount; does it over-catch the kennel's own Node 0, W10); and the GUI legs (the
-  AF_UNIX compositor residual; the filtering proxy's privileged-protocol coverage). Standing services
+  host-compositor setup leg; whether `security-context-v1` actually denies the privileged globals on the
+  target compositor, and the `xdg-dbus-proxy`/portal filter coverage). Standing services
   are a longer-lived attack surface than ephemeral spawn, and two of these are new structural refusals
   whose bug-class is escalation — the review bar rises accordingly.
 
@@ -432,10 +473,11 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 
 ## Sequencing
 
-0. **Substrate confirms first — W0.** The two GUI confirms run ahead of everything, because W7's scope
+0. **Substrate confirms first — W0.** The GUI confirms run ahead of everything, because W7's scope
    depends on their outcome. Confirm A's mechanism is settled (and already imposes the seal-`/.flatpak-info`
-   requirement on W7); confirm A's interactive half and confirm B must come back clean on a graphical +
-   flatpak host before W7 is scheduled.
+   requirement on W7); confirm B has corrected the render mechanism to `security-context-v1`. Confirm A's
+   interactive half and the new compositor-support confirm must come back clean on a
+   `security-context-v1`-capable graphical host before W7 is scheduled.
 1. **Contracts first — W1 (schema) + W2 (sidecar/readiness API) + W3 (`SVC_CONNECT` wire).**
    Test-first, no daemon; these freeze the cross-workstream contract every later thrust derives from.
    W1's schema is consumed by W4/W6/W7; W2's readiness API by W4 and W14; W3's wire contract by W5.
@@ -465,9 +507,10 @@ service-mesh release and nothing else.
 
 ## Exit criteria
 
-0.4.0 ships when: the two W0 GUI substrate confirms have both come back clean on a graphical + flatpak
-host (W0 — confirm A's mechanism is already settled and feeding the model; its interactive half and
-confirm B are the remaining gate); the `[provides]`/`[consumes]` schema compiles with shape-checking and its
+0.4.0 ships when: the W0 GUI substrate confirms have come back clean on a `security-context-v1`-capable
+graphical host (W0 — confirm A's mechanism is settled and feeding the model; its interactive half and the
+new compositor-support confirm are the remaining gate, and confirm B has already rebased the render leg
+onto `security-context-v1`); the `[provides]`/`[consumes]` schema compiles with shape-checking and its
 valid/invalid corpus passes (W1); the sidecar/restart-policy declaration schema and the readiness
 state machine are landed and their transitions asserted as tests (W2); the `SVC_CONNECT` wire
 contract is specified and round-trip tested (W3); the derived catalogue resolves with readiness
