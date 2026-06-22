@@ -1,8 +1,8 @@
 {
   "crate_count": 24,
-  "total_sloc": 31335,
+  "total_sloc": 31357,
   "tcb_crate_count": 16,
-  "tcb_sloc": 19347,
+  "tcb_sloc": 19356,
   "crates": [
     {
       "name": "kenneld",
@@ -56,7 +56,7 @@
     },
     {
       "name": "kennel-lib-policy",
-      "sloc": 1750,
+      "sloc": 1759,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -106,7 +106,7 @@
     },
     {
       "name": "kennel-facade",
-      "sloc": 1043,
+      "sloc": 1056,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["facade-afunix", "facade-client", "facade-dbus", "facade-socks5", "facade-spawn", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh"],

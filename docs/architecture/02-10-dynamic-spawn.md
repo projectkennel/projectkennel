@@ -121,6 +121,21 @@ not in the agent's write set. Single-leg is enforced once, at the floor; the man
 underneath it. The unit of mutation is the leaf field (or an explicitly scoped subtree), so a
 manifest opening `net.allow` cannot be used to rewrite `net.mode` beside it.
 
+**`workload.argv` — the caller chooses *what runs*, the cage chooses *what is reachable*.** A template
+may open `workload.argv` as a mutable field, so the requester supplies the command line and the template
+fixes the containment around it. This is the one leaf the patch *replaces* rather than appends to (the
+agent gives the whole command, not an addition to a list), and its safety does not rest on the bound at
+all: `argv[0]` is gated by the template's frozen `[exec].allow` under Landlock execve default-deny
+([[landlock-execute-gates-execve-only]]), so a write here can only ever launch a program the template
+already permits, with no path to anything `net`/`fs`/the ceilings do not already allow. The arguments
+are therefore safely `freeform` — the cage, not the argument shape, is the containment — and the
+template's `[exec].allow` is the real allowlist of runnable programs. A template that leaves
+`workload.argv` frozen runs its own pinned entrypoint and rejects a caller command. The registry of
+which leaves are mutable (`net.proxy.allow`, `fs.read`, `fs.write`, `rootfs.writable`, `workload.argv`)
+lives in one place — the verify-half applicator (`kennel-lib-policy`'s `patch::is_mutable_field`) — and
+the compile-time manifest validator shares it, so a manifest can never name a leaf the daemon cannot
+apply.
+
 **Spawn-eligibility is verified at `SPAWN`, not assumed from install** (check 2 above). The install-time
 gate validates each named template at the *spawner's* compile — it carries no `[spawn]` (depth-1), and
 declares its `max_lifetime`, resource ceilings (memory/pids/CPU), and `[[mutable]]` manifest; that gate
@@ -209,10 +224,13 @@ fixed `facade-spawn-probe`/`-bench` test drivers:
 
 - **`facade-spawn caps`** issues `SPAWN_QUERY` and prints the grant listing — the workload discovers its
   delegated-spawn surface instead of probing `SPAWN` by trial.
-- **`facade-spawn run <template@version> [field=value]…`** issues `SPAWN` with the given mutable-field
-  patch, then splices **this process's stdio onto the sibling's channel** (our stdin → the tool's stdin,
-  the tool's stdout → our stdout, its stderr → our stderr). `kenneld` brokers the fds and steps out of
-  the byte path.
+- **`facade-spawn run <template@version> [field=value]… [-- <argv>…]`** issues `SPAWN` with the given
+  mutable-field patch, then splices **this process's stdio onto the sibling's channel** (our stdin → the
+  tool's stdin, the tool's stdout → our stdout, its stderr → our stderr). `kenneld` brokers the fds and
+  steps out of the byte path. Everything after `--` is the command line, carried as the `workload.argv`
+  mutable field (one patch entry per token): on a template that opens that leaf, the caller chooses the
+  command — `facade-spawn run net-fetch@v1 net.proxy.allow=ghcr.io:443 -- curl -sSL https://ghcr.io/…` —
+  and `[exec].allow` gates `argv[0]`.
 
 ## The capability handoff (construction)
 
