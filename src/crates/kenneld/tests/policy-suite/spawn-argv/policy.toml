@@ -1,0 +1,54 @@
+# ============================================================================
+# Suite case: spawn-argv — caller-supplied command line via SPAWN (§7.12).
+#
+# Proves the `workload.argv` mutable field end to end: a confined requester holds
+# a [spawn] grant for the signed `argv-tool@v1` template, whose `[workload].argv`
+# is mutable (freeform) and whose `[exec].allow` floor is the only gate on what may
+# run. Its workload runs the real `facade-spawn` client with a `--` command line:
+#
+#     facade-spawn run argv-tool@v1 -- /bin/echo <marker>
+#
+# kenneld validates the grant, re-verifies argv-tool's content-pin, re-runs
+# spawn-eligibility, applies the patch (workload.argv = [/bin/echo, <marker>] —
+# replacing the template default /bin/true), and constructs the sibling. The
+# sibling execs the caller's command (gated by [exec].allow under Landlock), its
+# stdout streams back over the channel, and the requester asserts the marker.
+#
+# Exit 0 ⇒ the caller chose WHAT RUNS within the template's cage, the command line
+# crossed as a mutable field, and the sibling's stdout reached the requester. A
+# marker (not the empty output the default /bin/true would give) proves the
+# caller-supplied argv actually drove the sibling.
+#
+# setup.sh compiles + signs argv-tool to its settled form with the suite key.
+# ============================================================================
+
+name = "spawn-argv"
+template_base = "base-confined@v1"
+
+# The requester reaches nothing itself — the whole point of delegated spawn.
+[net]
+mode = "none"
+
+# Read the system dirs the (static) facade and the spawned /bin/echo resolve from.
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+# Execute only the in-kennel SPAWN client (+ /bin/sh for the framework shell check).
+[exec]
+allow = ["/usr/libexec/kennel/facade-spawn", "/bin/sh"]
+
+# The workload spawns argv-tool@v1 with a caller-supplied command and checks the echo.
+[workload]
+argv = [
+  "/bin/sh", "-c",
+  'out="$(/usr/libexec/kennel/facade-spawn run argv-tool@v1 -- /bin/echo argv-mutable-works)"; printf "%s\n" "$out"; case "$out" in *argv-mutable-works*) echo "OK: caller-supplied argv ran in the sibling";; *) echo "FAIL: marker not echoed back (argv did not drive the sibling)"; exit 1;; esac',
+]
+pinned = true
+
+# The delegated-spawn grant (§7.12.2): may instantiate argv-tool, bounded to 4 concurrent.
+[spawn]
+max_instances = 4
+reason = "spawn-argv e2e: instantiate argv-tool and prove a caller-supplied command line runs in the sibling"
+
+[[spawn.allow]]
+template = "argv-tool@v1"

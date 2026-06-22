@@ -35,7 +35,7 @@ pub struct PatchEntry {
 pub fn is_mutable_field(field: &str) -> bool {
     matches!(
         field,
-        "net.proxy.allow" | "fs.read" | "fs.write" | "rootfs.writable"
+        "net.proxy.allow" | "fs.read" | "fs.write" | "rootfs.writable" | "workload.argv"
     )
 }
 
@@ -54,6 +54,15 @@ fn apply_field(policy: &mut SettledPolicy, field: &str, value: &str) -> Result<(
         }
         "rootfs.writable" => {
             policy.rootfs.writable.push(value.to_owned());
+            Ok(())
+        }
+        // The command line: the agent supplies the program and its arguments. `argv[0]` is gated by
+        // `[exec].allow` (Landlock execve default-deny) regardless of what is written here, so a template
+        // that opens this leaf delegates *what runs* without widening *what is reachable* — the cage
+        // (net/fs/exec floor, ttl, ceilings) is unchanged. Entries replace the template default in order;
+        // the clear happens once in `instantiate`.
+        "workload.argv" => {
+            policy.workload.argv.push(value.to_owned());
             Ok(())
         }
         // Defence in depth: a field outside the registry should already have been rejected at compile.
@@ -108,6 +117,12 @@ pub fn instantiate(
     let mut instance = template.clone();
     let mut counts: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
 
+    // `workload.argv` is the one leaf the patch SETS rather than appends to (the agent supplies the
+    // whole command line). Clear the template default once so the entries below replace it in order.
+    if patch.iter().any(|e| e.field == "workload.argv") {
+        instance.workload.argv.clear();
+    }
+
     for entry in patch {
         let variant = template
             .manifest
@@ -124,15 +139,19 @@ pub fn instantiate(
             .admits(&entry.value)
             .map_err(|d| PolicyError::Patch(d.0))?;
 
-        // Per-field entry cap (the running count across the patch).
+        // Per-field entry cap (the running count across the patch). `workload.argv` is exempt: a
+        // command line is a sequence of tokens, bounded by the wire's 64 KiB SPAWN patch cap and by
+        // `[exec].allow` (Landlock gates `argv[0]`), not by a manifest entry count.
         let count = counts.entry(entry.field.as_str()).or_insert(0);
         *count = count.saturating_add(1);
-        if let Some(max) = constraint.max_entries() {
-            if *count > max {
-                return Err(PolicyError::Patch(format!(
-                    "field `{}` exceeds its {max}-entry cap",
-                    entry.field
-                )));
+        if entry.field != "workload.argv" {
+            if let Some(max) = constraint.max_entries() {
+                if *count > max {
+                    return Err(PolicyError::Patch(format!(
+                        "field `{}` exceeds its {max}-entry cap",
+                        entry.field
+                    )));
+                }
             }
         }
 
@@ -234,5 +253,41 @@ mod tests {
         assert!(net.bpf_connect_allow.is_empty(), "BPF is never touched");
         // A destination matching no pattern is refused.
         assert!(instantiate(&t, &[entry("net.proxy.allow", "evil.com:443")]).is_err());
+    }
+
+    #[test]
+    fn workload_argv_replaces_the_default_with_the_supplied_command() {
+        let mut t = template_with(vec![Variant {
+            field: "workload.argv".to_owned(),
+            freeform: true,
+            reason: "the agent chooses the command; the cage contains it".to_owned(),
+            ..Variant::default()
+        }]);
+        t.workload.argv = vec!["/bin/true".to_owned()]; // the template default
+
+        // Many tokens replace the default in order — not appended to it, and not capped at one
+        // (freeform's single-entry cap does not apply to a command line).
+        let inst = instantiate(
+            &t,
+            &[
+                entry("workload.argv", "/bin/echo"),
+                entry("workload.argv", "-n"),
+                entry("workload.argv", "hello world"),
+            ],
+        )
+        .expect("argv applies");
+        assert_eq!(
+            inst.workload.argv,
+            vec![
+                "/bin/echo".to_owned(),
+                "-n".to_owned(),
+                "hello world".to_owned()
+            ]
+        );
+        assert!(inst.manifest.is_empty(), "instance carries no manifest");
+
+        // No argv patch leaves the template default untouched.
+        let untouched = instantiate(&t, &[]).expect("empty patch");
+        assert_eq!(untouched.workload.argv, vec!["/bin/true".to_owned()]);
     }
 }
