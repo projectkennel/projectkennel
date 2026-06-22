@@ -60,7 +60,7 @@ Which limb applies to a class is a design decision, not an accident of mechanism
 | D-Bus (§7.7) | Interposition | Per-method filtering via the typed `IDBus` facade (§7.7) |
 | Process visibility (§7.9) | Construction | PID namespace; only the kennel's own descendants |
 | Environment (§7.9) | Construction | Synthesised spawn (`env_clear`); built from policy, framework variables forced, parent pass-through a warned per-variable opt-in |
-| X11 (§7.8) | Construction | Non-goal: X11 cannot be granted (no useful per-client confinement), the view does not expose the host display socket, and `DISPLAY` is not synthesised — the host display is simply not reachable. Isolated X11 is descoped |
+| X11 (§7.8) | Construction | Out of scope: X11 cannot be granted (no useful per-client confinement); the view exposes no host display socket and `DISPLAY` is not synthesised, so the host display is not reachable |
 
 The unifying property holds in both columns: what is not constructed is not there, and what is reachable is reached only through a transaction the monitor sees. Default-deny is structural, not the residue of an exhaustive deny-list.
 
