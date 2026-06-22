@@ -433,7 +433,7 @@ fn build_image_view_and_pivot(
     // 1. A tmpfs backing under the kenneld staging dir holds the two Kennel-built lowers
     //    (`kennel-etc`, `scaffold`), the ephemeral upper+work (discard), and the `merged`
     //    mountpoint we build into and pivot to.
-    mount::mount_tmpfs(staging, None, Some("0755"), false).map_err(|e| {
+    mount::mount_tmpfs(staging, None, Some("0755"), false, false).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("mount tmpfs overlay backing {}: {e}", staging.display()),
@@ -500,7 +500,7 @@ fn build_image_view_and_pivot(
     //    is `readonly = ["/"]`. `[fs.home].persist` paths bind on top via `view.binds`.
     let under = |abs: &Path| root.join(abs.strip_prefix("/").unwrap_or(abs));
     let home = under(Path::new("/home"));
-    mount::mount_tmpfs(&home, None, Some("0755"), false)?;
+    mount::mount_tmpfs(&home, None, Some("0755"), false, true)?;
 
     // 6. Assembly (§7.11.4a): bind the granted ~/ + launcher + config + additive binds. `/etc` is
     //    writable-through (§7.11.4c) — the `kennel-etc` lower sets the defaults and a workload may
@@ -556,7 +556,7 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
     //    rules match). nosuid; devices come only from the explicit binds.
     let dev = under(Path::new("/dev"));
     std::fs::create_dir_all(&dev)?;
-    mount::mount_tmpfs(&dev, None, Some("0755"), true)?;
+    mount::mount_tmpfs(&dev, None, Some("0755"), true, true)?;
     for node in &view.dev_allow {
         let dest = under(node);
         if let Some(parent) = dest.parent() {
@@ -604,7 +604,13 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
     mount::mount_proc(&proc, view.proc_hidepid)?;
     let tmp = under(Path::new("/tmp"));
     std::fs::create_dir_all(&tmp)?;
-    mount::mount_tmpfs(&tmp, Some(view.tmp_size_mib), Some(&view.tmp_mode), false)?;
+    mount::mount_tmpfs(
+        &tmp,
+        Some(view.tmp_size_mib),
+        Some(&view.tmp_mode),
+        false,
+        true,
+    )?;
 
     // 6. Ensure the shim $HOME exists even if no ~ path was granted, so HOME resolves.
     std::fs::create_dir_all(under(&view.shim_root))?;

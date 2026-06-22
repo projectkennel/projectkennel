@@ -461,7 +461,18 @@ impl LeafPolicy {
             .ssh
             .as_ref()
             .is_none_or(|s| s.destinations.as_ref().is_none_or(|d| d.remove.is_empty()));
-        fs_ok && exec_ok && net_ok && unix_ok && ssh_ok
+        // Scalar `[*.override]` forms are overrides, not additions: an include "may add rules but
+        // not remove or override" (§5.10). `apply` overwrites the inherited TTL/ttl_action and the
+        // audit log_path/level from these, so a fragment carrying one would silently replace a frozen
+        // cage field (acute for spawn, whose eligibility re-check trusts the template's TTL). Reject
+        // them from an include — the inheritance chain is where an override legitimately lives.
+        let lifecycle_ok = self.lifecycle.as_ref().is_none_or(|l| l.over.is_none());
+        let audit_ok = self
+            .net
+            .as_ref()
+            .and_then(|n| n.audit.as_ref())
+            .is_none_or(|a| a.over.is_none());
+        fs_ok && exec_ok && net_ok && unix_ok && ssh_ok && lifecycle_ok && audit_ok
     }
 
     /// This policy's `[[net.proxy.allow.add]]` entries (for include conflict checks).
@@ -966,5 +977,25 @@ level = "full"
         // The whole reason leaves get their own type: the delta form is not a SourcePolicy.
         assert!(parse_source(PROJECT_LEAF.as_bytes()).is_err());
         assert!(parse(PROJECT_LEAF.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn scalar_overrides_are_not_additive_only() {
+        // Pure `[[*.add]]` deltas are additive — fine for an include.
+        let add =
+            parse(b"name = \"f\"\n[[exec.allow.add]]\npath = \"/usr/bin/x\"\nreason = \"r\"\n")
+                .expect("parse");
+        assert!(add.is_additive_only());
+        // A `[lifecycle.override]` is an OVERRIDE, not an addition: a fragment must not carry it (it
+        // would silently replace the frozen TTL the spawn eligibility re-check trusts).
+        let ttl = parse(b"name = \"f\"\n[lifecycle.override]\nttl = \"8760h\"\n").expect("parse");
+        assert!(
+            !ttl.is_additive_only(),
+            "lifecycle override is not additive"
+        );
+        // Likewise `[net.audit.override]`.
+        let audit =
+            parse(b"name = \"f\"\n[net.audit.override]\nlevel = \"none\"\n").expect("parse");
+        assert!(!audit.is_additive_only(), "audit override is not additive");
     }
 }

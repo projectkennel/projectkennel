@@ -156,6 +156,10 @@ pub struct SpawnRuntime {
     /// its `reap_children`). A clone rides each [`SlotGuard`] to the construction thread, which re-checks
     /// it once the spawned cgroup is live, closing the async-reaper race (§7.12.7).
     parent_alive: Arc<AtomicBool>,
+    /// Memoised body of the `SPAWN_QUERY` caps listing (immutable for the grant's lifetime). Computed
+    /// once on first query so repeated `SPAWN_QUERY` calls do not re-resolve and re-verify every
+    /// allowed template (CPU amplification, §7.12). The live-count header is rendered fresh per call.
+    caps_body: std::sync::OnceLock<String>,
 }
 
 impl Drop for SpawnRuntime {
@@ -187,6 +191,7 @@ impl SpawnRuntime {
             live: Arc::new(AtomicU32::new(0)),
             tracer,
             parent_alive: Arc::new(AtomicBool::new(true)),
+            caps_body: std::sync::OnceLock::new(),
         }
     }
 }
@@ -304,16 +309,26 @@ pub fn handle_spawn_query(
 /// per-requester-narrowed mutable fields (or "no mutable fields"), or an `unavailable` note if the
 /// template no longer resolves from the trust store / its content-pin no longer matches.
 fn render_caps(rt: &SpawnRuntime) -> String {
-    use std::fmt::Write as _;
     let live = rt.live.load(Ordering::Acquire);
-    let mut s = format!(
-        "spawn grant: max_instances {}, live {}\n",
+    // Only the header's live count changes between calls; the per-template body is immutable for the
+    // grant's lifetime — a `(template, pin)` resolves to the same bytes and the same verified manifest
+    // forever — so resolve+ed25519-verify+render it ONCE (memoised), not on every SPAWN_QUERY. This
+    // removes the per-call signature-verification cost an in-cage caller could otherwise spin to
+    // amplify CPU in the shared looper pool.
+    let body = rt.caps_body.get_or_init(|| render_caps_body(rt));
+    format!(
+        "spawn grant: max_instances {}, live {}\n{body}",
         rt.grant.max_instances, live
-    );
+    )
+}
+
+/// The immutable per-template body of the caps listing (everything but the live-count header).
+fn render_caps_body(rt: &SpawnRuntime) -> String {
+    use std::fmt::Write as _;
     if rt.grant.allow.is_empty() {
-        s.push_str("  (no templates allowed)\n");
-        return s;
+        return "  (no templates allowed)\n".to_owned();
     }
+    let mut s = String::new();
     for pin in &rt.grant.allow {
         let Some(bytes) = resolve_template(&rt.template_dirs, &pin.template) else {
             let _ = writeln!(
