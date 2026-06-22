@@ -19,9 +19,9 @@ the code whose compromise would break confinement.
 
 | Crate | SLOC | unsafe | TCB | Consumers | External deps |
 |---|--:|:--:|:--:|---|---|
-| `kenneld` | 6158 | — | **yes** | *(2 bins)* | basic-toml, serde |
+| `kenneld` | 6128 | — | **yes** | *(2 bins)* | basic-toml, serde |
 | `kennel-lib-compile` | 4815 | — | — | cli | basic-toml, serde |
-| `kennel-cli` | 3614 | — | — | *(binary)* | lexopt, serde, serde_json |
+| `kennel-cli` | 3985 | — | — | *(binary)* | lexopt, serde, serde_json |
 | `kennel-lib-binder` | 2003 | **yes** | **yes** | bin-init, dbus, facade, kenneld, spawn | libc |
 | `kennel-lib-spawn` | 1942 | — | **yes** | bin-init, kenneld, privhelper | — |
 | `kennel-lib-policy` | 1728 | — | **yes** | cli, compile, kenneld, spawn | basic-toml, ed25519-compact, object, serde |
@@ -35,7 +35,7 @@ the code whose compromise would break confinement.
 | `kennel-host-dbus` | 496 | — | — | *(binary)* | mini-sansio-dbus, nix |
 | `kennel-lib-control` | 433 | — | **yes** | cli, kenneld | — |
 | `kennel-lib-os` | 396 | — | **yes** | syscall | libc, nix |
-| `kennel-lib-config` | 385 | — | **yes** | bin-init, cli, kenneld, privhelper | basic-toml, serde |
+| `kennel-lib-config` | 391 | — | **yes** | bin-init, cli, kenneld, privhelper | basic-toml, serde |
 | `kennel-bin-init` | 338 | — | **yes** | *(binary)* | — |
 | `kennel-host-delegate` | 256 | — | **yes** | kenneld | — |
 | `kennel-lib-landlock` | 249 | **yes** | **yes** | syscall | bitflags, libc |
@@ -60,7 +60,7 @@ the code whose compromise would break confinement.
 - `kennel-privhelper` → bpf, config, spawn, syscall
 - `kenneld` → host-delegate, audit, binder, bpf, config, control, policy, spawn, syscall, privhelper
 
-**Totals.** 24 crates, **30787 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **19261 SLOC**; the remaining 8 crates (11526 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
+**Totals.** 24 crates, **31134 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **19237 SLOC**; the remaining 8 crates (11897 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
 
 <!-- END GENERATED: crate-inventory -->
 
@@ -109,18 +109,16 @@ compiler, not the daemon process, so they are not in-process attack surface at a
 
 **The danger axis is the point.** Logic-vs-bindings says what executes in-process;
 adversarial-vs-trusted says what an attacker can steer. The intersection that matters —
-**vendored logic on adversarial input inside the daemon** — is now **empty**. Until W11
-it was `vte` (2,943 SLOC) + its sole dep `arrayvec` (1,314): a `vte` ANSI state machine
-parsing **workload-controlled** PTY output at the daemon's master-read point, the §4.8
-anti-pattern. W11 moved that parser client-side into `kennel-cli`, removing **4,257 SLOC
-of adversarial-input parsing logic** from the daemon TCB; the broker is now a raw-byte
-router. The vendored logic that remains all reads *trusted* input — first-party ELF, our
+**vendored logic on adversarial input inside the daemon** — is **empty**. The `vte` ANSI
+state machine that parses **workload-controlled** PTY output (the §4.8 anti-pattern) runs
+**client-side in `kennel-cli`**, not at the daemon's master-read point; the broker is a
+raw-byte router. The vendored logic that remains all reads *trusted* input — first-party ELF, our
 own typed wire, our own filter program, a signed artefact — or is itself a verification
 guard (`ed25519-compact`). The one first-party parser of adversarial bytes left in the
 daemon is `kennel-lib-binder`'s `BC_*`/`BR_*` decoder, which is `unsafe`-quarantined and
 fuzzed (§4 / CODING-STANDARDS §10.6).
 
-The W8 D-Bus mediation is the same discipline held: `mini-sansio-dbus` (~4.4k logic) parses the
+The D-Bus mediation is the same discipline held: `mini-sansio-dbus` (~4.4k logic) parses the
 **adversarial** D-Bus wire, but it is vendored onto `kennel-lib-dbus` / `kennel-host-dbus` — the
 in-kennel `facade-dbus` and the operator-context `host-dbus` delegate — **not** the daemon. So it
 does *not* re-populate the empty "vendored-logic-on-adversarial-input-in-the-daemon" intersection:
@@ -400,7 +398,7 @@ The control protocol (CLI ↔ kenneld) lives in its own crate `kennel-lib-contro
 
 ### `kennel-cli` (the `kennel` operator CLI)
 
-- Its own crate (`src/main.rs`), **outside the daemon TCB**: the unprivileged CLI links the control wire types via `kennel-lib-control` but none of the daemon's enforcement code, so its `serde_json` (trust-manifest reader), `lexopt` (arg parser), and `kennel-lib-term`/`vte` (the terminal-escape filter, moved here by W11) deps stay out of `kenneld`'s dependency closure. The protocol cannot drift because both sides depend on the one `kennel-lib-control` crate.
+- Its own crate (`src/main.rs`), **outside the daemon TCB**: the unprivileged CLI links the control wire types via `kennel-lib-control` but none of the daemon's enforcement code, so its `serde_json` (trust-manifest reader), `lexopt` (arg parser), and `kennel-lib-term`/`vte` (the terminal-escape filter, client-side) deps stay out of `kenneld`'s dependency closure. The protocol cannot drift because both sides depend on the one `kennel-lib-control` crate.
 - Owns the **client-side terminal-escape filter** (§4.8): on an interactive run/attach the daemon's PTY broker routes the workload's output raw and conveys the `[tty]` filter decision in its `Started`/`Attached` response; the CLI runs `kennel-lib-term` over the broker→terminal stream so the `vte` parser of workload-controlled bytes never executes in the daemon.
 - A thin sync Unix-socket client of the control protocol. Argument parsing is `lexopt` over `std::env::args` (dispatch on the first argument, each subcommand parsing its own flags); no `clap` and no proc-macro arg-parser is linked.
 

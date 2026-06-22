@@ -248,11 +248,17 @@ both.
 Because the image lower is never mutated and the upper is a known Kennel-owned path under the store
 entry, two verbs act on the managed upper without reconstructing anything:
 
-- **`kennel oci revert <name>`** obliterates the managed upper and recreates it empty; the next run's
-  merged root is the lowers plus a clean layer. It is the *total* case of the persistence-safety
-  revert (the blunt end of selective revert), a host-side operator act the workload cannot perform,
-  refused while the entry runs. Its claim is narrow — it returns the mutable state to empty; it does
-  not re-attest the image lower (the integrity ladder's job). A no-op for a `discard` entry (no
+- **`kennel oci revert <name> [--list] [-- <path>…]`** restores the managed upper toward the image
+  lower. The image lower is the **pin** (content-addressed by its digest); the upper's copy-ups and
+  whiteouts are the **diff against the pin**; removing an upper entry is **restore-from-pin** — the OCI
+  instantiation of the same pin / diff-against-pin / restore-from-pin mechanism the masked
+  trust-manifest store (§7.4) runs over workspace bytes (one mechanism, two callers). `--list` shows
+  the diff (a copy-up/added file, or a whiteout deleting a lower file); `-- <path>…` restores selected
+  paths; with neither it is the **total** case — obliterate the whole upper so the next run's merged
+  root is the lowers plus a clean layer (the blunt end of selective revert). A host-side operator act
+  the workload cannot perform; the mutating modes are refused while the entry runs (`--list` is
+  read-only). Its claim is narrow — it returns the mutable state toward the pin; it does not re-attest
+  the image lower (the integrity ladder's job). The total case is a no-op for a `discard` entry (no
   managed upper exists).
 - **`kennel oci update <name> -- <new-image-ref>`** replaces the assured layer: fetch and unpack the
   new image by digest through the vetted builder path, swap `rootfs/` + `config.json` + `digest`,

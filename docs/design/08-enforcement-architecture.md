@@ -94,7 +94,6 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
      behind a kenneld↔delegate socketpair rather than a TCP loopback listener
    - the `IDBus` facade (§7.7) for the session bus (if dbus.session.enabled)
    - the `IDBus` facade (§7.7) for the system bus (if dbus.system.enabled)
-   - Xwayland or Xephyr (if X11 isolation enabled)
 
 6. Compile and attach BPF programs to cgroup:
    - inet4_connect, inet6_connect: address allowlist
@@ -255,7 +254,7 @@ Project Kennel also provides `kennel audit <kennel> [--since 1h] [--resource net
 
 ## 8.7 Lifecycle of the supporting daemons
 
-Per-kennel daemons (SOCKS5 proxy, the D-Bus facade, Xwayland/Xephyr) are managed by Project Kennel's supervisor:
+Per-kennel daemons (SOCKS5 proxy, the D-Bus facade) are managed by Project Kennel's supervisor:
 
 **Launch.** When a kennel starts and a daemon is needed, the supervisor launches it. The daemon's socket is placed at a framework-known path (`/run/kennel/<ctx>/<daemon>.sock`).
 
@@ -265,7 +264,7 @@ Per-kennel daemons (SOCKS5 proxy, the D-Bus facade, Xwayland/Xephyr) are managed
 
 **Crash recovery.** If a daemon crashes while a kennel is active, the supervisor restarts it. The kennel's traffic to that daemon will briefly fail (connections to a missing proxy fail with ECONNREFUSED until the proxy is back). Audit log records the crash and restart.
 
-**Health checks.** The supervisor periodically probes each daemon (TCP connect for proxies, D-Bus call for dbus-proxy, X11 query for X servers). Failed health checks trigger a restart.
+**Health checks.** The supervisor periodically probes each daemon (TCP connect for proxies, D-Bus call for dbus-proxy). Failed health checks trigger a restart.
 
 ## 8.8 Inter-kennel isolation
 

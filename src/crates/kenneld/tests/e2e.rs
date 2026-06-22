@@ -888,7 +888,7 @@ fn ttl_warn_suspends_then_resumes_the_workload() {
     );
 }
 
-/// **TTL `renew` with no operator, end to end (the W13 fallback).** A non-interactive run
+/// **TTL `renew` with no operator, end to end (the renew-without-operator fallback).** A non-interactive run
 /// has no attached terminal to prompt, so the `renew` action cannot ask: at the deadline the
 /// handler takes the no-operator fallback (thaw + RESUME, no re-arm) rather than terminating.
 /// A `sleep 3; exit 0` workload under a 1s renew-TTL therefore survives the TTL and completes

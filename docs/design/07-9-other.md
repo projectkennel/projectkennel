@@ -1,6 +1,6 @@
 # §7.9 Policy surface: process introspection, environment, capabilities, mounts, tty
 
-The remaining resource classes, grouped because each is smaller than the major classes (exec, fs, net, unix, dbus, x11) but each is essential to the threat model.
+The remaining resource classes, grouped because each is smaller than the major classes (exec, fs, net, unix, dbus) but each is essential to the threat model.
 
 ## 7.9.1 Process introspection: ptrace, signals, /proc visibility
 

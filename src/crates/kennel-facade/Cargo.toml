@@ -38,7 +38,7 @@ path = "src/bin/facade-dbus.rs"
 name = "facade-spawn-probe"
 path = "src/bin/facade-spawn-probe.rs"
 
-# The in-kennel sequential SPAWN bench driver — the ephemeral half of the W10 spinup profile
+# The in-kennel sequential SPAWN bench driver — the ephemeral half of the spinup profile
 # (`tools/spawn-spinup.sh`): drives N back-to-back constructions to time the in-daemon SPAWN path.
 [[bin]]
 name = "facade-spawn-bench"

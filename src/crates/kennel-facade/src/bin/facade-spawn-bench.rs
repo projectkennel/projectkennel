@@ -1,4 +1,4 @@
-//! `facade-spawn-bench` — the in-kennel **spinup bench** driver (`02-10` §7.12, W10 "one layer down").
+//! `facade-spawn-bench` — the in-kennel **spinup bench** driver (`02-10` §7.12, the "one layer down" spinup profile).
 //!
 //! Run as the workload of a single, long-lived **control kennel**, this times two ways of running the
 //! same payload `count` times in a row, from inside that one kennel's lifetime — no per-run CLI launch,

@@ -182,6 +182,10 @@ install_config() {
 		done
 	fi
 	run install -m 0644 "$repo_root/dist/config/system.toml" "$vendor_dir/system.toml"
+	# The bastion's hardened sshd_config template (W18): surfaced root-owned in the vendor layer so
+	# its lockdown is legible and admin-tunable (override at /etc/kennel/kennel-sshd.conf), not baked
+	# into the daemon. kenneld renders it per bastion; a missing file falls back to the compiled copy.
+	run install -m 0644 "$repo_root/dist/kennel-sshd.conf" "$vendor_dir/kennel-sshd.conf"
 	run install -m 0644 "$repo_root/dist/config/config.toml" "$vendor_dir/config.toml"
 	# The machine-readable threat catalogue `kennel policy risks` reads (the CLI
 	# falls back to its embedded copy if absent; this lets an org ship an extended one).

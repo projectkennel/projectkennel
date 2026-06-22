@@ -519,7 +519,7 @@ pub struct Plan {
     /// Whether to **birth** the kennel into [`cgroup`](Self::cgroup): the privhelper factory passes the
     /// cgroup fd to `clone3(CLONE_INTO_CGROUP)`, so the kennel's PID 1 is created *already inside* the
     /// cgroup — no post-clone `cgroup.procs` migration, which would block on the
-    /// `cgroup_threadgroup_rwsem` RCU grace period (the ~13 ms construction cost W10 removed). The
+    /// `cgroup_threadgroup_rwsem` RCU grace period (the ~13 ms construction cost since removed). The
     /// factory selects the birth path on this flag (`kennel-privhelper::construct`: `Some(cgroup) →
     /// clone_pid1_in_cgroup`, `None → clone_pid1` with no cgroup). True for policy-derived plans; it
     /// works because the kennel cgroup is a descendant of kenneld's delegated `user@<uid>` subtree

@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn output_pump_filters_escapes_client_side() {
         // The dangerous OSC-52 clipboard write is dropped on the way to the terminal; the
-        // surrounding benign bytes survive. This is the client-side half of the W11 cut —
+        // surrounding benign bytes survive. This is the client-side half of the escape-filter split —
         // the daemon broker routes raw and never runs this parser (§4.8).
         let got = pump_through(b"hi\x1b]52;c;cGF5bG9hZA==\x07bye", true);
         let text = String::from_utf8_lossy(&got);

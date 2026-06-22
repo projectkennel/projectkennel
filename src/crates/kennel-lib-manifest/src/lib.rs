@@ -172,7 +172,7 @@ pub struct Execution {
 }
 
 /// What a pinned trigger is — a regular file whose bytes are pinned, or a symlink whose
-/// target is pinned (an escaping link is itself a trigger class, §2.1 / W2).
+/// target is pinned (an escaping link is itself a trigger class, §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerKind {
