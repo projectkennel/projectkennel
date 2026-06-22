@@ -7,7 +7,7 @@ Baseline: 0.3.0 (released)
 > (`docs/design/`) and the as-built notes (`docs/architecture/`) remain the source of truth
 > for *what each item is*; this file records *what 0.4.0 commits to, why, and in what order*.
 > The two anchor designs are `docs/design/07-13-service-catalog.md` (sidecars + catalog) and
-> `docs/design/07-14-confined-gui.md` (Wayland + portals); their architecture contracts are
+> `docs/design/07-14-confined-gui.md` (nested-compositor Wayland); their architecture contracts are
 > written as-built across the build. (Design chapter numbers provisional.)
 
 ## Theme
@@ -31,7 +31,8 @@ Two continuities make this one move, not a new direction:
   standing service amortises construction (the GUI kennel is up once, many apps use it). The mesh is
   the latency complement to spawn — repeated capability use stops paying per-use construction.
 - **It completes the GUI story 0.3.0 opened.** W16 removed X11 from built artefacts; 0.4.0 ships the
-  Wayland + portal path that makes that removal a replacement, not a capability regression.
+  confined-Wayland path (a per-kennel nested compositor) that makes that removal a replacement, not a
+  capability regression.
 
 The **forcing function and headline proof is confined GUI** — the first non-trivial service kennel,
 and the thing that pressure-tests every mesh primitive.
@@ -88,43 +89,31 @@ consumers in parallel and reconciling their assumptions afterward.
 ### Thrust 0 — Substrate confirms (gating, run FIRST)
 
 The assumptions about **external substrate the project does not control** that the GUI headline (W7)
-rides on. They test whether the render mechanism (Wayland) and the host-services mechanism (the portal
-over D-Bus) behave as the design needs *under a constructed view they were never built for*, and they run
-**first** — ahead of committing the GUI scope, not merely ahead of scheduling W7 — because a dirty result
-should inform whether confined GUI is a 0.4.0 ship item or the design forcing-function for a 0.4.0 mesh
-foundation it later rides on. They earned their keep many times over: they falsified the "Flatpak Wayland
-proxy" premise, then the "host `security-context-v1`" premise (released GNOME doesn't ship it), and landed
+rides on — the render mechanism (Wayland). They run **first** — ahead of committing the GUI scope, not
+merely ahead of scheduling W7 — because a dirty result should inform whether confined GUI is a 0.4.0 ship
+item or the design forcing-function for a 0.4.0 mesh foundation it later rides on. They earned their keep
+many times over: they falsified the "Flatpak Wayland proxy" premise, then the "host `security-context-v1`"
+premise (released GNOME doesn't ship it), retired the portal/identity leg as unnecessary, and landed
 on the host-independent **nested inner compositor** — proven end-to-end on stock GNOME (below). Detailed in
 `07-14-confined-gui.md`.
 
 - **W0 · GUI substrate confirms.** **[gating] S.** **Status: RESOLVED (2026-06-22, firsthand on real
-  hardware). Confirm A's mechanism settled; confirm B went through two corrections and landed on a
-  host-independent answer — the per-kennel *nested inner compositor*, proven end-to-end on stock GNOME.
-  `security-context-v1` is real and enforces (verified on sway), but GNOME lacks it through Mutter 50.1, so
-  the design no longer depends on it. The gate is clear; what remains is engineering, not substrate risk.**
+  hardware). Confirm A retired (the portal it investigated is cut from W7); confirm B went through two
+  corrections and landed on a host-independent answer — the per-kennel *nested inner compositor*, proven
+  end-to-end on stock GNOME. `security-context-v1` is real and enforces (verified on sway), but GNOME lacks
+  it through Mutter 50.1, so the design no longer depends on it. The gate is clear; what remains is
+  engineering, not substrate risk.**
   Confirms run against Ubuntu 25.10→26.04 LTS (GNOME 49→50, Mutter 50.1) and sway 1.11 / Weston 14 / cage.
 
-  - **Confirm A — portal identity through the bwrap-mimicked view.** *Mechanism: SETTLED from substrate.*
-    On a representative host (`xdg-desktop-portal` **1.18.4** — the version the roadmap's `gui-services@1.18.x`
-    pin example names), the portal derives a caller's app-id by reading **`/.flatpak-info`** from the
-    calling process's mount-namespace root (`instance-id` + the app-id; confirmed directly from the portal
-    binary). Two consequences, both load-bearing:
-    - The bwrap-mimicry delivers app-identity **for free** — the clean-win path. A constructed view that
-      presents a well-formed `/.flatpak-info` is seen as that Flatpak app, so the permission store keys on
-      it and persists; there is no per-call re-prompt *by construction*, provided the file is present and
-      well-formed.
-    - **Security (the W13 authentication/attestation seam — now substrate-confirmed, not hypothetical):**
-      app-id is *asserted by the sandbox's own `/.flatpak-info`*, so the permission-store key is only as
-      trustworthy as the view's integrity. The kennel must **own and seal `/.flatpak-info`** — synthesised
-      at construction, never workload-writable — exactly as it masks the trust-manifest (§4.6). A workload
-      able to author or rewrite it is a confused deputy against its own (or another app-id's) permission
-      store. This converts confirm A's "identity seam" from a UX question into a *construction-integrity
-      requirement* that W7 must carry.
-    - *Interactive half: OPEN.* Whether the permission store persists across real sessions without
-      re-prompting, and how a 1.18 backend behaves under the constructed view, needs a live graphical
-      session plus a flatpak (or a faithful mimic) app — not runnable on the headless host this pass used,
-      and the box's live GNOME session was deliberately **not** perturbed (exercising a real desktop's
-      portal writes permission state and pops dialogs in the maintainer's session).
+  - **Confirm A — portal identity through the bwrap-mimicked view. *RETIRED — the portal is cut (W7).***
+    The investigation stands as the trail that led to cutting it: `xdg-desktop-portal` 1.18.4 derives a
+    caller's app-id by reading **`/.flatpak-info`** from the calling process's mount-ns root, so the
+    permission-store key is only as trustworthy as the view (a confused-deputy seam that would have required
+    the kennel to *seal* `/.flatpak-info`). But the portal turned out to be **unnecessary** — Kennel brokers
+    host resources natively (`fs` grants, SOCKS egress, AF_UNIX, the `IDBus` facade), so W7 cuts it (see W7).
+    With no portal there is no `/.flatpak-info`, no app-id mimicry, and no sealing requirement — the seam is
+    designed out rather than defended. Interactive permission-store behaviour is now moot (no portal to
+    persist anything).
 
   - **Confirm B — the render-leg mechanism.** *Premise corrected twice; landed host-independent.* Verified
     firsthand on real hardware (Ubuntu 25.10 → 26.04 LTS, plus sway 1.11 / Weston 14 / cage).
@@ -156,15 +145,15 @@ on the host-independent **nested inner compositor** — proven end-to-end on sto
       same-trust-domain non-issue. **Folded into W7; `07-14-confined-gui.md` is written on the
       nested-compositor model, not the host-protocol one.**
 
-  - **W0 exit — CLEAR.** Confirm A green and feeding the model (seal `/.flatpak-info`); confirm B resolved
-    to the **host-independent nested-compositor architecture**, proven on real GNOME. The earlier "ship only
-    on a security-context-capable compositor + `wl-proxy` fallback" framing is **withdrawn** — the nested
-    compositor *is* the cross-host mechanism (and a better one: construction, not filtering), so it works on
-    GNOME and the `wl-proxy` fallback is retired (BACKLOG). What remains for W7 is **engineering, not
-    substrate risk**: the per-kennel compositor lifecycle, the fd-brokered host leg, toplevel→host-window
-    mapping, dmabuf-passthrough perf, and confirm A's interactive permission-store half (run on a host with a
-    flatpak + portal). The confirms paid for themselves many times over — they killed *two* reach-for-the-
-    wrong-component errors and a "won't-run-on-GNOME" dead end before a line of GUI code was written.
+  - **W0 exit — CLEAR.** Confirm A retired (the portal is cut from W7, so `/.flatpak-info` and its sealing
+    concern are designed out); confirm B resolved to the **host-independent nested-compositor architecture**,
+    proven on real GNOME. The earlier "ship only on a security-context-capable compositor + `wl-proxy`
+    fallback" framing is **withdrawn** — the nested compositor *is* the cross-host mechanism (and a better
+    one: construction, not filtering), so it works on GNOME and the `wl-proxy` fallback is retired (BACKLOG).
+    What remains for W7 is **engineering, not substrate risk**: the per-kennel compositor lifecycle, the
+    fd-brokered host leg, toplevel→host-window mapping, and dmabuf-passthrough perf. The confirms paid for
+    themselves many times over — they killed *two* reach-for-the-wrong-component errors, a "won't-run-on-
+    GNOME" dead end, and a whole unneeded portal/identity leg before a line of GUI code was written.
 
 ### Thrust 1 — Contracts first (schema + API, test-first, no daemon)
 
@@ -183,7 +172,7 @@ Self-contained and testable with no broker and no runtime — the contract every
   **Confine the provide-name namespace — `[provides]` is not sidecar-only.** Any kennel may declare a
   `[provides]`, not just the operator-declared service set, so the name a provider may *claim* is the
   load-bearing gate, not which kennels are allowed to provide. The reserved `dev.kennel.*` namespace
-  (Wayland, portal, D-Bus, the system service names a consumer trusts by reputation) is claimable
+  (GUI/Wayland, D-Bus, the system service names a consumer trusts by reputation) is claimable
   **only by the operator-declared, signed service-kennel trust class** (W11); an ordinary workload or
   spawn-target kennel that declares `[provides] dev.kennel.wayland` is refused at compile, because
   otherwise it could advertise a reserved name and have a consumer resolving `wayland` brokered to the
@@ -249,9 +238,10 @@ Self-contained and testable with no broker and no runtime — the contract every
   declared-but-failed (one mechanism, not two). Supervision state ephemeral, re-derived from signed
   declaration on daemon restart. Full design: `07-13-service-catalog.md`.
 
-- **W7 · Confined GUI: a per-kennel nested compositor + portals as a service kennel.** **[dep] L.**
-  A sidecar that `[provides]` GUI capability against the W1 schema, in **two legs**. W0 proved both on real
-  hardware, the render leg **host-independent** — it works on stock GNOME, which ships no `security-context-v1`.
+- **W7 · Confined GUI: a per-kennel nested compositor as a service kennel.** **[dep] L.**
+  A sidecar that `[provides]` GUI capability against the W1 schema, in **one leg — rendering** (the portal is
+  cut; see below). W0 proved it on real hardware, **host-independent** — it works on stock GNOME, which ships
+  no `security-context-v1`.
 
   - **Render leg — a per-kennel nested inner compositor (bring-your-own compositor).** The GUI-service
     kennel does not rely on the host compositor; it runs an upstream compositor (**cage** — a lightweight
@@ -277,10 +267,15 @@ Self-contained and testable with no broker and no runtime — the contract every
     enforcing on sway 1.11: 19 privileged globals denied to a tagged client), not a dependency — which is
     *why this works on GNOME*. No Kennel-authored Wayland parser anywhere; the `wl-proxy` filter idea is
     retired (the nested compositor is the cross-host mechanism, and a better one — construction, not filtering).
-  - **Host-services leg — `xdg-desktop-portal` over Kennel's `IDBus` D-Bus facade (§7.7), unchanged.**
-    Reached as `dev.kennel.dbus` (Kennel's existing per-method D-Bus interposition, not a vendored proxy);
-    app-id via the `/.flatpak-info` mechanism W0 confirm A settled (the kennel **seals** that file). Keeps
-    the version-pinned, run-unpatched, bwrap-shaped-view framing.
+  - **No host-services leg — the portal is CUT (2026-06-22).** `xdg-desktop-portal` is Flatpak's *only*
+    escape hatch to host resources; Kennel already brokers those natively and in-model (files via `fs`
+    grants, network via SOCKS egress, sockets via AF_UNIX brokered-connect, D-Bus via the `IDBus` facade), so
+    the portal would only re-add a foreign D-Bus protocol + an app-id permission store + the `/.flatpak-info`
+    identity mimicry. The one genuine residual — *interactive, user-consented file access* (FileChooser's
+    "user picks a file → app gets one fd") — is **not** the portal; it is Kennel's own fd-broker shape (like
+    AF_UNIX brokered-connect / SPAWN). If a GUI workload ever needs it, build a **small Kennel-native
+    file-broker** (deferred, optional, one cap), not the portal stack. Cutting the portal **retires W0
+    confirm A** and the `/.flatpak-info` sealing requirement (they existed only to satisfy the portal).
 
   **The host residual is one AF_UNIX leg, concentrated and bounded:** only the GUI-service kennel reaches
   the host compositor, and only to vend fds — and even there it is *one ordinary Wayland client* to the host,
@@ -423,11 +418,9 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   (the README already states it). The positive form is in §4.3 too: trust material (credentials, keys)
   arrives as a signed construction parameter from the operator/host layer, never provided to a kennel by
   a peer at runtime. This sweep is what stops a future "useful" signing or secrets service from being
-  proposed as a service kennel — the principle is written down where a contributor will hit it. **The one
-  seam to name, not gloss:** a portal-style permission store that persists a decision keyed on an app-id
-  the confined app can influence (W7's substrate confirm #1) sits right on the authentication/attestation
-  line — call it out as the thin spot, gated on the identity-spoofing confirm, rather than asserting the
-  line is clean everywhere.
+  proposed as a service kennel — the principle is written down where a contributor will hit it. *(The
+  portal-permission-store seam earlier flagged here is **designed out**: W7 cut the portal, so there is no
+  app-id permission store to be a confused deputy — the thin spot was removed rather than defended.)*
 
 ### Thrust 5 — Operability (extends a shipped surface)
 
@@ -447,8 +440,7 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   host-control-socket rule** (does the endpoint-not-path-string resolution actually hold under a
   cascade-relocated mount; does it over-catch the kennel's own Node 0, W10); and the GUI legs (does the
   nested inner compositor leak any host global to the confined app; can one kennel's compositor reach
-  another's or the host beyond one-client; the fd-brokered host leg; the `IDBus` facade / portal filter
-  coverage). Standing services
+  another's or the host beyond one-client; the fd-brokered host leg). Standing services
   are a longer-lived attack surface than ephemeral spawn, and two of these are new structural refusals
   whose bug-class is escalation — the review bar rises accordingly.
 
@@ -494,10 +486,9 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 ## Sequencing
 
 0. **Substrate confirms first — W0: DONE (2026-06-22).** The GUI confirms ran ahead of everything and
-   cleared the substrate. Confirm A's mechanism is settled (and imposes the seal-`/.flatpak-info`
-   requirement on W7); confirm B resolved to the host-independent **nested inner compositor**, proven
-   end-to-end on stock GNOME 50. W7 is no longer substrate-gated; only confirm A's *interactive*
-   permission-store half remains (run on a host with a flatpak + portal), not blocking the design.
+   cleared the substrate. Confirm A is retired (W7 cuts the portal it investigated); confirm B resolved to
+   the host-independent **nested inner compositor**, proven end-to-end on stock GNOME 50. W7 is no longer
+   substrate-gated; what remains is engineering, not substrate risk.
 1. **Contracts first — W1 (schema) + W2 (sidecar/readiness API) + W3 (`SVC_CONNECT` wire).**
    Test-first, no daemon; these freeze the cross-workstream contract every later thrust derives from.
    W1's schema is consumed by W4/W6/W7; W2's readiness API by W4 and W14; W3's wire contract by W5.
@@ -528,8 +519,8 @@ service-mesh release and nothing else.
 ## Exit criteria
 
 0.4.0 ships when: the W0 GUI substrate confirms are cleared (DONE — confirm B resolved to the
-host-independent nested-compositor architecture, proven on stock GNOME 50; only confirm A's interactive
-permission-store half remains, non-blocking); the `[provides]`/`[consumes]` schema compiles with shape-checking and its
+host-independent nested-compositor architecture, proven on stock GNOME 50; confirm A retired with the
+portal); the `[provides]`/`[consumes]` schema compiles with shape-checking and its
 valid/invalid corpus passes (W1); the sidecar/restart-policy declaration schema and the readiness
 state machine are landed and their transitions asserted as tests (W2); the `SVC_CONNECT` wire
 contract is specified and round-trip tested (W3); the derived catalogue resolves with readiness
@@ -537,8 +528,8 @@ states (W4); the service-connector broker is built and proven by a policy-suite 
 `provide`/`consume` against the W3 contract — deny-by-default resolution, consume-with-wait, the
 restart-invalidates-connectors behaviour (W5); the sidecar set autostarts and is supervised with
 crash-loop-bounded restart feeding declared-but-failed (W6); **confined GUI ships** — a GUI-service
-kennel that spawns a per-kennel nested inner compositor (host-independent) and brokers the portal, an app
-kennel consumes it, completing the 0.3.0 X11 removal (W7); the spawn facade interface is documented as-built with the authority model derived from
+kennel that spawns a per-kennel nested inner compositor (host-independent, no portal), an app kennel
+consumes it, completing the 0.3.0 X11 removal (W7); the spawn facade interface is documented as-built with the authority model derived from
 principles, `kennel caps` reports the caller's scoped envelope, and the spawn surface is unified behind
 one `kennel` shim over a `/usr/libexec/kennel` host/spawn split — the spawn unit `exec.allow`-gated and
 auto-derived from the `[spawn]` grant, the `facade-spawn` name retired (W8/W9/W10); the service-kennel
@@ -569,6 +560,6 @@ not, with the reasoning that keeps each from being re-proposed every cycle.
   tool: all live in confined interposers at workload authority, never in `kenneld`.
 - **Boot-ordering logic** — async autostart + consume-with-wait makes dependencies settle themselves;
   no topological start-order computation in the daemon.
-- **Patching upstream GUI binaries** — the constructed view is shaped to the bwrap contract so the
-  Flatpak proxy/portal run unmodified; zero patches carried.
+- **Patching upstream GUI binaries** — the nested inner compositor (cage / Weston / sway) runs
+  **unmodified**; the confinement is the per-kennel nesting, not a patched compositor. Zero patches carried.
 
