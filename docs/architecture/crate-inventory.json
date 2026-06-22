@@ -1,12 +1,12 @@
 {
   "crate_count": 24,
-  "total_sloc": 31134,
+  "total_sloc": 31313,
   "tcb_crate_count": 16,
-  "tcb_sloc": 19237,
+  "tcb_sloc": 19325,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 6128,
+      "sloc": 6215,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -36,7 +36,7 @@
     },
     {
       "name": "kennel-lib-binder",
-      "sloc": 2003,
+      "sloc": 2004,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -106,10 +106,10 @@
     },
     {
       "name": "kennel-facade",
-      "sloc": 952,
+      "sloc": 1043,
       "uses_unsafe": false,
       "in_tcb": false,
-      "bins": ["facade-afunix", "facade-client", "facade-dbus", "facade-socks5", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh"],
+      "bins": ["facade-afunix", "facade-client", "facade-dbus", "facade-socks5", "facade-spawn", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh"],
       "consumers": [],
       "first_party_deps": ["kennel-lib-binder", "kennel-lib-dbus", "kennel-lib-scm"],
       "external_deps": []

@@ -98,7 +98,7 @@ HOST_BINS="kenneld kennel host-netproxy host-inetd host-dbus kennel-akc"
 # open shared object`). So the launcher and the in-kennel facades are built **statically**
 # (glibc `+crt-static` → static-pie, no interpreter, no NEEDED libs) and run in any root. The
 # trusted init `kennel-bin-init` is the same class but installed root-owned (below).
-INKERNEL_BINS="kennel-bin-oci-entry facade-socks5 facade-client facade-afunix facade-ssh facade-dbus facade-spawn-probe facade-spawn-bench"
+INKERNEL_BINS="kennel-bin-oci-entry facade-socks5 facade-client facade-afunix facade-ssh facade-dbus facade-spawn facade-spawn-probe facade-spawn-bench"
 
 # The host triple, so the static `--target` build lands in a separate `target/<triple>/release`
 # (specifying `--target` always uses the triple subdir, even when it equals the host default).

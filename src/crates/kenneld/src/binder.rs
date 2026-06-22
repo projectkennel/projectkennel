@@ -287,6 +287,10 @@ fn handle(
     if incoming.code == verb::SPAWN {
         return crate::spawn::handle_spawn(spawn, incoming, ctx, writer);
     }
+    // Read-only interrogation of this kennel's own [spawn] grant (§7.12): what it may ask SPAWN for.
+    if incoming.code == verb::SPAWN_QUERY {
+        return crate::spawn::handle_spawn_query(spawn, incoming, ctx, writer);
+    }
     // The af-unix and INet facades dial host I/O (blocking) and return a descriptor, so they are
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the
     // blocking call must not serialise the whole pool.

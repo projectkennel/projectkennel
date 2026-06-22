@@ -32,6 +32,11 @@ path = "src/bin/facade-ssh.rs"
 name = "facade-dbus"
 path = "src/bin/facade-dbus.rs"
 
+# The usable in-kennel SPAWN client: `caps` interrogates the [spawn] grant, `run` spawns + wires stdio.
+[[bin]]
+name = "facade-spawn"
+path = "src/bin/facade-spawn.rs"
+
 # The in-kennel SPAWN round-trip probe — the reference workload-side spawn client and the
 # `spawn-roundtrip` policy-suite case's requester workload (`02-10` §7.12).
 [[bin]]
