@@ -35,20 +35,43 @@ narration is kept here; the chapter named is the source of truth.
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
 - **Composable fragment catalogue** (`05-templates.md` §5.10) — **built.** The `include`
-  mechanism and the curated set of signed à-la-carte fragments (`lang-python`, `lang-node`,
-  `toolchain-c`, `vcs-git`, `net-permissive`) ship under `fragments/`, signed by the
-  maintainer key, installed into the runtime template search dir, surfaced by `kennel policy
-  list` as `(fragment)`, and gated in CI (`kennel-lib-compile/tests/fragments_catalogue.rs`:
-  signature + additive-only + compile-and-assert per fragment). `kennel policy sign` gained
-  the leaf-syntax (fragment) signing path. `net-permissive` is a curated broad-egress
-  allowlist, not a `net.mode` flip (a mode override belongs in the inheritance chain, not an
-  additive fragment).
+  mechanism and the curated set of signed à-la-carte fragments ship under `fragments/`,
+  signed by the maintainer key, installed into the runtime template search dir, surfaced by
+  `kennel policy list` as `(fragment)`, and gated in CI
+  (`kennel-lib-compile/tests/fragments_catalogue.rs`: signature + additive-only +
+  compile-and-assert per fragment). Two kinds: the **capability bundles** (`lang-python`,
+  `lang-node`, `toolchain-c`, `vcs-git`, `net-permissive`) and the **base userland**
+  (`core-shell` — incl. `/usr/bin/env`, the universal shebang target — `core-coreutils`,
+  `core-file-mutation`, `core-archive`, `net-clients`). The shipped reference templates
+  compose these rather than hand-listing (`inspect-only` is `core-shell` + `core-coreutils`
+  and pointedly not `core-file-mutation`). `kennel policy sign` gained the leaf-syntax
+  (fragment) signing path. `net-permissive` is a curated broad-egress allowlist, not a
+  `net.mode` flip (a mode override belongs in the inheritance chain, not an additive
+  fragment, enforced by `is_additive_only` rejecting scalar overrides from an include).
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
   kennel's services through kenneld (the MCP topology) is designed, not built, as is
   `SpawnKennel`-over-binder. kenneld owns the reserved nodes; the relay grows kenneld's TCB and
   is tracked as a new threat surface.
+- **First-party in-kennel OCI unpacker** (`07-11-oci.md`) — designed, not built. The unpack
+  runs `skopeo`+`umoci` confined inside the signed `oci-fetch@v1` view at workload authority
+  (never in the daemon closure), so the adversarial-input security argument is already met by
+  confinement; a first-party static unpacker buys only supply-chain hygiene (drop `umoci`) and
+  deployment convenience (no host prereq). The `umoci`-confined path is the shipped state, not
+  an interim.
+- **OCI integrity ladder (`fs-verity`) + per-inode closure-derivation walk** (`07-11-oci.md`) —
+  designed, not built. The digest-pinned floor verifies image content at the trust boundary and
+  the rootfs is RO-mounted; `fs-verity`'s marginal value is narrow runtime defence-in-depth
+  against offline tampering of the *cached* unpacked rootfs by a separate local attacker — to be
+  weighed against that residual before committing the mechanism.
+- **In-kennel MCP interposer** (`07-12-dynamic-spawn.md` §7.12.5) — designed, not built. The
+  dynamic-spawn capability ships usable without in-kennel MCP mediation; the interposer is an
+  operator-opt-in, application-semantic filter (tool allow-listing/audit) — a small MCP-aware
+  kennel wired between requester and tool, parsing JSON-RPC because it is confined and
+  disposable, not because the daemon does. Its absence is explicit, not a gap: the cross-kennel
+  composition residual (T3.9 R2) is accepted-and-tagged, not closed, so this changes no ship
+  posture.
 - **`[container]` runtime** (`05-templates.md` §5.7) — there is no container-runtime integration,
   and the `[container]` config surface has been **removed from the schema** (rejected at parse)
   rather than kept as design-level language. No shipped template uses it: `containerised-service`

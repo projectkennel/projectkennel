@@ -6,6 +6,88 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-22
+
+**Dynamic spawn.** A confined workload instantiates ephemeral **sibling** kennels from
+operator-signed templates and talks to them over a kernel-to-kernel channel — choosing the
+command within a frozen cage, never authoring policy at runtime. Plus the composable
+exec-fragment catalogue, OCI substrate completion, the live topology surface, and the
+"do less" latency discipline spawn forces. The spawn surface was red-teamed before ship
+([audit](docs/governance/audits/2026-06-22-spawn-surface-redteam.md)): the cage held — no
+escape — and the contract-vs-enforcement gaps it surfaced are fixed. Verified on Linux 6.17;
+the policy test suite runs 19 self-checking cases against the installed stack.
+
+### CLI changes
+
+- **`facade-spawn`** — the in-kennel `SPAWN` client a workload drives: `caps` interrogates
+  the kennel's `[spawn]` grant (which templates it may instantiate, the mutable fields it
+  may write and their bounds, the `max_instances`/live ceiling); `run <template@version>
+  [field=value]… [-- <argv>…]` instantiates the sibling and splices this process's stdio onto
+  its channel. The command after `--` is the caller's choice, gated by the template's frozen
+  `[exec].allow`.
+- **`kennel ps` / topology** — a live view of running kennels and the spawn parent/child tree.
+- **`kennel oci update`** preserves operator carve-outs across a re-pull; **`kennel oci
+  revert`** selectively restores. `kennel policy sign` gained the leaf-syntax path so it signs
+  a composable fragment as well as a template.
+
+### Policy schema changes
+
+- **`[spawn]` grant** — `max_instances` (the fork-bomb ceiling) + `[[spawn.allow]]` naming the
+  signed `name@version` templates a workload may instantiate, each with an optional per-requester
+  `mutable` narrowing. A loud delegated-instantiation capability (threat **T3.9**).
+- **`[[mutable]]` manifest** on a spawn-target template — the leaf fields a spawn may write and
+  the bound each must satisfy (`oneof` / `pool` / `pattern` / `relpath` / `freeform`). `workload.argv`
+  is a mutable leaf: the caller supplies the command line, contained by the frozen `[exec].allow`
+  (Landlock) and cage, not by the argument shape.
+- **Composable fragments** (`include = […]`, §5.10) — signed, version-pinned, additive-only
+  capability bundles under `fragments/`. Two kinds: capability (`lang-python`, `lang-node`,
+  `toolchain-c`, `vcs-git`, `net-permissive`) and base userland (`core-shell` incl. `/usr/bin/env`,
+  `core-coreutils`, `core-file-mutation`, `core-archive`, `net-clients`). The reference templates
+  compose these instead of hand-listing.
+
+### IPC protocol changes
+
+- **`SPAWN`** (Node 0 facade verb) — request: a length-prefixed `name@version` then a
+  count-prefixed `(field-path, value)` manifest patch, bounded to 64 KiB (enforced at decode);
+  reply: a status byte, the transient `spawn-<uuid>`, and **two** `BINDER_TYPE_FD` (the socketpair
+  + the stderr pipe) via `Reply::DataAndFds`. Node 0 stays accepts-fds-unset (fds flow *out* only).
+- **`SPAWN_QUERY`** (Node 0 facade verb) — read-only grant interrogation; no request payload (the
+  grant identifies the caller), a plain UTF-8 reply (no serializer in the daemon TCB). Exposes only
+  the caller's own grant.
+
+### Runtime &amp; enforcement
+
+- **Spawn construction** — the privhelper factory mints the channel and constructs the sibling;
+  fate-sharing is the claimed `max_instances` slot, the soft reaper (channel `EOF`), the
+  template-TTL self-reap, and the hard cgroup-kill reaper. Depth-1 is enforced at the spawner's
+  compile (no recursion).
+- **Writable `$HOME`/`/tmp`/`/dev` tmpfs is mounted `noexec`** — extends the "writable is never
+  executable" (`deny_writable`) rule from execve to mmap, closing the file-backed `PROT_EXEC`
+  load path Landlock has no hook for.
+- **"Do less"** — per-kennel loopback addresses are provisioned only where an inbound `bind`
+  consumes them; the egress BPF attach is skipped outside `host` mode (~7–10 ms/spawn saved). A
+  spawn-latency profiling harness backs the discipline.
+
+### Threat catalogue
+
+- **T3.9 — delegated instantiation** added with its risk derivation (`kennel policy risks`
+  surfaces it). The open-value (R1) and cross-kennel-composition (R2) residuals are tagged, not
+  closed; the in-kennel MCP interposer that would close R2 is explicit backlog.
+
+### Hygiene
+
+- X11 removed (`07-8-x11.md` is now an out-of-scope record). The bastion `sshd_config` template is
+  surfaced to the `/etc/kennel` cascade. Single-version `W##` work-item tags purged from the
+  durable docs (they belong only in a release roadmap). The spent 0.3.0 roadmap is retired; its
+  deferred items (first-party OCI unpacker, the OCI `fs-verity` integrity ladder, the MCP
+  interposer) live in `08-as-built-notes.md` §8.1.
+
+### Internal / supply chain
+
+- The runtime **TCB closure** stays 16 crates; dynamic spawn adds no daemon dependency (no JSON
+  parser, no serializer in `kenneld`). The spawn policy compiler stays out of the daemon — `SPAWN`
+  is load-verify + typed patch-apply in the verify half, never a compile.
+
 ## [0.2.0] — 2026-06-20
 
 Persistence safety (the trust-manifest review/revert family), the authoring experience
