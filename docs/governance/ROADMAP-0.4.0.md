@@ -239,9 +239,10 @@ Self-contained and testable with no broker and no runtime — the contract every
   declaration on daemon restart. Full design: `07-13-service-catalog.md`.
 
 - **W7 · Confined GUI: a per-kennel nested compositor as a service kennel.** **[dep] L.**
-  A sidecar that `[provides]` GUI capability against the W1 schema, in **one leg — rendering** (the portal is
-  cut; see below). W0 proved it on real hardware, **host-independent** — it works on stock GNOME, which ships
-  no `security-context-v1`.
+  A sidecar that `[provides]` GUI capability against the W1 schema: a **rendering leg** (the nested
+  compositor) plus a small **Kennel-native file-broker** for interactive file access (the portal is cut; the
+  one capability worth keeping is kept in-model — both below). W0 proved the render leg on real hardware,
+  **host-independent** — it works on stock GNOME, which ships no `security-context-v1`.
 
   - **Render leg — a per-kennel nested inner compositor (bring-your-own compositor).** The GUI-service
     kennel does not rely on the host compositor; it runs an upstream compositor (**cage** — a lightweight
@@ -271,11 +272,20 @@ Self-contained and testable with no broker and no runtime — the contract every
     escape hatch to host resources; Kennel already brokers those natively and in-model (files via `fs`
     grants, network via SOCKS egress, sockets via AF_UNIX brokered-connect, D-Bus via the `IDBus` facade), so
     the portal would only re-add a foreign D-Bus protocol + an app-id permission store + the `/.flatpak-info`
-    identity mimicry. The one genuine residual — *interactive, user-consented file access* (FileChooser's
-    "user picks a file → app gets one fd") — is **not** the portal; it is Kennel's own fd-broker shape (like
-    AF_UNIX brokered-connect / SPAWN). If a GUI workload ever needs it, build a **small Kennel-native
-    file-broker** (deferred, optional, one cap), not the portal stack. Cutting the portal **retires W0
-    confirm A** and the `/.flatpak-info` sealing requirement (they existed only to satisfy the portal).
+    identity mimicry. Cutting it **retires W0 confirm A** and the `/.flatpak-info` sealing requirement (they
+    existed only to satisfy the portal). The one portal capability worth keeping — interactive file access —
+    is kept *Kennel-native*, next.
+  - **Interactive file access — a Kennel-native file-broker (committed, the one portal residual kept).**
+    The portal's genuinely-useful function was FileChooser: the user picks a file at runtime and the app
+    receives an **fd to just that file**, having held no filesystem. That pattern is not portal-shaped — it
+    is *Kennel*-shaped: the same fd-broker as AF_UNIX brokered-connect and the SPAWN channel
+    (construction-by-absence + interposition-by-transaction, §4.3). So confined GUI carries a **small
+    Kennel-native file-broker**: `kenneld` brokers a host file picker, the user consents, and the workload
+    gets one fd into its view — no D-Bus portal protocol, no app-id permission store, no `/.flatpak-info`.
+    Coarse first (open/save one user-chosen file → one fd); save-back and multi-select are extensions. This
+    is a **committed deliverable of confined GUI**, not a deferred maybe — a GUI app that can only touch its
+    pre-granted paths is half a capability. (Whether it lands in 0.4.0 with W7 or as a fast-follow is a
+    sequencing call; the capability is on the roadmap either way.)
 
   **The host residual is one AF_UNIX leg, concentrated and bounded:** only the GUI-service kennel reaches
   the host compositor, and only to vend fds — and even there it is *one ordinary Wayland client* to the host,
@@ -528,8 +538,8 @@ states (W4); the service-connector broker is built and proven by a policy-suite 
 `provide`/`consume` against the W3 contract — deny-by-default resolution, consume-with-wait, the
 restart-invalidates-connectors behaviour (W5); the sidecar set autostarts and is supervised with
 crash-loop-bounded restart feeding declared-but-failed (W6); **confined GUI ships** — a GUI-service
-kennel that spawns a per-kennel nested inner compositor (host-independent, no portal), an app kennel
-consumes it, completing the 0.3.0 X11 removal (W7); the spawn facade interface is documented as-built with the authority model derived from
+kennel that spawns a per-kennel nested inner compositor (host-independent, no portal) plus a Kennel-native
+file-broker for interactive file access, an app kennel consumes it, completing the 0.3.0 X11 removal (W7); the spawn facade interface is documented as-built with the authority model derived from
 principles, `kennel caps` reports the caller's scoped envelope, and the spawn surface is unified behind
 one `kennel` shim over a `/usr/libexec/kennel` host/spawn split — the spawn unit `exec.allow`-gated and
 auto-derived from the `[spawn]` grant, the `facade-spawn` name retired (W8/W9/W10); the service-kennel
