@@ -299,26 +299,83 @@ fn list() -> Result<ExitCode, String> {
             if kennels.is_empty() {
                 println!("no running kennels");
             } else {
-                println!(
-                    "{:<20} {:>5} {:>8}  {:<8} CLIENT",
-                    "NAME", "CTX", "PID", "STATE"
-                );
-                for k in kennels {
-                    let state = if k.running { "running" } else { "starting" };
-                    // The terminal-attachment state of an interactive kennel: a
-                    // detached kennel keeps running, reattachable with `kennel attach`.
-                    let client = if k.attached { "attached" } else { "detached" };
-                    println!(
-                        "{:<20} {:>5} {:>8}  {state:<8} {client}",
-                        k.kennel, k.ctx, k.pid
-                    );
-                }
+                print_topology(&kennels);
             }
             Ok(ExitCode::SUCCESS)
         }
         Response::Error(message) => Err(message),
         other => Err(format!("unexpected response: {other:?}")),
     }
+}
+
+/// A spawned kennel's parent context, parsed from its `spawn-<parent-ctx>-<id>` registry name
+/// (§7.12.7). `None` for a top-level kennel. The parent ctx ties an ephemeral SPAWN sibling back to
+/// the kennel that requested it — the topology the `list` tree renders without any daemon-side change.
+fn spawn_parent_ctx(name: &str) -> Option<u16> {
+    name.strip_prefix("spawn-")?.split_once('-')?.0.parse().ok()
+}
+
+/// One rendered topology row: the kennel, its tree-connector prefix (`""` root, `"├─ "`/`"└─ "`
+/// nested), and whether it is an orphan spawn (a spawn whose requester has already torn down).
+type Row<'a> = (&'a control::KennelInfo, &'static str, bool);
+
+/// Order the running kennels as a **what-spawned-what** tree (W20): top-level kennels at the root
+/// (sorted by ctx), each ephemeral SPAWN sibling nested under the kennel that spawned it. Spawns are
+/// depth-1 (a spawn target holds no `[spawn]` grant), so the tree is two levels; an orphan spawn whose
+/// parent has already torn down renders at the root, flagged. Pure (testable); the caller prints it.
+fn topology_rows(kennels: &[control::KennelInfo]) -> Vec<Row<'_>> {
+    use std::collections::{BTreeMap, HashSet};
+    let present: HashSet<u16> = kennels.iter().map(|k| k.ctx).collect();
+    // parent ctx -> its spawned children (only when the parent is itself in the listing).
+    let mut children: BTreeMap<u16, Vec<&control::KennelInfo>> = BTreeMap::new();
+    let mut roots: Vec<&control::KennelInfo> = Vec::new();
+    for k in kennels {
+        match spawn_parent_ctx(&k.kennel).filter(|p| present.contains(p)) {
+            Some(parent) => children.entry(parent).or_default().push(k),
+            None => roots.push(k),
+        }
+    }
+    roots.sort_by_key(|k| k.ctx);
+    for kids in children.values_mut() {
+        kids.sort_by_key(|k| k.ctx);
+    }
+    let mut rows: Vec<Row<'_>> = Vec::with_capacity(kennels.len());
+    for root in roots {
+        let orphan = spawn_parent_ctx(&root.kennel).is_some(); // a spawn whose parent is gone
+        rows.push((root, "", orphan));
+        if let Some(kids) = children.get(&root.ctx) {
+            let last = kids.len().saturating_sub(1);
+            for (i, kid) in kids.iter().enumerate() {
+                rows.push((kid, if i == last { "└─ " } else { "├─ " }, false));
+            }
+        }
+    }
+    rows
+}
+
+/// Render the running kennels as the what-spawned-what tree (W20).
+fn print_topology(kennels: &[control::KennelInfo]) {
+    println!(
+        "{:<32} {:>5} {:>8}  {:<8} CLIENT",
+        "NAME", "CTX", "PID", "STATE"
+    );
+    for (k, prefix, orphan) in topology_rows(kennels) {
+        print_row(k, prefix, orphan);
+    }
+}
+
+/// Print one kennel row, the `prefix` carrying the tree connector for a nested spawn.
+fn print_row(k: &control::KennelInfo, prefix: &str, orphan: bool) {
+    // The terminal-attachment state of an interactive kennel: a detached kennel keeps running,
+    // reattachable with `kennel attach`.
+    let state = if k.running { "running" } else { "starting" };
+    let client = if k.attached { "attached" } else { "detached" };
+    let name = format!("{prefix}{}", k.kennel);
+    let tail = if orphan { "  (orphan spawn)" } else { "" };
+    println!(
+        "{name:<32} {:>5} {:>8}  {state:<8} {client}{tail}",
+        k.ctx, k.pid
+    );
 }
 
 /// The per-class JSONL file stems the audit CLI knows about (`02-3` §Sink: JSONL).
@@ -1249,6 +1306,61 @@ mod tests {
     };
 
     const BASE_CONFINED: &[u8] = include_bytes!("../../../../templates/base-confined/policy.toml");
+
+    #[test]
+    fn spawn_parent_ctx_parses_the_topology_name() {
+        // `spawn-<parent-ctx>-<id>` ties an ephemeral sibling to its requester's ctx.
+        assert_eq!(spawn_parent_ctx("spawn-5-0000000abcde"), Some(5));
+        assert_eq!(spawn_parent_ctx("spawn-42-deadbeef0000"), Some(42));
+        // A top-level kennel (any non-spawn name) has no parent.
+        for top in [
+            "my-agent",
+            "echo-tool",
+            "spawn",
+            "spawnish",
+            "spawn-",
+            "spawn-x-1",
+        ] {
+            assert_eq!(
+                spawn_parent_ctx(top),
+                None,
+                "`{top}` should have no parent ctx"
+            );
+        }
+    }
+
+    #[test]
+    fn topology_nests_spawns_under_their_requester() {
+        let ki = |name: &str, ctx: u16| control::KennelInfo {
+            kennel: name.to_owned(),
+            ctx,
+            pid: 100 + u32::from(ctx),
+            running: true,
+            attached: false,
+        };
+        // Two top-level kennels (ctx 7, 3), one child of 7, and an orphan spawn whose parent (99)
+        // is not in the listing. Input order is deliberately scrambled.
+        let kennels = vec![
+            ki("spawn-7-00000000aaaa", 11),
+            ki("agent", 7),
+            ki("spawn-99-00000000bbbb", 20), // orphan: parent ctx 99 absent
+            ki("builder", 3),
+        ];
+        let shape: Vec<(&str, &str, bool)> = topology_rows(&kennels)
+            .iter()
+            .map(|(k, p, o)| (k.kennel.as_str(), *p, *o))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("builder", "", false),                 // root ctx 3
+                ("agent", "", false),                   // root ctx 7
+                ("spawn-7-00000000aaaa", "└─ ", false), // nested under its requester (ctx 7)
+                ("spawn-99-00000000bbbb", "", true),    // orphan at root, flagged
+            ],
+            "roots sorted by ctx, spawn nested under its parent, orphan flagged at root"
+        );
+    }
 
     #[test]
     fn rewrite_template_base_replaces_only_the_reference() {

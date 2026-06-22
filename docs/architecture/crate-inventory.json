@@ -1,6 +1,6 @@
 {
   "crate_count": 24,
-  "total_sloc": 31094,
+  "total_sloc": 31134,
   "tcb_crate_count": 16,
   "tcb_sloc": 19237,
   "crates": [
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 3945,
+      "sloc": 3985,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel"],
