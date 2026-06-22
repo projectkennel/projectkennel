@@ -28,6 +28,27 @@ fn main() {
         .collect();
     sources.sort();
 
+    // The BPF object runs on the privhelper's host kernel, so it is compiled for the
+    // *target* arch (`CARGO_CFG_TARGET_ARCH`), not whatever the build host happens to be:
+    // both the `__TARGET_ARCH_*` token and the multiarch UAPI include path follow it. This
+    // keeps native builds working on every supported arch, and cross-builds working when the
+    // target's multiarch headers are installed (`<arch>-linux-gnu`; from `linux-libc-dev`).
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH");
+    let (bpf_arch, multiarch) = match target_arch.as_str() {
+        "x86_64" => ("x86", "x86_64-linux-gnu"),
+        "aarch64" => ("arm64", "aarch64-linux-gnu"),
+        // Fail the build cleanly (no `panic!`, denied by clippy::panic) with a helpful note.
+        other => {
+            println!(
+                "cargo:warning=kennel-lib-bpf: unsupported target arch {other:?}; \
+                 add its BPF __TARGET_ARCH token and multiarch include dir"
+            );
+            std::process::exit(1);
+        }
+    };
+    let target_arch_def = format!("-D__TARGET_ARCH_{bpf_arch}");
+    let multiarch_inc = format!("-I/usr/include/{multiarch}");
+
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     for src in &sources {
         let name = src
@@ -44,12 +65,12 @@ fn main() {
                 "-Wall",
                 "-target",
                 "bpf",
-                "-D__TARGET_ARCH_x86",
+                target_arch_def.as_str(),
                 "-c",
             ])
             .arg("-I")
             .arg(&bpf_dir)
-            .args(["-I/usr/include", "-I/usr/include/x86_64-linux-gnu"])
+            .args(["-I/usr/include", multiarch_inc.as_str()])
             .arg(src)
             .arg("-o")
             .arg(&obj)
