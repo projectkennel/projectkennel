@@ -88,7 +88,7 @@ Each property is demonstrated via the test corpus (§8 and §11). A claim withou
 
 A determined same-uid attacker outside any kennel — the user's normal shell, another unconfined process — can read Project Kennel's state, signal its daemons, modify its policies. Project Kennel is built on user-space trust; the user is the trust root.
 
-Inside kennels, Project Kennel's daemons (SOCKS5 proxy, the IDBus D-Bus facade, Xwayland/Xephyr) are accessible only via brokered interfaces. The cgroup BPF and Landlock constraints block direct access to the daemon's memory, signals, or non-broker sockets. A workload inside a kennel cannot ptrace the SOCKS5 proxy — the AppArmor ruleset denies cross-kennel ptrace. Cannot read the proxy's `/proc/<pid>/mem` — the PID namespace makes the proxy invisible. Cannot signal the proxy — the AppArmor signal rule denies it.
+Inside kennels, Project Kennel's daemons (SOCKS5 proxy, the IDBus D-Bus facade) are accessible only via brokered interfaces. The cgroup BPF and Landlock constraints block direct access to the daemon's memory, signals, or non-broker sockets. A workload inside a kennel cannot ptrace the SOCKS5 proxy — the AppArmor ruleset denies cross-kennel ptrace. Cannot read the proxy's `/proc/<pid>/mem` — the PID namespace makes the proxy invisible. Cannot signal the proxy — the AppArmor signal rule denies it.
 
 The hostility assumption requires the daemons to be isolated from the kennels they mediate. Isolation from the user's default context (the unconfined shell) is a separate and stricter property; it is out of scope for v1. The user is the trust root and the daemons run within the user's session.
 

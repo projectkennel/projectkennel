@@ -368,6 +368,40 @@ spawn hot path (~7–10 ms; design §7.5 "cgroup BPF connect"). A `[net.bpf]` bl
 a non-host policy therefore shapes nothing at runtime — the net-ns already does —
 and `mode = none` has no network surface to gate at all.
 
+### Decision record: cgroup BPF retained over Landlock ABI 4 (egress)
+
+**Context.** Landlock ABI 4 (Linux 6.7) added network rights, so it is fair to ask
+whether the kernel-level egress ACL could be a Landlock ruleset instead of a cgroup
+BPF program. It cannot, and this records why — so the BPF dependency is understood as
+load-bearing, not legacy.
+
+**The capability gap.** Landlock's network surface is **TCP, port-scoped, allow-only-
+by-port** and nothing more: the only rights are `LANDLOCK_ACCESS_NET_{CONNECT,BIND}_TCP`,
+expressed through a single `LANDLOCK_RULE_NET_PORT` rule type (see
+`kennel-lib-landlock`: `BIND_TCP`/`CONNECT_TCP`, `RULE_NET_PORT`). It therefore **cannot**:
+
+- match a **destination address or CIDR** — a rule is a port, full stop (no `1.2.3.0/24`);
+- gate **UDP** or any non-TCP family/protocol — TCP `connect`/`bind` are the only hooks;
+- shape the socket itself — deny `AF_PACKET`/`AF_NETLINK`/raw at `socket(2)` creation.
+
+Kennel's `[net.bpf]` ACL is **CIDR + port + family/type/protocol, deny-first** (the
+`socket`/`bind`/`connect` gates above). That set is **inexpressible** in a port-only
+mechanism, so address-granular egress is impossible under Landlock alone.
+
+**Decision.** The cgroup **inet** BPF (`sock_create`/`bind`/`connect`) is retained **by
+necessity** as the address-granular egress ACL and the family/protocol shaper. Landlock
+network access is kept as the coarse **port floor** — the `Ruleset` always handles net,
+so every TCP port is denied except those granted ([[landlock-always-handles-net]]) — a
+companion to the BPF ACL, not a replacement for it. (Orthogonally, the BPF is *attached*
+only in `host` mode, where it is the primary gate; elsewhere the per-kennel net-ns is the
+primary boundary and the attach is skipped for spawn latency, W11 — but the *mechanism*
+stays, because no kernel LSM can express CIDR egress.)
+
+**Consequence.** A "Landlock-only egress" posture is not achievable for Kennel's
+destination-address policy model; this holds until Landlock gains address matching (not on
+the kernel roadmap). The dependency is named here so a future ABI bump is evaluated against
+this exact gap rather than re-litigated from scratch.
+
 ---
 
 ## Audit events

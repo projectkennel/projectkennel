@@ -68,11 +68,7 @@
 
 **ULA (Unique Local Address, IPv6).** An IPv6 address range (`fc00::/7`) reserved for private use. Project Kennel allocates a `/48` at install time and per-kennel `/64`s for loopback isolation. See RFC 4193.
 
-**Wayland.** A display server protocol replacing X11. Per-client capability model is stricter than X11's; Project Kennel supports Xwayland-isolated as the X11 path on Wayland hosts.
-
-**Xephyr.** A nested X server (X-server-inside-X-server) used for the X11-isolated path on X11 hosts. See §7.8.4.
-
-**Xwayland.** An X server running as a Wayland client. Used for the X11-isolated path on Wayland hosts. See §7.8.3.
+**Wayland.** A display server protocol replacing X11, with a per-client capability model stricter than X11's — which is why it (unlike X11) admits a mediated grant, the `IWayland` facade (§7.6). X11 itself is a non-goal (§7.8).
 
 **Yama.** A Linux LSM providing coarse-grained `ptrace` restrictions. Less expressive than AppArmor's per-profile ptrace rules but easier to deploy system-wide.
 

@@ -158,7 +158,7 @@ Properties that hold across every policy, regardless of which template it derive
 - `cap.no_new_privs = true` — non-negotiable. `PR_SET_NO_NEW_PRIVS` is always set.
 - `exec.deny_setuid = true` — non-negotiable. Setuid binaries are always refused at execve.
 - `exec.deny_setgid = true` — non-negotiable. Same logic for setgid.
-- Granting `unix.allow` for `/tmp/.X11-unix/*` — forbidden. X11 must be isolated via `xwayland_isolated` or `xephyr_isolated`; direct grant of the host X server socket is rejected.
+- Granting `unix.allow` for `/tmp/.X11-unix/*` — forbidden. X11 is a non-goal (§7.8): it cannot be granted (no useful per-client confinement), and the view exposes no host X server socket.
 - Granting `unix.allow` for `/var/run/docker.sock` or `/run/containerd/containerd.sock` at the *framework* level — permitted (some templates need it), but invariant-marked by templates that include it, so deltas in user policies can never silently grant it.
 - `unix.default = "allow"` — forbidden. Default-deny on AF_UNIX sockets is structural to the constructed-view design.
 - `dbus.session.enabled = true` without a corresponding `dbus.session.allow` block — forbidden. Enabling D-Bus session-bus access requires explicitly specifying what is allowed; the validator rejects "enable but allow nothing" because it is almost always a policy bug.
@@ -233,7 +233,6 @@ The minimum viable set of templates, each maintained as a first-class artefact:
 | `containerised-service` | Long-lived local service (Postgres, Redis, etc) confined **directly by the kennel** — no container runtime; the kennel *is* the container. Per-kennel loopback for the service's port. | T3.3, T1.1 partial | Secrets via a run-time store; kernel/Landlock CVEs |
 | `containerised-tool` | Short-lived build tools, linters, formatters under the same direct-kennel confinement. | T1.2, T3.3 | Strict outbound; no published ports by default |
 | `ml-coding` | ML workflow with GPU. | T1.1 with GPU caveat | GPU driver surface in scope; documented |
-| `x11-isolated-dev` | Workflow needing X11. Xwayland-isolated on Wayland hosts, Xephyr-isolated on X11. | T2.6, T2.7 | Clipboard bridging off by default |
 | `mcp-server` | MCP server invoked by an agent in another kennel. | T3.6, T1.1 | Inherits parent kennel's policy by default |
 
 Each ships in the Project Kennel repository, versioned. The repository is the canonical source; users typically reference templates by name and Project Kennel resolves to the local installed copy.
