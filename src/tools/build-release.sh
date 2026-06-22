@@ -45,11 +45,15 @@ VERSION="$(grep -m1 '^version = ' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 SHA="$(git -C "$ROOT" log -1 --format=%h 2>/dev/null || echo nogit)"
 EPOCH="$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)"
 
-# The binaries install.sh consumes. `-p kenneld` builds the kenneld, kennel, and
-# kennel-akc bins (src/bin/); kennel-bin-init is the trusted uid-0 PID 1 the
-# privhelper factory fexecves (07-2); the privhelper is built separately because
-# it needs the bpf-egress feature (and thus clang, on the build host).
-BINS="kenneld kennel kennel-akc host-netproxy host-inetd facade-socks5 facade-client facade-afunix facade-ssh kennel-bin-init kennel-privhelper"
+# The binaries install.sh consumes (its HOST_BINS + INKERNEL_BINS + the privhelper) — kept in
+# sync with install.sh, and built in the same three phases: the host bins dynamic (glibc); the
+# in-kennel bins static (`+crt-static` — they run inside a constructed view with no host ld.so,
+# 08-as-built §in-kennel-static); the privhelper with `bpf-egress` (its BPF objects embedded at
+# build time, needs clang). `-p kenneld` also builds the `kennel-akc` bin (kenneld/src/bin),
+# `-p kennel-cli` the `kennel` CLI, and `-p kennel-facade` all eight `facade-*` bins.
+HOST_BINS="kenneld kennel-akc kennel host-netproxy host-inetd host-dbus"
+INKERNEL_BINS="kennel-bin-oci-entry kennel-bin-init facade-afunix facade-socks5 facade-client facade-ssh facade-dbus facade-spawn facade-spawn-probe facade-spawn-bench"
+BINS="$HOST_BINS $INKERNEL_BINS kennel-privhelper"
 
 # The highest GLIBC_x.y symbol version a binary references — the runtime glibc floor.
 glibc_floor() {
@@ -63,9 +67,14 @@ build_arch() {
 	name="kennel-${VERSION}-${SHA}-${arch}-linux-gnu"
 
 	echo "==> [$triple] building release binaries (reproducible, offline, locked)" >&2
+	# Host-side, dynamic (glibc).
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
-		-p kenneld -p host-netproxy -p host-inetd -p facade-socks5 \
-		-p facade-client -p facade-afunix -p facade-ssh -p kennel-bin-init
+		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus
+	# In-kennel, static (`+crt-static`): these run inside the constructed view, which has no host
+	# ld.so. reproducible-build.sh prepends its remap to this RUSTFLAGS, so the build stays reproducible.
+	KENNEL_PROFILE=release RUSTFLAGS="-C target-feature=+crt-static" \
+		"$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
+		-p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade
 	# The privhelper LAST and with its feature, so its build is the bpf-egress one
 	# (a plain workspace build would clobber it; see 08-as-built-notes §8.3).
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
@@ -84,12 +93,25 @@ build_arch() {
 
 	for b in $BINS; do install -m 0755 "$rel/$b" "$dest/target/release/$b"; done
 	install -m 0755 "$ROOT/src/tools/install.sh" "$dest/src/tools/install.sh"
-	cp -a "$ROOT/dist/config" "$ROOT/dist/systemd" "$ROOT/dist/apparmor" "$ROOT/dist/threats" "$dest/dist/"
+	# Everything under dist/ that install.sh consumes (config, systemd, apparmor, threats, vendor,
+	# kennel-sshd.conf) — stage all of dist/ except the release/ output dir, so this never drifts.
+	install -d "$dest/dist"
+	for item in "$ROOT"/dist/*; do
+		[ "$(basename "$item")" = "release" ] && continue
+		cp -a "$item" "$dest/dist/"
+	done
 	for p in "$ROOT"/keys/*.pub; do install -m 0644 "$p" "$dest/keys/$(basename "$p")"; done
 	for d in "$ROOT"/templates/*/; do
 		[ -f "${d}policy.toml" ] || continue
 		n="$(basename "$d")"
 		install -D -m 0644 "${d}policy.toml" "$dest/templates/$n/policy.toml"
+	done
+	# The composable fragments — signed includes the reference templates compose (§5.10); install.sh
+	# ships them alongside the templates, so the tarball must carry them or an `include` cannot resolve.
+	for d in "$ROOT"/fragments/*/; do
+		[ -f "${d}policy.toml" ] || continue
+		n="$(basename "$d")"
+		install -D -m 0644 "${d}policy.toml" "$dest/fragments/$n/policy.toml"
 	done
 	# The committed man pages (install.sh installs them into $mandir).
 	for p in "$ROOT"/man/*.[1-9]; do
