@@ -59,9 +59,11 @@ documentation sweep.
 
 ## Candidate (promote-if-needed, not a workstream)
 
-- **Generalise policy-pinned-to-bundled-binaries.** The GUI kennel's version-pinning becomes a
-  reusable service-kennel build mechanism the moment a second binary-bundling service kennel needs it.
-  Reuse, not new surface; promote on demand, no scheduled work.
+- **Generalise policy-pinned-to-bundled-binaries.** A reusable service-kennel build mechanism for the
+  moment a binary-bundling service kennel needs it. *(It lost its first presumed consumer: confined GUI no
+  longer bundles version-pinned Flatpak proxy/portal binaries — the nested compositor runs unmodified, with
+  no version-pin-to-mimicry premise. So this reverts to a clean promote-if-needed candidate with no current
+  consumer.)* Reuse, not new surface; promote on demand, no scheduled work.
 
 - **`wl-proxy`-based render-leg filtering proxy — RETIRED, superseded (not promotable).** Briefly considered
   as the compositor-independent fallback for hosts without `security-context-v1` (notably GNOME, which W0

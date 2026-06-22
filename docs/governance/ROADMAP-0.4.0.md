@@ -268,6 +268,11 @@ Self-contained and testable with no broker and no runtime — the contract every
     enforcing on sway 1.11: 19 privileged globals denied to a tagged client), not a dependency — which is
     *why this works on GNOME*. No Kennel-authored Wayland parser anywhere; the `wl-proxy` filter idea is
     retired (the nested compositor is the cross-host mechanism, and a better one — construction, not filtering).
+    **Design invariant — confined GUI depends on no host-compositor enforcement.** The host sees one ordinary
+    client and is asked to enforce nothing; bring-your-own-compositor is the right shape *unconditionally*,
+    regardless of what any host compositor supports now or later. This is **not** "revisit when GNOME ships
+    `security-context-v1`" — depending on the host compositor at all is the weaker position even where the
+    protocol exists. The enforcer is a compositor Kennel ships and controls, inside a kennel.
   - **No host-services leg — the portal is CUT (2026-06-22).** `xdg-desktop-portal` is Flatpak's *only*
     escape hatch to host resources; Kennel already brokers those natively and in-model (files via `fs`
     grants, network via SOCKS egress, sockets via AF_UNIX brokered-connect, D-Bus via the `IDBus` facade), so
@@ -286,6 +291,12 @@ Self-contained and testable with no broker and no runtime — the contract every
     is a **committed deliverable of confined GUI**, not a deferred maybe — a GUI app that can only touch its
     pre-granted paths is half a capability. (Whether it lands in 0.4.0 with W7 or as a fast-follow is a
     sequencing call; the capability is on the roadmap either way.)
+  - **Other desktop services, if ever needed, are Kennel-native brokers — never a portal.** Screenshot /
+    screencast is the inner compositor's own (cage) capability, scoped to the kennel (the compositor is
+    Kennel's here, not the host's); openURI / notifications are brokered host-request services (the broker
+    pattern again); desktop-service D-Bus rides the `IDBus` facade. None reintroduce a foreign protocol or
+    identity model. **There is no foreign desktop-sandbox substrate in confined GUI** — only kennels, a
+    compositor-in-a-kennel, and Kennel brokers; the capabilities are preserved, the implementation is owned.
 
   **The host residual is one AF_UNIX leg, concentrated and bounded:** only the GUI-service kennel reaches
   the host compositor, and only to vend fds — and even there it is *one ordinary Wayland client* to the host,
