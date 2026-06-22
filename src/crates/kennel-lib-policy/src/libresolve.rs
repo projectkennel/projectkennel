@@ -26,7 +26,9 @@ pub struct LoaderResolution {
     /// Absolute loader paths to `EXECUTE`-grant (sorted, deduped). One per distinct
     /// `PT_INTERP`; a statically-linked binary contributes none.
     pub loaders: Vec<String>,
-    /// Non-fatal advisories: a binary that could not be read to resolve its loader.
+    /// Non-fatal advisories. The single actionable case: an allowlisted `#!` script whose
+    /// **interpreter** (the path after `#!`) is itself absent from the allowlist, so the
+    /// kernel would deny the `execve` of that interpreter.
     pub warnings: Vec<String>,
 }
 
@@ -36,23 +38,39 @@ pub struct LoaderResolution {
 /// Wildcard (`**`) and glob entries are skipped: they are not single binaries to inspect
 /// (and `**` is the permissive-exec opt-in, where everything is executable anyway). A
 /// statically-linked binary has no `PT_INTERP` and needs no loader grant.
+///
+/// A `#!` **script** has no `PT_INTERP`; what it needs to `execve` is its *interpreter* (the
+/// path after `#!`), which the kernel opens `FMODE_EXEC` and Landlock therefore gates. The
+/// interpreter's own loader is resolved when the interpreter appears as its own allowlist
+/// entry, so the only thing worth a warning is an interpreter the allowlist omits. A file
+/// that cannot be read on the compile host (a binary present only on the deploy host) or that
+/// is neither ELF nor a script is passed over silently — the deploy host is authoritative for
+/// what is present.
 #[must_use]
 pub fn resolve_loaders(binaries: &[String]) -> LoaderResolution {
+    let allow: BTreeSet<&str> = binaries.iter().map(String::as_str).collect();
     let mut loaders: BTreeSet<String> = BTreeSet::new();
     let mut warnings: Vec<String> = Vec::new();
     for binary in binaries {
         if binary.contains('*') || !binary.starts_with('/') {
             continue;
         }
-        match interp_of(Path::new(binary)) {
-            Ok(Some(loader)) => {
+        match classify(Path::new(binary)) {
+            Kind::Elf(Some(loader)) => {
                 loaders.insert(loader.to_string_lossy().into_owned());
             }
-            Ok(None) => {} // statically linked: no loader to grant
-            Err(()) => warnings.push(format!(
-                "could not read `{binary}` to resolve its loader; a dynamic binary may fail to \
-                 execve without an EXECUTE grant on its PT_INTERP"
-            )),
+            Kind::Script(interp) => {
+                let interp = interp.to_string_lossy();
+                if !allow.contains(interp.as_ref()) {
+                    warnings.push(format!(
+                        "`{binary}` is a `#!` script whose interpreter `{interp}` is not on \
+                         exec.allow; the kernel denies its execve — add `{interp}` to the allowlist"
+                    ));
+                }
+            }
+            // Statically linked (no loader), unreadable on this host, or not an executable
+            // object: nothing to grant or warn about.
+            Kind::Elf(None) | Kind::Opaque => {}
         }
     }
     LoaderResolution {
@@ -61,21 +79,47 @@ pub fn resolve_loaders(binaries: &[String]) -> LoaderResolution {
     }
 }
 
-/// Read a binary's `PT_INTERP` (the `.interp` section) — the dynamic loader path.
-/// `Ok(Some(path))` for a dynamic binary, `Ok(None)` for a statically-linked one, and
-/// `Err(())` if the file is unreadable or not an object file. Never executes the binary.
-fn interp_of(path: &Path) -> Result<Option<PathBuf>, ()> {
-    let data = std::fs::read(path).map_err(|_| ())?;
-    let file = object::File::parse(&*data).map_err(|_| ())?;
-    let interp = file
-        .section_by_name(".interp")
+/// What an allowlisted path is, for loader resolution.
+enum Kind {
+    /// An ELF binary, with its `PT_INTERP` loader (or `None` when statically linked).
+    Elf(Option<PathBuf>),
+    /// A `#!` script, carrying the absolute interpreter path after `#!`.
+    Script(PathBuf),
+    /// Unreadable on this host, or readable but neither ELF nor a `#!` script — nothing to resolve.
+    Opaque,
+}
+
+/// Classify a binary path without executing it: a `#!` script (by its leading shebang), an
+/// ELF object (by parse), or opaque (unreadable / other).
+fn classify(path: &Path) -> Kind {
+    std::fs::read(path).map_or(Kind::Opaque, |data| classify_bytes(&data))
+}
+
+/// The pure classifier over a file's bytes (so the shebang parse is unit-testable without disk).
+fn classify_bytes(data: &[u8]) -> Kind {
+    if let Some(rest) = data.strip_prefix(b"#!") {
+        // The interpreter is the first whitespace-delimited token of the shebang line.
+        let line = rest.split(|&b| b == b'\n').next().unwrap_or(rest);
+        let text = String::from_utf8_lossy(line);
+        let token = text.split_whitespace().next().unwrap_or("");
+        if token.starts_with('/') {
+            return Kind::Script(PathBuf::from(token));
+        }
+        return Kind::Opaque; // a relative/empty shebang is not actionable here
+    }
+    object::File::parse(data).map_or(Kind::Opaque, |file| Kind::Elf(interp_of_elf(&file)))
+}
+
+/// Extract an ELF's `PT_INTERP` (the `.interp` section) — its dynamic loader path, or `None`
+/// when statically linked.
+fn interp_of_elf(file: &object::File<'_>) -> Option<PathBuf> {
+    file.section_by_name(".interp")
         .and_then(|section| section.data().ok())
         .map(|bytes| {
             let nul_terminated = bytes.split(|&b| b == 0).next().unwrap_or(bytes);
             PathBuf::from(String::from_utf8_lossy(nul_terminated).into_owned())
         })
-        .filter(|p| !p.as_os_str().is_empty());
-    Ok(interp)
+        .filter(|p| !p.as_os_str().is_empty())
 }
 
 #[cfg(test)]
@@ -108,13 +152,54 @@ mod tests {
     }
 
     #[test]
-    fn wildcards_globs_and_missing_binaries_are_handled() {
+    fn wildcards_globs_and_missing_binaries_are_silent() {
         // `**` (permissive) and non-absolute entries are skipped, not inspected.
         let res = resolve_loaders(&["**".to_owned(), "sh".to_owned()]);
         assert!(res.loaders.is_empty() && res.warnings.is_empty());
-        // An absolute path that does not exist warns (a real binary that we could not read).
+        // An absolute path absent on the compile host is passed over silently — the deploy host is
+        // authoritative for what is present, and an unreadable file is not the actionable case.
         let res = resolve_loaders(&["/nonexistent/binary".to_owned()]);
-        assert!(res.loaders.is_empty());
-        assert_eq!(res.warnings.len(), 1, "unreadable binary warns");
+        assert!(res.loaders.is_empty() && res.warnings.is_empty());
+    }
+
+    #[test]
+    fn shebang_is_parsed_to_its_interpreter() {
+        assert!(matches!(
+            classify_bytes(b"#!/bin/sh\nexec grep -E \"$@\"\n"),
+            Kind::Script(p) if p == Path::new("/bin/sh")
+        ));
+        // `#!/usr/bin/env python3` → the interpreter is /usr/bin/env (the kernel's execve target).
+        assert!(matches!(
+            classify_bytes(b"#!/usr/bin/env python3\n"),
+            Kind::Script(p) if p == Path::new("/usr/bin/env")
+        ));
+        // A relative or empty shebang is not actionable.
+        assert!(matches!(classify_bytes(b"#!sh\n"), Kind::Opaque));
+        // Arbitrary non-ELF, non-script data is opaque.
+        assert!(matches!(classify_bytes(b"plain text\n"), Kind::Opaque));
+    }
+
+    #[test]
+    fn a_script_warns_only_when_its_interpreter_is_not_allowlisted() {
+        // Write a real `#!` script and resolve it against two allowlists.
+        let dir = std::env::temp_dir();
+        let script = dir.join(format!("kennel-libresolve-test-{}", std::process::id()));
+        std::fs::write(&script, b"#!/bin/sh\nexec echo hi\n").expect("write script");
+        let path = script.to_string_lossy().into_owned();
+
+        // Interpreter present → silent (its own loader is resolved via its own allowlist entry).
+        let res = resolve_loaders(&[path.clone(), "/bin/sh".to_owned()]);
+        assert!(
+            res.warnings.is_empty(),
+            "interpreter allowlisted → no warning"
+        );
+
+        // Interpreter absent → exactly one actionable warning naming the interpreter.
+        let res = resolve_loaders(&[path]);
+        assert_eq!(res.warnings.len(), 1);
+        let warning = res.warnings.first().expect("one warning");
+        assert!(warning.contains("/bin/sh") && warning.contains("exec.allow"));
+
+        let _ = std::fs::remove_file(&script);
     }
 }

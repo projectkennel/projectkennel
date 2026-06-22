@@ -68,3 +68,39 @@ pub use source_sig::{
 };
 pub use translate::{translate, Translated};
 pub use version::{is_newer as version_is_newer, parse_reference};
+
+/// Shared test fixtures: the shipped fragments the reference templates `include`. Test
+/// `TemplateSource`s serve these (in addition to `base-confined`) so a retrofitted template's
+/// includes resolve under `Trust::dev`. Kept in one place so adding a fragment a template uses
+/// updates every test source at once.
+#[cfg(test)]
+pub(crate) const TEST_FRAGMENTS: &[(&str, &str)] = &[
+    (
+        "core-shell",
+        include_str!("../../../../fragments/core-shell/policy.toml"),
+    ),
+    (
+        "core-coreutils",
+        include_str!("../../../../fragments/core-coreutils/policy.toml"),
+    ),
+    (
+        "core-file-mutation",
+        include_str!("../../../../fragments/core-file-mutation/policy.toml"),
+    ),
+    (
+        "core-archive",
+        include_str!("../../../../fragments/core-archive/policy.toml"),
+    ),
+    (
+        "net-clients",
+        include_str!("../../../../fragments/net-clients/policy.toml"),
+    ),
+    (
+        "toolchain-c",
+        include_str!("../../../../fragments/toolchain-c/policy.toml"),
+    ),
+    (
+        "vcs-git",
+        include_str!("../../../../fragments/vcs-git/policy.toml"),
+    ),
+];

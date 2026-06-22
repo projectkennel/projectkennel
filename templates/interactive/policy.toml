@@ -21,6 +21,11 @@ template_name = "interactive"
 template_version = "1"
 template_base = "base-confined@v1"
 
+# Exec floor composed from the fragment catalogue (05-templates.md §5.10):
+# the shells + POSIX userland + capability bundles, instead of hand-listing them.
+include = ["core-shell@v1", "core-coreutils@v1", "core-file-mutation@v1", "core-archive@v1", "net-clients@v1", "vcs-git@v1"]
+
+
 # Host egress: a human-driven shell needs unmediated network (curl, git clone, ssh, …)
 # on the host stack — no SOCKS proxy. This shares the host network namespace and so
 # reinstates the host-recon residual (T1.6), which is why `host` requires a reason; the
@@ -44,48 +49,40 @@ read = [
 
 [exec]
 shell = "/bin/bash"
+# Only the binaries no fragment provides stay inline here; the shell, the POSIX
+# userland, and the toolchains come from the `include` above.
 allow = [
-    # Shells
-    "/bin/sh", "/bin/bash",
-    # Coreutils + everyday file management
-    "/usr/bin/ls", "/usr/bin/cat", "/usr/bin/cp", "/usr/bin/mv", "/usr/bin/rm",
-    "/usr/bin/mkdir", "/usr/bin/rmdir", "/usr/bin/ln", "/usr/bin/touch",
-    "/usr/bin/chmod", "/usr/bin/readlink", "/usr/bin/realpath", "/usr/bin/basename",
-    "/usr/bin/dirname", "/usr/bin/stat", "/usr/bin/du", "/usr/bin/df",
-    "/usr/bin/mktemp", "/usr/bin/sync", "/usr/bin/env", "/usr/bin/printenv",
-    "/usr/bin/date", "/usr/bin/sleep", "/usr/bin/seq", "/usr/bin/tee",
-    "/usr/bin/id", "/usr/bin/whoami", "/usr/bin/groups", "/usr/bin/uname",
-    "/usr/bin/nproc", "/usr/bin/hostname", "/usr/bin/tty", "/usr/bin/clear",
-    # Text + search
-    "/usr/bin/grep", "/usr/bin/egrep", "/usr/bin/fgrep", "/usr/bin/sed",
-    "/usr/bin/awk", "/usr/bin/less", "/usr/bin/more", "/usr/bin/head",
-    "/usr/bin/tail", "/usr/bin/wc", "/usr/bin/sort", "/usr/bin/uniq",
-    "/usr/bin/cut", "/usr/bin/tr", "/usr/bin/nl", "/usr/bin/tac", "/usr/bin/rev",
-    "/usr/bin/column", "/usr/bin/fmt", "/usr/bin/find", "/usr/bin/xargs",
-    "/usr/bin/diff", "/usr/bin/cmp", "/usr/bin/file", "/usr/bin/strings",
-    "/usr/bin/xxd", "/usr/bin/hexdump", "/usr/bin/od",
-    # Editors
-    "/usr/bin/nano", "/usr/bin/vim", "/usr/bin/vim.basic", "/usr/bin/vi",
-    # Archives / compression
-    "/usr/bin/tar", "/usr/bin/gzip", "/usr/bin/gunzip", "/usr/bin/zcat",
-    "/usr/bin/bzip2", "/usr/bin/xz", "/usr/bin/zstd", "/usr/bin/zip",
-    "/usr/bin/unzip",
-    # Process / system inspection
-    "/usr/bin/ps", "/usr/bin/top", "/usr/bin/free", "/usr/bin/uptime",
-    "/usr/bin/kill", "/usr/bin/pkill", "/usr/bin/pgrep", "/usr/bin/pidof",
-    "/usr/bin/watch", "/usr/bin/timeout",
-    # Network + source control (open egress)
-    "/usr/bin/curl", "/usr/bin/wget", "/usr/bin/ssh", "/usr/bin/scp",
-    "/usr/bin/git", "/usr/lib/git-core/**",
-    # Network inspection. NOTE: a kennel shares the host network namespace
-    # (egress is gated by the cgroup BPF + proxy, not net-ns isolation, §7.3), so
-    # these report the HOST's interfaces/routes/sockets/neighbours — useful for a
-    # human at their own workstation, but a deliberate host-network view. iproute2
-    # (ip/ss) lives in /usr/bin; net-tools (ifconfig/route/arp) in /usr/sbin.
-    "/usr/bin/ip", "/usr/bin/ss", "/usr/bin/netstat",
-    "/usr/sbin/ifconfig", "/usr/sbin/route", "/usr/sbin/arp",
-    # A scripting interpreter for quick work
+    "/usr/bin/clear",
+    "/usr/bin/df",
+    "/usr/bin/du",
+    "/usr/bin/free",
+    "/usr/bin/hexdump",
+    "/usr/bin/ip",
+    "/usr/bin/kill",
+    "/usr/bin/nano",
+    "/usr/bin/netstat",
+    "/usr/bin/od",
+    "/usr/bin/pgrep",
+    "/usr/bin/pidof",
+    "/usr/bin/pkill",
+    "/usr/bin/ps",
     "/usr/bin/python3",
+    "/usr/bin/scp",
+    "/usr/bin/ss",
+    "/usr/bin/ssh",
+    "/usr/bin/strings",
+    "/usr/bin/sync",
+    "/usr/bin/timeout",
+    "/usr/bin/top",
+    "/usr/bin/uptime",
+    "/usr/bin/vi",
+    "/usr/bin/vim",
+    "/usr/bin/vim.basic",
+    "/usr/bin/watch",
+    "/usr/bin/xxd",
+    "/usr/sbin/arp",
+    "/usr/sbin/ifconfig",
+    "/usr/sbin/route",
 ]
 # net-tools (ifconfig/route/arp) live in /usr/sbin; put it on PATH so they resolve
 # by name. Landlock EXECUTE is independent of PATH (the absolute allow entries above
@@ -97,7 +94,8 @@ ttl = "12h"
 ttl_action = "warn"
 
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "/VRym77BSgcRyxaH/FSL95oqfj69qtoDBqcHWk6QYj94U1R+/KGo3gvzg/NgEV53AirLmlf7fWOLN5Io8SozCQ=="
+signature = "sCMqucLyqXZ73vZM4yyCGoYZ822aGZQpywsQ3S+37QcVsUV69JlZxE4CfSYR2rclGZctOmhD8Kd28JeLzjVNCw=="

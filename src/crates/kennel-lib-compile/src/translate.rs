@@ -1486,8 +1486,9 @@ const fn translation(msg: String) -> PolicyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::{resolve, TemplateSource};
+    use crate::resolve::TemplateSource;
     use crate::source::parse;
+    use crate::source_sig::Trust;
     use kennel_lib_policy::settled::{AuditSinkKind, Provenance, ResolvedArtifact, SettledPolicy};
 
     #[test]
@@ -1790,11 +1791,19 @@ mod tests {
         }
     }
     fn base_src() -> MapSource {
-        MapSource(vec![(
+        let mut entries = vec![(
             "base-confined".to_owned(),
             "v1".to_owned(),
             BASE_CONFINED.as_bytes().to_vec(),
-        )])
+        )];
+        for (name, body) in crate::TEST_FRAGMENTS {
+            entries.push((
+                (*name).to_owned(),
+                "v1".to_owned(),
+                body.as_bytes().to_vec(),
+            ));
+        }
+        MapSource(entries)
     }
     fn ulimits_src(pairs: &[(&str, &str)]) -> SourcePolicy {
         let mut m = std::collections::BTreeMap::new();
@@ -1968,9 +1977,13 @@ mod tests {
     }
 
     fn translate_template(src: &str) -> Translated {
-        let entry = parse(src.as_bytes()).expect("parse");
-        let resolved = resolve(&entry, &base_src()).expect("resolve");
-        translate(&resolved.effective).expect("translate")
+        // Use the full effective fold (inheritance chain + included fragments), not bare `resolve`:
+        // a retrofitted template draws its shell and userland from composed fragments, which only the
+        // include-applying path materialises before translation's shell-in-allow invariant runs.
+        let effective =
+            crate::compile::effective_source(src.as_bytes(), &base_src(), &Trust::dev())
+                .expect("effective source");
+        translate(&effective).expect("translate")
     }
 
     #[test]

@@ -1,0 +1,29 @@
+# ============================================================================
+# Fragment: net-clients  (HTTP(S) fetch clients)
+#
+# A composable capability bundle (05-templates.md §5.10): The command-line fetch-client BINARIES. Distinct from `net-permissive`, which grants egress
+# DESTINATIONS: this adds curl/wget to `exec.allow`; the leaf or `net-permissive` says where
+# they may reach, and a `[net].mode = "constrained"` cage + the proxy bound that egress.
+#
+#   include = ["net-clients@v1"]
+#
+# Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
+# this widens the program menu only; `argv[0]` stays gated by the resolved
+# `[exec].allow` under Landlock execve default-deny, and the cage (net/fs/ttl/
+# ceilings) is untouched.
+# ============================================================================
+
+name = "net-clients"
+
+[[exec.allow.add]]
+path = "/usr/bin/curl"
+reason = "transfer a URL"
+
+[[exec.allow.add]]
+path = "/usr/bin/wget"
+reason = "retrieve files over HTTP(S)/FTP"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "+k16WzcYqb0NpC4xhvSxjY1E9tB1RLU/QlO/1iKAEHPopVwTpq4J5QCt3/nGazbdxRDa9GKx/ngLPBkfn0M6BQ=="

@@ -793,7 +793,11 @@ mod tests {
     }
 
     fn base_source() -> MapSource {
-        MapSource::new().with("base-confined", "v1", BASE_CONFINED.as_bytes())
+        let mut src = MapSource::new().with("base-confined", "v1", BASE_CONFINED.as_bytes());
+        for (name, body) in crate::TEST_FRAGMENTS {
+            src = src.with(name, "v1", body.as_bytes());
+        }
+        src
     }
 
     #[test]
@@ -823,10 +827,11 @@ mod tests {
             "invariant deny inherited"
         );
 
-        // Set by ai-coding-strict (replaces base's empty allow / adds its own).
+        // Set by ai-coding-strict's own inline allow (its shared userland now comes from included
+        // fragments, applied by `compile`, not `resolve` — so resolve sees only the bespoke tools).
         let allow = exec.allow.as_ref().expect("exec.allow set");
         assert!(
-            allow.iter().any(|a| a.contains("git")),
+            allow.iter().any(|a| a.contains("python3")),
             "ai-coding-strict tool present"
         );
         assert!(proxy
