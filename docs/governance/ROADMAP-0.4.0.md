@@ -308,6 +308,22 @@ Self-contained and testable with no broker and no runtime — the contract every
   default** (§4.7), a deliberate mediated bridge only later. The forcing function; completes the 0.3.0 X11
   removal. Full design: `07-14-confined-gui.md`.
 
+  **Open thread — capture, answer when `07-14` is written.** Two things are owed and not yet done:
+  1. **`07-14` must carry the durable conclusions present-tense, as-built** (not as a rejection list): the
+     design invariant *confined GUI depends on no host-compositor enforcement*; *no foreign desktop-sandbox
+     substrate* (only kennels, a compositor-in-a-kennel, and Kennel brokers); and the capability-preservation
+     mapping (render = nested cage, file access = Kennel file-broker, other desktop services = Kennel brokers).
+     The roadmap carries these now; they must land permanently in the design corpus, because this roadmap is
+     retired after 0.4.0 (as 0.3.0's was) and the conclusion would otherwise be lost.
+  2. **Decide: standalone governance decision-record, yes or no?** A durable record (spawn-red-team-audit
+     format, `docs/governance/audits/`) that pins the substrate verdict *so the rejected Flatpak-substrate
+     options are not re-proposed* after the roadmap is retired — the non-existent Wayland proxy, host
+     `security-context-v1`, the portal, the D-Bus filtering proxy, and the `.flatpak-info` mimicry. **The
+     catch:** it must be reworded to pass the `no-never-built-mechanisms` guard (no forbidden literals) and fit
+     the as-built / no-tombstone standard — i.e. a *positive* decision-record, not a "here's what we rejected"
+     tombstone. Source material: `scratch/substrate verdict gui wayland.md` (+ `scratch/handoff gui wayland
+     cage.md`). Default if undecided: the durable principle in `07-14` (item 1) suffices; the record is optional.
+
 ### Thrust 3 — One `kennel` binary, context-aware (the spawn facade, harmonised)
 
 W19a (a 0.3.0 red-team finding) surfaced that the spawn vertical rests on a facade interface that was
