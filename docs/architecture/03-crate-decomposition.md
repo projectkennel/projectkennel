@@ -226,7 +226,9 @@ kennel/
 │   │   └── kennel-cli/              binary: the `kennel` operator CLI (src/main.rs); unprivileged,
 │   │                                outside the daemon TCB (its serde_json/lexopt deps stay here)
 │   ├── tools/
-│   │   ├── install.sh               installer
+│   │   ├── install.sh               pure installer (places an unpacked release payload)
+│   │   ├── build-release.sh         builds the offline release tarball (per arch)
+│   │   ├── stage-tree.sh            assembles the flat install payload (shared source of truth)
 │   │   ├── install-hooks.sh         git hooks installer
 │   │   ├── verify-checksums.sh      shell checksum-manifest verifier
 │   │   ├── audit-helper.sh          helper for §5.5 dep audit

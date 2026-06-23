@@ -49,15 +49,15 @@ checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
 name = "gen-inventory"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "gen-man"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "gen-schema"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "itoa"
@@ -67,7 +67,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kennel-bin-init"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-config",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-bin-oci-entry"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "gen-man",
  "kennel-lib-audit",
@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-facade"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-dbus",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-host-dbus"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-dbus",
  "mini-sansio-dbus",
@@ -122,14 +122,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-host-delegate"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-scm",
 ]
 
 [[package]]
 name = "kennel-lib-audit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-syscall",
  "kennel-lib-text",
@@ -137,14 +137,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-binder"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "kennel-lib-bpf"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "object",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-compile"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "basic-toml",
  "gen-schema",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-config"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "basic-toml",
  "serde",
@@ -170,14 +170,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-control"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-syscall",
 ]
 
 [[package]]
 name = "kennel-lib-dbus"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-binder",
  "mini-sansio-dbus",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-landlock"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitflags",
  "libc",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-manifest"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-os"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "nix",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-policy"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "basic-toml",
  "ed25519-compact",
@@ -220,14 +220,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-scm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nix",
 ]
 
 [[package]]
 name = "kennel-lib-spawn"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-bpf",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-syscall"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitflags",
  "kennel-lib-landlock",
@@ -250,18 +250,18 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-term"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "vte",
 ]
 
 [[package]]
 name = "kennel-lib-text"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "kennel-privhelper"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kennel-lib-bpf",
  "kennel-lib-config",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "kenneld"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "basic-toml",
  "kennel-host-delegate",

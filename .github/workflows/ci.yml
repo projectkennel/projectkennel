@@ -209,6 +209,7 @@ jobs:
           src/tools/tests/install-ci-tools.sh
           src/tools/tests/threats-catalogue.sh
           src/tools/tests/no-never-built-mechanisms.sh
+          src/tools/tests/release-install-layout.sh
 
   man:
     name: man (regen check + groff lint)

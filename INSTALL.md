@@ -2,7 +2,7 @@
 
 This document describes how to build, install, and configure Project Kennel from source on a Linux system.
 
-The recommended installation method is using the provided `install.sh` script, which automates building the release binaries (including the BPF-enabled privileged helper), configuring directory structures, setting up setuid-root permissions, and copying systemd units.
+Installing is two steps: build a self-contained release tarball with `src/tools/build-release.sh`, then install it with the `install.sh` bundled inside. `install.sh` is a **pure installer** — it places a prebuilt payload (the binaries, the vendor config, the systemd units, the AppArmor profile, the trust-store key, and the signed templates) and sets up the setuid-root privhelper. It does **not** build, and it runs only from an unpacked release tree, never from the source checkout.
 
 ---
 
@@ -26,26 +26,36 @@ sudo apt-get install -y clang libbpf-dev linux-libc-dev
 
 ---
 
-## 1. Running the Installer
+## 1. Building and Installing
 
-Run the installer script with `sudo` to perform the system-wide installation. By default, it builds all release binaries (compiling `kennel-privhelper` with the `bpf-egress` feature) and installs them under `/usr/libexec/kennel` (the documented non-PATH helper location; see `docs/architecture/07-paths.md`):
+First build a self-contained, offline-installable tarball for the host architecture. This compiles every binary (the privhelper with the `bpf-egress` feature), stages the flat install payload, and writes a `SHA256SUMS` manifest covering every shipped file — including the trust-store public key:
 
 ```bash
-sudo src/tools/install.sh
+src/tools/build-release.sh --arch "$(uname -m)-unknown-linux-gnu"
+# → dist/release/kennel-<version>-<sha>-<arch>-linux-gnu.tar.xz
+```
+
+Then unpack it, verify the manifest, and run its bundled installer with `sudo`. It installs the binaries under `/usr/libexec/kennel` (the documented non-PATH helper location; see `docs/architecture/07-paths.md`):
+
+```bash
+tar xf dist/release/kennel-*.tar.xz
+cd kennel-*/
+sha256sum -c SHA256SUMS          # every shipped file, incl. the trust key
+sudo ./install.sh
 ```
 
 ### Installation Options
 
-The script accepts the following flags to customize the installation:
+`./install.sh` accepts the following flags:
 
-* `--prefix DIR`: Set a custom installation directory prefix (default: `/usr/libexec/kennel`).
-* `--no-build`: Skip the `cargo build` step and install the binaries already compiled in `target/release/`.
+* `--prefix DIR`: Set a custom libexec directory for the binaries (default: `/usr/libexec/kennel`).
+* `--mandir DIR`: Set the man-page root (default: `/usr/share/man`).
 * `--dry-run`: Print the actions the installer would perform without modifying the system.
 * `-h` or `--help`: Display the usage guidelines.
 
-For example, to preview the installation without compiling:
+For example, to preview the installation:
 ```bash
-sudo src/tools/install.sh --dry-run
+sudo ./install.sh --dry-run
 ```
 
 ---

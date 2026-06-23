@@ -131,7 +131,12 @@ if [ "$DO_INSTALL" = 1 ]; then
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
         --target "$HOST_TRIPLE" -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade >/dev/null
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress >/dev/null
-    sudo bash "$REPO_ROOT/src/tools/install.sh" --no-build >/dev/null || { echo "install failed" >&2; exit 1; }
+    # install.sh is a pure tarball installer — stage the just-built bins into a flat payload
+    # (stage-tree.sh) and install that, like a user installs an unpacked release.
+    STAGE="$(mktemp -d)"
+    bash "$REPO_ROOT/src/tools/stage-tree.sh" --dest "$STAGE" >/dev/null || { echo "staging failed" >&2; exit 1; }
+    sudo bash "$STAGE/install.sh" >/dev/null || { echo "install failed" >&2; exit 1; }
+    rm -rf "$STAGE"
 fi
 [ -x "$KENNEL" ] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
 
