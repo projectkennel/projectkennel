@@ -81,6 +81,28 @@ pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, Poli
     verify_doc(doc, keys)
 }
 
+/// Like [`verify_settled`], but also returns the **signing key id** from the verified
+/// `[signature]` envelope — the trusted key that signed this policy.
+///
+/// `kenneld` needs the key id, not just the verified body, for the runtime reserved-namespace
+/// gate (`07-13-service-catalog.md` §7.13.5): a settled policy may *provide* a reserved capability
+/// name only when an *authorized* key signed it, and that decision turns on the signing key's
+/// identity. The id is the verified envelope's, returned only on a successful verification.
+///
+/// # Errors
+///
+/// The same errors as [`verify_settled`] (parse, schema version, signature, invariants).
+pub fn verify_settled_signed(
+    bytes: &[u8],
+    keys: &KeySet,
+) -> Result<(SettledPolicy, String), PolicyError> {
+    let doc: SignedSettledPolicy =
+        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    let key_id = doc.signature.key_id.clone();
+    let policy = verify_doc(doc, keys)?;
+    Ok((policy, key_id))
+}
+
 /// Verify a settled-policy document **and** confirm it is the exact artefact a `[spawn]` grant
 /// pinned (the content-pin, §7.12.8).
 ///

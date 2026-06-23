@@ -26,6 +26,7 @@ pub mod audit;
 pub mod bastion;
 pub mod binder;
 pub mod bpf_audit;
+pub mod catalogue;
 pub mod cgroup;
 pub mod ctx;
 pub mod dbus;
