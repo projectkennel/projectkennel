@@ -320,6 +320,17 @@ fn handle(
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the
     // blocking call must not serialise the whole pool.
     if incoming.code == verb::CONNECT_AFUNIX {
+        // The af-unix facade is one mechanism over two resolutions. If the requested name matches a
+        // signed `[[consumes]]` stanza, it is a mesh capability: route to the broker (§7.13.4 — resolve,
+        // socket-activate if cold, connect the provider's endpoint). Otherwise it is a host
+        // `[[unix.allow]]` socket: the regular path. The request payload is the bare name in both, and
+        // the reply (a connected fd in the binder object table) is identical, so the facade is unaware.
+        if let Some(name) = kennel_lib_binder::service::svc_connect::decode_request(&incoming.data)
+        {
+            if consumes.iter().any(|c| c.name == name) {
+                return svc_connect(consumes, catalogue, activator, incoming, ctx, writer);
+            }
+        }
         return af_unix_connect(unix, incoming, ctx, writer);
     }
     if incoming.code == verb::CONNECT_INET {
