@@ -212,6 +212,16 @@ decided when the operator signed its `[[consumes]]`; the broker only enforces th
 is present. A failure at any step — no installed provider, a shape that disagrees, a key that does not
 match — is a **denial-and-audit**, never a silent fallback to another provider.
 
+**A contested name resolves to no provider.** Resolution is to a *single* provider, and the catalogue is a
+projection of independently-signed policies, so two enabled providers can claim the same `name`. There is no
+defined winner — picking one would silently broker a consumer to a provider the operator never singled out —
+so a name offered by **more than one** authorized provider is **ambiguous and admitted from none**: it
+resolves to nothing and the conflict is audited, fail-closed, until the operator removes the collision. (A
+reserved name cannot collide this way across trust boundaries — only an authorized key may claim it, §7.13.5
+— so the case is a genuine concern only for unreserved names two parties both chose.) This is the
+cross-provider complement to the compile-time in-policy duplicate check (§7.13.3): the compiler rejects two
+`[[provides]]` of one name in one policy; the catalogue drops one name claimed across two policies.
+
 **Bringing the provider up (step 5).** The matched provider need not already be running. A provider enabled
 for **lazy** start (linked into `ondemand/`, §7.13.6) is **socket-activated** on first consume — a capability
 is reachable from the moment its provider is enabled, and the first request is what brings it up, `kenneld`
