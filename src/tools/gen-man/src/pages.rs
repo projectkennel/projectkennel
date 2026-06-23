@@ -105,6 +105,11 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     ("stop", "stop a running kennel", "stop <name>"),
     ("list", "list running kennels", "list"),
     (
+        "daemon-reload",
+        "re-derive the service catalogue from the enablement links",
+        "daemon-reload",
+    ),
+    (
         "policy",
         "author, inspect, sign, and check policies",
         "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]",

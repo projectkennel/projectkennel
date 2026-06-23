@@ -17,5 +17,10 @@ ed25519-compact = { version = "=2.3.0", default-features = false, features = ["s
 # read-only, the inspected binary is never executed. Same pin as kennel-lib-bpf.
 object = { version = "=0.36.7", default-features = false, features = ["read_core", "elf", "std"] }
 
+[features]
+# Exposes the `settled::sample_settled` fixture to dependent crates' tests (a representative
+# SettledPolicy to sign/scan), without shipping it in the default build.
+test-support = []
+
 [lints]
 workspace = true

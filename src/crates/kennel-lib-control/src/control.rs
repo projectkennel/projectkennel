@@ -76,6 +76,10 @@ pub enum Request {
         /// The operator's answer (free text; the daemon decides what counts as yes).
         answer: String,
     },
+    /// Re-derive the service catalogue from the enablement links on disk (`kennel daemon-reload`, the
+    /// `systemctl daemon-reload` analogue, §7.13.6). Carries no payload; the daemon answers
+    /// [`Response::Reloaded`] with the resulting capability count.
+    DaemonReload,
 }
 
 /// The payload of a [`Request::Start`].
@@ -189,6 +193,12 @@ pub enum Response {
     },
     /// The request failed; the string is a human-readable reason.
     Error(String),
+    /// A [`Request::DaemonReload`] completed; `catalogued` is the number of capability names the
+    /// re-derived catalogue resolves (§7.13.6).
+    Reloaded {
+        /// The count of catalogued capability names after the reload.
+        catalogued: u32,
+    },
 }
 
 /// A summary of one running kennel, for [`Response::Listing`].
@@ -362,6 +372,7 @@ impl Request {
                 put_u32(&mut b, *id);
                 put_str(&mut b, answer);
             }
+            Self::DaemonReload => put_u8(&mut b, 8),
         }
         b
     }
@@ -405,6 +416,7 @@ impl Request {
                 id: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
                 answer: r.string()?,
             }),
+            8 => Ok(Self::DaemonReload),
             _ => Err(WireError::BadTag),
         }
     }
@@ -469,6 +481,10 @@ impl Response {
                 put_u32(&mut b, *id);
                 put_str(&mut b, prompt);
             }
+            Self::Reloaded { catalogued } => {
+                put_u8(&mut b, 9);
+                put_u32(&mut b, *catalogued);
+            }
         }
         b
     }
@@ -519,6 +535,9 @@ impl Response {
             8 => Ok(Self::Prompt {
                 id: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
                 prompt: r.string()?,
+            }),
+            9 => Ok(Self::Reloaded {
+                catalogued: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
             }),
             _ => Err(WireError::BadTag),
         }
@@ -641,6 +660,14 @@ mod tests {
             kennel: "ai-coding".to_owned(),
         });
         round_trip_request(&Request::List);
+        round_trip_request(&Request::DaemonReload);
+    }
+
+    #[test]
+    fn daemon_reload_messages_round_trip() {
+        round_trip_request(&Request::DaemonReload);
+        round_trip_response(&Response::Reloaded { catalogued: 7 });
+        round_trip_response(&Response::Reloaded { catalogued: 0 });
     }
 
     #[test]

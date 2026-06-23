@@ -99,8 +99,8 @@ A specific 12\-bit tag (otherwise allocated).
 Operate on PATH instead of /etc/kennel/subkennel.
 .RE
 .TP
-\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]\fR
-author, inspect, sign, and check policies
+\fBkennel daemon\-reload\fR
+re\-derive the service catalogue from the enablement links
 .RS
 .TP
 \fB\-\-resource CLASS\fR
@@ -127,8 +127,8 @@ Stream new events as they arrive.
 Print the equivalent journalctl invocation and exit.
 .RE
 .TP
-\fBkennel oci <build|run|revert|update> <name> [\-\-image <ref>] [\-\-key K] [\-\-force] [\-\- <cmd...>]\fR
-build and run an OCI image as a confined kennel substrate (§7.11)
+\fBkennel audit <name> [\-\-resource CLASS] [\-\-since DUR] [\-\-novel\-only] [\-\-follow] [\-\-print\-journalctl\-command]\fR
+show a kennel's audit log
 .RS
 .TP
 \fBbuild <name> \-\-image <ref>\fR

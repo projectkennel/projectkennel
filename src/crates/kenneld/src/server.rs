@@ -126,6 +126,16 @@ pub trait PolicyLoader {
     fn trust_keys(&self) -> kennel_lib_policy::KeySet {
         kennel_lib_policy::KeySet::new()
     }
+
+    /// Build the service catalogue (§7.13.4) from the enabled providers — the projection the broker
+    /// resolves against, re-derivable on `daemon-reload`.
+    ///
+    /// The default is an empty catalogue: a loader with no enablement set (e.g. a test loader) offers
+    /// nothing. The production [`crate::policy::TrustStoreLoader`] scans the enablement directories and
+    /// projects them through the reserved-namespace gate.
+    fn build_catalogue(&self) -> crate::catalogue::Catalogue {
+        crate::catalogue::Catalogue::default()
+    }
 }
 
 /// The identity and resources of the user this daemon serves.
@@ -241,19 +251,44 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// `[ssh]` grant and shared by all of them. `None` until then, or always when
     /// no `bastion` is configured in [`Identity`].
     bastion: Mutex<Option<crate::bastion::Bastion>>,
+    /// The service catalogue (§7.13.4): the derived projection of the enabled providers' `[[provides]]`
+    /// the broker resolves against. Built at startup from the enablement links on disk and re-derived
+    /// on `daemon-reload` — never standing authored state.
+    catalogue: Mutex<crate::catalogue::Catalogue>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// Build the shared state for `identity`.
     #[must_use]
     pub fn new(identity: Identity, privileged: P, loader: L) -> Self {
+        let catalogue = loader.build_catalogue();
+        if !catalogue.is_empty() {
+            eprintln!(
+                "kenneld: catalogue: {} capabilit{} from the enabled providers",
+                catalogue.len(),
+                if catalogue.len() == 1 { "y" } else { "ies" }
+            );
+        }
         Self {
             identity,
             privileged,
             loader,
             registry: Mutex::new(Registry::default()),
             bastion: Mutex::new(None),
+            catalogue: Mutex::new(catalogue),
         }
+    }
+
+    /// Re-derive the service catalogue from the enablement links on disk (the `daemon-reload`
+    /// analogue), returning the number of catalogued capability names. The set is the links on disk,
+    /// never authored state, so this simply re-scans and re-projects.
+    pub fn rebuild_catalogue(&self) -> usize {
+        let cat = self.loader.build_catalogue();
+        let n = cat.len();
+        if let Ok(mut guard) = self.catalogue.lock() {
+            *guard = cat;
+        }
+        n
     }
 
     /// Prepare a kennel's SSH egress (§7.10): mint a synthetic key per grant, register
@@ -819,6 +854,11 @@ pub fn dispatch_request<P, L>(
         // already-running connection (§9.7) — never a fresh request to the dispatcher. An
         // unsolicited one is a protocol error.
         Request::PromptReply { .. } => Response::Error("unexpected PromptReply".to_owned()),
+        // Re-derive the service catalogue from the enablement links on disk (§7.13.6).
+        Request::DaemonReload => {
+            let catalogued = u32::try_from(shared.rebuild_catalogue()).unwrap_or(u32::MAX);
+            Response::Reloaded { catalogued }
+        }
     };
     let _ = control::send_response(conn, &response);
 }

@@ -62,6 +62,7 @@ fn run() -> Result<(), String> {
         Some(kennel_lib_config::vendor_key_dir()),
         &rest_refs,
         deployment.reserved().to_vec(),
+        kennel_lib_config::enablement_dirs(),
     );
 
     let shared = Arc::new(Shared::new(identity, privileged, loader));

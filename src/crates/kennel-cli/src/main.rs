@@ -88,6 +88,11 @@ const COMMANDS: &[CommandSpec] = &[
         usage: "list",
     },
     CommandSpec {
+        name: "daemon-reload",
+        summary: "re-derive the service catalogue from the enablement links",
+        usage: "daemon-reload",
+    },
+    CommandSpec {
         name: "policy",
         summary: "author, inspect, sign, and check policies",
         usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]",
@@ -227,6 +232,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "oci" => oci::dispatch(rest),
         "stop" => stop(rest),
         "list" => list(),
+        "daemon-reload" => daemon_reload(),
         "policy" => dispatch_policy(rest),
         "keygen" => keygen(rest),
         "subkennel" => subkennel(rest),
@@ -301,6 +307,22 @@ fn list() -> Result<ExitCode, String> {
             } else {
                 print_topology(&kennels);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Response::Error(message) => Err(message),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+/// `kennel daemon-reload` — ask the daemon to re-derive the service catalogue from the enablement
+/// links on disk (§7.13.6), the `systemctl daemon-reload` analogue.
+fn daemon_reload() -> Result<ExitCode, String> {
+    let mut conn = connect()?;
+    send(&conn, &Request::DaemonReload, &[])?;
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Reloaded { catalogued } => {
+            let plural = if catalogued == 1 { "y" } else { "ies" };
+            println!("reloaded: {catalogued} catalogued capabilit{plural}");
             Ok(ExitCode::SUCCESS)
         }
         Response::Error(message) => Err(message),
