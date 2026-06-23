@@ -353,6 +353,11 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 0.3.0 deliberately; it lands here.
 
 - **W8 · The facade kennel-spawn interface contract (document the existing surface).** **[dep] M.**
+  **Documented (2026-06-23): the contract is design §7.12.3a — the three authority regions (`@`-pinned
+  template · bounded mutable-field patch · `exec.allow`-gated argv), their independence (the proxy gates
+  egress regardless of argv), and the single-host kennel-to-kennel scope bound; the as-built mechanics are
+  02-10 (`facade-spawn`). Code checked against the model — `exec.allow` gates the resolved binary via
+  Landlock (not the `argv[0]` string), no divergence.**
   Write down what the spawn facade already does, deriving the authority model from the principles rather
   than from the code (then check the code against it — divergence is a code fix, not a spec
   accommodation). The settled model, all homed in the **signed template**: `exec.allow` gates every

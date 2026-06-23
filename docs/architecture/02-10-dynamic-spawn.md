@@ -230,7 +230,11 @@ fixed `facade-spawn-probe`/`-bench` test drivers:
   steps out of the byte path. Everything after `--` is the command line, carried as the `workload.argv`
   mutable field (one patch entry per token): on a template that opens that leaf, the caller chooses the
   command — `facade-spawn run net-fetch@v1 net.proxy.allow=ghcr.io:443 -- curl -sSL https://ghcr.io/…` —
-  and `[exec].allow` gates `argv[0]`.
+  and `[exec].allow` gates the resolved binary (Landlock, matched on the executed path, not the literal
+  `argv[0]` string). The three authority regions this command spans — `@`-pinned template · bounded
+  mutable-field patch · `exec.allow`-gated argv — are syntactically distinct because semantically distinct,
+  and the egress patch and the argv are independent (the proxy gates egress regardless of what argv claims):
+  the facade interface contract, design §7.12.3a.
 
 ## The capability handoff (construction)
 

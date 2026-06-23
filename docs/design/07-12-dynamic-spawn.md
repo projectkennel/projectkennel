@@ -185,6 +185,45 @@ key-membership, so a manifest opening `net.allow` cannot be used to rewrite `net
 *template + manifest*; the requester's `[spawn.allow].mutable` may narrow the manifest further per
 requester (§7.12.2), never widen it.
 
+## 7.12.3a The facade interface contract — three authority regions
+
+A `SPAWN` request, and the command line that carries it, partitions its authority into **three regions
+that are syntactically distinct because they are semantically distinct**. Each is a different question with
+a different answer, governed by a different mechanism, all floored in the **signed template**:
+
+```
+kennel run  net-fetch@v1   net.proxy.allow=ghcr.io:443   --  curl -sSL https://ghcr.io/…
+            |__ template _| |___ mutable-field patch ___|     |________ argv ________|
+              @-pinned         bounded, manifest-gated          unpinned, exec.allow-gated
+```
+
+- **The named template** (`net-fetch@v1`) is `@`-version-pinned and is the whole signed capability floor
+  (§7.12.1): the requester *names* operator-consented capability, it does not author it. Everything the
+  spawn may do floors at this template's grants.
+- **The mutable-field patch** (`net.proxy.allow=ghcr.io:443`) writes only the leaf fields the template's
+  `[[mutable]]` manifest *exposes*, each within its declared bound, validated by the manifest-patch
+  validator (§7.12.3). Frozen fields cannot move and an unexposed field is not writable at all — a
+  *bounded* authority, a value chosen inside a fence the operator signed.
+- **The argv** (everything after `--`) is *unpinned* — the requester writes any command line — but gated by
+  the template's `[exec].allow` floor: Landlock admits only a binary the allow-list permits, **matched on
+  the resolved binary, not the literal `argv[0]` string**. argv is unpinned precisely because the allow-list
+  does the gating; pinning the command line would be redundant with, and weaker than, gating the binary. A
+  template that does not open the `workload.argv` mutable leaf runs its own fixed entrypoint and rejects a
+  `--` command.
+
+The three regions are **independent**, and the egress patch and the argv most sharply so: the per-kennel
+proxy gates egress against `[net.proxy.allow]` **regardless of what the argv claims**. `curl` naming a
+different host does not widen the patch, and the patch admitting `ghcr.io:443` does not compel any binary to
+reach it — one governs *where the kennel may connect*, the other *what binary runs*, and neither constrains
+the other. Reading them as coupled is the mistake to avoid; each region is floored separately by the signed
+template, so widening one cannot widen another. This separability is what makes the surface safe to expose
+to an untrusted requester.
+
+**Scope.** This is the authority model for the single-host, kennel-to-kennel spawn that exists (§7.12.10):
+the template runs *here*, under *this* `kenneld`. Placement and federation — *where* a spawn runs across
+hosts — are non-goals; there is no scheduling engine. The contract answers the authority and envelope
+questions, never a "where does it run" one.
+
 ## 7.12.4 The capability handoff
 
 `kenneld` mints the channel and hands each side its ends; nothing flows *into* the daemon. Node 0 stays
