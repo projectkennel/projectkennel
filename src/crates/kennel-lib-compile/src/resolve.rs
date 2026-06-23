@@ -47,8 +47,8 @@ use crate::source::{
     self, BinderSection, BoundaryAcl, CapSection, DbusAudit, DbusBus, DbusRules, DbusSection,
     EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
     LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny,
-    NetSection, RootfsSection, SeccompSection, SourcePolicy, SpawnSection, SshSection,
-    TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
+    NetSection, RootfsSection, SeccompSection, ServiceSection, SourcePolicy, SpawnSection,
+    SshSection, TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::Trust;
 use kennel_lib_policy::audit::{
@@ -100,6 +100,32 @@ pub struct ResolvedChain {
     pub effective: SourcePolicy,
     /// The parents that were fetched and folded in, root-first.
     pub chain: Vec<ChainLink>,
+    /// Where the folded `[[provides]]` came from — the provenance the reserved-namespace
+    /// gate keys on (`07-13-service-catalog.md` §7.13.5).
+    pub provides_origin: ProvidesOrigin,
+}
+
+/// Where a resolved policy's effective `[[provides]]` originated.
+///
+/// Provides fold *set-replace* (a child's non-empty list replaces the inherited one, §7.13), so
+/// exactly one layer supplies the whole effective set, and a single origin describes it. The
+/// reserved-namespace gate (§7.13.5) keys on this: a reserved `org.projectkennel.*` name is
+/// maintainer-trust material, so it is permitted only when it traces to a signature-verified
+/// template — never an unverified layer that could inject it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvidesOrigin {
+    /// No `[[provides]]` in the resolved policy.
+    Absent,
+    /// The entry (the most-derived artefact) authored them — the template-authoring path. Its
+    /// reserved-name authority is conferred by the maintainer signing the settled output, checked
+    /// at the catalogue (§7.13.4), not at this resolution.
+    Entry,
+    /// An ancestor template supplied them; `verified` is whether that ancestor's signature checked
+    /// against the resolution trust store (i.e. it is a maintainer-signed template).
+    Ancestor {
+        /// Whether the supplying ancestor's signature verified against the trust store.
+        verified: bool,
+    },
 }
 
 /// Resolve and fold `entry`'s inheritance chain into one effective policy.
@@ -174,6 +200,22 @@ pub fn resolve_verified(
         current = parent;
     }
 
+    // Provides fold set-replace, so the effective set comes from one layer; record which, for
+    // the reserved-namespace gate (§7.13.5). The entry (most-derived) wins if it declares any;
+    // else the most-derived *ancestor* that does (parents is leaf-first, so `position` finds it),
+    // tagged with whether that ancestor's signature verified against the trust store.
+    let provides_origin = if !entry.provides.is_empty() {
+        ProvidesOrigin::Entry
+    } else if let Some(i) = parents.iter().position(|p| !p.provides.is_empty()) {
+        // `i` indexes the parent that supplies the provides; `links[i]` is its verification record
+        // (built in the same leaf-first order). `.get` keeps clippy's no-indexing rule satisfied.
+        ProvidesOrigin::Ancestor {
+            verified: links.get(i).is_some_and(|l| l.signing_key_id.is_some()),
+        }
+    } else {
+        ProvidesOrigin::Absent
+    };
+
     // Fold root-first: the deepest ancestor is the accumulator, then each more-derived
     // artefact overrides it, and finally `entry`. `parents` is leaf-first, so the root
     // is its last element.
@@ -198,6 +240,7 @@ pub fn resolve_verified(
     Ok(ResolvedChain {
         effective: acc,
         chain: links,
+        provides_origin,
     })
 }
 
@@ -247,6 +290,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         } else {
             child.consumes.clone()
         },
+        service: merge(&parent.service, &child.service, fold_service),
         unsafe_section: merge(&parent.unsafe_section, &child.unsafe_section, fold_unsafe),
         env: merge(&parent.env, &child.env, fold_env),
         seccomp: merge(&parent.seccomp, &child.seccomp, fold_seccomp),
@@ -353,6 +397,16 @@ fn union_dbus_rules(p: Option<&DbusRules>, c: Option<&DbusRules>) -> Option<Dbus
                 own: join(&p.own, &c.own),
             })
         }
+    }
+}
+
+/// Fold `[service]` scalar-wins (child overrides), like `[lifecycle]` — a derived policy may
+/// override any one restart-policy field without restating the others.
+fn fold_service(p: &ServiceSection, c: &ServiceSection) -> ServiceSection {
+    ServiceSection {
+        restart: or(&c.restart, &p.restart),
+        backoff: or(&c.backoff, &p.backoff),
+        max_attempts: or(&c.max_attempts, &p.max_attempts),
     }
 }
 
@@ -1011,6 +1065,93 @@ mod tests {
             err.to_string().contains("version must start"),
             "explains why: {err}"
         );
+    }
+
+    // ---- provides_origin: the reserved-namespace gate's signature provenance (§7.13.5) ----
+
+    /// A well-formed `[[provides]]` body for a given name (resolve does not mesh-validate, but
+    /// keeping it well-formed keeps these tests honest about what a real provider looks like).
+    fn provides_block(name: &str) -> String {
+        format!(
+            "[[provides]]\nname = \"{name}\"\nshape = \"af-unix\"\nendpoint = \"e\"\nreason = \"r\"\n"
+        )
+    }
+
+    #[test]
+    fn provides_origin_is_entry_when_the_entry_declares_them() {
+        // The most-derived artefact authored the provides — the template-authoring path.
+        let parent = "template_name = \"p\"\n";
+        let child = format!(
+            "name = \"c\"\ntemplate_base = \"p@v1\"\n{}",
+            provides_block("org.projectkennel.wayland")
+        );
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        assert_eq!(r.provides_origin, ProvidesOrigin::Entry);
+    }
+
+    #[test]
+    fn provides_origin_is_unverified_ancestor_in_dev() {
+        // An ancestor supplies the provides; dev mode verifies nothing → unverified.
+        let parent = format!(
+            "template_name = \"p\"\n{}",
+            provides_block("doe.john.cache")
+        );
+        let child = "name = \"c\"\ntemplate_base = \"p@v1\"\n";
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        assert_eq!(
+            r.provides_origin,
+            ProvidesOrigin::Ancestor { verified: false }
+        );
+    }
+
+    #[test]
+    fn provides_origin_is_verified_ancestor_when_the_supplier_is_signed_under_require() {
+        use crate::source_sig::sign_source;
+        use kennel_lib_policy::keys::{KeySet, SigningKey};
+        let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
+        let mut ks = KeySet::new();
+        ks.insert(key.key_id(), &key.public_key_bytes())
+            .expect("insert");
+        let parent = parse(
+            format!(
+                "template_name = \"p\"\n{}",
+                provides_block("org.projectkennel.wayland")
+            )
+            .as_bytes(),
+        )
+        .expect("parse parent");
+        let signed = basic_toml::to_string(&sign_source(&parent, &key).expect("sign"))
+            .expect("ser")
+            .into_bytes();
+        let src = MapSource::new().with("p", "v1", &signed);
+        let child = parse(b"name = \"c\"\ntemplate_base = \"p@v1\"\n").expect("parse child");
+        let r = resolve_verified(&child, &src, &Trust::require(&ks)).expect("resolve");
+        assert_eq!(
+            r.provides_origin,
+            ProvidesOrigin::Ancestor { verified: true }
+        );
+    }
+
+    #[test]
+    fn service_folds_scalar_wins_per_field() {
+        // Parent sets restart + max_attempts; child overrides only backoff — the others inherit.
+        let parent = "template_name = \"p\"\n[service]\nrestart = \"always\"\nmax_attempts = 9\n";
+        let child = "name = \"c\"\ntemplate_base = \"p@v1\"\n[service]\nbackoff = \"2s\"\n";
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        let svc = r.effective.service.expect("service");
+        assert_eq!(svc.restart, Some(kennel_lib_policy::RestartPolicy::Always));
+        assert_eq!(svc.max_attempts, Some(9));
+        assert_eq!(svc.backoff.as_deref(), Some("2s"));
+    }
+
+    #[test]
+    fn provides_origin_is_absent_without_any_provides() {
+        let entry = parse(b"template_name = \"p\"\n").expect("parse");
+        let r = resolve(&entry, &MapSource::new()).expect("resolve");
+        assert_eq!(r.provides_origin, ProvidesOrigin::Absent);
     }
 
     #[test]

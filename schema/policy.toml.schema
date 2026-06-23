@@ -119,6 +119,14 @@
         "$ref": "#/definitions/consumes_entry"
       }
     },
+    "service": {
+      "description": "`[service]` — supervision discipline for a service kennel (restart policy).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/service"
+        }
+      ]
+    },
     "unsafe": {
       "description": "Advisory footgun sub-sections (scoping enforced by the PID namespace + seccomp).",
       "allOf": [
@@ -1170,7 +1178,7 @@
       "additionalProperties": false,
       "properties": {
         "name": {
-          "description": "The capability's public identifier; a reserved `org.projectkennel.*` name needs the service-class context (§7.13.5).",
+          "description": "The capability's public identifier; a reserved `org.projectkennel.*` name is claimable only by a maintainer-signed template (§7.13.5).",
           "type": "string"
         },
         "shape": {
@@ -1477,6 +1485,31 @@
             "warn",
             "renew"
           ]
+        }
+      }
+    },
+    "service": {
+      "description": "`[service]` — the supervision discipline for a service kennel (§7.13.7).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "restart": {
+          "description": "Restart discipline (default `on-failure`).",
+          "type": "string",
+          "enum": [
+            "always",
+            "on-failure",
+            "never"
+          ]
+        },
+        "backoff": {
+          "description": "Initial restart delay (`500ms`, `2s`; default `500ms`); doubles each attempt.",
+          "type": "string"
+        },
+        "max_attempts": {
+          "description": "Restarts within the crash-loop window before declared-but-failed (default 5; must be ≥ 1).",
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

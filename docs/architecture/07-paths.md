@@ -158,7 +158,7 @@ System configuration. Installed by the package; managed by the administrator.
 │   ├── corp-policy-2026.pub
 │   └── ...
 ├── audit.toml                       installation-wide audit-sink defaults
-├── system.toml                      deployment paths: libexec_dir, trust_dir, sshd (admin layer)
+├── system.toml                      deployment paths: libexec_dir, trust_dir, sshd; [[reserved]] host namespaces (admin layer)
 └── config.toml                      CLI conveniences: template/key/policy search dirs (admin layer)
 ```
 
@@ -168,7 +168,7 @@ The installer creates `keys/`, `templates/`, and `policies/` (and the matching v
 
 **No install path is baked into a binary.** Deployment paths — the helper-binary directory (`libexec_dir`, default `/usr/libexec/kennel`), the daemon's signing-key `trust_dir` (default `/etc/kennel/keys`), and the host `sshd` — are expressed in `system.toml`, resolved through a cascade by the `kennel-lib-config` crate. The cascade reads lowest-priority first, a higher layer overriding a lower one **per key**, with compiled-in fallback defaults so a host with no config files still runs:
 
-* **`system.toml`** (deployment, integrity-sensitive) resolves from **root-owned dirs only** — `/usr/lib/kennel` (vendor) then `/etc/kennel` (admin). It is deliberately **not** read from the user's `~/.config`, and honours no environment override: `kenneld` runs as the user, so letting the user redirect `trust_dir` would defeat policy signing. Each helper binary defaults to `<libexec_dir>/<name>`; an explicit per-binary key overrides one.
+* **`system.toml`** (deployment, integrity-sensitive) resolves from **root-owned dirs only** — `/usr/lib/kennel` (vendor) then `/etc/kennel` (admin). It is deliberately **not** read from the user's `~/.config`, and honours no environment override: `kenneld` runs as the user, so letting the user redirect `trust_dir` would defeat policy signing. Each helper binary defaults to `<libexec_dir>/<name>`; an explicit per-binary key overrides one. It also carries the optional **`[[reserved]]`** host-declared capability namespaces (`{ prefix, keys }`, design §7.13.5a) — additive to the built-in `org.projectkennel.*`, accumulated across the cascade (a higher layer overrides the same `prefix`); being root-owned is what makes a reserved namespace a host trust-root decision a user cannot self-grant. The service catalogue consumes them (`Deployment::reserved`); the catalogue wiring is roadmap.
 * **`config.toml`** (CLI conveniences — template, key, and policy *search* dirs) resolves from `~/.config/kennel` then `/etc/kennel` then `/usr/lib/kennel`. Safe to be user-writable: it only steers where the CLI looks while authoring; the daemon re-verifies against the locked `system.toml` `trust_dir` (plus the user's own `keys/` for run policies, §Policy-signing trust split) at run.
 
 The per-*user* loopback allocation — the 12-bit IPv4 `tag` and the 40-bit IPv6 ULA `gid` — is **not** in either file; it lives in `/etc/kennel/subkennel` (`<uid>:<tag>:<gid>:<namespace>`), kernel-trusted, and the daemon loads it from there to fill `<tag>`/`<gid>` at spawn. `kennel subkennel add` generates a valid line (collision-free `tag`/`gid`); the `<namespace>` defaults to `kennel-<user>`.

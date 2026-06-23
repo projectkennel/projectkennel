@@ -915,6 +915,37 @@ pub struct ConsumeRuntime {
     pub required: bool,
 }
 
+/// The restart discipline for a service kennel (`07-13-service-catalog.md` §7.13.7) — how
+/// `kenneld` supervises a provider the operator has enabled. The systemd `Restart=` analogue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    /// Restart on any exit — a long-running service expected to stay up.
+    Always,
+    /// Restart only on a non-zero exit or signal (the default). A clean exit is *done*.
+    #[default]
+    OnFailure,
+    /// Run once; any exit, clean or not, leaves it down.
+    Never,
+}
+
+/// The `[service]` supervision discipline, resolved into the settled policy
+/// (`07-13-service-catalog.md` §7.13.7).
+///
+/// A *service* input `kenneld` realises (it governs how the daemon restarts an enabled provider),
+/// not part of the kernel-enforcement core. Carried in the signed settled policy; present only when
+/// the policy declares `[service]` — a non-service policy omits it entirely, so it signs unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceRuntime {
+    /// The restart discipline.
+    pub restart: RestartPolicy,
+    /// Initial delay before a restart, in milliseconds; doubles each successive attempt (to a cap).
+    pub backoff_ms: u64,
+    /// Restarts within the crash-loop window before the provider is driven declared-but-failed.
+    pub max_attempts: u32,
+}
+
 /// The workload's identity inside the kennel (`docs/design/07-4-filesystem.md`): the
 /// supplementary Unix groups it retains.
 ///
@@ -1378,6 +1409,11 @@ pub struct SettledPolicy {
     /// no mesh declarations signs exactly as before.
     #[serde(default, skip_serializing_if = "MeshRuntime::is_empty")]
     pub mesh: MeshRuntime,
+    /// The `[service]` supervision discipline (§7.13.7) — the restart policy `kenneld` applies to an
+    /// enabled provider. Present only when the policy declares `[service]`; omitted otherwise, so a
+    /// non-service policy signs exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceRuntime>,
     /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set. A table like
     /// [`binder`](Self::binder); omitted from the canonical form when empty, so a
     /// no-`[dbus]` policy signs exactly as before.
@@ -1576,6 +1612,7 @@ pub(crate) fn sample_settled() -> SettledPolicy {
         identity: IdentityRuntime::default(),
         binder: BinderRuntime::default(),
         mesh: MeshRuntime::default(),
+        service: None,
         dbus: DbusRuntime::default(),
         audit: AuditRuntime::default(),
         env: EnvRuntime::default(),

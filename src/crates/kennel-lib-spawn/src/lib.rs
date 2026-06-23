@@ -992,6 +992,7 @@ mod tests {
             identity: kennel_lib_policy::IdentityRuntime::default(),
             binder: kennel_lib_policy::BinderRuntime::default(),
             mesh: kennel_lib_policy::MeshRuntime::default(),
+            service: None,
             dbus: kennel_lib_policy::DbusRuntime::default(),
             audit: kennel_lib_policy::AuditRuntime::default(),
             env: kennel_lib_policy::EnvRuntime::default(),

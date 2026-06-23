@@ -116,6 +116,7 @@ pub static TABLES: &[Table] = &[
             f("binder", Ty::Obj("binder"), "User-defined binder IPC services this kennel may register/look up."),
             f("provides", Ty::ObjArray("provides_entry"), "`[[provides]]` — capabilities this kennel offers to other kennels over the mesh."),
             f("consumes", Ty::ObjArray("consumes_entry"), "`[[consumes]]` — capabilities this kennel reaches over the mesh."),
+            f("service", Ty::Obj("service"), "`[service]` — supervision discipline for a service kennel (restart policy)."),
             f("unsafe", Ty::Obj("unsafe"), "Advisory footgun sub-sections (scoping enforced by the PID namespace + seccomp)."),
             f("env", Ty::Obj("env"), "Environment curation."),
             f("seccomp", Ty::Obj("seccomp"), "The seccomp filter."),
@@ -430,7 +431,7 @@ pub static TABLES: &[Table] = &[
         name: "provides_entry",
         title: "One `[[provides]]` entry — a capability this kennel offers over the mesh (§7.13.1).",
         fields: &[
-            f("name", Ty::Str, "The capability's public identifier; a reserved `org.projectkennel.*` name needs the service-class context (§7.13.5)."),
+            f("name", Ty::Str, "The capability's public identifier; a reserved `org.projectkennel.*` name is claimable only by a maintainer-signed template (§7.13.5)."),
             f("shape", Ty::Enum(&["af-unix", "dbus-name", "binder-connector"]), "The typed transport (§7.13.2)."),
             f("endpoint", Ty::Str, "Where the capability is exposed, in the provider's own view."),
             f("key", Ty::Str, "Optional private match token, never advertised in the catalogue."),
@@ -530,6 +531,15 @@ pub static TABLES: &[Table] = &[
         fields: &[
             f("ttl", Ty::Str, "Time-to-live in human form (`8h`, `30m`)."),
             f("ttl_action", Ty::Enum(&["exit", "stop", "warn", "renew"]), "What to do at TTL expiry (default `exit`; `stop` is an alias)."),
+        ],
+    },
+    Table {
+        name: "service",
+        title: "`[service]` — the supervision discipline for a service kennel (§7.13.7).",
+        fields: &[
+            f("restart", Ty::Enum(&["always", "on-failure", "never"]), "Restart discipline (default `on-failure`)."),
+            f("backoff", Ty::Str, "Initial restart delay (`500ms`, `2s`; default `500ms`); doubles each attempt."),
+            f("max_attempts", Ty::Int, "Restarts within the crash-loop window before declared-but-failed (default 5; must be \u{2265} 1)."),
         ],
     },
     Table {

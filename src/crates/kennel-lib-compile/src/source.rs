@@ -107,6 +107,11 @@ pub struct SourcePolicy {
     /// `[[consumes]]` — capabilities this kennel reaches over the mesh (§7.13.1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumes: Vec<ConsumesEntry>,
+    /// `[service]` — the supervision discipline for a service kennel (§7.13.7): the restart policy
+    /// `kenneld` applies once the operator enables this provider. Meaningful on a kennel with
+    /// `[[provides]]`; folds scalar-wins up the chain like `[lifecycle]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceSection>,
     /// `[unsafe]` — advisory footgun sub-sections whose scoping is real but enforced
     /// elsewhere (the PID namespace + seccomp), not by the section. Grouped under one
     /// `[unsafe]` umbrella so an author sees they are in footgun territory; each
@@ -795,7 +800,7 @@ pub use kennel_lib_policy::settled::Shape;
 #[serde(deny_unknown_fields)]
 pub struct ProvidesEntry {
     /// The capability's public identifier — what the catalogue advertises. A reserved
-    /// `org.projectkennel.*` name may be claimed only in the service-class context (§7.13.5).
+    /// `org.projectkennel.*` name may be claimed only by a maintainer-signed template (§7.13.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The typed transport (§7.13.2).
@@ -1044,6 +1049,27 @@ pub struct LifecycleSection {
     /// audited `warn` today (the interactive renewal prompt is still owed, §9.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_action: Option<String>,
+}
+
+/// `[service]` — the supervision discipline for a service kennel (§7.13.7).
+///
+/// Present on a kennel that `[[provides]]` a capability; governs how `kenneld` restarts it once the
+/// operator enables it. The fields default (restart `on-failure`, 500ms backoff, 5 attempts), so a
+/// service may declare an empty `[service]` and accept the defaults; an absent `[service]` carries
+/// no supervision runtime at all (`kenneld` applies its own default at enable time).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceSection {
+    /// Restart discipline: `always` / `on-failure` (default) / `never`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<kennel_lib_policy::RestartPolicy>,
+    /// Initial delay before a restart in human form (`"500ms"`, `"2s"`, default `"500ms"`); doubles
+    /// each successive attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff: Option<String>,
+    /// Restarts within the crash-loop window before declared-but-failed (default `5`; must be ≥ 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
 }
 
 /// `[tty]` — terminal hardening for an interactive (PTY) workload (§7.9.5).
