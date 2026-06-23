@@ -49,7 +49,7 @@ outright and move enforcement to the *operation*: the credential stays host-side
 unaimable by the workload. Binder generalises that move. kenneld becomes the policy
 decision point for every protocol *call*, the workload holds only unforgeable binder
 node references (no path to enumerate, no abstract name to probe), and the same primitive
-carries inter-kennel IPC for the MCP topology. Rationale in full: design §7.1.1–7.1.2.
+carries inter-kennel IPC for cross-instance service reach. Rationale in full: design §7.1.1–7.1.2.
 
 ---
 
@@ -327,7 +327,6 @@ absence of the node is proof the capability was not granted. The reserved set:
 |---|---|---|
 | `org.projectkennel.IAfUnix/default` | **Yes** | Brokered AF_UNIX connect; kenneld connects host-side and returns the fd. |
 | `org.projectkennel.IDBus/default` | Deferred | D-Bus facade/delegate pair; own chapter (§7.7). |
-| `org.projectkennel.IWayland/default` | Deferred | Wayland facade; clipboard/screencopy gate; closes T2.6. |
 
 Two things that were sketched as reserved services are **not** binder services: kennel
 spawning is a control-socket operation (§Kennel spawning), not a node; and policy/service
@@ -342,12 +341,12 @@ verbs, not a dedicated node.
 under it. User-defined services (§Policy surface) take their own names and may not begin
 with `org.projectkennel.`.
 
-The protocol-facade services (`dbus`, `wayland`) are kenneld-owned nodes
-backed by spawned service processes that parse foreign, untrusted wire protocols and
-translate to binder. Each is a new binary crate, each an untrusted-input parser requiring
-its own fuzz target, and the D-Bus one carries the bus with first-party code (the `IDBus`
-facade, §7.7). They are **out of scope for this chapter** and
-get their own architecture chapter(s); §7.1.5 is the design.
+The protocol-facade service (`dbus`) is a kenneld-owned node
+backed by a spawned service process that parses the foreign, untrusted D-Bus wire protocol and
+translates to binder — a binary crate, an untrusted-input parser requiring
+its own fuzz target, carrying the bus with first-party code (the `IDBus`
+facade, §7.7). It is **out of scope for this chapter** and
+gets its own architecture chapter; §7.1.5 is the design.
 
 ---
 
@@ -422,7 +421,7 @@ an opaque reference), so the naming is an authoring concern, not a runtime leak.
 
 This is the chapter's central architectural decision and the one reviewers will press
 hardest, because it grows kenneld's role from control-plane supervisor to **synchronous
-data-path relay**. For the MCP topology (§7.1.9), *every tool call's payload passes through
+data-path relay**. For a cross-instance service (§7.1.9), *every call's payload passes through
 kenneld.* That is a real TCB and hot-path change away from the "small supervisor + tiny
 privhelper" shape the rest of the system holds to, and it is called out here rather than
 buried so the trade is explicit.
@@ -523,10 +522,9 @@ the events land:
 | `binder.service-crash` | a service process crash + restart (service name) |
 | `kennel.spawn` | a `SpawnKennel` request (template, scoped name, effective policy hash) |
 
-The `binder.cross` and `kennel.spawn` records, correlated by transaction code and calling
-kennel ctx, are what let a security team reconstruct *which agent request caused which file
-access in which kennel* from the JSONL log alone, with no application-layer instrumentation
-(design §7.1.9). Payload *content* is never logged — byte counts and outcomes only, per
+The `binder.cross` records, correlated by transaction code and calling kennel ctx, let a
+security team reconstruct *which client request reached which service* from the JSONL log
+alone, with no application-layer instrumentation (design §7.1.9). Payload *content* is never logged — byte counts and outcomes only, per
 CODING-STANDARDS §9.3.
 
 ---
@@ -544,12 +542,12 @@ validation is a categorical policy-compile error, not a runtime check (design §
 
 ## What this chapter does not cover
 
-- The design rationale, MCP worked example, and residuals: design
+- The design rationale, cross-instance worked example, and residuals: design
   [`07-1-binder.md`](../design/07-1-binder.md).
 - The `[binder]` / `[[binder.provide]]` / `[[binder.consume]]` / `[ipc.spawn]` schema:
   [`02-2-config-schema.md`](02-2-config-schema.md).
 - The JSONL field layouts for the new audit events: [`02-3-audit-schema.md`](02-3-audit-schema.md).
-- The dbus/wayland protocol-facade service processes (deferred to their own chapter).
+- The dbus protocol-facade service process (deferred to its own chapter, §7.7).
 - The CLI/privhelper/daemon non-binder wire formats: [`02-6-ipc.md`](02-6-ipc.md).
 - The spawn pipeline this mounts into: design §8.7 and [`01-process-model.md`](01-process-model.md).
 - Per-crate public APIs (`kennel-lib-binder`, `kenneld::binder`): [`02-8-internal-api.md`](02-8-internal-api.md).
@@ -564,8 +562,8 @@ validation is a categorical policy-compile error, not a runtime check (design §
    simplest; the `SCM_RIGHTS` path avoids a `/proc` open against the child but reuses a
    channel that must exist anyway. Low risk either way (§Mount sequencing).
 2. **Relay placement.** In-kenneld relay vs a dedicated broker process, decided by the
-   measured per-call cost of the MCP hot path and the TCB-growth concern (§The relay state
-   machine).
+   measured per-call cost of the cross-instance relay hot path and the TCB-growth concern
+   (§The relay state machine).
 3. **af-unix migration.** Whether the facade supersedes the built `[unix]` shim, coexists
    behind a gate, or the shim becomes the sub-feature fallback (§The af-unix facade).
 4. **Looper-pool sizing.** Single looper per instance vs a pool, driven by head-of-line

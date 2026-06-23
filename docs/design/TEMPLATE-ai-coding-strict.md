@@ -1098,7 +1098,7 @@ It is worth being explicit about what `ai-coding-strict` does not cover, so that
 
 **Multi-project workflows.** A developer working on three projects simultaneously needs three contexts, each derived from this template with a different project path. Project Kennel supports this directly; the policy author writes one leaf policy per kennel.
 
-**Workflows requiring GUI tooling.** X11 is a non-goal (§7.8) — there is no display-bearing template, and this template provisions no display server. A Wayland-bearing workload would need the mediated `IWayland` facade (§7.6); X11 is not offered.
+**Workflows requiring GUI tooling.** X11 is a non-goal (§7.8) — there is no display-bearing template, and this template provisions no display server. A Wayland-bearing workload would consume the nested-compositor display service (§7.14); X11 is not offered.
 
 **Workflows requiring docker, kubernetes, or systemd-user operations.** The `containerised-dev` template covers Docker; equivalent templates cover Kubernetes (`k8s-coding`) and systemd (`systemd-coding`). Each documents the threat-impact of the additional capabilities granted.
 

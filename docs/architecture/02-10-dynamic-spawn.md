@@ -230,7 +230,11 @@ fixed `facade-spawn-probe`/`-bench` test drivers:
   steps out of the byte path. Everything after `--` is the command line, carried as the `workload.argv`
   mutable field (one patch entry per token): on a template that opens that leaf, the caller chooses the
   command — `facade-spawn run net-fetch@v1 net.proxy.allow=ghcr.io:443 -- curl -sSL https://ghcr.io/…` —
-  and `[exec].allow` gates `argv[0]`.
+  and `[exec].allow` gates the resolved binary (Landlock, matched on the executed path, not the literal
+  `argv[0]` string). The three authority regions this command spans — `@`-pinned template · bounded
+  mutable-field patch · `exec.allow`-gated argv — are syntactically distinct because semantically distinct,
+  and the egress patch and the argv are independent (the proxy gates egress regardless of what argv claims):
+  the facade interface contract, design §7.12.3a.
 
 ## The capability handoff (construction)
 
@@ -422,9 +426,9 @@ must know them.
 
 ## What this chapter does not cover
 
-- **MCP semantics** — tool allow-listing and call audit live in the opt-in in-kennel **interposer**
-  (§7.12.5), a confined disposable kennel the operator wires between requester and tool;
-  `kenneld` does not understand MCP.
+- **MCP semantics** — `kenneld` does not understand MCP, and Kennel builds no interposer for it
+  (§7.12.5). Tool allow-listing and call audit, if an operator wants them, are an *existing* MCP proxy
+  confined like any vendored tool, not a Kennel-authored component.
 - **Fleet observability** — `kennel ps` over ephemeral spawns and what-spawned-what is the
   live-topology surface.
 - **The `[spawn]` / `[[mutable]]` policy schema** — [`02-2-config-schema.md`](02-2-config-schema.md).

@@ -98,6 +98,15 @@ pub struct SourcePolicy {
     /// never declared here (`07-1-binder.md` §7.1.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binder: Option<BinderSection>,
+    /// `[[provides]]` — capabilities this kennel offers to other kennels over the mesh
+    /// (`docs/design/07-13-service-catalog.md` §7.13.1). Top-level; each entry names a
+    /// capability and its typed shape. Additive to `[binder]` (§7.13.2): the cross-kennel
+    /// `binder-connector` shape and the legacy `[[binder.provide]]` are reconciled later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<ProvidesEntry>,
+    /// `[[consumes]]` — capabilities this kennel reaches over the mesh (§7.13.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumes: Vec<ConsumesEntry>,
     /// `[unsafe]` — advisory footgun sub-sections whose scoping is real but enforced
     /// elsewhere (the PID namespace + seccomp), not by the section. Grouped under one
     /// `[unsafe]` umbrella so an author sees they are in footgun territory; each
@@ -771,6 +780,90 @@ pub struct BinderConsume {
     /// Threat tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
+}
+
+/// The typed shape of a mesh capability (§7.13.2) — defined in the settled crate so the
+/// source parser and the signed runtime share one type.
+pub use kennel_lib_policy::settled::Shape;
+
+/// One `[[provides]]` entry — a capability this kennel offers over the mesh (§7.13.1).
+///
+/// `name`/`shape`/`reason` are validated present at compile (like `[[binder.provide]]`),
+/// not required at parse, so a malformed entry yields one problem per missing field
+/// rather than a parse abort.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvidesEntry {
+    /// The capability's public identifier — what the catalogue advertises. A reserved
+    /// `org.projectkennel.*` name may be claimed only in the service-class context (§7.13.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The typed transport (§7.13.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<Shape>,
+    /// Where the capability is exposed, in the provider's own view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// An optional private match token, never advertised in the catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Why this capability is offered (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
+}
+
+/// One `[[consumes]]` entry — a capability this kennel reaches over the mesh (§7.13.1).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumesEntry {
+    /// The capability's public identifier, resolved against the catalogue at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The transport it expects; the broker refuses a mismatched shape (§7.13.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<Shape>,
+    /// Where the brokered connector is delivered, in this kennel's own view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// Environment variable(s) synthesised into this kennel to name the connector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// An optional private match token; must match the provider's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Whether the capability's absence fails kennel construction. Hard dependency by
+    /// default; `false` starts the kennel without it (§7.13.1).
+    #[serde(default = "default_required")]
+    pub required: bool,
+    /// Why this capability is consumed (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
+}
+
+impl Default for ConsumesEntry {
+    fn default() -> Self {
+        Self {
+            name: None,
+            shape: None,
+            at: None,
+            env: Vec::new(),
+            key: None,
+            required: true,
+            reason: None,
+            threats: None,
+        }
+    }
+}
+
+/// The `required` default: a consume is a hard dependency unless stated otherwise (§7.13.1).
+const fn default_required() -> bool {
+    true
 }
 
 /// `[identity]` — the workload's identity inside the kennel (`docs/design/07-4-filesystem.md`).

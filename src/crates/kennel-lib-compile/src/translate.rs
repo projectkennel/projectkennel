@@ -40,10 +40,11 @@
 use crate::source::SourcePolicy;
 use kennel_lib_policy::settled::{
     AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy,
-    DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
-    IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy,
-    ProcVisibility, Protocol, ProxyListen, RootfsRuntime, SeccompAction, SeccompPolicy, SshGrant,
-    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
+    ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, MeshRuntime, NameRule, NetMode,
+    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProvideRuntime, ProxyListen,
+    RootfsRuntime, SeccompAction, SeccompPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction,
+    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use kennel_lib_policy::variant::{Manifest, Variant};
 use kennel_lib_policy::PolicyError;
@@ -63,6 +64,8 @@ pub struct Translated {
     pub identity: IdentityRuntime,
     /// The per-kennel binder IPC runtime (§7.1.4) — user-defined provide/consume grants.
     pub binder: BinderRuntime,
+    /// The cross-kennel capability mesh runtime (§7.13) — `[[provides]]`/`[[consumes]]`.
+    pub mesh: MeshRuntime,
     /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set.
     pub dbus: DbusRuntime,
     /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
@@ -144,6 +147,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective)?;
     let binder = translate_binder(effective);
+    let mesh = translate_mesh(effective);
     let dbus = translate_dbus(effective);
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
@@ -167,6 +171,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         unix,
         identity,
         binder,
+        mesh,
         dbus,
         audit,
         env,
@@ -300,6 +305,41 @@ fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
         })
         .collect();
     BinderRuntime { provide, consume }
+}
+
+/// Flatten the resolved `[[provides]]`/`[[consumes]]` into the settled [`MeshRuntime`]
+/// (§7.13): one runtime entry each. Already compile-time-validated (`crate::mesh`), so the
+/// required fields are present — `filter_map` skips a malformed entry defensively. An empty
+/// mesh yields an empty runtime (omitted from the canonical form), so a policy with no mesh
+/// declarations signs exactly as before.
+fn translate_mesh(src: &SourcePolicy) -> MeshRuntime {
+    let provides = src
+        .provides
+        .iter()
+        .filter_map(|p| {
+            Some(ProvideRuntime {
+                name: p.name.clone()?,
+                shape: p.shape?,
+                endpoint: p.endpoint.clone()?,
+                key: p.key.clone(),
+            })
+        })
+        .collect();
+    let consumes = src
+        .consumes
+        .iter()
+        .filter_map(|c| {
+            Some(ConsumeRuntime {
+                name: c.name.clone()?,
+                shape: c.shape?,
+                at: c.at.clone(),
+                env: c.env.clone(),
+                key: c.key.clone(),
+                required: c.required,
+            })
+        })
+        .collect();
+    MeshRuntime { provides, consumes }
 }
 
 /// Translate `[dbus]` into the settled [`DbusRuntime`] (§7.7): one resolved rule set per
@@ -2013,6 +2053,43 @@ mod tests {
         assert!(translate_ssh(&SourcePolicy::default()).is_empty());
     }
 
+    #[test]
+    fn provides_and_consumes_flatten_into_the_settled_mesh() {
+        use crate::source::{ConsumesEntry, ProvidesEntry, Shape, SourcePolicy};
+        let src = SourcePolicy {
+            provides: vec![ProvidesEntry {
+                name: Some("org.projectkennel.wayland".to_owned()),
+                shape: Some(Shape::AfUnix),
+                endpoint: Some("$XDG_RUNTIME_DIR/wayland-0".to_owned()),
+                reason: Some("the display service".to_owned()),
+                ..ProvidesEntry::default()
+            }],
+            consumes: vec![ConsumesEntry {
+                name: Some("org.projectkennel.wayland".to_owned()),
+                shape: Some(Shape::AfUnix),
+                at: Some("$XDG_RUNTIME_DIR/wayland-0".to_owned()),
+                env: vec!["WAYLAND_DISPLAY".to_owned()],
+                required: true,
+                reason: Some("render the window".to_owned()),
+                ..ConsumesEntry::default()
+            }],
+            ..SourcePolicy::default()
+        };
+        let mesh = translate_mesh(&src);
+        assert!(!mesh.is_empty());
+        let p = mesh.provides.first().expect("one provide");
+        assert_eq!(p.name, "org.projectkennel.wayland");
+        assert_eq!(p.shape, Shape::AfUnix);
+        assert_eq!(p.endpoint, "$XDG_RUNTIME_DIR/wayland-0");
+        let c = mesh.consumes.first().expect("one consume");
+        assert_eq!(c.name, "org.projectkennel.wayland");
+        assert!(c.required);
+        assert_eq!(c.env, vec!["WAYLAND_DISPLAY"]);
+        assert_eq!(c.at.as_deref(), Some("$XDG_RUNTIME_DIR/wayland-0"));
+        // No mesh ⇒ empty runtime, omitted from the canonical form (back-compat).
+        assert!(translate_mesh(&SourcePolicy::default()).is_empty());
+    }
+
     fn translate_audit_str(src: &str) -> Result<AuditRuntime, PolicyError> {
         let mut deferred = BTreeSet::new();
         let parsed = parse(src.as_bytes()).expect("parse");
@@ -2460,6 +2537,7 @@ mod tests {
             unix: t.unix,
             identity: t.identity,
             binder: t.binder,
+            mesh: t.mesh,
             dbus: t.dbus,
             audit: t.audit,
             env: t.env,

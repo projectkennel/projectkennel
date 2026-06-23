@@ -201,9 +201,9 @@ relay and `SpawnKennel` are **roadmap** (`02-4-binder.md`).
 - **`binder.service-crash`** — a facade/service process crash and restart. Adds
   `service`; `outcome: error`.
 
-The `binder.cross` and `kennel.spawn` records, correlated by transaction `code` and the
-calling kennel ctx, are what let a security team reconstruct *which agent request caused
-which file access in which kennel* from the JSONL log alone (design §7.1.9).
+The `binder.cross` records, correlated by transaction `code` and the calling kennel ctx,
+let a security team reconstruct *which client request reached which service* from the JSONL
+log alone (design §7.1.9).
 
 ### Kennel spawning (`resource: "lifecycle"`)
 

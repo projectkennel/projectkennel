@@ -82,6 +82,11 @@ pub enum SignatureMode {
 pub struct Trust<'a> {
     keys: Option<&'a KeySet>,
     mode: SignatureMode,
+    /// Whether this policy is compiled in the **service-class** context — the
+    /// operator-supplied trust under which a kennel may claim a reserved
+    /// `org.projectkennel.*` mesh capability name (`07-13-service-catalog.md` §7.13.5).
+    /// Defaults `false`; an operator sets it for a signed service kennel.
+    service_class: bool,
 }
 
 impl<'a> Trust<'a> {
@@ -91,6 +96,7 @@ impl<'a> Trust<'a> {
         Self {
             keys: Some(keys),
             mode: SignatureMode::Require,
+            service_class: false,
         }
     }
 
@@ -100,6 +106,7 @@ impl<'a> Trust<'a> {
         Self {
             keys,
             mode: SignatureMode::AllowUnsigned,
+            service_class: false,
         }
     }
 
@@ -109,7 +116,22 @@ impl<'a> Trust<'a> {
         Self {
             keys: None,
             mode: SignatureMode::AllowUnsigned,
+            service_class: false,
         }
+    }
+
+    /// Re-derive this context as the **service-class** trust (§7.13.5), under which a
+    /// kennel may claim a reserved `org.projectkennel.*` mesh capability name.
+    #[must_use]
+    pub const fn as_service_class(mut self) -> Self {
+        self.service_class = true;
+        self
+    }
+
+    /// Whether this is the service-class context (may claim reserved mesh names).
+    #[must_use]
+    pub const fn is_service_class(&self) -> bool {
+        self.service_class
     }
 
     /// Whether this context requires signatures ([`SignatureMode::Require`]).

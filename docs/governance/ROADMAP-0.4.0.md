@@ -45,8 +45,8 @@ Standing constraints that shape the mix (carried from 0.3.0):
   new daemon state-machine surface. The [[tcb-only-shrinks]] constraint as it actually binds is about
   the daemon's **dependency closure** and its **authored state**, and on *those* axes the line still
   holds: the broker parses no protocol bodies (fine-grained service mediation — which D-Bus method,
-  which portal interface — lives in a confined interposer, never the daemon; no mesh work may land a
-  protocol parser in `cargo tree -p kenneld`); the catalogue is a derived projection, not authored
+  which portal interface — lives in a confined component at workload authority, never the daemon; no mesh
+  work may land a protocol parser in `cargo tree -p kenneld`); the catalogue is a derived projection, not authored
   central state; the supervisor is *borrowed* `bin-init` code, not new code. So the discipline is
   **maximise reuse inside the TCB and add no new dependencies or authored state — while accepting that
   the daemon's behaviour, and therefore the audit surface, is larger after 0.4.0 than before.** Naming
@@ -159,22 +159,30 @@ on the host-independent **nested inner compositor** — proven end-to-end on sto
 
 Self-contained and testable with no broker and no runtime — the contract every later thrust consumes.
 
-- **W1 · `[provides]` / `[consumes]` schema + compile-time shape checking.** **[dep] M.**
+- **W1 · `[provides]` / `[consumes]` schema + local compile validation.** **[dep] M.**
   New policy blocks in `schema/policy.toml.schema` and `kennel-lib-compile`. A provider declares
-  `[provides]` (name + typed *shape*: AF_UNIX / D-Bus name / binder connector); a consumer declares
-  `[consumes]` (a name). The compiler checks the consumed name has a matching `[provides]` of the
-  right shape across known kennels — compatibility verified before runtime, fail-at-compile not
-  at-runtime (the version-pinning discipline). Compiler-side; out of `cargo tree -p kenneld`.
-  **Test-first:** the valid/invalid provide-consume corpus (matching shapes accept; name-mismatch,
-  shape-mismatch, dangling-consume, duplicate-provide all reject) is written and asserted before the
-  compiler logic. The schema is frozen here — W2, W4, W5, W6 all compile against it.
+  `[[provides]]` (a public `name`, a typed `shape` — AF_UNIX / D-Bus name / binder connector — an
+  `endpoint`, an optional private `key`); a consumer declares `[[consumes]]` (a `name`, `shape`, `at`,
+  an optional `env` and `key`, and a `required` flag — hard dependency by default, `false` to start degraded). **Neither
+  side names the other**, and resolution is a **runtime** act (the broker, W5) against the live catalogue
+  (W4): the compiler only ever holds one policy, so it does **not** — and cannot — resolve across kennels
+  (policies compile and sign independently; the provider set is whatever is installed at connect time, not
+  what existed when a consumer was signed; full reasoning in `07-13-service-catalog.md` §7.13.3). What W1
+  freezes is the schema and the **local** checks: well-formedness, `shape` is a defined transport, the
+  reserved-namespace gate (below), and duplicate `name` within one policy. Compiler-side; out of
+  `cargo tree -p kenneld`.
+  **Test-first:** the valid/invalid corpus (well-formed accept; missing field / undefined `shape` reject;
+  reserved-name-by-non-service-class reject; in-policy duplicate-provide reject) is written and asserted
+  before the compiler logic. The schema is frozen here — W2, W4, W5, W6 all compile against it; the
+  cross-kennel resolution / shape-mismatch / dangling-consume tests live with the runtime broker (W5) and
+  catalogue (W4), where the live installed set exists.
 
   **Confine the provide-name namespace — `[provides]` is not sidecar-only.** Any kennel may declare a
   `[provides]`, not just the operator-declared service set, so the name a provider may *claim* is the
-  load-bearing gate, not which kennels are allowed to provide. The reserved `dev.kennel.*` namespace
+  load-bearing gate, not which kennels are allowed to provide. The reserved `org.projectkennel.*` namespace
   (GUI/Wayland, D-Bus, the system service names a consumer trusts by reputation) is claimable
   **only by the operator-declared, signed service-kennel trust class** (W11); an ordinary workload or
-  spawn-target kennel that declares `[provides] dev.kennel.wayland` is refused at compile, because
+  spawn-target kennel that declares `[provides] org.projectkennel.wayland` is refused at compile, because
   otherwise it could advertise a reserved name and have a consumer resolving `wayland` brokered to the
   impostor — provider-name spoofing, a capability-granting side channel through the catalogue. Other
   kennels may provide only in an unreserved namespace, and a consumer reaching one of those gets no
@@ -216,16 +224,24 @@ Self-contained and testable with no broker and no runtime — the contract every
   construction status. The projection's *shape* is derived; its *membership* (which kennels exist, and
   thus which `[provides]` are in scope) is the operator's declared set — derived-shape over
   authored-membership, not magic. Reserved-namespace claims are already gated at compile (W1), so the
-  catalogue can trust that a `dev.kennel.*` entry came from the service-kennel trust class.
+  catalogue can trust that a `org.projectkennel.*` entry came from the service-kennel trust class.
   *Resolution-only, no runtime registration* (a workload registering a service at runtime is a
-  capability-granting side channel — forbidden). Full design: `07-13-service-catalog.md`.
+  capability-granting side channel — forbidden). Re-derived from the installed set on `kennel daemon-reload`
+  (the `systemctl daemon-reload` analogue — refresh the catalogue, bring newly-declared eager providers
+  online) and on daemon restart; never standing authored state. Full design: `07-13-service-catalog.md`.
 
 - **W5 · The service-connector broker (the logic behind `SVC_CONNECT`).** **[dep] L.** The keystone.
   Implements the W3 wire contract: resolve a name against the W4 catalogue, broker a connector to the
   providing kennel — the standing-service sibling of `SPAWN`'s FD-handoff (resolve-and-broker rather
   than mint-and-inject). Carries the three properties W3 specified and tested: deny-by-default
   resolution, consume-with-wait, and the restart-invalidates-connectors contract (consumers `EOF` and
-  re-resolve, reusing the soft-reaper semantics). Lands §7.12.10's deferred cross-kennel
+  re-resolve, reusing the soft-reaper semantics). **Request-don't-author, like spawn:** the workload
+  requests a capability through the broker facade and `kenneld` matches the request against the signed
+  `[[consumes]]` grant — the floor it cannot widen — exactly as `SPAWN` is matched against `[[spawn.allow]]`
+  (§7.12.1). The consumer's `at` is materialised at construction, but the backing provider is brokered (and
+  socket-activated, W6) only when the workload first reaches for it — which is what makes a soft
+  `required = false` ("wants") consume work, and what lets a hard `required = true` be a construction-time
+  *resolvability* check with the connection still made on demand. Lands §7.12.10's deferred cross-kennel
   `provide`/`consume`.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
@@ -236,7 +252,15 @@ Self-contained and testable with no broker and no runtime — the contract every
   owns, no new trust boundary (`kenneld` is not a kennel). Enforces the signed restart policy
   (executed not invented); crash-loop-exhaustion drives the W2 readiness machine into
   declared-but-failed (one mechanism, not two). Supervision state ephemeral, re-derived from signed
-  declaration on daemon restart. Full design: `07-13-service-catalog.md`.
+  declaration on daemon restart.
+  **Two start disciplines, one supervisor.** Beside the eager boot-autostart set, a provider may start
+  **lazily, on demand**: its config is installed, so its `[[provides]]` is in the catalogue from install
+  (W4) and resolves, but the kennel is **not spun up until a consumer first reaches its capability** (the
+  §7.14 "no consumer, no compositor" rule). The name is in the catalogue while the kennel is not yet
+  running; the broker (W5) starts it on first consume and it is reaped when idle. Only the **trigger**
+  (daemon start vs first consume) and the **lifecycle** (daemon-coupled vs consumer-driven) differ — the
+  signed restart policy, the readiness machine, and the borrowed supervisor are the same for both. Full
+  design: `07-13-service-catalog.md`.
 
 - **W7 · Confined GUI: a per-kennel nested compositor as a service kennel.** **[dep] L.**
   A sidecar that `[provides]` GUI capability against the W1 schema: a **rendering leg** (the nested
@@ -308,21 +332,16 @@ Self-contained and testable with no broker and no runtime — the contract every
   default** (§4.7), a deliberate mediated bridge only later. The forcing function; completes the 0.3.0 X11
   removal. Full design: `07-14-confined-gui.md`.
 
-  **Open thread — capture, answer when `07-14` is written.** Two things are owed and not yet done:
-  1. **`07-14` must carry the durable conclusions present-tense, as-built** (not as a rejection list): the
-     design invariant *confined GUI depends on no host-compositor enforcement*; *no foreign desktop-sandbox
-     substrate* (only kennels, a compositor-in-a-kennel, and Kennel brokers); and the capability-preservation
-     mapping (render = nested cage, file access = Kennel file-broker, other desktop services = Kennel brokers).
-     The roadmap carries these now; they must land permanently in the design corpus, because this roadmap is
-     retired after 0.4.0 (as 0.3.0's was) and the conclusion would otherwise be lost.
-  2. **Decide: standalone governance decision-record, yes or no?** A durable record (spawn-red-team-audit
-     format, `docs/governance/audits/`) that pins the substrate verdict *so the rejected Flatpak-substrate
-     options are not re-proposed* after the roadmap is retired — the non-existent Wayland proxy, host
-     `security-context-v1`, the portal, the D-Bus filtering proxy, and the `.flatpak-info` mimicry. **The
-     catch:** it must be reworded to pass the `no-never-built-mechanisms` guard (no forbidden literals) and fit
-     the as-built / no-tombstone standard — i.e. a *positive* decision-record, not a "here's what we rejected"
-     tombstone. Source material: `scratch/substrate verdict gui wayland.md` (+ `scratch/handoff gui wayland
-     cage.md`). Default if undecided: the durable principle in `07-14` (item 1) suffices; the record is optional.
+  **Open thread — RESOLVED (`07-14-confined-gui.md` written).** Both halves are landed in the design
+  corpus, so the conclusion survives this roadmap's retirement: §7.14 carries the durable conclusions
+  present-tense, as-built — the *no host-compositor enforcement* invariant (§7.14.4), *no foreign
+  desktop-sandbox substrate* (§7.14.8), and the capability-preservation mapping (render = nested compositor,
+  file access = Kennel file-broker, other desktop services = Kennel brokers). The substrate verdict is the
+  chapter's closing **decision record (§7.14.13)**, recorded *in the chapter* rather than a standalone
+  governance audit — a positive rationale (why the display server is constructed, not borrowed; why the
+  non-existent Wayland proxy, host `security-context-v1`, and a foreign desktop-sandbox substrate each fail
+  their check) that passes the `no-never-built-mechanisms` guard and fits the no-tombstone standard. The
+  superseded `IWayland` Node-0 wire-facade framing was struck from the binder corpus in the same pass.
 
 ### Thrust 3 — One `kennel` binary, context-aware (the spawn facade, harmonised)
 
@@ -334,6 +353,11 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 0.3.0 deliberately; it lands here.
 
 - **W8 · The facade kennel-spawn interface contract (document the existing surface).** **[dep] M.**
+  **Documented (2026-06-23): the contract is design §7.12.3a — the three authority regions (`@`-pinned
+  template · bounded mutable-field patch · `exec.allow`-gated argv), their independence (the proxy gates
+  egress regardless of argv), and the single-host kennel-to-kennel scope bound; the as-built mechanics are
+  02-10 (`facade-spawn`). Code checked against the model — `exec.allow` gates the resolved binary via
+  Landlock (not the `argv[0]` string), no divergence.**
   Write down what the spawn facade already does, deriving the authority model from the principles rather
   than from the code (then check the code against it — divergence is a code fix, not a spec
   accommodation). The settled model, all homed in the **signed template**: `exec.allow` gates every
@@ -472,7 +496,7 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 - **W15 · Red-team the cross-kennel surface.** **[dep, ship gate] M.**
   Same logic as 0.3.0's W19, pointed at the new surface: the W5 connector broker (can a consumer
   reach a service it didn't declare; can resolution be raced; can a restart confuse a consumer); the
-  **provide-name namespace gate** (can a non-service-class kennel claim a reserved `dev.kennel.*` name
+  **provide-name namespace gate** (can a non-service-class kennel claim a reserved `org.projectkennel.*` name
   and have a consumer brokered to the impostor — provider-name spoofing, W1); the **ungrantable
   host-control-socket rule** (does the endpoint-not-path-string resolution actually hold under a
   cascade-relocated mount; does it over-catch the kennel's own Node 0, W10); and the GUI legs (does the
@@ -594,7 +618,8 @@ not, with the reasoning that keeps each from being re-proposed every cycle.
 - **Service mesh orchestration** — no health-check-as-load-balancing, no multi-provider selection, no
   failover policy. `kenneld` resolves and brokers; it is not an orchestrator.
 - **Protocol-body mediation in the daemon** — which D-Bus method, which portal interface, which MCP
-  tool: all live in confined interposers at workload authority, never in `kenneld`.
+  tool: all live in confined components at workload authority (an existing tool, not a Kennel-built
+  interposer), never in `kenneld`.
 - **Boot-ordering logic** — async autostart + consume-with-wait makes dependencies settle themselves;
   no topological start-order computation in the daemon.
 - **Patching upstream GUI binaries** — the nested inner compositor (cage / Weston / sway) runs

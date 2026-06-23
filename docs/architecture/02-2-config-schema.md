@@ -63,6 +63,7 @@ The full section list:
 | `[net]` and `[net.*]` | Egress mode (`none`/`constrained`/`unconstrained`/`host`), split by enforcer: `[net.proxy]` (the user-space by-name allow/deny the per-kennel SOCKS proxy enforces, proxied modes only) and `[net.bpf]` (the kernel/syscall CIDR+port connect/bind ACL, present in every mode), plus `[net.bind]` rewrite knobs, `[net.ipv6]`, and `[net.audit]`. Each mode gets its own net-ns except `host`, which shares the host net-ns; the net-ns is the egress boundary (§7.5). See §The `[net]` section. | §7.5 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
 | `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
+| `[[provides]]`, `[[consumes]]` | Cross-kennel capability mesh: a kennel offers capabilities (`name` + typed `shape` `af-unix`/`dbus-name`/`binder-connector` + `endpoint` + optional `key`) and reaches them (`name` + `shape` + `at` + `env` + `key` + `required`). **Schema + local compile validation built** (well-formedness, the `org.projectkennel.*` service-class namespace gate, in-policy duplicate `name`); carried in the settled policy (`MeshRuntime`). Runtime brokering (catalogue, the connector broker) is roadmap. Additive to `[binder]`. | §7.13 |
 | `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
 | `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.destinations]]` = `dest` + host-side `ssh` `options`; no real-key fingerprint, no agent); carried in the settled policy (`SshRuntime`, with the compile-time-minted synthetic public key pinned per grant), realised by kenneld | §7.10 |
 | `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.4 |
@@ -622,9 +623,61 @@ prefix. The compiler rejects such a policy by name, the same way it rejects an o
 
 ---
 
+## The `[[provides]]` and `[[consumes]]` sections — the cross-kennel mesh
+
+The mesh policy surface (design §7.13). **Built compiler-side** — the schema and the *local* compile
+validation below are implemented and tested; the runtime that brokers a consume to a provider (the
+catalogue and the connector broker) is roadmap. Additive to `[binder]`; the two are reconciled later.
+
+`[[provides]]` — a capability this kennel offers over the mesh:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | the capability's public identifier (the catalogue advertises it); a reserved `org.projectkennel.*` name is accepted only in the service-class context (below) |
+| `shape` | enum | the typed transport: `af-unix` / `dbus-name` / `binder-connector` |
+| `endpoint` | string | where the capability is exposed, in the provider's own view |
+| `key` | string | optional private match token, never advertised in the catalogue |
+| `reason` | string | why this capability is offered |
+| `threats` | table | `threats.exposed` / `threats.mitigated` |
+
+`[[consumes]]` — a capability this kennel reaches over the mesh:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | the capability's public identifier, resolved against the catalogue at runtime |
+| `shape` | enum | the transport it expects; the broker refuses a mismatched shape |
+| `at` | string | where the brokered connector is delivered, in this kennel's own view |
+| `env` | array of strings | environment variable(s) synthesised into this kennel to name the connector |
+| `key` | string | optional private match token; must match the provider's |
+| `required` | bool | whether the capability's absence fails kennel construction (default `true`) |
+| `reason` | string | why this capability is consumed |
+| `threats` | table | `threats.exposed` / `threats.mitigated` |
+
+Neither side names the other (design §7.13.1): resolution is by capability `name` at runtime, never a
+peer-kennel reference, so the surface carries no cross-kennel link and the compiler — holding one
+policy — does no cross-kennel resolution.
+
+### Local compile validation
+
+What the compiler checks from the one policy in hand (design §7.13.3), implemented in
+`kennel-lib-compile/src/mesh.rs`:
+
+- **Well-formedness** — each entry has a `name`, a `shape` (one of the three transports), and a
+  `reason`; a `[[provides]]` also an `endpoint`.
+- **Reserved-namespace gate** — a `[[provides]]` `name` beginning with `org.projectkennel.` is rejected
+  unless the policy is compiled in the **service-class** context (the operator-supplied `Trust` flag,
+  design §7.13.5). An ordinary kennel cannot claim a reserved capability name.
+- **Duplicate provide** — two `[[provides]]` with the same `name` in one policy is an error.
+
+Cross-kennel resolution — does a consume resolve to a provider of the matching shape — is a runtime act
+and is never attempted at compile (design §7.13.3). The settled policy carries the validated entries as
+`MeshRuntime` for the runtime broker to read.
+
+---
+
 ## The remaining sections — field reference
 
-The `[net.*]` and `[binder]`/`[ipc.spawn]` sections are documented in full above. This section gives the field-level schema for every other section, kept exact against the parser (`kennel-lib-policy/src/source.rs`). Every struct is `#[serde(deny_unknown_fields)]`: a key not named here is rejected at parse. The design rationale for each lives in the §7.x chapter named in its heading.
+The `[net.*]`, `[binder]`/`[ipc.spawn]`, and `[[provides]]`/`[[consumes]]` sections are documented in full above. This section gives the field-level schema for every other section, kept exact against the parser (`kennel-lib-compile/src/source.rs`). Every struct is `#[serde(deny_unknown_fields)]`: a key not named here is rejected at parse. The design rationale for each lives in the §7.x chapter named in its heading.
 
 ### `[exec]` — what may be `execve()`'d (§7.3)
 

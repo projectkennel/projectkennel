@@ -50,12 +50,13 @@ pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
     AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
-    BinderRuntime, CapPolicy, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
-    ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, NameRule, NetMode, NetPolicy, NetRule,
-    OnChangeAction, ProcPolicy, ProcVisibility, Protocol, Provenance, ProxyListen,
-    ResolvedArtifact, SeccompAction, SeccompPolicy, SettledPolicy, SignedSettledPolicy, SpawnGrant,
-    SpawnTemplate, SshGrant, SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy,
-    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
+    BinderRuntime, CapPolicy, ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy,
+    EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
+    MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, OnChangeAction, ProcPolicy, ProcVisibility,
+    Protocol, Provenance, ProvideRuntime, ProxyListen, ResolvedArtifact, SeccompAction,
+    SeccompPolicy, SettledPolicy, Shape, SignedSettledPolicy, SpawnGrant, SpawnTemplate, SshGrant,
+    SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime,
+    UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use spawn::spawn_eligible;

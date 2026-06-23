@@ -43,6 +43,7 @@ pub mod identity;
 pub mod leaf;
 pub mod lint;
 pub mod lock;
+pub mod mesh;
 pub mod resolve;
 pub mod risks;
 pub mod source;

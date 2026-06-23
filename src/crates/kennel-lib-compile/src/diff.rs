@@ -338,9 +338,10 @@ fn rank(section: &str) -> u8 {
         "unix" => 3,
         "ssh" => 4,
         "binder" => 5,
-        "identity" => 6,
-        "workload" => 7,
-        _ => 8, // lifecycle / tty / trust and other posture toggles
+        "mesh" => 6,
+        "identity" => 7,
+        "workload" => 8,
+        _ => 9, // lifecycle / tty / trust and other posture toggles
     }
 }
 
@@ -564,6 +565,39 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
         }
     }
 
+    // [[provides]] / [[consumes]] — the cross-kennel capability mesh (§7.13). Top-level,
+    // distinguished by capability name; the shape is the grant's value.
+    for prov in &p.provides {
+        out.push(Grant {
+            key: format!("provides:{}", prov.name.as_deref().unwrap_or("?")),
+            carrier: label("[[provides]]", prov.name.as_deref()),
+            section: "mesh",
+            value: prov
+                .shape
+                .map(|s| s.as_str().to_owned())
+                .unwrap_or_default(),
+            reason: prov.reason.clone(),
+            exposed: exposed_of(prov.threats.as_ref()),
+            mitigated: mitigated_of(prov.threats.as_ref()),
+            polarity: Polarity::Allow,
+        });
+    }
+    for cons in &p.consumes {
+        out.push(Grant {
+            key: format!("consumes:{}", cons.name.as_deref().unwrap_or("?")),
+            carrier: label("[[consumes]]", cons.name.as_deref()),
+            section: "mesh",
+            value: cons
+                .shape
+                .map(|s| s.as_str().to_owned())
+                .unwrap_or_default(),
+            reason: cons.reason.clone(),
+            exposed: exposed_of(cons.threats.as_ref()),
+            mitigated: mitigated_of(cons.threats.as_ref()),
+            polarity: Polarity::Allow,
+        });
+    }
+
     // [identity] — retained supplementary groups.
     if let Some(identity) = &p.identity {
         for group in &identity.groups {
@@ -755,6 +789,23 @@ mod tests {
             .any(|t| t.id == "T1.8" && t.title.is_some()));
         // The summary reflects the newly-exposed threat too.
         assert!(d.summary.newly_exposed.iter().any(|t| t.id == "T1.8"));
+    }
+
+    #[test]
+    fn an_added_provide_shows_as_a_mesh_grant() {
+        let old = parse("name = \"x\"\n");
+        let new = parse(
+            "name = \"x\"\n[[provides]]\nname = \"build-cache\"\nshape = \"binder-connector\"\n\
+             endpoint = \"/run/cache.sock\"\nreason = \"serve build cache\"\n",
+        );
+        let d = diff(&old, &new, &cat());
+        let c = d
+            .changes
+            .iter()
+            .find(|c| c.carrier.contains("[[provides]]") && c.carrier.contains("build-cache"))
+            .expect("the new provide shows up");
+        assert_eq!(c.kind, ChangeKind::Added);
+        assert_eq!(c.reason.as_deref(), Some("serve build cache"));
     }
 
     #[test]

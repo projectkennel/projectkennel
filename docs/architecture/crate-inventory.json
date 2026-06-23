@@ -1,8 +1,8 @@
 {
   "crate_count": 24,
-  "total_sloc": 31388,
+  "total_sloc": 31678,
   "tcb_crate_count": 16,
-  "tcb_sloc": 19381,
+  "tcb_sloc": 19437,
   "crates": [
     {
       "name": "kenneld",
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 4821,
+      "sloc": 5055,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
@@ -56,7 +56,7 @@
     },
     {
       "name": "kennel-lib-policy",
-      "sloc": 1765,
+      "sloc": 1821,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],

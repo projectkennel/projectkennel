@@ -823,6 +823,98 @@ pub struct BinderConsumeRuntime {
     pub from: Option<String>,
 }
 
+/// The typed shape of a mesh capability: how its connector is delivered (§7.13.2).
+///
+/// Declared on both `[[provides]]` and `[[consumes]]` (`docs/design/07-13-service-catalog.md`)
+/// and carried verbatim into the settled policy; defined here so the source parser and the
+/// signed runtime share one type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Shape {
+    /// An `AF_UNIX` socket the workload connects to (the display render leg).
+    AfUnix,
+    /// Reachability of a D-Bus name through the `IDBus` facade (§7.7).
+    DbusName,
+    /// A connector to a binder node the provider offers (§7.1).
+    BinderConnector,
+}
+
+impl Shape {
+    /// The canonical kebab-case name (`af-unix`/`dbus-name`/`binder-connector`), for
+    /// display in policy tooling and audit.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AfUnix => "af-unix",
+            Self::DbusName => "dbus-name",
+            Self::BinderConnector => "binder-connector",
+        }
+    }
+}
+
+/// The cross-kennel capability mesh runtime (`07-13-service-catalog.md` §7.13) — the
+/// `[[provides]]`/`[[consumes]]` the broker (§7.13.4) and catalogue read at runtime.
+///
+/// A *service* input `kenneld` realises, not part of the kernel-enforcement core. Carried in
+/// the signed settled policy; omitted from the canonical form when empty, so a policy with no
+/// mesh declarations signs exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshRuntime {
+    /// Capabilities this kennel offers (`[[provides]]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<ProvideRuntime>,
+    /// Capabilities this kennel reaches (`[[consumes]]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumes: Vec<ConsumeRuntime>,
+}
+
+impl MeshRuntime {
+    /// Whether there is no mesh grant to realise.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.provides.is_empty() && self.consumes.is_empty()
+    }
+}
+
+/// One offered capability: a public name, its shape, where it is exposed, and an optional
+/// private match token.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvideRuntime {
+    /// The capability's public identifier — what the catalogue advertises.
+    pub name: String,
+    /// The typed transport.
+    pub shape: Shape,
+    /// Where the capability is exposed, in the provider's own view.
+    pub endpoint: String,
+    /// Optional private match token, never advertised in the catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// One reached capability: a name, the expected shape, where the connector is delivered,
+/// the env naming it, an optional match token, and whether it is required.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumeRuntime {
+    /// The capability's public identifier, resolved against the catalogue at runtime.
+    pub name: String,
+    /// The expected transport; the broker refuses a mismatched shape.
+    pub shape: Shape,
+    /// Where the brokered connector is delivered, in this kennel's own view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// Environment variable(s) synthesised into this kennel to name the connector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// Optional private match token; must match the provider's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Whether the capability's absence fails kennel construction (hard dependency).
+    pub required: bool,
+}
+
 /// The workload's identity inside the kennel (`docs/design/07-4-filesystem.md`): the
 /// supplementary Unix groups it retains.
 ///
@@ -1280,6 +1372,12 @@ pub struct SettledPolicy {
     /// no-`[binder]` policy signs exactly as before.
     #[serde(default, skip_serializing_if = "BinderRuntime::is_empty")]
     pub binder: BinderRuntime,
+    /// The cross-kennel capability mesh runtime (`07-13-service-catalog.md` §7.13) — the
+    /// `[[provides]]`/`[[consumes]]` the broker and catalogue read. A table like
+    /// [`binder`](Self::binder); omitted from the canonical form when empty, so a policy with
+    /// no mesh declarations signs exactly as before.
+    #[serde(default, skip_serializing_if = "MeshRuntime::is_empty")]
+    pub mesh: MeshRuntime,
     /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set. A table like
     /// [`binder`](Self::binder); omitted from the canonical form when empty, so a
     /// no-`[dbus]` policy signs exactly as before.
@@ -1477,6 +1575,7 @@ pub(crate) fn sample_settled() -> SettledPolicy {
         unix: UnixRuntime::default(),
         identity: IdentityRuntime::default(),
         binder: BinderRuntime::default(),
+        mesh: MeshRuntime::default(),
         dbus: DbusRuntime::default(),
         audit: AuditRuntime::default(),
         env: EnvRuntime::default(),

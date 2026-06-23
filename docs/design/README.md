@@ -65,6 +65,8 @@ implementation-independent. The as-built *how* lives under
 | 07.10 | [SSH](07-10-ssh.md) | The double-blind re-origination bastion |
 | 07.11 | [OCI substrate](07-11-oci-substrate.md) | Booting a vendor OCI image as a confined kennel root |
 | 07.12 | [Dynamic spawn](07-12-dynamic-spawn.md) | Delegated ephemeral sibling kennels; MCP-over-stdio transport |
+| 07.13 | [Capability mesh](07-13-service-catalog.md) | Cross-kennel `provide`/`consume`; compile-time shape checking; the service catalogue |
+| 07.14 | [Confined GUI](07-14-confined-gui.md) | The nested-compositor display service; the Kennel-native file broker |
 | 08 | [Enforcement architecture](08-enforcement-architecture.md) | How the kernel mechanisms compose |
 | 09 | [Policy lifecycle](09-policy-lifecycle.md) | Author → compile → sign → run |
 | 10 | [Failure modes](10-failure-modes.md) | What happens when each step fails |
