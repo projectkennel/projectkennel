@@ -42,20 +42,27 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("loading deployment config: {e}"))?;
     let identity = build_identity(&deployment)?;
     let privileged = HelperClient::new(deployment.privhelper());
-    // Settled run policies verify against the system trust store **then** the calling
-    // user's own keys (the trust split, 07-paths): a user may run a policy signed with
-    // their own key, but a user key cannot shadow a system key id (system is first, so
-    // it wins). Templates are a separate, system-only trust at compile time.
-    let mut trust_dirs: Vec<std::path::PathBuf> = vec![deployment.trust_dir().to_path_buf()];
+    // Settled run policies verify against the trust store: the vendor layer first (the
+    // package-shipped maintainer key — `org.projectkennel.*` authority, §7.13.5), then the admin
+    // trust dir, then the calling user's own keys (the trust split, 07-paths). A user may run a
+    // policy signed with their own key, but cannot shadow a vendor/admin key of the same id (earlier
+    // dirs win), so the maintainer key is unshadowable. Templates are a separate, system-only trust at
+    // compile time.
+    let mut rest_dirs: Vec<std::path::PathBuf> = vec![deployment.trust_dir().to_path_buf()];
     if let Some(user_keys) = kennel_lib_config::user_key_dir() {
-        trust_dirs.push(user_keys);
+        rest_dirs.push(user_keys);
     }
-    let dir_refs: Vec<&std::path::Path> =
-        trust_dirs.iter().map(std::path::PathBuf::as_path).collect();
+    let rest_refs: Vec<&std::path::Path> =
+        rest_dirs.iter().map(std::path::PathBuf::as_path).collect();
     // The loader re-reads these dirs on every request, so a key created, changed, or
     // removed after the daemon started (e.g. by `kennel keygen`) is honoured without a
-    // restart — the trust store lives on disk, not frozen in memory at boot.
-    let loader = policy::TrustStoreLoader::from_dirs(&dir_refs);
+    // restart — the trust store lives on disk, not frozen in memory at boot. The host-declared
+    // `[[reserved]]` namespaces (§7.13.5a) ride along for the runtime reserved-provide gate.
+    let loader = policy::TrustStoreLoader::from_trust_dirs(
+        Some(kennel_lib_config::vendor_key_dir()),
+        &rest_refs,
+        deployment.reserved().to_vec(),
+    );
 
     let shared = Arc::new(Shared::new(identity, privileged, loader));
     let listener = socket::listener().map_err(|e| format!("control socket: {e}"))?;

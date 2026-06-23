@@ -255,14 +255,18 @@ install_etc_skeleton() {
 }
 
 install_keys() {
-	# Ship the project's own template-signing public key(s) into the trust store,
-	# so the signed reference templates verify out of the box. Private seeds are
-	# never in the repo (MAINTAINERS.md); only `*.pub` is shipped. Org/customer
-	# keys are added alongside these by the admin.
+	# Ship the project's own public key(s) into the VENDOR trust dir
+	# (/usr/lib/kennel/keys), so the signed reference templates verify out of the box.
+	# The daemon searches the vendor dir first, and a key there is vendor-provenance —
+	# the authority for the built-in org.projectkennel.* reserved namespace
+	# (07-13-service-catalog.md §7.13.5). The maintainer key belongs here, not in the
+	# admin /etc/kennel/keys (which holds org/customer keys an admin adds): an admin or
+	# user key cannot claim the project's own namespace. Private seeds are never in the
+	# repo (MAINTAINERS.md); only `*.pub` is shipped.
 	if [ -d "$repo_root/keys" ]; then
 		for pub in "$repo_root"/keys/*.pub; do
 			[ -e "$pub" ] || continue
-			run install -m 0644 "$pub" "/etc/kennel/keys/$(basename "$pub")"
+			run install -m 0644 "$pub" "$vendor_dir/keys/$(basename "$pub")"
 		done
 	fi
 }

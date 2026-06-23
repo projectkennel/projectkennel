@@ -694,6 +694,17 @@ pub fn user_key_dir() -> Option<PathBuf> {
     user_config_dir().map(|d| d.join("keys"))
 }
 
+/// The **vendor** key dir (`/usr/lib/kennel/keys`) — the package-shipped trust layer where the
+/// project maintainer key lives.
+///
+/// The daemon searches it first, and a key found here is vendor-provenance: the authority for the
+/// built-in `org.projectkennel.*` reserved namespace (`07-13-service-catalog.md` §7.13.5). Fixed,
+/// never user- or admin-redirectable — the project's own namespace stays the project's.
+#[must_use]
+pub fn vendor_key_dir() -> PathBuf {
+    PathBuf::from(VENDOR_DIR).join("keys")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
