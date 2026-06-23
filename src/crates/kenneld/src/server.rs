@@ -485,6 +485,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     fn prepare_unix(
         &self,
         unix: &kennel_lib_policy::UnixRuntime,
+        consumes: &[kennel_lib_policy::ConsumeRuntime],
         subst: &RuntimeSubstitutions,
         shim_root: &Path,
     ) -> crate::UnixPrep {
@@ -500,6 +501,28 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             }
             shims.push(crate::UnixShim {
                 name: sock.name.clone(),
+                shim_path,
+            });
+        }
+        // Mesh consumes of af-unix shape ride the SAME facade: an `at` socket presented in the view,
+        // brokered by name. kenneld's `CONNECT_AFUNIX` handler dispatches a `[[consumes]]` name to the
+        // broker (§7.13.4 — resolve, socket-activate if cold, connect the provider's endpoint) rather
+        // than a host `[[unix.allow]]` socket, so the facade is byte-identical; only kenneld's
+        // resolution differs. A consume with no `at` is resolvable-only (no in-view socket); a non
+        // af-unix shape is not an af-unix socket and is materialised elsewhere when those shapes land.
+        for consume in consumes {
+            if consume.shape != kennel_lib_policy::settled::Shape::AfUnix {
+                continue;
+            }
+            let Some(at) = consume.at.as_ref() else {
+                continue;
+            };
+            let shim_path = resolve_path(at, subst, shim_root);
+            for var in &consume.env {
+                env.push((var.clone(), shim_path.to_string_lossy().into_owned()));
+            }
+            shims.push(crate::UnixShim {
+                name: consume.name.clone(),
                 shim_path,
             });
         }
@@ -1283,7 +1306,7 @@ pub fn run_kennel<P, L>(
     };
     // Prepare the AF_UNIX socket shims (§7.6): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
-    let unix = shared.prepare_unix(&loaded.unix, &subst, &shim_root);
+    let unix = shared.prepare_unix(&loaded.unix, &loaded.consumes, &subst, &shim_root);
     // Prepare D-Bus mediation (§7.7): pair each enabled bus's compiled table with the real bus
     // address and the in-view socket the facade presents. Stateless, like the unix shims.
     let dbus = shared.prepare_dbus(&loaded.dbus, &shim_root);
@@ -2261,6 +2284,68 @@ mod tests {
         assert!(
             s.activator().is_none(),
             "no activator until serve() wires it"
+        );
+    }
+
+    #[test]
+    fn prepare_unix_materialises_an_af_unix_consume_as_a_facade_shim() {
+        use kennel_lib_policy::settled::Shape;
+        let s = shared();
+        let subst = RuntimeSubstitutions {
+            ctx: 1,
+            uid: 1000,
+            kennel: "t".to_owned(),
+            home: PathBuf::from("/home/dev"),
+            namespace: "kennel-test".to_owned(),
+            tag: 42,
+            ula_gid: [0, 0, 0, 0, 2],
+        };
+        let consume = |name: &str, shape: Shape, at: Option<&str>, env: &[&str]| {
+            kennel_lib_policy::ConsumeRuntime {
+                name: name.to_owned(),
+                shape,
+                at: at.map(ToOwned::to_owned),
+                env: env.iter().copied().map(str::to_owned).collect(),
+                key: None,
+                required: true,
+            }
+        };
+        let consumes = vec![
+            // af-unix + `at` → a facade shim brokered by capability name, plus its env var.
+            consume(
+                "org.projectkennel.wayland",
+                Shape::AfUnix,
+                Some("/run/kennel/wl.sock"),
+                &["WAYLAND_PROXY"],
+            ),
+            // A non-af-unix shape is not an af-unix socket → no shim here.
+            consume(
+                "org.acme.bus",
+                Shape::DbusName,
+                Some("/run/kennel/bus"),
+                &[],
+            ),
+            // af-unix with no `at` is resolvable-only → no in-view socket.
+            consume("org.acme.nowhere", Shape::AfUnix, None, &[]),
+        ];
+        let prep = s.prepare_unix(
+            &kennel_lib_policy::UnixRuntime::default(),
+            &consumes,
+            &subst,
+            &PathBuf::from("/home/dev"),
+        );
+        assert_eq!(
+            prep.shims.len(),
+            1,
+            "only the af-unix consume with an `at` materialises a shim"
+        );
+        let shim = prep.shims.first().expect("one shim");
+        assert_eq!(shim.name, "org.projectkennel.wayland");
+        assert_eq!(shim.shim_path, PathBuf::from("/run/kennel/wl.sock"));
+        assert!(
+            prep.env
+                .contains(&("WAYLAND_PROXY".to_owned(), "/run/kennel/wl.sock".to_owned())),
+            "the consume's env var names its `at` socket"
         );
     }
 
