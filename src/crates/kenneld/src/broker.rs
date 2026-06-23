@@ -30,6 +30,9 @@ pub struct Selected {
     pub shape: Shape,
     /// Where the capability is exposed in the provider's own view (the bridge target).
     pub endpoint: String,
+    /// The running provider's host pid (`Some` once `Ready`) — the broker reaches its endpoint socket
+    /// through `/proc/<pid>/root` for the af-unix connector handoff (§7.13.4a).
+    pub pid: Option<u32>,
 }
 
 /// The broker's decision for one `SVC_CONNECT` (§7.13.4a). The handler maps each to a reply status.
@@ -70,6 +73,7 @@ pub fn decide(consumes: &[ConsumeRuntime], catalogue: &Catalogue, name: &str) ->
         provider: cand.provider.to_owned(),
         shape: cand.shape,
         endpoint: cand.endpoint.to_owned(),
+        pid: cand.pid,
     };
     match cand.readiness {
         Readiness::Ready => Decision::Ready(selected),
@@ -219,6 +223,7 @@ mod tests {
                 provider: "p".to_owned(),
                 shape: Shape::AfUnix,
                 endpoint: "/run/p.sock".to_owned(),
+                pid: None,
             })
         );
         // Ready → Ready(selected).

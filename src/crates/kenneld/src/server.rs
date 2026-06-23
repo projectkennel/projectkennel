@@ -311,6 +311,14 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
+    /// Record a provider's running host pid and drive it to `Ready` (§7.13.6) — the supervisor calls
+    /// this when construction seals, so the broker can reach the provider's endpoint for a connector.
+    pub fn note_provider_ready(&self, provider: &str, pid: u32) {
+        if let Ok(mut guard) = self.catalogue.lock() {
+            guard.note_constructed(provider, pid);
+        }
+    }
+
     /// A handle to the live catalogue, for the supervisor's autostart thread (§7.13.6). Cloning the
     /// `Arc` lets a supervision thread drive readiness without borrowing `self`.
     #[must_use]

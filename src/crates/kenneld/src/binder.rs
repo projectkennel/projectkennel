@@ -586,14 +586,84 @@ fn svc_connect(
     let (outcome, status) = match decision {
         Decision::NoGrant => (Outcome::Deny, status::DENIED),
         Decision::NoProvider => (Outcome::Deny, status::NOT_FOUND),
-        // `NotServing` is a failed provider; `Pending`/`Ready` need the supervisor (W6) to
-        // socket-activate and hand off the connector. Until W6 no provider runs, so all three are
-        // unavailable here — W6 splits `Pending` (activate + consume-with-wait) and `Ready` (connect).
-        Decision::NotServing | Decision::Pending(_) | Decision::Ready(_) => {
-            (Outcome::Error, status::UNAVAILABLE)
-        }
+        // A `Ready` provider is running: broker the connector now. (Other shapes' handoff and the
+        // socket-activation of a `Pending` provider land next.)
+        Decision::Ready(sel) => return svc_connect_handoff(writer, incoming, ctx, name, &sel),
+        // `NotServing` (failed) or `Pending` (resolvable but not yet running — socket-activation is
+        // the broker's next step) cannot hand a connector yet.
+        Decision::NotServing | Decision::Pending(_) => (Outcome::Error, status::UNAVAILABLE),
     };
     emit_svc_connect(writer, incoming, ctx, name, outcome, status)
+}
+
+/// Broker the connector to a `Ready` provider (§7.13.4a). The af-unix shape reaches the provider's
+/// endpoint socket through its mount namespace (`/proc/<pid>/root`, the move
+/// [`crate::acquire_binder_node0`] uses) and hands the consumer the **connected fd** — the §4.3
+/// fd-broker, the same shape as the af-unix facade. Other shapes' handoff lands later; a connect
+/// failure (provider gone, wrong endpoint) is reported `UNAVAILABLE`, never a wedged looper.
+fn svc_connect_handoff(
+    writer: &Writer,
+    incoming: &Incoming,
+    ctx: u16,
+    name: &str,
+    sel: &crate::broker::Selected,
+) -> Reply {
+    use kennel_lib_policy::settled::Shape;
+
+    let Some(pid) = sel.pid else {
+        return emit_svc_connect(
+            writer,
+            incoming,
+            ctx,
+            name,
+            Outcome::Error,
+            status::UNAVAILABLE,
+        );
+    };
+    if sel.shape != Shape::AfUnix {
+        return emit_svc_connect(
+            writer,
+            incoming,
+            ctx,
+            name,
+            Outcome::Error,
+            status::UNAVAILABLE,
+        );
+    }
+    // The endpoint is an absolute path in the provider's own view; reach it through `/proc/<pid>/root`.
+    let endpoint = sel.endpoint.trim_start_matches('/');
+    let path = std::path::Path::new("/proc")
+        .join(pid.to_string())
+        .join("root")
+        .join(endpoint);
+    kennel_lib_syscall::net::connect_unix_timeout(&path, AFUNIX_CONNECT_DEADLINE).map_or_else(
+        // Granted but unreachable (provider gone / wrong endpoint): never tie up the looper.
+        |_| {
+            emit_svc_connect(
+                writer,
+                incoming,
+                ctx,
+                name,
+                Outcome::Error,
+                status::UNAVAILABLE,
+            )
+        },
+        |stream| {
+            writer.emit(
+                &Event::new(
+                    "binder.svc-connect",
+                    Resource::Binder,
+                    Outcome::Allow,
+                    Source::Kenneld,
+                )
+                .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+                .field("name", Value::untrusted(name.to_owned()))
+                .field("provider", Value::untrusted(sel.provider.clone()))
+                .field("ctx", Value::Uint(u64::from(ctx))),
+            );
+            Reply::Fd(OwnedFd::from(stream))
+        },
+    )
 }
 
 /// Audit one `SVC_CONNECT` outcome and reply with the status byte (no connector object on a non-OK).
