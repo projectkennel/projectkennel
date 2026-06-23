@@ -139,8 +139,8 @@ where
         let mut clean = false;
         loop {
             match recv_response(&mut client) {
-                Ok(Response::Started { .. }) => {
-                    shared.note_provider_event(&id, Event::ConstructionSucceeded);
+                Ok(Response::Started { pid, .. }) => {
+                    shared.note_provider_ready(&id, pid);
                 }
                 Ok(Response::Exited { code }) => {
                     clean = code == 0;
