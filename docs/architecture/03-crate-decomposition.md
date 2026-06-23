@@ -20,11 +20,11 @@ the code whose compromise would break confinement.
 | Crate | SLOC | unsafe | TCB | Consumers | External deps |
 |---|--:|:--:|:--:|---|---|
 | `kenneld` | 6220 | — | **yes** | *(2 bins)* | basic-toml, serde |
-| `kennel-lib-compile` | 4821 | — | — | cli | basic-toml, serde |
+| `kennel-lib-compile` | 5055 | — | — | cli | basic-toml, serde |
 | `kennel-cli` | 3985 | — | — | *(binary)* | lexopt, serde, serde_json |
 | `kennel-lib-binder` | 2008 | **yes** | **yes** | bin-init, dbus, facade, kenneld, spawn | libc |
 | `kennel-lib-spawn` | 1948 | — | **yes** | bin-init, kenneld, privhelper | — |
-| `kennel-lib-policy` | 1765 | — | **yes** | cli, compile, kenneld, spawn | basic-toml, ed25519-compact, object, serde |
+| `kennel-lib-policy` | 1821 | — | **yes** | cli, compile, kenneld, spawn | basic-toml, ed25519-compact, object, serde |
 | `kennel-privhelper` | 1594 | — | **yes** | kenneld | — |
 | `kennel-lib-audit` | 1287 | — | **yes** | cli, kenneld | — |
 | `kennel-lib-bpf` | 1244 | **yes** | **yes** | kenneld, privhelper, spawn | libc, object |
@@ -60,7 +60,7 @@ the code whose compromise would break confinement.
 - `kennel-privhelper` → bpf, config, spawn, syscall
 - `kenneld` → host-delegate, audit, binder, bpf, config, control, policy, spawn, syscall, privhelper
 
-**Totals.** 24 crates, **31388 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **19381 SLOC**; the remaining 8 crates (12007 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
+**Totals.** 24 crates, **31678 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **19437 SLOC**; the remaining 8 crates (12241 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
 
 <!-- END GENERATED: crate-inventory -->
 
