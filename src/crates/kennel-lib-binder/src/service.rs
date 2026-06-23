@@ -106,6 +106,24 @@ pub mod verb {
     /// may ask `SPAWN` for* rather than probe by trial. It exposes only the caller's own granted
     /// authority (nothing it could not learn by trying every `SPAWN`), and spawns nothing.
     pub const SPAWN_QUERY: u32 = 15;
+
+    /// Resolve a mesh capability `name` and broker a connector to its provider (the cross-kennel
+    /// capability mesh, `07-13-service-catalog.md` §7.13.4a).
+    ///
+    /// The standing-service sibling of [`SPAWN`]: where `SPAWN` mints a fresh kennel and injects its
+    /// stdio fds, `SVC_CONNECT` *resolves* a named capability against the catalogue (§7.13.4) and
+    /// brokers a connector to the already-declared provider — socket-activating it on first consume if
+    /// it is enabled lazily (§7.13.6). A facade-class verb the consumer's facade transacts on the
+    /// workload's behalf when the workload acts against its `at` endpoint, never the workload directly
+    /// (request-don't-author, §7.12.1). The request carries only the capability
+    /// [`name`](crate::service::svc_connect) (see that module for why the optional private `key` is
+    /// matched broker-side and never on the wire); the reply is a [`crate::service::status`] byte, and
+    /// on [`crate::service::status::OK`] the connector rides the binder object table per shape (a
+    /// connected `af-unix` fd, a `binder-connector` node handle, or — for `dbus-name` — no object, the
+    /// `IDBus` allow-set widened). A **consume-with-wait** blocks until the provider is
+    /// declared-and-ready or the broker's deadline fires, returning
+    /// [`crate::service::status::UNAVAILABLE`] on timeout (§7.13.4a).
+    pub const SVC_CONNECT: u32 = 16;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
@@ -404,6 +422,16 @@ pub mod status {
     /// Distinct from [`DENIED`] (a grant/pin/eligibility refusal) so a requester can tell "try again
     /// later" from "never".
     pub const CEILING_FULL: u8 = 6;
+    /// A [`crate::service::verb::SVC_CONNECT`] resolved a capability whose provider is **not serving**.
+    ///
+    /// Either declared-but-failed (§7.13.7), or pending and the consume-with-wait deadline fired
+    /// before it became ready (§7.13.4a, the cycle-safe timeout).
+    ///
+    /// Distinct from [`NOT_FOUND`] (nothing in the catalogue offers the `name`) precisely because
+    /// §7.13.7 requires a consumer to tell "the capability exists but is down" from "no such
+    /// capability" — a failed provider stays catalogued, so its consume is denied-and-audited as
+    /// `UNAVAILABLE`, never a silent resolve-miss.
+    pub const UNAVAILABLE: u8 = 7;
 }
 
 /// The [`verb::SPAWN`] request and reply wire (`02-10` §7.12).
@@ -540,6 +568,120 @@ pub mod spawn {
             // decoder enforces the bound the doc asserts, not merely the upstream buffer size.
             let big = vec![0u8; super::SPAWN_PATCH_MAX_BYTES + 1];
             assert!(decode_request(&big).is_none());
+        }
+    }
+}
+
+/// The [`verb::SVC_CONNECT`] request and reply wire (`07-13-service-catalog.md` §7.13.4a).
+///
+/// **Request**: the capability `name` to resolve, as bare bounded UTF-8 (`[name: UTF-8]`) — the
+/// single-field idiom of [`inet::decode_request`]'s host, not the length-prefixed multi-field
+/// [`spawn`] shape, because a `SVC_CONNECT` carries exactly one field. The name is the *public*
+/// identifier (§7.13.1); the optional private **`key`** is deliberately **not** on the wire. kenneld
+/// matches the key broker-side, reading the consumer's from its signed `[[consumes]]` (keyed by the
+/// kernel-stamped caller identity and this `name`) and the provider's from its signed `[[provides]]`,
+/// so the private token never transits the in-kennel facade boundary where a workload could observe
+/// or forge it (§7.13.4 step 3). The facade names the capability; everything else — identity, key,
+/// expected shape — is the signed grant the broker enforces.
+///
+/// **Reply**: a [`status`] byte. On [`status::OK`] the connector itself rides the binder object
+/// table, not these bytes — a connected `af-unix` fd, a `binder-connector` node handle, or (for
+/// `dbus-name`) no object at all — so [`svc_connect::decode_reply`] reads the leading status and
+/// tolerates the trailing object, exactly as [`inet::decode_port_prefix`] does for the conduit fd. A
+/// non-`OK`
+/// status carries no object: [`status::DENIED`] (no signed `[[consumes]]`), [`status::NOT_FOUND`]
+/// (nothing in the catalogue offers the name), [`status::UNAVAILABLE`] (resolved but the provider is
+/// failed, or pending past the consume-with-wait deadline — §7.13.4a), or [`status::BAD_REQUEST`] (a
+/// malformed name).
+pub mod svc_connect {
+    /// The hard upper bound on a `SVC_CONNECT` capability name.
+    ///
+    /// Matches the binderfs service-name cap (`02-4-binder.md` §Node 0, ≤ 255 bytes); a mesh name is
+    /// a short dotted identifier (`org.projectkennel.wayland`), far under it.
+    pub const SVC_NAME_MAX_BYTES: usize = 255;
+
+    /// Encode a `SVC_CONNECT` request: the bare capability name.
+    #[must_use]
+    pub fn encode_request(name: &str) -> Vec<u8> {
+        name.as_bytes().to_vec()
+    }
+
+    /// Decode a `SVC_CONNECT` request into the capability name. `None` for an empty, oversized
+    /// (> [`SVC_NAME_MAX_BYTES`]), or non-UTF-8 payload — all untrusted, all fail closed.
+    #[must_use]
+    pub fn decode_request(data: &[u8]) -> Option<&str> {
+        if data.is_empty() || data.len() > SVC_NAME_MAX_BYTES {
+            return None;
+        }
+        core::str::from_utf8(data).ok()
+    }
+
+    /// Encode a `SVC_CONNECT` reply body: a [`super::status`] byte. On [`super::status::OK`] the
+    /// connector (fd / node handle / nothing) is attached as a binder object, not in this payload.
+    #[must_use]
+    pub fn encode_reply(status: u8) -> Vec<u8> {
+        vec![status]
+    }
+
+    /// Decode a `SVC_CONNECT` reply into its [`super::status`] byte, **ignoring** any trailing
+    /// connector object the OK reply carries in the binder buffer. `None` only for an empty buffer
+    /// (malformed).
+    #[must_use]
+    pub const fn decode_reply(data: &[u8]) -> Option<u8> {
+        data.first().copied()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::service::status;
+
+        #[test]
+        fn request_round_trips() {
+            let bytes = encode_request("org.projectkennel.wayland");
+            assert_eq!(decode_request(&bytes), Some("org.projectkennel.wayland"));
+        }
+
+        #[test]
+        fn request_rejects_empty_oversized_and_non_utf8() {
+            assert!(decode_request(&[]).is_none()); // empty name
+            assert!(decode_request(&vec![b'a'; SVC_NAME_MAX_BYTES + 1]).is_none()); // oversized
+            assert!(decode_request(&[0xFF, 0xFE]).is_none()); // not UTF-8
+        }
+
+        #[test]
+        fn request_accepts_the_name_at_the_exact_bound() {
+            // The bound is inclusive: a name of exactly SVC_NAME_MAX_BYTES is valid.
+            let name = "a".repeat(SVC_NAME_MAX_BYTES);
+            assert_eq!(decode_request(name.as_bytes()), Some(name.as_str()));
+        }
+
+        #[test]
+        fn reply_round_trips_each_status() {
+            for s in [
+                status::OK,
+                status::DENIED,
+                status::NOT_FOUND,
+                status::UNAVAILABLE,
+                status::BAD_REQUEST,
+            ] {
+                assert_eq!(decode_reply(&encode_reply(s)), Some(s));
+            }
+        }
+
+        #[test]
+        fn reply_reads_status_past_a_trailing_connector_object() {
+            // The OK reply's data buffer is `[status | padding | flat_binder_object]` (the connector
+            // fd/handle); decode_reply reads the leading status and tolerates the object bytes.
+            let mut wire = encode_reply(status::OK);
+            wire.extend_from_slice(&[0u8; 7]); // alignment padding
+            wire.extend_from_slice(&[0xCC; 24]); // a 24-byte flat_binder_object
+            assert_eq!(decode_reply(&wire), Some(status::OK));
+        }
+
+        #[test]
+        fn reply_rejects_an_empty_buffer() {
+            assert!(decode_reply(&[]).is_none());
         }
     }
 }
