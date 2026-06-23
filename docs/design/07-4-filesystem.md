@@ -167,7 +167,15 @@ allow = [
 > target — but do **not** read that as an execution barrier: an allowlisted interpreter
 > reads a script as *data* (`sh script.sh`, `python evil.py`) and needs no `EXECUTE` on it,
 > so the only thing the writable home really gives you is the ephemeral-tmpfs safety above,
-> not a guarantee that nothing in it can run. `[fs.home].readonly = true` is the escape
+> not a guarantee that nothing in it can run. The grant permits the ordinary objects of a writable
+> tree — files, directories, symlinks, and **IPC objects (unix sockets and named pipes)**. The last
+> matters: a kennel is granted **no ambient network** by default, so a local socket or fifo in the
+> writable view is a confined workload's *only* channel to talk between its own processes or to accept
+> a brokered connection (`07-6`/`07-13`) — denying it would not contain a threat, it would leave the
+> process mute, and it confers nothing beyond the already-writable subtree. What a write grant does
+> **not** permit is a **device node** (char/block): minting one is raw hardware/kernel surface and a
+> real escalation, so it stays the constructed `/dev`'s job (§7.2.8), never a writable-path right.
+> `[fs.home].readonly = true` is the escape
 > hatch: it suppresses the home-root grant, so only `write`-granted `~/…` paths are writable
 > and the rest of the home is read-only.
 

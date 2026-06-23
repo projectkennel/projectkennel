@@ -1377,14 +1377,16 @@ mod tests {
         assert!(plan.landlock_fs.iter().any(|(path, acc)| path
             == &PathBuf::from("/run/kennel/ai-coding/home")
             && acc.contains(AccessFs::WRITE_FILE)));
-        // The private /tmp is the workload's own scratch: read+write+list.
+        // The private /tmp is the workload's own scratch: read+write+list, and make-socket — with no
+        // ambient network, a local socket/fifo in the writable view is the workload's only IPC.
         assert!(
             plan.landlock_fs
                 .iter()
                 .any(|(path, acc)| path == &PathBuf::from("/tmp")
                     && acc.contains(AccessFs::WRITE_FILE)
-                    && acc.contains(AccessFs::READ_DIR)),
-            "the private /tmp is writable + listable"
+                    && acc.contains(AccessFs::READ_DIR)
+                    && acc.contains(AccessFs::MAKE_SOCK)),
+            "the private /tmp is writable + listable + socket-bindable"
         );
         // The view root is listable (`ls /`), READ_DIR only.
         assert!(

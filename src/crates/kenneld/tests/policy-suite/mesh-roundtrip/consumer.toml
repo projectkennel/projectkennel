@@ -1,0 +1,37 @@
+# ============================================================================
+# mesh-roundtrip — the CONSUMER half + the verdict (§7.13.4).
+#
+# Declares `[[consumes]]` for `test.mesh.echo` (af-unix) at an `at` socket in its own
+# view. kenneld materialises that socket via the af-unix facade (one mechanism, two
+# resolutions); the workload connects to it, and kenneld resolves the capability,
+# socket-activates the cold provider, reaches its endpoint through /proc/<pid>/root,
+# and splices. The workload — `facade-mesh-probe connect` — sends `ping` and exits 0
+# iff it reads `pong` back: the brokered connector reached a running provider across
+# the kennel boundary. Exit code IS the case verdict.
+# ============================================================================
+
+name = "mesh-consumer"
+template_base = "base-confined@v1"
+
+# The consumer holds NO host reach of its own — it uses a capability provided by another kennel.
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+
+# Connect to the brokered `at` socket and round-trip ping→pong.
+[workload]
+argv = ["/usr/libexec/kennel/facade-mesh-probe", "connect", "/tmp/mesh-in.sock"]
+pinned = true
+
+# The reached capability: delivered at `at` (a facade socket in this kennel's view).
+[[consumes]]
+name = "test.mesh.echo"
+shape = "af-unix"
+at = "/tmp/mesh-in.sock"
+required = true
+reason = "mesh-roundtrip e2e: reach the provider's ping→pong echo over the mesh"

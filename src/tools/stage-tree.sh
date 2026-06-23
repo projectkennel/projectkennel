@@ -63,7 +63,7 @@ STAT_BINS="kennel-bin-oci-entry kennel-bin-init facade-afunix facade-socks5 faca
 # part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload and
 # `facade-spawn-bench` drives spawn-spinup.sh. Staged into the payload ONLY under --with-test-bins
 # (the spawn e2e/bench install them to libexec); a real release never carries them.
-TEST_BINS="facade-spawn-probe facade-spawn-bench"
+TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe"
 
 install -d "$DEST/bin"
 for b in $REL_BINS;  do install -m 0755 "$REL/$b"  "$DEST/bin/$b"; done

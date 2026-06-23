@@ -1,0 +1,38 @@
+# ============================================================================
+# mesh-roundtrip — the PROVIDER half (§7.13).
+#
+# An ondemand service kennel that offers `test.mesh.echo` (af-unix) and serves a
+# ping→pong echo at its endpoint. run.sh compiles + signs this to its settled form
+# and links it into ~/.config/kennel/ondemand/, so the daemon catalogues it (Pending)
+# and socket-activates it on the consumer's first connect (W6). The endpoint lives in
+# the provider's private /tmp (a fresh tmpfs); kenneld reaches it for the brokered
+# connector through /proc/<pid>/root (§7.13.4a).
+# ============================================================================
+
+name = "mesh-provider"
+template_base = "base-confined@v1"
+
+# A service that vends a capability — it reaches nothing itself.
+[net]
+mode = "none"
+
+# Read the system dirs the static probe resolves from. It binds its endpoint in the private /tmp,
+# which is writable (incl. make-socket) by default — a fresh per-kennel ephemeral tmpfs.
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+# Execute only the in-kennel mesh probe.
+[exec]
+allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+
+# The workload IS the service: bind the endpoint socket and echo ping→pong forever.
+[workload]
+argv = ["/usr/libexec/kennel/facade-mesh-probe", "serve", "/tmp/mesh-echo.sock"]
+pinned = true
+
+# The offered capability: an af-unix socket at the endpoint, in this kennel's own view.
+[[provides]]
+name = "test.mesh.echo"
+shape = "af-unix"
+endpoint = "/tmp/mesh-echo.sock"
+reason = "mesh-roundtrip e2e: serve a ping→pong echo for the consumer to reach over the mesh"

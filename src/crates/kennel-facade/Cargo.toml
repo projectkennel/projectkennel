@@ -2,14 +2,14 @@
 name = "kennel-facade"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel in-kennel binder-connector facades: the small proxies kennel-bin-init launches inside the constructed view. Each pushes one class of the workload's traffic across the binder gateway to kenneld — facade-socks5 (SOCKS5/HTTP egress), facade-afunix (AF_UNIX sockets), facade-ssh (ssh ProxyCommand), facade-client (inbound BIND mirror). No policy, no host socket: kenneld decides, resolves, and pins."
+description = "Project Kennel in-kennel binder-connector facades: the small proxies kennel-bin-init launches inside the constructed view. Each pushes one class of the workload's traffic across the binder gateway to kenneld â facade-socks5 (SOCKS5/HTTP egress), facade-afunix (AF_UNIX sockets), facade-ssh (ssh ProxyCommand), facade-client (inbound BIND mirror). No policy, no host socket: kenneld decides, resolves, and pins."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# One crate, four binaries (names preserved — kennel-bin-init resolves them by name).
+# One crate, four binaries (names preserved â kennel-bin-init resolves them by name).
 autobins = false
 
 [[bin]]
@@ -37,25 +37,31 @@ path = "src/bin/facade-dbus.rs"
 name = "facade-spawn"
 path = "src/bin/facade-spawn.rs"
 
-# The in-kennel SPAWN round-trip probe — the reference workload-side spawn client and the
-# `spawn-roundtrip` policy-suite case's requester workload (`02-10` §7.12).
+# The in-kennel SPAWN round-trip probe â the reference workload-side spawn client and the
+# `spawn-roundtrip` policy-suite case's requester workload (`02-10` Â§7.12).
 [[bin]]
 name = "facade-spawn-probe"
 path = "src/bin/facade-spawn-probe.rs"
 
-# The in-kennel sequential SPAWN bench driver — the ephemeral half of the spinup profile
+# The in-kennel sequential SPAWN bench driver â the ephemeral half of the spinup profile
 # (`tools/spawn-spinup.sh`): drives N back-to-back constructions to time the in-daemon SPAWN path.
 [[bin]]
 name = "facade-spawn-bench"
 path = "src/bin/facade-spawn-bench.rs"
 
+# The in-kennel mesh provide/consume round-trip probe — the `mesh-roundtrip` policy-suite
+# case's provider (serve) and consumer (connect) workloads (07-13 service-catalog).
+[[bin]]
+name = "facade-mesh-probe"
+path = "src/bin/facade-mesh-probe.rs"
+
 [dependencies]
 # The binder client transaction surface every facade uses to reach node 0.
 kennel-lib-binder = { path = "../kennel-lib-binder" }
-# The shared bidirectional splice (conduit relay) — used by facade-socks5 and
+# The shared bidirectional splice (conduit relay) â used by facade-socks5 and
 # facade-client after brokering a conduit fd; harmless for the two that do not.
 kennel-lib-scm = { path = "../kennel-lib-scm" }
-# The D-Bus mediation engine for facade-dbus (§7.7): the typed conduit wire, the SASL
+# The D-Bus mediation engine for facade-dbus (Â§7.7): the typed conduit wire, the SASL
 # handshake, message reconstruction, and the Facade connection state machine. Wraps the
 # mini-sansio-dbus marshalling. Outside the daemon TCB (facades run confined in the kennel).
 kennel-lib-dbus = { path = "../kennel-lib-dbus" }
