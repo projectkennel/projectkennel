@@ -251,6 +251,81 @@ semantics. A consumer therefore treats its connector as reconnectable, not perma
 Materialising `at` as a re-requestable endpoint (rather than a one-shot fd) is what makes a restart
 transparent to a workload that simply reconnects.
 
+## 7.13.4a The `SVC_CONNECT` wire contract
+
+The broker of §7.13.4 is realised by **one Node 0 transaction, `SVC_CONNECT`** — the standing-service
+sibling of `SPAWN` (§7.12): where `SPAWN` *mints* a fresh kennel and injects its stdio fds,
+`SVC_CONNECT` *resolves* a named capability against the catalogue and brokers a connector to a provider
+that already exists. It is a **facade-class verb** the consumer's facade transacts on the workload's
+behalf the moment the workload acts against its `at` endpoint (connects to the `af-unix` socket, calls
+through `IDBus`, `getService`s the binder node) — never the workload directly. This is
+request-don't-author at the wire (§7.12.1): the facade names a capability; it cannot widen what the
+consumer's signed `[[consumes]]` already grants.
+
+**The request carries only the name.** The wire payload is the capability `name` and nothing else. The
+optional private **`key`** (§7.13.1) is *deliberately not on the wire*: `kenneld` matches it broker-side,
+reading the consumer's key from its signed `[[consumes]]` (selected by the kernel-stamped caller identity
+and this `name`) and the provider's from its signed `[[provides]]`, then comparing the two. So the private
+token never transits the in-kennel facade boundary where a workload could observe or forge it — the name
+*discovers*, the key *binds privately*, and only the broker, holding both signed policies, ever sees the
+key. Everything the broker enforces — identity, key, expected `shape` — is read from the signed grant, not
+asserted by the requester.
+
+**The reply is a status byte, and the connector rides the object table.** The reply payload is a single
+status byte; on success (`OK`) the connector itself is attached as a **binder object**, exactly as
+`SPAWN`'s channel fds are — not in the status bytes. What that object is, is the `shape` (§7.13.2):
+
+- **`af-unix`** → a **connected fd** to the provider, the byte path `kenneld` then steps out of (§4.3).
+- **`binder-connector`** → a **node handle** referencing the provider's node; whatever rides it afterward
+  is opaque to `kenneld`, which frames and parses none of it (the TCB discipline — no protocol body in the
+  daemon).
+- **`dbus-name`** → **no object**: success means the broker widened the consumer's `IDBus` allow-set to
+  the resolved name (§7.13.2), and the consumer continues to call through the facade it already holds.
+
+A non-`OK` status carries no object and names *why* the connect did not happen, distinguishably:
+
+| Status | Meaning |
+|---|---|
+| `OK` | resolved and brokered; the connector is attached per shape. |
+| `DENIED` | the caller's signed policy declares no `[[consumes]]` for this name (or the identity check failed) — the request-don't-author floor (§7.13.4 step 1). |
+| `NOT_FOUND` | nothing in the catalogue offers the name — the clean resolve-miss (no enabled provider, §7.13.6). |
+| `UNAVAILABLE` | the name *resolves*, but the provider is not serving: **declared-but-failed** (§7.13.7), or **pending past the consume-with-wait deadline** (below). |
+| `BAD_REQUEST` | a malformed name (empty, oversized, non-UTF-8). |
+
+The `NOT_FOUND`/`UNAVAILABLE` split is the wire half of the §7.13.7 readiness requirement: a failed
+provider stays catalogued (the operator's link is unchanged), so its consume must be distinguishable from
+"no such capability" — `UNAVAILABLE` is "the capability exists but is down," `NOT_FOUND` is "no such
+capability," and a consumer (or operator) can tell them apart without guessing.
+
+**Consume-with-wait, and why it is the cycle's safety valve.** Step 5 of §7.13.4 may socket-activate a
+cold provider, so a `SVC_CONNECT` against a lazy provider does not return instantly: the broker **blocks
+the transaction until the provider is declared-and-ready, or a deadline fires** (the *consume-with-wait*
+deadline — a broker constant, default **5 s**, sized to the slowest legitimate provider start; it is not a
+`[service]` field). A provider that is itself still **declared-but-pending does not satisfy a waiter** —
+the connector is brokered only at `Ready` (§7.13.7). That single rule is what makes the flat, boot-order-free
+model safe under a dependency cycle. Consider the operator misconfiguration where sidecar **A** consumes
+**B** and **B** consumes **A**, both enabled eager: at daemon start `kenneld` autostarts both
+asynchronously, A's readiness blocks on consuming B and B's on consuming A. Neither reaches `Ready` (each
+waits on the other), so neither consume-with-wait is satisfied; both hit the deadline, both return
+`UNAVAILABLE`, and both providers' pending construction is driven to **declared-but-failed** (the
+`pending → failed` transition, §7.13.7). The cycle resolves to a **loud, observable double-timeout** —
+visible in the topology surface (§7.13.7, the `kennel ps` mesh view) — not a silent deadlock. The timeout
+is not an implementation detail; it is the contract that converts an un-orderable dependency graph into a
+fail-closed, legible outcome, which is why it is specified here and asserted before the broker is built.
+
+**Restart invalidates the connector.** A brokered connector is a live handle to a running provider, not a
+standing guarantee (§7.13.4, *connector lifecycle*). When the provider restarts or dies, the consumer
+observes **`EOF`** on the connector and re-transacts `SVC_CONNECT` for the same name, which re-resolves and
+socket-activates afresh. The consumer treats the connector as reconnectable; the mesh guarantees *a*
+connection to the named capability on request, never the *same* one for the kennel's life.
+
+The wire itself is **internal-stable** and lives with the other Node 0 verbs in
+`kennel-lib-binder::service` (`svc_connect`): both ends ship from one release, the request/reply codec is
+hand-rolled and bounded (no `serde` in the daemon's binder path — the TCB discipline), and `kenneld`
+frames the connector but parses nothing that rides it. The behaviour above — resolution, key/shape match,
+socket-activation, the consume-with-wait timeout, the restart-`EOF` — is the **broker logic** built against
+this frozen surface (§7.13.4); this section freezes the surface.
+
 ## 7.13.5 The reserved namespace and the service-kennel trust class
 
 A capability name is the thing a consumer trusts: a kennel that resolves `org.projectkennel.wayland` is trusting
@@ -455,7 +530,8 @@ provider, so there is one readiness contract for every reader to depend on, not 
 The mesh is not a new subsystem so much as a composition of primitives the system already has: the
 **`[[provides]]`/`[[consumes]]` declarations** (this section), each locally validated at compile (§7.13.3);
 the **service-connector broker** on Node 0 that resolves a capability against the catalogue, hands the
-consumer its connector, and steps out (the §4.3 fd-broker, developed with the broker wire); the **service
+consumer its connector, and steps out (the §4.3 fd-broker, built against the `SVC_CONNECT` wire of
+§7.13.4a); the **service
 catalogue**, a derived projection of the installed configs' `[[provides]]` blocks that the broker resolves
 against and the topology surface reads (developed with the catalogue); **enablement and autostart** (§7.13.6)
 — a provider the operator links into `autorun/` (eager, started at daemon start) or `ondemand/` (lazy,

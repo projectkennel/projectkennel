@@ -81,6 +81,21 @@ impl Readiness {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Failed)
     }
+
+    /// Whether this readiness satisfies a **consume-with-wait** (§7.13.4a): the broker hands a
+    /// connector over **only** when the resolved provider is [`Ready`](Self::Ready).
+    ///
+    /// This is the cycle-safety pivot of the `SVC_CONNECT` wire contract. A
+    /// [`Pending`](Self::Pending) provider — *including one blocked on its own consume* — does not
+    /// serve a waiter, so a mutual consume (sidecar A consumes B, B consumes A) cannot bootstrap
+    /// itself: each waiter blocks on the other's never-arriving [`Ready`](Self::Ready), both hit the
+    /// consume-with-wait deadline, and both land [`Failed`](Self::Failed) — a loud, observable
+    /// double-timeout rather than a deadlock. A [`Failed`](Self::Failed) provider never serves (its
+    /// consume is denied-and-audited as `UNAVAILABLE`, distinct from an unresolved name).
+    #[must_use]
+    pub const fn serves(self) -> bool {
+        matches!(self, Self::Ready)
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +161,16 @@ mod tests {
         assert!(Readiness::Failed.is_terminal());
         assert!(!Readiness::Pending.is_terminal());
         assert!(!Readiness::Ready.is_terminal());
+    }
+
+    #[test]
+    fn only_ready_serves_a_consume_with_wait() {
+        // The cycle-safety pivot (§7.13.4a): a connector is brokered only to a Ready provider, so a
+        // provider blocked on its own consume (Pending) cannot satisfy a waiter, and a Failed one
+        // never does.
+        assert!(Readiness::Ready.serves());
+        assert!(!Readiness::Pending.serves());
+        assert!(!Readiness::Failed.serves());
     }
 
     #[test]
