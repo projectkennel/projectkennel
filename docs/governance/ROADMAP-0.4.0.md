@@ -237,6 +237,29 @@ Self-contained and testable with no broker and no runtime — the contract every
   consume cycle resolves to double-timeout-then-failed, not deadlock) so W5's broker logic is built to a
   frozen, asserted transaction surface, not one that emerges from the implementation.
 
+- **W17 · Control-plane version handshake (the runtime anti-drift guard).** **[dep] S–M.**
+  *(Added 2026-06-23, from a 0.3.1 field finding.)*
+  W1–W3 freeze the contracts test-first — anti-drift at *compile* time. This is its **runtime
+  complement:** when two *different builds* of `kennel` and `kenneld` nonetheless talk (a reinstall
+  without a daemon restart, a half-upgraded host), the skew must fail **loudly and at the boundary**, not
+  as a cryptic error five layers down. The 0.3.1 install surfaced exactly this — a newer CLI compiled a
+  settled policy carrying a field (`on_change`) the still-running older daemon could not parse, and it
+  surfaced as `unknown field on_change, expected manifest` deep in policy loading rather than "your daemon
+  is older than your CLI; restart it." API drift happens *despite* the contract discipline; the handshake
+  makes it legible.
+  A **protocol version** (bumped on any control-wire *or* settled-policy-schema change) plus the **build
+  identity** are exchanged on the control connection at connect; `kenneld` checks them and, on an
+  incompatible version, returns a **typed refusal** naming both versions and the remedy (restart the
+  daemon) — *before* any request body or policy file is parsed. The settled-policy schema the daemon loads
+  is explicitly in scope: the protocol version is the proxy that catches a CLI-compiled policy a daemon of
+  a different build cannot read (the precise drift that bit 0.3.1). **Test-first:** equal versions accept;
+  an incompatible version returns the typed remediation (not a parse error); the preamble round-trips; and
+  the check is the *first* thing on the connection, so it precedes policy load. **Honest limitation,
+  stated:** a handshake only binds versions that *have* it — a pre-handshake daemon cannot speak it, so
+  this ends the cryptic-skew class *going forward*, it does not retrofit onto already-shipped builds. An
+  IPC-protocol surface change (CHANGELOG-tracked); homed in the control-plane contract (`02-6-ipc.md`).
+  Independent of the mesh — it can land early, beside W1–W3.
+
 ### Thrust 2 — Runtime logic (built against the frozen contracts)
 
 - **W4 · The service catalogue (the derived projection).** **[dep] M.**
@@ -579,11 +602,12 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    cleared the substrate. Confirm A is retired (W7 cuts the portal it investigated); confirm B resolved to
    the host-independent **nested inner compositor**, proven end-to-end on stock GNOME 50. W7 is no longer
    substrate-gated; what remains is engineering, not substrate risk.
-1. **Contracts first — W1 (schema) + W2 (sidecar/readiness API) + W3 (`SVC_CONNECT` wire).**
-   Test-first, no daemon; these freeze the cross-workstream contract every later thrust derives from.
-   W1's schema is consumed by W4/W6/W7; W2's readiness API by W4 and W14; W3's wire contract by W5.
-   Settle the connector lifecycle (consume-with-wait timeout, restart-invalidates-connectors) in W3's
-   contract before W5 implements it.
+1. **Contracts first — W1 (schema) + W2 (sidecar/readiness API) + W3 (`SVC_CONNECT` wire) + W17
+   (version handshake).** Test-first, no daemon; these freeze the cross-workstream contract every later
+   thrust derives from. W1's schema is consumed by W4/W6/W7; W2's readiness API by W4 and W14; W3's wire
+   contract by W5. W17 is the runtime anti-drift guard on the same control plane, independent of the mesh,
+   so it lands whenever capacity allows. Settle the connector lifecycle (consume-with-wait timeout,
+   restart-invalidates-connectors) in W3's contract before W5 implements it.
 2. **Runtime logic — W4 → W5 → W6 → W7**, each built against a frozen contract. Catalogue (the
    derived projection over W1), then the connector broker (the logic behind W3, resolving against W4),
    then sidecars (the supervision logic behind W2), then GUI (the first real consumer). W7 gated on the
@@ -604,7 +628,8 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 The release carries **no OCI tail and no natural-extensions thrust** by design — the OCI integrity
 ladder and the secrets broker are both in Backlog for principled reasons (TCB growth, model fit), and
 version-pinning generalisation is a one-line promote-if-needed, not a workstream. 0.4.0 is the
-service-mesh release and nothing else.
+service-mesh release — plus the one robustness item its expanded IPC surface earns (W17, the
+control-plane version handshake) — and nothing else.
 
 ## Exit criteria
 
@@ -613,8 +638,9 @@ host-independent nested-compositor architecture, proven on stock GNOME 50; confi
 portal); the `[provides]`/`[consumes]` schema compiles with shape-checking and its
 valid/invalid corpus passes (W1); the sidecar/restart-policy declaration schema and the readiness
 state machine are landed and their transitions asserted as tests (W2); the `SVC_CONNECT` wire
-contract is specified and round-trip tested (W3); the derived catalogue resolves with readiness
-states (W4); the service-connector broker is built and proven by a policy-suite case exercising
+contract is specified and round-trip tested (W3); the control-plane version handshake rejects an
+incompatible CLI/daemon pair with a typed remediation *before* any policy is parsed, round-trip tested
+(W17); the derived catalogue resolves with readiness states (W4); the service-connector broker is built and proven by a policy-suite case exercising
 `provide`/`consume` against the W3 contract — deny-by-default resolution, consume-with-wait, the
 restart-invalidates-connectors behaviour (W5); the sidecar set autostarts and is supervised with
 crash-loop-bounded restart feeding declared-but-failed (W6); **confined GUI ships** — a GUI-service
@@ -630,8 +656,8 @@ authentication-never-attestation sweep has landed (W11/W12/W13); the topology su
 cannot be defended against the substrate (W16 accuracy pass). The **positioning rewrite** (W16) is an
 explicit fast-follow, not a ship gate — done after the tag, never blocking it. The W0 confirms must come
 back clean before W7 is scheduled. CHANGELOG records every stable-surface change — the `[provides]`/`[consumes]` policy schema,
-the sidecar/restart-policy schema, the `SVC_CONNECT` IPC verb, the unified `kennel` CLI surface
-(retiring `facade-spawn`), and the new threat-catalogue entries.
+the sidecar/restart-policy schema, the `SVC_CONNECT` IPC verb, the control-plane version handshake,
+the unified `kennel` CLI surface (retiring `facade-spawn`), and the new threat-catalogue entries.
 
 ## Parked work
 
