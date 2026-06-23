@@ -723,7 +723,7 @@ Execution is **deny-by-default**: an empty or absent `allow` denies all execve. 
 | Field | Type | Notes |
 |---|---|---|
 | `read` | array of path globs | Paths granted read (and directory traversal / execute). |
-| `write` | array of path globs | Paths granted write (covers create/modify/delete — there is no separate `create` field). |
+| `write` | array of path globs | Paths granted write (covers create/modify/delete — files, dirs, symlinks, and **IPC objects (unix sockets/fifos)**, but not device nodes, which are `[fs.dev]`'s job; there is no separate `create` field). With no ambient network by default, a local socket/fifo in a writable path is a confined workload's only IPC (§7.4). |
 | `exclusive` | array of paths | Writable paths bound **exclusively** (§7.4 / §2.7, T2.8): while the kennel runs, the factory over-mounts an opaque sentinel on the host path so the operator and the workload do not use it concurrently. Subset of `write` (a non-`write` entry is a compile error). Ownership-gated — the privhelper refuses a path the operator does not own (overreach), checked early at compile/run too. Released at teardown; `kennel release <policy>` clears a crash-leaked over-mount. |
 | `deny` | array of path globs | Categorical denies, belt-and-braces over the constructed view, evaluated before any allow. |
 

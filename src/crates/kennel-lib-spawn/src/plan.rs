@@ -276,8 +276,16 @@ fn dev_access() -> AccessFs {
 /// `MAKE_SYM` is included: ordinary writable-path work (an unpack, `npm`, a build) creates
 /// symlinks, and Landlock re-evaluates a symlink's *target* against the ruleset on every access,
 /// so a created link cannot reach a path the policy did not grant (a link to `/etc/shadow` resolves
-/// to a denied path). `MAKE_SOCK`/`MAKE_FIFO`/`MAKE_CHAR`/`MAKE_BLOCK` are deliberately omitted —
-/// no writable-path workflow needs to mint those, and device nodes are the constructed `/dev`'s job.
+/// to a denied path).
+///
+/// `MAKE_SOCK`/`MAKE_FIFO` are included. A unix socket or named pipe is an ordinary IPC object, and a
+/// kennel is granted **no ambient network stack** by default — so a local socket/fifo in the writable
+/// view is the *only* way a confined workload's processes have to talk to each other (or for a
+/// workload to listen for a brokered connection, §7.6/§7.13). Denying it would not contain a threat; it
+/// would leave the process mute. It confers nothing beyond the writable subtree it lives in — it is not
+/// a path into anything the policy did not already grant. Only `MAKE_CHAR`/`MAKE_BLOCK` stay omitted: a
+/// device node is raw hardware/kernel surface and minting one is a real escalation — that is the
+/// constructed `/dev`'s job (its nodes are bound in by the seal), never a writable-path right.
 ///
 /// `REFER` is included so a `rename`/`link` *between two directories* within a writable subtree
 /// succeeds (without it Landlock fails such a cross-directory move with `EXDEV` — the
@@ -291,6 +299,8 @@ fn write_access() -> AccessFs {
         | AccessFs::MAKE_REG
         | AccessFs::MAKE_DIR
         | AccessFs::MAKE_SYM
+        | AccessFs::MAKE_SOCK
+        | AccessFs::MAKE_FIFO
         | AccessFs::REFER
         | AccessFs::REMOVE_FILE
         | AccessFs::REMOVE_DIR

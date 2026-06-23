@@ -1,8 +1,8 @@
 {
   "crate_count": 24,
-  "total_sloc": 32949,
+  "total_sloc": 33026,
   "tcb_crate_count": 16,
-  "tcb_sloc": 20595,
+  "tcb_sloc": 20597,
   "crates": [
     {
       "name": "kenneld",
@@ -56,7 +56,7 @@
     },
     {
       "name": "kennel-lib-spawn",
-      "sloc": 1948,
+      "sloc": 1950,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -95,6 +95,16 @@
       "external_deps": ["libc", "object"]
     },
     {
+      "name": "kennel-facade",
+      "sloc": 1131,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": ["facade-afunix", "facade-client", "facade-dbus", "facade-mesh-probe", "facade-socks5", "facade-spawn", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh"],
+      "consumers": [],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-dbus", "kennel-lib-scm"],
+      "external_deps": []
+    },
+    {
       "name": "kennel-lib-syscall",
       "sloc": 1064,
       "uses_unsafe": true,
@@ -103,16 +113,6 @@
       "consumers": ["audit", "bin-init", "cli", "control", "kenneld", "privhelper", "spawn"],
       "first_party_deps": ["kennel-lib-landlock", "kennel-lib-os", "kennel-lib-scm"],
       "external_deps": ["bitflags", "libc", "nix", "seccompiler"]
-    },
-    {
-      "name": "kennel-facade",
-      "sloc": 1056,
-      "uses_unsafe": false,
-      "in_tcb": false,
-      "bins": ["facade-afunix", "facade-client", "facade-dbus", "facade-socks5", "facade-spawn", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh"],
-      "consumers": [],
-      "first_party_deps": ["kennel-lib-binder", "kennel-lib-dbus", "kennel-lib-scm"],
-      "external_deps": []
     },
     {
       "name": "kennel-lib-dbus",
