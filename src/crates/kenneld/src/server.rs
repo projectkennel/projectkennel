@@ -266,6 +266,11 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// on `daemon-reload` — never standing authored state. An `Arc` so each kennel's binder serving
     /// shares the one live catalogue its `SVC_CONNECT` handler resolves against.
     catalogue: std::sync::Arc<Mutex<crate::catalogue::Catalogue>>,
+    /// The lazy-provider socket-activator (§7.13.6): set once at `serve` startup, after `Shared` is
+    /// `Arc`-wrapped (the activator holds a back-reference to it). The binder `SVC_CONNECT` broker
+    /// reaches it type-erased to socket-activate an `ondemand` provider on first consume. `None` before
+    /// startup wires it, or in a test harness that does not.
+    activator: std::sync::OnceLock<std::sync::Arc<dyn crate::supervisor::ProviderActivator>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -287,6 +292,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             registry: Mutex::new(Registry::default()),
             bastion: Mutex::new(None),
             catalogue: std::sync::Arc::new(Mutex::new(catalogue)),
+            activator: std::sync::OnceLock::new(),
         }
     }
 
@@ -335,6 +341,32 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .into_iter()
             .filter(|p| p.enablement == crate::catalogue::Enablement::Autorun)
             .collect()
+    }
+
+    /// The enabled **`ondemand`** provider named `provider`, if any (§7.13.6) — the lazy provider the
+    /// broker socket-activates on first consume. `None` for an unknown name, or an `autorun` one
+    /// (`autostart` already brings those up). Re-derived from the enablement scan, never authored state.
+    #[must_use]
+    pub fn ondemand_provider(&self, provider: &str) -> Option<crate::catalogue::EnabledProvider> {
+        self.loader.enabled_providers().into_iter().find(|p| {
+            p.provider == provider && p.enablement == crate::catalogue::Enablement::Ondemand
+        })
+    }
+
+    /// Install the lazy-provider [`crate::supervisor::ProviderActivator`] — once, at `serve` startup.
+    /// A second call is ignored; the activator is set for the daemon's life.
+    pub fn set_activator(
+        &self,
+        activator: std::sync::Arc<dyn crate::supervisor::ProviderActivator>,
+    ) {
+        let _ = self.activator.set(activator);
+    }
+
+    /// The lazy-provider activator the binder broker socket-activates an `ondemand` provider through,
+    /// if one is installed (it is, in a live daemon; `None` in a test harness that skips the wiring).
+    #[must_use]
+    pub fn activator(&self) -> Option<std::sync::Arc<dyn crate::supervisor::ProviderActivator>> {
+        self.activator.get().cloned()
     }
 
     /// Prepare a kennel's SSH egress (§7.10): mint a synthetic key per grant, register
@@ -735,6 +767,11 @@ where
     // Autostart the enabled `autorun` providers (§7.13.6) before serving control requests — each in
     // its own supervision thread, lifecycle-coupled to the daemon (the `ondemand` set is socket-
     // activated by the broker on first consume instead).
+    // Install the lazy-provider activator first (the back-reference the `ondemand` socket-activation
+    // path reaches through), then autostart the eager `autorun` set.
+    shared.set_activator(std::sync::Arc::new(crate::supervisor::Activator::new(
+        std::sync::Arc::clone(shared),
+    )));
     crate::supervisor::autostart(shared);
     for conn in listener.incoming() {
         let mut conn = conn?;
@@ -1426,6 +1463,7 @@ pub fn run_kennel<P, L>(
             spawn,
             consumes: loaded.consumes,
             catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
+            activator: shared.activator(),
         });
     }
 
@@ -2207,6 +2245,23 @@ mod tests {
         assert!(s.reserve("a").is_err(), "duplicate name refused");
         s.release("a", 1);
         assert_eq!(s.reserve("a"), Ok(1), "released ctx is reusable");
+    }
+
+    #[test]
+    fn no_enablement_means_no_providers_and_no_activator() {
+        // With no enablement set (the default loader), both provider accessors are empty and the
+        // lazy-provider activator is unset until `serve` wires it — so a `SVC_CONNECT` resolves to no
+        // provider and nothing is socket-activated.
+        let s = shared();
+        assert!(s.autorun_providers().is_empty(), "no autorun set");
+        assert!(
+            s.ondemand_provider("anything").is_none(),
+            "no ondemand provider"
+        );
+        assert!(
+            s.activator().is_none(),
+            "no activator until serve() wires it"
+        );
     }
 
     #[test]

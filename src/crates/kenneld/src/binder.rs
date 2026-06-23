@@ -42,6 +42,13 @@ const POOL_MAX_THREADS: u32 = 8;
 /// reclaims its looper instead of tying it up indefinitely (bounding pool exhaustion alongside
 /// `POOL_MAX_THREADS`).
 const AFUNIX_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// The consume-with-wait deadline (§7.13.4a): a `SVC_CONNECT` to a cold `ondemand` provider holds the
+/// transaction this long for it to become declared-and-ready before returning `UNAVAILABLE`. A broker
+/// constant sized to the slowest legitimate provider start; also the dependency-cycle safety valve (a
+/// mutual consume double-times-out rather than deadlocking).
+const CONSUME_WAIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// How often the consume-with-wait loop re-resolves the activated provider's readiness.
+const CONSUME_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// A service name is bounded (binderfs's own `BINDERFS_MAX_NAME`); reject longer.
 const MAX_NAME: usize = 255;
 
@@ -211,6 +218,7 @@ pub fn spawn(
     spawn: Option<Arc<crate::spawn::SpawnRuntime>>,
     consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
     catalogue: Option<Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<Arc<dyn crate::supervisor::ProviderActivator>>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
     let stop = Arc::new(AtomicBool::new(false));
@@ -242,6 +250,7 @@ pub fn spawn(
             spawn.as_deref(),
             &consumes,
             catalogue.as_ref(),
+            activator.as_ref(),
             incoming,
             conn,
             ctx,
@@ -280,6 +289,7 @@ fn handle(
     spawn: Option<&crate::spawn::SpawnRuntime>,
     consumes: &[kennel_lib_policy::ConsumeRuntime],
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
     conn: &Connection,
     ctx: u16,
@@ -304,7 +314,7 @@ fn handle(
     // catalogue and broker a connector. A facade-class verb (no registry lock): the request-don't-author
     // gate is the kennel's signed [[consumes]], and the resolve is against the daemon catalogue.
     if incoming.code == verb::SVC_CONNECT {
-        return svc_connect(consumes, catalogue, incoming, ctx, writer);
+        return svc_connect(consumes, catalogue, activator, incoming, ctx, writer);
     }
     // The af-unix and INet facades dial host I/O (blocking) and return a descriptor, so they are
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the
@@ -547,14 +557,14 @@ const fn lifecycle_authorized(init: Option<i32>, sender_pid: i32, sender_euid: u
 /// The service-connector broker (§7.13.4a): resolve a mesh capability name against the live catalogue
 /// and broker a connector, gated by this kennel's signed `[[consumes]]` (request-don't-author).
 ///
-/// The broker decision ([`crate::broker::decide`]) maps to a reply status. The connector handoff for a
-/// `Ready` provider (the af-unix fd bridge) and the socket-activation + consume-with-wait of a
-/// `Pending` one are the supervisor's (W6), reached once providers actually run; until then every
-/// enabled provider is `Pending`/`Failed`, so the live outcomes are the deny/not-found/unavailable
-/// gates — all enforced here.
+/// The broker decision ([`crate::broker::decide`]) maps to a reply status: `NoGrant` → `DENIED`,
+/// `NoProvider` → `NOT_FOUND`, `NotServing` → `UNAVAILABLE`. A `Ready` provider gets the connector
+/// handoff (the af-unix fd bridge) now; a `Pending` (enabled-but-cold) one is **socket-activated and
+/// consume-with-waited** ([`svc_connect_activate_wait`]) until it is ready or the deadline fires.
 fn svc_connect(
     consumes: &[kennel_lib_policy::ConsumeRuntime],
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
@@ -586,14 +596,86 @@ fn svc_connect(
     let (outcome, status) = match decision {
         Decision::NoGrant => (Outcome::Deny, status::DENIED),
         Decision::NoProvider => (Outcome::Deny, status::NOT_FOUND),
-        // A `Ready` provider is running: broker the connector now. (Other shapes' handoff and the
-        // socket-activation of a `Pending` provider land next.)
+        // A `Ready` provider is running: broker the connector now.
         Decision::Ready(sel) => return svc_connect_handoff(writer, incoming, ctx, name, &sel),
-        // `NotServing` (failed) or `Pending` (resolvable but not yet running — socket-activation is
-        // the broker's next step) cannot hand a connector yet.
-        Decision::NotServing | Decision::Pending(_) => (Outcome::Error, status::UNAVAILABLE),
+        // A `Pending` provider is enabled but cold: socket-activate it and consume-with-wait until it
+        // is declared-and-ready (broker the connector) or the deadline fires (§7.13.4a).
+        Decision::Pending(sel) => {
+            return svc_connect_activate_wait(
+                consumes, catalogue, activator, incoming, ctx, name, writer, &sel,
+            );
+        }
+        // A `NotServing` (declared-but-failed) provider cannot hand a connector — no fallback (§7.13.4).
+        Decision::NotServing => (Outcome::Error, status::UNAVAILABLE),
     };
     emit_svc_connect(writer, incoming, ctx, name, outcome, status)
+}
+
+/// Socket-activate a cold `ondemand` provider and consume-with-wait (§7.13.4a): trigger its start,
+/// then hold the transaction — re-resolving against the live catalogue — until it is
+/// declared-and-ready (broker the connector) or the consume-with-wait deadline fires (`UNAVAILABLE`).
+///
+/// The bounded wait is the dependency-cycle safety valve: a mutual consume double-times-out into
+/// `UNAVAILABLE` rather than deadlocking (§7.13.4a). It runs on a dedicated binder looper, so the wait
+/// head-of-line-blocks nothing else on the instance. With no activator installed (a test path) the
+/// provider stays cold and the wait simply times out.
+#[allow(clippy::too_many_arguments)] // the broker's per-consume inputs; each is one concern
+fn svc_connect_activate_wait(
+    consumes: &[kennel_lib_policy::ConsumeRuntime],
+    catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
+    incoming: &Incoming,
+    ctx: u16,
+    name: &str,
+    writer: &Writer,
+    sel: &crate::broker::Selected,
+) -> Reply {
+    use crate::broker::Decision;
+    let unavailable = || {
+        emit_svc_connect(
+            writer,
+            incoming,
+            ctx,
+            name,
+            Outcome::Error,
+            status::UNAVAILABLE,
+        )
+    };
+    // Trigger the lazy start (idempotent — a second consume does not double-start it).
+    if let Some(act) = activator {
+        act.activate(&sel.provider);
+    }
+    // The `Pending` decision came from the live catalogue, so it is present; without it (a no-catalogue
+    // construction path) there is nothing to wait on.
+    let Some(cat) = catalogue else {
+        return unavailable();
+    };
+    // Track elapsed against the deadline (never `Instant + Duration`, which can overflow-panic).
+    let start = std::time::Instant::now();
+    loop {
+        std::thread::sleep(CONSUME_WAIT_POLL);
+        let decision = {
+            let guard = cat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::broker::decide(consumes, &guard, name)
+        };
+        match decision {
+            // Construction sealed: the provider is ready — broker the connector.
+            Decision::Ready(ready) => {
+                return svc_connect_handoff(writer, incoming, ctx, name, &ready)
+            }
+            // Crash-loop-exhausted / vanished / grant lost: stop waiting, report unavailable.
+            Decision::NoGrant | Decision::NoProvider | Decision::NotServing => {
+                return unavailable()
+            }
+            // Still coming up — keep waiting until the deadline.
+            Decision::Pending(_) => {}
+        }
+        if start.elapsed() >= CONSUME_WAIT_DEADLINE {
+            return unavailable();
+        }
+    }
 }
 
 /// Broker the connector to a `Ready` provider (§7.13.4a). The af-unix shape reaches the provider's

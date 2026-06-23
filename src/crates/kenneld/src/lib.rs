@@ -310,6 +310,10 @@ pub struct BinderPrep {
     /// against. `None` for a construction path with no catalogue (a `SVC_CONNECT` then resolves
     /// nothing).
     pub catalogue: Option<std::sync::Arc<std::sync::Mutex<crate::catalogue::Catalogue>>>,
+    /// The lazy-provider socket-activator (§7.13.6): the broker activates an `ondemand` provider
+    /// through this when a `SVC_CONNECT` resolves to a not-yet-running one. `None` on a construction
+    /// path with no activator (a test path) — a `Pending` consume then waits out the deadline.
+    pub activator: Option<std::sync::Arc<dyn crate::supervisor::ProviderActivator>>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -1457,6 +1461,7 @@ fn acquire_binder_node0(
         prep.spawn.clone(),
         prep.consumes.clone(),
         prep.catalogue.clone(),
+        prep.activator.clone(),
     )
 }
 
