@@ -63,7 +63,7 @@ members = [
 [workspace.package]
 # All members inherit this via `version.workspace = true`, so a release bump is a
 # one-line change here.
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # Set to the toolchain we actually build and test against. The standards
 # (§2.1) call for an MSRV lagging the dev toolchain; lowering it is deferred

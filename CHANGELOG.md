@@ -6,6 +6,26 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-23
+
+**Installer fix.** The 0.3.0 release tarball was unusable: it mirrored the dev source tree and
+its `install.sh` read the in-kennel binaries from a `target/<triple>/release` directory the
+tarball never shipped, so the install failed on the first `kennel-bin-init`. 0.3.1 reships a
+clean, flat tarball and a pure installer. Packaging only — no code, schema, CLI, IPC, or
+BPF-ABI changes.
+
+- The release tarball is now **flat** — `install.sh`, `bin/` (every binary), and
+  `dist/ keys/ templates/ fragments/ man/ SHA256SUMS` — with no source-tree mirror and no
+  wrapper. `install.sh` is a **pure installer**: it places the payload beside it, refuses to
+  run without a `bin/` (so it never runs from a source checkout), and no longer builds (the
+  `--no-build` flag is gone — `build-release.sh` builds, the new `stage-tree.sh` assembles the
+  payload as the single source of truth both it and the dev/e2e install share).
+- `SHA256SUMS` now covers **every** shipped file — and especially the trust-store public key —
+  and `install.sh` verifies the payload against it before placing anything, aborting on any
+  mismatch rather than installing a tampered key or binary.
+- The `facade-spawn-probe` / `facade-spawn-bench` test drivers are no longer shipped in a
+  release; they are staged only for the spawn end-to-end / benchmark harness.
+
 ## [0.3.0] — 2026-06-22
 
 **Dynamic spawn.** A confined workload instantiates ephemeral **sibling** kennels from
