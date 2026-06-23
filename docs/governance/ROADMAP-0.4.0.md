@@ -294,6 +294,16 @@ Self-contained and testable with no broker and no runtime — the contract every
   `required = false` ("wants") consume work, and what lets a hard `required = true` be a construction-time
   *resolvability* check with the connection still made on demand. Lands §7.12.10's deferred cross-kennel
   `provide`/`consume`.
+  **Connector shapes — af-unix lands; dbus-name and binder-connector defer (BACKLOG).** The W1 schema
+  types three transports, but 0.4.0 brokers the **af-unix** connector handoff only. It is the critical
+  shape — confined GUI (W7) rides a Wayland af-unix socket, and an af-unix consume reuses the existing
+  `CONNECT_AFUNIX` facade *byte-identically* (kenneld dispatches a name matching a signed `[[consumes]]`
+  to the broker; the facade is unaware), so the consumer side cost nothing extra. The **dbus-name** and
+  **binder-connector** handoffs are **deferred to a later release**: the schema accepts them (policies may
+  be authored and validated against them), but a consume of either shape is refused at broker time until
+  its handoff is built. af-unix is sufficient for the 0.4.0 headline; the other two are a later increment,
+  not a 0.4.0 gap. *(Landed: the af-unix broker, the consumer-side facade dispatch, and the two-kennel
+  provide/consume e2e — `mesh-roundtrip`.)*
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
@@ -308,7 +318,14 @@ Self-contained and testable with no broker and no runtime — the contract every
   **lazily, on demand**: its config is installed, so its `[[provides]]` is in the catalogue from install
   (W4) and resolves, but the kennel is **not spun up until a consumer first reaches its capability** (the
   §7.14 "no consumer, no compositor" rule). The name is in the catalogue while the kennel is not yet
-  running; the broker (W5) starts it on first consume and it is reaped when idle. Only the **trigger**
+  running; the broker (W5) starts it on first consume and it is **idle-reaped through the existing kennel
+  TTL custodian** (§9.7), not a parallel reaper. A consumer *is* the keep-alive: while a provider has at
+  least one live consumer its TTL auto-renews; when the **last** consumer disconnects the TTL counter
+  (re)starts, and if none returns before it expires the custodian reaps the now-idle provider (a fresh
+  consume re-activates it from cold). The **policy sets the max TTL** — the ceiling on how long an idle
+  provider lingers — so reaping is the author's tunable and rides one mechanism with the workload-TTL
+  path, never a second one. *(Owed W6 work: activation lands, this consumer-refcount TTL idle-reaping is
+  the remaining piece.)* Only the **trigger**
   (daemon start vs first consume) and the **lifecycle** (daemon-coupled vs consumer-driven) differ — the
   signed restart policy, the readiness machine, and the borrowed supervisor are the same for both. Full
   design: `07-13-service-catalog.md`.

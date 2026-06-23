@@ -82,6 +82,12 @@ documentation sweep.
 
 ## Fenced to a later release
 
+- **Mesh connector handoff: dbus-name + binder-connector shapes** — the `[[provides]]`/`[[consumes]]`
+  schema types three transports (`af-unix` / `dbus-name` / `binder-connector`), and 0.4.0 brokers only
+  the **af-unix** handoff — the critical shape (confined GUI rides a Wayland af-unix socket) and the one
+  that reuses the existing `CONNECT_AFUNIX` facade byte-identically. The other two are schema-accepted but
+  broker-refused until built; promote when a real consumer needs a brokered D-Bus name or a binder
+  connector node-handle. Not a 0.4.0 gap — a later increment on a frozen schema.
 - **Fine-grained service-method policy** — `[consumes]` at interface/method granularity (FileChooser
   yes, Camera no) rather than coarse service-name reachability. Ships coarse first; finer policy must
   not drag a protocol-body parser into a broker.
