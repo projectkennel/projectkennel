@@ -15,22 +15,23 @@ user. See [docs/architecture/01-process-model.md](docs/architecture/01-process-m
 
 ## 1. Install and verify
 
-From a source checkout:
-
-```sh
-sudo src/tools/install.sh
-```
-
-Or from a prebuilt release tarball (no toolchain needed on the target):
+From a prebuilt release tarball (no toolchain needed on the target):
 
 ```sh
 tar xf kennel-*.tar.xz && cd kennel-* && sudo ./install.sh
 ```
 
+From a source checkout, build a tarball first, then install it the same way:
+
+```sh
+src/tools/build-release.sh --arch "$(uname -m)-unknown-linux-gnu"
+tar xf dist/release/kennel-*.tar.xz && cd kennel-*/ && sudo ./install.sh
+```
+
 By default this installs every binary under `/usr/libexec/kennel` (the
 documented non-PATH helper location), the vendor config under `/usr/lib/kennel`,
 the per-user systemd units, the AppArmor profile, the man pages, and the
-root-owned `/etc/kennel` skeleton. Useful flags (`src/tools/install.sh --help`):
+root-owned `/etc/kennel` skeleton. Useful flags (`./install.sh --help`):
 
 - `--prefix DIR` — relocate the binaries (the vendor `system.toml`, the systemd
   unit, and the AppArmor profile are rewritten to match).
@@ -180,8 +181,8 @@ wins over the vendor copy. Every override key is documented inline in the shippe
 
 ## 7. Upgrades
 
-1. Reinstall (`sudo src/tools/install.sh`, or unpack a new tarball and
-   `sudo ./install.sh`).
+1. Reinstall: unpack the new release tarball and `sudo ./install.sh` (from a
+   source checkout, `src/tools/build-release.sh` builds the tarball first).
 2. **Restart the daemon** — a running kenneld keeps serving the *old* binary
    until restarted:
    ```sh

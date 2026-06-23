@@ -24,13 +24,12 @@
 # the directory skeleton and tells the admin what to populate. See
 # CODING-STANDARDS.md §5 and docs/architecture/07-paths.md.
 #
-# Usage:
-#   sudo tools/install.sh [--prefix DIR] [--no-build] [--dry-run]
-#                         [--provision-users [GROUP]]
+# Usage (from an unpacked release tarball):
+#   sudo ./install.sh [--prefix DIR] [--mandir DIR] [--dry-run]
+#                     [--provision-users [GROUP]]
 #
 #   --prefix DIR          libexec dir for the binaries (default: /usr/libexec/kennel)
 #   --mandir DIR          man-page root (default: /usr/share/man; pages go in manN/)
-#   --no-build            install the binaries already in target/release (skip cargo)
 #   --dry-run             print the actions without performing them
 #   --provision-users [G] write a /etc/kennel/subkennel allocation for every member of
 #                         group G (default `users`) — one per uid that lacks one. We are
@@ -49,7 +48,6 @@ libexec="/usr/libexec/kennel"
 vendor_dir="/usr/lib/kennel"
 # Man-page root; pages install into $mandir/man{1,5,8}.
 mandir="/usr/share/man"
-do_build=1
 dry_run=0
 provision_group=""
 
@@ -57,7 +55,6 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--prefix) libexec="${2:?--prefix needs a directory}"; shift 2 ;;
 		--mandir) mandir="${2:?--mandir needs a directory}"; shift 2 ;;
-		--no-build) do_build=0; shift ;;
 		--dry-run) dry_run=1; shift ;;
 		# Provision a /etc/kennel/subkennel allocation for every member of GROUP
 		# (default `users`). We are root, so we can write the file directly — saving
@@ -68,13 +65,23 @@ while [ $# -gt 0 ]; do
 			else
 				provision_group="users"; shift
 			fi ;;
-		-h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+		-h|--help) sed -n '2,38p' "$0"; exit 0 ;;
 		*) echo "install.sh: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
 
-# Repo root = the directory above tools/ (this script's location).
-repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+# This is a PURE installer: it places a prebuilt payload that sits beside it in an unpacked release
+# tarball — a flat `bin/` of binaries plus the `dist/ keys/ templates/ fragments/ man/` it ships.
+# It does not build (`src/tools/build-release.sh` produces the tarball) and must never run from the
+# source tree. No `bin/` beside it → not a release tree, so refuse rather than half-install.
+pkg_root="$(cd "$(dirname "$0")" && pwd)"
+bindir="$pkg_root/bin"
+if [ ! -d "$bindir" ]; then
+	echo "install.sh: no bin/ beside this installer ($bindir)." >&2
+	echo "            Run it from an unpacked release tarball; build one from a source" >&2
+	echo "            checkout with src/tools/build-release.sh." >&2
+	exit 2
+fi
 
 # The systemd user-unit directory (system-wide location for user units).
 units_dir="/usr/lib/systemd/user"
@@ -88,41 +95,6 @@ run() {
 	fi
 }
 
-# Host-side binaries: run in the operator's context where the host libc is present, so they link
-# dynamically. kenneld + the CLI + the host-side delegates (netproxy/inetd/dbus) + the AKC.
-HOST_BINS="kenneld kennel host-netproxy host-inetd host-dbus kennel-akc"
-
-# In-kennel binaries: the seal runs these INSIDE the kennel's root, which for an OCI substrate
-# (§7.11) is an arbitrary image's filesystem — possibly musl, distroless, or scratch with no host
-# `ld.so`/`libc`. A dynamically-linked host binary would fail to load there (`libgcc_s.so.1: cannot
-# open shared object`). So the launcher and the in-kennel facades are built **statically**
-# (glibc `+crt-static` → static-pie, no interpreter, no NEEDED libs) and run in any root. The
-# trusted init `kennel-bin-init` is the same class but installed root-owned (below).
-INKERNEL_BINS="kennel-bin-oci-entry facade-socks5 facade-client facade-afunix facade-ssh facade-dbus facade-spawn facade-spawn-probe facade-spawn-bench"
-
-# The host triple, so the static `--target` build lands in a separate `target/<triple>/release`
-# (specifying `--target` always uses the triple subdir, even when it equals the host default).
-# Derived from `uname` rather than `rustc` so it also resolves under a `sudo` install where the
-# rustup shim is not on root's PATH; a glibc Linux host is always `<arch>-unknown-linux-gnu`.
-HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
-STATIC_RUSTFLAGS="-C target-feature=+crt-static"
-
-build_binaries() {
-	[ "$do_build" -eq 1 ] || { echo "install.sh: --no-build, using target/release"; return 0; }
-	echo "install.sh: building release binaries (offline, frozen, locked)"
-	# Host-side (dynamic): -p kenneld builds kenneld + kennel-akc; -p kennel-cli the `kennel` CLI;
-	# -p kennel-host-delegate host-netproxy + host-inetd; -p kennel-host-dbus host-dbus.
-	run cargo build --release --offline --frozen --locked \
-		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus
-	# In-kennel (static-pie): the launcher, the trusted init, and all facade-* bins (kennel-facade).
-	run env RUSTFLAGS="$STATIC_RUSTFLAGS" cargo build --release --offline --frozen --locked \
-		--target "$HOST_TRIPLE" \
-		-p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade
-	# The privhelper needs its BPF feature; build it separately (host-side, dynamic).
-	run cargo build --release --offline --frozen --locked \
-		-p kennel-privhelper --features bpf-egress
-}
-
 require_root() {
 	[ "$dry_run" -eq 1 ] && return 0
 	if [ "$(id -u)" -ne 0 ]; then
@@ -131,29 +103,46 @@ require_root() {
 	fi
 }
 
+# Verify the payload against its own manifest BEFORE placing anything. SHA256SUMS covers every
+# shipped file — and ESPECIALLY the trust-store public key the daemon will trust forever after. The
+# install is the moment that key enters the trust store; a tampered or truncated payload must abort
+# here, not after a bad key or binary is already on disk. (stage-tree.sh always writes the manifest,
+# so its absence means this is not a real payload.)
+verify_payload() {
+	local manifest="$pkg_root/SHA256SUMS"
+	if [ ! -f "$manifest" ]; then
+		echo "install.sh: no SHA256SUMS beside the installer — refusing to install an unverifiable payload" >&2
+		exit 2
+	fi
+	echo "install.sh: verifying the payload against SHA256SUMS ($(grep -c . "$manifest") files, incl. the trust key)"
+	if ! ( cd "$pkg_root" && sha256sum -c --quiet SHA256SUMS ); then
+		echo "install.sh: payload integrity check FAILED — not installing" >&2
+		exit 1
+	fi
+}
+
 install_binaries() {
-	local rel="$repo_root/target/release"
-	local stat="$repo_root/target/$HOST_TRIPLE/release"
 	run install -d -m 0755 "$libexec"
-	# Host-side dynamic binaries (mode 0755) from the default target dir.
-	local b
-	for b in $HOST_BINS; do
-		run install -m 0755 "$rel/$b" "$libexec/$b"
-	done
-	# In-kennel static binaries (mode 0755) from the `+crt-static` target dir — they run inside
-	# an arbitrary image root, so they carry their own libc (no `ld.so` to find).
-	for b in $INKERNEL_BINS; do
-		run install -m 0755 "$stat/$b" "$libexec/$b"
+	# Every shipped binary installs 0755 under $libexec (none are on PATH — kenneld locates them by
+	# absolute path from the config). The tarball's flat `bin/` already holds them all: the
+	# host-dynamic set (kenneld, the CLI, the delegates, the AKC) and the in-kennel static set (the
+	# launcher, init, and facades — built `+crt-static` so they carry their own libc and run inside an
+	# arbitrary image root with no host `ld.so`). build-release.sh / stage-tree.sh built `bin/`; we
+	# just place it, then tighten the two trust-sensitive binaries below.
+	local f
+	for f in "$bindir"/*; do
+		[ -f "$f" ] || continue
+		run install -m 0755 "$f" "$libexec/$(basename "$f")"
 	done
 	# The privhelper: setuid root (mode 4755, owner root). This is the one
 	# privilege boundary; everything else runs as the user.
-	run install -m 0755 -o root -g root "$rel/kennel-privhelper" "$libexec/kennel-privhelper"
+	run install -m 0755 -o root -g root "$bindir/kennel-privhelper" "$libexec/kennel-privhelper"
 	run chmod 4755 "$libexec/kennel-privhelper"
 	# The trusted init: the privhelper factory fexecves this as the kennel's uid-0
 	# PID 1, so it is a trust anchor — install it root-owned and not group/other
 	# writable (verify_trusted_init refuses any other owner or a 0o022 bit). It is
-	# NOT setuid: it gains uid 0 only inside the kennel's user namespace. Static (in-kennel).
-	run install -m 0755 -o root -g root "$stat/kennel-bin-init" "$libexec/kennel-bin-init"
+	# NOT setuid: it gains uid 0 only inside the kennel's user namespace.
+	run install -m 0755 -o root -g root "$bindir/kennel-bin-init" "$libexec/kennel-bin-init"
 }
 
 install_config() {
@@ -170,8 +159,8 @@ install_config() {
 	# CLI resolve them at the standard path (07-paths), never the source tree. Source `policy.toml`
 	# + meta; a spawn target's signed `<name>.settled.toml` is produced by `kennel policy compile`
 	# (the maintainer signs the reference set; the operator their own).
-	if [ -d "$repo_root/templates" ]; then
-		for tdir in "$repo_root"/templates/*/; do
+	if [ -d "$pkg_root/templates" ]; then
+		for tdir in "$pkg_root"/templates/*/; do
 			[ -d "$tdir" ] || continue
 			tname="$(basename "$tdir")"
 			run install -d -m 0755 "$vendor_dir/templates/$tname"
@@ -181,21 +170,21 @@ install_config() {
 			done
 		done
 	fi
-	run install -m 0644 "$repo_root/dist/config/system.toml" "$vendor_dir/system.toml"
+	run install -m 0644 "$pkg_root/dist/config/system.toml" "$vendor_dir/system.toml"
 	# The bastion's hardened sshd_config template (W18): surfaced root-owned in the vendor layer so
 	# its lockdown is legible and admin-tunable (override at /etc/kennel/kennel-sshd.conf), not baked
 	# into the daemon. kenneld renders it per bastion; a missing file falls back to the compiled copy.
-	run install -m 0644 "$repo_root/dist/kennel-sshd.conf" "$vendor_dir/kennel-sshd.conf"
-	run install -m 0644 "$repo_root/dist/config/config.toml" "$vendor_dir/config.toml"
+	run install -m 0644 "$pkg_root/dist/kennel-sshd.conf" "$vendor_dir/kennel-sshd.conf"
+	run install -m 0644 "$pkg_root/dist/config/config.toml" "$vendor_dir/config.toml"
 	# The machine-readable threat catalogue `kennel policy risks` reads (the CLI
 	# falls back to its embedded copy if absent; this lets an org ship an extended one).
 	run install -d -m 0755 "$vendor_dir/threats"
-	run install -m 0644 "$repo_root/dist/threats/catalogue.toml" "$vendor_dir/threats/catalogue.toml"
+	run install -m 0644 "$pkg_root/dist/threats/catalogue.toml" "$vendor_dir/threats/catalogue.toml"
 	# The vendor-default catalogues (§2.6 / §7.4): the trust-trigger set the CLI pins/watches
 	# (T2.8) and the essential /etc subtrees the daemon binds read-only into every view (W14).
 	# Both are additive cascades; /etc/kennel overrides this vendor layer.
-	run install -m 0644 "$repo_root/dist/vendor/triggers.catalog" "$vendor_dir/triggers.catalog"
-	run install -m 0644 "$repo_root/dist/vendor/etc-binds.catalog" "$vendor_dir/etc-binds.catalog"
+	run install -m 0644 "$pkg_root/dist/vendor/triggers.catalog" "$vendor_dir/triggers.catalog"
+	run install -m 0644 "$pkg_root/dist/vendor/etc-binds.catalog" "$vendor_dir/etc-binds.catalog"
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then
 		run sed -i "s#^libexec_dir = .*#libexec_dir = \"$libexec\"#" "$vendor_dir/system.toml"
 	fi
@@ -203,8 +192,8 @@ install_config() {
 
 install_units() {
 	run install -d -m 0755 "$units_dir"
-	run install -m 0644 "$repo_root/dist/systemd/kenneld.socket" "$units_dir/kenneld.socket"
-	run install -m 0644 "$repo_root/dist/systemd/kenneld.service" "$units_dir/kenneld.service"
+	run install -m 0644 "$pkg_root/dist/systemd/kenneld.socket" "$units_dir/kenneld.socket"
+	run install -m 0644 "$pkg_root/dist/systemd/kenneld.service" "$units_dir/kenneld.service"
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then
 		run sed -i "s#^ExecStart=.*#ExecStart=$libexec/kenneld#" "$units_dir/kenneld.service"
 	fi
@@ -213,7 +202,7 @@ install_units() {
 # Install the committed man pages (man/<name>.<section>) into $mandir/man<section>.
 # The pages are generated by `gen-man` and committed; see man/README.md.
 install_man() {
-	local man_src="$repo_root/man" page sect dest
+	local man_src="$pkg_root/man" page sect dest
 	if [ ! -d "$man_src" ]; then
 		echo "install.sh: no man/ directory; skipping man pages" >&2
 		return 0
@@ -232,7 +221,7 @@ install_apparmor() {
 	# (Ubuntu 23.10+: kernel.apparmor_restrict_unprivileged_userns=1). The profile
 	# attaches to the kenneld binary by absolute path, so it must match libexec.
 	[ -d /etc/apparmor.d ] || { echo "install.sh: no /etc/apparmor.d; skipping AppArmor profile"; return 0; }
-	run install -m 0644 "$repo_root/dist/apparmor/kenneld" /etc/apparmor.d/kenneld
+	run install -m 0644 "$pkg_root/dist/apparmor/kenneld" /etc/apparmor.d/kenneld
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then
 		run sed -i "s#/usr/libexec/kennel/kenneld#$libexec/kenneld#" /etc/apparmor.d/kenneld
 	fi
@@ -263,8 +252,8 @@ install_keys() {
 	# admin /etc/kennel/keys (which holds org/customer keys an admin adds): an admin or
 	# user key cannot claim the project's own namespace. Private seeds are never in the
 	# repo (MAINTAINERS.md); only `*.pub` is shipped.
-	if [ -d "$repo_root/keys" ]; then
-		for pub in "$repo_root"/keys/*.pub; do
+	if [ -d "$pkg_root/keys" ]; then
+		for pub in "$pkg_root"/keys/*.pub; do
 			[ -e "$pub" ] || continue
 			run install -m 0644 "$pub" "$vendor_dir/keys/$(basename "$pub")"
 		done
@@ -276,9 +265,9 @@ install_templates() {
 	# dir (/etc/kennel/templates, per dist/config/config.toml), so a leaf that
 	# derives e.g. base-confined@v1 resolves and verifies out of the box (the
 	# maintainer public key is installed above). Org templates are added alongside.
-	[ -d "$repo_root/templates" ] || return 0
+	[ -d "$pkg_root/templates" ] || return 0
 	local d n
-	for d in "$repo_root"/templates/*/; do
+	for d in "$pkg_root"/templates/*/; do
 		[ -f "${d}policy.toml" ] || continue
 		n="$(basename "$d")"
 		run install -d -m 0755 "/etc/kennel/templates/$n"
@@ -292,9 +281,9 @@ install_fragments() {
 	# verifies out of the box. Fragments and templates are both signed includes; sharing
 	# the dir means no extra search-path config, and `kennel policy list` labels each one
 	# `(fragment)`. Org fragments are added alongside.
-	[ -d "$repo_root/fragments" ] || return 0
+	[ -d "$pkg_root/fragments" ] || return 0
 	local d n
-	for d in "$repo_root"/fragments/*/; do
+	for d in "$pkg_root"/fragments/*/; do
 		[ -f "${d}policy.toml" ] || continue
 		n="$(basename "$d")"
 		run install -d -m 0755 "/etc/kennel/templates/$n"
@@ -446,7 +435,7 @@ Docs:  man kennel · man kennel-policy · man policy.toml · man kenneld
 EOF
 }
 
-build_binaries
+verify_payload
 require_root
 install_binaries
 install_config

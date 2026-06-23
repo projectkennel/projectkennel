@@ -17,8 +17,8 @@
 # A skip is not a proof: a missing prerequisite aborts with the precise cause.
 #
 # What it does:
-#   1. build the release + run `sudo tools/install.sh` (the real install) — unless
-#      --no-install (use what is already installed);
+#   1. build the release, stage it into a flat payload (stage-tree.sh), and run the real
+#      `sudo ./install.sh` against it — unless --no-install (use what is already installed);
 #   2. provision the admin inputs install.sh deliberately does NOT fabricate: this user's
 #      /etc/kennel/subkennel allocation (tag 42) and a suite signing key the daemon trusts;
 #   3. (re)start the installed kenneld.service so it runs the just-installed binary;
@@ -96,7 +96,7 @@ trap cleanup EXIT
 #    already-installed kennel.
 if [ "$DO_INSTALL" = 1 ]; then
     echo "== building release =="
-    # Host-side (dynamic) and in-kennel (static-pie) sets, mirroring install.sh — the in-kennel
+    # Host-side (dynamic) and in-kennel (static-pie) sets, mirroring stage-tree.sh — the in-kennel
     # binaries (launcher, init, facades) must be static to run inside an arbitrary OCI image root.
     HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
     cargo build --release --offline --frozen --locked \
@@ -108,8 +108,16 @@ if [ "$DO_INSTALL" = 1 ]; then
         || { echo "static in-kernel build failed" >&2; exit 1; }
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress \
         || { echo "privhelper build failed" >&2; exit 1; }
-    echo "== installing (sudo tools/install.sh --no-build) =="
-    sudo bash "$REPO_ROOT/src/tools/install.sh" --no-build || { echo "install failed" >&2; exit 1; }
+    echo "== staging the install payload + installing (sudo ./install.sh) =="
+    # install.sh is a pure tarball installer — it never runs from the source tree. Stage the
+    # just-built binaries into a flat payload (stage-tree.sh, the same assembler build-release.sh
+    # uses) and install THAT, exactly as a user installs an unpacked release.
+    # --with-test-bins: the spawn-roundtrip suite's workload is facade-spawn-probe, a test driver a
+    # release never ships, so the payload must carry it for this install.
+    STAGE="$(mktemp -d)"
+    bash "$REPO_ROOT/src/tools/stage-tree.sh" --dest "$STAGE" --with-test-bins || { echo "staging failed" >&2; exit 1; }
+    sudo bash "$STAGE/install.sh" || { echo "install failed" >&2; exit 1; }
+    rm -rf "$STAGE"
 fi
 [ -x "$KENNEL" ] || { echo "kennel not installed at $KENNEL — run without --no-install" >&2; exit 2; }
 

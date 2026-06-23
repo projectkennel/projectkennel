@@ -45,15 +45,12 @@ VERSION="$(grep -m1 '^version = ' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 SHA="$(git -C "$ROOT" log -1 --format=%h 2>/dev/null || echo nogit)"
 EPOCH="$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)"
 
-# The binaries install.sh consumes (its HOST_BINS + INKERNEL_BINS + the privhelper) — kept in
-# sync with install.sh, and built in the same three phases: the host bins dynamic (glibc); the
-# in-kennel bins static (`+crt-static` — they run inside a constructed view with no host ld.so,
-# 08-as-built §in-kennel-static); the privhelper with `bpf-egress` (its BPF objects embedded at
-# build time, needs clang). `-p kenneld` also builds the `kennel-akc` bin (kenneld/src/bin),
-# `-p kennel-cli` the `kennel` CLI, and `-p kennel-facade` all eight `facade-*` bins.
-HOST_BINS="kenneld kennel-akc kennel host-netproxy host-inetd host-dbus"
-INKERNEL_BINS="kennel-bin-oci-entry kennel-bin-init facade-afunix facade-socks5 facade-client facade-ssh facade-dbus facade-spawn facade-spawn-probe facade-spawn-bench"
-BINS="$HOST_BINS $INKERNEL_BINS kennel-privhelper"
+# The three release build phases. The host bins build dynamic (glibc); the in-kennel bins static
+# (`+crt-static` — they run inside a constructed view with no host ld.so, 08-as-built
+# §in-kennel-static); the privhelper with `bpf-egress` (its BPF objects embedded at build time,
+# needs clang). `-p kenneld` also builds the `kennel-akc` bin (kenneld/src/bin), `-p kennel-cli`
+# the `kennel` CLI, and `-p kennel-facade` all the `facade-*` bins. The payload's binary list and
+# flat layout live in `stage-tree.sh` — the single source of truth this and the e2e install share.
 
 # The highest GLIBC_x.y symbol version a binary references — the runtime glibc floor.
 glibc_floor() {
@@ -81,53 +78,15 @@ build_arch() {
 		-p kennel-privhelper --features bpf-egress
 
 	rel="$ROOT/target/$triple/release"
-	for b in $BINS; do
-		[ -x "$rel/$b" ] || { echo "build-release.sh: missing binary $rel/$b" >&2; exit 1; }
-	done
 	glibc="$(glibc_floor "$rel/kenneld")"
 
 	echo "==> [$triple] staging $name (glibc floor ${glibc:-unknown})" >&2
 	stage="$(mktemp -d)"
 	dest="$stage/$name"
-	install -d "$dest/src/tools" "$dest/target/release" "$dest/dist" "$dest/keys"
-
-	for b in $BINS; do install -m 0755 "$rel/$b" "$dest/target/release/$b"; done
-	install -m 0755 "$ROOT/src/tools/install.sh" "$dest/src/tools/install.sh"
-	# Everything under dist/ that install.sh consumes (config, systemd, apparmor, threats, vendor,
-	# kennel-sshd.conf) — stage all of dist/ except the release/ output dir, so this never drifts.
-	install -d "$dest/dist"
-	for item in "$ROOT"/dist/*; do
-		[ "$(basename "$item")" = "release" ] && continue
-		cp -a "$item" "$dest/dist/"
-	done
-	for p in "$ROOT"/keys/*.pub; do install -m 0644 "$p" "$dest/keys/$(basename "$p")"; done
-	for d in "$ROOT"/templates/*/; do
-		[ -f "${d}policy.toml" ] || continue
-		n="$(basename "$d")"
-		install -D -m 0644 "${d}policy.toml" "$dest/templates/$n/policy.toml"
-	done
-	# The composable fragments — signed includes the reference templates compose (§5.10); install.sh
-	# ships them alongside the templates, so the tarball must carry them or an `include` cannot resolve.
-	for d in "$ROOT"/fragments/*/; do
-		[ -f "${d}policy.toml" ] || continue
-		n="$(basename "$d")"
-		install -D -m 0644 "${d}policy.toml" "$dest/fragments/$n/policy.toml"
-	done
-	# The committed man pages (install.sh installs them into $mandir).
-	for p in "$ROOT"/man/*.[1-9]; do
-		[ -e "$p" ] || continue
-		install -D -m 0644 "$p" "$dest/man/$(basename "$p")"
-	done
-
-	cat > "$dest/install.sh" <<'WRAP'
-#!/usr/bin/env bash
-# Install Project Kennel from this prebuilt release. Forwards to the real
-# installer with --no-build (the binaries are already built and shipped).
-exec "$(cd "$(dirname "$0")" && pwd)/src/tools/install.sh" --no-build "$@"
-WRAP
-	chmod 0755 "$dest/install.sh"
-
-	( cd "$dest/target/release" && sha256sum $BINS > "$dest/SHA256SUMS" )
+	# Assemble the flat payload install.sh consumes — a `bin/` of every binary, the installer at the
+	# root, and dist/keys/templates/fragments/man. A cross-build puts every binary in one dir
+	# (target/<triple>/release), so --rel and --stat are the same here; stage-tree.sh owns the layout.
+	"$ROOT/src/tools/stage-tree.sh" --dest "$dest" --rel "$rel" --stat "$rel"
 
 	cat > "$dest/RELEASE.md" <<EOF
 # Project Kennel ${VERSION} — release ${SHA} (${arch}, linux-gnu)
@@ -149,12 +108,12 @@ grant, the maintainer trust-store key, and the signed reference templates under
 2. Add any org policy-signing keys to /etc/kennel/keys/<key_id>.pub.
 3. Each user: systemctl --user enable --now kenneld.socket
 
-## Verify
-    sha256sum -c SHA256SUMS                       # the shipped binaries
-    ls -l /usr/libexec/kennel/kennel-privhelper   # expect -rwsr-xr-x root root
+## Verify (from this unpacked directory, BEFORE installing)
+    sha256sum -c SHA256SUMS                       # every shipped file, incl. the trust key
+    ls -l /usr/libexec/kennel/kennel-privhelper   # after install: expect -rwsr-xr-x root root
 
-Contents: target/release/ (9 binaries), dist/ (config, systemd, apparmor),
-keys/*.pub, templates/<name>/policy.toml, src/tools/install.sh, install.sh.
+Contents: install.sh, bin/ (every binary, flat), dist/ (config, systemd, apparmor,
+threats, vendor), keys/*.pub, templates/<name>/, fragments/<name>/, man/, SHA256SUMS.
 EOF
 
 	tar="$OUT/$name.tar.xz"
