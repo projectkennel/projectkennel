@@ -3,14 +3,14 @@
 > **A confined workload reaches a graphical display not by being handed the host
 > compositor's socket, but by talking to a display server constructed for it: an upstream
 > compositor running inside a separate, operator-declared GUI-service kennel, one instance
-> per consuming kennel.** The app's `wl_registry` is that inner compositor's globals; the
+> per app connection.** The app's `wl_registry` is that inner compositor's globals; the
 > host compositor is *absent* from its view, not denied. The GUI-service kennel holds the one
-> connection to the host compositor and hands each inner compositor a connected host file
-> descriptor, so even the host socket's pathname is absent from the workload's world. Confined
-> GUI therefore depends on **no enforcement by the host compositor** — it is the same construction
-> and brokering the rest of the system is built from, pointed at the display. The concrete
-> lifecycle and fd-handoff are the implementation contract, written as-built in the architecture
-> corpus.
+> connection to the host compositor and brokers each inner compositor's host connection — relaying
+> the connected descriptor, bytes and `SCM_RIGHTS` fds alike — so even the host socket's pathname is
+> absent from the workload's world. Confined GUI therefore depends on **no enforcement by the host
+> compositor** — it is the same construction and brokering the rest of the system is built from,
+> pointed at the display. The concrete lifecycle and fd-handoff are the implementation contract,
+> written as-built in the architecture corpus.
 
 A graphical workload needs a display server the way a networked workload needs a route: it is a
 capability the workload cannot supply itself and the operator must mediate. X11 admits no mediation
@@ -50,8 +50,8 @@ compositor that contains only what a single confined app should see.
 ## 7.14.2 The nested inner compositor — absence for the display server
 
 The GUI-service kennel runs an upstream Wayland compositor *inside* the confinement — **cage** (a
-single-application kiosk compositor) by default, with Weston or sway as alternatives — and runs **one
-instance per consuming kennel**. The confined app connects to *that* compositor. Its `wl_registry`
+single-application kiosk compositor) by default, with Weston or sway as alternatives — and spawns **one
+fresh instance per app connection**. The confined app connects to *that* compositor. Its `wl_registry`
 enumerates the inner compositor's globals and nothing else: the host's screen-copy, input-synthesis, and
 layer-shell globals, and the host's other clients, sit on a socket the app's view does not contain. They
 are not present, not deniable, not enumerable — absence, not denial (§4.2). There is no allow-list of host
@@ -68,30 +68,31 @@ be a compositor.
 ## 7.14.3 Brokering the host leg — the socket path is absent
 
 A nested compositor must itself reach *some* compositor to put pixels on the user's screen. The
-GUI-service kennel holds that one connection to the host compositor, and hands each inner compositor an
-**already-connected host file descriptor** rather than a path to open. A Wayland client offered
-`WAYLAND_SOCKET` (an inherited connected fd) uses it directly and never consults `WAYLAND_DISPLAY`; the
-host compositor's socket *pathname* is therefore absent from the inner compositor's constructed view, and
-from the app's beneath it. The app cannot name the host socket, cannot reach the host's other display
-clients, and cannot open a second connection of its own — it has a display server, and that display server
-is the kennel's.
+GUI-service kennel holds that one connection to the host compositor, and the inner compositor reaches it
+through the **AF_UNIX brokered connect** (§7.6): the compositor opens a Wayland socket presented at a path
+in its own view (`WAYLAND_DISPLAY`), and `kenneld` brokers that connect to the host compositor, **relaying
+the connection's bytes and its `SCM_RIGHTS` fds** — the keymap, shm pools, and dmabuf buffers Wayland
+passes as ancillary data, which a byte-only relay would silently drop. The path the compositor opens names
+the **facade**, not the host: the host compositor's own socket *pathname* is absent from the inner
+compositor's constructed view, and from the app's beneath it. The app cannot name the host socket, cannot
+reach the host's other display clients, and cannot open a second connection of its own — it has a display
+server, and that display server is the kennel's.
 
-This is the §4.3 interposition fd-handoff, the same machinery as AF_UNIX brokered connect (§7.6) and the
+This is the §4.3 interposition fd-handoff — the AF_UNIX brokered connect it literally is (§7.6), kin to the
 dynamic-spawn channel (§7.12): a capability arrives as a descriptor the broker established, the workload
-holding the one resource it was granted and no means to name or widen it. This **host** leg is a brokered fd
-like the other §4.3 hand-offs; the app's own leg is brokered differently — on demand — as the next paragraph
-sets out.
+holding the one resource it was granted and no means to name or widen it. The broker never parses the
+Wayland wire — it relays bytes and fds and nothing else, so the trusted path carries no display-protocol
+parser (the parse-nothing-foreign line of §7.14.13).
 
-The two legs use two mechanisms, and the split is lazy-versus-eager. The **inner-compositor → host** leg is
-the inherited connected fd above (`WAYLAND_SOCKET`): the GUI-service kennel spawns the inner compositor and
-hands it the already-open host connection at spawn, which it can because the host compositor is always up —
-eager, fd by inheritance, a parent handing its child a descriptor. The **app → inner-compositor** leg is the
-**mesh consume**, and it is **socket-activated** (§7.13.4): the app connects to a Wayland socket presented at
-its own `at` (`WAYLAND_DISPLAY`), and that first connect is what spins up its dedicated inner compositor —
-lazy, because there is no inner compositor to hand a descriptor from until the app reaches for one, and no fd
-to hand a workload that has not connected. What is absent from the app's view is the **host** socket; the
-socket it connects to is its own inner compositor's, brought up on demand — so "the host socket path is
-absent from the workload's world" holds without claiming the app has no display socket at all.
+The two legs are both brokered AF_UNIX, and the split is lazy-versus-eager. The **inner-compositor → host**
+leg is *eager*: the host compositor is always up, so the GUI-service kennel's facade brokers the inner
+compositor's host connect the moment that compositor starts. The **app → inner-compositor** leg is the
+**mesh consume**, and it is **socket-activated** (§7.13.4): the app connects to a Wayland socket presented
+at its own `at` (`WAYLAND_DISPLAY`), and that first connect is what spins up its dedicated inner compositor
+— lazy, because there is no inner compositor until the app reaches for one. What is absent from the app's
+view is the **host** socket; the socket it connects to is its own inner compositor's, brought up on demand
+— so "the host socket path is absent from the workload's world" holds without claiming the app has no
+display socket at all.
 
 ## 7.14.4 The invariant: no dependence on host-compositor enforcement
 
@@ -112,11 +113,16 @@ must be inside the boundary; the nested compositor puts it there.
 
 ## 7.14.5 Per-kennel isolation and tamperproofing
 
-One inner compositor per consuming kennel makes cross-kennel GUI invisibility structural (§4.5): two
+One inner compositor per app connection makes cross-kennel GUI invisibility structural (§4.5): two
 graphical kennels have two disjoint display servers, with no shared global, surface, or input path —
-the same lateral isolation as their disjoint loopback subnets and AF_UNIX views. Applications *within* a
-single kennel share that kennel's compositor, which is correct: they are one trust domain, and a window
-manager that lets a kennel's own apps see each other is the kennel's own world.
+the same lateral isolation as their disjoint loopback subnets and AF_UNIX views. The isolation is in fact
+*finer* than the trust boundary requires: because each connection gets its own compositor, two apps even
+within a single kennel do not share a display server unless they share a connection. That is stricter than
+"a kennel is one trust domain" demands, and it costs nothing — a nested compositor is cheap and its life is
+exactly the connection's (§7.14.12) — so the broker spawns one per connection rather than reference-counting
+a shared one. (Where a kennel *wants* its apps on one surface — a multi-window weston or sway desktop — that
+is one app driving one compositor with several windows, still one connection, not the broker fanning a
+kennel across compositors.)
 
 The inner compositor runs in the **GUI-service kennel, never the app's** (§4.6): a workload must not be
 able to reach or subvert the component that confines its display. This is why the model is two kennels and
@@ -250,16 +256,16 @@ The host need only run *a* Wayland compositor for the GUI-service kennel to be o
 compositor it is does not change any confinement property, because the enforcer is the inner compositor
 inside the kennel. The primary command-line tenant has no display leg at all — confined GUI is the
 desktop-application case, and a kennel that needs no graphical surface declares no `org.projectkennel.wayland`
-consumption and constructs no compositor. Lazy construction is the rule: no consumer, no inner compositor;
-the per-kennel compositor is spawned on demand and reaped when its consuming kennel exits.
+consumption and constructs no compositor. Lazy construction is the rule: no connection, no inner compositor;
+each compositor is spawned on demand by an app's connect and reaped the moment that connection closes.
 
-This makes the GUI-service kennel's relationship to its inner compositors a **per-consumer lifecycle**, not
-a fixed sidecar set: it supervises one inner compositor *per consuming kennel*, each spawned when that
-consumer first reaches for the display and reaped when that consumer exits, so the supervised set tracks the
-live consumer population rather than a static declaration. That is a design property — a compositor's life
-is bound to its consumer's — closer to what `kenneld` does for a spawn than to a fixed facade-supervisor
-set; the supervision mechanism for it lives in the architecture corpus, but a reader should model the set as
-per-consumer-dynamic, not static.
+This makes the GUI-service kennel's relationship to its inner compositors a **per-connection lifecycle**,
+not a fixed sidecar set: it runs a broker that spawns one inner compositor per accepted connection and ends
+it when the connection drops, so the supervised set tracks the live *connection* population rather than a
+static declaration. A compositor's life is exactly its connection's — the window folds when the app
+disconnects, while the GUI-service kennel stands ready for the next connect. That is closer to what `kenneld`
+does for a spawn than to a fixed facade-supervisor set; the broker mechanism lives in the architecture
+corpus (`02-11-confined-gui.md`), but a reader should model the set as per-connection-dynamic, not static.
 
 ## 7.14.13 Decision record — why the display server is constructed, not borrowed
 

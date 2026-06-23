@@ -10,9 +10,15 @@
 //! the caller's thread. Each direction half-closes the *write* side of its destination on EOF so a
 //! peer doing a request/response (e.g. an HTTP client that reads until close) sees the end. Both
 //! endpoints are owned and dropped here, closing them at the relay's end of life.
+//!
+//! [`splice_with_fds`] is the `AF_UNIX`-only fd-passing variant: it forwards `SCM_RIGHTS` file
+//! descriptors alongside the bytes, for protocols (Wayland) where a byte-only copy would silently
+//! drop the fds and break the peer.
 
-use std::io;
+use std::io::{self, Write};
 use std::net::Shutdown;
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::net::UnixStream;
 
 /// A connected stream socket this module can relay.
 ///
@@ -86,9 +92,58 @@ where
     drop(a);
 }
 
+/// Splice two `AF_UNIX` streams bidirectionally, **forwarding `SCM_RIGHTS` fds** as well as bytes.
+///
+/// The fd-passing analogue of [`splice`], for protocols that send file descriptors in ancillary data
+/// (Wayland: the keymap, shm pools, dmabuf buffers). A byte-only copy drops those fds (`file
+/// descriptor expected` → a dead client), so this relays bytes and fds together, in order, never
+/// parsing the protocol — it stays a transport, not an interposer. `AF_UNIX`-only, since
+/// `SCM_RIGHTS` rides Unix ancillary data. Both endpoints are consumed and dropped at return.
+pub fn splice_with_fds(a: UnixStream, b: UnixStream) {
+    let (Ok(a_w), Ok(b_w)) = (a.try_clone(), b.try_clone()) else {
+        return;
+    };
+    // a → b on a worker (reads `a`, writes the `b` clone); b → a here (reads `b`, writes the `a`
+    // clone). Both directions forward SCM_RIGHTS fds.
+    let up = std::thread::spawn(move || relay_fds(&a, &b_w));
+    relay_fds(&b, &a_w);
+    let _ = up.join();
+    drop(b); // own the pair to their close (the relay's end of life)
+}
+
+/// Forward bytes and any `SCM_RIGHTS` fds from `from` to `to` until `from` reaches EOF, then
+/// half-close `to`'s write side. The fds ride the first `sendmsg` of the chunk they arrived with;
+/// any bytes the kernel could not place in that one call follow as plain data, preserving fd order
+/// (all a consumer like libwayland needs — it pulls the next fd as it parses each fd-typed message).
+fn relay_fds(from: &UnixStream, to: &UnixStream) {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match crate::recv_with_fds(from.as_fd(), &mut buf) {
+            Ok((0, _)) | Err(_) => break, // EOF or read error
+            Ok((n, fds)) => {
+                let Some(chunk) = buf.get(..n) else { break };
+                let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
+                match crate::send_with_fds(to.as_fd(), chunk, &borrowed) {
+                    Ok(sent) if sent < n => {
+                        // Send the tail without fds (they already rode the first call).
+                        let Some(rest) = buf.get(sent..n) else { break };
+                        let mut w = to;
+                        if w.write_all(rest).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    let _ = to.shutdown(Shutdown::Write);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::splice;
+    use super::{splice, splice_with_fds};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -132,5 +187,44 @@ mod tests {
         drop(dead_a);
         drop(dead_b);
         splice(a, b); // both directions see EOF immediately → returns
+    }
+
+    #[test]
+    fn fd_passing_relay_forwards_a_live_fd() {
+        // The property the byte-only `splice` cannot provide and Wayland depends on: an fd sent
+        // through `splice_with_fds` arrives as a *working* descriptor on the far side. We send the
+        // read end of a pipe through the relay and prove the arrived fd is the same live pipe by
+        // writing to its write end and reading the bytes back through the relayed fd.
+        use crate::{recv_with_fds, send_with_fds};
+        use std::io::{Read, Write};
+        use std::os::fd::AsFd;
+
+        let (left, a) = UnixStream::pair().expect("pair a");
+        let (b, right) = UnixStream::pair().expect("pair b");
+        let h = std::thread::spawn(move || splice_with_fds(a, b));
+
+        let (pipe_r, pipe_w) = nix::unistd::pipe().expect("pipe");
+        // left → a → (relay) → b → right, carrying the pipe's read end as an SCM_RIGHTS fd.
+        send_with_fds(left.as_fd(), b"x", &[pipe_r.as_fd()]).expect("send byte + fd");
+        drop(pipe_r); // only the relayed copy should reach `right`
+
+        let mut buf = [0u8; 8];
+        let (n, fds) = recv_with_fds(right.as_fd(), &mut buf).expect("recv");
+        assert_eq!(n, 1, "the byte rode through");
+        assert_eq!(fds.len(), 1, "the fd survived the relay");
+
+        // Prove the arrived fd is the live pipe end, not a dead number.
+        let mut writer = std::fs::File::from(pipe_w);
+        writer.write_all(b"ping").expect("write pipe");
+        drop(writer); // EOF the pipe so read_to_end returns
+        let received = fds.into_iter().next().expect("one fd");
+        let mut reader = std::fs::File::from(received);
+        let mut got = Vec::new();
+        reader.read_to_end(&mut got).expect("read relayed fd");
+        assert_eq!(got, b"ping", "bytes flow through the relayed descriptor");
+
+        drop(left);
+        drop(right);
+        h.join().expect("relay thread");
     }
 }

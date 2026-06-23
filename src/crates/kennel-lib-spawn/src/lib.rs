@@ -611,6 +611,12 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
         false,
         true,
     )?;
+    // Private POSIX shared memory at /dev/shm — a fresh per-kennel tmpfs like /tmp, so `shm_open(3)`
+    // works (Wayland compositors, Chromium, …). The constructed minimal /dev exists above; this adds
+    // the conventional shm tmpfs inside it (mode 1777 like the host's).
+    let dev_shm = under(Path::new("/dev/shm"));
+    std::fs::create_dir_all(&dev_shm)?;
+    mount::mount_tmpfs(&dev_shm, Some(view.tmp_size_mib), Some("1777"), false, true)?;
 
     // 6. Ensure the shim $HOME exists even if no ~ path was granted, so HOME resolves.
     std::fs::create_dir_all(under(&view.shim_root))?;
