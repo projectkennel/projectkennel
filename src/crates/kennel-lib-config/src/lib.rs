@@ -705,6 +705,56 @@ pub fn vendor_key_dir() -> PathBuf {
     PathBuf::from(VENDOR_DIR).join("keys")
 }
 
+/// One operator enablement directory (§7.13.6): a path to scan, its tier, and its bring-up posture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnablementDir {
+    /// The directory the operator links providers into.
+    pub path: PathBuf,
+    /// `true` for the per-user tier (`~/.config/kennel/`), `false` for per-host (`/etc/kennel/`).
+    /// Per-user is preferred when two providers offer the same name and are otherwise equivalent.
+    pub per_user: bool,
+    /// `true` for `autorun/` (eager — started at daemon start); `false` for `ondemand/` (lazy —
+    /// socket-activated on first consume).
+    pub eager: bool,
+}
+
+/// The operator enablement directories (§7.13.6), in **precedence order** — per-USER first.
+///
+/// A provider is enabled by linking its installed policy into `autorun/` (eager) or `ondemand/`
+/// (lazy), at the per-user (`~/.config/kennel/`) **or** per-host (`/etc/kennel/`) layer. Per-user wins
+/// over per-host for the same provider (same direction as the config cascade), so the user layers come
+/// first and a scan takes the first occurrence of each provider name. **Neither vendor layer** appears:
+/// a vendor ships a provider policy but cannot enable it — enablement is an act in an operator-owned
+/// directory. A missing directory is simply absent from a scan, not an error.
+#[must_use]
+pub fn enablement_dirs() -> Vec<EnablementDir> {
+    let mut dirs = Vec::new();
+    if let Some(user) = user_config_dir() {
+        dirs.push(EnablementDir {
+            path: user.join("autorun"),
+            per_user: true,
+            eager: true,
+        });
+        dirs.push(EnablementDir {
+            path: user.join("ondemand"),
+            per_user: true,
+            eager: false,
+        });
+    }
+    let etc = PathBuf::from(SYSTEM_DIR);
+    dirs.push(EnablementDir {
+        path: etc.join("autorun"),
+        per_user: false,
+        eager: true,
+    });
+    dirs.push(EnablementDir {
+        path: etc.join("ondemand"),
+        per_user: false,
+        eager: false,
+    });
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
