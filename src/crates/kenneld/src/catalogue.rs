@@ -2,8 +2,10 @@
 //! (`07-13-service-catalog.md` §7.13.4), and the **authoritative reserved-namespace gate** (§7.13.5).
 //!
 //! The catalogue is a projection, never authored state: [`Catalogue::project`] reads the
-//! `[[provides]]` of the enabled providers and resolves a capability `name` to a single provider
-//! ([`Catalogue::resolve`]), carrying the [`Readiness`] state every reader sees (§7.13.7). It is also
+//! `[[provides]]` of the enabled providers and resolves a capability `name` to its candidate
+//! provider(s) ([`Catalogue::resolve`]) — never collapsed, since the optional `key` (§7.13.1) lets a
+//! consumer bind to a *specific* provider of a shared public name, and collapsing would let one
+//! provider revoke another's name. It carries the [`Readiness`] every reader sees (§7.13.7). It is also
 //! the **authoritative gate**: a reserved name is admitted only when an *authorized* key signed the
 //! providing policy ([`provide_authorized`]) — the runtime backstop the compile-time check (W1) fails
 //! fast for, closing the provider-name-spoofing channel. The broker that resolves against the
@@ -82,8 +84,22 @@ pub enum Enablement {
     Ondemand,
 }
 
-/// One enabled provider feeding the catalogue: its identity, who signed it, its posture, and what it
-/// offers. The membership the enablement scan produces from the enabled set (§7.13.6).
+/// The enablement **tier** a provider was enabled at (§7.13.6) — the resolution preference when two
+/// providers offer the same name and are otherwise equivalent (no `key` to tell them apart).
+///
+/// `User` precedes `Host` (the [`Ord`] derive's variant order) because per-user enablement wins over
+/// per-host, the same direction as the config cascade — a user's own provider wins the name on the
+/// user's kennels. There is no vendor tier: a vendor ships a provider but cannot enable it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// `~/.config/kennel/{autorun,ondemand}/` — the per-user operator layer (preferred).
+    User,
+    /// `/etc/kennel/{autorun,ondemand}/` — the per-host (admin) operator layer.
+    Host,
+}
+
+/// One enabled provider feeding the catalogue: its identity, who signed it, its tier + posture, and
+/// what it offers. The membership the enablement scan produces from the enabled set (§7.13.6).
 #[derive(Debug, Clone)]
 pub struct EnabledProvider {
     /// The provider's identifier — the enablement link name, i.e. the kennel the broker (W5)
@@ -91,150 +107,181 @@ pub struct EnabledProvider {
     pub provider: String,
     /// The key that signed the provider's settled policy — the reserved-namespace gate's input.
     pub signing_key_id: String,
+    /// The tier it was enabled at (per-user preferred over per-host).
+    pub tier: Tier,
     /// Eager (`autorun`) or lazy (`ondemand`).
     pub enablement: Enablement,
     /// The capabilities the provider offers (`[[provides]]`).
     pub provides: Vec<ProvideRuntime>,
 }
 
-/// One resolved catalogue entry: a capability `name` mapped to the single provider that offers it,
-/// plus the readiness a consumer's connect waits on (§7.13.4/§7.13.7).
+/// A provider in the catalogue: who signed it, its tier/posture, its readiness, and what it offers.
+///
+/// Readiness is **per provider** — one kennel is `Ready` or not as a whole, across every name it
+/// offers (§7.13.7).
 #[derive(Debug, Clone)]
-pub struct CatalogueEntry {
-    /// The typed transport the broker delivers (§7.13.2).
+pub struct CatalogueProvider {
+    /// The key that signed the provider's settled policy (the reserved-gate provenance).
+    pub signing_key_id: String,
+    /// The tier it was enabled at (per-user preferred over per-host on an equivalent tie).
+    pub tier: Tier,
+    /// Eager (`autorun`) or lazy (`ondemand`) bring-up.
+    pub enablement: Enablement,
+    /// The provider's readiness — a connect bridges only at [`Readiness::Ready`] (§7.13.4a).
+    pub readiness: Readiness,
+    /// The capabilities this provider offers, post-gate.
+    pub offers: Vec<ProvideRuntime>,
+}
+
+/// One candidate provider for a resolved `name`: what the broker (W5) needs to select and connect.
+#[derive(Debug, Clone, Copy)]
+pub struct Candidate<'a> {
+    /// The provider kennel offering the name.
+    pub provider: &'a str,
+    /// The typed transport (§7.13.2).
     pub shape: Shape,
     /// Where the capability is exposed, in the provider's own view.
-    pub endpoint: String,
-    /// The optional private match token (§7.13.1) — never advertised, matched broker-side.
-    pub key: Option<String>,
-    /// The provider kennel that offers this name.
-    pub provider: String,
-    /// The provider's enablement posture (eager vs lazy bring-up).
+    pub endpoint: &'a str,
+    /// The optional private match token (§7.13.1) — the broker matches a consumer's key against it.
+    pub key: Option<&'a str>,
+    /// The tier the provider was enabled at (candidates are ordered user-tier first).
+    pub tier: Tier,
+    /// The provider's bring-up posture.
     pub enablement: Enablement,
-    /// The provider's current readiness — a connect bridges only at [`Readiness::Ready`] (§7.13.4a).
+    /// The provider's current readiness.
     pub readiness: Readiness,
 }
 
-/// The service catalogue: a name → provider projection over the enabled set (§7.13.4).
+/// The service catalogue: a name → provider(s) projection over the enabled set (§7.13.4).
 ///
 /// Derived, never authored: rebuilt by [`project`](Self::project) on daemon start and `daemon-reload`
-/// from the enablement links on disk, so a restart cannot lose it or a bug desync it.
+/// from the enablement links on disk, so a restart cannot lose it or a bug desync it. A capability
+/// `name` maps to **all** the enabled providers that offer it — never collapsed to one — because the
+/// optional private `key` (§7.13.1) is what a consumer uses to bind to a *specific* provider of a
+/// shared public name; collapsing would let one provider knock out another by claiming its name.
 #[derive(Debug, Clone, Default)]
 pub struct Catalogue {
-    entries: BTreeMap<String, CatalogueEntry>,
+    /// Provider id → its state and offers.
+    providers: BTreeMap<String, CatalogueProvider>,
+    /// Capability name → the provider ids that offer it (the candidates), sorted for determinism.
+    by_name: BTreeMap<String, Vec<String>>,
 }
 
 impl Catalogue {
-    /// Project the catalogue from the enabled providers, applying the reserved-namespace gate and
-    /// resolving each name to a **single** provider.
+    /// Project the catalogue from the enabled providers, applying the reserved-namespace gate.
     ///
-    /// A `[[provides]]` is admitted only if [`provide_authorized`] passes (an unauthorized reserved
-    /// claim is dropped — the spoofing backstop). A name offered by **more than one** authorized
-    /// provider is **ambiguous** and admitted from none of them: deny-by-default fails closed rather
-    /// than silently broker a consumer to one of several claimants (§7.13.4 resolves to a *single*
-    /// provider; cross-provider duplicates have no defined winner, so none wins). Every dropped or
-    /// conflicted name is reported via `audit` for the caller to log; the returned catalogue contains
-    /// only the cleanly-resolved entries, each [`Readiness::Pending`] until construction reports in.
+    /// A `[[provides]]` is admitted only if [`provide_authorized`] passes — an unauthorized reserved
+    /// claim is dropped (the spoofing backstop) and reported via `audit_unauthorized(name, provider)`
+    /// for the caller to log. **A name offered by more than one authorized provider is kept from
+    /// *all* of them** as candidates, never collapsed: the broker (W5) selects by the consumer's
+    /// `key` (§7.13.1), so a second provider claiming a name *adds* a candidate and can never revoke
+    /// the name another provider serves (no denial-of-service by name-claim). Every provider starts
+    /// [`Readiness::Pending`] until construction reports in.
     pub fn project(
         providers: &[EnabledProvider],
         vendor_key_ids: &BTreeSet<String>,
         reserved: &[ReservedNamespace],
-        mut audit: impl FnMut(CatalogueRejection<'_>),
+        mut audit_unauthorized: impl FnMut(&str, &str),
     ) -> Self {
-        // First pass: gather every authorized (name → provider) claim.
-        let mut claims: BTreeMap<&str, Vec<&EnabledProvider>> = BTreeMap::new();
+        let mut prov_map = BTreeMap::new();
+        let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for prov in providers {
+            let mut offers = Vec::new();
             for offer in &prov.provides {
                 if provide_authorized(&offer.name, &prov.signing_key_id, vendor_key_ids, reserved) {
-                    claims.entry(&offer.name).or_default().push(prov);
+                    by_name
+                        .entry(offer.name.clone())
+                        .or_default()
+                        .push(prov.provider.clone());
+                    offers.push(offer.clone());
                 } else {
-                    audit(CatalogueRejection::Unauthorized {
-                        name: &offer.name,
-                        provider: &prov.provider,
-                    });
+                    audit_unauthorized(&offer.name, &prov.provider);
                 }
             }
-        }
-        // Second pass: admit names with exactly one claimant; a contested name resolves to none.
-        let mut entries = BTreeMap::new();
-        for (name, owners) in claims {
-            let [owner] = owners.as_slice() else {
-                audit(CatalogueRejection::Conflict {
-                    name,
-                    providers: owners.iter().map(|o| o.provider.as_str()).collect(),
-                });
-                continue;
-            };
-            // The owner's own offer for this name (it is present — that is why it claimed it).
-            if let Some(offer) = owner.provides.iter().find(|pr| pr.name == name) {
-                entries.insert(
-                    name.to_owned(),
-                    CatalogueEntry {
-                        shape: offer.shape,
-                        endpoint: offer.endpoint.clone(),
-                        key: offer.key.clone(),
-                        provider: owner.provider.clone(),
-                        enablement: owner.enablement,
+            if !offers.is_empty() {
+                prov_map.insert(
+                    prov.provider.clone(),
+                    CatalogueProvider {
+                        signing_key_id: prov.signing_key_id.clone(),
+                        tier: prov.tier,
+                        enablement: prov.enablement,
                         readiness: Readiness::Pending,
+                        offers,
                     },
                 );
             }
         }
-        Self { entries }
+        // Order candidates by tier (per-user before per-host — the equivalent-tie preference),
+        // then by provider id for a stable order independent of scan/`read_dir` order; one provider
+        // listed once.
+        for ids in by_name.values_mut() {
+            ids.sort_by(|a, b| {
+                let tier = |id: &String| prov_map.get(id).map(|p| p.tier);
+                tier(a).cmp(&tier(b)).then_with(|| a.cmp(b))
+            });
+            ids.dedup();
+        }
+        Self {
+            providers: prov_map,
+            by_name,
+        }
     }
 
-    /// Resolve a capability `name` to its provider entry, or `None` if no enabled provider cleanly
-    /// offers it (unresolved / conflicted) — the deny-on-no-match the broker (W5) audits (§7.13.4).
+    /// The candidate providers offering `name` — empty if no enabled provider offers it (the
+    /// deny-on-no-match the broker, W5, audits, §7.13.4). More than one candidate means a shared
+    /// public name the broker disambiguates by the consumer's `key`.
     #[must_use]
-    pub fn resolve(&self, name: &str) -> Option<&CatalogueEntry> {
-        self.entries.get(name)
+    pub fn resolve(&self, name: &str) -> Vec<Candidate<'_>> {
+        let Some(ids) = self.by_name.get(name) else {
+            return Vec::new();
+        };
+        ids.iter()
+            .filter_map(|id| {
+                let p = self.providers.get(id)?;
+                let offer = p.offers.iter().find(|o| o.name == name)?;
+                Some(Candidate {
+                    provider: id,
+                    shape: offer.shape,
+                    endpoint: &offer.endpoint,
+                    key: offer.key.as_deref(),
+                    tier: p.tier,
+                    enablement: p.enablement,
+                    readiness: p.readiness,
+                })
+            })
+            .collect()
     }
 
-    /// Update the readiness of the entry for `name`, returning the new state, or `None` if no such
-    /// entry — the hook the supervisor (W6) drives construction status through (§7.13.7).
-    pub fn set_readiness(&mut self, name: &str, readiness: Readiness) -> Option<Readiness> {
-        self.entries.get_mut(name).map(|e| {
-            e.readiness = readiness;
+    /// Update a **provider's** readiness (one state across all its names), returning the new state,
+    /// or `None` if no such provider — the hook the supervisor (W6) drives construction through.
+    pub fn set_readiness(&mut self, provider: &str, readiness: Readiness) -> Option<Readiness> {
+        self.providers.get_mut(provider).map(|p| {
+            p.readiness = readiness;
             readiness
         })
     }
 
     /// The catalogued capability names (the topology surface reads this, §7.13.7).
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.entries.keys().map(String::as_str)
+        self.by_name.keys().map(String::as_str)
     }
 
-    /// The number of resolved entries.
+    /// The enabled provider ids in the catalogue.
+    pub fn providers(&self) -> impl Iterator<Item = &str> {
+        self.providers.keys().map(String::as_str)
+    }
+
+    /// The number of distinct catalogued capability names.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.by_name.len()
     }
 
     /// Whether the catalogue resolves nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.by_name.is_empty()
     }
-}
-
-/// Why a `[[provides]]` did not enter the catalogue — reported by [`Catalogue::project`] for the
-/// caller to audit (§7.13.4: a refusal is denied-**and-audited**, never silent).
-#[derive(Debug)]
-pub enum CatalogueRejection<'a> {
-    /// A reserved name whose signing key is not authorized for the namespace (spoofing attempt).
-    Unauthorized {
-        /// The reserved capability name that was refused.
-        name: &'a str,
-        /// The provider that tried to claim it.
-        provider: &'a str,
-    },
-    /// A name offered by more than one authorized provider — ambiguous, so admitted from none.
-    Conflict {
-        /// The contested capability name.
-        name: &'a str,
-        /// The providers that each claimed it.
-        providers: Vec<&'a str>,
-    },
 }
 
 #[cfg(test)]
@@ -414,31 +461,28 @@ mod tests {
     fn enabled(
         who: &str,
         key_id: &str,
+        tier: Tier,
         en: Enablement,
         offers: Vec<ProvideRuntime>,
     ) -> EnabledProvider {
         EnabledProvider {
             provider: who.to_owned(),
             signing_key_id: key_id.to_owned(),
+            tier,
             enablement: en,
             provides: offers,
         }
     }
 
-    /// Project, collecting rejections into a vec for assertion.
+    /// Project, collecting the unauthorized rejections (name:provider) for assertion.
     fn project_with_rejections(
         providers: &[EnabledProvider],
         vendor_key_ids: &BTreeSet<String>,
         reserved: &[ReservedNamespace],
     ) -> (Catalogue, Vec<String>) {
         let mut rejected = Vec::new();
-        let cat = Catalogue::project(providers, vendor_key_ids, reserved, |r| match r {
-            CatalogueRejection::Unauthorized { name, provider } => {
-                rejected.push(format!("unauthorized:{name}:{provider}"));
-            }
-            CatalogueRejection::Conflict { name, providers } => {
-                rejected.push(format!("conflict:{name}:{}", providers.join(",")));
-            }
+        let cat = Catalogue::project(providers, vendor_key_ids, reserved, |name, provider| {
+            rejected.push(format!("unauthorized:{name}:{provider}"));
         });
         (cat, rejected)
     }
@@ -448,6 +492,7 @@ mod tests {
         let providers = [enabled(
             "build-cache",
             "alice-key",
+            Tier::User,
             Enablement::Ondemand,
             vec![provide(
                 "doe.john.cache",
@@ -458,15 +503,17 @@ mod tests {
         )];
         let (cat, rejected) = project_with_rejections(&providers, &vendor(&[]), &[]);
         assert!(rejected.is_empty());
-        let e = cat.resolve("doe.john.cache").expect("resolves");
+        let cands = cat.resolve("doe.john.cache");
+        assert_eq!(cands.len(), 1);
+        let e = cands.first().expect("one candidate");
         assert_eq!(e.shape, Shape::AfUnix);
         assert_eq!(e.endpoint, "$XDG_RUNTIME_DIR/cache.sock");
-        assert_eq!(e.key.as_deref(), Some("tok"));
+        assert_eq!(e.key, Some("tok"));
         assert_eq!(e.provider, "build-cache");
         assert_eq!(e.enablement, Enablement::Ondemand);
         assert_eq!(e.readiness, Readiness::Pending); // resolvable before it is running
         assert_eq!(cat.len(), 1);
-        assert!(cat.resolve("nope").is_none()); // deny-on-no-match
+        assert!(cat.resolve("nope").is_empty()); // deny-on-no-match
     }
 
     #[test]
@@ -484,66 +531,87 @@ mod tests {
             &[enabled(
                 "gui",
                 "kennel-maint-2026",
+                Tier::Host,
                 Enablement::Autorun,
                 wayland(),
             )],
             &vendor(&["kennel-maint-2026"]),
             &[],
         );
-        assert!(cat.resolve("org.projectkennel.wayland").is_some());
+        assert!(!cat.resolve("org.projectkennel.wayland").is_empty());
         assert!(rej.is_empty());
         // A self-signed impostor: dropped, and the name resolves to nothing (spoofing backstop).
         let (cat, rej) = project_with_rejections(
-            &[enabled("evil", "alice-key", Enablement::Autorun, wayland())],
+            &[enabled(
+                "evil",
+                "alice-key",
+                Tier::User,
+                Enablement::Autorun,
+                wayland(),
+            )],
             &vendor(&["kennel-maint-2026"]),
             &[],
         );
-        assert!(cat.resolve("org.projectkennel.wayland").is_none());
+        assert!(cat.resolve("org.projectkennel.wayland").is_empty());
         assert_eq!(rej, vec!["unauthorized:org.projectkennel.wayland:evil"]);
     }
 
     #[test]
-    fn project_fails_closed_on_a_cross_provider_name_conflict() {
-        // Two authorized providers claim the same unreserved name → ambiguous → admitted from none.
-        let p = |who: &str| {
+    fn a_shared_name_keeps_every_provider_no_dos() {
+        // Two authorized providers claim the same unreserved name. Neither is revoked: the name keeps
+        // BOTH as candidates (a second claim cannot knock out the first — no denial-of-service).
+        let cache = |who: &str, tier: Tier| {
             enabled(
                 who,
                 "alice-key",
+                tier,
                 Enablement::Ondemand,
                 vec![provide("doe.john.cache", Shape::AfUnix, "/run/x", None)],
             )
         };
-        let (cat, rejected) =
-            project_with_rejections(&[p("cache-a"), p("cache-b")], &vendor(&[]), &[]);
-        assert!(
-            cat.resolve("doe.john.cache").is_none(),
-            "a contested name resolves to no provider"
+        let (cat, rejected) = project_with_rejections(
+            &[cache("zzz-host", Tier::Host), cache("aaa-user", Tier::User)],
+            &vendor(&[]),
+            &[],
         );
-        assert_eq!(rejected.len(), 1);
-        let r = rejected.first().expect("one rejection");
-        assert!(r.starts_with("conflict:doe.john.cache:"));
-        assert!(r.contains("cache-a") && r.contains("cache-b"));
+        assert!(rejected.is_empty(), "a shared name is not a rejection");
+        let cands = cat.resolve("doe.john.cache");
+        assert_eq!(cands.len(), 2, "both providers are kept");
+        // Equivalent (no key divergence) → the per-USER provider is preferred (ordered first),
+        // even though "zzz-host" sorts after "aaa-user" by id — tier wins over id.
+        assert_eq!(cands.first().expect("first").provider, "aaa-user");
+        assert_eq!(cands.first().expect("first").tier, Tier::User);
+        assert_eq!(cands.get(1).expect("second").provider, "zzz-host");
     }
 
     #[test]
-    fn set_readiness_drives_an_entry_and_no_op_on_a_missing_name() {
+    fn set_readiness_drives_a_provider_across_its_names() {
+        // Readiness is per-provider: one provider offering two names goes Ready for both at once.
         let mut cat = project_with_rejections(
             &[enabled(
                 "svc",
                 "k",
+                Tier::Host,
                 Enablement::Autorun,
-                vec![provide("x.y", Shape::BinderConnector, "node", None)],
+                vec![
+                    provide("x.y", Shape::BinderConnector, "node", None),
+                    provide("x.z", Shape::AfUnix, "/run/z", None),
+                ],
             )],
             &vendor(&[]),
             &[],
         )
         .0;
         assert_eq!(
-            cat.set_readiness("x.y", Readiness::Ready),
+            cat.set_readiness("svc", Readiness::Ready),
             Some(Readiness::Ready)
         );
         assert_eq!(
-            cat.resolve("x.y").expect("entry").readiness,
+            cat.resolve("x.y").first().expect("y").readiness,
+            Readiness::Ready
+        );
+        assert_eq!(
+            cat.resolve("x.z").first().expect("z").readiness,
             Readiness::Ready
         );
         assert_eq!(cat.set_readiness("absent", Readiness::Ready), None);
@@ -554,5 +622,6 @@ mod tests {
         let (cat, rej) = project_with_rejections(&[], &vendor(&[]), &[]);
         assert!(cat.is_empty() && rej.is_empty());
         assert_eq!(cat.names().count(), 0);
+        assert_eq!(cat.providers().count(), 0);
     }
 }

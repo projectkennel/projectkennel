@@ -212,15 +212,22 @@ decided when the operator signed its `[[consumes]]`; the broker only enforces th
 is present. A failure at any step — no installed provider, a shape that disagrees, a key that does not
 match — is a **denial-and-audit**, never a silent fallback to another provider.
 
-**A contested name resolves to no provider.** Resolution is to a *single* provider, and the catalogue is a
-projection of independently-signed policies, so two enabled providers can claim the same `name`. There is no
-defined winner — picking one would silently broker a consumer to a provider the operator never singled out —
-so a name offered by **more than one** authorized provider is **ambiguous and admitted from none**: it
-resolves to nothing and the conflict is audited, fail-closed, until the operator removes the collision. (A
-reserved name cannot collide this way across trust boundaries — only an authorized key may claim it, §7.13.5
-— so the case is a genuine concern only for unreserved names two parties both chose.) This is the
-cross-provider complement to the compile-time in-policy duplicate check (§7.13.3): the compiler rejects two
-`[[provides]]` of one name in one policy; the catalogue drops one name claimed across two policies.
+**A shared name keeps every provider; the key (then tier) selects.** Resolution is to a *single* provider,
+but the catalogue is a projection of independently-signed policies and a public `name` may be offered by
+more than one enabled provider — the design anticipates exactly this, which is why the optional `key` exists
+(§7.13.1). The catalogue keeps **all** authorized providers of a name as candidates and never collapses
+them: collapsing to "no winner, so none" would let one provider **revoke** a name another serves simply by
+also claiming it — a denial-of-service by name-claim, honesty-shaped but a DoS all the same. So a second
+provider claiming a name **adds a candidate**; it can never empty the name. The broker (§7.13.4a) selects
+among candidates: a consumer that set a `key` is bound to the candidate whose `key` matches (the private
+binding); for candidates that are **truly equivalent** — no `key` to tell them apart — the preference is the
+cascade direction, **per-user over per-host** (a user's own enabled provider wins the name on that user's
+kennels; there is no vendor tier, as a vendor cannot enable, §7.13.6). A reserved name cannot be contested
+this way across trust boundaries — only an authorized key may claim it (§7.13.5) — so a shared *public* name
+is the only case, and it is the operator's own arrangement, made legible (the topology surface shows the
+several providers), never a silent denial. This is the cross-provider complement to the compile-time
+in-policy duplicate check (§7.13.3): the compiler rejects two `[[provides]]` of one name in one policy; the
+catalogue keeps one name offered across two policies, ordered, and fails **open**.
 
 **Bringing the provider up (step 5).** The matched provider need not already be running. A provider enabled
 for **lazy** start (linked into `ondemand/`, §7.13.6) is **socket-activated** on first consume — a capability
