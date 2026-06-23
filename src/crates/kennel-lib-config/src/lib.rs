@@ -236,6 +236,36 @@ fn now_nanos() -> u128 {
         .map_or(0, |d| d.as_nanos())
 }
 
+/// A host-declared **reserved capability namespace** (`07-13-service-catalog.md` §7.13.5a).
+///
+/// A name prefix whose claimants the host trusts by reputation, plus the signing key-ids authorized
+/// to claim a name under it.
+///
+/// Additive to the built-in `org.projectkennel.*` namespace (claimable only by the project maintainer
+/// key, not expressible here and not host-redefinable). Declared in the root-owned `system.toml`, so
+/// reserving a namespace is a host trust-root decision out of any policy author's reach — a user
+/// cannot grant themselves one because they cannot write the deployment config. Consumed by the
+/// service catalogue, which admits a reserved-name provider only if its originating-template
+/// signature is one of the namespace's `keys`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReservedNamespace {
+    /// The reserved name prefix, e.g. `"com.acme."`.
+    pub prefix: String,
+    /// The signing key-ids whose signature may claim a name under `prefix`. Empty reserves the
+    /// prefix to *no one* (a deliberate lock-out — no template can claim it).
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+impl ReservedNamespace {
+    /// Whether `key_id` is authorized to claim a name under this namespace.
+    #[must_use]
+    pub fn authorizes(&self, key_id: &str) -> bool {
+        self.keys.iter().any(|k| k == key_id)
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDeployment {
@@ -255,12 +285,24 @@ struct RawDeployment {
     init: Option<PathBuf>,
     oci_entry: Option<PathBuf>,
     log_level: Option<LogLevel>,
+    #[serde(default)]
+    reserved: Vec<ReservedNamespace>,
 }
 
 impl RawDeployment {
     /// Overlay `higher` onto `self` per key (a present value in `higher` wins).
     fn overlay(self, higher: Self) -> Self {
         Self {
+            // Reserved namespaces *accumulate* across layers (additive, §7.13.5a); a higher layer
+            // declaring the same `prefix` overrides the lower one, distinct prefixes coexist.
+            reserved: {
+                let mut v = self.reserved;
+                for ns in higher.reserved {
+                    v.retain(|e| e.prefix != ns.prefix);
+                    v.push(ns);
+                }
+                v
+            },
             libexec_dir: higher.libexec_dir.or(self.libexec_dir),
             trust_dir: higher.trust_dir.or(self.trust_dir),
             sshd: higher.sshd.or(self.sshd),
@@ -303,6 +345,7 @@ impl RawDeployment {
             init: self.init,
             oci_entry: self.oci_entry,
             log_level: self.log_level.unwrap_or_default(),
+            reserved: self.reserved,
         }
     }
 }
@@ -327,6 +370,7 @@ pub struct Deployment {
     init: Option<PathBuf>,
     oci_entry: Option<PathBuf>,
     log_level: LogLevel,
+    reserved: Vec<ReservedNamespace>,
 }
 
 impl Deployment {
@@ -387,6 +431,28 @@ impl Deployment {
     #[must_use]
     pub const fn log_level(&self) -> LogLevel {
         self.log_level
+    }
+
+    /// The host-declared reserved capability namespaces (`[[reserved]]`, §7.13.5a), accumulated
+    /// across the root-owned cascade. Additive to the built-in `org.projectkennel.*`; the service
+    /// catalogue checks a reserved-name provider's template signature against the matching
+    /// namespace's authorized [`keys`](ReservedNamespace::keys).
+    #[must_use]
+    pub fn reserved(&self) -> &[ReservedNamespace] {
+        &self.reserved
+    }
+
+    /// The host-declared reserved namespace governing `name`, if any — the one whose `prefix` is the
+    /// **longest** match (the most specific reservation wins when prefixes nest). `None` if `name`
+    /// falls under no host-declared namespace; the built-in `org.projectkennel.*` is **not** included
+    /// here (it is not host-declared and not host-redefinable — its authority is the project
+    /// maintainer key, checked separately).
+    #[must_use]
+    pub fn reserved_namespace(&self, name: &str) -> Option<&ReservedNamespace> {
+        self.reserved
+            .iter()
+            .filter(|ns| name.starts_with(&ns.prefix))
+            .max_by_key(|ns| ns.prefix.len())
     }
 
     /// The setuid privhelper.
@@ -709,6 +775,87 @@ mod tests {
         write(&bad, SYSTEM_FILE, "trust_dir = \"/x\"\nbogus = 1\n");
         let err = Deployment::load_from_dirs(&[bad]).expect_err("must reject unknown key");
         assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
+    }
+
+    // ---- [[reserved]] host-declared namespaces (§7.13.5a) ----
+
+    #[test]
+    fn reserved_namespaces_parse_and_authorize() {
+        let dir = tmp("reserved");
+        write(
+            &dir,
+            SYSTEM_FILE,
+            "[[reserved]]\nprefix = \"com.acme.\"\nkeys = [\"acme-2026\"]\n",
+        );
+        let d = Deployment::load_from_dirs(&[dir]).expect("load");
+        let ns = d
+            .reserved_namespace("com.acme.build-cache")
+            .expect("matched");
+        assert_eq!(ns.prefix, "com.acme.");
+        assert!(ns.authorizes("acme-2026"));
+        assert!(!ns.authorizes("someone-else"));
+        // A name under no declared prefix is unreserved here.
+        assert!(d.reserved_namespace("doe.john.cache").is_none());
+        // The built-in project namespace is NOT host-declared, so it is absent from this set.
+        assert!(d.reserved_namespace("org.projectkennel.wayland").is_none());
+    }
+
+    #[test]
+    fn reserved_namespaces_accumulate_across_layers_higher_overrides_same_prefix() {
+        let vendor = tmp("res-vendor");
+        let admin = tmp("res-admin");
+        write(
+            &vendor,
+            SYSTEM_FILE,
+            "[[reserved]]\nprefix = \"com.acme.\"\nkeys = [\"vendor-key\"]\n",
+        );
+        // Admin adds a distinct prefix AND overrides com.acme. with its own key.
+        write(
+            &admin,
+            SYSTEM_FILE,
+            "[[reserved]]\nprefix = \"com.acme.\"\nkeys = [\"admin-key\"]\n\
+             [[reserved]]\nprefix = \"net.example.\"\nkeys = [\"ex-key\"]\n",
+        );
+        let d = Deployment::load_from_dirs(&[vendor, admin]).expect("load");
+        assert_eq!(d.reserved().len(), 2, "distinct prefixes coexist");
+        let acme = d.reserved_namespace("com.acme.x").expect("acme");
+        assert!(acme.authorizes("admin-key"), "higher layer overrides");
+        assert!(!acme.authorizes("vendor-key"));
+        assert!(d
+            .reserved_namespace("net.example.y")
+            .expect("ex")
+            .authorizes("ex-key"));
+    }
+
+    #[test]
+    fn reserved_namespace_picks_the_longest_matching_prefix() {
+        let dir = tmp("res-nest");
+        write(
+            &dir,
+            SYSTEM_FILE,
+            "[[reserved]]\nprefix = \"com.\"\nkeys = [\"broad\"]\n\
+             [[reserved]]\nprefix = \"com.acme.\"\nkeys = [\"specific\"]\n",
+        );
+        let d = Deployment::load_from_dirs(&[dir]).expect("load");
+        // The more specific (longer) prefix wins when they nest.
+        assert!(d
+            .reserved_namespace("com.acme.svc")
+            .expect("ns")
+            .authorizes("specific"));
+        // A name under only the broad prefix gets the broad one.
+        assert!(d
+            .reserved_namespace("com.other.svc")
+            .expect("ns")
+            .authorizes("broad"));
+    }
+
+    #[test]
+    fn no_reserved_section_yields_empty() {
+        let dir = tmp("res-none");
+        write(&dir, SYSTEM_FILE, "trust_dir = \"/x\"\n");
+        let d = Deployment::load_from_dirs(&[dir]).expect("load");
+        assert!(d.reserved().is_empty());
+        assert!(d.reserved_namespace("com.acme.x").is_none());
     }
 
     #[test]

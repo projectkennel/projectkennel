@@ -1,11 +1,18 @@
 //! Compile-time **local** validation of the `[[provides]]` / `[[consumes]]` mesh surface
 //! (`docs/design/07-13-service-catalog.md` §7.13.3).
 //!
-//! Only what is checkable from the one policy in hand plus the operator's service-class
-//! context: well-formedness, the reserved-namespace gate, and a duplicate `name` within
-//! *this* policy. Cross-kennel resolution — does a consume's `name` resolve to a provider
-//! of the matching shape — is a **runtime** act (the broker against the live catalogue) and
-//! is never attempted here: the compiler only ever holds one policy (§7.13.3).
+//! Only what is checkable from the one policy in hand plus its signature provenance:
+//! well-formedness, the reserved-namespace gate, and a duplicate `name` within *this* policy.
+//! Cross-kennel resolution — does a consume's `name` resolve to a provider of the matching shape
+//! — is a **runtime** act (the broker against the live catalogue) and is never attempted here:
+//! the compiler only ever holds one policy (§7.13.3).
+//!
+//! The reserved-namespace gate keys on **whether a reserved name may be claimed**, computed from
+//! the policy's signature provenance ([`crate::resolve::ProvidesOrigin`]) by the caller: a reserved
+//! `org.projectkennel.*` name is maintainer-trust material, claimable only through a maintainer-signed
+//! template (§7.13.5) — the same trust mechanism spawn targets use. This module enforces that
+//! permission; the *authoritative* gate (a reserved provide's settled signature must be a maintainer
+//! key) is the catalogue's, at runtime (§7.13.4).
 //!
 //! Validation runs on the *resolved* policy. Errors fail the compile; there are no footgun
 //! warnings for this surface, so success returns an empty warning list, kept `Vec<String>`
@@ -19,16 +26,20 @@ use kennel_lib_policy::PolicyError;
 
 /// Validate the `[[provides]]` / `[[consumes]]` entries of a resolved source policy.
 ///
-/// `service_class` is the operator-supplied trust context (§7.13.5): only a service-class
-/// policy may `[[provides]]` a reserved `org.projectkennel.*` capability name. Returns every
-/// problem found, not just the first. On success returns an empty warning list.
+/// `reserved_permitted` is computed by the caller from the policy's signature provenance
+/// (§7.13.5): a reserved `org.projectkennel.*` name may be claimed only through a maintainer-signed
+/// template. Returns every problem found, not just the first. On success returns an empty warning
+/// list.
 ///
 /// # Errors
 ///
 /// Returns [`PolicyError::SourceValidation`] carrying one message per problem: a missing
-/// `name`/`shape`/`endpoint`/`reason`, a reserved name claimed without the service-class
-/// context, or a duplicate provide `name`.
-pub fn validate(policy: &SourcePolicy, service_class: bool) -> Result<Vec<String>, PolicyError> {
+/// `name`/`shape`/`endpoint`/`reason`, a reserved name claimed by a policy not permitted to, or a
+/// duplicate provide `name`.
+pub fn validate(
+    policy: &SourcePolicy,
+    reserved_permitted: bool,
+) -> Result<Vec<String>, PolicyError> {
     let mut errs: Vec<String> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
 
@@ -36,11 +47,11 @@ pub fn validate(policy: &SourcePolicy, service_class: bool) -> Result<Vec<String
         match p.name.as_deref() {
             None | Some("") => errs.push("[[provides]] entry is missing `name`".to_owned()),
             Some(name) => {
-                if name.starts_with(RESERVED_PREFIX) && !service_class {
+                if name.starts_with(RESERVED_PREFIX) && !reserved_permitted {
                     errs.push(format!(
-                        "[[provides]] `{name}` is in the reserved `{RESERVED_PREFIX}*` namespace: \
-                         only an operator-signed service-class kennel may claim a reserved capability \
-                         name (§7.13.5)"
+                        "[[provides]] `{name}` is in the reserved `{RESERVED_PREFIX}*` namespace: a \
+                         reserved capability name may be claimed only through a maintainer-signed \
+                         template (§7.13.5); an unreserved name is free to any signed template"
                     ));
                 }
                 if !seen.insert(name) {
@@ -133,9 +144,9 @@ mod tests {
         }
     }
 
-    fn err_has(policy: &SourcePolicy, service_class: bool, needle: &str) -> bool {
+    fn err_has(policy: &SourcePolicy, reserved_permitted: bool, needle: &str) -> bool {
         matches!(
-            validate(policy, service_class),
+            validate(policy, reserved_permitted),
             Err(PolicyError::SourceValidation(ref m)) if m.iter().any(|s| s.contains(needle))
         )
     }
@@ -152,22 +163,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unreserved_provide_accepts_without_service_class() {
-        let p = policy_with(vec![provide("build-cache")], vec![]);
+    fn an_unreserved_provide_accepts_even_when_reserved_is_not_permitted() {
+        // Anyone may author and sign a template for an unreserved name (e.g. `doe.john.cache`):
+        // the reserved gate never touches it, regardless of `reserved_permitted`.
+        let p = policy_with(vec![provide("doe.john.cache")], vec![]);
         assert!(validate(&p, false).expect("valid").is_empty());
     }
 
     #[test]
-    fn a_reserved_name_by_a_non_service_class_kennel_rejects() {
+    fn a_reserved_name_rejects_when_not_permitted() {
+        // A reserved name from a non-maintainer-signed origin (the caller computes
+        // `reserved_permitted = false`) is refused.
         let p = policy_with(vec![provide("org.projectkennel.wayland")], vec![]);
         assert!(err_has(&p, false, "reserved"));
+        assert!(err_has(&p, false, "maintainer-signed template"));
     }
 
     #[test]
-    fn a_reserved_name_by_a_service_class_kennel_accepts() {
+    fn a_reserved_name_accepts_when_permitted() {
+        // Permitted (the caller traced it to a maintainer-signed template, or development).
         let p = policy_with(vec![provide("org.projectkennel.wayland")], vec![]);
         assert!(validate(&p, true)
-            .expect("valid for the service class")
+            .expect("valid when reserved is permitted")
             .is_empty());
     }
 

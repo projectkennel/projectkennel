@@ -26,7 +26,7 @@
 
 use crate::leaf::LeafPolicy;
 use crate::lock::Lockfile;
-use crate::resolve::{resolve_verified, ChainLink, TemplateSource};
+use crate::resolve::{resolve_verified, ChainLink, ProvidesOrigin, TemplateSource};
 use crate::source::SourcePolicy;
 use crate::source_sig::Trust;
 use crate::translate::{translate, Translated};
@@ -89,6 +89,7 @@ pub fn compile(
     compiler_version: &str,
 ) -> Result<Compiled, PolicyError> {
     let resolved = resolve_verified(entry, source, trust)?;
+    let provides_origin = resolved.provides_origin;
     let mut effective = resolved.effective;
     let name = effective
         .name
@@ -112,7 +113,10 @@ pub fn compile(
     crate::ssh::validate(&effective)?;
     let mut warnings = crate::unix::validate(&effective)?;
     warnings.extend(crate::binder::validate(&effective)?);
-    warnings.extend(crate::mesh::validate(&effective, trust.is_service_class())?);
+    warnings.extend(crate::mesh::validate(
+        &effective,
+        reserved_namespace_permitted(provides_origin, trust),
+    )?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
@@ -129,6 +133,21 @@ pub fn compile(
         warnings,
         spawn_grant,
     )
+}
+
+/// Whether the resolved policy may carry a reserved `org.projectkennel.*` `[[provides]]` name
+/// (§7.13.5). The reserved namespace is maintainer-trust material, claimable only through a
+/// maintainer-signed template — the same trust mechanism spawn targets use (§7.12). This is the
+/// compile-time fail-fast over the signature provenance [`resolve_verified`] records: permissive
+/// without a trust store (development authoring) and for an entry-authored provide (the
+/// template-authoring path, whose authority is the maintainer signature on the settled output,
+/// checked authoritatively at the catalogue, §7.13.4); a reserved name inherited from an
+/// *unverified* ancestor while a store is configured is refused, since an unsigned ancestor must
+/// not inject a reserved capability into the chain.
+const fn reserved_namespace_permitted(origin: ProvidesOrigin, trust: &Trust<'_>) -> bool {
+    trust.keys().is_none()
+        || matches!(origin, ProvidesOrigin::Absent | ProvidesOrigin::Entry)
+        || matches!(origin, ProvidesOrigin::Ancestor { verified: true })
 }
 
 /// Resolve, apply a leaf's deltas, translate, and assemble a settled policy.
@@ -164,6 +183,7 @@ pub fn compile_leaf(
         ..SourcePolicy::default()
     };
     let resolved = resolve_verified(&stub, source, trust)?;
+    let provides_origin = resolved.provides_origin;
     let mut effective = resolved.effective;
 
     // Resolution order (02-2 §Includes): chain → includes (chain's + leaf's, in
@@ -184,7 +204,10 @@ pub fn compile_leaf(
     crate::ssh::validate(&effective)?;
     let mut warnings = crate::unix::validate(&effective)?;
     warnings.extend(crate::binder::validate(&effective)?);
-    warnings.extend(crate::mesh::validate(&effective, trust.is_service_class())?);
+    warnings.extend(crate::mesh::validate(
+        &effective,
+        reserved_namespace_permitted(provides_origin, trust),
+    )?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
@@ -428,6 +451,7 @@ fn assemble(
         identity: translated.identity.clone(),
         binder: translated.binder.clone(),
         mesh: translated.mesh.clone(),
+        service: translated.service,
         dbus: translated.dbus.clone(),
         audit: translated.audit.clone(),
         env: translated.env.clone(),

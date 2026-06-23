@@ -63,11 +63,12 @@ The full section list:
 | `[net]` and `[net.*]` | Egress mode (`none`/`constrained`/`unconstrained`/`host`), split by enforcer: `[net.proxy]` (the user-space by-name allow/deny the per-kennel SOCKS proxy enforces, proxied modes only) and `[net.bpf]` (the kernel/syscall CIDR+port connect/bind ACL, present in every mode), plus `[net.bind]` rewrite knobs, `[net.ipv6]`, and `[net.audit]`. Each mode gets its own net-ns except `host`, which shares the host net-ns; the net-ns is the egress boundary (§7.5). See §The `[net]` section. | §7.5 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
 | `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
-| `[[provides]]`, `[[consumes]]` | Cross-kennel capability mesh: a kennel offers capabilities (`name` + typed `shape` `af-unix`/`dbus-name`/`binder-connector` + `endpoint` + optional `key`) and reaches them (`name` + `shape` + `at` + `env` + `key` + `required`). **Schema + local compile validation built** (well-formedness, the `org.projectkennel.*` service-class namespace gate, in-policy duplicate `name`); carried in the settled policy (`MeshRuntime`). Runtime brokering (catalogue, the connector broker) is roadmap. Additive to `[binder]`. | §7.13 |
+| `[[provides]]`, `[[consumes]]` | Cross-kennel capability mesh: a kennel offers capabilities (`name` + typed `shape` `af-unix`/`dbus-name`/`binder-connector` + `endpoint` + optional `key`) and reaches them (`name` + `shape` + `at` + `env` + `key` + `required`). **Schema + local compile validation built** (well-formedness, the `org.projectkennel.*` reserved-namespace gate keyed on maintainer-signed-template provenance, in-policy duplicate `name`); carried in the settled policy (`MeshRuntime`). Runtime brokering (catalogue, the connector broker) is roadmap. Additive to `[binder]`. | §7.13 |
 | `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
 | `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.destinations]]` = `dest` + host-side `ssh` `options`; no real-key fingerprint, no agent); carried in the settled policy (`SshRuntime`, with the compile-time-minted synthetic public key pinned per grant), realised by kenneld | §7.10 |
 | `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.4 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.9 |
+| `[service]` | Supervision discipline for a service kennel: `restart` (`always`/`on-failure`/`never`) + `backoff` + `max_attempts`. **Schema + local validation built** (folds scalar-wins, translated to `ServiceRuntime` in the settled policy; `max_attempts ≥ 1`). The supervision loop and the readiness state machine (`kennel-lib-control::readiness`: pending/ready/failed) are the runtime half — the loop is roadmap. | §7.13.7 |
 | `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.4 |
 | `[cap]` | Capabilities and `no_new_privs` | §7.9 |
 | `[seccomp]` | Seccomp filter | §7.9 |
@@ -633,7 +634,7 @@ catalogue and the connector broker) is roadmap. Additive to `[binder]`; the two 
 
 | Field | Type | Notes |
 |---|---|---|
-| `name` | string | the capability's public identifier (the catalogue advertises it); a reserved `org.projectkennel.*` name is accepted only in the service-class context (below) |
+| `name` | string | the capability's public identifier (the catalogue advertises it); a reserved `org.projectkennel.*` name is claimable only by a maintainer-signed template (below) |
 | `shape` | enum | the typed transport: `af-unix` / `dbus-name` / `binder-connector` |
 | `endpoint` | string | where the capability is exposed, in the provider's own view |
 | `key` | string | optional private match token, never advertised in the catalogue |
@@ -665,13 +666,34 @@ What the compiler checks from the one policy in hand (design §7.13.3), implemen
 - **Well-formedness** — each entry has a `name`, a `shape` (one of the three transports), and a
   `reason`; a `[[provides]]` also an `endpoint`.
 - **Reserved-namespace gate** — a `[[provides]]` `name` beginning with `org.projectkennel.` is rejected
-  unless the policy is compiled in the **service-class** context (the operator-supplied `Trust` flag,
-  design §7.13.5). An ordinary kennel cannot claim a reserved capability name.
+  unless it traces to a **maintainer-signed template** (design §7.13.5) — the same trust mechanism spawn
+  targets use. The permission is computed from the policy's signature provenance
+  (`resolve::ProvidesOrigin`): provides fold set-replace, so one layer supplies them, and the reserved name
+  is permitted when that layer is a signature-verified ancestor (or the development/authoring case). An
+  unreserved name (e.g. `doe.john.cache`) is free to any signed template and never gated. This is the
+  compile-time fail-fast; the **authoritative** gate — a reserved provide's settled signature must be a
+  maintainer key — is the catalogue's, at runtime.
 - **Duplicate provide** — two `[[provides]]` with the same `name` in one policy is an error.
 
 Cross-kennel resolution — does a consume resolve to a provider of the matching shape — is a runtime act
 and is never attempted at compile (design §7.13.3). The settled policy carries the validated entries as
 `MeshRuntime` for the runtime broker to read.
+
+### `[service]` — supervision discipline (§7.13.7)
+
+A service kennel (one that `[[provides]]`) carries the restart policy `kenneld` applies once the operator
+enables it. Folds scalar-wins up the chain like `[lifecycle]`; translated to `ServiceRuntime` in the settled
+policy (present only when `[service]` is declared).
+
+| Field | Type | Notes |
+|---|---|---|
+| `restart` | enum | `always` / `on-failure` (default) / `never` |
+| `backoff` | string | initial restart delay (`"500ms"`, `"2s"`; default `"500ms"`); doubles each attempt |
+| `max_attempts` | int | restarts within the crash-loop window before declared-but-failed (default `5`; rejected if `0`) |
+
+The **readiness state machine** (the W2 contract the catalogue and topology surface read) is
+`kennel-lib-control::readiness` — `Pending` / `Ready` / `Failed` with fixed legal transitions (a pure,
+dependency-free value type, no `serde`). The supervision loop that drives it is the runtime half (roadmap).
 
 ---
 

@@ -220,53 +220,75 @@ mod tests {
 
     #[test]
     fn an_accepted_connection_is_pushed_back_with_its_port() {
+        use std::time::Duration;
+
         // The per-kennel command socket the delegate listens on.
         let sock = std::env::temp_dir().join(format!("kennel-inetd-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).expect("bind cmd socket");
         std::thread::spawn(move || serve(&listener));
 
-        // kenneld's side: connect, register a bind on an ephemeral loopback port.
-        let cmd = UnixStream::connect(&sock).expect("connect cmd socket");
-        // Pick a free port by binding+dropping, then register it (race-tolerant for a test).
-        let probe = TcpListener::bind(("127.0.0.1", 0)).expect("probe");
-        let port = probe.local_addr().expect("addr").port();
-        drop(probe);
-        let reg = encode_bind(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        kennel_lib_scm::send_with_fds(cmd.as_fd(), &reg, &[]).expect("send registration");
+        // Picking a free port by bind+drop and asking the delegate to *re*bind it is a TOCTOU: under
+        // parallel load another process can steal the port between the drop and the delegate's bind,
+        // so the delegate's bind fails and it drops the command connection. (Production has no such
+        // race — kenneld registers the exact port the workload already bound, on a per-kennel
+        // loopback alias.) So retry the whole handshake on a fresh port until one survives the
+        // round-trip, bounded so a genuine failure still terminates. The `recv` timeout is what turns
+        // a stolen port (no delegate behind the connection) from a hang into a retry.
+        let mut succeeded = false;
+        for _ in 0..40 {
+            let cmd = UnixStream::connect(&sock).expect("connect cmd socket");
+            cmd.set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("set cmd recv timeout");
+            let probe = TcpListener::bind(("127.0.0.1", 0)).expect("probe");
+            let port = probe.local_addr().expect("addr").port();
+            drop(probe);
+            let reg = encode_bind(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+            kennel_lib_scm::send_with_fds(cmd.as_fd(), &reg, &[]).expect("send registration");
 
-        // Give the delegate a moment to bind, then connect to the host-side port from "outside".
-        // Retry the connect until the listener is up.
-        let mut external = None;
-        for _ in 0..50 {
-            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
-                external = Some(s);
-                break;
+            // Connect to the mirrored host-side port from "outside", retrying until the delegate's
+            // listener is up. If the port was stolen, nobody we control bound it.
+            let mut external = None;
+            for _ in 0..50 {
+                if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+                    external = Some(s);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
             }
-            std::thread::yield_now();
+            let Some(mut external) = external else {
+                continue; // nobody bound it in time — fresh port
+            };
+
+            // The conduit's KENNEL end + the port notification arrive on the command connection
+            // (host-inetd already spliced the accepted connection to the host end). A stolen port
+            // means no delegate is behind this connection, so the timed `recv` errors → retry.
+            let mut nbuf = [0u8; 8];
+            let Ok((n, mut fds)) = kennel_lib_scm::recv_with_fds(cmd.as_fd(), &mut nbuf) else {
+                continue; // timed out / closed: the bind lost the race, try a fresh port
+            };
+            assert_eq!(nbuf.get(..n), Some(&port.to_be_bytes()[..]), "port framing");
+            let kennel_end = fds.pop().expect("a conduit fd");
+            assert!(fds.is_empty(), "exactly one fd");
+
+            // Bytes from the external client traverse external → accepted → host_end → kennel_end
+            // through host-inetd's splice. The kennel end is a UnixStream (the socketpair end), so
+            // reading it back yields what the external client wrote — proving the splice is live.
+            let mut conduit = UnixStream::from(kennel_end);
+            external.write_all(b"hello").expect("client write");
+            let mut got = [0u8; 5];
+            conduit
+                .read_exact(&mut got)
+                .expect("read off the conduit kennel end");
+            assert_eq!(&got, b"hello");
+
+            succeeded = true;
+            break;
         }
-        let mut external = external.expect("connect to the mirrored host port");
-
-        // kenneld receives the conduit's KENNEL end + the port notification on the command
-        // connection (host-inetd already spliced the accepted connection to the host end).
-        let mut nbuf = [0u8; 8];
-        let (n, mut fds) =
-            kennel_lib_scm::recv_with_fds(cmd.as_fd(), &mut nbuf).expect("recv notification");
-        assert_eq!(nbuf.get(..n), Some(&port.to_be_bytes()[..]), "port framing");
-        let kennel_end = fds.pop().expect("a conduit fd");
-        assert!(fds.is_empty(), "exactly one fd");
-
-        // Bytes from the external client traverse external → accepted → host_end → kennel_end
-        // through host-inetd's splice. The kennel end is a UnixStream (the socketpair end), so
-        // reading it back yields what the external client wrote — proving the splice is live.
-        let mut conduit = UnixStream::from(kennel_end);
-        external.write_all(b"hello").expect("client write");
-        let mut got = [0u8; 5];
-        conduit
-            .read_exact(&mut got)
-            .expect("read off the conduit kennel end");
-        assert_eq!(&got, b"hello");
-
         let _ = std::fs::remove_file(&sock);
+        assert!(
+            succeeded,
+            "the delegate never bound a free loopback port in 40 attempts"
+        );
     }
 }

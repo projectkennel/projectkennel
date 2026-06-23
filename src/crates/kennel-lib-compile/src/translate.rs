@@ -43,8 +43,8 @@ use kennel_lib_policy::settled::{
     ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
     ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, MeshRuntime, NameRule, NetMode,
     NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProvideRuntime, ProxyListen,
-    RootfsRuntime, SeccompAction, SeccompPolicy, SshGrant, SshRuntime, TmpPolicy, TtlAction,
-    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy, ServiceRuntime, SshGrant,
+    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
 };
 use kennel_lib_policy::variant::{Manifest, Variant};
 use kennel_lib_policy::PolicyError;
@@ -66,6 +66,9 @@ pub struct Translated {
     pub binder: BinderRuntime,
     /// The cross-kennel capability mesh runtime (§7.13) — `[[provides]]`/`[[consumes]]`.
     pub mesh: MeshRuntime,
+    /// The `[service]` supervision discipline (§7.13.7) — the restart policy, present only when
+    /// the policy declares `[service]`.
+    pub service: Option<ServiceRuntime>,
     /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set.
     pub dbus: DbusRuntime,
     /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
@@ -148,6 +151,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let identity = translate_identity(effective)?;
     let binder = translate_binder(effective);
     let mesh = translate_mesh(effective);
+    let service = translate_service(effective)?;
     let dbus = translate_dbus(effective);
     let audit = translate_audit(effective, &mut deferred)?;
     let env = translate_env(effective, &mut deferred);
@@ -172,6 +176,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         identity,
         binder,
         mesh,
+        service,
         dbus,
         audit,
         env,
@@ -1432,6 +1437,37 @@ fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyErro
     })
 }
 
+/// Default initial restart backoff when `[service].backoff` is unset (§7.13.7).
+const DEFAULT_BACKOFF_MS: u64 = 500;
+/// Default crash-loop restart bound when `[service].max_attempts` is unset (§7.13.7).
+const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// Translate `[service]` (§7.13.7) into the settled [`ServiceRuntime`] — the supervision discipline
+/// `kenneld` applies to an enabled provider. Present only when the policy declares `[service]`; the
+/// fields default (restart `on-failure`, 500ms backoff, 5 attempts) so an empty `[service]` is the
+/// stated defaults. `max_attempts = 0` is rejected (use `restart = "never"` to not restart).
+fn translate_service(src: &SourcePolicy) -> Result<Option<ServiceRuntime>, PolicyError> {
+    let Some(svc) = src.service.as_ref() else {
+        return Ok(None);
+    };
+    let backoff_ms = match svc.backoff.as_deref() {
+        Some(s) => parse_duration_ms(s)?,
+        None => DEFAULT_BACKOFF_MS,
+    };
+    let max_attempts = svc.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS);
+    if max_attempts == 0 {
+        return Err(translation(
+            "[service].max_attempts must be at least 1 (use restart = \"never\" to not restart)"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(ServiceRuntime {
+        restart: svc.restart.unwrap_or(RestartPolicy::OnFailure),
+        backoff_ms,
+        max_attempts,
+    }))
+}
+
 /// Split a human duration into its numeric part and a seconds multiplier.
 fn duration_unit(t: &str) -> (&str, u64) {
     if let Some(n) = t.strip_suffix(['s', 'S']) {
@@ -1457,6 +1493,37 @@ fn parse_duration_secs(s: &str) -> Result<u64, PolicyError> {
         ))
     };
     let (num, mult) = duration_unit(s.trim());
+    let value = num.trim().parse::<u64>().map_err(|_| bad())?;
+    value.checked_mul(mult).ok_or_else(bad)
+}
+
+/// Split a human duration into its numeric part and a **millisecond** multiplier. `ms` is tested
+/// before the bare `s`/`m` suffixes, or `"500ms"` would read as `"500m"` + a stray `s`.
+fn duration_unit_ms(t: &str) -> (&str, u64) {
+    if let Some(n) = t.strip_suffix("ms") {
+        return (n, 1);
+    }
+    if let Some(n) = t.strip_suffix(['s', 'S']) {
+        return (n, 1_000);
+    }
+    if let Some(n) = t.strip_suffix(['m', 'M']) {
+        return (n, 60_000);
+    }
+    if let Some(n) = t.strip_suffix(['h', 'H']) {
+        return (n, 3_600_000);
+    }
+    (t, 1)
+}
+
+/// Parse a human duration to **milliseconds** (`"500ms"`, `"2s"`, `"5m"`, `"1h"`, bare = ms) — for
+/// the `[service]` restart backoff, which needs the sub-second resolution `parse_duration_secs` lacks.
+fn parse_duration_ms(s: &str) -> Result<u64, PolicyError> {
+    let bad = || {
+        translation(format!(
+            "backoff `{s}` is not a number with an optional ms/s/m/h suffix"
+        ))
+    };
+    let (num, mult) = duration_unit_ms(s.trim());
     let value = num.trim().parse::<u64>().map_err(|_| bad())?;
     value.checked_mul(mult).ok_or_else(bad)
 }
@@ -2026,6 +2093,82 @@ mod tests {
         translate(&effective).expect("translate")
     }
 
+    // ---- [service] supervision discipline (§7.13.7) ----
+
+    #[test]
+    fn service_absent_yields_no_runtime() {
+        use crate::source::SourcePolicy;
+        assert!(translate_service(&SourcePolicy::default())
+            .expect("ok")
+            .is_none());
+    }
+
+    #[test]
+    fn service_defaults_apply_for_an_empty_section() {
+        use crate::source::{ServiceSection, SourcePolicy};
+        let src = SourcePolicy {
+            service: Some(ServiceSection::default()),
+            ..SourcePolicy::default()
+        };
+        let svc = translate_service(&src).expect("ok").expect("present");
+        assert_eq!(svc.restart, RestartPolicy::OnFailure);
+        assert_eq!(svc.backoff_ms, 500);
+        assert_eq!(svc.max_attempts, 5);
+    }
+
+    #[test]
+    fn service_explicit_values_translate() {
+        use crate::source::{ServiceSection, SourcePolicy};
+        let src = SourcePolicy {
+            service: Some(ServiceSection {
+                restart: Some(RestartPolicy::Always),
+                backoff: Some("2s".to_owned()),
+                max_attempts: Some(3),
+            }),
+            ..SourcePolicy::default()
+        };
+        let svc = translate_service(&src).expect("ok").expect("present");
+        assert_eq!(svc.restart, RestartPolicy::Always);
+        assert_eq!(svc.backoff_ms, 2_000);
+        assert_eq!(svc.max_attempts, 3);
+    }
+
+    #[test]
+    fn service_zero_max_attempts_is_rejected() {
+        use crate::source::{ServiceSection, SourcePolicy};
+        let src = SourcePolicy {
+            service: Some(ServiceSection {
+                max_attempts: Some(0),
+                ..ServiceSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        assert!(translate_service(&src).is_err());
+    }
+
+    #[test]
+    fn service_bad_backoff_is_rejected() {
+        use crate::source::{ServiceSection, SourcePolicy};
+        let src = SourcePolicy {
+            service: Some(ServiceSection {
+                backoff: Some("soon".to_owned()),
+                ..ServiceSection::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        assert!(translate_service(&src).is_err());
+    }
+
+    #[test]
+    fn parse_duration_ms_handles_units() {
+        assert_eq!(parse_duration_ms("500ms").expect("ms"), 500);
+        assert_eq!(parse_duration_ms("2s").expect("s"), 2_000);
+        assert_eq!(parse_duration_ms("5m").expect("m"), 300_000);
+        assert_eq!(parse_duration_ms("1h").expect("h"), 3_600_000);
+        assert_eq!(parse_duration_ms("250").expect("bare ms"), 250);
+        assert!(parse_duration_ms("nope").is_err());
+    }
+
     #[test]
     fn ssh_section_flattens_into_the_settled_runtime() {
         use crate::source::{SourcePolicy, SshDestination, SshSection};
@@ -2538,6 +2681,7 @@ mod tests {
             identity: t.identity,
             binder: t.binder,
             mesh: t.mesh,
+            service: t.service,
             dbus: t.dbus,
             audit: t.audit,
             env: t.env,

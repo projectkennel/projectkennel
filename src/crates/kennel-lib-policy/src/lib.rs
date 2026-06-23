@@ -53,10 +53,10 @@ pub use settled::{
     BinderRuntime, CapPolicy, ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy,
     EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
     MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, OnChangeAction, ProcPolicy, ProcVisibility,
-    Protocol, Provenance, ProvideRuntime, ProxyListen, ResolvedArtifact, SeccompAction,
-    SeccompPolicy, SettledPolicy, Shape, SignedSettledPolicy, SpawnGrant, SpawnTemplate, SshGrant,
-    SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime,
-    UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
+    Protocol, Provenance, ProvideRuntime, ProxyListen, ResolvedArtifact, RestartPolicy,
+    SeccompAction, SeccompPolicy, ServiceRuntime, SettledPolicy, Shape, SignedSettledPolicy,
+    SpawnGrant, SpawnTemplate, SshGrant, SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy,
+    UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use spawn::spawn_eligible;

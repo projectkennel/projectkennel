@@ -172,7 +172,7 @@ Self-contained and testable with no broker and no runtime — the contract every
   reserved-namespace gate (below), and duplicate `name` within one policy. Compiler-side; out of
   `cargo tree -p kenneld`.
   **Test-first:** the valid/invalid corpus (well-formed accept; missing field / undefined `shape` reject;
-  reserved-name-by-non-service-class reject; in-policy duplicate-provide reject) is written and asserted
+  reserved-name-from-an-unverified-origin reject; in-policy duplicate-provide reject) is written and asserted
   before the compiler logic. The schema is frozen here — W2, W4, W5, W6 all compile against it; the
   cross-kennel resolution / shape-mismatch / dangling-consume tests live with the runtime broker (W5) and
   catalogue (W4), where the live installed set exists.
@@ -180,27 +180,48 @@ Self-contained and testable with no broker and no runtime — the contract every
   **Confine the provide-name namespace — `[provides]` is not sidecar-only.** Any kennel may declare a
   `[provides]`, not just the operator-declared service set, so the name a provider may *claim* is the
   load-bearing gate, not which kennels are allowed to provide. The reserved `org.projectkennel.*` namespace
-  (GUI/Wayland, D-Bus, the system service names a consumer trusts by reputation) is claimable
-  **only by the operator-declared, signed service-kennel trust class** (W11); an ordinary workload or
-  spawn-target kennel that declares `[provides] org.projectkennel.wayland` is refused at compile, because
-  otherwise it could advertise a reserved name and have a consumer resolving `wayland` brokered to the
-  impostor — provider-name spoofing, a capability-granting side channel through the catalogue. Other
-  kennels may provide only in an unreserved namespace, and a consumer reaching one of those gets no
-  more trust than the name carries. **Test-first:** a non-service-class kennel claiming a reserved
-  name rejects; a duplicate claim on a reserved name rejects; an unreserved provide accepts. This makes
-  deny-by-default cover *who may be resolved as what*, not only *who may consume*.
+  (GUI/Wayland, D-Bus, the system service names a consumer trusts by reputation) is the **project's own** and
+  is claimable only through a template signed by the **project maintainer key** — the *same mechanism spawn
+  targets use*: a signed template is the unit of trust, and the host varies only its named `[[mutable]]` fields
+  (a different compositor). The gate is **name-scoped, not template-scoped:** a `[[provides]]` lives only on a
+  template (the delta-leaf form carries none), and a template with an *unreserved* name (`doe.john.cache`) is
+  freely authored and signed by any valid key — only a reserved name needs the authorized signature, so a user
+  who self-signs a reserved provide is refused at verification, closing the provider-name-spoofing channel
+  without a `service_class` flag. A host may **optionally** declare *additional* reserved namespaces of its own
+  (e.g. `com.acme.*`) and their authorized keys in the root-owned `system.toml` `[[reserved]]` table (design
+  §7.13.5a); `org.projectkennel.*` stays the project's and is not host-redefinable. **Test-first:** the
+  built-in reserved-name permission is computed from signature provenance (`resolve::ProvidesOrigin` — a
+  reserved name is permitted only when it traces to a signature-verified template, never an unverified layer);
+  a reserved name from an unverified origin rejects, a duplicate reserved claim rejects, an unreserved provide
+  accepts. The *authoritative* gate — a reserved provide's settled signature must be a key authorized for the
+  namespace (project maintainer for the built-in, or a host's `[[reserved]]` keys) — is the catalogue's (W4);
+  compile is the fail-fast on the built-in namespace. This makes deny-by-default cover *who may be resolved as
+  what*, not only *who may consume*.
 
 - **W2 · The sidecar + restart-policy declaration schema, and the supervision/readiness API.**
   **[dep] M.**
-  The *declaration* half of sidecars (W6's logic is the other half): the autostart-set declaration,
-  the per-sidecar restart policy (`always`/`on-failure`/`never` + backoff + max-attempts), and — the
-  load-bearing API — the **readiness state machine** (declared-and-ready / declared-but-pending /
-  declared-but-failed) and its transitions, which the catalogue (W4) and the topology surface (W11)
-  both read. **Test-first:** the readiness transitions are asserted as a contract (pending→ready on
-  construction success; pending→failed on crash-loop exhaustion; the legal/illegal transitions)
-  *before* the supervisor implements them, because a wrong state or transition propagates into every
-  reader. Scaffold the record types and the catalogue-readiness interface here; the supervision loop
-  itself is W6.
+  The *declaration* half of sidecars (W6's logic is the other half), in three pieces:
+
+  - **Enablement — the systemd `.wants` model, designed (§7.13.6).** Installing a provider (its signed
+    policy in the `policies/` cascade) and *enabling* one are distinct: an installed provider is inert
+    until the operator links it into a host-level enablement directory — `autorun/` (eager, started at
+    daemon start) or `ondemand/` (lazy, socket-activated on first consume). Both live only at the
+    operator layers (`/etc/kennel/{autorun,ondemand}/`, `~/.config/kennel/{autorun,ondemand}/`) and at
+    **neither vendor layer** — a vendor ships a provider but cannot self-enable it. The autostart set is
+    *the links on disk*, re-derived on `daemon-reload` and restart, never standing authored state. So
+    eager-vs-lazy is the operator's symlink choice, not a signed-policy field.
+  - **The `[service]` supervision discipline (§7.13.7).** The per-sidecar restart policy
+    (`always`/`on-failure`/`never` + backoff + max-attempts), signed into the policy because *how a
+    service tolerates its own crashes* is the author's to declare — unlike the deployment posture, which
+    is the operator's symlink. Schema + local validation here.
+  - **The readiness state machine (§7.13.7) — the load-bearing API.** declared-but-pending /
+    declared-and-ready / declared-but-failed, the contract the catalogue (W4) and topology surface (W14)
+    read. **Test-first:** the transitions are asserted as a contract (pending→ready on construction
+    success; pending→failed on crash-loop exhaustion; ready→pending on restart; the sticky-failed and
+    idle-reaped-to-pending rules; the illegal transitions) *before* the supervisor implements them,
+    because a wrong state propagates into every reader.
+
+  Scaffold the record types and the catalogue-readiness interface here; the supervision loop itself is W6.
 
 - **W3 · The `SVC_CONNECT` wire contract on Node 0.** **[dep] M.**
   The reply/transaction shape for resolve-a-name → brokered-connector, specified and tested as a wire
@@ -223,8 +244,15 @@ Self-contained and testable with no broker and no runtime — the contract every
   projection of signed policy, not authored central state — carrying the W2 readiness states fed by
   construction status. The projection's *shape* is derived; its *membership* (which kennels exist, and
   thus which `[provides]` are in scope) is the operator's declared set — derived-shape over
-  authored-membership, not magic. Reserved-namespace claims are already gated at compile (W1), so the
-  catalogue can trust that a `org.projectkennel.*` entry came from the service-kennel trust class.
+  authored-membership, not magic. **The catalogue is the authoritative reserved-namespace gate:** before it
+  admits a reserved-name entry, it verifies the provider's originating-template signature is a key **authorized
+  for that namespace** — the project maintainer key for the built-in `org.projectkennel.*`, plus any **host-declared**
+  additional namespaces and their keys from the root-owned `system.toml` `[[reserved]]` table (design §7.13.5a:
+  `org.projectkennel.*` is the project's and not host-redefinable; a host may *add* its own, e.g. `com.acme.*`).
+  An *unreserved* provide needs no such check — any valid signature. The compile-time check (W1) is the
+  fail-fast on the built-in namespace; the catalogue is where a self-signed reserved provide is finally refused
+  and where the host's `[[reserved]]` table is consulted, so a reserved entry in the catalogue is one an
+  authorized key signed.
   *Resolution-only, no runtime registration* (a workload registering a service at runtime is a
   capability-granting side channel — forbidden). Re-derived from the installed set on `kennel daemon-reload`
   (the `systemctl daemon-reload` analogue — refresh the catalogue, bring newly-declared eager providers
@@ -496,8 +524,9 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 - **W15 · Red-team the cross-kennel surface.** **[dep, ship gate] M.**
   Same logic as 0.3.0's W19, pointed at the new surface: the W5 connector broker (can a consumer
   reach a service it didn't declare; can resolution be raced; can a restart confuse a consumer); the
-  **provide-name namespace gate** (can a non-service-class kennel claim a reserved `org.projectkennel.*` name
-  and have a consumer brokered to the impostor — provider-name spoofing, W1); the **ungrantable
+  **provide-name namespace gate** (can a self-signed or unverified-origin template claim a reserved
+  `org.projectkennel.*` name and have a consumer brokered to the impostor — provider-name spoofing; does the
+  catalogue's maintainer-signature gate hold against a user-signed reserved provide, W1/W4); the **ungrantable
   host-control-socket rule** (does the endpoint-not-path-string resolution actually hold under a
   cascade-relocated mount; does it over-catch the kennel's own Node 0, W10); and the GUI legs (does the
   nested inner compositor leak any host global to the confined app; can one kennel's compositor reach

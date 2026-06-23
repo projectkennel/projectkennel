@@ -37,7 +37,7 @@ name = "org.projectkennel.wayland"              # the public identifier — what
 shape = "af-unix"                        # the transport (§7.13.2)
 endpoint = "$XDG_RUNTIME_DIR/wayland-0"  # where the capability is exposed, in the provider's own view
 reason = "the confined display service for desktop-application kennels"
-# key = "…"  — optional private match token (below); omitted here, a reserved service-class name
+# key = "…"  — optional private match token (below); omitted here, a reserved name on a maintainer-signed template
 ```
 
 A consumer lists each capability it reaches:
@@ -61,8 +61,8 @@ that a provider and a chosen consumer both set to the same value, which the brok
 match at runtime (§7.13.4). The name lets a consumer *discover and resolve*; the key lets a provider and a
 specific consumer *bind privately*, so a public name a different kennel could also advertise does not by
 itself get a consumer brokered to the wrong provider. The key is **optional** — a reserved `org.projectkennel.*`
-capability is trusted through its service-class provider (§7.13.5) and needs none — and it is **never
-published in the catalogue**. Crucially, nothing in a declaration points at another kennel: a key is a
+capability is trusted through its maintainer-signed service template (§7.13.5) and needs none — and it is
+**never published in the catalogue**. Crucially, nothing in a declaration points at another kennel: a key is a
 literal value both sides happen to share, not a reference to another policy. There is no cross-kennel
 reference anywhere in the surface — resolution happens at runtime, by name, against the catalogue
 (§7.13.4).
@@ -108,7 +108,7 @@ hard because declaring a consume is declaring a dependency; tolerating absence i
 `[[provides]]` and `[[consumes]]` are the **single** cross-kennel surface. There is no separate
 transport-specific provide/consume; the binder cross-instance reach that earlier drafts expressed as a
 dedicated `[binder]` provide/consume list is the **binder-connector shape** of this surface (§7.13.2), and
-the canonical agent↔tool topology (§7.13.7) is written in those terms. Folding the transports into one
+the agent↔tool topology is expressed in those terms. Folding the transports into one
 shape-typed surface is what lets a single broker and a single catalogue describe *every* cross-kennel reach
 uniformly, rather than a separate mechanism per transport.
 
@@ -161,17 +161,18 @@ and putting it anywhere else would be a guarantee the system cannot keep.
 So the two checks live in two places:
 
 - **At compile — local validation only.** Everything checkable from the single policy in hand plus the
-  operator's signing context: each `[[provides]]`/`[[consumes]]` is well-formed (a `name`, a `shape`, an
-  `endpoint`/`at`, a `reason`); `shape` is one of the defined transports (§7.13.2); a `org.projectkennel.*`
-  provide is refused unless the policy is compiled in the service-class context (§7.13.5); and no two
+  signature provenance: each `[[provides]]`/`[[consumes]]` is well-formed (a `name`, a `shape`, an
+  `endpoint`/`at`, a `reason`); `shape` is one of the defined transports (§7.13.2); a reserved
+  `org.projectkennel.*` provide traces to a maintainer-signed template (§7.13.5); and no two
   `[[provides]]` in *this* policy claim the same `name`. None of these consults another kennel, so all of
   them hold on a signed artefact for its whole life.
 - **At runtime — resolution and matching.** When a consumer reaches for a capability, the broker resolves
   its `name` against the **catalogue** — the projection of the installed configs that declare `[[provides]]`
   (§7.13.4) — requires the optional `key` to match, enforces the expected `shape`, and applies the
-  deny-by-default identity check. The matched provider need not already be running: a declared provider is
-  **started on demand** if it is not up (the lazy autostart of the supervision section), so a `name` is in
-  the catalogue because a signed config provides it, not because that kennel happens to be running. A consume
+  deny-by-default identity check. The matched provider need not already be running: an enabled provider is
+  **started on demand** if it is not up (the lazy enablement of §7.13.6), so a `name` is in the catalogue
+  because a signed config provides it *and the operator enabled it* (§7.13.6), not because that kennel
+  happens to be running. A consume
   that resolves to no installed provider, to a shape that disagrees, or to a key that does not match is
   **denied and audited** at connect — it reaches nothing, the correct and safe outcome, not a failure to have
   caught something earlier.
@@ -211,14 +212,15 @@ decided when the operator signed its `[[consumes]]`; the broker only enforces th
 is present. A failure at any step — no installed provider, a shape that disagrees, a key that does not
 match — is a **denial-and-audit**, never a silent fallback to another provider.
 
-**Bringing the provider up (step 5).** The matched provider need not already be running. A **lazily**
-declared provider is **socket-activated** on first consume — a capability is reachable from the moment its
-config is installed, and the first request is what brings it up, `kenneld` doing for a provider kennel what
-systemd's socket activation does for `kenneld` itself. An **eagerly** declared provider is simply already up,
-started when `kenneld` (re-)reads the installed configs (`kennel daemon-reload`, the `systemctl
-daemon-reload` analogue, which re-derives the catalogue and brings newly-declared eager providers online) or
-at daemon start. The two disciplines coexist, chosen per provider; step 5 is the same for both — bridge the
-workload's connection to a running provider, starting it first only when it is not.
+**Bringing the provider up (step 5).** The matched provider need not already be running. A provider enabled
+for **lazy** start (linked into `ondemand/`, §7.13.6) is **socket-activated** on first consume — a capability
+is reachable from the moment its provider is enabled, and the first request is what brings it up, `kenneld`
+doing for a provider kennel what systemd's socket activation does for `kenneld` itself. A provider enabled
+for **eager** start (linked into `autorun/`) is simply already up, started when `kenneld` (re-)reads the
+enablement set (`kennel daemon-reload`, the `systemctl daemon-reload` analogue, which re-derives the
+catalogue and brings newly-enabled eager providers online) or at daemon start. The two postures coexist,
+chosen per provider by which enablement directory holds its link (§7.13.6); step 5 is the same for both —
+bridge the workload's connection to a running provider, starting it first only when it is not.
 
 This is why delivery is a **socket the workload connects to** and not a connected fd handed in: you cannot
 hand an fd to a process that has not connected yet, and under lazy start there is nothing to connect it *to*
@@ -255,44 +257,209 @@ A capability name is the thing a consumer trusts: a kennel that resolves `org.pr
 whatever the mesh brokers it under that name to *be* the display service. So **who may claim a name** is the
 load-bearing gate, not merely who may consume one.
 
-`org.projectkennel.*` is the **reserved capability namespace** — the well-known names a consumer trusts by
-reputation (the display service, the D-Bus broker, the system services). A `[[provides]]` claiming a
-`org.projectkennel.*` name is accepted **only from a kennel in the operator-declared, signed service-kennel trust
-class**; an ordinary workload or spawn-target kennel that declares `[[provides]] name = "org.projectkennel.wayland"`
-is **refused at compile**. Were it not, such a kennel could advertise a reserved name and have a consumer
-resolving `wayland` brokered to the impostor — provider-name spoofing, a capability-granting side channel
-through the catalogue. The gate keys on the **operator-supplied service-class context** under which a policy
-is compiled and signed, not on a field the policy sets about itself: a workload cannot self-grant the trust
-class by writing a flag, because the class is asserted by the operator at sign time and the workload's own
-declarations are not consulted for it. Any kennel may `[[provides]]` freely in an **unreserved** namespace,
-and a consumer reaching one of those gets exactly the trust the name carries and no reputation it has not
-earned.
+A **reserved namespace** is a name prefix whose claimants a consumer trusts by reputation. `org.projectkennel.*`
+is the **project's own** reserved namespace — built in, not host-configurable, claimable only by the **project
+maintainer key** (the display service, the D-Bus broker, the system services live here). A `[[provides]]`
+claiming a name under it is legitimate **only when its originating template is signed by the project maintainer
+key**. This is the **same mechanism spawn targets already use** (§7.12): a signed template is the unit of
+trust, and the host varies only the template's named `[[mutable]]` fields (below). Were a reserved name
+claimable by anyone, an impostor could advertise it and have a consumer resolving `wayland` brokered to it —
+provider-name spoofing, a capability-granting side channel through the catalogue. (A host may declare *further*
+reserved namespaces of its own, §7.13.5a — but `org.projectkennel.*` is the project's and a host cannot
+redefine, release, or reassign it.)
+
+The gate is **scoped to the reserved namespace, not to templates in general.** A `[[provides]]` with an
+*unreserved* name (`doe.john.cache`, `com.example.build-cache`) is freely authored and signed by **any valid
+key** — a user's own included — exactly like any run policy; nothing about declaring a provider requires a
+maintainer. Only a reserved name carries the extra gate, because only a reserved name carries reputation a
+consumer relies on by name alone. Two facts make this precise:
+
+- **A `[[provides]]` can only be declared in a template, never in a user delta-leaf.** The leaf form (the
+  `[[*.add]]`/`[[*.remove]]` delta a user authors under their own key) carries no `provides` surface at all,
+  so a `[[provides]]` is always a template — and a template is trusted exactly as far as the key that signed
+  it. (This is *not* the base-template trust split: a provider template is not a security-baseline template
+  re-asserting invariants, so it is not confined to system keys — an unreserved provider is user-signable.)
+- **A reserved name additionally requires an authorized signature.** Claiming a reserved name is the one extra
+  bar: the originating template's signature must be a key authorized for that namespace — the **project
+  maintainer key** for `org.projectkennel.*`, or the host-declared keys for a host's own namespace (§7.13.5a).
+  So a user who authors a template with a reserved provide and signs it with their own key is **refused at
+  verification** — their key is not authorized for the reserved namespace — while the *same template under an
+  unreserved name* is accepted. The authority is the signature on the originating template, checked when the
+  provider is catalogued (§7.13.4) against the authorized-key set — structural, not a self-asserted context.
+
+## 7.13.5a Host-declared reserved namespaces (additive)
+
+`org.projectkennel.*` is the project's and is built in; a host may **optionally** reserve **further** namespaces
+of its own — an organisation that wants `com.acme.*` to carry the same name-is-trusted guarantee for its
+internal services. This is a host-level trust-root decision, declared in the root-owned, integrity-sensitive
+`system.toml` (the deployment config, `07-paths`; never user-writable, so a user cannot grant themselves a
+reserved namespace):
+
+```toml
+# /etc/kennel/system.toml (admin) or /usr/lib/kennel/system.toml (vendor)
+[[reserved]]
+prefix = "com.acme."                   # an organisation reserves its own namespace
+keys = ["acme-platform-2026"]          # key-ids whose signature may claim a name under it
+```
+
+A reserved provide under a declared `prefix` is legitimate iff its originating template is signed by one of
+that entry's `keys`. These entries are **purely additive** — the built-in `org.projectkennel.*` reservation
+(bound to the project maintainer key) is not expressed here and **cannot be redefined, released, or reassigned**
+by a host; `system.toml` only *adds* a host's own reputation-bearing prefixes alongside it. A name under
+neither the built-in namespace nor any declared one is unreserved and free to any valid key (above). Because
+`system.toml` is resolved only from root-owned dirs (never `~/.config`, `07-paths`), the host's reserved set is
+a property of the host, not of any policy author.
+
+This is the trust-root analogue of the signing-key store: the store says *which keys the host trusts at all*;
+the reserved table says *which of those keys may speak for a host-reputation-bearing name* — while the
+project's own namespace stays the project's. Both are root-owned and out of any policy's reach.
+
+**Named mutables are where the host diverges.** A maintainer-signed reserved-name template is not frozen
+whole: it exposes the bits a host legitimately varies as `[[mutable]]` fields, patched within their declared
+bounds by the existing manifest validator (§7.12.2, §7.12.3) — the **same** fenced-write surface a spawn
+target uses. The display service is the worked case: `org.projectkennel.wayland` is maintainer-signed and its
+reserved name is pinned, but the *compositor* (cage by default; sway or Weston as alternatives, §7.14) is a
+named mutable, so a host runs a different inner compositor without re-authoring the reserved name or escaping
+its trust. The reserved name carries the reputation; the mutable carries the host's choice — and the line
+between them is exactly the maintainer-pinned / host-patchable line spawn already draws.
 
 Within `org.projectkennel.*`, `kenneld` owns the **facade interface nodes** — the `I*`/instance forms such
 as `org.projectkennel.IAfUnix/default` and `org.projectkennel.IDBus/default`, which only `kenneld` registers
-(§7.1) — and **mesh capability names** such as `org.projectkennel.wayland`, which a service-class provider
-claims. Both are reserved under the one namespace: the facade nodes are `kenneld`'s alone, and a mesh name
-is claimable only in the service-class context above.
+(§7.1) — and **mesh capability names** such as `org.projectkennel.wayland`, which a maintainer-signed service
+template claims. Both are reserved under the one namespace: the facade nodes are `kenneld`'s alone, and a mesh
+name is claimable only by a maintainer-signed template, as above.
 
 The service-kennel trust class also carries the **multi-leg exemption**, and this is its canonical
 definition. The single-leg discipline (§7.12) is a review invariant on **composable spawn targets** — the
 things an *untrusted agent* may instantiate and bridge, where holding two legs at once would let the agent
 reconstitute, across one kennel, a capability the operator never granted as a whole. A service kennel is not
-such a target: it is **operator-declared and signed**, so the operator has already vouched for the whole of
-it, legs included. It may therefore **hold multiple legs** without violating the discipline, because the
-discipline binds what an *agent composes*, not what an *operator signs*. The GUI-service kennel's
+such a target: it is a **maintainer-signed template the operator deliberately enabled** (§7.13.6), so both
+the maintainer (by the signature) and the operator (by the enablement) have vouched for the whole of it, legs
+included. It may therefore **hold multiple legs** without violating the discipline, because the discipline
+binds what an *agent composes*, not what a maintainer signs and an operator enables. The GUI-service kennel's
 host-compositor connection together with its file broker (§7.14) is the worked instance. Chapters that hold
 multi-leg service kennels cite this exemption (e.g. §7.14.10); the definition lives here.
 
-## 7.13.6 What the mesh composes
+## 7.13.6 Enablement — the operator links what the vendor provides
+
+A `[[provides]]` block makes a capability *claimable*; it does not make the providing kennel run, nor put its
+name in the catalogue. **Installing** a provider — placing its signed policy in the `policies/` cascade
+(`07-paths`) — and **enabling** one are two distinct acts, and the gap between them is deliberate: a
+freshly-installed service kennel is present-but-inert until an operator deliberately turns it on. This is the
+deny-by-default discipline at the deployment layer, and it follows systemd exactly — a package ships a unit
+under `/usr/lib/systemd/system/`, and the unit does nothing until an operator *enables* it.
+
+**Enablement is a host-level symlink.** An operator enables a provider by linking its installed policy into
+one of two enablement directories:
+
+- **`autorun/`** — **eager**: `kenneld` starts the provider at daemon start (and on `daemon-reload` for a
+  newly-linked one) and supervises it for the daemon's life. The `multi-user.target.wants` analogue.
+- **`ondemand/`** — **lazy**: the provider's `name` is in the catalogue and resolvable from the moment it is
+  linked, but the kennel is **not** started until a consumer first reaches its capability — socket-activated
+  on first consume (§7.13.4), reaped when idle. The socket-activation analogue.
+
+Both directories exist at the two **operator** layers — `/etc/kennel/{autorun,ondemand}/` (the system admin)
+and `~/.config/kennel/{autorun,ondemand}/` (the user) — and at **neither vendor layer**: there is no
+`/usr/lib/kennel/autorun`. A vendor ships a provider policy under `/usr/lib/kennel/policies/`, but it
+**cannot enable its own provider** — enablement requires writing a symlink into an operator-owned directory,
+which the vendor package does not own. A vendor offers a capability; only the operator turns it on, and only
+by an act in a directory the operator controls. The two postures are the same provider differing in
+**trigger** (daemon start vs first consume) and **lifetime** (daemon-coupled vs consumer-driven); the restart
+policy, the readiness machine, and the supervisor are identical for both (the supervision work).
+
+**The link spans the cascade, and does not bypass signing.** A link `/etc/kennel/autorun/wayland` →
+`/usr/lib/kennel/policies/org.projectkennel.wayland/…settled.toml` enables a *vendor-shipped* capability from a
+*system* enablement directory — the operator turns on what the vendor provides without copying it, and a
+vendor policy update flows through the link. The link target is a settled, **signed** policy, verified at
+construction like any other (`04-trust-boundaries`); enabling a provider does not weaken the signature gate,
+it only adds the provider to the set `kenneld` will construct and supervise.
+
+**What the signature covers, and what the symlink covers.** The signed provider policy carries the
+*capability* (`[[provides]]`) and the *supervision discipline* (the `[service]` restart policy, §7.13.7). It
+does **not** carry whether the provider autostarts, or whether eagerly or lazily: that is the operator's
+deployment posture, expressed solely by which enablement directory holds the link, and deliberately kept out
+of the signed artefact. This is the same split as the config trust levels (`07-paths`): the vendor signs
+*what the service is and how it is supervised*; the operator decides *whether and how it participates* with a
+writable symlink, with no signed artefact to re-mint when they change their mind. A vendor cannot bake
+"autostart on every host that installs me" into a signed policy, and an operator cannot alter a service's
+restart discipline without re-signing it — each side owns exactly its half.
+
+**`daemon-reload` re-derives the enabled set from the filesystem.** `kennel daemon-reload` (the `systemctl
+daemon-reload` analogue) re-scans the enablement directories, re-derives the catalogue (§7.13.4) from the
+now-enabled providers, brings newly-linked `autorun/` providers online, and makes newly-linked `ondemand/`
+providers resolvable without starting them. Removing a link and reloading drops the capability from the
+catalogue and stops an eager provider. The enabled set is **the links on disk** — re-read on every reload and
+on daemon restart, never standing authored daemon state. This is the repo-is-truth discipline applied to
+service discovery: the filesystem *is* the registry, and `kenneld` holds no enabled-set state a restart could
+lose or a bug could desynchronise.
+
+## 7.13.7 The `[service]` block — supervision discipline and readiness
+
+A provider that the operator enables (§7.13.6) is a kennel `kenneld` keeps running on the operator's behalf,
+so it carries the one thing an ephemeral spawn does not: a **supervision discipline**, declared in a
+`[service]` block and signed into the policy with everything else.
+
+```toml
+[service]
+restart = "on-failure"   # always | on-failure | never  (default: on-failure)
+backoff = "500ms"        # initial delay before a restart; doubles each attempt (capped)
+max_attempts = 5         # restarts within the crash-loop window before declared-but-failed
+```
+
+- **`restart`** is the systemd `Restart=` analogue. `always` restarts on any exit (a long-running service
+  expected to stay up); `on-failure` (the default) restarts only on a non-zero exit or signal; `never` runs
+  the provider once and lets it stay down. A `never` provider that exits cleanly is *done*, not failed.
+- **`backoff`** is the delay before the first restart; it doubles each successive attempt (to a cap), so a
+  provider that crashes immediately on start does not spin the supervisor. The first start has no backoff.
+- **`max_attempts`** bounds the restarts within the crash-loop window. Exhausting it is what drives the
+  provider into **declared-but-failed** (below) rather than restarting forever — a flapping service becomes
+  a *visible, terminal* failure, not an invisible hot loop.
+
+The `[service]` block is **only meaningful for a provider** — a kennel with at least one `[[provides]]`. A
+policy that declares `[service]` without any `[[provides]]` is supervising nothing it offers to the mesh; the
+compiler accepts the block (a service kennel may be enabled before its first consumer exists) but the block
+does nothing until the kennel is enabled (§7.13.6). The discipline lives in the **signed** policy, not the
+enablement symlink, precisely because it is a property the *author* owns: how a service tolerates its own
+crashes is part of what the operator vouches for when they sign it, unlike the deployment posture
+(eager/lazy) which is the operator's alone.
+
+**Readiness — the state every reader sees.** An enabled provider is in exactly one of three readiness states,
+and this small machine is the contract the catalogue (§7.13.4) projects and the topology surface reads:
+
+- **declared-but-pending** — enabled and known to the catalogue, construction not yet complete: an `autorun/`
+  provider between daemon start and a successful seal, or an `ondemand/` provider that a consume has just
+  triggered. Its `name` **resolves** (a `required = true` consumer's construction-time resolvability check
+  passes, §7.13.4) but a connect waits on the transition to ready.
+- **declared-and-ready** — construction succeeded and the capability is reachable; a consumer's connect
+  bridges straight through (§7.13.4 step 5).
+- **declared-but-failed** — construction or supervision gave up: `max_attempts` exhausted within the
+  crash-loop window, or a `restart = never` provider that exited non-zero. The `name` stays in the catalogue
+  (it is still *enabled* — the operator's link is unchanged) so the failure is **visible**, not a silent
+  resolve-miss; a consume against it is denied-and-audited, distinguishable from "no such capability."
+
+The legal transitions are exactly: **pending → ready** (construction succeeds), **pending → failed**
+(construction fails, or crash-loop exhausts before a first ready), **ready → pending** (the provider died and
+is being restarted under its `[service]` policy — the same restart that invalidates live connectors,
+§7.13.4), and **ready → failed** (a restart-loop after a prior ready run exhausts `max_attempts`). There is
+**no** failed → \* transition without an operator act: a failed provider is terminal until the operator
+intervenes (fixes and `daemon-reload`s, or re-enables), so a failure is sticky and observable rather than
+self-clearing. An `ondemand/` provider reaped while idle returns to **declared-but-pending** (enabled,
+resolvable, not running) — idle reaping is not failure.
+
+This is one machine for both enablement postures: only the *trigger* into pending differs (daemon start vs
+first consume). Crash-loop exhaustion drives `failed` through the **same** path for an eager and a lazy
+provider, so there is one readiness contract for every reader to depend on, not two.
+
+## 7.13.8 What the mesh composes
 
 The mesh is not a new subsystem so much as a composition of primitives the system already has: the
 **`[[provides]]`/`[[consumes]]` declarations** (this section), each locally validated at compile (§7.13.3);
 the **service-connector broker** on Node 0 that resolves a capability against the catalogue, hands the
 consumer its connector, and steps out (the §4.3 fd-broker, developed with the broker wire); the **service
 catalogue**, a derived projection of the installed configs' `[[provides]]` blocks that the broker resolves
-against and the topology surface reads (developed with the catalogue); **autostart** — eager at daemon start
-for a standing provider, or lazy on first consume for one worth running only when reached, the operator's
-choice per provider (developed with the supervision work); and **per-kennel isolation** (§4.5), which keeps
+against and the topology surface reads (developed with the catalogue); **enablement and autostart** (§7.13.6)
+— a provider the operator links into `autorun/` (eager, started at daemon start) or `ondemand/` (lazy,
+socket-activated on first consume), the posture chosen by which enablement directory holds the link
+(developed with the supervision work); and **per-kennel isolation** (§4.5), which keeps
 every brokered reach pairwise and declared. The confined GUI display service
 (§7.14) is the first non-trivial consumer and exercises every one of them.
