@@ -59,6 +59,10 @@ pub struct Loaded {
     /// The per-kennel binder IPC runtime (§7.1.4): the user-defined services the
     /// context manager gates against. Empty for a kennel with no `[binder]` policy.
     pub binder: kennel_lib_policy::BinderRuntime,
+    /// The cross-kennel capability mesh consumes (§7.13.1): the `[[consumes]]` this kennel signed.
+    /// The `SVC_CONNECT` broker matches a consume request against these (request-don't-author). Empty
+    /// for a kennel with no `[[consumes]]`.
+    pub consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
     /// The per-kennel D-Bus mediation runtime (§7.7): the enabled buses and their compiled
     /// allow/deny tables. Empty (no bus enabled) for a kennel with no `[dbus]` policy.
     pub dbus: kennel_lib_policy::DbusRuntime,
@@ -253,8 +257,9 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     bastion: Mutex<Option<crate::bastion::Bastion>>,
     /// The service catalogue (§7.13.4): the derived projection of the enabled providers' `[[provides]]`
     /// the broker resolves against. Built at startup from the enablement links on disk and re-derived
-    /// on `daemon-reload` — never standing authored state.
-    catalogue: Mutex<crate::catalogue::Catalogue>,
+    /// on `daemon-reload` — never standing authored state. An `Arc` so each kennel's binder serving
+    /// shares the one live catalogue its `SVC_CONNECT` handler resolves against.
+    catalogue: std::sync::Arc<Mutex<crate::catalogue::Catalogue>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -275,7 +280,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             loader,
             registry: Mutex::new(Registry::default()),
             bastion: Mutex::new(None),
-            catalogue: Mutex::new(catalogue),
+            catalogue: std::sync::Arc::new(Mutex::new(catalogue)),
         }
     }
 
@@ -1374,6 +1379,8 @@ pub fn run_kennel<P, L>(
             init_bin: shared.identity.init_bin.clone(),
             prompt,
             spawn,
+            consumes: loaded.consumes,
+            catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
         });
     }
 
@@ -2091,6 +2098,7 @@ mod tests {
                 ssh: kennel_lib_policy::SshRuntime::default(),
                 unix: kennel_lib_policy::UnixRuntime::default(),
                 binder: kennel_lib_policy::BinderRuntime::default(),
+                consumes: Vec::new(),
                 dbus: kennel_lib_policy::DbusRuntime::default(),
                 groups: Vec::new(),
                 audit: kennel_lib_policy::AuditRuntime::default(),

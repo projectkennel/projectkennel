@@ -209,6 +209,8 @@ pub fn spawn(
     dbus: Option<Arc<DbusRelay>>,
     writer: Arc<Writer>,
     spawn: Option<Arc<crate::spawn::SpawnRuntime>>,
+    consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
+    catalogue: Option<Arc<Mutex<crate::catalogue::Catalogue>>>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
     let stop = Arc::new(AtomicBool::new(false));
@@ -225,6 +227,9 @@ pub fn spawn(
     let unix = Arc::new(unix);
     let net = Arc::new(net);
     let lifecycle = Arc::new(lifecycle);
+    // The mesh broker's per-kennel inputs: this kennel's signed consumes (the request-don't-author
+    // floor) and the daemon's live catalogue (resolved against on SVC_CONNECT), shared across loopers.
+    let consumes = Arc::new(consumes);
     let inbound_for_death = Arc::clone(&inbound);
     let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
         handle(
@@ -235,6 +240,8 @@ pub fn spawn(
             &lifecycle,
             dbus.as_deref(),
             spawn.as_deref(),
+            &consumes,
+            catalogue.as_ref(),
             incoming,
             conn,
             ctx,
@@ -271,6 +278,8 @@ fn handle(
     lifecycle: &Lifecycle,
     dbus: Option<&DbusRelay>,
     spawn: Option<&crate::spawn::SpawnRuntime>,
+    consumes: &[kennel_lib_policy::ConsumeRuntime],
+    catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     incoming: &Incoming,
     conn: &Connection,
     ctx: u16,
@@ -290,6 +299,12 @@ fn handle(
     // Read-only interrogation of this kennel's own [spawn] grant (§7.12): what it may ask SPAWN for.
     if incoming.code == verb::SPAWN_QUERY {
         return crate::spawn::handle_spawn_query(spawn, incoming, ctx, writer);
+    }
+    // The service-connector broker (§7.13.4a): resolve a mesh capability name against the live
+    // catalogue and broker a connector. A facade-class verb (no registry lock): the request-don't-author
+    // gate is the kennel's signed [[consumes]], and the resolve is against the daemon catalogue.
+    if incoming.code == verb::SVC_CONNECT {
+        return svc_connect(consumes, catalogue, incoming, ctx, writer);
     }
     // The af-unix and INet facades dial host I/O (blocking) and return a descriptor, so they are
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the
@@ -529,6 +544,81 @@ const fn lifecycle_authorized(init: Option<i32>, sender_pid: i32, sender_euid: u
 /// The connect is host-side I/O run inline on the looper for now; moving it to a
 /// worker (so a slow connect cannot head-of-line-block the instance) is the hardening
 /// in `02-4-binder.md` §Threading model.
+/// The service-connector broker (§7.13.4a): resolve a mesh capability name against the live catalogue
+/// and broker a connector, gated by this kennel's signed `[[consumes]]` (request-don't-author).
+///
+/// The broker decision ([`crate::broker::decide`]) maps to a reply status. The connector handoff for a
+/// `Ready` provider (the af-unix fd bridge) and the socket-activation + consume-with-wait of a
+/// `Pending` one are the supervisor's (W6), reached once providers actually run; until then every
+/// enabled provider is `Pending`/`Failed`, so the live outcomes are the deny/not-found/unavailable
+/// gates — all enforced here.
+fn svc_connect(
+    consumes: &[kennel_lib_policy::ConsumeRuntime],
+    catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    incoming: &Incoming,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
+    use crate::broker::Decision;
+    use kennel_lib_binder::service::svc_connect as wire;
+
+    let Some(name) = wire::decode_request(&incoming.data) else {
+        return emit_svc_connect(
+            writer,
+            incoming,
+            ctx,
+            "",
+            Outcome::Deny,
+            status::BAD_REQUEST,
+        );
+    };
+    // Resolve against the live catalogue (an absent catalogue resolves nothing — the gate still runs).
+    let empty = crate::catalogue::Catalogue::default();
+    let decision = catalogue.map_or_else(
+        || crate::broker::decide(consumes, &empty, name),
+        |cat| {
+            let guard = cat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::broker::decide(consumes, &guard, name)
+        },
+    );
+    let (outcome, status) = match decision {
+        Decision::NoGrant => (Outcome::Deny, status::DENIED),
+        Decision::NoProvider => (Outcome::Deny, status::NOT_FOUND),
+        // `NotServing` is a failed provider; `Pending`/`Ready` need the supervisor (W6) to
+        // socket-activate and hand off the connector. Until W6 no provider runs, so all three are
+        // unavailable here — W6 splits `Pending` (activate + consume-with-wait) and `Ready` (connect).
+        Decision::NotServing | Decision::Pending(_) | Decision::Ready(_) => {
+            (Outcome::Error, status::UNAVAILABLE)
+        }
+    };
+    emit_svc_connect(writer, incoming, ctx, name, outcome, status)
+}
+
+/// Audit one `SVC_CONNECT` outcome and reply with the status byte (no connector object on a non-OK).
+fn emit_svc_connect(
+    writer: &Writer,
+    incoming: &Incoming,
+    ctx: u16,
+    name: &str,
+    outcome: Outcome,
+    status: u8,
+) -> Reply {
+    writer.emit(
+        &Event::new(
+            "binder.svc-connect",
+            Resource::Binder,
+            outcome,
+            Source::Kenneld,
+        )
+        .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+        .field("name", Value::untrusted(name.to_owned()))
+        .field("ctx", Value::Uint(u64::from(ctx))),
+    );
+    Reply::Data(one(status))
+}
+
 fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
     let requested = decode_name(&incoming.data);
     let target = requested
