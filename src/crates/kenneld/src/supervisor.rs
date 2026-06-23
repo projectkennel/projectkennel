@@ -95,6 +95,60 @@ where
     }
 }
 
+/// Socket-activate a lazy (`ondemand`) provider on first consume (§7.13.6).
+///
+/// Starts the provider's supervision so it comes up, then is supervised exactly like an eager one.
+/// Type-erased so the binder broker (which erases the daemon's `P`/`L`) can hold it — the same move as
+/// the spawn `Constructor`.
+pub trait ProviderActivator: Send + Sync {
+    /// Bring `provider` up if it is an enabled `ondemand` provider not already activated — idempotent,
+    /// so repeated consumes do not double-start it. A no-op for an unknown or already-running provider.
+    fn activate(&self, provider: &str);
+}
+
+/// The daemon-backed [`ProviderActivator`]: starts a provider's supervision thread, deduped.
+pub struct Activator<P: Privileged, L: PolicyLoader> {
+    shared: Arc<Shared<P, L>>,
+    started: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl<P: Privileged, L: PolicyLoader> Activator<P, L> {
+    /// An activator bound to the daemon state.
+    #[must_use]
+    pub const fn new(shared: Arc<Shared<P, L>>) -> Self {
+        Self {
+            shared,
+            started: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+        }
+    }
+}
+
+impl<P, L> ProviderActivator for Activator<P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    fn activate(&self, provider: &str) {
+        // Dedup: start each provider's supervision at most once for the daemon's life (the
+        // consume-with-wait poll handles the window between activation and ready).
+        {
+            let mut started = self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !started.insert(provider.to_owned()) {
+                return;
+            }
+        }
+        // Only an enabled `ondemand` provider is socket-activated; an `autorun` one is already being
+        // brought up by `autostart`, and an unknown name resolves to nothing.
+        if let Some(prov) = self.shared.ondemand_provider(provider) {
+            let shared = Arc::clone(&self.shared);
+            std::thread::spawn(move || supervise_provider(&shared, prov));
+        }
+    }
+}
+
 /// Run and supervise one provider for the daemon's life: construct it, drive its readiness, and
 /// restart it per its `[service]` discipline ([`on_exit`]) until the discipline gives up or it is done.
 fn supervise_provider<P, L>(shared: &Arc<Shared<P, L>>, prov: EnabledProvider)
