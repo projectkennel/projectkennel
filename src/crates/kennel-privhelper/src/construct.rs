@@ -465,7 +465,18 @@ fn ensure_binderfs(tracer: &kennel_lib_config::Tracer) {
         return;
     }
     tracer.step("construct: `binder` fs absent from /proc/filesystems — modprobe binder_linux");
-    match std::process::Command::new("modprobe")
+    // The privhelper wipes its own environment on entry (`main.rs`), so it has no `PATH` — a bare
+    // `modprobe` would be `ENOENT`. It is also setuid-root, where a PATH-relative exec is an
+    // injection footgun. So resolve modprobe by absolute path: canonical `/sbin` first (FHS), with a
+    // `/usr/sbin` fallback for layouts that place it there.
+    let Some(modprobe) = ["/sbin/modprobe", "/usr/sbin/modprobe"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+    else {
+        tracer.step("construct: no modprobe in /sbin or /usr/sbin — cannot load binder_linux");
+        return;
+    };
+    match std::process::Command::new(modprobe)
         .arg("binder_linux")
         .status()
     {
