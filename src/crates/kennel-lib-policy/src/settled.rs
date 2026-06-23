@@ -839,6 +839,19 @@ pub enum Shape {
     BinderConnector,
 }
 
+impl Shape {
+    /// The canonical kebab-case name (`af-unix`/`dbus-name`/`binder-connector`), for
+    /// display in policy tooling and audit.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AfUnix => "af-unix",
+            Self::DbusName => "dbus-name",
+            Self::BinderConnector => "binder-connector",
+        }
+    }
+}
+
 /// The cross-kennel capability mesh runtime (`07-13-service-catalog.md` §7.13) — the
 /// `[[provides]]`/`[[consumes]]` the broker (§7.13.4) and catalogue read at runtime.
 ///

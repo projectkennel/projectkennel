@@ -231,6 +231,22 @@ fn authored_carriers(p: &SourcePolicy) -> Vec<(String, Option<String>, Option<&T
         }
     }
 
+    // [[provides]] / [[consumes]] — the cross-kennel capability mesh (§7.13).
+    for prov in &p.provides {
+        out.push((
+            label("[[provides]]", prov.name.as_deref()),
+            prov.reason.clone(),
+            prov.threats.as_ref(),
+        ));
+    }
+    for cons in &p.consumes {
+        out.push((
+            label("[[consumes]]", cons.name.as_deref()),
+            cons.reason.clone(),
+            cons.threats.as_ref(),
+        ));
+    }
+
     out
 }
 
@@ -350,6 +366,19 @@ mod tests {
         assert_eq!(f.reason.as_deref(), Some("need host net"));
         assert!(f.title.is_some());
         assert!(!f.residual.is_empty());
+    }
+
+    #[test]
+    fn a_consume_surfaces_its_authored_threat_tag() {
+        let p = parse(
+            "name = \"x\"\n[[consumes]]\nname = \"build-cache\"\nshape = \"binder-connector\"\n\
+             reason = \"use the shared cache\"\nthreats = { exposed = [\"T1.6\"] }\n",
+        );
+        let r = evaluate(&p, &cat());
+        assert!(r
+            .exposures
+            .iter()
+            .any(|f| f.carrier.contains("[[consumes]]") && f.threat_id == "T1.6"));
     }
 
     #[test]
