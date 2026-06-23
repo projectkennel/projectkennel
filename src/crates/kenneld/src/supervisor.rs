@@ -17,9 +17,17 @@
 //! the provider **declared-but-failed**. Backoff doubles each attempt (to a cap) so a provider that
 //! crashes on start does not spin the supervisor.
 
+use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::Duration;
 
+use kennel_lib_control::readiness::Event;
 use kennel_lib_policy::settled::{RestartPolicy, ServiceRuntime};
+
+use crate::catalogue::EnabledProvider;
+use crate::control::{recv_response, Response, StartRequest};
+use crate::server::{run_kennel, PolicyLoader, Shared};
+use crate::Privileged;
 
 /// The cap on a restart backoff, however many attempts have doubled it (§7.13.7, "to a cap").
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
@@ -68,6 +76,102 @@ pub fn on_exit(service: &ServiceRuntime, clean_exit: bool, restarts_so_far: u32)
 fn backoff(initial_ms: u64, restarts_so_far: u32) -> Duration {
     let doubled = initial_ms.saturating_mul(1u64.checked_shl(restarts_so_far).unwrap_or(u64::MAX));
     Duration::from_millis(doubled).min(BACKOFF_CAP)
+}
+
+/// Autostart the enabled `autorun` providers (§7.13.6): each runs in its own supervision thread,
+/// constructed at daemon start and kept up per its signed `[service]` discipline.
+///
+/// Lifecycle-coupled to the daemon, not to any consumer (the `ondemand` set is socket-activated by the
+/// broker instead). Each thread drives that provider's catalogue readiness — `Ready` once constructed,
+/// `Pending` while restarting, `Failed` on crash-loop exhaustion.
+pub fn autostart<P, L>(shared: &Arc<Shared<P, L>>)
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    for prov in shared.autorun_providers() {
+        let shared = Arc::clone(shared);
+        std::thread::spawn(move || supervise_provider(&shared, prov));
+    }
+}
+
+/// Run and supervise one provider for the daemon's life: construct it, drive its readiness, and
+/// restart it per its `[service]` discipline ([`on_exit`]) until the discipline gives up or it is done.
+fn supervise_provider<P, L>(shared: &Arc<Shared<P, L>>, prov: EnabledProvider)
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let id = prov.provider;
+    let mut restarts: u32 = 0;
+    loop {
+        // Construct the provider on a sub-thread — `run_kennel` blocks until the provider exits, like
+        // a `kennel run`, with its status responses going to a throwaway sink (no operator socket).
+        let req = StartRequest {
+            policy: prov.policy_path.clone(),
+            kennel: id.clone(),
+            argv: Vec::new(),
+            cwd: std::path::PathBuf::from("/"),
+            term: String::new(),
+            interactive: false,
+            force: false,
+            watch_paths: Vec::new(),
+            oci_config: None,
+        };
+        let Ok((mut client, mut sink)) = UnixStream::pair() else {
+            eprintln!("kenneld: supervisor: `{id}`: could not make a construction sink");
+            return;
+        };
+        let run_shared = Arc::clone(shared);
+        let run = std::thread::spawn(move || {
+            run_kennel(
+                &run_shared,
+                &req,
+                Vec::new(),
+                &mut sink,
+                None,
+                &crate::spawn::noop_constructor(),
+                None,
+            );
+        });
+        // Read the construction outcome from the sink to drive readiness: `Started` → ready, then park
+        // until the provider exits (`Exited`) or construction fails.
+        let mut clean = false;
+        loop {
+            match recv_response(&mut client) {
+                Ok(Response::Started { .. }) => {
+                    shared.note_provider_event(&id, Event::ConstructionSucceeded);
+                }
+                Ok(Response::Exited { code }) => {
+                    clean = code == 0;
+                    break;
+                }
+                Ok(Response::Error(msg)) => {
+                    eprintln!("kenneld: supervisor: `{id}` construction failed: {msg}");
+                    break;
+                }
+                Ok(_) => {}      // other responses are irrelevant to a headless provider
+                Err(_) => break, // the sink closed when run_kennel returned
+            }
+        }
+        let _ = run.join();
+        match on_exit(&prov.service, clean, restarts) {
+            RestartAction::RestartAfter(delay) => {
+                shared.note_provider_event(&id, Event::Restarting);
+                std::thread::sleep(delay);
+                restarts = restarts.saturating_add(1);
+            }
+            RestartAction::Fail => {
+                eprintln!("kenneld: supervisor: `{id}` declared-but-failed (crash-loop / never)");
+                shared.note_provider_event(&id, Event::CrashLoopExhausted);
+                return;
+            }
+            RestartAction::Done => {
+                shared.note_provider_event(&id, Event::IdleReaped);
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

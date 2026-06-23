@@ -140,6 +140,12 @@ pub trait PolicyLoader {
     fn build_catalogue(&self) -> crate::catalogue::Catalogue {
         crate::catalogue::Catalogue::default()
     }
+
+    /// The enabled providers (§7.13.6) — the membership the catalogue projects *and* the supervisor
+    /// (W6) autostarts (the `autorun` subset). Default empty (a loader with no enablement set).
+    fn enabled_providers(&self) -> Vec<crate::catalogue::EnabledProvider> {
+        Vec::new()
+    }
 }
 
 /// The identity and resources of the user this daemon serves.
@@ -294,6 +300,33 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             *guard = cat;
         }
         n
+    }
+
+    /// Drive a provider's readiness through the W2 machine (§7.13.7) — the supervisor (W6) raises a
+    /// construction/restart/crash-loop event as it runs the provider. A no-op if the provider is not
+    /// catalogued or the transition is illegal.
+    pub fn note_provider_event(&self, provider: &str, event: kennel_lib_control::readiness::Event) {
+        if let Ok(mut guard) = self.catalogue.lock() {
+            guard.apply_event(provider, event);
+        }
+    }
+
+    /// A handle to the live catalogue, for the supervisor's autostart thread (§7.13.6). Cloning the
+    /// `Arc` lets a supervision thread drive readiness without borrowing `self`.
+    #[must_use]
+    pub fn catalogue_handle(&self) -> std::sync::Arc<Mutex<crate::catalogue::Catalogue>> {
+        std::sync::Arc::clone(&self.catalogue)
+    }
+
+    /// The enabled **`autorun`** providers (§7.13.6) the supervisor starts at daemon boot — the eager
+    /// subset of the enablement scan (the lazy `ondemand` ones are socket-activated on first consume).
+    #[must_use]
+    pub fn autorun_providers(&self) -> Vec<crate::catalogue::EnabledProvider> {
+        self.loader
+            .enabled_providers()
+            .into_iter()
+            .filter(|p| p.enablement == crate::catalogue::Enablement::Autorun)
+            .collect()
     }
 
     /// Prepare a kennel's SSH egress (§7.10): mint a synthetic key per grant, register
@@ -691,6 +724,10 @@ where
     P: Privileged + Clone + Send + Sync + 'static,
     L: PolicyLoader + Send + Sync + 'static,
 {
+    // Autostart the enabled `autorun` providers (§7.13.6) before serving control requests — each in
+    // its own supervision thread, lifecycle-coupled to the daemon (the `ondemand` set is socket-
+    // activated by the broker on first consume instead).
+    crate::supervisor::autostart(shared);
     for conn in listener.incoming() {
         let mut conn = conn?;
         // Boundary 7 (04-trust-boundaries.md): only the user this daemon serves

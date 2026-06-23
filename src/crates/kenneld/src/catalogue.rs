@@ -113,6 +113,12 @@ pub struct EnabledProvider {
     pub enablement: Enablement,
     /// The capabilities the provider offers (`[[provides]]`).
     pub provides: Vec<ProvideRuntime>,
+    /// The enablement link's target — the signed policy path the supervisor (W6) runs to bring the
+    /// provider up. (The catalogue projection ignores it; the autostart runtime reads it.)
+    pub policy_path: std::path::PathBuf,
+    /// The provider's supervision discipline (`[service]`, §7.13.7) — the restart policy the
+    /// supervisor executes. The default discipline when the policy declares no `[service]`.
+    pub service: kennel_lib_policy::settled::ServiceRuntime,
 }
 
 /// A provider in the catalogue: who signed it, its tier/posture, its readiness, and what it offers.
@@ -489,6 +495,12 @@ mod tests {
             tier,
             enablement: en,
             provides: offers,
+            policy_path: std::path::PathBuf::new(),
+            service: kennel_lib_policy::settled::ServiceRuntime {
+                restart: kennel_lib_policy::settled::RestartPolicy::OnFailure,
+                backoff_ms: 500,
+                max_attempts: 5,
+            },
         }
     }
 

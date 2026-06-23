@@ -229,6 +229,20 @@ impl PolicyLoader for TrustStoreLoader {
         self.current_keys().map(|s| s.keys).unwrap_or_default()
     }
 
+    fn enabled_providers(&self) -> Vec<crate::catalogue::EnabledProvider> {
+        let store = match self.current_keys() {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!("kenneld: enablement: trust store unreadable, no providers: {e}");
+                return Vec::new();
+            }
+        };
+        // The enabled providers, verified against the trust store (warnings logged).
+        crate::enablement::scan(&self.enablement_dirs, &store.keys, |w| {
+            eprintln!("kenneld: enablement: {w}");
+        })
+    }
+
     fn build_catalogue(&self) -> crate::catalogue::Catalogue {
         let store = match self.current_keys() {
             Ok(store) => store,
@@ -237,13 +251,10 @@ impl PolicyLoader for TrustStoreLoader {
                 return crate::catalogue::Catalogue::default();
             }
         };
-        // Membership: the enabled providers, verified against the trust store (warnings logged).
-        let providers = crate::enablement::scan(&self.enablement_dirs, &store.keys, |w| {
-            eprintln!("kenneld: catalogue: {w}");
-        });
-        // Projection: gate each `[[provides]]`; an unauthorized reserved claim is dropped and audited.
+        // Projection over the enabled membership: gate each `[[provides]]`; an unauthorized reserved
+        // claim is dropped and audited.
         crate::catalogue::Catalogue::project(
-            &providers,
+            &self.enabled_providers(),
             &store.vendor_key_ids,
             &self.reserved,
             |name, provider| {

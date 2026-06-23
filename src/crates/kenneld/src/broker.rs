@@ -124,6 +124,12 @@ mod tests {
                 endpoint: format!("/run/{who}.sock"),
                 key: key.map(ToOwned::to_owned),
             }],
+            policy_path: std::path::PathBuf::new(),
+            service: kennel_lib_policy::settled::ServiceRuntime {
+                restart: kennel_lib_policy::settled::RestartPolicy::OnFailure,
+                backoff_ms: 500,
+                max_attempts: 5,
+            },
         }
     }
 
