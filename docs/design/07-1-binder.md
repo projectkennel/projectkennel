@@ -25,8 +25,10 @@ but the application expects to find a conforming socket or device at a well-know
 path. Each is mediated at the protocol level rather than by forwarding a raw socket:
 
 - **D-Bus** is mediated at method-call granularity by the `IDBus` facade (§7.7).
-- **Wayland** carries an unresolved residual for clipboard access (§7.6.8, §11.1)
-  with no structural enforcement path.
+- **Wayland** is not a binder facade at all: a graphical workload's display server is a
+  nested inner compositor constructed in a GUI-service kennel (§7.14), reached as a `provide`/
+  `consume` mesh service, so clipboard and screencopy are isolated by construction rather than
+  by filtering a forwarded socket.
 - **X11** is categorically denied (§7.8) because the protocol has no confinement
   vocabulary.
 
@@ -36,10 +38,9 @@ raw socket grants auditable at connect time. What is needed is enforcement and
 audit at call time, with kenneld as the policy decision point for every operation.
 
 A second problem is inter-kennel communication. §8.8 documents inter-kennel
-isolation as an invariant with no designed escape. The MCP topology (§7.1.9)
-requires kennels to communicate — an agent kennel calling tool servers, tool
-servers spawning kennels per invocation — without any of them holding ambient
-access to each other.
+isolation as an invariant with no designed escape. Some topologies require two
+kennels to communicate — a client kennel calling a standing service kennel
+(§7.1.6) — without either holding ambient access to the other.
 
 Both problems have the same solution: a kernel-enforced IPC primitive where
 kenneld is the context manager, policy enforcement is per-call, and no kennel
@@ -191,7 +192,6 @@ The reserved services and their roles:
 |---|---|
 | `org.projectkennel.IAfUnix/default` | Brokered AF_UNIX connections — kenneld connects on the workload's behalf and returns the fd (§7.1.5) |
 | `org.projectkennel.IDBus/default` | Mediated D-Bus access; method allowlist enforced per-call |
-| `org.projectkennel.IWayland/default` | Mediated Wayland; clipboard and screencopy gated; closes T2.6 |
 
 Kennel spawning is **not** a reserved service — it is a control-socket operation (§7.1.7),
 not a binder node. Policy/service introspection is **not** a reserved service either — node 0
@@ -247,15 +247,15 @@ reason = "audio via PipeWire"
 
 # User-defined service — registered by a service process the policy author provides
 [[binder.provide]]
-name   = "mcp-filesystem"
-accept_from = ["agent-kennel"]
-reason = "receive tool calls from the agent kennel"
+name   = "build-cache"
+accept_from = ["builder"]
+reason = "serve cached build artefacts to builder kennels"
 
 # Services this kennel may look up and call
 [[binder.consume]]
-name   = "mcp-filesystem"
-from   = "mcp-filesystem-kennel"
-reason = "send tool calls to the filesystem MCP server"
+name   = "build-cache"
+from   = "cache-server"
+reason = "query the shared build cache"
 ```
 
 `binder.provide` and `binder.consume` cover user-defined services only. The
@@ -302,10 +302,9 @@ This closes the gap where a workload could detect socket paths that appeared in
 its constructed view even when it was not supposed to use them — with
 `org.projectkennel.IAfUnix/default`, paths do not appear in the view at all.
 
-**`org.projectkennel.IDBus/default`** and **`org.projectkennel.IWayland/default`** are
-kenneld-provided but implemented via protocol-specific processes that kenneld spawns and
-supervises (an in-kennel facade that parses the adversarial wire and an operator-context
-delegate that holds the host connection — §7.7.2 for D-Bus). The binder node is owned by
+**`org.projectkennel.IDBus/default`** is kenneld-provided but implemented via protocol-specific
+processes that kenneld spawns and supervises (an in-kennel facade that parses the adversarial wire and
+an operator-context delegate that holds the host connection — §7.7.2). The binder node is owned by
 kenneld; the facade/delegate pair handles the foreign protocol on kenneld's behalf. From the
 workload's perspective, the node is kenneld.
 
@@ -314,7 +313,6 @@ The protocol facades are:
 | Service | Replaces | Translation |
 |---|---|---|
 | `org.projectkennel.IDBus/default` | a raw bus-socket grant + §7.7 | `facade-dbus` parses the D-Bus wire into typed messages; the `host-dbus` delegate filters them through the compiled `[dbus]` table and reconstructs the call to the real bus; kenneld builds the facade/delegate pair + conduit at construction only (§7.7.2 — the per-message check runs in the delegate, not the daemon) |
-| `org.projectkennel.IWayland/default` | raw Wayland socket grant + §7.6.8 | Speaks Wayland wire protocol inbound; forwards core rendering directly; gates `wl_data_device` and screencopy via kenneld; closes T2.6 |
 
 ### Service process lifetime
 
@@ -351,17 +349,17 @@ For a cross-instance lookup to succeed, two conditions must both hold:
    name and the consuming kennel's ctx in `accept_from`.
 
 ```toml
-# Consuming kennel (e.g. agent-kennel)
+# Consuming kennel (e.g. builder)
 [[binder.consume]]
-name = "mcp-filesystem"
-from = "mcp-filesystem-kennel"
-reason = "send tool calls to the filesystem MCP server"
+name = "build-cache"
+from = "cache-server"
+reason = "query the shared build cache"
 
-# Providing kennel (e.g. mcp-filesystem-kennel)
+# Providing kennel (e.g. cache-server)
 [[binder.provide]]
-name = "mcp-filesystem"
-accept_from = ["agent-kennel"]
-reason = "receive tool calls from the agent"
+name = "build-cache"
+accept_from = ["builder"]
+reason = "serve cached build artefacts to builder kennels"
 ```
 
 A unilateral declaration on either side produces a `getService` denial. kenneld
@@ -373,7 +371,7 @@ until the service is registered or the consuming kennel exits.
 
 Cross-instance policy requires naming the peer kennel in the `from` /
 `accept_from` fields. These names appear in policy files, not in the binder
-protocol seen by the workload. The workload sees a service name (`mcp-filesystem`)
+protocol seen by the workload. The workload sees a service name (`build-cache`)
 and a binder node reference; it does not see the peer's ctx or any other kennel
 identity. The naming is a policy-authoring concern, not a runtime information
 leak.
@@ -401,8 +399,8 @@ The audit record for a cross-instance transaction:
 ```jsonl
 {
   "ts": "...", "event": "binder.cross",
-  "from_ctx": "agent", "to_ctx": "mcp-filesystem",
-  "service": "mcp-filesystem", "transaction_code": 1,
+  "from_ctx": "builder", "to_ctx": "cache-server",
+  "service": "build-cache", "transaction_code": 1,
   "payload_bytes": 312, "outcome": "allow"
 }
 ```
@@ -435,60 +433,33 @@ requires an explicit `[ipc.spawn]` declaration in the spawned kennel's template.
 | Section | Status after §7.1 |
 |---|---|
 | §7.7 D-Bus | Mediated by the `facade-dbus`/`host-dbus` pair on the kennel's binderfs instance (§7.7.2). |
-| §7.6.8 Wayland clipboard residual | Closed structurally by the `wayland` service process gating `wl_data_device`. |
-| §11.1 Wayland clipboard open question | Resolved. |
 | §8.8 Inter-kennel isolation | Default unchanged. Cross-instance IPC requires explicit `[[binder.consume]]` + `[[binder.provide]]` declarations on both sides. Kennels without `[binder]` sections have no IPC surface at all. |
 
-## 7.1.9 MCP topology
+## 7.1.9 Cross-instance worked example
 
-The canonical worked example. An agent kennel calls tool server kennels via
-cross-instance binder transactions; each tool server spawns a kennel per
-invocation with the narrowest possible policy.
+A worked example, end to end. A `builder` kennel consumes a `build-cache` service
+that a `cache-server` kennel provides; neither holds ambient access to the other.
 
 ```
-agent-kennel
-  [[binder.consume]] name = "mcp-filesystem", from = "mcp-fs-kennel"
-  [[binder.consume]] name = "mcp-shell",      from = "mcp-shell-kennel"
+builder
+  [[binder.consume]] name = "build-cache", from = "cache-server"
 
-mcp-fs-kennel
-  [[binder.provide]] name = "mcp-filesystem", accept_from = ["agent-kennel"]
-  [ipc.spawn] template = "file-tool@v1"
-
-mcp-shell-kennel
-  [[binder.provide]] name = "mcp-shell", accept_from = ["agent-kennel"]
-  [ipc.spawn] template = "shell-sandbox@v1"
-
-shell-sandbox kennel (spawned per tool invocation — narrowest policy)
-  fs.read:  [project/**]
-  fs.write: [/tmp/tool-<ctx>/**]
-  net:      none
-  [binder]: (empty — leaf, no IPC surface)
+cache-server
+  [[binder.provide]] name = "build-cache", accept_from = ["builder"]
 ```
 
-The agent sends MCP JSON-RPC as binder transaction payloads to the tool server
-kennels. Each tool server spawns a kennel per invocation, executes the tool, and
-returns the result. The spawned kennel has no binder declarations — it is
-completely isolated from the bus.
+`builder` issues `getService("build-cache")`; kenneld resolves it cross-instance
+(§7.1.6), validates both sides' declarations, and returns a tunnel node reference.
+`builder` issues transactions against it; kenneld relays each as a flat payload to
+the `cache-server` service process and relays the reply back, framing and parsing
+none of the payload itself.
 
-The audit trail:
-
-- `binder.cross` events for every agent → tool server transaction, recording
-  service name, payload size, and outcome.
-- `kennel.spawn` events for each tool invocation kennel, recording effective
-  policy.
-- Filesystem and network events inside the spawned kennel, tagged with its
-  scoped name and correlated to the originating transaction via the transaction
-  code and calling kennel ctx.
-
-A security team can reconstruct which agent request caused which file access in
-which kennel from the JSONL log without any application-layer instrumentation.
+The audit trail correlates the two kennels without application-layer
+instrumentation: a `binder.cross` event records each transaction — service name,
+payload size, outcome, and the calling and providing ctx — so a security team can
+reconstruct which client request reached which service from the JSONL log.
 
 ## 7.1.10 Residuals
-
-**Wayland rendering trust.** The `wayland` service process forwards core
-rendering requests without inspection. Compositor-side robustness against
-malformed requests is not Kennel's responsibility. The confinement claim covers
-clipboard and screencopy isolation only.
 
 **Cross-instance payload opacity.** kenneld validates transaction object types
 (rejecting fd and pointer objects cross-instance) but does not inspect payload
@@ -536,8 +507,6 @@ Tests in `tests/binder/` and `tests/facades/`:
     `BR_DEAD_REPLY`.
 11. `dbus` service: allowed method call returns real bus response; denied method
     call returns `org.freedesktop.DBus.Error.AccessDenied`.
-14. `wayland` service: `wl_data_device` creation blocked when
-    `clipboard.read = false` and `clipboard.write = false`.
 15. Policy validation: `[[binder.provide]]` or `[[binder.consume]]` with a
     `org.projectkennel.*` name is rejected at policy compile time with a clear error.
 16. `kennel check`: missing `CONFIG_ANDROID_BINDERFS` reported as fatal.

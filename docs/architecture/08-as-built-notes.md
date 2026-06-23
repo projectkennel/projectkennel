@@ -51,9 +51,18 @@ narration is kept here; the chapter named is the source of truth.
 - **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
   §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
   bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
-  kennel's services through kenneld (the MCP topology) is designed, not built, as is
+  kennel's services through kenneld is designed, not built, as is
   `SpawnKennel`-over-binder. kenneld owns the reserved nodes; the relay grows kenneld's TCB and
   is tracked as a new threat surface.
+- **Confined GUI — the nested-compositor display service** (`07-14-confined-gui.md`) — designed, not
+  built. A graphical workload's display server is an upstream inner compositor (cage / Weston / sway) run
+  inside an operator-declared GUI-service kennel, one instance per consuming kennel, reached as a `provide`/
+  `consume` mesh capability (`org.projectkennel.wayland`); the GUI-service kennel holds the one host-compositor leg
+  and hands each inner compositor a connected host fd (`WAYLAND_SOCKET`), so the host socket path is absent
+  from the workload's view. Interactive file access is a Kennel-native file broker (one consented file → one
+  fd). Depends on the §7.13 service mesh; its as-built contract lands in the architecture corpus across the
+  build. No host-compositor enforcement is depended on — `security-context-v1` in the inner compositor is
+  optional defense-in-depth, not a requirement.
 - **First-party in-kennel OCI unpacker** (`07-11-oci.md`) — designed, not built. The unpack
   runs `skopeo`+`umoci` confined inside the signed `oci-fetch@v1` view at workload authority
   (never in the daemon closure), so the adversarial-input security argument is already met by
@@ -65,13 +74,6 @@ narration is kept here; the chapter named is the source of truth.
   the rootfs is RO-mounted; `fs-verity`'s marginal value is narrow runtime defence-in-depth
   against offline tampering of the *cached* unpacked rootfs by a separate local attacker — to be
   weighed against that residual before committing the mechanism.
-- **In-kennel MCP interposer** (`07-12-dynamic-spawn.md` §7.12.5) — designed, not built. The
-  dynamic-spawn capability ships usable without in-kennel MCP mediation; the interposer is an
-  operator-opt-in, application-semantic filter (tool allow-listing/audit) — a small MCP-aware
-  kennel wired between requester and tool, parsing JSON-RPC because it is confined and
-  disposable, not because the daemon does. Its absence is explicit, not a gap: the cross-kennel
-  composition residual (T3.9 R2) is accepted-and-tagged, not closed, so this changes no ship
-  posture.
 - **`[container]` runtime** (`05-templates.md` §5.7) — there is no container-runtime integration,
   and the `[container]` config surface has been **removed from the schema** (rejected at parse)
   rather than kept as design-level language. No shipped template uses it: `containerised-service`

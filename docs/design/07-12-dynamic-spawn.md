@@ -224,10 +224,12 @@ daemon.
 confined-stdio-service transport; MCP is a convention on top of it that Kennel cannot see, exactly as
 an LSP server or any other JSON-RPC-over-stdio tool would ride the same channel. Teaching `kenneld`
 `tools/call` would be the error the project refuses elsewhere — a per-message mediation surface against
-the single-chokepoint invariant, and a spec dependency in the TCB. Application-semantic mediation
-(tool allow-listing, audit) belongs in an *opt-in in-kennel interposer*: a small MCP-aware kennel the
-operator wires between requester and tool, parsing JSON-RPC because it is confined and disposable, not
-because the daemon does.
+the single-chokepoint invariant, and a spec dependency in the TCB. Kennel writes no MCP interposer of its
+own either: a first-party one re-imports the exact `tools/call` parsing this primitive keeps out. The
+principled form of application-semantic mediation (tool allow-listing, audit), if an operator wants it, is
+an *existing* MCP proxy confined like any other vendored tool — its code, dropped into a disposable kennel
+between requester and tool, the way `oci-fetch` confines `skopeo`/`umoci` — not a Kennel-authored
+interposer. Absent one, the cross-kennel composition residual is accepted-and-tagged (R2).
 
 `stderr` on its own pipe is the one detail worth stating explicitly: a traceback, compiler warning, or
 panic in the spawned tool flows out a separate descriptor, so the framed JSON-RPC channel is never

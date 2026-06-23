@@ -422,9 +422,9 @@ must know them.
 
 ## What this chapter does not cover
 
-- **MCP semantics** — tool allow-listing and call audit live in the opt-in in-kennel **interposer**
-  (§7.12.5), a confined disposable kennel the operator wires between requester and tool;
-  `kenneld` does not understand MCP.
+- **MCP semantics** — `kenneld` does not understand MCP, and Kennel builds no interposer for it
+  (§7.12.5). Tool allow-listing and call audit, if an operator wants them, are an *existing* MCP proxy
+  confined like any vendored tool, not a Kennel-authored component.
 - **Fleet observability** — `kennel ps` over ephemeral spawns and what-spawned-what is the
   live-topology surface.
 - **The `[spawn]` / `[[mutable]]` policy schema** — [`02-2-config-schema.md`](02-2-config-schema.md).

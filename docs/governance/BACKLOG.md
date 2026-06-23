@@ -59,6 +59,13 @@ documentation sweep.
 
 ## Candidate (promote-if-needed, not a workstream)
 
+- **Cross-instance binder reach — a kennel offering a rich binder interface to other kennels.** The mesh's
+  `binder-connector` shape (§7.13.2) is defined and the cross-instance mechanism is designed (§7.1.6,
+  designed-not-built per 08-as-built §8.1), but no provider offers a binder node over the mesh today:
+  agent↔tool composition is dynamic spawn with a minted stdio channel (§7.12), not a standing binder service.
+  Promote when a standing service genuinely needs to publish a binder interface cross-kennel; until then
+  `af-unix` and `dbus-name` are the shapes with consumers.
+
 - **Generalise policy-pinned-to-bundled-binaries.** A reusable service-kennel build mechanism for the
   moment a binary-bundling service kennel needs it. *(It lost its first presumed consumer: confined GUI no
   longer bundles version-pinned Flatpak proxy/portal binaries — the nested compositor runs unmodified, with
