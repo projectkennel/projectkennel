@@ -113,6 +113,12 @@ pub struct EnabledProvider {
     pub enablement: Enablement,
     /// The capabilities the provider offers (`[[provides]]`).
     pub provides: Vec<ProvideRuntime>,
+    /// The enablement link's target — the signed policy path the supervisor (W6) runs to bring the
+    /// provider up. (The catalogue projection ignores it; the autostart runtime reads it.)
+    pub policy_path: std::path::PathBuf,
+    /// The provider's supervision discipline (`[service]`, §7.13.7) — the restart policy the
+    /// supervisor executes. The default discipline when the policy declares no `[service]`.
+    pub service: kennel_lib_policy::settled::ServiceRuntime,
 }
 
 /// A provider in the catalogue: who signed it, its tier/posture, its readiness, and what it offers.
@@ -259,6 +265,24 @@ impl Catalogue {
             p.readiness = readiness;
             readiness
         })
+    }
+
+    /// Drive a provider's readiness through the W2 state machine (§7.13.7): apply `event` to its
+    /// current state and store the result, returning the new readiness.
+    ///
+    /// `None` if there is no such provider **or** the transition is illegal from the current state —
+    /// a no-op-and-audit, never a silent forced change (`Failed` is sticky, etc.). The supervisor
+    /// raises the events; the machine ([`kennel_lib_control::readiness::Readiness::on`]) decides what
+    /// each means. This is the event-driven counterpart of the direct [`set_readiness`](Self::set_readiness).
+    pub fn apply_event(
+        &mut self,
+        provider: &str,
+        event: kennel_lib_control::readiness::Event,
+    ) -> Option<Readiness> {
+        let p = self.providers.get_mut(provider)?;
+        let next = p.readiness.on(event)?;
+        p.readiness = next;
+        Some(next)
     }
 
     /// The catalogued capability names (the topology surface reads this, §7.13.7).
@@ -471,6 +495,12 @@ mod tests {
             tier,
             enablement: en,
             provides: offers,
+            policy_path: std::path::PathBuf::new(),
+            service: kennel_lib_policy::settled::ServiceRuntime {
+                restart: kennel_lib_policy::settled::RestartPolicy::OnFailure,
+                backoff_ms: 500,
+                max_attempts: 5,
+            },
         }
     }
 
@@ -615,6 +645,48 @@ mod tests {
             Readiness::Ready
         );
         assert_eq!(cat.set_readiness("absent", Readiness::Ready), None);
+    }
+
+    #[test]
+    fn apply_event_drives_readiness_through_the_machine() {
+        use kennel_lib_control::readiness::Event;
+        let mut cat = project_with_rejections(
+            &[enabled(
+                "svc",
+                "k",
+                Tier::Host,
+                Enablement::Autorun,
+                vec![provide("x.y", Shape::AfUnix, "/run/x", None)],
+            )],
+            &vendor(&[]),
+            &[],
+        )
+        .0;
+        // Pending → Ready on a sealed construction; Ready → Pending on a restart.
+        assert_eq!(
+            cat.apply_event("svc", Event::ConstructionSucceeded),
+            Some(Readiness::Ready)
+        );
+        assert_eq!(
+            cat.apply_event("svc", Event::Restarting),
+            Some(Readiness::Pending)
+        );
+        // An illegal transition is a no-op (Pending cannot be "restarting"); a missing provider too.
+        assert_eq!(cat.apply_event("svc", Event::Restarting), None);
+        assert_eq!(
+            cat.resolve("x.y").first().expect("y").readiness,
+            Readiness::Pending
+        );
+        assert_eq!(
+            cat.apply_event("absent", Event::ConstructionSucceeded),
+            None
+        );
+        // Crash-loop exhaustion is sticky-Failed thereafter.
+        assert_eq!(
+            cat.apply_event("svc", Event::CrashLoopExhausted),
+            Some(Readiness::Failed)
+        );
+        assert_eq!(cat.apply_event("svc", Event::ConstructionSucceeded), None);
     }
 
     #[test]

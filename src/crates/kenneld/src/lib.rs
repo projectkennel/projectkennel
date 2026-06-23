@@ -43,6 +43,7 @@ pub mod server;
 pub mod spawn;
 pub mod ssh;
 pub mod sshd;
+pub mod supervisor;
 pub mod tripwire;
 
 // The control-socket wire protocol now lives in its own crate so the unprivileged

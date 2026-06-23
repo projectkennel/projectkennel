@@ -14,10 +14,18 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use kennel_lib_config::EnablementDir;
-use kennel_lib_policy::settled::ProvideRuntime;
+use kennel_lib_policy::settled::{ProvideRuntime, RestartPolicy, ServiceRuntime};
 use kennel_lib_policy::KeySet;
 
 use crate::catalogue::{EnabledProvider, Enablement, Tier};
+
+/// The supervision discipline a provider with no `[service]` block gets — the schema defaults
+/// (§7.13.7): restart on failure, 500 ms initial backoff, five attempts in the crash-loop window.
+const DEFAULT_SERVICE: ServiceRuntime = ServiceRuntime {
+    restart: RestartPolicy::OnFailure,
+    backoff_ms: 500,
+    max_attempts: 5,
+};
 
 /// Scan the enablement directories and build the enabled-provider set.
 ///
@@ -49,7 +57,7 @@ pub fn scan(
                 continue; // an earlier (preferred) directory already enabled this provider
             }
             match load_provider(link, keys) {
-                Ok(Some((signing_key_id, offers))) => {
+                Ok(Some((signing_key_id, offers, service))) => {
                     seen.insert(provider.to_owned());
                     out.push(EnabledProvider {
                         provider: provider.to_owned(),
@@ -61,6 +69,8 @@ pub fn scan(
                             Enablement::Ondemand
                         },
                         provides: offers,
+                        policy_path: link.clone(),
+                        service,
                     });
                 }
                 Ok(None) => warn(format!(
@@ -79,14 +89,15 @@ pub fn scan(
 fn load_provider(
     link: &Path,
     keys: &KeySet,
-) -> Result<Option<(String, Vec<ProvideRuntime>)>, String> {
+) -> Result<Option<(String, Vec<ProvideRuntime>, ServiceRuntime)>, String> {
     let bytes = std::fs::read(link).map_err(|e| format!("cannot read: {e}"))?;
     let (settled, key_id) =
         kennel_lib_policy::verify_settled_signed(&bytes, keys).map_err(|e| e.to_string())?;
     if settled.mesh.provides.is_empty() {
         return Ok(None);
     }
-    Ok(Some((key_id, settled.mesh.provides)))
+    let service = settled.service.unwrap_or(DEFAULT_SERVICE);
+    Ok(Some((key_id, settled.mesh.provides, service)))
 }
 
 #[cfg(test)]
