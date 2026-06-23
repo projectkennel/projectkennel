@@ -105,6 +105,20 @@
         }
       ]
     },
+    "provides": {
+      "description": "`[[provides]]` — capabilities this kennel offers to other kennels over the mesh.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/provides_entry"
+      }
+    },
+    "consumes": {
+      "description": "`[[consumes]]` — capabilities this kennel reaches over the mesh.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/consumes_entry"
+      }
+    },
     "unsafe": {
       "description": "Advisory footgun sub-sections (scoping enforced by the PID namespace + seccomp).",
       "allOf": [
@@ -1138,6 +1152,97 @@
         },
         "reason": {
           "description": "Why this service is consumed (required).",
+          "type": "string"
+        },
+        "threats": {
+          "description": "Threat tags.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ]
+        }
+      }
+    },
+    "provides_entry": {
+      "description": "One `[[provides]]` entry — a capability this kennel offers over the mesh (§7.13.1).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The capability's public identifier; a reserved `org.projectkennel.*` name needs the service-class context (§7.13.5).",
+          "type": "string"
+        },
+        "shape": {
+          "description": "The typed transport (§7.13.2).",
+          "type": "string",
+          "enum": [
+            "af-unix",
+            "dbus-name",
+            "binder-connector"
+          ]
+        },
+        "endpoint": {
+          "description": "Where the capability is exposed, in the provider's own view.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Optional private match token, never advertised in the catalogue.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why this capability is offered (required).",
+          "type": "string"
+        },
+        "threats": {
+          "description": "Threat tags.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ]
+        }
+      }
+    },
+    "consumes_entry": {
+      "description": "One `[[consumes]]` entry — a capability this kennel reaches over the mesh (§7.13.1).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The capability's public identifier, resolved against the catalogue at runtime.",
+          "type": "string"
+        },
+        "shape": {
+          "description": "The transport it expects; the broker refuses a mismatched shape (§7.13.4).",
+          "type": "string",
+          "enum": [
+            "af-unix",
+            "dbus-name",
+            "binder-connector"
+          ]
+        },
+        "at": {
+          "description": "Where the brokered connector is delivered, in this kennel's own view.",
+          "type": "string"
+        },
+        "env": {
+          "description": "Environment variable(s) synthesised into this kennel to name the connector.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "key": {
+          "description": "Optional private match token; must match the provider's.",
+          "type": "string"
+        },
+        "required": {
+          "description": "Whether the capability's absence fails kennel construction (default true).",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why this capability is consumed (required).",
           "type": "string"
         },
         "threats": {

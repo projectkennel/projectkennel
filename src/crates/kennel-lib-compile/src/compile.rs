@@ -112,6 +112,7 @@ pub fn compile(
     crate::ssh::validate(&effective)?;
     let mut warnings = crate::unix::validate(&effective)?;
     warnings.extend(crate::binder::validate(&effective)?);
+    warnings.extend(crate::mesh::validate(&effective, trust.is_service_class())?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
@@ -183,6 +184,7 @@ pub fn compile_leaf(
     crate::ssh::validate(&effective)?;
     let mut warnings = crate::unix::validate(&effective)?;
     warnings.extend(crate::binder::validate(&effective)?);
+    warnings.extend(crate::mesh::validate(&effective, trust.is_service_class())?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
     let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
@@ -425,6 +427,7 @@ fn assemble(
         unix: translated.unix.clone(),
         identity: translated.identity.clone(),
         binder: translated.binder.clone(),
+        mesh: translated.mesh.clone(),
         dbus: translated.dbus.clone(),
         audit: translated.audit.clone(),
         env: translated.env.clone(),

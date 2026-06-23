@@ -235,6 +235,18 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
         identity: merge(&parent.identity, &child.identity, fold_identity),
         binder: merge(&parent.binder, &child.binder, fold_binder),
+        // `[[provides]]` / `[[consumes]]` fold like a bare list (the SSH set model): a child's
+        // non-empty list replaces the inherited one, an absent one inherits (§7.13).
+        provides: if child.provides.is_empty() {
+            parent.provides.clone()
+        } else {
+            child.provides.clone()
+        },
+        consumes: if child.consumes.is_empty() {
+            parent.consumes.clone()
+        } else {
+            child.consumes.clone()
+        },
         unsafe_section: merge(&parent.unsafe_section, &child.unsafe_section, fold_unsafe),
         env: merge(&parent.env, &child.env, fold_env),
         seccomp: merge(&parent.seccomp, &child.seccomp, fold_seccomp),

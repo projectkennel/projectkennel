@@ -195,6 +195,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         },
         identity: kennel_lib_policy::IdentityRuntime::default(),
         binder: kennel_lib_policy::BinderRuntime::default(),
+        mesh: kennel_lib_policy::MeshRuntime::default(),
         dbus: kennel_lib_policy::DbusRuntime::default(),
         audit: kennel_lib_policy::AuditRuntime::default(),
         env: kennel_lib_policy::EnvRuntime::default(),
