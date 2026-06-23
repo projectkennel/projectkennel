@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use kennel_lib_config::ReservedNamespace;
+use kennel_lib_config::{EnablementDir, ReservedNamespace};
 use kennel_lib_policy::KeySet;
 use kennel_lib_spawn::{Plan, RuntimeSubstitutions};
 
@@ -106,6 +106,8 @@ pub struct TrustStoreLoader {
     vendor_dir: Option<PathBuf>,
     /// Host-declared reserved namespaces (§7.13.5a) for the runtime reserved-provide gate.
     reserved: Vec<ReservedNamespace>,
+    /// The operator enablement directories (§7.13.6) the catalogue's membership is scanned from.
+    enablement_dirs: Vec<EnablementDir>,
 }
 
 impl TrustStoreLoader {
@@ -116,24 +118,28 @@ impl TrustStoreLoader {
             source: TrustSource::Dirs(vec![dir.to_path_buf()]),
             vendor_dir: None,
             reserved: Vec::new(),
+            enablement_dirs: Vec::new(),
         }
     }
 
     /// Build the **production** daemon loader: a `vendor_dir` searched first for provenance, then the
-    /// `rest` dirs (admin trust dir, then the user's), and the host-declared `reserved` namespaces for
-    /// the reserved-provide gate. A vendor key wins an id clash with a `rest` key (loaded first), so an
-    /// admin or user cannot shadow the maintainer key; vendor keys are the `org.projectkennel.*`
-    /// authority. A missing dir is skipped (not an error).
+    /// `rest` dirs (admin trust dir, then the user's), the host-declared `reserved` namespaces for the
+    /// reserved-provide gate, and the `enablement_dirs` the catalogue's membership is scanned from. A
+    /// vendor key wins an id clash with a `rest` key (loaded first), so an admin or user cannot shadow
+    /// the maintainer key; vendor keys are the `org.projectkennel.*` authority. A missing dir is
+    /// skipped (not an error).
     #[must_use]
     pub fn from_trust_dirs(
         vendor_dir: Option<PathBuf>,
         rest: &[&Path],
         reserved: Vec<ReservedNamespace>,
+        enablement_dirs: Vec<EnablementDir>,
     ) -> Self {
         Self {
             source: TrustSource::Dirs(rest.iter().map(|d| d.to_path_buf()).collect()),
             vendor_dir,
             reserved,
+            enablement_dirs,
         }
     }
 
@@ -154,6 +160,7 @@ impl TrustStoreLoader {
             source: TrustSource::Dirs(dirs.iter().map(|d| d.to_path_buf()).collect()),
             vendor_dir: None,
             reserved: Vec::new(),
+            enablement_dirs: Vec::new(),
         }
     }
 
@@ -164,6 +171,7 @@ impl TrustStoreLoader {
             source: TrustSource::Fixed(keys),
             vendor_dir: None,
             reserved: Vec::new(),
+            enablement_dirs: Vec::new(),
         }
     }
 
@@ -219,6 +227,32 @@ impl TrustStoreLoader {
 impl PolicyLoader for TrustStoreLoader {
     fn trust_keys(&self) -> kennel_lib_policy::KeySet {
         self.current_keys().map(|s| s.keys).unwrap_or_default()
+    }
+
+    fn build_catalogue(&self) -> crate::catalogue::Catalogue {
+        let store = match self.current_keys() {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!("kenneld: catalogue: trust store unreadable, empty catalogue: {e}");
+                return crate::catalogue::Catalogue::default();
+            }
+        };
+        // Membership: the enabled providers, verified against the trust store (warnings logged).
+        let providers = crate::enablement::scan(&self.enablement_dirs, &store.keys, |w| {
+            eprintln!("kenneld: catalogue: {w}");
+        });
+        // Projection: gate each `[[provides]]`; an unauthorized reserved claim is dropped and audited.
+        crate::catalogue::Catalogue::project(
+            &providers,
+            &store.vendor_key_ids,
+            &self.reserved,
+            |name, provider| {
+                eprintln!(
+                    "kenneld: catalogue: provider `{provider}` is not authorized to provide reserved \
+                     `{name}` — dropped (§7.13.5)"
+                );
+            },
+        )
     }
 
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
@@ -462,7 +496,12 @@ mod tests {
         write_pubkey(&admin, &imposter); // same id as the maintainer key, in the admin dir
         write_pubkey(&admin, &admin_only);
 
-        let loader = TrustStoreLoader::from_trust_dirs(Some(vendor.clone()), &[&admin], Vec::new());
+        let loader = TrustStoreLoader::from_trust_dirs(
+            Some(vendor.clone()),
+            &[&admin],
+            Vec::new(),
+            Vec::new(),
+        );
         let store = loader.current_keys().expect("read keys");
 
         // The maintainer id is vendor-provenance; the admin-only id is not.

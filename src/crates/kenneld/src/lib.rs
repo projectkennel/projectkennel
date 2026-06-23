@@ -30,6 +30,7 @@ pub mod catalogue;
 pub mod cgroup;
 pub mod ctx;
 pub mod dbus;
+pub mod enablement;
 pub mod etc;
 pub mod inbound;
 pub mod inet;

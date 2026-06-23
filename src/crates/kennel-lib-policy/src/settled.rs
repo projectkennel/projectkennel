@@ -1515,10 +1515,10 @@ pub struct SignedSettledPolicy {
 
 /// A representative settled policy for cross-module tests (signing, canonical-form, and the spawn
 /// patch applicator). The single fixture so every test shares one shape.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 #[allow(clippy::too_many_lines)] // one cohesive struct-literal fixture; splitting it obscures it.
-pub(crate) fn sample_settled() -> SettledPolicy {
+pub fn sample_settled() -> SettledPolicy {
     SettledPolicy {
         settled_schema_version: 1,
         name: "ai-coding".to_owned(),

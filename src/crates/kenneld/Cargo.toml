@@ -47,6 +47,9 @@ kennel-host-delegate = { path = "../kennel-host-delegate" }
 # The BPF-drain root test forks a child into a cgroup and attempts a connect to
 # produce a real denied-connect audit event; libc gives it fork/connect/_exit.
 libc = "=0.2.186"
+# Test-only: the `sample_settled` fixture for building/signing provider policies in the
+# enablement-scan and catalogue tests (off in the default daemon build).
+kennel-lib-policy = { path = "../kennel-lib-policy", features = ["test-support"] }
 
 [features]
 # End-to-end orchestration test that drives the real setuid privhelper and
