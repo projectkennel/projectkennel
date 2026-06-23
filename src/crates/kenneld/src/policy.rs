@@ -333,6 +333,7 @@ pub fn loaded_from_settled(
         ssh: substituted.ssh,
         unix: substituted.unix,
         binder: substituted.binder,
+        consumes: substituted.mesh.consumes,
         dbus: substituted.dbus,
         groups,
         audit: substituted.audit,

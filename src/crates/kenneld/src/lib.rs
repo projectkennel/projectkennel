@@ -26,6 +26,7 @@ pub mod audit;
 pub mod bastion;
 pub mod binder;
 pub mod bpf_audit;
+pub mod broker;
 pub mod catalogue;
 pub mod cgroup;
 pub mod ctx;
@@ -301,6 +302,13 @@ pub struct BinderPrep {
     /// `SPAWN` handler validates against. `None` for a kennel with no `[spawn]` grant (a `SPAWN` from
     /// it is denied). An `Arc` so the binder looper pool shares one immutable copy.
     pub spawn: Option<std::sync::Arc<crate::spawn::SpawnRuntime>>,
+    /// This kennel's signed `[[consumes]]` (§7.13.1) — the floor the node-0 `SVC_CONNECT` broker
+    /// matches a consume request against (request-don't-author). Empty when the kennel consumes nothing.
+    pub consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
+    /// The daemon's live service catalogue (§7.13.4) the `SVC_CONNECT` broker resolves a consume
+    /// against. `None` for a construction path with no catalogue (a `SVC_CONNECT` then resolves
+    /// nothing).
+    pub catalogue: Option<std::sync::Arc<std::sync::Mutex<crate::catalogue::Catalogue>>>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -1446,6 +1454,8 @@ fn acquire_binder_node0(
         dbus,
         std::sync::Arc::clone(&prep.writer),
         prep.spawn.clone(),
+        prep.consumes.clone(),
+        prep.catalogue.clone(),
     )
 }
 
