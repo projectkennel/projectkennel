@@ -336,6 +336,18 @@ Self-contained and testable with no broker and no runtime — the contract every
   one capability worth keeping is kept in-model — both below). W0 proved the render leg on real hardware,
   **host-independent** — it works on stock GNOME, which ships no `security-context-v1`.
 
+  **Status — render/display leg BUILT (2026-06-24), with two refinements to the plan below; durable truth
+  in [`07-14-confined-gui.md`](../design/07-14-confined-gui.md) +
+  [`02-11-confined-gui.md`](../architecture/02-11-confined-gui.md).** (1) The host leg landed as the
+  **af-unix facade brokered connect** (the inner compositor opens a facade shim; `kenneld` brokers each
+  connect to the host, the relay forwarding `SCM_RIGHTS` fds via `splice_with_fds`), **not
+  `WAYLAND_SOCKET`** — simpler, reusing the §7.6 path, and the host socket *path* is still absent (the shim
+  names the facade). (2) The compositor is spawned **per app connection** by the `compositor-broker`
+  workload and **reaped on disconnect** — the window folds when the app disconnects — not
+  per-consuming-kennel / reaped-on-kennel-exit. Also landed: the private `/dev/shm` tmpfs (wlroots
+  `shm_open`) and a headless `gui-mesh` policy-suite case. **Still designed, not built:** the interactive
+  file-broker and the other desktop-service brokers below.
+
   - **Render leg — a per-kennel nested inner compositor (bring-your-own compositor).** The GUI-service
     kennel does not rely on the host compositor; it runs an upstream compositor (**cage** — a lightweight
     single-app kiosk — by default; Weston / sway as alternatives) **inside the confinement, one instance per
@@ -344,15 +356,16 @@ Self-contained and testable with no broker and no runtime — the contract every
     inner compositor's globals, never the host's — the host's screencopy / input / other clients sit on a
     socket the app cannot reach, *absent* not denied. This **composes the 0.4.0 primitives** rather than
     adding GUI-specific daemon surface:
-    - **mesh** — the app kennel `consume`s GUI; **spawn** — the service kennel spawns the per-kennel
-      compositor on demand (lazy: no consumer, no compositor; reaped when the kennel exits).
-    - **fd-brokering** — the GUI-service kennel holds the **one** host Wayland socket and hands each
-      compositor a *connected host fd* via `WAYLAND_SOCKET`, so the host socket **path is absent** from the
-      compositor's view (proven: cage nested under GNOME 50 over an inherited fd, `WAYLAND_DISPLAY` unset,
-      rendering a real app on the desktop).
-    - **per-kennel isolation (§4.5)** — one compositor per kennel ⇒ cross-kennel GUI invisibility; apps
-      *within* a kennel share their compositor (same trust domain). The compositor runs in its **own**
-      kennel, never the app's (tamperproofing §4.6 — the app must not be able to subvert what confines it).
+    - **mesh** — the app kennel `consume`s GUI; **spawn** — the service kennel's broker spawns a compositor
+      on demand (lazy: no connection, no compositor; reaped when the connection closes — see Status).
+    - **fd-brokering** — the GUI-service kennel holds the **one** host Wayland socket; the inner compositor
+      reaches it through the **af-unix facade brokered connect** (as built — see Status; W0 also proved the
+      `WAYLAND_SOCKET` inherited-fd variant), so the host socket **path is absent** from the compositor's
+      view (proven: cage nested under GNOME 50 rendering a real app on the desktop).
+    - **per-connection isolation (§4.5)** — one compositor per app connection ⇒ cross-kennel GUI
+      invisibility, and *finer*: even apps within a kennel do not share a compositor unless they share a
+      connection. The compositor runs in its **own** kennel, never the app's (tamperproofing §4.6 — the app
+      must not be able to subvert what confines it).
     The inner compositor's own surface (cage exposes screencopy, virtual input, etc.) is **scoped to the
     kennel's world by the nesting** — it captures the kennel's own pixels and injects into the kennel's own
     apps; it cannot reach the host or sibling kennels, so it is a same-trust-domain non-issue.
@@ -394,11 +407,12 @@ Self-contained and testable with no broker and no runtime — the contract every
   the host compositor, and only to vend fds — and even there it is *one ordinary Wayland client* to the host,
   contained by the host's own client isolation (the GUI T1.6-equivalent, required `reason`).
 
-  **What remains is engineering, not substrate risk** (W0 cleared the substrate): the per-kennel compositor
-  lifecycle and its fd-brokered host leg; toplevel→host-window mapping (one host window per kennel vs.
-  per-app); dmabuf passthrough so the composition hop is ~zero-copy; clipboard / DnD left **isolated by
-  default** (§4.7), a deliberate mediated bridge only later. The forcing function; completes the 0.3.0 X11
-  removal. Full design: `07-14-confined-gui.md`.
+  **What remains is engineering, not substrate risk** (W0 cleared the substrate): the per-connection
+  compositor lifecycle and its fd-brokered host leg are **built** (Status above); what is left is the
+  interactive **file-broker**, dmabuf passthrough so the composition hop is ~zero-copy, and toplevel→host
+  surface polish; clipboard / DnD left **isolated by default** (§4.7), a deliberate mediated bridge only
+  later. The forcing function; completes the 0.3.0 X11 removal. Full design: `07-14-confined-gui.md`;
+  as-built contract: `02-11-confined-gui.md`.
 
   **Open thread — RESOLVED (`07-14-confined-gui.md` written).** Both halves are landed in the design
   corpus, so the conclusion survives this roadmap's retirement: §7.14 carries the durable conclusions

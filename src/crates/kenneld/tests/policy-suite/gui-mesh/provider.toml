@@ -1,0 +1,51 @@
+# ============================================================================
+# gui-mesh — the PROVIDER half: the GUI-service kennel (§7.14 / 02-11-confined-gui.md).
+#
+# An ondemand GUI-service kennel whose workload is `compositor-broker`: it listens on
+# the kennel-to-kennel socket (its `[[provides]]` endpoint) and, per accepted connection,
+# spawns a fresh nested compositor and relays the consumer into it. Here the "compositor"
+# is `facade-mesh-probe serve-display` — a headless stand-in that binds the broker-assigned
+# $XDG_RUNTIME_DIR/wayland-0 and echoes ping→pong — so the broker's spawn-relay-kill path is
+# exercised on real kennels with no GPU or display. A real GUI kennel swaps in `cage` and
+# adds the host-Wayland `[[unix.allow]]` leg + the `/dev/dri` passthrough; this case proves
+# the broker and the mesh, not the renderer.
+#
+# WAYLAND_DISPLAY is a stub: the broker requires the host-leg env to be set and passes it to
+# each spawned compositor, but the headless stand-in ignores it.
+# ============================================================================
+
+name = "gui-provider"
+template_base = "base-confined@v1"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+allow = [
+    "/usr/libexec/kennel/compositor-broker",
+    "/usr/libexec/kennel/facade-mesh-probe",
+    "/bin/sh",
+]
+
+# The workload IS the service: listen on /tmp/gui.sock and spawn one stand-in compositor per connect.
+[workload]
+argv = [
+    "/usr/libexec/kennel/compositor-broker",
+    "/tmp/gui.sock",
+    "/usr/libexec/kennel/facade-mesh-probe",
+    "serve-display",
+]
+pinned = true
+
+[env.set]
+WAYLAND_DISPLAY = "wayland-host-stub"
+XDG_RUNTIME_DIR = "/tmp"
+
+[[provides]]
+name = "test.gui.wayland"
+shape = "af-unix"
+endpoint = "/tmp/gui.sock"
+reason = "gui-mesh e2e: the compositor-broker spawns a nested compositor per connection and relays the consumer into it"

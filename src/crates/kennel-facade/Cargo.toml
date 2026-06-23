@@ -55,6 +55,12 @@ path = "src/bin/facade-spawn-bench.rs"
 name = "facade-mesh-probe"
 path = "src/bin/facade-mesh-probe.rs"
 
+# The GUI service kennel's workload (07-14): listens on the kennel-to-kennel socket and spawns one
+# nested compositor (cage/weston/sway) per accepted connection, folding it when the app disconnects.
+[[bin]]
+name = "compositor-broker"
+path = "src/bin/compositor-broker.rs"
+
 [dependencies]
 # The binder client transaction surface every facade uses to reach node 0.
 kennel-lib-binder = { path = "../kennel-lib-binder" }

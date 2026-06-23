@@ -1026,6 +1026,10 @@ impl Plan {
         // and even `ls /tmp` would be denied.
         if ep.fs.tmp.private {
             landlock_fs.push((PathBuf::from("/tmp"), write_access()));
+            // POSIX shared memory: a private `/dev/shm` tmpfs alongside `/tmp` (`07-4`). `shm_open(3)`
+            // users — wlroots/Wayland compositors, Chromium, anything allocating a shared buffer —
+            // need it; its absence is a silent `ENOENT` that breaks them. Fresh, ephemeral, no leak.
+            landlock_fs.push((PathBuf::from("/dev/shm"), write_access()));
         }
         // The view-root grant. For a constructed view: READ_DIR on `/` only (`ls /`; the
         // top-level entries are not sensitive and their contents stay separately gated).

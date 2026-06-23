@@ -54,15 +54,18 @@ narration is kept here; the chapter named is the source of truth.
   kennel's services through kenneld is designed, not built, as is
   `SpawnKennel`-over-binder. kenneld owns the reserved nodes; the relay grows kenneld's TCB and
   is tracked as a new threat surface.
-- **Confined GUI — the nested-compositor display service** (`07-14-confined-gui.md`) — designed, not
-  built. A graphical workload's display server is an upstream inner compositor (cage / Weston / sway) run
-  inside an operator-declared GUI-service kennel, one instance per consuming kennel, reached as a `provide`/
-  `consume` mesh capability (`org.projectkennel.wayland`); the GUI-service kennel holds the one host-compositor leg
-  and hands each inner compositor a connected host fd (`WAYLAND_SOCKET`), so the host socket path is absent
-  from the workload's view. Interactive file access is a Kennel-native file broker (one consented file → one
-  fd). Depends on the §7.13 service mesh; its as-built contract lands in the architecture corpus across the
-  build. No host-compositor enforcement is depended on — `security-context-v1` in the inner compositor is
-  optional defense-in-depth, not a requirement.
+- **Confined GUI — the nested-compositor display service** (`07-14-confined-gui.md`,
+  `02-11-confined-gui.md`) — **display path built**; the desktop-service brokers below are not. A graphical
+  workload's display server is an upstream inner compositor (cage / Weston / sway) run inside an
+  operator-declared GUI-service kennel, spawned **one per app connection** by the `compositor-broker`
+  workload and reaped when that connection closes; reached as a `provide`/`consume` mesh capability
+  (`org.projectkennel.wayland`), so it depends on the §7.13 service mesh. Both legs are AF_UNIX brokered
+  connects that forward `SCM_RIGHTS` fds (`splice_with_fds`): the GUI-service kennel holds the one
+  host-compositor leg via the af-unix facade, so the host socket path is absent from the workload's view.
+  Each private-tmpfs kennel also gets a private `/dev/shm` (wlroots allocates buffers via `shm_open`). No
+  host-compositor enforcement is depended on — `security-context-v1` in the inner compositor is optional
+  defense-in-depth, not a requirement. **Not built:** the Kennel-native interactive file broker (one
+  consented file → one fd, §7.14.7) and the screenshot / open-URL / notification brokers (§7.14.8).
 - **First-party in-kennel OCI unpacker** (`07-11-oci.md`) — designed, not built. The unpack
   runs `skopeo`+`umoci` confined inside the signed `oci-fetch@v1` view at workload authority
   (never in the daemon closure), so the adversarial-input security argument is already met by

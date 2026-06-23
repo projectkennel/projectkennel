@@ -1,0 +1,37 @@
+# ============================================================================
+# gui-mesh — the CONSUMER half + the verdict (§7.14 / 02-11-confined-gui.md).
+#
+# A graphical app kennel: it declares `[[consumes]]` the GUI capability at an `at` socket
+# bound to where a real app would point WAYLAND_DISPLAY. Its connect drives mesh activation
+# of the GUI-service kennel; kenneld brokers the connect to the `compositor-broker`'s listen
+# socket, which spawns this connection's compositor and relays. The workload —
+# `facade-mesh-probe connect` — sends `ping` and exits 0 iff `pong` round-trips back through
+# the broker→compositor relay. Exit code IS the case verdict: a real app's Wayland traffic
+# would ride the same path.
+#
+# The consumer holds NO display leg, NO host reach, and NO GPU grant — it has a display
+# server, and that display server is the GUI-service kennel's.
+# ============================================================================
+
+name = "gui-consumer"
+template_base = "base-confined@v1"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+
+[workload]
+argv = ["/usr/libexec/kennel/facade-mesh-probe", "connect", "/tmp/wl-in.sock"]
+pinned = true
+
+[[consumes]]
+name = "test.gui.wayland"
+shape = "af-unix"
+at = "/tmp/wl-in.sock"
+required = true
+reason = "gui-mesh e2e: reach the broker-spawned compositor's display over the mesh"

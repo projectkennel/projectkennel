@@ -28,7 +28,6 @@
 
 use std::fs::OpenOptions;
 use std::io;
-use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::ExitCode;
@@ -95,7 +94,8 @@ fn serve_socket(device: &str, shim: &str, service: &str) -> io::Result<()> {
         // rare, short part. The splice that follows touches no binder.
         match broker(device, service) {
             Ok(host) => {
-                thread::spawn(move || splice(client, host));
+                // Forward bytes *and* SCM_RIGHTS fds (Wayland and any fd-passing protocol ride this).
+                thread::spawn(move || kennel_lib_scm::splice::splice_with_fds(client, host));
             }
             Err(e) => {
                 eprintln!("facade-afunix: facade refused {service}: {e}");
@@ -116,20 +116,4 @@ fn broker(device: &str, service: &str) -> io::Result<UnixStream> {
         service.as_bytes(),
     )?;
     Ok(UnixStream::from(host))
-}
-
-/// Splice two connected streams bidirectionally until either closes.
-fn splice(client: UnixStream, host: UnixStream) {
-    let (Ok(client_r), Ok(host_r)) = (client.try_clone(), host.try_clone()) else {
-        return;
-    };
-    // client -> host on a worker; host -> client here.
-    let up = thread::spawn(move || {
-        let _ = io::copy(&mut &client_r, &mut &host);
-        let _ = host.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut &host_r, &mut &client);
-    let _ = client.shutdown(Shutdown::Write);
-    let _ = up.join();
-    drop(client); // own the stream to its close (the splice's end of life)
 }
