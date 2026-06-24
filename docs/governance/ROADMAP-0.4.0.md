@@ -245,9 +245,12 @@ Self-contained and testable with no broker and no runtime — the contract every
   or policy is parsed, wired into the CLI `connect()`, `kennel-akc`, and kenneld's `handle_connection`
   (the first thing on the connection). Test-first corpus (equal accepts, too-new refuses with the
   remediation not a parse error, older accepts, preamble/verdict round-trip) + e2e-validated on the live
-  CLI↔daemon path. **Complement still owed:** a CI guard that a settled-schema field-set change forces a
-  `SETTLED_SCHEMA_VERSION` bump — the discipline that makes the handshake catch the 0.3.1 class (that bug
-  slipped a field in *without* bumping the version). Homed in `02-6-ipc.md`; CHANGELOG-tracked.
+  CLI↔daemon path. **Complement built:** the prevention half — a CI guard
+  (`src/tools/tests/schema-version-pin.sh`) that pins the *shape* of the generated policy schema
+  (`schema/policy.toml.schema`, descriptions stripped so a doc edit is free) to
+  `SETTLED_SCHEMA_VERSION` in an append-only lock, so a field/type change cannot land without a
+  deliberate version bump + re-pin — the discipline that makes the handshake catch the 0.3.1 class
+  (that bug slipped a field in *without* bumping the version). Homed in `02-6-ipc.md`; CHANGELOG-tracked.
   *(Added 2026-06-23, from a 0.3.1 field finding.)*
   W1–W3 freeze the contracts test-first — anti-drift at *compile* time. This is its **runtime
   complement:** when two *different builds* of `kennel` and `kenneld` nonetheless talk (a reinstall
