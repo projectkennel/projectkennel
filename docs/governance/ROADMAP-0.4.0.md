@@ -546,7 +546,15 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   snapshot, not a reservation; the atomic slot-claim at spawn time remains authoritative.
 
 - **W10 · Unify the spawn surface behind one `kennel` shim; split execution into `/usr/libexec`.** **[dep] M.**
-  **Status: in progress.**
+  **Status: unification + reshuffle built (#112), e2e-validated; one security follow-up owed.** The
+  static `/usr/bin/kennel` shim, the host/spawn execution-unit split, the shared-grammar crate, and the
+  `[spawn]` → `exec.allow` auto-derive are built and proven on a real install (`spawn-caps`/`spawn-argv`
+  on the unified surface, plus the facade-relocation and ordinary-kennel cases). The binary reshuffle
+  folded in: the three-dir layout (`/usr/bin`, host-only `/usr/libexec/kennel`, in-cage
+  `/usr/libexec/kennel-facades`) and the **host-control-surface blacklist** (the host tree masked from
+  every view by an empty read-only dir — construction-by-absence for the whole subtree). **Owed as a
+  focused follow-up:** the host-control-*socket* ungrantability rule (the runtime-dir socket the binary
+  blacklist does not cover) — built and tested first-class with its own valid/invalid corpus, per below.
   One command surface, three binaries — because linkage is a build-time property the cage constraint
   will not let a single ELF straddle (everything in-cage is static; the host unit is the one
   dynamically-linked thing). **Two of the three already exist**, which is why the thrust is M, not L: the
