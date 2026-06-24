@@ -53,7 +53,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-KENNEL="/usr/libexec/kennel/kennel"
+# The `kennel` shim on PATH (W10: /usr/bin/kennel), falling back to PATH lookup.
+KENNEL="/usr/bin/kennel"
 [ -x "$KENNEL" ] || KENNEL="$(command -v kennel || true)"
 SYSTEM_TOML="/etc/kennel/system.toml"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
