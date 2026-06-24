@@ -14,7 +14,7 @@ Policy describes kernel-level constraints (which files, which network destinatio
 
 ## Status
 
-Latest tagged release: [0.3.1](CHANGELOG.md) (the [0.3.0 "dynamic spawn"](https://github.com/projectkennel/projectkennel/releases) line). **0.4.0 — the service-mesh release — is feature-complete and in its pre-tag hardening pass:** the surface below is implemented and exercised end-to-end, not just designed. The threat catalogue ([THREATS.md](docs/design/THREATS.md)) and the design corpus are publishable.
+**0.4.0 — the service-mesh release.** The reference runtime, the threat catalogue ([THREATS.md](docs/design/THREATS.md)), and the design corpus are all implemented and published — the runtime is the reference, not a sketch. Versioned on a stable-surface cadence, with a [CHANGELOG](CHANGELOG.md) recording every change.
 
 The full vertical runs **unprivileged**, proven end-to-end as the ordinary operator with no `sudo` (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/BUILD-ENV.md) for the kernel floor), each slice exercised by the real installed toolchain in the policy-suite e2e:
 
