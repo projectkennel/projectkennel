@@ -59,7 +59,7 @@ implementation-independent. The as-built *how* lives under
 | 07.4 | [Filesystem](07-4-filesystem.md) | The constructed `$HOME` view, Landlock, the masked manifest |
 | 07.5 | [Network](07-5-network.md) | The egress proxy, the net-ns boundary, the inbound mirror |
 | 07.6 | [AF_UNIX](07-6-afunix.md) | The socket shim |
-| 07.7 | [D-Bus](07-7-dbus.md) | Session-bus mediation (roadmap) |
+| 07.7 | [D-Bus](07-7-dbus.md) | Session-bus mediation; the per-method allowlist the `IDBus` facade enforces |
 | 07.8 | [X11](07-8-x11.md) | Out of scope — X11 cannot be granted |
 | 07.9 | [Other](07-9-other.md) | Procfs, env, capabilities, seccomp, the tty (escape filter, controlling pty) |
 | 07.10 | [SSH](07-10-ssh.md) | The double-blind re-origination bastion |

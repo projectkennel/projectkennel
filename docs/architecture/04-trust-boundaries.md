@@ -26,11 +26,11 @@ The discipline itself — *what* sanitisation looks like — is in CODING-STANDA
 | 14 | Workload/facade → kenneld over binder | binder transaction on node 0 → registry/facade decision | kenneld (`binder` looper, sender-identity gate) |
 | 15 | `kennel-bin-init` → kenneld (lifecycle) | binder lifecycle/config verb → supervised action | kenneld (init-host-pid gate) |
 | 16 *(roadmap)* | Cross-kennel transaction → kenneld relay | provider/consumer transaction → relayed payload | kenneld (`binder` relay; → `02-4-binder.md`) |
-| 17 *(roadmap)* | Kennel net-ns ↔ host net-ns | binder `INet` crossing + host loopback mirror | kenneld + delegates (→ `02-5-binder-net.md`) |
+| 17 | Kennel net-ns ↔ host net-ns | binder `INet` crossing + host loopback mirror | kenneld + delegates (→ `02-5-binder-net.md`) |
 
 Each boundary is described in its own section below. The descriptions follow a common shape: what crosses, what is trusted on each side, what the validator does, what the failure mode is.
 
-**Compile-time vs runtime.** Boundaries 2 and 3 (policy parsing, template/fragment signature and lockfile verification) are *compile-time* boundaries — they are crossed when `kennel compile` resolves a source policy into a settled policy (`02-2-config-schema.md` §The settled policy). Boundary 13 is the *runtime* boundary: what the spawn path trusts when it enforces a settled policy. In an attested fleet deployment, the workstation crosses only boundary 13 (plus the operational ones — the per-spawn construction boundary 1 and the runtime boundaries 4–12, 14, 15); boundaries 2 and 3 were crossed earlier, centrally, at compile time. This is the point of compilation — the complex, fallible parsing-and-verification surface is exercised once at compile time, not on every spawn.
+**Compile-time vs runtime.** Boundaries 2 and 3 (policy parsing, template/fragment signature and lockfile verification) are *compile-time* boundaries — they are crossed when `kennel compile` resolves a source policy into a settled policy (`02-2-config-schema.md` §The settled policy). Boundary 13 is the *runtime* boundary: what the spawn path trusts when it enforces a settled policy. In an attested fleet deployment, the workstation crosses only boundary 13 (plus the operational ones — the per-spawn construction boundary 1 and the runtime boundaries 4–12, 14, 15, 17); boundaries 2 and 3 were crossed earlier, centrally, at compile time. This is the point of compilation — the complex, fallible parsing-and-verification surface is exercised once at compile time, not on every spawn.
 
 ---
 

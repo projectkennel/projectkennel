@@ -84,9 +84,9 @@ The flow consumes a *settled policy* — the flat, signed artefact produced by t
    - Add IPv4 address to loopback (or to per-kennel dummy interface)
    - Add IPv6 ULA address
    - Create cgroup if not exists
-   - (Roadmap, §7.5) `AddLoopbackAlias`: for `constrained`/`unconstrained`
-     net-ns modes, bring the kennel's `/28`+`/64` up on the host `lo` so the
-     host-side BIND leg can mirror inbound listeners at the kennel's own IP
+   - For `constrained`/`unconstrained` net-ns modes (§7.5), bring the kennel's
+     `/28`+`/64` up on the host `lo` so the host-side BIND leg can mirror inbound
+     listeners at the kennel's own IP
 
 5. Launch supporting daemons (if not already running for this kennel):
    - the egress proxy — on the kennel's loopback address, or, under the
