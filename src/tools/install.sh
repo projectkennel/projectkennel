@@ -41,9 +41,16 @@
 
 set -euo pipefail
 
-# The libexec dir holds every kennel binary (all non-PATH helpers located by
-# absolute path from kenneld via the config). --prefix relocates it.
+# The libexec dir holds the HOST-SIDE binaries only (daemon, privhelper, host delegates, the host
+# execution unit). This whole tree is blacklisted from constructed views (W10), so nothing a view
+# runs may live here. --prefix relocates it.
 libexec="/usr/libexec/kennel"
+# The in-cage facade dir (W10): the binaries a constructed view legitimately runs (the conduit
+# facades, the spawn execution unit, the OCI launcher). A sibling of $libexec so the host tree can be
+# blacklisted while these stay reachable.
+facades_dir="/usr/libexec/kennel-facades"
+# The one binary on PATH: the `kennel` shim, which dispatches to the host or in-cage execution unit.
+pathbin_dir="/usr/bin"
 # Vendor (package-shipped) config dir: the lowest-priority config layer.
 vendor_dir="/usr/lib/kennel"
 # Man-page root; pages install into $mandir/man{1,5,8}.
@@ -122,18 +129,15 @@ verify_payload() {
 }
 
 install_binaries() {
-	run install -d -m 0755 "$libexec"
-	# Every shipped binary installs 0755 under $libexec (none are on PATH — kenneld locates them by
-	# absolute path from the config). The tarball's flat `bin/` already holds them all: the
-	# host-dynamic set (kenneld, the CLI, the delegates, the AKC) and the in-kennel static set (the
-	# launcher, init, and facades — built `+crt-static` so they carry their own libc and run inside an
-	# arbitrary image root with no host `ld.so`). build-release.sh / stage-tree.sh built `bin/`; we
-	# just place it, then tighten the two trust-sensitive binaries below.
+	run install -d -m 0755 "$libexec" "$facades_dir" "$pathbin_dir"
+	# W10's three-dir layout — the payload encodes each binary's destination in its staging subdir
+	# (stage-tree.sh): `bin/` is host-side (→ $libexec, blacklisted from views), `facades/` is the
+	# in-cage set (→ $facades_dir, reachable in a view), `pathbin/` is the `kennel` shim (→ $pathbin_dir,
+	# the one name on PATH). Place each group, then tighten the two trust-sensitive host binaries.
 	local f
-	for f in "$bindir"/*; do
-		[ -f "$f" ] || continue
-		run install -m 0755 "$f" "$libexec/$(basename "$f")"
-	done
+	for f in "$bindir"/*;          do [ -f "$f" ] && run install -m 0755 "$f" "$libexec/$(basename "$f")"; done
+	for f in "$pkg_root/facades"/*; do [ -f "$f" ] && run install -m 0755 "$f" "$facades_dir/$(basename "$f")"; done
+	for f in "$pkg_root/pathbin"/*; do [ -f "$f" ] && run install -m 0755 "$f" "$pathbin_dir/$(basename "$f")"; done
 	# The privhelper: setuid root (mode 4755, owner root). This is the one
 	# privilege boundary; everything else runs as the user.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper" "$libexec/kennel-privhelper"

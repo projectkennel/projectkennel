@@ -545,26 +545,48 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   over `[provides]` — computed from the grant, cannot drift from it. The instance count is an advisory
   snapshot, not a reservation; the atomic slot-claim at spawn time remains authoritative.
 
-- **W10 · Unify the spawn surface behind one `kennel` shim; split execution into `/usr/libexec`.** **[dep] L.**
-  **Status: not started.**
+- **W10 · Unify the spawn surface behind one `kennel` shim; split execution into `/usr/libexec`.** **[dep] M.**
+  **Status: unification + reshuffle built (#112), e2e-validated; one security follow-up owed.** The
+  static `/usr/bin/kennel` shim, the host/spawn execution-unit split, the shared-grammar crate, and the
+  `[spawn]` → `exec.allow` auto-derive are built and proven on a real install (`spawn-caps`/`spawn-argv`
+  on the unified surface, plus the facade-relocation and ordinary-kennel cases). The binary reshuffle
+  folded in: the three-dir layout (`/usr/bin`, host-only `/usr/libexec/kennel`, in-cage
+  `/usr/libexec/kennel-facades`) and the **host-control-surface blacklist** (the host tree masked from
+  every view by an empty read-only dir — construction-by-absence for the whole subtree). **Owed as a
+  focused follow-up:** the host-control-*socket* ungrantability rule (the runtime-dir socket the binary
+  blacklist does not cover) — built and tested first-class with its own valid/invalid corpus, per below.
   One command surface, three binaries — because linkage is a build-time property the cage constraint
-  will not let a single ELF straddle (everything in-cage is static; `kennel` on the host is the one
-  dynamically-linked thing). The split separates *dispatch* from *execution*:
+  will not let a single ELF straddle (everything in-cage is static; the host unit is the one
+  dynamically-linked thing). **Two of the three already exist**, which is why the thrust is M, not L: the
+  host surface is today's `kennel` (`kennel-cli`, dynamically linked) and the in-cage spawn-requester is
+  `facade-spawn` (statically linked, already carrying `run`/`caps`, already derived into spawn-capable
+  views). So this is *unification over existing units*, not three fresh builds — relocate the two under
+  `/usr/libexec/kennel/{host,spawn}`, add the one new artifact (a thin static dispatch shim), home the
+  shared grammar that keeps the two surfaces consistent, and retire the `facade-spawn` name. **The one
+  piece that does *not* shrink with the plumbing is the host-control-socket ungrantability rule below** —
+  it is sized by care, not by lines, and is built and tested as the escalation gate it is. The split
+  separates *dispatch* from *execution*:
 
   - **`kennel` — a static, authority-free shim on `$PATH`.** The only name a user or agent types, in
     either context. It holds no authority and does no work: it detects context and `exec`s the right
-    execution unit. Static so the same artifact runs host-side and in-cage.
-  - **`/usr/libexec/kennel/host` — the dynamically-linked host execution unit.** The operator-side
-    implementation (spawn a first kennel, `policy`, `ps`, `oci`, the full host surface).
-  - **`/usr/libexec/kennel/spawn` — the statically-linked in-cage execution unit.** The confined
-    spawn-requester implementation (`run`, `caps` over Node 0). Retires the `facade-spawn` name into
-    this unit.
+    execution unit. Static so the same artifact runs host-side and in-cage. The one new binary.
+  - **`/usr/libexec/kennel/host` — the dynamically-linked host execution unit.** Today's `kennel-cli`,
+    relocated: spawn a first kennel, `policy`, `ps`, `oci`, the full host surface.
+  - **`/usr/libexec/kennel/spawn` — the statically-linked in-cage execution unit.** Today's
+    `facade-spawn`, relocated and its name retired: the confined spawn-requester (`run`, `caps` over
+    Node 0).
 
-  **The surface is defined once, in a shared crate** both units link — the verb grammar, help, and
-  argv parsing live there, so "one surface, two contexts" is one definition plus two thin
-  context-specific mains differing only in linkage and which authority path they wire (host-direct vs
-  Node 0 `SPAWN`). Unification is interface-layer; the two authority paths stay distinct and
-  separately validated, never shared enforcement.
+  **The surface is defined once, in a shared grammar crate** both units link — and this is the piece the
+  thrust *invests* care in, not the piece it cuts, because it is what makes "similar commands keep similar
+  shapes" a structural guarantee rather than a review-time hope. An **overlapping verb is defined once**
+  (its name, argument shape, flags, and help), so `kennel run` / `kennel ps` cannot drift between
+  contexts. A verb's *operand* may still differ where the operation genuinely differs — `run` takes a
+  policy path host-side, a `template@version` + field patch in-cage, same verb and same `--`-separates-argv
+  convention, different operand — but the grammar is one definition. Context-specific verbs (`caps`
+  in-cage; `oci`/`policy`/`mesh` host-side) live in their own unit and reuse the shared primitives. **A
+  test asserts any verb present in both units exposes identical flags and help** — the consistency
+  discipline made enforceable. The two authority paths (host-direct vs Node 0 `SPAWN`) stay distinct and
+  separately validated; unification is interface-layer only, never shared enforcement.
 
   **The spawn unit is gated by `exec.allow` like every other in-cage binary — no exception.** From the
   cage's view `/usr/libexec/kennel/spawn` is just an executable, and the every-exec rule applies: a

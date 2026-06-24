@@ -32,10 +32,11 @@ path = "src/bin/facade-ssh.rs"
 name = "facade-dbus"
 path = "src/bin/facade-dbus.rs"
 
-# The usable in-kennel SPAWN client: `caps` interrogates the [spawn] grant, `run` spawns + wires stdio.
+# The in-cage spawn execution unit (W10): installed as `/usr/libexec/kennel-facades/spawn`, reached through
+# the `kennel` shim (`kennel caps`, `kennel run`). Retires the `facade-spawn` name.
 [[bin]]
-name = "facade-spawn"
-path = "src/bin/facade-spawn.rs"
+name = "kennel-spawn"
+path = "src/bin/kennel-spawn.rs"
 
 # The in-kennel SPAWN round-trip probe â the reference workload-side spawn client and the
 # `spawn-roundtrip` policy-suite case's requester workload (`02-10` Â§7.12).
@@ -64,6 +65,9 @@ path = "src/bin/compositor-broker.rs"
 [dependencies]
 # The binder client transaction surface every facade uses to reach node 0.
 kennel-lib-binder = { path = "../kennel-lib-binder" }
+# The shared CLI surface grammar (W10): the spawn unit's `run`/`--` convention is the host
+# unit's, from one definition, so the two surfaces cannot drift.
+kennel-lib-cli = { path = "../kennel-lib-cli" }
 # The shared bidirectional splice (conduit relay) â used by facade-socks5 and
 # facade-client after brokering a conduit fd; harmless for the two that do not.
 kennel-lib-scm = { path = "../kennel-lib-scm" }

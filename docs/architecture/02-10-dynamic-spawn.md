@@ -217,24 +217,32 @@ trust store, or whose signature no longer verifies, is listed as unavailable rat
 across the trust boundary: no other kennel's grant, no template body, no signing key. It is the natural
 read-side of the same capability `SPAWN` exercises on the write side.
 
-### `facade-spawn` — the usable client
+### `kennel` — the usable client
 
-`facade-spawn` is the in-kennel binary a confined workload (an agent) actually drives, distinct from the
-fixed `facade-spawn-probe`/`-bench` test drivers:
+The in-cage spawn surface is the unified `kennel` command: the one name an agent types, on `$PATH` at
+`/usr/bin/kennel` (a static, authority-free shim that `exec`s the in-cage spawn execution unit,
+`/usr/libexec/kennel-facades/spawn`). It is distinct from the fixed `facade-spawn-probe`/`-bench` test
+drivers, and shares its verb grammar with the host command (the surface contract, design §7.12.3a):
 
-- **`facade-spawn caps`** issues `SPAWN_QUERY` and prints the grant listing — the workload discovers its
+- **`kennel caps`** issues `SPAWN_QUERY` and prints the grant listing — the workload discovers its
   delegated-spawn surface instead of probing `SPAWN` by trial.
-- **`facade-spawn run <template@version> [field=value]… [-- <argv>…]`** issues `SPAWN` with the given
+- **`kennel run <template@version> [field=value]… [-- <argv>…]`** issues `SPAWN` with the given
   mutable-field patch, then splices **this process's stdio onto the sibling's channel** (our stdin → the
   tool's stdin, the tool's stdout → our stdout, its stderr → our stderr). `kenneld` brokers the fds and
   steps out of the byte path. Everything after `--` is the command line, carried as the `workload.argv`
   mutable field (one patch entry per token): on a template that opens that leaf, the caller chooses the
-  command — `facade-spawn run net-fetch@v1 net.proxy.allow=ghcr.io:443 -- curl -sSL https://ghcr.io/…` —
+  command — `kennel run net-fetch@v1 net.proxy.allow=ghcr.io:443 -- curl -sSL https://ghcr.io/…` —
   and `[exec].allow` gates the resolved binary (Landlock, matched on the executed path, not the literal
   `argv[0]` string). The three authority regions this command spans — `@`-pinned template · bounded
   mutable-field patch · `exec.allow`-gated argv — are syntactically distinct because semantically distinct,
   and the egress patch and the argv are independent (the proxy gates egress regardless of what argv claims):
   the facade interface contract, design §7.12.3a.
+
+A `[spawn]` grant **auto-derives** the shim and the spawn unit into the kennel's `exec.allow`, so the
+agent runs `kennel caps`/`kennel run` without the author allow-listing the binaries — spawning stays
+double-gated by the `[spawn]` grant *and* the every-exec gate. The shim is reached by `exec`; the host
+execution unit it would otherwise dispatch to is absent from a constructed view (the host
+`/usr/libexec/kennel` tree is blacklisted, §below), so a wrong dispatch cannot reach host authority.
 
 ## The capability handoff (construction)
 

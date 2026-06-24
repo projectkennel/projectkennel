@@ -89,6 +89,7 @@ version = "0.3.1"
 dependencies = [
  "gen-man",
  "kennel-lib-audit",
+ "kennel-lib-cli",
  "kennel-lib-compile",
  "kennel-lib-config",
  "kennel-lib-control",
@@ -107,6 +108,7 @@ name = "kennel-facade"
 version = "0.3.1"
 dependencies = [
  "kennel-lib-binder",
+ "kennel-lib-cli",
  "kennel-lib-dbus",
  "kennel-lib-scm",
 ]
@@ -149,6 +151,10 @@ dependencies = [
  "libc",
  "object",
 ]
+
+[[package]]
+name = "kennel-lib-cli"
+version = "0.3.1"
 
 [[package]]
 name = "kennel-lib-compile"
@@ -268,6 +274,10 @@ dependencies = [
  "kennel-lib-spawn",
  "kennel-lib-syscall",
 ]
+
+[[package]]
+name = "kennel-shim"
+version = "0.3.1"
 
 [[package]]
 name = "kenneld"

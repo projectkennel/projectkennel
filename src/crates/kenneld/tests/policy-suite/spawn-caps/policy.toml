@@ -1,12 +1,12 @@
 # ============================================================================
 # Suite case: spawn-caps — interrogate the [spawn] grant (§7.12).
 #
-# Proves the grant-introspection path: a confined requester holds a [spawn] grant
-# for echo-tool@v1 but spawns nothing. Its workload runs `facade-spawn caps`, which
-# transacts verb::SPAWN_QUERY on node 0; kenneld renders the grant (the allowed
-# template + its mutable fields + the max_instances/live ceiling) as text. The
-# workload asserts the listing names echo-tool@v1 and the ceiling — so an agent can
-# discover what it may ask SPAWN for instead of probing by trial.
+# Proves the grant-introspection path through the unified `kennel` surface (W10): a confined
+# requester holds a [spawn] grant for echo-tool@v1 but spawns nothing. Its workload runs
+# `kennel caps` (the shim → the in-cage spawn unit), which transacts verb::SPAWN_QUERY on node 0;
+# kenneld renders the grant (the allowed template + its mutable fields + the max_instances/live
+# ceiling) as text. The workload asserts the listing names echo-tool@v1 and the ceiling — so an
+# agent can discover what it may ask SPAWN for instead of probing by trial.
 #
 # setup.sh compiles + suite-signs echo-tool into the standard user template cascade
 # (so the grant's template resolves), exactly as spawn-roundtrip does.
@@ -21,13 +21,15 @@ mode = "none"
 [fs]
 read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
 
+# Only /bin/sh is listed: the [spawn] grant auto-derives the `kennel` shim + the in-cage spawn unit
+# into exec.allow (W10), so the agent runs `kennel caps` without allow-listing the binaries by hand.
 [exec]
-allow = ["/usr/libexec/kennel/facade-spawn", "/bin/sh"]
+allow = ["/bin/sh"]
 
 [workload]
 argv = [
   "/bin/sh", "-c",
-  'caps="$(/usr/libexec/kennel/facade-spawn caps)"; printf "%s\n" "$caps"; case "$caps" in *"echo-tool@v1"*) ;; *) echo "FAIL: echo-tool@v1 not listed"; exit 1;; esac; case "$caps" in *"max_instances 4"*) ;; *) echo "FAIL: max_instances 4 not shown"; exit 1;; esac; echo "OK: grant interrogated"',
+  'caps="$(/usr/bin/kennel caps)"; printf "%s\n" "$caps"; case "$caps" in *"echo-tool@v1"*) ;; *) echo "FAIL: echo-tool@v1 not listed"; exit 1;; esac; case "$caps" in *"max_instances 4"*) ;; *) echo "FAIL: max_instances 4 not shown"; exit 1;; esac; echo "OK: grant interrogated"',
 ]
 pinned = true
 

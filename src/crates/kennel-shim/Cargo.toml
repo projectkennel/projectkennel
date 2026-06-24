@@ -1,0 +1,17 @@
+[package]
+name = "kennel-shim"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel unified `kennel` command shim (W10): an authority-free dispatcher that detects context — which execution unit the construction exposes — and execs it (host-side or in-cage). Static so one artifact runs in both contexts. Stdlib only."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kennel"
+path = "src/main.rs"
+
+[lints]
+workspace = true

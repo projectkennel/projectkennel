@@ -24,6 +24,12 @@ use crate::SpawnError;
 /// here to avoid a libc dependency in this pure crate.)
 const EPERM: u16 = 1;
 
+/// The host-side helper-binary tree (W10), blacklisted from every constructed view by an empty
+/// read-only dir mask. Holds the daemon, the privhelper, the host execution unit, and the host
+/// delegates — never anything a view runs. The default `libexec_dir`; a deployment that relocates
+/// it (rare, deliberate) would re-point this. The in-cage binaries live in a sibling directory.
+const HOST_LIBEXEC_DIR: &str = "/usr/libexec/kennel";
+
 /// `KENNEL_META_MAGIC` ("KNEL") from `bpf/maps.h`.
 const KENNEL_META_MAGIC: u32 = 0x4B4E_454C;
 /// `KENNEL_ABI_VERSION` from `bpf/maps.h`.
@@ -1067,7 +1073,7 @@ impl Plan {
         // nor forge them, while the host IDE reads the untouched real inode. Gated by
         // `[trust].manifest` (default on); only writable binds carry a manifest. The mask
         // target keys on the bind *target* (the in-kennel path).
-        let (mask_paths, mask_dir_paths): (Vec<PathBuf>, Vec<PathBuf>) = if ep.trust.manifest {
+        let (mask_paths, mut mask_dir_paths): (Vec<PathBuf>, Vec<PathBuf>) = if ep.trust.manifest {
             let writable = || binds.iter().filter(|b| b.writable);
             (
                 writable()
@@ -1082,6 +1088,13 @@ impl Plan {
         } else {
             (Vec::new(), Vec::new())
         };
+        // The host-control-surface blacklist (W10): the host `/usr/libexec/kennel` tree holds the
+        // daemon, the privhelper, the host execution unit, and the host delegates — none of which a
+        // constructed view ever needs (the in-cage binaries live in `/usr/libexec/kennel-facades`,
+        // and `kennel-bin-init` is `fexecve`'d from an fd). Overmount it with an empty read-only dir
+        // so the whole host control surface is absent from every view by one rule — construction-by-
+        // absence for the entire subtree, not per-binary. A no-op when the view does not bind `/usr`.
+        mask_dir_paths.push(PathBuf::from(HOST_LIBEXEC_DIR));
 
         let view = Some(ShimView {
             shim_root,

@@ -158,7 +158,7 @@ System configuration. Installed by the package; managed by the administrator.
 │   ├── corp-policy-2026.pub
 │   └── ...
 ├── audit.toml                       installation-wide audit-sink defaults
-├── system.toml                      deployment paths: libexec_dir, trust_dir, sshd; [[reserved]] host namespaces (admin layer)
+├── system.toml                      deployment paths: libexec_dir, facades_dir, trust_dir, sshd; [[reserved]] host namespaces (admin layer)
 └── config.toml                      CLI conveniences: template/key/policy search dirs (admin layer)
 ```
 
@@ -250,15 +250,19 @@ into the kennel's view.
 
 | Binary | Default install path | Notes |
 |---|---|---|
-| `kennel` | `/usr/bin/kennel` | The CLI; user binary, no special permissions. |
+| `kennel` | `/usr/bin/kennel` | The command shim (W10): the one name on `PATH`, authority-free; it detects context and `exec`s the right execution unit. Static, so one artifact runs host-side and in-cage. |
+| `host` (host execution unit) | `/usr/libexec/kennel/host` | The operator surface (`run` a first kennel, `policy`, `list`, `oci`, …) the shim dispatches to host-side. Dynamic; reached only through the shim. |
+| `spawn` (in-cage execution unit) | `/usr/libexec/kennel-facades/spawn` | The confined spawn-requester (`kennel caps`/`kennel run` over Node 0 `SPAWN`) the shim dispatches to in a cage. Static; bound into a spawn-capable view with a Landlock execute grant (auto-derived from `[spawn]`). |
 | `kenneld` | `/usr/libexec/kennel/kenneld` | Started by systemd-user or by the CLI in degraded mode; not on `PATH`. |
 | `kennel-bin-init` | `/usr/libexec/kennel/kennel-bin-init` | The kennel's PID 1 / supervisor (§7.2, `../design/07-2-kennel-bin-init.md`); root-owned and non-writable (`0755`, owner root, no setuid/setcap). The privhelper verifies its root ownership + non-writability, opens it on the host pre-`clone`, and `fexecve`s it after `pivot_root`. Its path comes from the deployment config (`Deployment::kennel_bin_init()` → libexec), never the wire. Not on `PATH`; located by absolute path. |
 | `kennel-privhelper` | `/usr/libexec/kennel/kennel-privhelper` | `install.sh` installs it setuid root (mode `4755`, owner root); file capabilities `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin,cap_net_admin=ep` are a documented per-distribution alternative the installer does not itself apply. The privhelper is the kennel *constructor* (`../design/07-2-kennel-bin-init.md`): it clones the namespaces as the operator (so the userns is operator-owned), writes the identity map (host root `0 0 1` + the operator line + one line per granted gid) in a single `write(2)`, builds the root-owned surfaces, mounts binderfs, `pivot_root`s, and `fexecve`s `kennel-bin-init`. `cap_setuid` writes the `0 0 1` uid map (the kennel's real uid 0); `cap_setgid` writes the `gid_map` so a workload keeps a granted supplementary group (§7.4.8); `cap_setfcap` lets the single map `write(2)` land; `cap_sys_admin` mounts (view, `/dev`, binderfs) and `pivot_root`s; `cap_net_admin` is for loopback addresses and egress BPF. Not on `PATH`; located by absolute path from kenneld. |
 | `host-netproxy` | `/usr/libexec/kennel/host-netproxy` | Spawned by kenneld; not on `PATH`. |
 | `kennel-akc` | `/usr/libexec/kennel/kennel-akc` | The SSH bastion's root-owned `AuthorizedKeysCommand` (§7.10); installed root-owned (safe-path), queries kenneld; not on `PATH`. |
-| `facade-ssh` | `/usr/libexec/kennel/facade-ssh` | The in-kennel `ssh` `ProxyCommand` (§7.10): a binder `CONNECT_INET` to kenneld, which has `host-netproxy` dial the bastion; bound into the view with a Landlock execute grant. |
+| `facade-ssh` | `/usr/libexec/kennel-facades/facade-ssh` | The in-kennel `ssh` `ProxyCommand` (§7.10): a binder `CONNECT_INET` to kenneld, which has `host-netproxy` dial the bastion; bound into the view with a Landlock execute grant. |
 
 Distributions relocate the libexec directory with `install.sh --prefix <dir>`, which installs the binaries there and rewrites `libexec_dir` in the deployment `system.toml` (and the `kenneld.service` `ExecStart` and the AppArmor profile path) to match — no path is baked into a binary. The default `/usr/libexec/kennel` matches the FHS recommendation.
+
+**Two libexec trees, by reachability (W10).** Binaries split by whether a constructed view ever runs them: `<libexec_dir>` (`/usr/libexec/kennel`) holds the **host-side** set only — the daemon, the privhelper, the host execution unit, the host delegates — and `<facades_dir>` (`/usr/libexec/kennel-facades`, the `facades_dir` deployment key) holds the **in-cage** set the view legitimately runs: the conduit facades, the spawn execution unit, and the OCI launcher. The split exists so the entire host tree can be **blacklisted from every constructed view**: the seal overmounts `/usr/libexec/kennel` with an empty read-only directory, so the host control surface — daemon, privhelper, host unit, control plane — is absent from inside by one construction-by-absence rule, not per-binary. `kennel-bin-init` stays host-side because the privhelper `fexecve`s it from an fd, never a view path.
 
 ---
 

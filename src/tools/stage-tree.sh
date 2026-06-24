@@ -52,24 +52,41 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$DEST" ] || { echo "stage-tree.sh: --dest is required" >&2; exit 2; }
 
-# The payload's binaries, grouped by where the build puts them. REL = host-dynamic (run in the
-# operator's context, linked against the host glibc) plus the privhelper. STAT = in-kennel static
-# (`+crt-static`: the launcher, the trusted init, and the facades run inside an arbitrary image root
-# with no host `ld.so`, so they carry their own libc). Both flatten into one `bin/` for the payload.
-REL_BINS="kenneld kennel-akc kennel host-netproxy host-inetd host-dbus kennel-privhelper"
-STAT_BINS="kennel-bin-oci-entry kennel-bin-init facade-afunix facade-socks5 facade-client facade-ssh facade-dbus facade-spawn"
+# The payload's binaries, grouped by their INSTALL DESTINATION (W10's three-dir layout). The build
+# puts host-dynamic bins in REL (host glibc) and in-kennel static bins in STAT (`+crt-static`: they
+# run inside an arbitrary image root with no host `ld.so`). The payload encodes the destination in
+# the staging subdir — install.sh places each verbatim:
+#   bin/      → <libexec>            (/usr/libexec/kennel)  host-side ONLY; blacklisted from views.
+#   facades/  → <facades_dir>        (/usr/libexec/kennel-facades) the in-cage binaries a view runs.
+#   pathbin/  → /usr/bin             the `kennel` shim, the one name on PATH.
+#
+# Host-side (→ bin/): the daemon, the AKC, the host delegates, the privhelper (all dynamic), the
+# trusted init (static, `fexecve`'d from an fd — needs no view path), and the host execution unit
+# (`kennel-host` → `host`, dynamic).
+HOST_REL_BINS="kenneld kennel-akc host-netproxy host-inetd host-dbus kennel-privhelper"
+HOST_STAT_BINS="kennel-bin-init"
+# In-cage (→ facades/): the conduit facades, the OCI launcher, and the spawn execution unit
+# (`kennel-spawn` → `spawn`) — all static, all reached by path inside a constructed view.
+FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus kennel-bin-oci-entry"
 
 # The in-kennel SPAWN test drivers — `kennel-facade` builds them, but they are the TEST SUITE, not
 # part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload and
-# `facade-spawn-bench` drives spawn-spinup.sh. Staged into the payload ONLY under --with-test-bins
-# (the spawn e2e/bench install them to libexec); a real release never carries them.
-TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe"
+# `facade-spawn-bench` drives spawn-spinup.sh. Staged into `facades/` ONLY under --with-test-bins (they
+# run in-cage); a real release never carries them.
+TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe compositor-broker"
 
-install -d "$DEST/bin"
-for b in $REL_BINS;  do install -m 0755 "$REL/$b"  "$DEST/bin/$b"; done
-for b in $STAT_BINS; do install -m 0755 "$STAT/$b" "$DEST/bin/$b"; done
+install -d "$DEST/bin" "$DEST/facades" "$DEST/pathbin"
+for b in $HOST_REL_BINS;    do install -m 0755 "$REL/$b"  "$DEST/bin/$b";     done
+for b in $HOST_STAT_BINS;   do install -m 0755 "$STAT/$b" "$DEST/bin/$b";     done
+for b in $FACADE_STAT_BINS; do install -m 0755 "$STAT/$b" "$DEST/facades/$b"; done
+
+# The unified `kennel` surface (W10): one static shim on PATH dispatches to two execution units, under
+# their context names — `kennel` (shim, → /usr/bin), `host` (dynamic, host-side), `spawn` (static, in-cage).
+install -m 0755 "$STAT/kennel"       "$DEST/pathbin/kennel"
+install -m 0755 "$REL/kennel-host"   "$DEST/bin/host"
+install -m 0755 "$STAT/kennel-spawn" "$DEST/facades/spawn"
 if [ "$WITH_TEST_BINS" = 1 ]; then
-	for b in $TEST_BINS; do install -m 0755 "$STAT/$b" "$DEST/bin/$b"; done
+	for b in $TEST_BINS; do install -m 0755 "$STAT/$b" "$DEST/facades/$b"; done
 fi
 
 install -m 0755 "$ROOT/src/tools/install.sh" "$DEST/install.sh"

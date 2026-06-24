@@ -43,8 +43,15 @@ const SYSTEM_FILE: &str = "system.toml";
 const USER_FILE: &str = "config.toml";
 
 /// Last-resort default for the helper-binary directory (D4: the documented
-/// `/usr/libexec/kennel`). The vendor `system.toml` normally sets this.
+/// `/usr/libexec/kennel`). The vendor `system.toml` normally sets this. Holds the
+/// **host-side** binaries only (daemon, privhelper, host delegates, the host
+/// execution unit) — the whole tree is blacklisted from constructed views (W10).
 const DEFAULT_LIBEXEC_DIR: &str = "/usr/libexec/kennel";
+/// Last-resort default for the **in-cage** facade directory (W10): the binaries a
+/// constructed view legitimately runs — the conduit facades, the spawn execution
+/// unit, the OCI launcher. A sibling of `libexec_dir` so the host tree can be
+/// blacklisted from views while these stay reachable.
+const DEFAULT_FACADES_DIR: &str = "/usr/libexec/kennel-facades";
 /// Last-resort default for the daemon trust store (the system signing keys).
 const DEFAULT_TRUST_DIR: &str = "/etc/kennel/keys";
 /// Last-resort default for the host `sshd` the SSH bastion launches.
@@ -270,6 +277,7 @@ impl ReservedNamespace {
 #[serde(deny_unknown_fields)]
 struct RawDeployment {
     libexec_dir: Option<PathBuf>,
+    facades_dir: Option<PathBuf>,
     trust_dir: Option<PathBuf>,
     sshd: Option<PathBuf>,
     privhelper: Option<PathBuf>,
@@ -304,6 +312,7 @@ impl RawDeployment {
                 v
             },
             libexec_dir: higher.libexec_dir.or(self.libexec_dir),
+            facades_dir: higher.facades_dir.or(self.facades_dir),
             trust_dir: higher.trust_dir.or(self.trust_dir),
             sshd: higher.sshd.or(self.sshd),
             privhelper: higher.privhelper.or(self.privhelper),
@@ -328,6 +337,9 @@ impl RawDeployment {
             libexec_dir: self
                 .libexec_dir
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_LIBEXEC_DIR)),
+            facades_dir: self
+                .facades_dir
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_FACADES_DIR)),
             trust_dir: self
                 .trust_dir
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_TRUST_DIR)),
@@ -355,6 +367,7 @@ impl RawDeployment {
 #[derive(Debug, Clone)]
 pub struct Deployment {
     libexec_dir: PathBuf,
+    facades_dir: PathBuf,
     trust_dir: PathBuf,
     sshd: PathBuf,
     privhelper: Option<PathBuf>,
@@ -407,10 +420,16 @@ impl Deployment {
         RawDeployment::default().resolve()
     }
 
-    /// The helper-binary directory.
+    /// The host-side helper-binary directory (blacklisted from constructed views, W10).
     #[must_use]
     pub fn libexec_dir(&self) -> &Path {
         &self.libexec_dir
+    }
+
+    /// The in-cage facade directory (W10): the binaries a constructed view legitimately runs.
+    #[must_use]
+    pub fn facades_dir(&self) -> &Path {
+        &self.facades_dir
     }
 
     /// The daemon's signing-key trust store.
@@ -470,7 +489,7 @@ impl Deployment {
     /// The in-kennel SOCKS connector the bastion's `ProxyCommand` invokes.
     #[must_use]
     pub fn ssh(&self) -> PathBuf {
-        self.resolve_bin(self.ssh.as_deref(), "facade-ssh")
+        self.resolve_facade(self.ssh.as_deref(), "facade-ssh")
     }
 
     /// The bastion's root-owned `AuthorizedKeysCommand`.
@@ -483,14 +502,14 @@ impl Deployment {
     /// broker granted sockets through the binder facade (`07-1` §7.1.5).
     #[must_use]
     pub fn afunix(&self) -> PathBuf {
-        self.resolve_bin(self.afunix.as_deref(), "facade-afunix")
+        self.resolve_facade(self.afunix.as_deref(), "facade-afunix")
     }
 
     /// The in-kennel SOCKS5 egress shim bound into the view and launched by the seal: it
     /// brokers each outbound connect to node 0 as a `CONNECT_INET` transaction (`07-5` §7.5).
     #[must_use]
     pub fn socks5(&self) -> PathBuf {
-        self.resolve_bin(self.socks5.as_deref(), "facade-socks5")
+        self.resolve_facade(self.socks5.as_deref(), "facade-socks5")
     }
 
     /// The `host-inetd` inbound BIND delegate (§7.5.7).
@@ -502,14 +521,14 @@ impl Deployment {
     /// The `facade-client` in-kennel inbound facade (§7.5.7).
     #[must_use]
     pub fn facade_client(&self) -> PathBuf {
-        self.resolve_bin(self.facade_client.as_deref(), "facade-client")
+        self.resolve_facade(self.facade_client.as_deref(), "facade-client")
     }
 
     /// The in-kennel `facade-dbus` bound into the view and launched by the seal: it terminates the
     /// workload's bus connection and frames typed transactions onto binder node 0 (§7.7.2).
     #[must_use]
     pub fn facade_dbus(&self) -> PathBuf {
-        self.resolve_bin(self.facade_dbus.as_deref(), "facade-dbus")
+        self.resolve_facade(self.facade_dbus.as_deref(), "facade-dbus")
     }
 
     /// The `host-dbus` D-Bus mediation delegate kenneld spawns in the operator's context: it holds
@@ -533,12 +552,18 @@ impl Deployment {
     /// workload cannot substitute its own launcher.
     #[must_use]
     pub fn oci_entry(&self) -> PathBuf {
-        self.resolve_bin(self.oci_entry.as_deref(), "kennel-bin-oci-entry")
+        self.resolve_facade(self.oci_entry.as_deref(), "kennel-bin-oci-entry")
     }
 
-    /// An explicit override, else `<libexec_dir>/<name>`.
+    /// An explicit override, else `<libexec_dir>/<name>` (a host-side binary).
     fn resolve_bin(&self, override_path: Option<&Path>, name: &str) -> PathBuf {
         override_path.map_or_else(|| self.libexec_dir.join(name), Path::to_path_buf)
+    }
+
+    /// An explicit override, else `<facades_dir>/<name>` — an in-cage binary (W10): a conduit
+    /// facade, the spawn execution unit, or the OCI launcher, living outside the blacklisted host tree.
+    fn resolve_facade(&self, override_path: Option<&Path>, name: &str) -> PathBuf {
+        override_path.map_or_else(|| self.facades_dir.join(name), Path::to_path_buf)
     }
 }
 

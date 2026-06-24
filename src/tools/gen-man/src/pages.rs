@@ -84,7 +84,7 @@ pub struct Page {
 pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     (
         "run",
-        "run a workload confined by a policy, in the foreground",
+        "run a workload confined by a policy or template, in the foreground",
         "run <policy> [<name>] [--key K] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
     ),
     (

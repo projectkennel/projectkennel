@@ -30,11 +30,11 @@ read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
 
 # Execute only the in-kennel SPAWN probe (+ /bin/sh for the framework shell check).
 [exec]
-allow = ["/usr/libexec/kennel/facade-spawn-probe", "/bin/sh"]
+allow = ["/usr/libexec/kennel-facades/facade-spawn-probe", "/bin/sh"]
 
 # The workload IS the SPAWN client: it spawns echo-tool@v1 and round-trips the channel.
 [workload]
-argv = ["/usr/libexec/kennel/facade-spawn-probe", "echo-tool@v1"]
+argv = ["/usr/libexec/kennel-facades/facade-spawn-probe", "echo-tool@v1"]
 pinned = true
 
 # The delegated-spawn grant (§7.12.2): may instantiate echo-tool, bounded to 4 concurrent.

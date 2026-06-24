@@ -126,9 +126,9 @@ mode = "none"
 [fs]
 read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
 [exec]
-allow = ["/usr/libexec/kennel/facade-spawn-bench", "/bin/sh", $3]
+allow = ["/usr/libexec/kennel-facades/facade-spawn-bench", "/bin/sh", $3]
 [workload]
-argv = ["/usr/libexec/kennel/facade-spawn-bench", "$N", "$2", $4]
+argv = ["/usr/libexec/kennel-facades/facade-spawn-bench", "$N", "$2", $4]
 pinned = true
 [lifecycle]
 ttl = "10m"

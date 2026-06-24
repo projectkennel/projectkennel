@@ -1,13 +1,14 @@
-//! `facade-spawn` — the usable in-kennel `SPAWN` client (`02-10` §7.12).
+//! `kennel-spawn` — the in-cage spawn execution unit (`02-10` §7.12, W10).
 //!
-//! Where `facade-spawn-probe`/`-bench` are fixed test drivers, this is the client a confined workload
-//! (an agent) actually uses to reach its delegated-spawn capability:
+//! Installed as `/usr/libexec/kennel-facades/spawn` and reached through the `kennel` shim, this is the
+//! surface a confined workload (an agent) uses to reach its delegated-spawn capability. (The fixed
+//! test drivers `facade-spawn-probe`/`-bench` are separate.)
 //!
-//! - **`facade-spawn caps`** interrogates this kennel's `[spawn]` grant (`verb::SPAWN_QUERY`): which
+//! - **`kennel caps`** interrogates this kennel's `[spawn]` grant (`verb::SPAWN_QUERY`): which
 //!   `name@version` templates it may instantiate, the mutable manifest fields it may write (narrowed to
 //!   this requester) and their bounds, and the `max_instances`/live ceiling. So the workload discovers
 //!   *what it may ask for* instead of probing `SPAWN` by trial.
-//! - **`facade-spawn run <template> [field=value]… [-- <argv>…]`** transacts `verb::SPAWN` for the
+//! - **`kennel run <template> [field=value]… [-- <argv>…]`** transacts `verb::SPAWN` for the
 //!   chosen template, applying the given mutable-field writes, then wires **this process's stdio to the
 //!   sibling's channel** — our stdin → the tool's stdin, the tool's stdout → our stdout, the tool's
 //!   stderr → our stderr — so the operator/agent talks to the spawned tool directly. `kenneld` brokers
@@ -17,6 +18,9 @@
 //!   says *what may run* (its `[exec].allow` floor — Landlock gates `argv[0]` — and a `[[mutable]]`
 //!   `workload.argv` variant), and the caller says *what to run* within it. A template that does not open
 //!   `workload.argv` runs its own fixed entrypoint and rejects a `--` command.
+//!
+//! `run` is the verb shared with the host unit ([`kennel_lib_cli::RUN`]): the same verb and the same
+//! `--`-separates-argv convention, with a `template@version` operand here where the host takes a policy.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -27,6 +31,7 @@ use std::thread;
 
 use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
 use kennel_lib_binder::service::{spawn, status, verb};
+use kennel_lib_cli::{split_trailing_argv, RUN};
 
 /// The binder buffer mapping size for the node-0 client.
 const MAP_SIZE: usize = 128 * 1024;
@@ -37,18 +42,16 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("caps") => caps(),
-        Some("run") => run(args.get(1..).unwrap_or(&[])),
+        Some(v) if v == RUN => run(args.get(1..).unwrap_or(&[])),
         _ => {
-            eprintln!(
-                "usage: facade-spawn <caps | run <template@version> [field=value]… [-- <argv>…]>"
-            );
+            eprintln!("usage: kennel <caps | run <template@version> [field=value]… [-- <argv>…]>");
             return ExitCode::FAILURE;
         }
     };
     match result {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("facade-spawn: {e}");
+            eprintln!("kennel: {e}");
             ExitCode::FAILURE
         }
     }
@@ -81,13 +84,12 @@ fn caps() -> io::Result<ExitCode> {
 /// this process's stdio to the sibling's channel.
 fn run(args: &[String]) -> io::Result<ExitCode> {
     let (template, rest) = args.split_first().ok_or_else(|| {
-        io::Error::other("usage: facade-spawn run <template@version> [field=value]… [-- <argv>…]")
+        io::Error::other("usage: kennel run <template@version> [field=value]… [-- <argv>…]")
     })?;
-    // Split at the first `--`: before it, `field=value` mutable-field writes; after it, the command
-    // line, sent as `workload.argv` tokens (one patch entry per token, in order).
-    let mut parts = rest.splitn(2, |a| a == "--");
-    let fields = parts.next().unwrap_or(&[]);
-    let cmd = parts.next();
+    // The shared `--` convention (`kennel_lib_cli::split_trailing_argv`): before it, `field=value`
+    // mutable-field writes; after it, the command line, sent as `workload.argv` tokens (one patch
+    // entry per token, in order).
+    let (fields, cmd) = split_trailing_argv(rest);
     let cmd_tokens = cmd.unwrap_or(&[]);
 
     let mut patch: Vec<(&str, &str)> =
@@ -114,7 +116,7 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
         .ok_or_else(|| io::Error::other("empty SPAWN reply"))?;
     if code != status::OK {
         return Err(io::Error::other(format!(
-            "SPAWN refused: status {code} — run `facade-spawn caps` to see what this grant allows"
+            "SPAWN refused: status {code} — run `kennel caps` to see what this grant allows"
         )));
     }
     if fds.len() != 2 {

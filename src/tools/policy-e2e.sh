@@ -36,7 +36,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 SUITE_DIR="$REPO_ROOT/src/crates/kenneld/tests/policy-suite"
 LIBEXEC="/usr/libexec/kennel"
-KENNEL="$LIBEXEC/kennel"
+# The `kennel` shim is on PATH at /usr/bin (W10); it dispatches to the host execution unit.
+KENNEL="/usr/bin/kennel"
 
 UID_NUM="$(id -u)"
 if [ "$UID_NUM" = "0" ]; then
@@ -104,7 +105,7 @@ if [ "$DO_INSTALL" = 1 ]; then
         || { echo "build failed" >&2; exit 1; }
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
         --target "$HOST_TRIPLE" \
-        -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade \
+        -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade -p kennel-shim \
         || { echo "static in-kernel build failed" >&2; exit 1; }
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress \
         || { echo "privhelper build failed" >&2; exit 1; }
