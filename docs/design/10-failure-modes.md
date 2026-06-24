@@ -26,7 +26,6 @@ Project Kennel checks kernel feature availability at policy-load time, against t
 | cgroup BPF (bind hook) | Any `net.bind.inaddr_any_policy = "rewrite"` | Refuse to start; report kernel ≥5.7 needed |
 | Mount namespace | Any shim-using rule (essentially all confined policies) | Refuse to start; report kernel unsupported (essentially impossible on modern Linux) |
 | AppArmor | `unix.abstract = "deny"` policy | Warn; fall back to seccomp-TRAP for abstract-socket denial; functionality reduced |
-| `legacy_tiocsti` sysctl | `tty.require_tiocsti_disabled = true` and kernel ≥6.2 | If sysctl is enabled, refuse to start; report how to disable |
 
 The principle is "refuse to start rather than silently weaken the confinement". A policy that claims to defend against T2.2 (lateral movement to local services) and runs without cgroup BPF is not defending against T2.2; the user must be told.
 
