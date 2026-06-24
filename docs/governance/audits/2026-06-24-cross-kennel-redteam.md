@@ -28,7 +28,7 @@ cgroup-bounded DoS, now capped. All actionable findings are remedied in this cha
 
 | # | Sev | Finding | Remedy |
 |---|---|---|---|
-| 1 | HIGH | **Host control socket reachable via an `fs` grant.** The control socket (`/run/user/<uid>/kennel/control.sock`, the CLI→daemon trust boundary) is refused on the `[[unix.allow]]` path at both compile (`unix.rs:107`, `is_control_socket`) and construction (`binder.rs:825`, canonicalised). But that refusal is **absent from `fs.read`/`fs.write`**: `translate_fs` (`translate.rs:1240`) applies no such check, and the construction backstop in `binder.rs` only guards the brokered `af_unix_connect` path — an `fs` grant is bind-mounted straight into the view by the spawn factory, never touching it. A signed policy naming the parent dir `fs.write = ["/run/user/<uid>/kennel"]` thus drags `control.sock` into the view, violating the design's stated invariant that the socket is "grantable by no policy" (`unix.rs:111`). `is_control_socket` checks the socket *leaf*; the grant names a *directory* ancestor, which it does not catch. (ESCAPE — invariant break; see Notes on takeover contingency) | **Fixed.** New `kennel_lib_control::socket::grant_exposes_control_socket` — an ancestor-aware form of `is_control_socket` (refuses the socket or any directory that contains it, this-uid and structural-any-uid). `translate_fs` now sweeps every `fs` path through it (one pass: `read` folds in `write`, and `exclusive ⊆ write`), refusing the grant at compile — the loud primary guard, parity with `unix.rs`. |
+| 1 | HIGH | **Host control socket reachable via an `fs` grant.** The control socket (`/run/user/<uid>/kennel/control.sock`, the CLI→daemon trust boundary) is refused on the `[[unix.allow]]` path at both compile (`unix.rs:107`, `is_control_socket`) and construction (`binder.rs:825`, canonicalised). But that refusal is **absent from `fs.read`/`fs.write`**: `translate_fs` (`translate.rs:1240`) applies no such check, and the construction backstop in `binder.rs` only guards the brokered `af_unix_connect` path — an `fs` grant is bind-mounted straight into the view by the spawn factory, never touching it. A signed policy naming the parent dir `fs.write = ["/run/user/<uid>/kennel"]` thus drags `control.sock` into the view, violating the design's stated invariant that the socket is "grantable by no policy" (`unix.rs:111`). `is_control_socket` checks the socket *leaf*; the grant names a *directory* ancestor, which it does not catch. (ESCAPE — invariant break; see Notes on takeover contingency) | **Fixed, two layers.** (1) *Primary, loud, compile-time:* new `kennel_lib_control::socket::grant_exposes_control_socket` — an ancestor-aware form of `is_control_socket` (refuses the socket or any directory that contains it, this-uid and structural-any-uid); `translate_fs` sweeps every `fs` path through it (one pass: `read` folds in `write`, `exclusive ⊆ write`), so the policy is *refused at install* with a clear error — parity with `unix.rs`. (2) *Structural backstop, at the privileged factory:* the lexical compile guard cannot see a grant written with the deferred `<uid>` placeholder (`/run/user/<uid>/kennel`), which resolves only at `substitute`, *after* the check. So the **unprivileged** daemon unconditionally adds its own `socket_path()` to the view's blind-mask list (`policy.rs:loaded_from_settled`), and the **privhelper — kept a dumb applier, no tree-searching** (that is where TOCTOU/symlink-race bugs live) — over-mounts an empty file there after building the view (`materialize_masks`, the same primitive used for T2.8 manifests). However the tree was bound, `connect(2)` hits a plain file (`ENOTSOCK`). The mask is a no-op on the common path (skipped when no grant placed the runtime dir in the view). |
 | 3 | LOW–MED | **compositor-broker unbounded per-connection spawn.** The GUI broker's accept loop (`compositor-broker.rs`) spawns a thread + a nested-compositor `Child` for *every* accepted connection with no concurrency bound. A consumer brokered to the GUI service can spam connect/disconnect, churning thread/process creation and degrading the GUI service for co-consumers. Bounded by the GUI kennel's own cgroup (no host impact, no escape) — an in-budget availability gap, not a breakout. (CONTRACT-GAP) | **Fixed.** A soft concurrency cap (`MAX_LIVE_COMPOSITORS = 64`): the accept loop reserves a slot via an atomic counter and drops connections over the ceiling (the consumer retries) rather than spawning unboundedly; the slot is released when the window folds. |
 
 ## Refuted findings
@@ -62,11 +62,23 @@ The verification confirmed, by code citation, that these hold:
   in-userns uid mapping vs. the dropped masked identity. That end-to-end step was **not independently
   reproduced** in this pass. The fix restores the structural invariant regardless, so the question is
   moot — which is why it is fixed at the refusal, not left to the perimeter.
-- **F1 symlink-source residual.** The compile guard is lexical; a bind *source* that symlink-resolves
-  to the control dir at construction is the separately-tracked deferred work (the anchored
-  bind-source `RESOLVE_NO_SYMLINKS` guard, BACKLOG) — which, when landed, covers the control socket
-  for free. No new half-measure was added here to avoid a `kennel-lib-control` dependency in the
-  spawn crate (which deliberately carries none).
+- **Why two layers (and what each closes).** The compile guard is lexical, so a grant using the
+  deferred `<uid>` placeholder slips past it (it resolves only later, at `substitute`). The privhelper
+  backstop is what closes that: it masks the socket at its *resolved* in-view path regardless of how
+  the grant named it. The division of labour is deliberate — the path is computed on the **unprivileged**
+  side (the daemon, which knows its own socket and carries no escalation risk), and the **privileged**
+  factory only *applies* a mask vector it is handed, never searches the constructed tree (keeping the
+  setuid TCB small and dumb — no traversal, no TOCTOU window).
+- **Residual: source-symlink aliasing.** The backstop masks the socket's canonical in-view path. A bind
+  *source* that symlink-resolves the socket to a *different* in-view path (a host symlink at a granted
+  path) would sidestep both the lexical compile guard and the canonical-path mask. That is the
+  separately-tracked deferred work (the anchored bind-source `RESOLVE_NO_SYMLINKS` guard, BACKLOG); it
+  requires an operator-placed host symlink at a granted path, and it is the general writable-bind-source
+  concern, not specific to the control socket.
+- **F1 takeover contingency (now moot, recorded for honesty).** Even before the mask, end-to-end
+  *takeover* (vs. the certain invariant break) further required the in-view `connect()` to succeed —
+  dependent on socket mode and the in-userns uid map, not independently reproduced here. The backstop
+  makes it moot: the socket is a plain file in the view, so there is nothing to connect to.
 - **Surfaces not exhaustively exercised.** The connector-broker *resolution race* (TOCTOU between
   `SVC_CONNECT` and the live capability map) and the GUI *confidentiality* legs (host-global leak
   through the inner compositor; one kennel reaching another's compositor) produced **no confirmed
