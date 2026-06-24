@@ -464,6 +464,13 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   over `[provides]` — computed from the grant, cannot drift from it. The instance count is an advisory
   snapshot, not a reservation; the atomic slot-claim at spawn time remains authoritative.
 
+  **Status — built (the functionality; the name awaits W10).** `facade-spawn caps` already transacts
+  `verb::SPAWN_QUERY`, whose daemon handler (`render_caps`) emits the `max_instances`/live ceiling, every
+  allowed template, and each mutable field with its bound (`describe_constraint`) — the exact projection
+  above, scoped to the caller's grant and memoised so a query cannot spin signature verification. The
+  `kennel caps` *name* is the W10 one-`kennel`-binary unification of the `facade-spawn` surface, not new
+  logic.
+
 - **W10 · Unify the spawn surface behind one `kennel` shim; split execution into `/usr/libexec`.** **[dep] L.**
   One command surface, three binaries — because linkage is a build-time property the cage constraint
   will not let a single ELF straddle (everything in-cage is static; `kennel` on the host is the one
@@ -547,6 +554,15 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   (a T1.6-equivalent — the GUI-service kennel's connection to the host compositor, held only to vend
   per-kennel host fds; one ordinary Wayland client to the host, in a confined kennel, required `reason`).
   Plus the compliance-table mapping.
+
+  **Status — built (2026-06-24).** `T3.10` (standing-service delegation) and `T1.12` (the GUI
+  host-compositor leg) added to `THREATS.md` + `dist/threats/catalogue.toml` (the catalogue-sync gate
+  passes; the v0.3 *scheme* version is unchanged — these are entries within it, not a scheme change),
+  each derived-from-grant like T3.8/T3.9, with the compliance rows extended
+  (SOC 2 / ISO / NIS2 / DORA) and `T2.7` cross-referenced to `T1.12`. The threat-narrative voice (esp. the
+  framework-grounded "observed instances", which carry no external CVE citation like T3.9's) is flagged
+  for maintainer review. **W11 (home the trust class in `04-trust-boundaries.md`, citing the canonical
+  §7.13.5 definition) and W13 (the §4.3 cross-reference sweep) remain** — both light, faithful follow-ups.
 
 - **W13 · Documentation sweep: "authentication, never attestation."** **[dep] S–M.**
   Land the principle solidly across the corpus, not as a buried backlog note. The mesh provides

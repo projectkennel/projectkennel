@@ -94,6 +94,13 @@ scope = "in"
 title = "Compromised browser, lateral movement"
 residual = "A browser the policy grants is trusted with its own profile; the framework confines what the kennel reaches, not the browser's own sessions."
 
+[[threat]]
+id = "T1.12"
+family = 1
+scope = "in"
+title = "The GUI-service kennel's host-compositor leg"
+residual = "Confined GUI vends a nested compositor, not the host socket; the one host-compositor leg is held by the GUI-service kennel (never the app's), as one ordinary client contained by the host's own client isolation — concentrated, reason-required, derived from the [[unix.allow]] grant. Bounded by, not eliminating, the host compositor's client isolation."
+
 # ── Family 2 — Posture degradation ──────────────────────────────────────────
 
 [[threat]]
@@ -216,6 +223,13 @@ family = 3
 scope = "in"
 title = "Delegated spawning: a workload instantiates sibling kennels"
 residual = "Each spawn floors at a signed, pre-resolved template; residuals are R1 the agent-written mutable-field surface (only as strong as the template's per-field bounds) and R2 cross-kennel composition (an agent bridging two spawned channels reconstitutes the trifecta — not mechanically closed, scoped by [[spawn.allow]]). Derived from the [spawn] grant."
+
+[[threat]]
+id = "T3.10"
+family = 3
+scope = "in"
+title = "Standing-service delegation: a confined kennel brokers a capability to its peers"
+residual = "A mesh provider is a standing, operator-enabled, maintainer-signed service (the service-kennel trust class) reached deny-by-default by name; residuals are R1 a compromised provider serves every consumer for its lifetime (blast radius = grant × consumers, scoped by least-privilege enablement) and R2 the standing SVC_CONNECT broker grows the daemon's always-present surface (bounded by the parse-nothing/route-nothing TCB discipline, not eliminated). Derived from the [[provides]]/[[consumes]] grants."
 
 # ── Family 5 — Framework attack surface ─────────────────────────────────────
 

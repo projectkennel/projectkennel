@@ -233,6 +233,24 @@ Within typically-granted project trees:
 
 ---
 
+## T1.12 — The GUI-service kennel's host-compositor leg
+
+**Definition.** Confined GUI (design §7.14) gives a graphical workload a display server *constructed for it* — a nested compositor inside a separate GUI-service kennel — rather than the host compositor's socket. That nested compositor must still reach *some* compositor to put pixels on screen, so the GUI-service kennel holds **one** connection to the host compositor and brokers it to each inner compositor. That single host-compositor leg is a deliberate, reasoned host-reach held by a confined kennel — the GUI analogue of the host-reconnaissance residual (T1.6).
+
+**Workload class.** Confined-GUI-specific. Like T3.8 and T3.9, a residual *derived* from a loud grant — the GUI-service kennel's `[[unix.allow]]` host-compositor leg — not a framework escape.
+
+**Observed instances.** The general pattern is a graphical sandbox that must vend display access without handing the workload the host compositor's socket. The established desktop sandboxes pass the host Wayland socket *through* to the confined client and rely on the host compositor's own per-client isolation; confined GUI instead never lets the workload name the host socket at all (design §7.14.3), concentrating the host-reach in one confined broker kennel. This entry catalogues what remains after that concentration.
+
+**Attack pattern.** A subverted GUI-service kennel would hold a connection to the host compositor and could exercise whatever that compositor exposes to an ordinary client. Two structural facts bound this. First, the leg is held by the **GUI-service kennel, never the app's** (design §7.14.5, §4.6): the graphical workload cannot reach or subvert the component that confines its display, because the inner compositor runs in a separate kennel the app has no path into. Second, to the host compositor the GUI-service kennel is **one ordinary Wayland client**, contained by the host's own client isolation exactly as any application is — it composites and can capture the surfaces it owns (the kennel's own pixels), but a client cannot reach across its connection to drive or capture the *server's* other clients, the host's own sessions (design §7.14.5).
+
+**Mitigation in Project Kennel.** The host-reach is **concentrated and bounded** (design §7.14.6): exactly one party reaches the host compositor — the GUI-service kennel — and only to vend connected fds to the inner compositors it spawns; no workload kennel holds the host leg, and no unconfined host process holds standing display capability. The leg rides the §7.6 AF_UNIX brokered connect, so the host compositor's socket *path* is absent from every confined view (design §7.14.3) — the workload reaches a facade, not the host. Confined GUI depends on **no enforcement by the host compositor** (the §7.14.4 invariant): every confinement property of the display is carried by a compositor Kennel ships and controls, inside a kennel. The grant is **loud**: the host-compositor leg requires a `reason`, and the exposure is *derived* from the grant and surfaced by `kennel policy risks` — the same mechanism by which `mode = host` derives T1.6, with no stored `threats.reinstated` field.
+
+**Residuals.** One, bounded not eliminated. The GUI-service kennel is a single confined client of the host compositor, so it sees what any host client sees of itself and nothing of the host's other clients — but it *is* a standing host-reach, and a host compositor with an unusually permissive global surface would widen what that one leg exposes. This is not closed by Kennel; it is the host compositor's own client-isolation property, the same one every desktop application already depends on, concentrated in one reasoned, confined, `reason`-required kennel rather than handed to each graphical workload. The posture claim is a single bounded host-reach made legible, not the elimination of host-reach for graphics.
+
+**MITRE ATT&CK.** T1113 (Screen Capture — bounded to the GUI-service kennel's own client relationship to the host), T1021 (Remote Services — the one brokered host-compositor leg).
+
+---
+
 # Family 2 — Posture degradation (T2.1–T2.8)
 
 This family captures what workloads do *to the user's host configuration and to the artefacts they produce*, distinct from what they do to access resources. The posture-degradation threats are the direct consequence of the optimisation-pressure thesis for AI agents (design document §1.2) and the friction-routing-around behaviour for human-driven workloads (developers configuring containers permissively because narrow configuration didn't work).
@@ -358,7 +376,7 @@ The Reddit r/claudecode incident (referenced in claudecodecamp.com, April 2026) 
 
 **Mitigation in Project Kennel.** X11 is out of scope (§7.8), so a workload has no X server to capture from or synthesise input into. TIOCSTI is gated at the kernel sysctl (`dev.tty.legacy_tiocsti = 0`); the framework refuses to start kennels on kernels where this is enabled unless explicitly overridden. Under the confined-GUI design (§7.14) a graphical workload's display server is its own nested inner compositor; that compositor's screen-capture and input-synthesis globals reach only the kennel's own surfaces (§7.14.5), never the host screen or a sibling kennel, and there is no host portal in the path to mediate capture under consent fatigue.
 
-**Residuals.** The inner compositor's capture and input globals are scoped to the kennel's own world; the host-facing residual is the single host-compositor leg the GUI-service kennel holds (the T1.6 analogue, §7.14.6), where that kennel is one ordinary client of the host compositor — concentrated and reasoned, not a workload-craftable host capture. On older kernels with TIOCSTI re-enabled, the seccomp fallback denies the ioctl.
+**Residuals.** The inner compositor's capture and input globals are scoped to the kennel's own world; the host-facing residual is the single host-compositor leg the GUI-service kennel holds (T1.12, the T1.6 analogue, §7.14.6), where that kennel is one ordinary client of the host compositor — concentrated and reasoned, not a workload-craftable host capture. On older kernels with TIOCSTI re-enabled, the seccomp fallback denies the ioctl.
 
 **MITRE ATT&CK.** T1113 (Screen Capture), T1059 (Command and Scripting Interpreter — partial analogue for input synthesis), T1185 (Browser Session Hijacking — partial analogue).
 
@@ -532,6 +550,24 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 **Residuals.** Two, both narrowed and neither eliminated. **R1 — the mutable-field surface is agent-controlled.** The boundary is exactly as strong as the template's per-field bounds; pure pool/`oneof` manifests reduce the agent's input to closed-set selection with zero free text, while a predicate field is the loud exception that reintroduces an open value (held by a typed, traversal-free, `RESOLVE_IN_ROOT` bound). Operator-owned: signing a manifest signs its per-field bounds as load-bearing. **R2 — delegated composition is the requester's to compose.** Kennel bounds each spawned kennel to its template but does not reason about what an agent composes across several; an agent permitted to spawn a network-capable tool and a filesystem-capable tool can bridge their channels and reconstitute the lethal trifecta across two kennels though no single kennel holds both legs. This is **not mechanically closed** — closing it would put cross-kennel information-flow analysis in the daemon, a larger and different project. It is mitigated, not eliminated, by scoping `[[spawn.allow]]` to the templates a given agent actually needs: the composition surface shrinks with the grant. The same in-band shape as T1.8 and T5.2, between kennels rather than to an external API. The posture claim is confinement and consented delegation, not control over what the agent does with the tools it is permitted to spawn.
 
 **MITRE ATT&CK.** T1610 (Deploy Container — the spawn analogue, contained to the template's grant), T1559 (Inter-Process Communication — the minted stdio channel and the agent-bridged cross-kennel composition), T1041 (Exfiltration Over C2 Channel — the unclosed R2, over an agent-bridged channel).
+
+---
+
+## T3.10 — Standing-service delegation: a confined kennel brokers a capability to its peers
+
+**Definition.** The cross-kennel service mesh (design §7.13) lets one confined kennel `[[provides]]` a capability that another `[[consumes]]`, with `kenneld` brokering the connector at construction, deny-by-default. Unlike delegated spawning (T3.9), which is ephemeral, a provider is a **standing service**: an operator-enabled kennel that stays up across many consumers (the GUI compositor service, a D-Bus broker, a cache). The delegation is longer-lived, and the brokering channel — `kenneld`'s `SVC_CONNECT` path — is a standing cross-kennel edge rather than a one-shot spawn.
+
+**Workload class.** Service-mesh-specific. Like T3.8 and T3.9, a residual *derived* from a loud, operator-enabled grant (the provider's `[[provides]]`, the consumer's `[[consumes]]`), not a framework escape. The provider runs in the **service-kennel trust class** (design §7.13.5): an operator-declared, maintainer-signed, non-composable standing service.
+
+**Observed instances.** The pattern is the desktop/system service bus generalised: long-lived helpers (a compositor, a notification daemon, a secrets agent) that many confined clients reach. In the unconfined form these are ambient host services any process can speak to; the mesh replaces that ambient reach with an enabled, named, deny-by-default brokered connector, and this entry catalogues what remains after the replacement.
+
+**Attack pattern.** A mesh consumer cannot author policy or invent a capability: it reaches only the names its `[[consumes]]` declares, brokered only to a provider the catalogue resolves under that name (design §7.13.4). A reserved name (`org.projectkennel.*`) resolves only to a **maintainer-signed** provider (design §7.13.5), so a workload cannot advertise `org.projectkennel.wayland` and have a consumer's display brokered to an impostor. Two surfaces remain. First, **a compromised provider serves every consumer**: a standing service is a longer-lived, higher-value target than an ephemeral spawn — subverting it reaches each kennel that consumes it, for the service's lifetime. Second, the **brokering channel is standing**: `kenneld`'s `SVC_CONNECT` path is a cross-kennel edge that exists for as long as the provider is enabled, a larger always-present surface on the daemon than the one-shot spawn verb.
+
+**Mitigation in Project Kennel.** Deny-by-default and request-don't-author: the connector is instantiated at construction only for a declared `[[consumes]]` against a catalogue-resolved `[[provides]]`, floored at what the operator enabled (design §7.13). The reserved-namespace gate binds high-trust names to the maintainer key, so the name a consumer trusts cannot be claimed by a workload (design §7.13.5). The provider holds its legs under the service-kennel trust class with its **multi-leg exemption** (design §7.13.5): a maintainer-signed, operator-enabled service may hold multiple legs because both the maintainer (by signature) and the operator (by enablement) have vouched for the whole of it — the single-leg discipline (design §7.12) binds what an *untrusted agent composes*, not what a maintainer signs. The broker stays **control-plane**: `kenneld` resolves the name and reaches the provider's endpoint through `/proc/<pid>/root`, then steps out of the byte path — it parses no protocol and routes no application traffic (design §7.13.4a). The grants are **loud**: `[[provides]]` and `[[consumes]]` each require a `reason`, surfaced by `kennel policy risks`; the standing service is operable, not blind — its readiness (pending/ready/failed) is visible in the topology surface (design §7.13.7), so a flaked provider is loud rather than a silent resolve-deny.
+
+**Residuals.** Two, narrowed not eliminated. **R1 — a provider is a standing, shared target.** Confinement bounds what a *subverted* provider can reach (its own grants, its own legs), but a compromised standing service still serves every consumer for its lifetime; the blast radius is the provider's grant times its consumer set. Operator-owned: enabling a service signs its grant as load-bearing, and scoping a provider to the minimum it needs shrinks the radius. **R2 — the brokering channel grows the daemon's standing surface.** The `SVC_CONNECT` path is an always-present cross-kennel edge on `kenneld`, a larger attack surface than the ephemeral spawn verb; it is bounded by the same TCB discipline (the broker parses no application protocol and routes no bytes) but not eliminated — a standing mesh is a standing surface. The posture claim is confined, named, deny-by-default delegation made legible and operable, not the elimination of the standing-service attack surface.
+
+**MITRE ATT&CK.** T1559 (Inter-Process Communication — the brokered cross-kennel connector), T1071 (Application Layer Protocol — the standing service channel), T1078 (Valid Accounts — a subverted provider serving its consumers under its enabled grant).
 
 ---
 
@@ -759,12 +795,12 @@ This section is intended for security teams who need to map the catalogue to com
 |---|---|
 | T1.1, T2.3 | CC6.1, CC6.7 (Logical and Physical Access) |
 | T1.2, T1.3, T1.9 | CC8.1 (Change Management); CC7.1 (System Operations: detection of malicious software) |
-| T1.8, T1.6 | CC6.6, CC6.7 (boundary controls; transmission of data) |
+| T1.8, T1.6, T1.12 | CC6.6, CC6.7 (boundary controls; transmission of data) |
 | T2.1, T2.5, T2.8 | CC7.2, CC8.1 (system monitoring; change management) |
 | T2.2, T2.4 | CC8.1 (change management); CC7.1 (detection of system anomalies) |
 | T3.2–T3.5 | CC6.6, CC8.1 (boundary controls; change management) |
 | T3.6, T3.7 | CC8.1, CC7.1 (change management; detection) |
-| T3.8, T3.9 | CC6.1, CC6.3 (least-privilege logical access); CC9.2 (vendor and business-partner risk: third-party images and templates) |
+| T3.8, T3.9, T3.10 | CC6.1, CC6.3 (least-privilege logical access); CC9.2 (vendor and business-partner risk: third-party images and templates) |
 
 ## ISO/IEC 27001:2022 (selected controls)
 
@@ -772,12 +808,12 @@ This section is intended for security teams who need to map the catalogue to com
 |---|---|
 | T1.1, T2.3 | A.5.10 (Acceptable use); A.8.3 (Information access restriction); A.8.4 (Access to source code) |
 | T1.2, T1.3, T1.9 | A.8.8 (Management of technical vulnerabilities); A.8.30 (Outsourced development) |
-| T1.8, T1.6 | A.8.20 (Network security); A.8.21 (Security of network services) |
+| T1.8, T1.6, T1.12 | A.8.20 (Network security); A.8.21 (Security of network services) |
 | T2.1, T2.5, T2.8 | A.8.31 (Separation of development, test and production environments); A.8.32 (Change management) |
 | T2.2, T2.4 | A.8.28 (Secure coding); A.8.29 (Security testing in development and acceptance) |
 | T3.2–T3.5 | A.8.22 (Segregation of networks); A.8.23 (Web filtering) |
 | T3.6, T3.7 | A.5.7 (Threat intelligence); A.8.28 (Secure coding) |
-| T3.8, T3.9 | A.8.2 (Privileged access rights); A.8.3 (Information access restriction); A.5.19, A.5.21 (Supplier relationships; managing ICT supply chain) |
+| T3.8, T3.9, T3.10 | A.8.2 (Privileged access rights); A.8.3 (Information access restriction); A.5.19, A.5.21 (Supplier relationships; managing ICT supply chain) |
 
 ## NIS2 (Directive (EU) 2022/2555, Article 21 measures)
 
@@ -786,7 +822,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T1.1–T1.11 | Article 21(2)(d): supply chain security; Article 21(2)(e): security in acquisition, development, and maintenance |
 | T2.1–T2.8 | Article 21(2)(a): policies on risk analysis and information system security; Article 21(2)(g): basic cyber hygiene practices and training |
 | T3.1–T3.7 | Article 21(2)(d): supply chain security; Article 21(2)(j): use of multi-factor authentication and secured communications |
-| T3.8, T3.9 | Article 21(2)(i): access control policies and least privilege; Article 21(2)(d): supply chain security (third-party images and templates) |
+| T3.8, T3.9, T3.10 | Article 21(2)(i): access control policies and least privilege; Article 21(2)(d): supply chain security (third-party images and templates) |
 | T5.1–T5.4 | Article 21(2)(e): security in acquisition, development, and maintenance; Article 21(2)(i): human resources security, access control policies and asset management |
 
 ## DORA (Regulation (EU) 2022/2554, for financial entities)
@@ -796,7 +832,7 @@ This section is intended for security teams who need to map the catalogue to com
 | T1.1–T1.11 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
 | T2.1–T2.8 | Article 9; Article 16 (ICT-related incidents); Article 17 (ICT-related incident reporting) |
 | T3.1–T3.7 | Article 9; Article 28 (third-party risk) |
-| T3.8, T3.9 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
+| T3.8, T3.9, T3.10 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
 | T5.1–T5.4 | Article 9 (ICT risk management framework); Article 16 (ICT-related incidents) |
 
 These mappings are first-pass starting points for compliance teams. Specific control-objective mapping requires organisation-specific analysis.
