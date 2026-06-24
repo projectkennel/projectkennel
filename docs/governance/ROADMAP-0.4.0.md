@@ -377,11 +377,13 @@ Self-contained and testable with no broker and no runtime — the contract every
   is `broker::decide` (pure resolution — match a signed consume to a catalogue candidate, no I/O) and the
   consume-with-wait loop in `svc_connect_activate_wait` (the cycle-safety deadline, §7.13.4a); everything
   else reduces to a shim — `svc_connect_handoff` → `connect_unix_timeout(derive_rp(…))` (the same call the
-  `[[unix.allow]]` facade uses), the rendezvous mount → one `BindMount` through `materialize_binds`, the
-  readiness probe → a `stat`, request/reply → the existing `kennel-lib-binder::service` codec, audit →
-  `writer.emit`. The deliverable includes the evidence: the `kenneld` inventory/SLOC delta should show the
-  broker subsystem net-*shrinking* (the deleted `/proc/<pid>/root` join and `pid` plumbing) or holding flat
-  with the new logic confined to `decide` — never a second connect/bind/route path beside an existing one.
+  `[[unix.allow]]` facade uses), the rendezvous mount → one `BindMount` through `materialize_binds`,
+  request/reply → the existing `kennel-lib-binder::service` codec, audit → `writer.emit`. **As built it
+  adds ~40 TCB SLOC** (measured): the `/proc/<pid>/root` join and `pid` plumbing it deletes are small,
+  and the rendezvous derivation plus the construction bind cost more than they save — the win is the
+  primitive (no namespace-crossing connect, no pid-reuse race), not LOC. No new dependency and no new
+  authored state (the catalogue stays a projection); no second connect/bind/route path beside an existing
+  one.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
