@@ -80,6 +80,10 @@ pub enum Request {
     /// `systemctl daemon-reload` analogue, §7.13.6). Carries no payload; the daemon answers
     /// [`Response::Reloaded`] with the resulting capability count.
     DaemonReload,
+    /// Snapshot the cross-kennel service mesh (`kennel mesh`, §7.13.7): the catalogued providers,
+    /// each capability they offer, and its readiness — the operability surface over the standing
+    /// mesh. Carries no payload; the daemon answers [`Response::Mesh`].
+    Mesh,
 }
 
 /// The payload of a [`Request::Start`].
@@ -199,6 +203,9 @@ pub enum Response {
         /// The count of catalogued capability names after the reload.
         catalogued: u32,
     },
+    /// The cross-kennel mesh snapshot (the answer to [`Request::Mesh`]): one row per catalogued
+    /// provider→capability, with its readiness (§7.13.7).
+    Mesh(Vec<MeshProvider>),
 }
 
 /// A summary of one running kennel, for [`Response::Listing`].
@@ -215,6 +222,30 @@ pub struct KennelInfo {
     /// Whether a terminal is currently attached to this (interactive) kennel. False
     /// for a detached or non-interactive kennel.
     pub attached: bool,
+}
+
+/// One catalogued provider→capability row, for [`Response::Mesh`] (`kennel mesh`, §7.13.7).
+///
+/// One row per (provider, offered capability) — the standing-mesh analogue of [`KennelInfo`]. The
+/// enum-valued fields ride as their canonical lower-case strings (`shape`: `af-unix`…; `tier`:
+/// `user`/`host`; `enablement`: `autorun`/`ondemand`; `readiness`: `pending`/`ready`/`failed`) so the
+/// control wire stays free of the catalogue's and policy's enums.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshProvider {
+    /// The offered capability name (a `[[provides]]` name).
+    pub capability: String,
+    /// The provider kennel offering it (the broker's resolution + socket-activation target).
+    pub provider: String,
+    /// The connector shape (`af-unix` / `dbus-name` / `binder-connector`).
+    pub shape: String,
+    /// The enablement tier the provider was enabled at (`user` / `host`).
+    pub tier: String,
+    /// Eager (`autorun`) or lazy (`ondemand`) bring-up.
+    pub enablement: String,
+    /// The provider's readiness (`pending` / `ready` / `failed`).
+    pub readiness: String,
+    /// The running provider's host pid, or `0` when not running (readiness is not `ready`).
+    pub pid: u32,
 }
 
 /// A malformed control message.
@@ -373,6 +404,7 @@ impl Request {
                 put_str(&mut b, answer);
             }
             Self::DaemonReload => put_u8(&mut b, 8),
+            Self::Mesh => put_u8(&mut b, 9),
         }
         b
     }
@@ -417,6 +449,7 @@ impl Request {
                 answer: r.string()?,
             }),
             8 => Ok(Self::DaemonReload),
+            9 => Ok(Self::Mesh),
             _ => Err(WireError::BadTag),
         }
     }
@@ -485,6 +518,19 @@ impl Response {
                 put_u8(&mut b, 9);
                 put_u32(&mut b, *catalogued);
             }
+            Self::Mesh(providers) => {
+                put_u8(&mut b, 10);
+                put_u32(&mut b, u32::try_from(providers.len()).unwrap_or(u32::MAX));
+                for p in providers {
+                    put_str(&mut b, &p.capability);
+                    put_str(&mut b, &p.provider);
+                    put_str(&mut b, &p.shape);
+                    put_str(&mut b, &p.tier);
+                    put_str(&mut b, &p.enablement);
+                    put_str(&mut b, &p.readiness);
+                    put_u32(&mut b, p.pid);
+                }
+            }
         }
         b
     }
@@ -539,6 +585,25 @@ impl Response {
             9 => Ok(Self::Reloaded {
                 catalogued: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
             }),
+            10 => {
+                let n = r.u32_len()?;
+                if n > MAX_COUNT {
+                    return Err(WireError::TooLarge);
+                }
+                let mut providers = Vec::with_capacity(n);
+                for _ in 0..n {
+                    providers.push(MeshProvider {
+                        capability: r.string()?,
+                        provider: r.string()?,
+                        shape: r.string()?,
+                        tier: r.string()?,
+                        enablement: r.string()?,
+                        readiness: r.string()?,
+                        pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
+                    });
+                }
+                Ok(Self::Mesh(providers))
+            }
             _ => Err(WireError::BadTag),
         }
     }
@@ -668,6 +733,32 @@ mod tests {
         round_trip_request(&Request::DaemonReload);
         round_trip_response(&Response::Reloaded { catalogued: 7 });
         round_trip_response(&Response::Reloaded { catalogued: 0 });
+    }
+
+    #[test]
+    fn mesh_messages_round_trip() {
+        round_trip_request(&Request::Mesh);
+        round_trip_response(&Response::Mesh(vec![]));
+        round_trip_response(&Response::Mesh(vec![
+            MeshProvider {
+                capability: "org.projectkennel.wayland".to_owned(),
+                provider: "gui".to_owned(),
+                shape: "af-unix".to_owned(),
+                tier: "user".to_owned(),
+                enablement: "ondemand".to_owned(),
+                readiness: "ready".to_owned(),
+                pid: 4242,
+            },
+            MeshProvider {
+                capability: "com.acme.vault".to_owned(),
+                provider: "secrets".to_owned(),
+                shape: "af-unix".to_owned(),
+                tier: "host".to_owned(),
+                enablement: "autorun".to_owned(),
+                readiness: "failed".to_owned(),
+                pid: 0,
+            },
+        ]));
     }
 
     #[test]

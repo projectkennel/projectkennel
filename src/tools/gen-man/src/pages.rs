@@ -103,7 +103,11 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "release <policy>",
     ),
     ("stop", "stop a running kennel", "stop <name>"),
-    ("list", "list running kennels", "list"),
+    (
+        "list",
+        "list running kennels and the cross-kennel service mesh",
+        "list",
+    ),
     (
         "daemon-reload",
         "re-derive the service catalogue from the enablement links",

@@ -84,6 +84,17 @@ pub enum Enablement {
     Ondemand,
 }
 
+impl Enablement {
+    /// The lower-case wire/display name (`autorun` / `ondemand`), for the topology surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Autorun => "autorun",
+            Self::Ondemand => "ondemand",
+        }
+    }
+}
+
 /// The enablement **tier** a provider was enabled at (§7.13.6) — the resolution preference when two
 /// providers offer the same name and are otherwise equivalent (no `key` to tell them apart).
 ///
@@ -96,6 +107,17 @@ pub enum Tier {
     User,
     /// `/etc/kennel/{autorun,ondemand}/` — the per-host (admin) operator layer.
     Host,
+}
+
+impl Tier {
+    /// The lower-case wire/display name (`user` / `host`), for the topology surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Host => "host",
+        }
+    }
 }
 
 /// One enabled provider feeding the catalogue: its identity, who signed it, its tier + posture, and
@@ -318,6 +340,12 @@ impl Catalogue {
     /// The enabled provider ids in the catalogue.
     pub fn providers(&self) -> impl Iterator<Item = &str> {
         self.providers.keys().map(String::as_str)
+    }
+
+    /// The catalogued providers as `(id, provider)` pairs — the topology surface (`kennel mesh`,
+    /// §7.13.7) reads this to project one row per offered capability with its readiness.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &CatalogueProvider)> {
+        self.providers.iter().map(|(id, p)| (id.as_str(), p))
     }
 
     /// The number of distinct catalogued capability names.
@@ -569,6 +597,40 @@ mod tests {
         assert_eq!(e.readiness, Readiness::Pending); // resolvable before it is running
         assert_eq!(cat.len(), 1);
         assert!(cat.resolve("nope").is_empty()); // deny-on-no-match
+    }
+
+    #[test]
+    fn entries_projects_each_provider_with_its_offers_for_the_topology_surface() {
+        // `kennel mesh` reads `entries()`: one provider, every capability it offers, its readiness.
+        let providers = [enabled(
+            "build-cache",
+            "alice-key",
+            Tier::User,
+            Enablement::Ondemand,
+            vec![
+                provide("doe.john.cache", Shape::AfUnix, "/tmp/cache.sock", None),
+                provide("doe.john.build", Shape::AfUnix, "/tmp/build.sock", None),
+            ],
+        )];
+        let (cat, rejected) = project_with_rejections(&providers, &vendor(&[]), &[]);
+        assert!(rejected.is_empty());
+
+        let entries: Vec<(&str, &CatalogueProvider)> = cat.entries().collect();
+        assert_eq!(entries.len(), 1, "one catalogued provider");
+        let (id, p) = entries.first().expect("one entry");
+        assert_eq!(*id, "build-cache");
+        assert_eq!(p.tier, Tier::User);
+        assert_eq!(p.enablement, Enablement::Ondemand);
+        assert_eq!(p.readiness, Readiness::Pending); // catalogued but not yet running
+        assert_eq!(p.pid, None);
+        assert_eq!(p.offers.len(), 2);
+        assert!(p.offers.iter().any(|o| o.name == "doe.john.cache"));
+        assert!(p.offers.iter().any(|o| o.name == "doe.john.build"));
+
+        // the canonical lower-case strings the topology surface puts on the wire
+        assert_eq!(p.tier.as_str(), "user");
+        assert_eq!(p.enablement.as_str(), "ondemand");
+        assert_eq!(p.readiness.as_str(), "pending");
     }
 
     #[test]

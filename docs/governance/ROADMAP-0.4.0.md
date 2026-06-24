@@ -573,6 +573,16 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   An extension of a shipped surface, not a new build. A standing mesh cannot be operated blind: a
   flaked secrets broker must be *visible*, not a silent resolve-deny.
 
+  **Status — provider side built (2026-06-24).** `kennel list` now carries the mesh view (the §7.13.7
+  topology surface): a `Mesh` control verb projects the live catalogue, and the CLI prints a
+  capability→provider table with each provider's **readiness** (pending/ready/failed — so a flaked
+  broker is visible), shape, enablement, tier, and pid, below the running-kennel tree. This is
+  *who-provides-what + the readiness states + sidecar restart status* (the supervisor drives readiness,
+  so a crash-looped sidecar shows `failed`). **Follow-up: the consumer side** (*who-consumes-what*) —
+  each running kennel's `[[consumes]]` is loaded into its `KennelData` but not held in the registry, so
+  surfacing it needs a `KennelMeta` field set in `run_kennel`; deferred to keep this increment off the
+  construction hot path.
+
 ### Thrust 6 — Pre-ship
 
 - **W15 · Red-team the cross-kennel surface.** **[dep, ship gate] M.**
