@@ -912,7 +912,7 @@ The schema below is the shape; the full sink-parameter and per-class-level seman
 - The canonical-form serialisation procedure: `02-8-internal-api.md` (`kennel-lib-policy::canonical`).
 - The signing-key store and lockfile locations on disk: `07-paths.md`.
 - The mechanism by which template and fragment signatures are verified at runtime, and how the lockfile is checked: `04-trust-boundaries.md`.
-- How `kennel policy upgrade` reviews a newer template version and rewrites the lockfile: `02-1-cli.md`. (`kennel diff`'s semantic threat-impact delta is roadmap — `08-as-built-notes.md` §8.1.)
+- How `kennel policy upgrade` reviews a newer template version and rewrites the lockfile, and how `kennel policy diff` renders the semantic threat-impact delta between two policies: `02-1-cli.md`.
 - The `[audit]` schema in detail — sink selection, per-class levels, sink-specific parameters: `02-3-audit-schema.md`.
 - The design-level rationale for compilation and the settled policy: design doc §9.10.
 - How `kennel compile` is invoked and its flags: `02-1-cli.md`.

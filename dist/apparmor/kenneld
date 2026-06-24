@@ -1,50 +1,55 @@
-# AppArmor profile: permit kenneld to use unprivileged user namespaces.
+# AppArmor profile: permit the kennel spawn to create unprivileged user namespaces.
 #
 # Why this exists
 # ---------------
-# kenneld runs as an ordinary user and builds each workload's sandbox (mount
-# namespace, mount(2), pivot_root, the constructed view) by first establishing an
-# identity-mapped *user namespace* — the bubblewrap-equivalent mechanism that
-# grants CAP_SYS_ADMIN *inside that namespace* so none of the sandbox construction
-# needs real privilege (docs/architecture/01-process-model.md; the spawn seal in
-# kennel-spawn establishes it via kennel_syscall::namespace::establish_identity_userns).
+# kenneld runs as an ordinary user. To build each workload's sandbox it execs the
+# setuid-root privhelper (kennel-privhelper), which establishes an identity-mapped
+# *user namespace* — the bubblewrap-equivalent mechanism that grants CAP_SYS_ADMIN
+# *inside that namespace* — and constructs the view within it (mount(2), pivot_root).
+# Crucially the privhelper clones the userns *as the operator*: it drops its effective
+# uid across the clone so the namespace is operator-owned (docs/architecture/01-process-model.md),
+# so to the kernel it is an *unprivileged* userns creation despite the setuid bit.
 #
-# Ubuntu 23.10+/24.04 ship `kernel.apparmor_restrict_unprivileged_userns=1`: under
-# it, `unshare(CLONE_NEWUSER)` SUCCEEDS but the process holds NO capabilities in the
-# new namespace (the first /proc/self/setgroups or uid_map/gid_map write is EACCES),
-# so the unprivileged spawn cannot proceed. Granting the kenneld binary the `userns`
-# permission via this profile restores the capability for kenneld *specifically*,
-# without weakening the host-wide restriction for every other binary.
+# Ubuntu 23.10+/24.04 ship `kernel.apparmor_restrict_unprivileged_userns=1`: under it,
+# `clone/unshare(CLONE_NEWUSER)` SUCCEEDS but the creator holds NO capabilities in the
+# new namespace (the first /proc/self/setgroups or uid_map/gid_map write is EACCES), so
+# the operator-owned spawn cannot proceed. This profile grants the `userns` permission
+# to the kenneld binary; the privhelper *inherits it across exec* (see below), restoring
+# the capability for the kennel spawn *specifically*, without weakening the host-wide
+# restriction for every other binary.
 #
-# This is a deployment prerequisite on hardened distros, the AppArmor counterpart of
-# the privhelper's file capabilities (docs/architecture/07-paths.md). On hosts that
+# So construction needs BOTH the privhelper's setuid root (mode 4755; file capabilities
+# a per-distribution alternative, docs/architecture/07-paths.md) for the map-write and
+# mount capabilities, AND this AppArmor grant for the operator-owned userns creation
+# under the restriction. Removing the profile breaks construction (the privhelper's
+# child cannot write its uid_map: `kennel-bin-init did not report ready`). On hosts that
 # do not restrict unprivileged user namespaces, the profile is harmless.
 #
 # Why flags=(unconfined), not an enforcing profile
 # -------------------------------------------------
 # This profile's sole job is to GRANT the `userns` capability; it does not confine
-# kenneld. The threat model trusts kenneld — the enforcer — and confines the
-# *workload*, via Landlock + seccomp + the namespaces + the egress proxy/BPF. An
-# enforcing profile cannot confine kenneld here, for a concrete reason:
+# kenneld or the privhelper. The threat model trusts them — the enforcers — and confines
+# the *workload*, via Landlock + seccomp + the namespaces + the egress proxy/BPF. An
+# enforcing profile cannot work here, for a concrete reason:
 #
-#   - kenneld forks the spawn child, which (sharing this profile, by fork) must be
-#     permitted `userns` + `mount` + `pivot_root` + `capability sys_admin` to build
-#     the sandbox;
-#   - that same child sets PR_SET_NO_NEW_PRIVS (seccomp requires it) and then execs
-#     the *arbitrary* workload;
-#   - under no-new-privs the kernel forbids AppArmor from changing the profile at
-#     exec — EVERY transition is denied, both `Ux` (to unconfined, a privilege gain)
-#     and even `Cx`/`Px` to a *stricter* child profile (verified on 6.17 from the
-#     audit log: `apparmor="DENIED" operation="exec" info="no new privs"`).
+#   - kenneld execs the privhelper, which (inheriting this profile across exec, since the
+#     profile is unconfined and no transition rule names it) must be permitted `userns` +
+#     `mount` + `pivot_root` + `capability sys_admin` to build the sandbox;
+#   - the privhelper fexecve's kennel-bin-init (PID 1 of the cage), which sets
+#     PR_SET_NO_NEW_PRIVS (seccomp requires it) and then execs the *arbitrary* workload;
+#   - under no-new-privs the kernel forbids AppArmor from changing the profile at exec —
+#     EVERY transition is denied, both `Ux` (to unconfined, a privilege gain) and even
+#     `Cx`/`Px` to a *stricter* child profile (verified on 6.17 from the audit log:
+#     `apparmor="DENIED" operation="exec" info="no new privs"`).
 #
-# So an enforcing profile would leave only `ix` (inherit) for the workload exec,
-# which would hand the workload kenneld's own `mount`/`userns`/`sys_admin` — strictly
-# worse than unconfined. `flags=(unconfined)` (Ubuntu's documented idiom — cf. the
-# stock /etc/apparmor.d userns stubs, "exists only to give the application a name")
-# sidesteps the transition: the process is already unconfined, so the workload exec
-# needs no transition and proceeds, with the workload's confinement left to the kernel
-# mechanisms that actually own it. Confining the *workload* via AppArmor would require
-# runtime `aa_change_onexec` integration in the spawn (a v2 question, §11.1).
+# So an enforcing profile would leave only `ix` (inherit) for the workload exec, which
+# would hand the workload kenneld's own `mount`/`userns`/`sys_admin` — strictly worse
+# than unconfined. `flags=(unconfined)` (Ubuntu's documented idiom — cf. the stock
+# /etc/apparmor.d userns stubs, "exists only to give the application a name") sidesteps
+# the transition: the process is already unconfined, so the workload exec needs no
+# transition and proceeds, with the workload's confinement left to the kernel mechanisms
+# that actually own it. Confining the *workload* via AppArmor would require runtime
+# `aa_change_onexec` integration in the spawn (a v2 question, §11.1).
 #
 # Install
 # -------

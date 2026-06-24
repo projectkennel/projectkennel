@@ -161,28 +161,13 @@ Project Kennel automatically derives `visible` from `fs.read` and `fs.write` lis
 
 **Test plan.** Context sees only listed mounts in `/proc/mounts`. Context attempts `mount()`; expect EPERM (no `CAP_SYS_ADMIN`).
 
-## 7.9.5 Tty and TIOCSTI *(roadmap)*
+## 7.9.5 Terminal hardening — input injection and output escapes
 
-> **Roadmap — designed, not built.** The `[tty]` section below is not accepted by the parser today (`08-as-built-notes.md` §8.1); a policy declaring it is rejected (`deny_unknown_fields`). The TIOCSTI hardening described is the intended design.
+A confined workload running in a terminal threatens the *operator's* terminal two ways: by injecting **input** into the operator's shell, and by writing hostile **output** that drives the operator's terminal emulator. Kennel closes the first by construction and filters the second.
 
-**Why it matters.** The TIOCSTI ioctl ("type into the controlling tty as if I were the user") is a notorious sandbox escape. A confined process running in a terminal can inject keystrokes that appear to come from the user, executing commands in the user's shell after the kennel exits.
+**Input injection (`TIOCSTI` / `/dev/tty`) is closed by construction — there is no policy knob.** The `TIOCSTI` ioctl ("type into the controlling tty as if I were the user") is the classic terminal sandbox escape: a confined process injects keystrokes that run in the operator's shell after the kennel exits. Kennel removes the *target* rather than policing the *call*. The workload's controlling terminal is a node in the kennel's **own** isolated `devpts` (allocated by the seal, §7.9.5a), and the operator's `/dev/tty` is **absent from the view** (construction-by-absence, §4.2). So `TIOCSTI` from the workload reaches only its own confined pty — its own session — never the operator's terminal, which is not there to inject into. No `[tty]` flag and no `TIOCSTI` seccomp filter are needed; the isolation does it. (Recent kernels also gate `TIOCSTI` off by default via `dev.tty.legacy_tiocsti`, 6.2+ — a backstop the design does not rely on.)
 
-**Mechanism.** Recent kernels gate TIOCSTI behind the sysctl `dev.tty.legacy_tiocsti` (default off in kernels 6.2+). On older kernels, seccomp filtering of `ioctl()` is the fallback.
-
-**Policy primitives.**
-
-```toml
-[tty]
-# Check at policy load: refuse to apply this policy if TIOCSTI is enabled
-# and the kernel is recent enough that it should be disabled.
-require_tiocsti_disabled = true
-```
-
-If `require_tiocsti_disabled = true` and `dev.tty.legacy_tiocsti = 1`, Project Kennel refuses to start the kennel with a clear error message instructing the user to set the sysctl. This is preferable to attempting to work around a sysctl-disabled-by-policy via seccomp.
-
-On older kernels where the sysctl doesn't exist, Project Kennel applies a seccomp filter denying `ioctl(*, TIOCSTI, *)`. This is best-effort; seccomp can't always inspect the arguments safely, see §7.6 for the same caveat.
-
-**Terminal escape sequences.** A confined workload writing to its terminal can emit escape sequences that act on the *operator's* terminal: OSC 52 reads/writes the system clipboard, OSC 9 / 777 raise desktop notifications, and the DCS/APC/PM/SOS device-control bands carry terminal-specific commands. These are an exfiltration/injection channel independent of TIOCSTI. The `kennel` CLI runs the workload's PTY output through a streaming `vte`-based filter **client-side**, on the bytes' way to the operator's real terminal: it drops the dangerous set (OSC 52, OSC 9/777, DCS/APC/PM/SOS) and passes the benign (OSC 0/1/2 title, 8 hyperlink, 4/104 palette, CSI, C0). The interactive PTY broker (§7.9.5a) is a **raw-byte router** — it never parses workload output — so this hostile-input parser stays out of the daemon's trusted base (§4.8); the daemon conveys the filter decision to each attached client. Gated by `[tty].filter_terminal_escapes` (default on; §02-2). The workload cannot choose its client, so it cannot opt out; a raw consumer of the attach socket only footguns its own terminal. It is best-effort, not a proof — the standard state machine bounds a terminal-specific desync, and it shuts down the low-effort clipboard/notification-injection class (`T2.6`), no more; "run kennels in a terminal you trust" remains the backstop.
+**Output escapes.** A confined workload writing to its terminal can emit escape sequences that act on the *operator's* terminal: OSC 52 reads/writes the system clipboard, OSC 9 / 777 raise desktop notifications, and the DCS/APC/PM/SOS device-control bands carry terminal-specific commands. These are an exfiltration/injection channel independent of TIOCSTI. The `kennel` CLI runs the workload's PTY output through a streaming `vte`-based filter **client-side**, on the bytes' way to the operator's real terminal: it drops the dangerous set (OSC 52, OSC 9/777, DCS/APC/PM/SOS) and passes the benign (OSC 0/1/2 title, 8 hyperlink, 4/104 palette, CSI, C0). The interactive PTY broker (§7.9.5a) is a **raw-byte router** — it never parses workload output — so this hostile-input parser stays out of the daemon's trusted base (§4.8); the daemon conveys the filter decision to each attached client. Gated by `[tty].filter_terminal_escapes` (default on; §02-2). The workload cannot choose its client, so it cannot opt out; a raw consumer of the attach socket only footguns its own terminal. It is best-effort, not a proof — the standard state machine bounds a terminal-specific desync, and it shuts down the low-effort clipboard/notification-injection class (`T2.6`), no more; "run kennels in a terminal you trust" remains the backstop.
 
 ## 7.9.5a Interactive controlling terminal
 
