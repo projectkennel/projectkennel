@@ -312,28 +312,31 @@ Self-contained and testable with no broker and no runtime — the contract every
   namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the provider **pid**. That is a
   namespace-crossing connect in the most privileged process, over a path the provider's view controls, with
   a **pid-reuse race** between *Ready* and the connect. Frozen design: `07-13-service-catalog.md` §7.13.4b.
-  Replace it with a **host-owned rendezvous point** — `<runtime>/mesh/<tier>/<provider>/`, derived
-  deterministically from `(tier, provider, name)`, all signed-catalogue state (`provider` is the enablement
-  link name, `tier` distinguishes a per-user from a per-host link of the same name — both in `EnabledProvider`
-  at construction and `Selected` at the broker, neither the pid), bind-mounted into the
-  provider's view as the root its `endpoint` lives under. The provider binds its listener unchanged; the
-  socket inode is the one `kenneld` holds host-side, so the handoff becomes a plain `connect` to that path —
-  **byte-identical to the host-socket facade** (`af_unix_connect` over `socket.real`, §7.6), the same §4.3
-  fd-broker shape.
-  **Reuse-only — invents no path and touches no privhelper verb.** The rendezvous bind is **one ordinary
-  `BindMount`** in the provider's `ShimView.binds`, mounted by the existing `materialize_binds` loop that
-  already binds every view path — the privhelper construct half runs it unchanged. The handoff collapses
-  onto the existing `connect_unix_timeout(&real, …)` call the `[[unix.allow]]` facade already uses; the
-  `/proc/<pid>/root` join and the `pid` field **delete** from `svc_connect_handoff` and from
+  Replace it with a **host-owned rendezvous point** that names the *capability*, not the provider process —
+  `<runtime>/mesh/<tier>/<name>[.<key>]/`, derived deterministically from `(tier, name, key)`, all
+  signed-catalogue state (none of it the pid; the optional private `key` is appended iff set, the same token
+  that disambiguates a shared public name across policies). `kenneld` **derives and injects** the af-unix
+  endpoint into the provider — no author-chosen path — and binds only that **per-capability** directory into
+  the provider's view (never a shared parent, so a provider cannot reach a sibling's endpoint behind the
+  broker). The provider binds where it is told; the socket inode is the one `kenneld` holds host-side, so the
+  handoff becomes a plain `connect` to that path — **byte-identical to the host-socket facade**
+  (`af_unix_connect` over `socket.real`, §7.6), the same §4.3 fd-broker shape.
+  **Reuse-only — invents no path and touches no privhelper verb.** Each capability's rendezvous bind is
+  **one ordinary `BindMount`** in the provider's `ShimView.binds`, mounted by the existing `materialize_binds`
+  loop that already binds every view path — the privhelper construct half runs it unchanged. The handoff
+  collapses onto the existing `connect_unix_timeout(&real, …)` call the `[[unix.allow]]` facade already uses;
+  the `/proc/<pid>/root` join and the `pid` field **delete** from `svc_connect_handoff` and from
   `broker::Selected`/the catalogue. Readiness (W6) `stat`s the same host path — the pid leaves the model
   entirely, the reuse race becoming **structurally absent** rather than mitigated.
-  **Scope.** `svc_connect_handoff` (the connect), the provider-construction rendezvous bind, the
-  `(tier, provider, name)` path derivation (one pure function, shared by construction and broker), dropping
-  `pid` from `Selected`/`CatalogueProvider`, and the §7.13.3 validation that an `af-unix` `endpoint` resolves
-  under the rendezvous root (the only schema-adjacent change — `endpoint` is otherwise unchanged). The
-  `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a frozen surface.
-  Land it **before** W5's mesh grows more dependents on `pid`/`/proc/<pid>/root` — today it is the one
-  `svc_connect_handoff` call site and two catalogue fields.
+  **Scope.** `svc_connect_handoff` (the connect), the provider-construction per-capability rendezvous bind,
+  the `(tier, name, key)` path derivation (one pure function, shared by construction and broker), dropping
+  `pid` from `Selected`/`CatalogueProvider`, and the **schema change** this entails (a revision of W1's
+  frozen mesh schema, noted honestly): for `af-unix` the provider no longer authors `endpoint` — `kenneld`
+  derives it and injects it via a provider-side `env`, the listen-direction mirror of the consumer's
+  `at`+`env` — and `key` gains a filesystem-safe-charset validation (it now appears in a path; a UUID already
+  complies). The `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a
+  frozen surface. Land it **before** W5's mesh grows more dependents on `pid`/`/proc/<pid>/root` — today it is
+  the one `svc_connect_handoff` call site and two catalogue fields.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
