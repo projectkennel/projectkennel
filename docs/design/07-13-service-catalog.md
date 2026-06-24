@@ -502,7 +502,13 @@ one of two enablement directories:
   newly-linked one) and supervises it for the daemon's life. The `multi-user.target.wants` analogue.
 - **`ondemand/`** — **lazy**: the provider's `name` is in the catalogue and resolvable from the moment it is
   linked, but the kennel is **not** started until a consumer first reaches its capability — socket-activated
-  on first consume (§7.13.4), reaped when idle. The socket-activation analogue.
+  on first consume (§7.13.4), reaped when idle. The socket-activation analogue. **Idle** means *no running
+  kennel consumes one of its capabilities*: a running kennel whose settled `[[consumes]]` names a capability
+  this provider offers is the keep-alive — not a live byte-stream connection (`kenneld` steps out of the byte
+  path, §4.3), but a running consumer kennel `kenneld` already tracks. The provider's policy TTL is its idle
+  grace, enforced by the **existing §9.7 TTL custodian**, not a parallel reaper: on each TTL fire `kenneld`
+  re-arms the provider while a consumer kennel runs and reaps it when none does (a fresh consume re-activates
+  it from cold).
 
 Both directories exist at the two **operator** layers — `/etc/kennel/{autorun,ondemand}/` (the system admin)
 and `~/.config/kennel/{autorun,ondemand}/` (the user) — and at **neither vendor layer**: there is no

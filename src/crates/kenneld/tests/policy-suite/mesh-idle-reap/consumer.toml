@@ -1,0 +1,35 @@
+# ============================================================================
+# mesh-idle-reap — the CONSUMER half (§7.13.6).
+#
+# Declares `[[consumes]]` for `test.mesh.idle` (af-unix) at an `at` socket in its own
+# view. Its workload connects, sends `ping`, and exits 0 iff it reads `pong` back —
+# which socket-activates the cold ondemand provider and round-trips across the kennel
+# boundary. run.sh runs this consumer twice: once to activate the provider, and again
+# after the idle reap, to prove the reaped provider re-activates from cold.
+# ============================================================================
+
+name = "mesh-idle-consumer"
+template_base = "base-confined@v1"
+
+# The consumer holds NO host reach of its own — it uses a capability provided by another kennel.
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+
+# Connect to the brokered `at` socket and round-trip ping→pong.
+[workload]
+argv = ["/usr/libexec/kennel/facade-mesh-probe", "connect", "/tmp/mesh-in.sock"]
+pinned = true
+
+# The reached capability: delivered at `at` (a facade socket in this kennel's view).
+[[consumes]]
+name = "test.mesh.idle"
+shape = "af-unix"
+at = "/tmp/mesh-in.sock"
+required = true
+reason = "mesh-idle-reap e2e: reach the provider's ping→pong echo over the mesh"

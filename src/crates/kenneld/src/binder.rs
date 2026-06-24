@@ -298,7 +298,7 @@ fn handle(
     // Lifecycle/config verbs (the high range) are spoken only by kennel-bin-init and gated
     // on its kernel-stamped identity — handled before the registry/af-unix dispatch.
     if incoming.code >= lifecycle::GET_SANDBOX_PLAN {
-        return lifecycle_handle(lifecycle, incoming, ctx, writer);
+        return lifecycle_handle(lifecycle, catalogue, activator, incoming, ctx, writer);
     }
     // Dynamic spawn (§7.12): the requester workload asks kenneld to instantiate a signed-template
     // sibling. A facade-class verb (no registry lock): the validation is verify-half and the only fd
@@ -408,8 +408,45 @@ fn handle(
 /// the answer while the kennel stays frozen — and re-arms (`RENEW`) on yes, terminates on an
 /// explicit no, or falls back to a warn when no operator could be asked (never destroying a
 /// kennel on a missed prompt). Returns the audit name, outcome, and reply byte.
-fn ttl_expired(lifecycle: &Lifecycle) -> (&'static str, Outcome, Reply) {
+fn ttl_expired(
+    lifecycle: &Lifecycle,
+    catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
+) -> (&'static str, Outcome, Reply) {
     let _ = crate::cgroup::freeze_cgroup(&lifecycle.cgroup);
+    // W6 idle-reap (§7.13.6): an ondemand provider's TTL is its idle grace. On each fire, keep it
+    // (re-arm) while a consumer kennel runs, reap it when none — riding this existing TTL custodian,
+    // not a parallel reaper. "Consumer" = a running kennel whose `[[consumes]]` names a capability
+    // this provider offers.
+    let provider_offers = catalogue.and_then(|cat| {
+        cat.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ondemand_provider_offers(&lifecycle.name)
+    });
+    if let Some(offers) = provider_offers {
+        // No activator (a construction-only path) ⇒ cannot census ⇒ keep it: never destroy a
+        // provider on a blind check (mirrors the missed-prompt `renew` fallback).
+        if activator.is_none_or(|a| a.has_running_consumer(&offers)) {
+            let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
+            return (
+                "binder.ttl-provider-keep",
+                Outcome::Info,
+                Reply::Data(one(ttl::RENEW)),
+            );
+        }
+        // Mark the reap before the kill so the supervisor reads the resulting exit as a reap
+        // (→ declared-but-pending, re-activatable), not a crash to restart. The activator is
+        // `Some` here — `is_none_or` only falls through when it is present and reports no consumer.
+        if let Some(a) = activator {
+            a.mark_idle_reaped(&lifecycle.name);
+        }
+        let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
+        return (
+            "binder.ttl-provider-reap",
+            Outcome::Allow,
+            Reply::Data(one(ttl::TERMINATE)),
+        );
+    }
     match lifecycle.ttl_action {
         kennel_lib_policy::TtlAction::Exit => {
             // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-bin-init is
@@ -475,6 +512,8 @@ fn ttl_expired(lifecycle: &Lifecycle) -> (&'static str, Outcome, Reply) {
 /// and audited.
 fn lifecycle_handle(
     lifecycle: &Lifecycle,
+    catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
@@ -529,7 +568,7 @@ fn lifecycle_handle(
             Outcome::Info,
             Reply::Data(one(status::OK)),
         ),
-        lifecycle::NOTIFY_TTL_EXPIRED => ttl_expired(lifecycle),
+        lifecycle::NOTIFY_TTL_EXPIRED => ttl_expired(lifecycle, catalogue, activator),
         _ => (
             "binder.bad-request",
             Outcome::Error,

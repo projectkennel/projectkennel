@@ -247,6 +247,10 @@ struct KennelMeta {
     /// a non-interactive run (no terminal) or before the broker is built. A clone is
     /// handed to an `Attach` so a later client reaches this running kennel's pump.
     broker: Option<crate::pty_broker::PtyBroker>,
+    /// The mesh capability names this kennel's settled `[[consumes]]` declares — the W6 idle-reap
+    /// census (§7.13.6): an ondemand provider is kept alive while any running kennel consumes one of
+    /// its capabilities. Empty for a kennel with no `[[consumes]]`.
+    consumed: Vec<String>,
 }
 
 /// The mutable shared state: the context allocator and the kennel registry.
@@ -276,6 +280,10 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// reaches it type-erased to socket-activate an `ondemand` provider on first consume. `None` before
     /// startup wires it, or in a test harness that does not.
     activator: std::sync::OnceLock<std::sync::Arc<dyn crate::supervisor::ProviderActivator>>,
+    /// Providers the TTL handler has idle-reaped (§7.13.6), pending the supervisor's observation of
+    /// the exit. The supervisor takes the mark to treat the kill as a reap (→ declared-but-pending,
+    /// re-activatable) rather than a crash (→ restart/failed). Cleared as it is taken.
+    idle_reaped: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -298,6 +306,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             bastion: Mutex::new(None),
             catalogue: std::sync::Arc::new(Mutex::new(catalogue)),
             activator: std::sync::OnceLock::new(),
+            idle_reaped: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -615,6 +624,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 ctx,
                 pid: None,
                 broker: None,
+                consumed: Vec::new(),
             },
         );
         drop(reg);
@@ -663,6 +673,48 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         if let Some(meta) = reg.kennels.get_mut(name) {
             meta.pid = Some(pid);
         }
+    }
+
+    /// Record the mesh capability names this kennel consumes, once its policy is loaded — the W6
+    /// idle-reap census (§7.13.6) reads it to keep an ondemand provider alive while a consumer runs.
+    fn note_consumes(&self, name: &str, consumed: Vec<String>) {
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(meta) = reg.kennels.get_mut(name) {
+            meta.consumed = consumed;
+        }
+    }
+
+    /// Whether any running kennel's settled `[[consumes]]` names one of `capabilities` (§7.13.6).
+    /// The W6 idle-reap keep-alive: an ondemand provider is reaped only when no consumer kennel runs.
+    pub(crate) fn any_running_consumer(&self, capabilities: &[String]) -> bool {
+        let reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reg.kennels
+            .values()
+            .any(|m| m.consumed.iter().any(|c| capabilities.contains(c)))
+    }
+
+    /// Mark `provider` idle-reaped (§7.13.6) — the TTL handler records this before killing the cgroup,
+    /// so the supervisor reads the kill as a reap, not a crash.
+    pub(crate) fn mark_idle_reaped(&self, provider: &str) {
+        self.idle_reaped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider.to_owned());
+    }
+
+    /// Take `provider`'s idle-reaped mark (§7.13.6): `true` once, then cleared — the supervisor calls
+    /// this when the provider exits, to distinguish an idle reap (→ declared-but-pending) from a crash.
+    pub(crate) fn take_idle_reaped(&self, provider: &str) -> bool {
+        self.idle_reaped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(provider)
     }
 
     /// Deregister `name` and return its context to the pool.
@@ -1343,6 +1395,12 @@ pub fn run_kennel<P, L>(
     // Prepare the AF_UNIX socket shims (§7.6): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &loaded.consumes, &subst, &shim_root);
+    // Record this kennel's consumed capabilities for the W6 idle-reap census (§7.13.6): while this
+    // kennel runs, any ondemand provider it consumes is kept alive.
+    shared.note_consumes(
+        &req.kennel,
+        loaded.consumes.iter().map(|c| c.name.clone()).collect(),
+    );
     // Prepare D-Bus mediation (§7.7): pair each enabled bus's compiled table with the real bus
     // address and the in-view socket the facade presents. Stateless, like the unix shims.
     let dbus = shared.prepare_dbus(&loaded.dbus, &shim_root);
