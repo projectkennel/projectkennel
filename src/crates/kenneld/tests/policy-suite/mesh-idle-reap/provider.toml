@@ -26,7 +26,7 @@ write = ["/run/mesh-idle"]
 
 # Execute only the in-kennel mesh probe.
 [exec]
-allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+allow = ["/usr/libexec/kennel-facades/facade-mesh-probe", "/bin/sh"]
 
 # The TTL is the ondemand idle grace (§7.13.6): on each fire kenneld reaps this provider iff no
 # consumer kennel runs. Short, so the case observes the reap without a long wait.
@@ -35,7 +35,7 @@ ttl = "4s"
 
 # The workload IS the service: bind the endpoint socket and echo ping→pong until reaped.
 [workload]
-argv = ["/usr/libexec/kennel/facade-mesh-probe", "serve", "/run/mesh-idle/echo.sock"]
+argv = ["/usr/libexec/kennel-facades/facade-mesh-probe", "serve", "/run/mesh-idle/echo.sock"]
 pinned = true
 
 # The offered capability: an af-unix socket the provider listens on at its endpoint (§7.13.1).

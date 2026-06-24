@@ -28,17 +28,17 @@ write = ["/run/mesh"]
 
 [exec]
 allow = [
-    "/usr/libexec/kennel/compositor-broker",
-    "/usr/libexec/kennel/facade-mesh-probe",
+    "/usr/libexec/kennel-facades/compositor-broker",
+    "/usr/libexec/kennel-facades/facade-mesh-probe",
     "/bin/sh",
 ]
 
 # The workload IS the service: listen on its endpoint and spawn one stand-in compositor per connect.
 [workload]
 argv = [
-    "/usr/libexec/kennel/compositor-broker",
+    "/usr/libexec/kennel-facades/compositor-broker",
     "/run/mesh/gui.sock",
-    "/usr/libexec/kennel/facade-mesh-probe",
+    "/usr/libexec/kennel-facades/facade-mesh-probe",
     "serve-display",
 ]
 pinned = true

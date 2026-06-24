@@ -1,7 +1,7 @@
 //! Shared CLI surface grammar for the unified `kennel` command (W10).
 //!
 //! One definition of the verb grammar the two execution units link — the host unit
-//! (`/usr/libexec/kennel/host`) and the in-cage spawn unit (`/usr/libexec/kennel/spawn`)
+//! (`/usr/libexec/kennel/host`) and the in-cage spawn unit (`/usr/libexec/kennel-facades/spawn`)
 //! behind the `kennel` shim. An **overlapping verb is defined once here** (its name and
 //! summary), so a command present in both contexts cannot drift in how it reads. A verb's
 //! *operand* may still differ where the operation genuinely differs — `run` takes a policy

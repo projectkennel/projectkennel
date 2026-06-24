@@ -23,10 +23,10 @@ mode = "none"
 read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
 
 [exec]
-allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+allow = ["/usr/libexec/kennel-facades/facade-mesh-probe", "/bin/sh"]
 
 [workload]
-argv = ["/usr/libexec/kennel/facade-mesh-probe", "connect", "/tmp/wl-in.sock"]
+argv = ["/usr/libexec/kennel-facades/facade-mesh-probe", "connect", "/tmp/wl-in.sock"]
 pinned = true
 
 [[consumes]]

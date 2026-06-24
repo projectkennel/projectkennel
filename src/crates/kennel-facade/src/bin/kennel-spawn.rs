@@ -1,6 +1,6 @@
 //! `kennel-spawn` — the in-cage spawn execution unit (`02-10` §7.12, W10).
 //!
-//! Installed as `/usr/libexec/kennel/spawn` and reached through the `kennel` shim, this is the
+//! Installed as `/usr/libexec/kennel-facades/spawn` and reached through the `kennel` shim, this is the
 //! surface a confined workload (an agent) uses to reach its delegated-spawn capability. (The fixed
 //! test drivers `facade-spawn-probe`/`-bench` are separate.)
 //!

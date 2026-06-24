@@ -36,7 +36,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 SUITE_DIR="$REPO_ROOT/src/crates/kenneld/tests/policy-suite"
 LIBEXEC="/usr/libexec/kennel"
-KENNEL="$LIBEXEC/kennel"
+# The `kennel` shim is on PATH at /usr/bin (W10); it dispatches to the host execution unit.
+KENNEL="/usr/bin/kennel"
 
 UID_NUM="$(id -u)"
 if [ "$UID_NUM" = "0" ]; then

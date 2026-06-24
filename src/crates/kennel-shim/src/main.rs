@@ -5,7 +5,7 @@
 //!
 //! - **`/usr/libexec/kennel/host`** — the dynamically-linked host execution unit (the operator
 //!   surface: `run` a first kennel, `policy`, `list`, `oci`, …).
-//! - **`/usr/libexec/kennel/spawn`** — the statically-linked in-cage spawn-requester (`run` a
+//! - **`/usr/libexec/kennel-facades/spawn`** — the statically-linked in-cage spawn-requester (`run` a
 //!   sibling over Node 0 `SPAWN`, `caps`).
 //!
 //! Context is **construction, not a flag**, and detection is **try-then-fall-back**: the shim execs

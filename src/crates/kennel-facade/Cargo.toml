@@ -32,7 +32,7 @@ path = "src/bin/facade-ssh.rs"
 name = "facade-dbus"
 path = "src/bin/facade-dbus.rs"
 
-# The in-cage spawn execution unit (W10): installed as `/usr/libexec/kennel/spawn`, reached through
+# The in-cage spawn execution unit (W10): installed as `/usr/libexec/kennel-facades/spawn`, reached through
 # the `kennel` shim (`kennel caps`, `kennel run`). Retires the `facade-spawn` name.
 [[bin]]
 name = "kennel-spawn"

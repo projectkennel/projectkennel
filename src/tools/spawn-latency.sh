@@ -85,7 +85,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-KENNEL="/usr/libexec/kennel/kennel"
+KENNEL="/usr/bin/kennel"
 [ -x "$KENNEL" ] || KENNEL="$(command -v kennel || true)"
 SUITE_DIR="$REPO_ROOT/src/crates/kenneld/tests/policy-suite"
 CASE_DIR="$SUITE_DIR/$CASE"

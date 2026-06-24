@@ -19,11 +19,11 @@ mode = "none"
 read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
 
 [exec]
-allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+allow = ["/usr/libexec/kennel-facades/facade-mesh-probe", "/bin/sh"]
 
 # Connect to the brokered `at` socket and round-trip ping→pong.
 [workload]
-argv = ["/usr/libexec/kennel/facade-mesh-probe", "connect", "/tmp/mesh-in.sock"]
+argv = ["/usr/libexec/kennel-facades/facade-mesh-probe", "connect", "/tmp/mesh-in.sock"]
 pinned = true
 
 # The reached capability: delivered at `at` (a facade socket in this kennel's view).

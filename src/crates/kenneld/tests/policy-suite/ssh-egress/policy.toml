@@ -45,7 +45,7 @@ allow = [
     "/usr/bin/ssh", "/usr/bin/grep", "/usr/bin/test", "/usr/bin/[",
     # facade-ssh is the ProxyCommand the synthetic config invokes; it is bound into the
     # view by kenneld at the deployment path, granted here so the stock client can exec it.
-    "/usr/libexec/kennel/facade-ssh", "__FACADE_SSH__",
+    "/usr/libexec/kennel-facades/facade-ssh", "__FACADE_SSH__",
 ]
 
 [ssh]

@@ -25,11 +25,11 @@ write = ["/run/mesh"]
 
 # Execute only the in-kennel mesh probe.
 [exec]
-allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+allow = ["/usr/libexec/kennel-facades/facade-mesh-probe", "/bin/sh"]
 
 # The workload IS the service: bind the endpoint socket and echo ping→pong forever.
 [workload]
-argv = ["/usr/libexec/kennel/facade-mesh-probe", "serve", "/run/mesh/echo.sock"]
+argv = ["/usr/libexec/kennel-facades/facade-mesh-probe", "serve", "/run/mesh/echo.sock"]
 pinned = true
 
 # The offered capability: an af-unix socket the provider listens on at its endpoint (§7.13.1).
