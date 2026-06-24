@@ -239,12 +239,11 @@ mod tests {
             provider("plain", Tier::Host, "x.cap", Shape::AfUnix, None),
         ]);
         let c = [consume("x.cap", Shape::AfUnix, None)];
-        match decide(&c, &ready(both, "plain"), "x.cap") {
-            Decision::Ready(s) => {
-                assert_eq!(s.provider, "plain", "the keyless provider is selected")
-            }
-            other => panic!("expected the keyless provider, got {other:?}"),
-        }
+        let decision = decide(&c, &ready(both, "plain"), "x.cap");
+        assert!(
+            matches!(&decision, Decision::Ready(s) if s.provider == "plain"),
+            "expected the keyless provider, got {decision:?}"
+        );
     }
 
     #[test]
