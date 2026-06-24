@@ -94,13 +94,14 @@ prose tense is not mistaken for open work:
 - **Merged.** W0 (substrate confirm), W1 (schema) + W8 (spawn-facade contract) (#83), W2 (readiness
   scaffold) (#84), W3 (`SVC_CONNECT` wire) (#85), W4 (catalogue) (#86–#89), W5 (broker + af-unix handoff)
   (#90, #92), W6 (supervisor + ondemand activation) (#91, #95), W7 (confined GUI compositor-broker) (#99),
-  W11 (trust class) + W13 (auth-not-attestation sweep) (#102), W14 (mesh topology view) (#100); W17 (version
-  handshake) partial (#94). The mesh runtime, the GUI path, and the topology surface are **shipped**.
-- **Open for 0.4.0.** **W21** (correct the shipped `/proc/<pid>/root` handoff to the host-owned rendezvous
-  point — a post-merge fix, design landed in #103, code owed; **ship-gate**); **W12** (THREATS entries —
-  first cut #101, to be rewritten against W21 then re-landed); **W15** (red-team, ship-gate); **W16** (README
-  accuracy pass, ship-gate; positioning pass a fast-follow). **W9**/**W10** (spawn-surface introspection +
-  unify) track independently of the mesh.
+  W11 (trust class) + W13 (auth-not-attestation sweep) (#102), W14 (mesh topology view) (#100),
+  **W21** (host-owned rendezvous point + `/run` endpoint gating — replaces the `/proc/<pid>/root` handoff,
+  e2e-proven; #103 design, #105 code) and **W12** (THREATS T1.12 + T3.10, landed with #105; #101 closed);
+  W17 (version handshake) partial (#94). The mesh runtime, the GUI path, the topology surface, and the
+  brokered connector are **shipped**.
+- **Open for 0.4.0.** **W15** (red-team the cross-kennel surface — ship-gate); **W16** (README accuracy
+  pass — ship-gate; positioning pass a fast-follow). **W9** (`kennel caps`) verified-built; **W10** (unify
+  the spawn surface — multi-week, deferrable) tracks independently of the mesh.
 
 The per-thrust entries below keep their original planning prose; treat the snapshot above as the authority on
 what is built. Status notes inline (`*Landed: …*`, `**Status:**`) are the per-item record.
@@ -326,7 +327,13 @@ Self-contained and testable with no broker and no runtime — the contract every
   `/proc/<pid>/root` form **superseded by W21** — see there before building any further mesh consumer.)*
 
 - **W21 · Host-owned rendezvous point for the `af-unix` handoff (supersedes the shipped `/proc/<pid>/root`).**
-  **[debt, ship-gate] S.** A **correction to merged code**, not a forward build item: W4/W5/W6/W7/W14 all
+  **[debt, ship-gate] S. MERGED (#105; design #103).** Shipped: the rendezvous point
+  (`<runtime>/mesh/<tier>/<name>[.key]/`, bound at the in-view `dirname(endpoint)`, broker connects
+  host-side), the `pid`/`/proc` deletion, and the optional `af-unix` endpoint defaulted + gated under `/run`.
+  Settled schema untouched; **+40 TCB** (measured — the rendezvous derivation + bind cost more than the
+  `/proc` join they replace; the win is the primitive, not LOC). policy-suite e2e (`mesh-roundtrip`,
+  `gui-mesh`) PASS. *(Original entry below, for the rationale.)*
+  A **correction to merged code**, not a forward build item: W4/W5/W6/W7/W14 all
   **shipped** (PRs #86–#100), and the af-unix handoff among them (#92) reaches a provider's endpoint by
   traversing the provider's mount namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the
   provider **pid**. That is a namespace-crossing connect in the most privileged process, over a path the
@@ -620,7 +627,10 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   templates. Home the multi-leg exemption here as a general principle, so it is cited consistently
   rather than restated per-instance (the GUI two-leg case references this, does not redefine it).
 
-- **W12 · THREATS entries + compliance mapping.** **[dep] M.**
+- **W12 · THREATS entries + compliance mapping.** **[dep] M. MERGED (landed with #105).** T3.10
+  (standing-service delegation) and T1.12 (GUI host-compositor leg) are in `THREATS.md` +
+  `dist/threats/catalogue.toml`, the mitigation written against the rendezvous point (§7.13.4b); the
+  first cut (#101, against the `/proc` handoff) is closed. *(Original entry below.)*
   New residuals into `THREATS.md` and `dist/threats/catalogue.toml`, derived-from-grant the way
   T3.8/T3.9 are: a **standing-service delegation residual** (longer-lived attack surface than
   ephemeral spawn; the cross-kennel brokering channel) and the **GUI host-compositor leg**
@@ -736,21 +746,19 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    contract by W5. W17 is the runtime anti-drift guard on the same control plane, independent of the mesh,
    so it lands whenever capacity allows. Settle the connector lifecycle (consume-with-wait timeout,
    restart-invalidates-connectors) in W3's contract before W5 implements it.
-2. **Runtime logic — W4 → W5 → W6 → W7: MERGED** (#86–#100), each built against a frozen contract.
-   Catalogue (the derived projection over W1), the connector broker (the logic behind W3, resolving against
-   W4), sidecars (the supervision logic behind W2), GUI (the first real consumer). **W21 is the one
-   open thread in this thrust** — a post-merge correction to the shipped provider-side handoff (#92): it
-   reworks `/proc/<pid>/root`→host-owned rendezvous point *underneath* the already-built W6 readiness and W7
-   GUI (which rebase onto the rendezvous path), and must land before the 0.4.0 tag.
+2. **Runtime logic — W4 → W5 → W6 → W7 → W21: MERGED** (#86–#100, #105), each built against a frozen
+   contract. Catalogue (the derived projection over W1), the connector broker (the logic behind W3, resolving
+   against W4), sidecars (the supervision logic behind W2), GUI (the first real consumer), then **W21** — the
+   post-merge correction of the provider-side handoff (#92) to the host-owned rendezvous point, reworked
+   *underneath* the built W6 readiness and W7 GUI and proven by the policy-suite e2e.
 3. **Spawn facade — W8 → W9 → W10**, independent of the mesh (it documents and harmonises the
    *existing* spawn surface, not the new mesh one). W8 (the contract) first — it derives the authority
    model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in
    parallel with Thrusts 2/4; slot against capacity.
-4. **Trust + threat — W11 → W12 → W13**, in parallel with Thrust 2; W11 (trust class) before the GUI
-   multi-leg case references it, W12 after the residuals are concrete **and after W21** (the standing-service
-   residual's mitigation describes the handoff W21 reshapes — write it against the rendezvous point, not the
-   superseded `/proc/<pid>/root` connect), W13 (the doc sweep) once the trust class and threat entries give
-   it something canonical to point at.
+4. **Trust + threat — W11 → W12 → W13: MERGED** (#102, #105). W11 (trust class) before the GUI multi-leg
+   case references it; W12 (T3.10/T1.12) landed with W21 (#105) so the mitigation describes the rendezvous
+   point, not the superseded `/proc/<pid>/root` connect; W13 (the doc sweep) once the trust class and threat
+   entries gave it something canonical to point at.
 5. **Operability — W14** after W4 (it reads the catalogue) and W6 (it reads readiness).
 6. **Pre-ship — W15 (red-team) gating, then W16's accuracy pass (also gating); W16's positioning pass
    is a fast-follow after the tag**, all after the whole mesh surface (W1–W7) *and* the harmonised spawn
