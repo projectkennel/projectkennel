@@ -522,8 +522,14 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   the argv are *independent* (the proxy gates regardless of what argv claims) — state it, so the
   independence is not misread as coupling.
 
-- **W9 · `kennel caps` — the spawn-envelope introspection verb.** **[dep] S. Status: not started**
-  (no `caps` subcommand in `kennel-cli`).
+- **W9 · `kennel caps` — the spawn-envelope introspection verb.** **[dep] S.**
+  **Status: verb built; only the `kennel caps` surface name is pending (W10).** The `SPAWN_QUERY` verb (15)
+  and its daemon projection `handle_spawn_query` (`kenneld::spawn`, rendering `max_instances`/live + each
+  allowed template's per-requester-narrowed mutable fields with bounds + `unavailable` notes, memoised
+  against looper-pool CPU amplification) are built, and the in-cage client is `facade-spawn caps`
+  (`kennel-facade`). What remains is purely the surface: exposing it as `kennel caps`, which the W10
+  unification delivers when it rehomes `facade-spawn` under the `kennel` shim — there is no separable W9
+  build, the capability ships the moment W10 names it.
   A read-only projection of the caller's resolved `[spawn.allow]`: the templates it may spawn, each
   template's exposed mutable fields *with their bounds* (so an agent composes a valid request first
   try), and remaining `max_instances`. **Scoped to the caller's own grant** — deny-by-default applied to
@@ -725,9 +731,11 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    rendezvous point that replaced the provider-side `/proc/<pid>/root` handoff, e2e-proven. The open work
    in this thrust is the W6 idle-reaping and the remaining W7 pieces.
 3. **Spawn facade — W8 → W9 → W10**, independent of the mesh (it documents and harmonises the
-   *existing* spawn surface, not the new mesh one). W8 (the contract) first — it derives the authority
-   model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in
-   parallel with Thrusts 2/4; slot against capacity.
+   *existing* spawn surface, not the new mesh one). W8 (the contract) merged (#83); W9's introspection
+   verb is **built** (`SPAWN_QUERY` + `handle_spawn_query`, in-cage client `facade-spawn caps`) — only its
+   `kennel caps` surface name is pending, which W10 delivers. So the one remaining build here is **W10**
+   (the unified binary): the static `kennel` shim, the `/usr/libexec` host/spawn split, and rehoming the
+   spawn surface (`run`/`caps`) under it. Can run in parallel with Thrusts 2/4; slot against capacity.
 4. **Trust + threat — W11 → W12 → W13: merged** (#102, #105). W11 (trust class) and W13 (the doc sweep)
    in #102; W12 (T3.10/T1.12) landed with W21 (#105), so the standing-service mitigation describes the
    host-owned rendezvous point, not the superseded `/proc/<pid>/root` connect.
