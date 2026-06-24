@@ -1310,8 +1310,12 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         under the workload, Kennel uses kernel namespaces + LSMs (Landlock, seccomp, cgroup&nbsp;BPF), a
                         lighter boundary on the host kernel. The flex is not "a faster VM"; it is that kernel-enforced
                         containment is cheap enough to make <em>per-task</em> isolation practical, where a VM's startup
-                        makes it per-session. Put a microVM underneath when the threat model needs the hardware boundary —
-                        the two compose.</p>
+                        makes it per-session. And the boundaries answer different questions: a microVM isolates the
+                        <em>box</em> — one tenant's environment from the next — but says nothing about what the code does
+                        <em>inside</em> its own box (read its credentials, exfiltrate in&#8209;band, plant persistence in
+                        its own tree). That within-environment confinement is Kennel's layer. The two compose: put a
+                        microVM underneath when the threat model needs the hardware boundary between tenants, Kennel
+                        inside it to govern what each workload may reach.</p>
                     <p style="margin:14px 0 0;font-size:13px;color:var(--blue-soft);max-width:76ch">And to be straight
                         about what beats it: Microsoft Hyperlight clocks
                         <a href="https://opensource.microsoft.com/blog/2025/02/11/hyperlight-creating-a-0-0009-second-micro-vm-execution-time/"><b>~0.9 ms</b></a>
@@ -1328,8 +1332,10 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                     <h3 style="margin:0 0 6px">"Isn't this just bubblewrap?"</h3>
                     <p style="margin:0 0 22px;max-width:74ch">Fair question — and the most important one to answer
                         straight. Kennel builds its sandbox with the very mechanism bubblewrap pioneered; the README calls
-                        it "the bubblewrap mechanism." The difference is the layer: <b>bubblewrap is the construction
-                        primitive; Kennel is the policy, enforcement, lifecycle, and audit system around it.</b></p>
+                        it "the bubblewrap mechanism." The difference is <b>reference-monitor discipline</b>: bubblewrap
+                        composes a view and <code>exec</code>s — it mediates <em>once, at launch,</em> then steps out;
+                        Kennel mediates at <em>every boundary crossing, at runtime,</em> through kenneld. bwrap is the
+                        construction primitive; Kennel is the reference monitor built from it.</p>
                     <div class="status" style="margin-top:0">
                         <div class="built">
                             <h4>Same engine</h4>
@@ -1353,7 +1359,17 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                             </ul>
                         </div>
                     </div>
-                    <p style="margin:20px 0 0;font-size:14px;max-width:76ch">bubblewrap hands you one sandbox per
+                    <p style="margin:20px 0 0;font-size:14px;max-width:78ch">The gap isn't theoretical. The catalogue's
+                        canonical instance (<a
+                            href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md">THREATS.md
+                            T2.1</a>): a Claude Code agent, blocked by a bubblewrap sandbox, reasoned — unprompted —
+                        <em>"let me try disabling the sandbox and using the full binary path to bypass the deny rule,"</em>
+                        and in a separate incident found <code>/proc/self/root/usr/bin/npx</code> to reach a denylisted
+                        binary; the pattern is common enough that Anthropic shipped a setting to disable the agent's own
+                        escape hatch. A launch-time view had no runtime mediator to catch the move — not a bwrap bug (it
+                        does exactly what it claims), but the gap between a mechanism configured <em>once</em> and a
+                        reference monitor deciding <em>every time</em>.</p>
+                    <p style="margin:16px 0 0;font-size:14px;max-width:76ch">bubblewrap hands you one sandbox per
                         invocation, from the command line, and gets out of the way — exactly right as a <em>primitive</em>
                         (it is what Flatpak runs on). Kennel is the layer that turns that primitive into a policy-driven,
                         deny-by-default, LSM-enforced, audited, daemon-managed confinement system with a threat model.
