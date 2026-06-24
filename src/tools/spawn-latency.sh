@@ -219,7 +219,7 @@ PROFILE_OUT="$RUNS_DIR/profile.txt"
 #    CONSTRUCTION phase (everything before the first `teardown:` milestone) and a TEARDOWN phase;
 #    each phase yields a span (first→last) and per-boundary deltas. A machine profile is written to
 #    PROFILE_OUT for --baseline / --compare.
-awk -v n="$N" -v wall_ns="$((END_NS - START_NS))" -v profile_out="$PROFILE_OUT" -v root_kind="$ROOT_KIND" '
+gawk -v n="$N" -v wall_ns="$((END_NS - START_NS))" -v profile_out="$PROFILE_OUT" -v root_kind="$ROOT_KIND" '
 function ms(ns){ return sprintf("%.2f ms", ns/1000000) }
 function pick(arr, count, frac,   idx){ idx = int(count*frac); if (idx < 1) idx = 1; if (idx > count) idx = count; return arr[idx] }
 FNR==1 { delete T; delete M; delete PH; k=0 }
@@ -275,7 +275,7 @@ END {
 if [ -n "$OFFCPU_OUT" ] && [ -s "$OFFCPU_OUT" ]; then
     echo
     echo "  off-CPU residency per spawn-path process (mean ms / construction, over $OFFCPU_RUNS runs):"
-    awk -v runs="$OFFCPU_RUNS" '
+    gawk -v runs="$OFFCPU_RUNS" '
         function kind(c){ return (c == "kenneld" || c ~ /^kennel-lib/) ? "daemon (incl. idle parking — not per-construction)" : "per-construction blocked-wait on the hops" }
         match($0, /@offcpu_us\[([^\]]+)\]: ([0-9]+)/, g) { rows[g[1]] = g[2]+0 }
         END {

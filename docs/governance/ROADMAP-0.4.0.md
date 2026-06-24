@@ -718,7 +718,14 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   are a longer-lived attack surface than ephemeral spawn, and two of these are new structural refusals
   whose bug-class is escalation — the review bar rises accordingly.
 
-- **W16 · README + website reconciliation: accuracy, then positioning.** **[dep] M. Status: not started.**
+- **W16 · README + website reconciliation: accuracy, then positioning.** **[dep] M. Status: accuracy
+  pass done (the ship-gate); positioning rewrite is the fast-follow, not yet started.** The README and
+  `projectkennel.org` are reconciled to the as-built 0.4.0 tree: the headline shipped features (dynamic
+  spawn, the service mesh, confined GUI, the OCI substrate, binder IPC, the D-Bus facade, the four
+  network modes, the version handshake) are stated where they were silently absent; the "designed, not
+  yet built" lists no longer carry built things (D-Bus, `kennel diff`, fragments) and X11 reads as *cut*,
+  not deferred; the size/scale numbers (26 crates, ≈33.8k SLOC, the doc word counts) are refreshed; and
+  an unverified "sub-4ms" floor was replaced with a pointer to the measuring harness (never overclaim).
   After 0.4.0 the codebase is a full confinement framework — dynamic spawn, sub-4ms per-task
   isolation, a standing service mesh, confined GUI — while the README and `projectkennel.org` still
   describe a much earlier, smaller thing. The public front door chronically under- and mis-sells what

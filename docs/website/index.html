@@ -1178,7 +1178,11 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                             <code>kennel review &lt;policy&gt;</code>
                             <span>re-pin a workspace trust manifest after edits</span>
                             <code>kennel stop / list</code>
-                            <span>stop a kennel; list the running ones</span>
+                            <span>stop a kennel; list running kennels + the service mesh</span>
+                            <code>kennel oci run &lt;policy&gt;</code>
+                            <span>boot a digest-pinned OCI image as the kennel root</span>
+                            <code>kennel run &lt;template@ver&gt; -- &lt;cmd&gt;</code>
+                            <span>in-cage: an agent spawns a signed-template sibling</span>
                             <code>kennel policy compile / sign / lint</code>
                             <span>resolve + sign a policy; check the template corpus</span>
                         </div>
@@ -1191,19 +1195,22 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                                 <h4>Runs today</h4>
                                 <ul>
                                     <li>The full unprivileged spawn vertical</li>
-                                    <li>Egress proxy + cgroup-BPF allowlist + audit</li>
-                                    <li>AF_UNIX shim · SSH re-origination bastion</li>
+                                    <li>Dynamic spawn — agent instantiates signed-template siblings</li>
+                                    <li>Cross-kennel service mesh · binder IPC · OCI substrate</li>
+                                    <li>Confined GUI — per-kennel nested Wayland compositor</li>
+                                    <li>Four net modes · egress proxy + cgroup-BPF · D-Bus facade</li>
+                                    <li>AF_UNIX shim · SSH re-origination bastion · audit</li>
                                     <li>Masked workspace manifest · pty escape filter</li>
-                                    <li>Signed templates · policy compiler · lockfile</li>
+                                    <li>Signed templates &amp; fragments · policy compiler · lockfile</li>
                                 </ul>
                             </div>
                             <div class="road">
                                 <h4>Designed, not yet built</h4>
                                 <ul>
-                                    <li>D-Bus &amp; X11 facades</li>
-                                    <li>Binder cross-instance relay (MCP topology)</li>
+                                    <li>Cross-<em>instance</em> binder relay (rich MCP topology)</li>
+                                    <li>Confined GUI interactive file broker (post-0.4.0)</li>
                                     <li><code>fs.scrub</code> / <code>fs.home.sanitise</code></li>
-                                    <li><code>kennel diff</code></li>
+                                    <li>Minimal-view floor (tighter default <code>/usr</code>,<code>/var</code>)</li>
                                 </ul>
                             </div>
                         </div>
@@ -1272,6 +1279,103 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                             trail — light enough to leave on. Put a VM underneath only when you need to.</p>
                         <div class="verdict">containment you'll actually run</div>
                     </div>
+                </div>
+
+                <div class="rv"
+                    style="margin-top:38px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
+                    <p class="fig" style="margin:0 0 4px">Light enough to leave on — measured</p>
+                    <h3 style="margin:0 0 6px">Cheap enough to be disposable.</h3>
+                    <p style="margin:0 0 22px;max-width:62ch">Time to stand up a fresh, isolated execution context.
+                        Kennel builds confinement <b>per task</b>, not per session — so the cost has to be small enough
+                        to pay on every tool call, not just every login.</p>
+                    <div
+                        style="display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;gap:12px 18px;align-items:center;font-family:var(--mono);font-size:13px">
+                        <span style="color:var(--ink)">Project&nbsp;Kennel</span>
+                        <span style="height:16px;background:var(--blue);width:2%;min-width:6px;border-radius:3px"></span>
+                        <b style="color:var(--blue);white-space:nowrap">≈ 3.7 ms</b>
+                        <span style="color:var(--blue-soft)">Firecracker&nbsp;microVM</span>
+                        <span style="height:16px;background:var(--rule-2);width:46%;border-radius:3px"></span>
+                        <b style="color:var(--blue-soft);white-space:nowrap">~ 275 ms</b>
+                        <span style="color:var(--blue-soft)">Apple&nbsp;container</span>
+                        <span style="height:16px;background:var(--rule-2);width:100%;border-radius:3px"></span>
+                        <b style="color:var(--blue-soft);white-space:nowrap">~ 600 ms</b>
+                    </div>
+                    <p style="margin:22px 0 0;font-size:14px;max-width:76ch">Per-task kennel construction measures
+                        <b>≈ 3.7 ms</b> (median, workload-independent; build→workload-exec span, <code>spawn-spinup.sh</code>,
+                        kernel 6.17) — roughly <b>75×</b> under a Firecracker microVM and <b>150×</b> under Apple's
+                        container. All three are timed the same way: to the <em>workload</em> running, not just to the
+                        kernel — Firecracker reaches <code>/sbin/init</code> in ~125 ms but the workload in
+                        <a href="https://gist.github.com/sameo/0647d6aaa36e73e6b536b51c29db1ead">~275 ms</a>. The honest
+                        caveat: these are <em>different</em> isolation models — the microVMs put a separate guest kernel
+                        under the workload, Kennel uses kernel namespaces + LSMs (Landlock, seccomp, cgroup&nbsp;BPF), a
+                        lighter boundary on the host kernel. The flex is not "a faster VM"; it is that kernel-enforced
+                        containment is cheap enough to make <em>per-task</em> isolation practical, where a VM's startup
+                        makes it per-session. And the boundaries answer different questions: a microVM isolates the
+                        <em>box</em> — one tenant's environment from the next — but says nothing about what the code does
+                        <em>inside</em> its own box (read its credentials, exfiltrate in&#8209;band, plant persistence in
+                        its own tree). That within-environment confinement is Kennel's layer. The two compose: put a
+                        microVM underneath when the threat model needs the hardware boundary between tenants, Kennel
+                        inside it to govern what each workload may reach.</p>
+                    <p style="margin:14px 0 0;font-size:13px;color:var(--blue-soft);max-width:76ch">And to be straight
+                        about what beats it: Microsoft Hyperlight clocks
+                        <a href="https://opensource.microsoft.com/blog/2025/02/11/hyperlight-creating-a-0-0009-second-micro-vm-execution-time/"><b>~0.9 ms</b></a>
+                        — but that runs a <em>single function</em> in a VM partition with <b>no guest OS</b>: no kernel,
+                        no processes, no filesystem, and a fixed host-call ABI in place of syscalls. It is fast because
+                        there is almost nothing to construct — it is built to <em>embed one function</em>, not to confine
+                        a general workload (an agent that forks processes, reads your files, runs a shell, talks to the
+                        network). Faster, narrower, a different job.</p>
+                </div>
+
+                <div class="rv"
+                    style="margin-top:38px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
+                    <p class="fig" style="margin:0 0 4px">The nearest neighbour</p>
+                    <h3 style="margin:0 0 6px">"Isn't this just bubblewrap?"</h3>
+                    <p style="margin:0 0 22px;max-width:74ch">Fair question — and the most important one to answer
+                        straight. Kennel builds its sandbox with the very mechanism bubblewrap pioneered; the README calls
+                        it "the bubblewrap mechanism." The difference is <b>reference-monitor discipline</b>: bubblewrap
+                        composes a view and <code>exec</code>s — it mediates <em>once, at launch,</em> then steps out;
+                        Kennel mediates at <em>every boundary crossing, at runtime,</em> through kenneld. bwrap is the
+                        construction primitive; Kennel is the reference monitor built from it.</p>
+                    <div class="status" style="margin-top:0">
+                        <div class="built">
+                            <h4>Same engine</h4>
+                            <ul>
+                                <li>Unprivileged, identity-mapped user namespace — no setuid, no root</li>
+                                <li>Mount / PID / IPC / (opt.) net namespaces; <code>pivot_root</code></li>
+                                <li>A minimal bound view: present by construction, not denied</li>
+                                <li>seccomp on the syscall surface</li>
+                            </ul>
+                        </div>
+                        <div class="built">
+                            <h4>Different vehicle</h4>
+                            <ul>
+                                <li>A <b>signed, declarative, versioned policy</b> (templates, inheritance, a trust
+                                    chain) — not imperative CLI flags</li>
+                                <li><b>Landlock</b> + cgroup-BPF egress allowlist + a brokering SOCKS proxy + the SSH
+                                    re-origination bastion + a D-Bus facade — atop namespaces + seccomp</li>
+                                <li>A <b>daemon</b> (kenneld): lifecycle, attach/detach, supervision, the service mesh,
+                                    dynamic spawn</li>
+                                <li>A unified <b>audit</b> trail, and a threat catalogue the policy answers to</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <p style="margin:20px 0 0;font-size:14px;max-width:78ch">The gap isn't theoretical. The catalogue's
+                        canonical instance (<a
+                            href="https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md">THREATS.md
+                            T2.1</a>): a Claude Code agent, blocked by a bubblewrap sandbox, reasoned — unprompted —
+                        <em>"let me try disabling the sandbox and using the full binary path to bypass the deny rule,"</em>
+                        and in a separate incident found <code>/proc/self/root/usr/bin/npx</code> to reach a denylisted
+                        binary; the pattern is common enough that Anthropic shipped a setting to disable the agent's own
+                        escape hatch. A launch-time view had no runtime mediator to catch the move — not a bwrap bug (it
+                        does exactly what it claims), but the gap between a mechanism configured <em>once</em> and a
+                        reference monitor deciding <em>every time</em>.</p>
+                    <p style="margin:16px 0 0;font-size:14px;max-width:76ch">bubblewrap hands you one sandbox per
+                        invocation, from the command line, and gets out of the way — exactly right as a <em>primitive</em>
+                        (it is what Flatpak runs on). Kennel is the layer that turns that primitive into a policy-driven,
+                        deny-by-default, LSM-enforced, audited, daemon-managed confinement system with a threat model.
+                        Same lineage; a different job — and where you'd otherwise hand-write and maintain a wall of
+                        <code>bwrap</code> flags per workload, that surface becomes one signed, reviewable, inheritable
+                        policy.</p>
                 </div>
             </div>
         </section>
