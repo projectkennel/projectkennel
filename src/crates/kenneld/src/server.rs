@@ -909,6 +909,18 @@ where
     P: Privileged + Clone + Send + Sync + 'static,
     L: PolicyLoader + Send + Sync + 'static,
 {
+    // W17: the version handshake is the FIRST thing on the connection — before any request or policy
+    // is read. A client compiling a settled-policy schema newer than this daemon parses is refused
+    // here (the daemon sends the typed verdict and we drop), so a skew surfaces as "restart the
+    // daemon", not a cryptic parse error later. A pre-handshake client / malformed preamble drops too.
+    match control::server_handshake(
+        conn,
+        kennel_lib_policy::SETTLED_SCHEMA_VERSION,
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return,
+    }
     // A malformed/closed connection is just dropped.
     let Ok((request, fds)) = recv_request_with_fds(conn) else {
         return;
