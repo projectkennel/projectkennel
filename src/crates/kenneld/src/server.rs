@@ -280,6 +280,10 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// reaches it type-erased to socket-activate an `ondemand` provider on first consume. `None` before
     /// startup wires it, or in a test harness that does not.
     activator: std::sync::OnceLock<std::sync::Arc<dyn crate::supervisor::ProviderActivator>>,
+    /// Providers the TTL handler has idle-reaped (§7.13.6), pending the supervisor's observation of
+    /// the exit. The supervisor takes the mark to treat the kill as a reap (→ declared-but-pending,
+    /// re-activatable) rather than a crash (→ restart/failed). Cleared as it is taken.
+    idle_reaped: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -302,6 +306,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             bastion: Mutex::new(None),
             catalogue: std::sync::Arc::new(Mutex::new(catalogue)),
             activator: std::sync::OnceLock::new(),
+            idle_reaped: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -692,6 +697,24 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         reg.kennels
             .values()
             .any(|m| m.consumed.iter().any(|c| capabilities.contains(c)))
+    }
+
+    /// Mark `provider` idle-reaped (§7.13.6) — the TTL handler records this before killing the cgroup,
+    /// so the supervisor reads the kill as a reap, not a crash.
+    pub(crate) fn mark_idle_reaped(&self, provider: &str) {
+        self.idle_reaped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider.to_owned());
+    }
+
+    /// Take `provider`'s idle-reaped mark (§7.13.6): `true` once, then cleared — the supervisor calls
+    /// this when the provider exits, to distinguish an idle reap (→ declared-but-pending) from a crash.
+    pub(crate) fn take_idle_reaped(&self, provider: &str) -> bool {
+        self.idle_reaped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(provider)
     }
 
     /// Deregister `name` and return its context to the pool.

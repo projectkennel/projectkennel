@@ -434,6 +434,12 @@ fn ttl_expired(
                 Reply::Data(one(ttl::RENEW)),
             );
         }
+        // Mark the reap before the kill so the supervisor reads the resulting exit as a reap
+        // (→ declared-but-pending, re-activatable), not a crash to restart. The activator is
+        // `Some` here — `is_none_or` only falls through when it is present and reports no consumer.
+        if let Some(a) = activator {
+            a.mark_idle_reaped(&lifecycle.name);
+        }
         let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
         return (
             "binder.ttl-provider-reap",

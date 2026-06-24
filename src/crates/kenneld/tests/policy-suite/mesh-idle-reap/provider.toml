@@ -1,0 +1,46 @@
+# ============================================================================
+# mesh-idle-reap — the PROVIDER half (§7.13.6, W6 idle-reaping).
+#
+# An ondemand service kennel that offers `test.mesh.idle` (af-unix) and serves a
+# ping→pong echo at its endpoint — the mesh-roundtrip provider, plus a short
+# `[lifecycle].ttl`. For an ondemand provider that TTL is its idle grace: on each
+# fire kenneld re-arms it while a consumer kennel runs and reaps it when none does,
+# riding the existing §9.7 TTL custodian. run.sh activates it (a consumer connects),
+# lets it idle past the TTL, and proves it returns to declared-but-pending and then
+# re-activates from cold.
+# ============================================================================
+
+name = "mesh-idle-provider"
+template_base = "base-confined@v1"
+
+# A service that vends a capability — it reaches nothing itself.
+[net]
+mode = "none"
+
+# Read the system dirs the static probe resolves from; grant write on the endpoint's directory so the
+# provider binds its endpoint there. kenneld binds the host rendezvous directory at this path at
+# construction (§7.13.4b).
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+write = ["/run/mesh-idle"]
+
+# Execute only the in-kennel mesh probe.
+[exec]
+allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
+
+# The TTL is the ondemand idle grace (§7.13.6): on each fire kenneld reaps this provider iff no
+# consumer kennel runs. Short, so the case observes the reap without a long wait.
+[lifecycle]
+ttl = "4s"
+
+# The workload IS the service: bind the endpoint socket and echo ping→pong until reaped.
+[workload]
+argv = ["/usr/libexec/kennel/facade-mesh-probe", "serve", "/run/mesh-idle/echo.sock"]
+pinned = true
+
+# The offered capability: an af-unix socket the provider listens on at its endpoint (§7.13.1).
+[[provides]]
+name = "test.mesh.idle"
+shape = "af-unix"
+endpoint = "/run/mesh-idle/echo.sock"
+reason = "mesh-idle-reap e2e: serve a ping→pong echo so a consumer can activate this ondemand provider"

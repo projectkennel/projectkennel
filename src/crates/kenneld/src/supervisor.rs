@@ -109,6 +109,11 @@ pub trait ProviderActivator: Send + Sync {
     /// idle-reap keep-alive (§7.13.6): the TTL handler reaps an ondemand provider only when this
     /// returns `false`.
     fn has_running_consumer(&self, capabilities: &[String]) -> bool;
+
+    /// Mark `provider` idle-reaped (§7.13.6) — the TTL handler calls this just before killing the
+    /// cgroup, so the supervisor reads the kill as a reap (→ declared-but-pending, re-activatable) and
+    /// the next consume can socket-activate it afresh.
+    fn mark_idle_reaped(&self, provider: &str);
 }
 
 /// The daemon-backed [`ProviderActivator`]: starts a provider's supervision thread, deduped.
@@ -155,6 +160,16 @@ where
 
     fn has_running_consumer(&self, capabilities: &[String]) -> bool {
         self.shared.any_running_consumer(capabilities)
+    }
+
+    fn mark_idle_reaped(&self, provider: &str) {
+        // Record the reap for the supervisor (which reads it when the killed provider exits), and clear
+        // the activation dedup so the next consume re-activates this provider from cold.
+        self.shared.mark_idle_reaped(provider);
+        self.started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(provider);
     }
 }
 
@@ -220,6 +235,13 @@ where
             }
         }
         let _ = run.join();
+        // An idle reap (§7.13.6) is not a crash: the TTL custodian killed the cgroup because no consumer
+        // kennel runs. Return the provider to declared-but-pending and stop supervising — the next consume
+        // re-activates it from cold — rather than feeding the kill through the `[service]` restart discipline.
+        if shared.take_idle_reaped(&id) {
+            shared.note_provider_event(&id, Event::IdleReaped);
+            return;
+        }
         match on_exit(&prov.service, clean, restarts) {
             RestartAction::RestartAfter(delay) => {
                 shared.note_provider_event(&id, Event::Restarting);
