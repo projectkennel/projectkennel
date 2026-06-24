@@ -40,8 +40,29 @@ kernel enforces as a boolean) — this is **not** a local fix and **not** an ord
 A substrate surprise is a finding about the spec, not just about the build. It propagates
 upward, or the layers drift.
 
+## Claims track evidence — never over, never under
+
+Separate from resolving uncertainty: how you **report** it. The project's whole stance is *never
+overclaim*. Apply it to your own work, in both directions.
+
+- **No status word without its receipt.** "done / built / merged / shipped / verified / passing
+  / proven" is a claim, and a claim carries the check that produced it **in the same turn** — the
+  grep, the command output, the PR number, the test result. Can't show the check? Then it isn't
+  done: write "unverified" or "I haven't checked," not the status word. Inferring status from a PR
+  title, a prior summary, or "it should be" is fabrication, however confident it reads.
+- **But don't underclaim either.** When the check *is* there, state the result flat — no hedging
+  a proven fact, no performed caution, no "shall I proceed?" gate on work already blessed.
+  Reflexive hedging is just overclaiming uncertainty. Humility is the claim matching the
+  evidence; it is not a tone.
+- **Measure before you characterise.** "shrinks / faster / smaller / cheaper" is a measurement;
+  run it (`gen-inventory`, a diff stat, a benchmark) and quote the number, or drop the claim.
+
+The tell, for you and the reader both: a confidence word with no evidence beside it is unverified
+until proven otherwise.
+
 ## One-line version
 
 Corpus for intent → repo-then-source-then-docs for substrate → ask for the undecided → and
 when substrate truth contradicts the corpus, **stop and surface it up as a doc defect**, never
-patch around it.
+patch around it. And every status/measurement claim carries the check that produced it — never
+overclaim, never hedge what you've proven.
