@@ -230,6 +230,24 @@ mod tests {
     }
 
     #[test]
+    fn a_keyless_consumer_binds_the_keyless_provider_when_both_exist() {
+        // A keyless consumer gets nothing from a keyed-*only* catalogue (asserted above), but when the
+        // name is offered by *both* a keyed and a keyless provider, it binds the keyless one — the only
+        // candidate whose key matches (None == None). The keyed provider is skipped, not preferred.
+        let both = catalogue(&[
+            provider("keyed", Tier::Host, "x.cap", Shape::AfUnix, Some("k1")),
+            provider("plain", Tier::Host, "x.cap", Shape::AfUnix, None),
+        ]);
+        let c = [consume("x.cap", Shape::AfUnix, None)];
+        match decide(&c, &ready(both, "plain"), "x.cap") {
+            Decision::Ready(s) => {
+                assert_eq!(s.provider, "plain", "the keyless provider is selected")
+            }
+            other => panic!("expected the keyless provider, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn readiness_maps_to_the_decision_and_carries_the_endpoint() {
         let c = [consume("x.cap", Shape::AfUnix, None)];
         // Pending (the default after projection) → Pending(selected).
