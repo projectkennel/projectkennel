@@ -86,6 +86,25 @@ landed ahead of the runtime W6–W11), and it is the anti-drift discipline appli
 freeze and test the contract, then build consumers against the frozen thing, rather than building
 consumers in parallel and reconciling their assumptions afterward.
 
+### Build state (2026-06-24)
+
+This is a planning artefact written ahead of the build; most of it has since **landed**. Snapshot so the
+prose tense is not mistaken for open work:
+
+- **Merged.** W0 (substrate confirm), W1 (schema) + W8 (spawn-facade contract) (#83), W2 (readiness
+  scaffold) (#84), W3 (`SVC_CONNECT` wire) (#85), W4 (catalogue) (#86–#89), W5 (broker + af-unix handoff)
+  (#90, #92), W6 (supervisor + ondemand activation) (#91, #95), W7 (confined GUI compositor-broker) (#99),
+  W11 (trust class) + W13 (auth-not-attestation sweep) (#102), W14 (mesh topology view) (#100); W17 (version
+  handshake) partial (#94). The mesh runtime, the GUI path, and the topology surface are **shipped**.
+- **Open for 0.4.0.** **W21** (correct the shipped `/proc/<pid>/root` handoff to the host-owned rendezvous
+  point — a post-merge fix, design landed in #103, code owed; **ship-gate**); **W12** (THREATS entries —
+  first cut #101, to be rewritten against W21 then re-landed); **W15** (red-team, ship-gate); **W16** (README
+  accuracy pass, ship-gate; positioning pass a fast-follow). **W9**/**W10** (spawn-surface introspection +
+  unify) track independently of the mesh.
+
+The per-thrust entries below keep their original planning prose; treat the snapshot above as the authority on
+what is built. Status notes inline (`*Landed: …*`, `**Status:**`) are the per-item record.
+
 ### Thrust 0 — Substrate confirms (gating, run FIRST)
 
 The assumptions about **external substrate the project does not control** that the GUI headline (W7)
@@ -306,12 +325,16 @@ Self-contained and testable with no broker and no runtime — the contract every
   provide/consume e2e — `mesh-roundtrip`. The provider-side connector handoff it shipped is the
   `/proc/<pid>/root` form **superseded by W21** — see there before building any further mesh consumer.)*
 
-- **W21 · Host-owned rendezvous point for the `af-unix` handoff (supersedes W5's `/proc/<pid>/root`).**
-  **[dep, blocker] S.** The keystone correction, and the **blocker for every other mesh consumer** (W6
-  activation, W7 GUI): the W5 broker reaches a provider's endpoint by traversing the provider's mount
-  namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the provider **pid**. That is a
-  namespace-crossing connect in the most privileged process, over a path the provider's view controls, with
-  a **pid-reuse race** between *Ready* and the connect. Frozen design: `07-13-service-catalog.md` §7.13.4b.
+- **W21 · Host-owned rendezvous point for the `af-unix` handoff (supersedes the shipped `/proc/<pid>/root`).**
+  **[debt, ship-gate] S.** A **correction to merged code**, not a forward build item: W4/W5/W6/W7/W14 all
+  **shipped** (PRs #86–#100), and the af-unix handoff among them (#92) reaches a provider's endpoint by
+  traversing the provider's mount namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the
+  provider **pid**. That is a namespace-crossing connect in the most privileged process, over a path the
+  provider's view controls, with a **pid-reuse race** between *Ready* and the connect. The merged mesh runs
+  on it today; W21 reworks it underneath the built consumers (W6 readiness, W7 GUI rebase onto the
+  rendezvous path) and **must land before 0.4.0 ships** so the release does not ship the weaker handoff — it
+  also gates W12 (the threat prose describes this mechanism). Frozen design: `07-13-service-catalog.md`
+  §7.13.4b.
   Replace it with a **host-owned rendezvous point** that names the *capability*, not the provider process —
   `<runtime>/mesh/<tier>/<name>[.<key>]/`, derived deterministically from `(tier, name, key)`, all
   signed-catalogue state (none of it the pid; the optional private `key` is appended iff set, the same token
@@ -335,8 +358,9 @@ Self-contained and testable with no broker and no runtime — the contract every
   derives it and injects it via a provider-side `env`, the listen-direction mirror of the consumer's
   `at`+`env` — and `key` gains a filesystem-safe-charset validation (it now appears in a path; a UUID already
   complies). The `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a
-  frozen surface. Land it **before** W5's mesh grows more dependents on `pid`/`/proc/<pid>/root` — today it is
-  the one `svc_connect_handoff` call site and two catalogue fields.
+  frozen surface. The shipped surface is still small — one `svc_connect_handoff` call site and two catalogue
+  fields — so the rework is contained; land it before any further mesh shape or consumer accretes on the
+  `pid`/`/proc/<pid>/root` form, and before the 0.4.0 tag.
   **Rendezvous ownership on a same-capability collision.** Two equally-enabled providers of one
   `(tier, name)` with no `key` to separate them contest one rendezvous point. The rule (§7.13.4b, the §7.13.4
   fail-open doctrine extended one inch): the point has **one owner — the provider the broker resolves the
@@ -710,12 +734,12 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    contract by W5. W17 is the runtime anti-drift guard on the same control plane, independent of the mesh,
    so it lands whenever capacity allows. Settle the connector lifecycle (consume-with-wait timeout,
    restart-invalidates-connectors) in W3's contract before W5 implements it.
-2. **Runtime logic — W4 → W5 → W21 → W6 → W7**, each built against a frozen contract. Catalogue (the
-   derived projection over W1), then the connector broker (the logic behind W3, resolving against W4),
-   then **W21 reshapes W5's provider-side handoff to the host-owned rendezvous point** — a blocker that
-   lands before W6/W7 grow more dependents on the `/proc/<pid>/root`/pid form it deletes — then sidecars
-   (the supervision logic behind W2, whose readiness probe rides W21's rendezvous path), then GUI (the
-   first real consumer). W7 gated on the W0 confirms coming back fully clean.
+2. **Runtime logic — W4 → W5 → W6 → W7: MERGED** (#86–#100), each built against a frozen contract.
+   Catalogue (the derived projection over W1), the connector broker (the logic behind W3, resolving against
+   W4), sidecars (the supervision logic behind W2), GUI (the first real consumer). **W21 is the one
+   open thread in this thrust** — a post-merge correction to the shipped provider-side handoff (#92): it
+   reworks `/proc/<pid>/root`→host-owned rendezvous point *underneath* the already-built W6 readiness and W7
+   GUI (which rebase onto the rendezvous path), and must land before the 0.4.0 tag.
 3. **Spawn facade — W8 → W9 → W10**, independent of the mesh (it documents and harmonises the
    *existing* spawn surface, not the new mesh one). W8 (the contract) first — it derives the authority
    model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in
