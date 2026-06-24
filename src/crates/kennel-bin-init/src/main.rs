@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn facade_argv_uses_the_path_as_argv0() {
         let facade = AuxProcess {
-            path: PathBuf::from("/usr/libexec/kennel/facade-afunix"),
+            path: PathBuf::from("/usr/libexec/kennel-facades/facade-afunix"),
             args: vec![
                 "/dev/binderfs/binder".to_owned(),
                 "/run/x.sock=wl".to_owned(),
@@ -583,7 +583,7 @@ mod tests {
         let argv = facade_argv(&facade).expect("argv");
         assert_eq!(
             argv.first().expect("0").to_bytes(),
-            b"/usr/libexec/kennel/facade-afunix"
+            b"/usr/libexec/kennel-facades/facade-afunix"
         );
         assert_eq!(argv.get(1).expect("1").to_bytes(), b"/dev/binderfs/binder");
         assert_eq!(argv.get(2).expect("2").to_bytes(), b"/run/x.sock=wl");

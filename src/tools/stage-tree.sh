@@ -56,8 +56,8 @@ done
 # operator's context, linked against the host glibc) plus the privhelper. STAT = in-kennel static
 # (`+crt-static`: the launcher, the trusted init, and the facades run inside an arbitrary image root
 # with no host `ld.so`, so they carry their own libc). Both flatten into one `bin/` for the payload.
-REL_BINS="kenneld kennel-akc kennel host-netproxy host-inetd host-dbus kennel-privhelper"
-STAT_BINS="kennel-bin-oci-entry kennel-bin-init facade-afunix facade-socks5 facade-client facade-ssh facade-dbus facade-spawn"
+REL_BINS="kenneld kennel-akc host-netproxy host-inetd host-dbus kennel-privhelper"
+STAT_BINS="kennel-bin-oci-entry kennel-bin-init facade-afunix facade-socks5 facade-client facade-ssh facade-dbus"
 
 # The in-kennel SPAWN test drivers — `kennel-facade` builds them, but they are the TEST SUITE, not
 # part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload and
@@ -68,6 +68,14 @@ TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe"
 install -d "$DEST/bin"
 for b in $REL_BINS;  do install -m 0755 "$REL/$b"  "$DEST/bin/$b"; done
 for b in $STAT_BINS; do install -m 0755 "$STAT/$b" "$DEST/bin/$b"; done
+
+# The unified `kennel` surface (W10): one static shim on PATH dispatches to two execution units.
+# The shim and the in-cage spawn unit are static (they run inside a constructed view with no host
+# ld.so); the host unit is the dynamic operator CLI. They install under their context names —
+# `kennel` (shim), `host`, `spawn` — so the shim's `/usr/libexec/kennel/{host,spawn}` dispatch resolves.
+install -m 0755 "$STAT/kennel"       "$DEST/bin/kennel"
+install -m 0755 "$REL/kennel-host"   "$DEST/bin/host"
+install -m 0755 "$STAT/kennel-spawn" "$DEST/bin/spawn"
 if [ "$WITH_TEST_BINS" = 1 ]; then
 	for b in $TEST_BINS; do install -m 0755 "$STAT/$b" "$DEST/bin/$b"; done
 fi

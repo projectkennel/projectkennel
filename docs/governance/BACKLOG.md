@@ -82,6 +82,18 @@ documentation sweep.
 
 ## Fenced to a later release
 
+- **Minimal view floor — tighten the default host-rootfs visibility (`/usr`, `/var`).** The base templates
+  grant `fs.read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]`, so every constructed view sees the
+  *entire* `/usr` (incl. `/usr/share`, `/usr/src`, `/usr/local`) — more host rootfs than a confined workload
+  needs. The principle is the one the W10 `/usr/libexec/kennel` blacklist is a single concrete instance of:
+  **a view should see the minimum host rootfs it needs, not a blanket subtree** (the read-side of
+  construction-by-absence, §4.2). The reason it is fenced rather than a quick edit: curating `/usr` is
+  breakage-prone — `terminfo`, `ca-certificates`, locale/`gconv` data live under `/usr/share`, the loader and
+  lib closure under `/usr/lib*` — so the floor must be **derived from what workloads actually resolve at
+  runtime** (measure-then-narrow), or it ships a default that mysteriously breaks TLS or the terminal. Pin it
+  as a design-corpus *principle* (the minimal-view floor, beside §4.2) + the *concrete floor* in the base
+  templates' fs grants + a *threat* entry (host-rootfs info-leak into views). Sequenced after the W10 binary
+  reshuffle, which is the down-payment on the same principle.
 - **Interactive file broker (confined GUI's §7.14.7 residual) — fenced post-0.4.0, behind a D-Bus-broker
   re-evaluation.** The confined-GUI render/display leg shipped (#99); the one committed residual is the
   Kennel-native file broker — a host-side transient picker the user consents through, delivering one fd into

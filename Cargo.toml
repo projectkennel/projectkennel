@@ -23,6 +23,12 @@ members = [
     # The unprivileged operator CLI (its own crate so the daemon TCB does not carry
     # the CLI's deps — serde_json, the trust-manifest reader, arg parsing).
     "src/crates/kennel-cli",
+    # The shared CLI surface grammar both execution units (host + in-cage spawn) link,
+    # so overlapping verbs keep identical shapes across contexts (std-only).
+    "src/crates/kennel-lib-cli",
+    # The unified `kennel` command shim: authority-free context-detect + exec the right
+    # execution unit. Static so one artifact runs host-side and in-cage (std-only).
+    "src/crates/kennel-shim",
     # Libraries (linked into the binaries).
     "src/crates/kennel-lib-audit",
     "src/crates/kennel-lib-binder",

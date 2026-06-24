@@ -25,6 +25,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use kennel_lib_cli::{render_commands, CommandSpec, RUN, RUN_SUMMARY};
 use kennel_lib_control::control::{self, Request, Response};
 use kennel_lib_control::socket;
 
@@ -44,22 +45,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// One CLI command, for both dispatch help and `--help`. The single source of truth:
-/// the top-level help renders from this table, so it cannot drift from what exists.
-pub(crate) struct CommandSpec {
-    /// The verb (`run`, `stop`, `policy`, …).
-    name: &'static str,
-    /// One-line summary for the command list.
-    summary: &'static str,
-    /// The full usage line (`kennel ` is prepended when shown).
-    usage: &'static str,
-}
-
 /// Top-level commands. `policy` is a noun group with its own sub-verbs (see `POLICY_VERBS`).
+/// [`CommandSpec`] is the shared surface grammar ([`kennel_lib_cli`], W10): the `run` verb's
+/// name and summary come from the shared constants so they cannot drift from the in-cage spawn
+/// unit's `run`; only the usage operand (a policy path here) is context-specific.
 const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
-        name: "run",
-        summary: "run a workload confined by a policy, in the foreground",
+        name: RUN,
+        summary: RUN_SUMMARY,
         usage: "run <policy> [<name>] [--key K] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
     },
     CommandSpec {
@@ -181,20 +174,14 @@ pub(crate) const POLICY_VERBS: &[CommandSpec] = &[
 /// Render the top-level help (the command list) to stdout.
 fn print_help() {
     println!("usage: kennel <command> [args...]\n\ncommands:");
-    let width = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
-    for c in COMMANDS {
-        println!("  {:<width$}  {}", c.name, c.summary, width = width);
-    }
+    print!("{}", render_commands(COMMANDS));
     println!("\nrun `kennel <command> --help` for a command's usage.");
 }
 
 /// Render `kennel policy` help (its sub-verb list) to stdout.
 fn print_policy_help() {
     println!("usage: kennel policy <verb> [args...]\n\nverbs:");
-    let width = POLICY_VERBS.iter().map(|c| c.name.len()).max().unwrap_or(0);
-    for c in POLICY_VERBS {
-        println!("  {:<width$}  {}", c.name, c.summary, width = width);
-    }
+    print!("{}", render_commands(POLICY_VERBS));
 }
 
 /// Whether `args` contains a help request (`--help`/`-h`).

@@ -1345,6 +1345,11 @@ fn parse_size_mib(s: &str) -> Result<u32, PolicyError> {
 
 // ---- exec ----------------------------------------------------------------------
 
+/// The unified `kennel` surface binaries a `[spawn]` grant derives into `exec.allow` (W10): the
+/// shim on `$PATH` the workload execs, and the in-cage spawn unit it dispatches to (in the in-cage
+/// facade directory, outside the blacklisted host `/usr/libexec/kennel` tree).
+const SPAWN_SURFACE_BINARIES: [&str; 2] = ["/usr/bin/kennel", "/usr/libexec/kennel-facades/spawn"];
+
 fn translate_exec(
     src: &SourcePolicy,
     deferred: &mut BTreeSet<String>,
@@ -1387,6 +1392,19 @@ fn translate_exec(
         return Err(translation(format!(
             "[exec].shell `{shell}` is not in exec.allow (the kennel would refuse to run its own shell)"
         )));
+    }
+    // W10: a `[spawn]` grant derives the unified `kennel` shim + the in-cage spawn unit into
+    // `exec.allow`, so a spawn-capable kennel can run `kennel caps`/`kennel run` without the author
+    // allow-listing the binaries by hand — a grant cannot leave the agent command-not-found. Spawning
+    // stays double-gated: the `[spawn]` grant (*may this kennel spawn at all*) and this exec entry
+    // (*may this binary run here*). Appended after the shell check so it never forces a shell onto a
+    // no-exec spawn policy whose workload is the shim itself.
+    if src.spawn.is_some() {
+        for bin in SPAWN_SURFACE_BINARIES {
+            if !allow.iter().any(|a| a == bin) {
+                allow.push(bin.to_owned());
+            }
+        }
     }
     // The resolved `loaders` set (each allowlisted dynamic binary's PT_INTERP) is filled at
     // compile time by `kennel_lib_policy::libresolve` (it reads the binaries from disk), so it is
@@ -2348,6 +2366,40 @@ mod tests {
         let ep2 = translate_exec(&dfl, &mut BTreeSet::new()).expect("translate");
         assert_eq!(ep2.shell, "/bin/sh");
         assert!(ep2.path.is_empty());
+    }
+
+    #[test]
+    fn spawn_grant_derives_the_kennel_surface_binaries_into_exec_allow() {
+        // W10: a [spawn] grant auto-derives the `kennel` shim + the in-cage spawn unit into
+        // exec.allow, so the agent can run `kennel caps`/`kennel run` without listing them by hand.
+        let src = parse(
+            b"name = \"k\"\n[spawn]\nreason = \"compose tools\"\nmax_instances = 2\n[[spawn.allow]]\ntemplate = \"echo-tool@v1\"\n[exec]\nallow = [\"/bin/sh\"]\nshell = \"/bin/sh\"\n",
+        )
+        .expect("parse");
+        let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
+        assert!(
+            ep.allow.contains(&"/usr/bin/kennel".to_owned()),
+            "shim derived"
+        );
+        assert!(
+            ep.allow
+                .contains(&"/usr/libexec/kennel-facades/spawn".to_owned()),
+            "spawn unit derived"
+        );
+        assert!(
+            ep.allow.contains(&"/bin/sh".to_owned()),
+            "authored entries kept"
+        );
+
+        // No [spawn] grant ⇒ the surface binaries are NOT silently added.
+        let plain = parse(b"name = \"k\"\n[exec]\nallow = [\"/bin/sh\"]\nshell = \"/bin/sh\"\n")
+            .expect("parse");
+        let ep2 = translate_exec(&plain, &mut BTreeSet::new()).expect("translate");
+        assert_eq!(
+            ep2.allow,
+            vec!["/bin/sh".to_owned()],
+            "no spawn surface added"
+        );
     }
 
     #[test]

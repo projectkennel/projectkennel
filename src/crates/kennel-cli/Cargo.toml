@@ -9,14 +9,19 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+# The host execution unit (W10): installed as `/usr/libexec/kennel/host`, reached through the
+# `kennel` shim. The cargo bin name is `kennel-host` so it does not collide with the shim's `kennel`.
 [[bin]]
-name = "kennel"
+name = "kennel-host"
 path = "src/main.rs"
 
 [dependencies]
 # The control-socket wire protocol shared with the daemon (the only thing the CLI
 # needs from the daemon side — never the daemon's enforcement code).
 kennel-lib-control = { path = "../kennel-lib-control" }
+# The shared CLI surface grammar (W10): the verb grammar this host unit and the in-cage
+# spawn unit both link, so overlapping verbs (`run`) keep identical shapes across contexts.
+kennel-lib-cli = { path = "../kennel-lib-cli" }
 # The runtime policy crate: settled-artefact types, verify_settled, sign_settled, keys.
 kennel-lib-policy = { path = "../kennel-lib-policy" }
 # The policy compiler (authoring: parse/resolve/compile/sign/lint/risks). CLI-only —

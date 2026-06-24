@@ -1122,7 +1122,7 @@ mod tests {
             workload_fd: None,
             stdio_fds: None,
             aux: vec![AuxProcess {
-                path: PathBuf::from("/usr/libexec/kennel/facade-afunix"),
+                path: PathBuf::from("/usr/libexec/kennel-facades/facade-afunix"),
                 args: vec![
                     "/dev/binderfs/binder".to_owned(),
                     "/home/kennel/wl.sock=echo".to_owned(),
@@ -1215,7 +1215,7 @@ mod tests {
             seccomp_deny_action: Action::Errno(1),
             ulimits: vec![(resource_by_name("nofile").expect("nofile"), 1024, 4096)],
             aux: vec![AuxProcess {
-                path: PathBuf::from("/usr/libexec/kennel/facade-afunix"),
+                path: PathBuf::from("/usr/libexec/kennel-facades/facade-afunix"),
                 args: vec![
                     "/dev/binderfs/binder".to_owned(),
                     "/run/wl.sock=wayland".to_owned(),
