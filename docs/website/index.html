@@ -1294,21 +1294,24 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         <span style="height:16px;background:var(--blue);width:2%;min-width:6px;border-radius:3px"></span>
                         <b style="color:var(--blue);white-space:nowrap">≈ 3.7 ms</b>
                         <span style="color:var(--blue-soft)">Firecracker&nbsp;microVM</span>
-                        <span style="height:16px;background:var(--rule-2);width:21%;border-radius:3px"></span>
-                        <b style="color:var(--blue-soft);white-space:nowrap">~ 125 ms</b>
+                        <span style="height:16px;background:var(--rule-2);width:46%;border-radius:3px"></span>
+                        <b style="color:var(--blue-soft);white-space:nowrap">~ 275 ms</b>
                         <span style="color:var(--blue-soft)">Apple&nbsp;container</span>
                         <span style="height:16px;background:var(--rule-2);width:100%;border-radius:3px"></span>
                         <b style="color:var(--blue-soft);white-space:nowrap">~ 600 ms</b>
                     </div>
-                    <p style="margin:22px 0 0;font-size:14px;max-width:74ch">Per-task kennel construction measures
+                    <p style="margin:22px 0 0;font-size:14px;max-width:76ch">Per-task kennel construction measures
                         <b>≈ 3.7 ms</b> (median, workload-independent; build→workload-exec span, <code>spawn-spinup.sh</code>,
-                        kernel 6.17) — roughly <b>30×</b> under a Firecracker microVM and <b>150×</b> under Apple's
-                        container. The honest caveat: these are <em>different</em> isolation models — the microVMs put a
-                        separate guest kernel under the workload, Kennel uses kernel namespaces + LSMs (Landlock, seccomp,
-                        cgroup&nbsp;BPF), a lighter boundary on the host kernel. The flex is not "a faster VM"; it is that
-                        kernel-enforced containment is cheap enough to make <em>per-task</em> isolation practical, where a
-                        VM's startup makes it per-session. Put a microVM underneath when the threat model needs the
-                        hardware boundary — the two compose.</p>
+                        kernel 6.17) — roughly <b>75×</b> under a Firecracker microVM and <b>150×</b> under Apple's
+                        container. All three are timed the same way: to the <em>workload</em> running, not just to the
+                        kernel — Firecracker reaches <code>/sbin/init</code> in ~125 ms but the workload in
+                        <a href="https://gist.github.com/sameo/0647d6aaa36e73e6b536b51c29db1ead">~275 ms</a>. The honest
+                        caveat: these are <em>different</em> isolation models — the microVMs put a separate guest kernel
+                        under the workload, Kennel uses kernel namespaces + LSMs (Landlock, seccomp, cgroup&nbsp;BPF), a
+                        lighter boundary on the host kernel. The flex is not "a faster VM"; it is that kernel-enforced
+                        containment is cheap enough to make <em>per-task</em> isolation practical, where a VM's startup
+                        makes it per-session. Put a microVM underneath when the threat model needs the hardware boundary —
+                        the two compose.</p>
                 </div>
             </div>
         </section>
