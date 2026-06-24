@@ -58,6 +58,7 @@ name = "kennel-facade"
 version = "0.3.1"
 dependencies = [
  "kennel-lib-binder",
+ "kennel-lib-cli",
  "kennel-lib-dbus",
  "kennel-lib-scm",
 ]
@@ -106,6 +107,10 @@ dependencies = [
  "libc",
  "object",
 ]
+
+[[package]]
+name = "kennel-lib-cli"
+version = "0.3.1"
 
 [[package]]
 name = "kennel-lib-config"
