@@ -123,3 +123,12 @@ documentation sweep.
 - **Sidecar dependency graphs** — if flat consume-with-wait proves insufficient and explicit
   inter-sidecar ordering is genuinely needed (it should not be).
 - **macOS service mesh** — the port's Mach-port analogue of the connector broker; tracked, not scheduled.
+- **Small designed-but-unbuilt pieces (parked from the old `08-as-built-notes` roadmap).** Each is a
+  convenience or a low-level hardening with a working path today — recorded so they are neither
+  re-proposed nor lost, none blocking a release: the `[env].template` / `[fs.home].template` file-seed
+  (design §7.9.2a — the inline `[env].set` + built-in dotfile defaults cover it); the TTL interactive
+  **`renew` prompt** (§9.7 — kenneld is a daemon with no session channel, so `renew` audits as `warn`
+  today); the `[unix]` deferred bits (§7.6 — the ABI-gated `abstract = "allow"` escape hatch and the
+  `--dry-run`/`inspect` shim output); `kennel_meta` BPF-map **read-only sealing + `magic`/`abi` readback**
+  (`02-7-bpf-abi.md` — written once by loader convention, not yet frozen with `BPF_F_RDONLY_PROG`); and
+  the removed-from-schema `fs.scrub` / `fs.home.sanitise` design (§7.4.5 — revive only on a concrete need).
