@@ -124,29 +124,37 @@ category error. Measured on the development box (kernel 6.17, `bubblewrap 0.11.1
 
 | | Median | What it measures |
 |---|---|---|
-| **bwrap, per invocation** | **7.8 ms** | `bwrap --unshare-{user,pid,ipc,net,uts,cgroup} --ro-bind /usr… --proc --dev --tmpfs /tmp /bin/true` — fork+exec bwrap, construct, run, tear down. |
-| ↳ of which: process launch | **~5.5 ms** | a near-empty bwrap (`--ro-bind / / /bin/true`): bwrap's own fork+exec+dynamic-link floor, **re-paid every call**. |
-| ↳ of which: construction | **~2.3 ms** | the namespace + bound-view + `/proc`·`/dev`·`/tmp` build itself. |
-| **Kennel, construction** | **3.7 ms** | the daemon's build→workload-exec span: namespaces + view + **Landlock** + the privhelper loopback/egress-BPF hop + binder. Daemon persistent — process launch paid **once**, not per task. |
-| **Kennel, full brokered spawn** | **9.4 ms** | the agent's `SPAWN`→result→EOF: construction + the **mediating binder round-trip** + channel — a reference-monitor hop bwrap has no analogue for. |
+| **bwrap, per invocation** | **7.8 ms** | `bwrap --unshare-{user,pid,ipc,net,uts,cgroup} --ro-bind /usr… --proc --dev --tmpfs /tmp /bin/true` — fork+exec bwrap, construct, run, tear down (one process does all of it). |
+| ↳ of which: process launch | ~5.5 ms | a near-empty bwrap (`--ro-bind / / /bin/true`): bwrap's own fork+exec+link floor. |
+| ↳ of which: construction | ~2.3 ms | the namespace + bound-view + `/proc`·`/dev`·`/tmp` build itself. |
+| **Kennel, `kennel run` (CLI)** | **13.7 ms** | the full operator path: the `kennel` shim → the host execution unit → the daemon → the **privhelper** factory → construct → run → teardown. *More* process hops than bwrap, doing more. |
+| **Kennel, agent spawn (binder)** | **9.4 ms** | the high-frequency path: an agent transacts `SPAWN` over the binder (no CLI shim/host-unit) → daemon → privhelper → construct → result+EOF. |
+| **Kennel, construction only** | **3.7 ms** | the daemon's build→workload-exec span — namespaces + view + **Landlock** + the privhelper's privileged construction + binder. Includes the privhelper invocation; excludes the CLI/binder round-trip around it. |
 
-The honest read — and it is *not* a "we're faster" claim:
+The honest read — and it is emphatically **not** a "we're faster" claim. Kennel costs **more**, end to end,
+and should, because it is doing more:
 
-- **The construction work is the same order of magnitude** — bwrap ~2.3 ms, Kennel ~3.7 ms — and Kennel's
-  does **more** (Landlock rules, the loopback/egress-BPF privhelper hop, the binder gateway) for ~1.4 ms
-  more. The shared mechanism has a shared floor; the reference-monitor layer is cheap on top of it.
-- **The architectures pay differently, and that is the real point.** bwrap re-execs its binary on every
-  command (~5.5 ms launch each time → 7.8 ms per task). Kennel's daemon pays that launch **once** and
-  amortises it, so per-task construction stays at 3.7 ms. For the high-frequency pattern the spawn/mesh
-  model rests on — an agent spawning many short-lived tool kennels — the warm daemon is the **cheaper**
-  model, not despite doing more but because it stops re-paying process launch.
-- **Same order, end to end.** Bare bwrap (7.8 ms) and a full mediated Kennel spawn (9.4 ms, gateway in the
-  path) sit in the same single-digit-millisecond range. Complete mediation, LSM enforcement, and audit cost
-  *almost nothing* over the shared mechanism floor.
+- **A full `kennel run` (13.7 ms) is ~75% over a bwrap invocation (7.8 ms).** Kennel's CLI is a shim →
+  host-unit → daemon → privhelper path — *more* process launches than bwrap's single binary — and the daemon
+  then enforces Landlock, brokers through the gateway, verifies a signed policy, and writes audit, none of
+  which bwrap does. Even the leanest path still invokes the privhelper per construction. You pay for the
+  reference monitor; it is not free, and we do not pretend it is.
+- **The construction *work* is the same order** — bwrap ~2.3 ms, Kennel ~3.7 ms (the privhelper's privileged
+  build included) — with Kennel's doing more (Landlock, the privileged construction) for ~1.4 ms more. The
+  shared mechanism has a shared floor.
+- **The high-frequency agent path is within ~20% of bare bwrap** — 9.4 ms vs 7.8 ms — *because* it skips the
+  CLI hops (the agent reaches the daemon over the binder directly), though it still pays the privhelper per
+  construction. This is the path the spawn/mesh model actually runs on: the full reference monitor for a
+  fifth more than a *bare* bwrap sandbox that mediates nothing at runtime.
+- **The premium is single-digit-to-low-double-digit milliseconds** — nothing for per-task confinement, and
+  orders of magnitude below any VM (Firecracker ~275 ms to workload). Complete mediation, LSM enforcement,
+  signed policy, and audit cost a few milliseconds over the shared mechanism floor; they do not move the
+  order of magnitude.
 
-*Machine-specific (an unpinned `schedutil` box; pin `performance` for stable medians). Kennel figures from
-`src/tools/spawn-spinup.sh`; the bwrap figures from a kennel-comparable `bwrap … /bin/true` loop, 50
-iterations, median. Re-measure on the target hardware before quoting.*
+*Machine-specific (unpinned `schedutil`; pin `performance` for stable medians). Kennel spawn/construction
+figures from `src/tools/spawn-spinup.sh`, the `kennel run` figure from a `kennel run … /bin/true` loop, the
+bwrap figures from a kennel-comparable `bwrap … /bin/true` loop — 40–50 iterations, median. Re-measure on
+the target hardware before quoting.*
 
 ---
 
