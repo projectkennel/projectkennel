@@ -105,7 +105,7 @@ if [ "$DO_INSTALL" = 1 ]; then
         || { echo "build failed" >&2; exit 1; }
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
         --target "$HOST_TRIPLE" \
-        -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade \
+        -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade -p kennel-shim \
         || { echo "static in-kernel build failed" >&2; exit 1; }
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress \
         || { echo "privhelper build failed" >&2; exit 1; }

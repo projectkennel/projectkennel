@@ -73,7 +73,7 @@ FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-db
 # part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload and
 # `facade-spawn-bench` drives spawn-spinup.sh. Staged into `facades/` ONLY under --with-test-bins (they
 # run in-cage); a real release never carries them.
-TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe"
+TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe compositor-broker"
 
 install -d "$DEST/bin" "$DEST/facades" "$DEST/pathbin"
 for b in $HOST_REL_BINS;    do install -m 0755 "$REL/$b"  "$DEST/bin/$b";     done
