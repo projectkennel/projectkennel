@@ -1313,11 +1313,13 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         makes it per-session. Put a microVM underneath when the threat model needs the hardware boundary —
                         the two compose.</p>
                     <p style="margin:14px 0 0;font-size:13px;color:var(--blue-soft);max-width:76ch">And to be straight
-                        about what beats it: Microsoft Hyperlight clocks <b>~0.9 ms</b> — but that <em>resumes</em> a
-                        pre-snapshotted VM partition already in memory (closer to a warm fork than a cold build) running a
-                        <em>single function</em> with no guest OS, a host-call ABI in place of syscalls. It is built to
-                        embed one function, not to confine a general workload — an agent that forks processes, reads your
-                        files, and talks to the network. Faster, narrower, a different job.</p>
+                        about what beats it: Microsoft Hyperlight clocks
+                        <a href="https://opensource.microsoft.com/blog/2025/02/11/hyperlight-creating-a-0-0009-second-micro-vm-execution-time/"><b>~0.9 ms</b></a>
+                        — but that runs a <em>single function</em> in a VM partition with <b>no guest OS</b>: no kernel,
+                        no processes, no filesystem, and a fixed host-call ABI in place of syscalls. It is fast because
+                        there is almost nothing to construct — it is built to <em>embed one function</em>, not to confine
+                        a general workload (an agent that forks processes, reads your files, runs a shell, talks to the
+                        network). Faster, narrower, a different job.</p>
                 </div>
             </div>
         </section>
