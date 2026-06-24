@@ -395,8 +395,11 @@ Self-contained and testable with no broker and no runtime — the contract every
   design: `07-13-service-catalog.md`.
 
 - **W7 · Confined GUI: a per-kennel nested compositor as a service kennel.** **[dep] L.**
-  **Status: partial** — the nested-compositor render path merged (#99); the pieces the entry marks
-  *"Still designed, not built"* remain.
+  **Status: 0.4.0 commitment met** — the nested-compositor render/display leg merged (#99); the one
+  committed residual, the interactive file broker, is **fenced post-0.4.0** (BACKLOG, "Fenced to a later
+  release"), behind a deliberate re-evaluation of where the D-Bus broker should live now that service
+  kennels exist (the file broker's app-facing FileChooser surface rides that decision). The render leg is
+  what 0.4.0 commits; the file broker is a self-contained capability that does not gate the tag.
   A sidecar that `[provides]` GUI capability against the W1 schema: a **rendering leg** (the nested
   compositor) plus a small **Kennel-native file-broker** for interactive file access (the portal is cut; the
   one capability worth keeping is kept in-model — both below). W0 proved the render leg on real hardware,
@@ -411,8 +414,10 @@ Self-contained and testable with no broker and no runtime — the contract every
   names the facade). (2) The compositor is spawned **per app connection** by the `compositor-broker`
   workload and **reaped on disconnect** — the window folds when the app disconnects — not
   per-consuming-kennel / reaped-on-kennel-exit. Also landed: the private `/dev/shm` tmpfs (wlroots
-  `shm_open`) and a headless `gui-mesh` policy-suite case. **Still designed, not built:** the interactive
-  file-broker and the other desktop-service brokers below.
+  `shm_open`) and a headless `gui-mesh` policy-suite case. **Fenced post-0.4.0:** the interactive
+  file-broker — its app-facing FileChooser surface couples to a deliberate re-evaluation of where the D-Bus
+  broker should live now that service kennels exist (BACKLOG, "Fenced to a later release"); the other
+  desktop-service brokers below stay *"if ever needed"*, not 0.4.0 commitments.
 
   - **Render leg — a per-kennel nested inner compositor (bring-your-own compositor).** The GUI-service
     kennel does not rely on the host compositor; it runs an upstream compositor (**cage** — a lightweight
@@ -459,9 +464,11 @@ Self-contained and testable with no broker and no runtime — the contract every
     Kennel-native file-broker**: `kenneld` brokers a host file picker, the user consents, and the workload
     gets one fd into its view — no D-Bus portal protocol, no app-id permission store, no `/.flatpak-info`.
     Coarse first (open/save one user-chosen file → one fd); save-back and multi-select are extensions. This
-    is a **committed deliverable of confined GUI**, not a deferred maybe — a GUI app that can only touch its
-    pre-granted paths is half a capability. (Whether it lands in 0.4.0 with W7 or as a fast-follow is a
-    sequencing call; the capability is on the roadmap either way.)
+    is a **committed capability of confined GUI**, not a dropped one — a GUI app that can only touch its
+    pre-granted paths is half a capability. (Sequenced **post-0.4.0 as a fast-follow**, fenced in BACKLOG:
+    its app-facing FileChooser surface couples to a deliberate re-evaluation of where the D-Bus broker should
+    live now that service kennels exist, and rides whatever that settles — committed capability, deferred
+    increment.)
   - **Other desktop services, if ever needed, are Kennel-native brokers — never a portal.** Screenshot /
     screencast is the inner compositor's own (cage) capability, scoped to the kennel (the compositor is
     Kennel's here, not the host's); openURI / notifications are brokered host-request services (the broker
@@ -720,10 +727,11 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    restart-invalidates-connectors) in W3's contract before W5 implements it.
 2. **Runtime logic — W4 → W5 → W6 → W7 → W21.** Catalogue (W4, #86–#89) and the connector broker (W5,
    #90, #92) merged; sidecars (W6) **partial** — autostart + ondemand activation merged (#91, #95), the
-   consumer-refcount TTL idle-reaping owed; confined GUI (W7) **partial** — the nested-compositor render
-   path merged (#99), the rest *"still designed, not built"*; and W21 (#105) merged — the host-owned
+   consumer-refcount TTL idle-reaping owed; confined GUI (W7) **0.4.0 commitment met** — the
+   nested-compositor render path merged (#99), and its one residual (the interactive file broker) is fenced
+   post-0.4.0 (BACKLOG), behind a D-Bus-broker re-evaluation; and W21 (#105) merged — the host-owned
    rendezvous point that replaced the provider-side `/proc/<pid>/root` handoff, e2e-proven. The open work
-   in this thrust is the W6 idle-reaping and the remaining W7 pieces.
+   in this thrust is the W6 idle-reaping; W7 needs nothing further for the tag.
 3. **Spawn facade — W8 → W9 → W10**, independent of the mesh (it documents and harmonises the
    *existing* spawn surface, not the new mesh one). W8 (the contract) first — it derives the authority
    model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in
@@ -756,8 +764,9 @@ incompatible CLI/daemon pair with a typed remediation *before* any policy is par
 `provide`/`consume` against the W3 contract — deny-by-default resolution, consume-with-wait, the
 restart-invalidates-connectors behaviour (W5); the sidecar set autostarts and is supervised with
 crash-loop-bounded restart feeding declared-but-failed (W6); **confined GUI ships** — a GUI-service
-kennel that spawns a per-kennel nested inner compositor (host-independent, no portal) plus a Kennel-native
-file-broker for interactive file access, an app kennel consumes it, completing the 0.3.0 X11 removal (W7); the spawn facade interface is documented as-built with the authority model derived from
+kennel that spawns a per-kennel nested inner compositor (host-independent, no portal) and an app kennel
+consumes it, completing the 0.3.0 X11 removal (W7 render leg; the interactive file broker is a post-0.4.0
+fast-follow fenced in BACKLOG, not a ship gate); the spawn facade interface is documented as-built with the authority model derived from
 principles, `kennel caps` reports the caller's scoped envelope, and the spawn surface is unified behind
 one `kennel` shim over a `/usr/libexec/kennel` host/spawn split — the spawn unit `exec.allow`-gated and
 auto-derived from the `[spawn]` grant, the `facade-spawn` name retired (W8/W9/W10); the service-kennel

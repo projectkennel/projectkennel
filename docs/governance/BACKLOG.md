@@ -82,6 +82,20 @@ documentation sweep.
 
 ## Fenced to a later release
 
+- **Interactive file broker (confined GUI's §7.14.7 residual) — fenced post-0.4.0, behind a D-Bus-broker
+  re-evaluation.** The confined-GUI render/display leg shipped (#99); the one committed residual is the
+  Kennel-native file broker — a host-side transient picker the user consents through, delivering one fd into
+  the workload's view (§4.3 fd-broker, no portal). It is fenced not for capacity but because its **app-facing
+  interface is unsettled and couples to a deliberate re-evaluation now that service kennels exist**: an
+  unmodified GTK/Qt app reaches a file chooser only through the `org.freedesktop.portal.FileChooser` D-Bus
+  interface, which §7.14 cuts — so the broker's app-facing surface is entangled with **where the D-Bus broker
+  itself (the `org.projectkennel.IDBus` facade, §7.7) should live now that the GUI service kennel exists**:
+  whether the D-Bus mediation belongs in daemon/host-facade surface or in a signed service kennel of its own,
+  and how a FileChooser-shaped request rides that home. Settle the D-Bus-broker home first; the file broker
+  follows whatever that decides. Promote when that re-evaluation lands and the app-facing interface is chosen
+  (the coarse open/save-one-file floor first; the fine-grained per-method policy below is a further increment
+  on top). Until then a confined GUI app touches only its pre-granted paths — a real limit, recorded, not
+  rushed into the tag.
 - **Mesh connector handoff: dbus-name + binder-connector shapes** — the `[[provides]]`/`[[consumes]]`
   schema types three transports (`af-unix` / `dbus-name` / `binder-connector`), and 0.4.0 brokers only
   the **af-unix** handoff — the critical shape (confined GUI rides a Wayland af-unix socket) and the one
