@@ -31,6 +31,7 @@
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,6 +44,14 @@ const POLL: Duration = Duration::from_millis(50);
 
 /// The private runtime-dir root under which each compositor gets its own `XDG_RUNTIME_DIR`.
 const RUNTIME_ROOT: &str = "/tmp/compositor-broker";
+
+/// Ceiling on concurrently-live nested compositors.
+///
+/// Each accepted connection spawns a thread and a compositor process; without a bound, a consumer
+/// can fork-bomb the GUI kennel by spamming connect/disconnect. The kennel's own cgroup caps the
+/// total damage, so this is the in-budget-churn backstop, not the only bound — generous for real
+/// use (this many simultaneous GUI windows is already a lot) while refusing a flood.
+const MAX_LIVE_COMPOSITORS: usize = 64;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -76,12 +85,29 @@ fn main() -> ExitCode {
     eprintln!("compositor-broker: listening at {listen}, compositor {compositor:?}");
 
     let compositor = Arc::new(compositor);
+    let live = Arc::new(AtomicUsize::new(0));
     let mut id: u64 = 0;
     for incoming in listener.incoming() {
         let Ok(conn) = incoming else { continue };
         id = id.wrapping_add(1);
+        // Bound concurrent compositors so a consumer cannot fork-bomb the GUI kennel by spamming
+        // connections. `fetch_add` reserves a slot; if we were already at the ceiling we give it
+        // back and drop the connection (the consumer retries) rather than queue it — a wedged
+        // compositor must not back up the accept loop. Soft cap: a brief over-count under a burst
+        // of simultaneous accepts is harmless.
+        if live.fetch_add(1, Ordering::SeqCst) >= MAX_LIVE_COMPOSITORS {
+            live.fetch_sub(1, Ordering::SeqCst);
+            eprintln!(
+                "compositor-broker: [{id}] at capacity ({MAX_LIVE_COMPOSITORS} live) — connection refused"
+            );
+            continue; // `conn` drops here, closing it
+        }
         let compositor = Arc::clone(&compositor);
-        thread::spawn(move || serve(conn, id, &compositor));
+        let live = Arc::clone(&live);
+        thread::spawn(move || {
+            serve(conn, id, &compositor);
+            live.fetch_sub(1, Ordering::SeqCst); // release the slot when the window folds
+        });
     }
     ExitCode::SUCCESS
 }

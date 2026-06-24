@@ -1305,6 +1305,21 @@ fn translate_fs(
         }
     }
 
+    // The kenneld control socket — the CLI→daemon trust boundary — is ungrantable by rule: reaching
+    // it from inside a kennel is privilege escalation, not a footgun (the same refusal `[[unix.allow]]`
+    // makes on the socket leaf, here extended to fs binds, which name a *directory* that can contain
+    // it). `read` has already folded in every `write` path, and every `exclusive` path is in `write`,
+    // so this one sweep covers fs.read, fs.write, and fs.exclusive.
+    for p in &read {
+        if kennel_lib_control::socket::grant_exposes_control_socket(std::path::Path::new(p)) {
+            return Err(translation(format!(
+                "fs grant `{p}` exposes the kenneld control socket — the CLI→daemon trust boundary. \
+                 Reaching it from inside a kennel is privilege escalation; it is refused by rule, \
+                 grantable by no policy (§7.13 / W10)"
+            )));
+        }
+    }
+
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
         read,
@@ -2493,6 +2508,34 @@ mod tests {
             .expect("parse");
         let err = translate_fs(&bad, &mut BTreeSet::new()).expect_err("must reject");
         assert!(matches!(err, PolicyError::Translation(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn fs_grant_exposing_the_control_socket_is_refused() {
+        // The control socket is ungrantable by rule, on the fs path as on the unix.allow path (W15 F1).
+        // A directory grant that would drag it into the view is refused at compile, both as write…
+        let w = parse(
+            b"name = \"k\"\n[fs.home]\nshadow = true\n[fs]\nwrite = [\"/run/user/1000/kennel\"]\n",
+        )
+        .expect("parse");
+        let err = translate_fs(&w, &mut BTreeSet::new()).expect_err("write must reject");
+        assert!(matches!(err, PolicyError::Translation(_)), "got {err:?}");
+        // …and as read.
+        let r = parse(
+            b"name = \"k\"\n[fs.home]\nshadow = true\n[fs]\nread = [\"/run/user/0/kennel/control.sock\"]\n",
+        )
+        .expect("parse");
+        let err = translate_fs(&r, &mut BTreeSet::new()).expect_err("read must reject");
+        assert!(matches!(err, PolicyError::Translation(_)), "got {err:?}");
+        // A sibling runtime path is unaffected.
+        let ok = parse(
+            b"name = \"k\"\n[fs.home]\nshadow = true\n[fs]\nread = [\"/run/user/1000/kennel/agent.sock\"]\n",
+        )
+        .expect("parse");
+        assert!(
+            translate_fs(&ok, &mut BTreeSet::new()).is_ok(),
+            "sibling must pass"
+        );
     }
 
     #[test]
