@@ -303,7 +303,35 @@ Self-contained and testable with no broker and no runtime — the contract every
   be authored and validated against them), but a consume of either shape is refused at broker time until
   its handoff is built. af-unix is sufficient for the 0.4.0 headline; the other two are a later increment,
   not a 0.4.0 gap. *(Landed: the af-unix broker, the consumer-side facade dispatch, and the two-kennel
-  provide/consume e2e — `mesh-roundtrip`.)*
+  provide/consume e2e — `mesh-roundtrip`. The provider-side connector handoff it shipped is the
+  `/proc/<pid>/root` form **superseded by W21** — see there before building any further mesh consumer.)*
+
+- **W21 · Host-owned rendezvous point for the `af-unix` handoff (supersedes W5's `/proc/<pid>/root`).**
+  **[dep, blocker] S.** The keystone correction, and the **blocker for every other mesh consumer** (W6
+  activation, W7 GUI): the W5 broker reaches a provider's endpoint by traversing the provider's mount
+  namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the provider **pid**. That is a
+  namespace-crossing connect in the most privileged process, over a path the provider's view controls, with
+  a **pid-reuse race** between *Ready* and the connect. Frozen design: `07-13-service-catalog.md` §7.13.4b.
+  Replace it with a **host-owned rendezvous point** — `<runtime>/mesh/<provider-id>/`, derived
+  deterministically from `(provider-id, name)` (both already in the signed catalogue), bind-mounted into the
+  provider's view as the root its `endpoint` lives under. The provider binds its listener unchanged; the
+  socket inode is the one `kenneld` holds host-side, so the handoff becomes a plain `connect` to that path —
+  **byte-identical to the host-socket facade** (`af_unix_connect` over `socket.real`, §7.6), the same §4.3
+  fd-broker shape.
+  **Reuse-only — invents no path and touches no privhelper verb.** The rendezvous bind is **one ordinary
+  `BindMount`** in the provider's `ShimView.binds`, mounted by the existing `materialize_binds` loop that
+  already binds every view path — the privhelper construct half runs it unchanged. The handoff collapses
+  onto the existing `connect_unix_timeout(&real, …)` call the `[[unix.allow]]` facade already uses; the
+  `/proc/<pid>/root` join and the `pid` field **delete** from `svc_connect_handoff` and from
+  `broker::Selected`/the catalogue. Readiness (W6) `stat`s the same host path — the pid leaves the model
+  entirely, the reuse race becoming **structurally absent** rather than mitigated.
+  **Scope.** `svc_connect_handoff` (the connect), the provider-construction rendezvous bind, the
+  `(provider-id, name)` path derivation (one pure function, shared by construction and broker), dropping
+  `pid` from `Selected`/`CatalogueProvider`, and the §7.13.3 validation that an `af-unix` `endpoint` resolves
+  under the rendezvous root (the only schema-adjacent change — `endpoint` is otherwise unchanged). The
+  `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a frozen surface.
+  Land it **before** W5's mesh grows more dependents on `pid`/`/proc/<pid>/root` — today it is the one
+  `svc_connect_handoff` call site and two catalogue fields.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
@@ -649,10 +677,12 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    contract by W5. W17 is the runtime anti-drift guard on the same control plane, independent of the mesh,
    so it lands whenever capacity allows. Settle the connector lifecycle (consume-with-wait timeout,
    restart-invalidates-connectors) in W3's contract before W5 implements it.
-2. **Runtime logic — W4 → W5 → W6 → W7**, each built against a frozen contract. Catalogue (the
+2. **Runtime logic — W4 → W5 → W21 → W6 → W7**, each built against a frozen contract. Catalogue (the
    derived projection over W1), then the connector broker (the logic behind W3, resolving against W4),
-   then sidecars (the supervision logic behind W2), then GUI (the first real consumer). W7 gated on the
-   W0 confirms coming back fully clean.
+   then **W21 reshapes W5's provider-side handoff to the host-owned rendezvous point** — a blocker that
+   lands before W6/W7 grow more dependents on the `/proc/<pid>/root`/pid form it deletes — then sidecars
+   (the supervision logic behind W2, whose readiness probe rides W21's rendezvous path), then GUI (the
+   first real consumer). W7 gated on the W0 confirms coming back fully clean.
 3. **Spawn facade — W8 → W9 → W10**, independent of the mesh (it documents and harmonises the
    *existing* spawn surface, not the new mesh one). W8 (the contract) first — it derives the authority
    model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in

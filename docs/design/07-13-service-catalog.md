@@ -118,11 +118,12 @@ A capability's shape is how its connector is delivered to the consumer once `ken
 pair. Three shapes are defined:
 
 - **`af-unix`** — the broker presents an **`AF_UNIX` socket** at the consumer's `at`; the workload connects
-  to it, and `kenneld` bridges that connection to the provider's `endpoint` — socket-activating the provider
-  on the first connect if it is not up (§7.13.4) — then steps out of the byte path (§4.3). The consumer
-  connects only to its own `at`; the provider's socket *pathname* never enters its view. The display render
-  leg is this shape: the app connects to the Wayland socket its inner compositor is reached at, and that
-  first connect is what spins the compositor up (§7.14.3).
+  to it, and `kenneld` bridges that connection to the provider's `endpoint` — reached through a host-owned
+  rendezvous point, not the provider's namespace (§7.13.4b) — socket-activating the provider on the first
+  connect if it is not up (§7.13.4), then steps out of the byte path (§4.3). The consumer connects only to
+  its own `at`; the provider's socket *pathname* never enters its view. The display render leg is this shape:
+  the app connects to the Wayland socket its inner compositor is reached at, and that first connect is what
+  spins the compositor up (§7.14.3).
 - **`dbus-name`** — the consumer may reach a specific **D-Bus name** on a bus, mediated by the `IDBus`
   facade (§7.7), which already filters D-Bus per message. The mesh declaration authorises *which* provider
   name is reachable; the facade governs the calls. No second D-Bus path is introduced.
@@ -342,6 +343,57 @@ hand-rolled and bounded (no `serde` in the daemon's binder path — the TCB disc
 frames the connector but parses nothing that rides it. The behaviour above — resolution, key/shape match,
 socket-activation, the consume-with-wait timeout, the restart-`EOF` — is the **broker logic** built against
 this frozen surface (§7.13.4); this section freezes the surface.
+
+## 7.13.4b The rendezvous point — how the broker reaches an `af-unix` endpoint
+
+The wire (§7.13.4a) freezes *what* the broker attaches on `OK` — for `af-unix`, a **connected fd** to the
+provider, the byte path `kenneld` then steps out of (§4.3). This section freezes *how* `kenneld` obtains that
+fd, because the obvious mechanism is the wrong one. A provider listens at its `endpoint` in **its own**
+mount namespace (§7.13.1); the broker runs in `kenneld`'s. The tempting bridge is to reach the listener
+*through* the provider — `connect` to `/proc/<pid>/root/<endpoint>`, traversing the provider's namespace from
+the host the way bring-up reaches a kennel's binderfs to claim binder node 0. That works, but it puts a
+**namespace-crossing connect in the most privileged process**, keyed on the provider's **pid**: the endpoint
+then resolves *through the provider's view*, so a provider controls what sits at that path (a symlink, a
+socket pointing elsewhere), and the pid is a **reuse race** — between *Ready* and the `connect` the provider
+can exit and its pid recycle to an unrelated host process. The provider is a trusted service kennel
+(§7.13.5), but the broker should not have to lean on that trust for a primitive it can avoid entirely.
+
+It avoids it by **owning the directory the endpoint lives in.** An `af-unix` provider's `endpoint` resolves
+under a framework-owned **rendezvous root** in its view — a single mount point (the mesh analogue of the
+synthetic `/etc`, framework-supplied, not author-chosen) that is the **bind-mount of a host directory
+`kenneld` holds**: `<runtime>/mesh/<provider-id>/`, derived deterministically from the provider's identity
+and the capability `name` (both already in the signed catalogue, both already unique — the in-policy
+duplicate-`name` check of §7.13.3 guarantees the basename does not collide within a provider). The provider
+binds its listener at `endpoint` exactly as before, unaware the directory beneath it is host-visible; the
+socket inode it creates **is the one `kenneld` holds** on the host side, because a bind mount is one inode
+set seen from two namespaces. So the broker's handoff is a plain `connect` to the host-side path it computed
+itself — **byte-identical to the host-socket facade** that brokers a `[[unix.allow]]` socket (§7.6), the same
+§4.3 fd-broker shape, with no namespace traversal, no `/proc/<pid>/root`, and **no provider pid** anywhere in
+the path.
+
+Three properties fall out, and they are why this is the frozen shape:
+
+- **The pid leaves the model.** It is not a broker input, not a catalogue field, and not a readiness input:
+  the supervisor's *pending → ready* probe (§7.13.7) `stat`s the same host rendezvous path for the socket to
+  appear, rather than watching a pid. The reuse race is not mitigated — it is **structurally absent**, there
+  being no pid to recycle.
+- **Construction and the broker never communicate.** The view-construction step binds `<runtime>/mesh/<id>/`
+  into the provider's view; the broker computes the *same* path from `(provider-id, name)` to `connect`. Two
+  pure derivations of one deterministic function over signed state — no handoff of an allocated path, no
+  shared mutable rendezvous table, no skew window. The catalogue stays a **projection, never authored
+  state** (§7.13.4).
+- **It reuses the substrate whole.** The rendezvous bind is **one ordinary entry** in the provider's
+  view-bind list — the same machinery (`materialize_binds`) that mounts every other path of every view, and
+  the same construction path the privhelper already runs: **no new privileged verb, no second connect path**.
+  The provider side is the listen-direction mirror of the host-socket facade's `{ shim, name, real }` triple
+  the consumer side already rides (§7.13.4): the provider's `endpoint` is the in-view `shim`, the host
+  rendezvous path is the `real` the broker connects.
+
+The constraint this places on a provider is narrow and validated like the reserved-namespace gate (§7.13.3):
+an `af-unix` `endpoint` must resolve under the rendezvous root, so the framework owns the directory it binds
+rather than over-mounting an author-chosen system path. The `endpoint` field is otherwise unchanged — it is
+still *where, in the provider's own view, the capability is exposed* (§7.13.1); only its parent is
+framework-supplied, exactly as `$HOME` and `/etc` already are in every view.
 
 ## 7.13.5 The reserved namespace and the service-kennel trust class
 
