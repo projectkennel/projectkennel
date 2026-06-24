@@ -1116,8 +1116,9 @@
                     <p>Project Kennel is <b>pre-release</b>: the reference runtime is built and runs the full
                         vertical unprivileged on stock Linux (kernel 6.17, Landlock ABI ≥ 6), but interfaces and
                         guarantees may still change. The install is offline — prebuilt binaries, no toolchain, no
-                        network — and adds one setuid-root helper for the three host-global operations a user
-                        namespace cannot reach.</p>
+                        network — and adds one small setuid-root helper for the handful of host-global operations a
+                        user namespace cannot reach (the per-kennel loopback addresses, the egress BPF attach, the
+                        policy-granted <code>gid_map</code> write, and the one-time binder module load).</p>
                 </div>
 
                 <div class="grid rv" style="grid-template-columns:1fr 1fr">
@@ -1340,7 +1341,7 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         <div class="built">
                             <h4>Same engine</h4>
                             <ul>
-                                <li>Unprivileged, identity-mapped user namespace — no setuid, no root</li>
+                                <li>Unprivileged, identity-mapped user namespace — <code>CAP_SYS_ADMIN</code> only inside it, the workload never root on the host</li>
                                 <li>Mount / PID / IPC / (opt.) net namespaces; <code>pivot_root</code></li>
                                 <li>A minimal bound view: present by construction, not denied</li>
                                 <li>seccomp on the syscall surface</li>
