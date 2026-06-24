@@ -134,18 +134,27 @@ category error. Measured on the development box (kernel 6.17, `bubblewrap 0.11.1
 The honest read — and it is emphatically **not** a "we're faster" claim. Kennel costs **more**, end to end,
 and should, because it is doing more:
 
-- **A full `kennel run` (13.7 ms) is ~75% over a bwrap invocation (7.8 ms).** Kennel's CLI is a shim →
-  host-unit → daemon → privhelper path — *more* process launches than bwrap's single binary — and the daemon
-  then enforces Landlock, brokers through the gateway, verifies a signed policy, and writes audit, none of
-  which bwrap does. Even the leanest path still invokes the privhelper per construction. You pay for the
-  reference monitor; it is not free, and we do not pretend it is.
+- **A full `kennel run` (13.7 ms) is ~75% over a bwrap invocation (7.8 ms) — and a chunk of that delta is
+  *work bwrap does not do at all*.** That path is a shim → host-unit → daemon → privhelper chain (more
+  process launches than bwrap's single binary), and on it the daemon **cryptographically verifies the
+  policy's ed25519 signature against the trust store**, resolves the template chain, enforces Landlock,
+  brokers through the gateway, and writes audit. bwrap validates *nothing* — it trusts whatever argv
+  assembled it (the T2.1/T2.8 surface above). So this is not "Kennel is slower at the same job"; it is
+  Kennel doing signed-policy validation + LSM enforcement + audit that bwrap structurally omits. You pay for
+  the reference monitor; it is not free, and we do not pretend it is.
 - **The construction *work* is the same order** — bwrap ~2.3 ms, Kennel ~3.7 ms (the privhelper's privileged
   build included) — with Kennel's doing more (Landlock, the privileged construction) for ~1.4 ms more. The
   shared mechanism has a shared floor.
-- **The high-frequency agent path is within ~20% of bare bwrap** — 9.4 ms vs 7.8 ms — *because* it skips the
-  CLI hops (the agent reaches the daemon over the binder directly), though it still pays the privhelper per
-  construction. This is the path the spawn/mesh model actually runs on: the full reference monitor for a
-  fifth more than a *bare* bwrap sandbox that mediates nothing at runtime.
+- **The path that actually matters is the spawn — kennel-spawns-kennel — and there it is within ~20% of bare
+  bwrap (9.4 ms vs 7.8 ms).** This is the MCP / agent-composition case the whole spawn/mesh model exists for:
+  an agent parcels out deny-by-default sub-capability to the tool kennels it spawns, each floored to a signed
+  template, over the binder (no CLI hops; the spawn *validates* the signed template — re-checking its
+  content-pin — it never authors or re-signs one). At ~9.4 ms a bounded, mediated, signed-template
+  sub-kennel is cheap enough to spawn-use-reap
+  constantly — and **bwrap has no analogue**: an agent re-invoking bwrap composes nothing bounded (the T3.9
+  *unbounded* residual above), because a per-invocation mechanism does not become a delegation model by being
+  fast. The comparison is "9.4 ms for bounded delegation with a reference monitor" against "no bounded
+  delegation at any speed."
 - **The premium is single-digit-to-low-double-digit milliseconds** — nothing for per-task confinement, and
   orders of magnitude below any VM (Firecracker ~275 ms to workload). Complete mediation, LSM enforcement,
   signed policy, and audit cost a few milliseconds over the shared mechanism floor; they do not move the
