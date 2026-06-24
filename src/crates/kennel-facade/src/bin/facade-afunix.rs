@@ -89,19 +89,19 @@ fn serve_socket(device: &str, shim: &str, service: &str) -> io::Result<()> {
 
     for incoming in listener.incoming() {
         let client = incoming?;
-        // A fresh facade client per accepted connection: binder transactions stay
-        // simple (no cross-thread sharing of one connection), and the connect is the
-        // rare, short part. The splice that follows touches no binder.
-        match broker(device, service) {
-            Ok(host) => {
-                // Forward bytes *and* SCM_RIGHTS fds (Wayland and any fd-passing protocol ride this).
-                thread::spawn(move || kennel_lib_scm::splice::splice_with_fds(client, host));
-            }
-            Err(e) => {
-                eprintln!("facade-afunix: facade refused {service}: {e}");
-                // Dropping `client` closes it; the application sees a failed connect.
-            }
-        }
+        // Broker *inside* the per-connection worker, never on the accept thread. An `ondemand`
+        // provider that is still booting makes the broker transaction block (consume-with-wait,
+        // §7.13.4a); doing it here would stall every other pending connection behind one slow-booting
+        // provider (head-of-line blocking). A fresh facade client per connection keeps each binder
+        // transaction simple, and kenneld serves the now-concurrent SVC_CONNECTs on its looper pool,
+        // so a slow boot delays only its own client. Dropping `client` on refusal closes it.
+        let device = device.to_owned();
+        let service = service.to_owned();
+        thread::spawn(move || match broker(&device, &service) {
+            // Forward bytes *and* SCM_RIGHTS fds (Wayland and any fd-passing protocol ride this).
+            Ok(host) => kennel_lib_scm::splice::splice_with_fds(client, host),
+            Err(e) => eprintln!("facade-afunix: facade refused {service}: {e}"),
+        });
     }
     Ok(())
 }

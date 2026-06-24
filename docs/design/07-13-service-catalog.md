@@ -210,7 +210,10 @@ for `at` (or its facade), `kenneld`:
    and confirms its signed policy declares this `[[consumes]]` — request-don't-author (§7.12.1): the workload
    can only request what its policy already grants, and cannot widen it;
 2. resolves the `name` against the catalogue to a single provider;
-3. requires the optional `key` to match, if both sides set one;
+3. requires the optional `key` to match **exactly** — if *either* side sets one, both must hold the
+   identical key (equal, or both absent). A keyed consumer is never brokered to a keyless provider, nor a
+   keyless consumer to a keyed one: the key is a discriminator, so one side setting it and the other not is
+   a mismatch, not a fallback;
 4. enforces the consumer's expected `shape`;
 5. **socket-activates the provider if it is not already running** (below) and bridges the workload's
    connection — made to the socket at `at` — through to the provider's `endpoint`, then steps out of the
