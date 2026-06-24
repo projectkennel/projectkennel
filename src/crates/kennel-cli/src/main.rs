@@ -84,7 +84,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "list",
-        summary: "list running kennels",
+        summary: "list running kennels and the cross-kennel service mesh",
         usage: "list",
     },
     CommandSpec {
@@ -298,6 +298,7 @@ fn stop(args: &[String]) -> Result<ExitCode, String> {
 
 /// `kennel list`
 fn list() -> Result<ExitCode, String> {
+    // The running-kennel tree (the 0.3.0 surface).
     let mut conn = connect()?;
     send(&conn, &Request::List, &[])?;
     match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
@@ -306,6 +307,20 @@ fn list() -> Result<ExitCode, String> {
                 println!("no running kennels");
             } else {
                 print_topology(&kennels);
+            }
+        }
+        Response::Error(message) => return Err(message),
+        other => return Err(format!("unexpected response: {other:?}")),
+    }
+    // The mesh view (§7.13.7): catalogued providers + readiness, in the same topology surface. Shown
+    // only when the catalogue holds providers, so a kennel without a mesh sees an unchanged list.
+    let mut conn = connect()?;
+    send(&conn, &Request::Mesh, &[])?;
+    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+        Response::Mesh(providers) => {
+            if !providers.is_empty() {
+                println!();
+                print_mesh(&providers);
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -327,6 +342,33 @@ fn daemon_reload() -> Result<ExitCode, String> {
         }
         Response::Error(message) => Err(message),
         other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+/// Render the mesh view (the §7.13.7 mesh section of `kennel list`): one row per provider→capability,
+/// sorted by capability then provider,
+/// with the readiness first (the operability signal) and the provider's pid when running.
+fn print_mesh(providers: &[control::MeshProvider]) {
+    let mut rows: Vec<&control::MeshProvider> = providers.iter().collect();
+    rows.sort_by(|a, b| {
+        a.capability
+            .cmp(&b.capability)
+            .then_with(|| a.provider.cmp(&b.provider))
+    });
+    println!(
+        "{:<32} {:<16} {:<9} {:<11} {:<9} {:<5} {:>7}",
+        "CAPABILITY", "PROVIDER", "READINESS", "SHAPE", "ENABLE", "TIER", "PID"
+    );
+    for r in rows {
+        let pid = if r.pid == 0 {
+            "-".to_owned()
+        } else {
+            r.pid.to_string()
+        };
+        println!(
+            "{:<32} {:<16} {:<9} {:<11} {:<9} {:<5} {:>7}",
+            r.capability, r.provider, r.readiness, r.shape, r.enablement, r.tier, pid
+        );
     }
 }
 

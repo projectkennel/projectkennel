@@ -773,6 +773,33 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         drop(reg);
         Response::Listing(kennels)
     }
+
+    /// Handle a `Mesh`: snapshot the service catalogue as one row per provider→offered-capability
+    /// (`kennel mesh`, §7.13.7). Read-only — the same live catalogue the broker resolves against, so a
+    /// flaked or pending provider is visible rather than a silent resolve-miss. The enum-valued fields
+    /// go on the wire as their canonical lower-case names.
+    fn mesh(&self) -> Response {
+        let cat = self
+            .catalogue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut providers = Vec::new();
+        for (id, p) in cat.entries() {
+            for offer in &p.offers {
+                providers.push(control::MeshProvider {
+                    capability: offer.name.clone(),
+                    provider: id.to_owned(),
+                    shape: offer.shape.as_str().to_owned(),
+                    tier: p.tier.as_str().to_owned(),
+                    enablement: p.enablement.as_str().to_owned(),
+                    readiness: p.readiness.as_str().to_owned(),
+                    pid: p.pid.unwrap_or(0),
+                });
+            }
+        }
+        drop(cat);
+        Response::Mesh(providers)
+    }
 }
 
 /// Accept connections on `listener` forever, handling each on its own thread.
@@ -937,6 +964,7 @@ pub fn dispatch_request<P, L>(
             }
         },
         Request::List => shared.list(),
+        Request::Mesh => shared.mesh(),
         // AuthorizedKeys errors are routine (sshd polls for keys the bastion may not
         // hold), so they are not logged here to avoid spamming the journal.
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),

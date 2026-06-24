@@ -51,6 +51,16 @@ pub enum Event {
 }
 
 impl Readiness {
+    /// The lower-case wire/display name (`pending` / `ready` / `failed`), for the topology surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+
     /// The state this `event` drives `self` to, or `None` if the transition is **illegal** from
     /// `self` (the caller treats `None` as a no-op-and-audit, never a silent state change).
     ///

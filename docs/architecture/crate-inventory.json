@@ -1,12 +1,12 @@
 {
   "crate_count": 24,
-  "total_sloc": 33169,
+  "total_sloc": 33302,
   "tcb_crate_count": 16,
-  "tcb_sloc": 20636,
+  "tcb_sloc": 20734,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7090,
+      "sloc": 7134,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 4004,
+      "sloc": 4039,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel"],
@@ -135,6 +135,16 @@
       "external_deps": ["serde", "serde_json"]
     },
     {
+      "name": "kennel-lib-control",
+      "sloc": 537,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["cli", "kenneld"],
+      "first_party_deps": ["kennel-lib-syscall"],
+      "external_deps": []
+    },
+    {
       "name": "kennel-host-dbus",
       "sloc": 496,
       "uses_unsafe": false,
@@ -143,16 +153,6 @@
       "consumers": [],
       "first_party_deps": ["kennel-lib-dbus"],
       "external_deps": ["mini-sansio-dbus", "nix"]
-    },
-    {
-      "name": "kennel-lib-control",
-      "sloc": 483,
-      "uses_unsafe": false,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["cli", "kenneld"],
-      "first_party_deps": ["kennel-lib-syscall"],
-      "external_deps": []
     },
     {
       "name": "kennel-lib-config",
