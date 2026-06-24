@@ -210,6 +210,7 @@ jobs:
           src/tools/tests/threats-catalogue.sh
           src/tools/tests/no-never-built-mechanisms.sh
           src/tools/tests/release-install-layout.sh
+          src/tools/tests/schema-version-pin.sh
 
   man:
     name: man (regen check + groff lint)
