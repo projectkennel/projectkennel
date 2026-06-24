@@ -97,6 +97,12 @@ The boundaries that must not weaken:
 - **Kennel ↔ kernel.** Every syscall passes through the kennel's policy; there is no bypass via "I am still uid 1000." The uid is not the trust boundary; cgroup membership, the mount namespace, and the Landlock ruleset are.
 - **Refining policy ↔ base policy.** A kennel whose policy refines another's computes the intersection of its own declarations and the base; it may narrow, never widen.
 
+Orthogonal to those boundaries, kennels fall into **trust classes** by how they are authored and enabled — the distinction that governs how much a kennel may be trusted to hold:
+
+- A **workload kennel** is the default: an operator-run policy, trusted only with its own grants.
+- A **spawn-target template** is a maintainer-signed policy an *untrusted agent* may instantiate (§7.12). Because the agent composes what it spawns, such a target is held to the **single-leg discipline** — it may not bridge two capabilities into one the operator never granted whole.
+- A **service kennel** is operator-declared, maintainer-signed, and **non-composable**: a standing service the operator deliberately enabled (§7.13.6). Because both the maintainer (by signature) and the operator (by enablement) vouch for the whole of it, it carries the **multi-leg exemption** — it may hold several legs (the GUI host-compositor leg and a file broker, say) without violating the single-leg discipline, which binds what an *agent composes*, not what a maintainer signs and an operator enables. The canonical definition and the exemption are §7.13.5; they are cited here, not restated. A service kennel is still bound by the §4.3 rule that *no* broker may be attestation-shaped: a standing service may render, transport, or authenticate, but a secrets broker or signing service is a trust root misplaced inside the boundary the project confines, and is refused regardless of its trust class.
+
 ## 4.6 Tamperproofing the monitor
 
 The second reference-monitor property is that the constrained code cannot alter the monitor. Two surfaces carry the weight: the construction path that builds a kennel, and the host-side integrity witness for what a kennel writes.

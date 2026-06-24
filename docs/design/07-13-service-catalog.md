@@ -432,6 +432,16 @@ binds what an *agent composes*, not what a maintainer signs and an operator enab
 host-compositor connection together with its file broker (§7.14) is the worked instance. Chapters that hold
 multi-leg service kennels cite this exemption (e.g. §7.14.10); the definition lives here.
 
+The exemption widens *how many* legs a service kennel may hold; it does not widen *what kind*. A service
+kennel is still bound by the §4.3 limit on every broker the monitor grows: it may vend
+**authentication-shaped** capabilities (render, transport, reach a destination, authenticate), never
+**attestation-shaped** ones (vouching, signing, secret-issuance). A standing service whose job is to *be
+trusted* — a secrets broker, a signing service — is a trust root placed inside the boundary the project
+exists to confine, incoherent regardless of how cleanly it fits the mesh grammar; trust material a kennel
+needs arrives as a signed construction parameter from the operator (§4.3), never brokered from a peer at
+runtime. The multi-leg exemption is permission to compose **use**-capabilities the operator vouched for, not
+a route by which a trust-issuing service slips in as "just another provider."
+
 ## 7.13.6 Enablement — the operator links what the vendor provides
 
 A `[[provides]]` block makes a capability *claimable*; it does not make the providing kennel run, nor put its
