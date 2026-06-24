@@ -63,12 +63,12 @@ The full section list:
 | `[net]` and `[net.*]` | Egress mode (`none`/`constrained`/`unconstrained`/`host`), split by enforcer: `[net.proxy]` (the user-space by-name allow/deny the per-kennel SOCKS proxy enforces, proxied modes only) and `[net.bpf]` (the kernel/syscall CIDR+port connect/bind ACL, present in every mode), plus `[net.bind]` rewrite knobs, `[net.ipv6]`, and `[net.audit]`. Each mode gets its own net-ns except `host`, which shares the host net-ns; the net-ns is the egress boundary (§7.5). See §The `[net]` section. | §7.5 |
 | `[unix]` | AF_UNIX socket allowlist, abstract-namespace handling (built — the `UnixRuntime` shim; the brokered `org.projectkennel.IAfUnix/default` facade that supersedes it is `02-4`) | §7.6 |
 | `[binder]`, `[[binder.provide]]`, `[[binder.consume]]` | Binder service registry: which `org.projectkennel.*`-free services this kennel provides to / consumes from named peer kennels (`02-4`). **Roadmap** (cross-instance relay is not built). | §7.1 |
-| `[[provides]]`, `[[consumes]]` | Cross-kennel capability mesh: a kennel offers capabilities (`name` + typed `shape` `af-unix`/`dbus-name`/`binder-connector` + `endpoint` + optional `key`) and reaches them (`name` + `shape` + `at` + `env` + `key` + `required`). **Schema + local compile validation built** (well-formedness, the `org.projectkennel.*` reserved-namespace gate keyed on maintainer-signed-template provenance, in-policy duplicate `name`); carried in the settled policy (`MeshRuntime`). The **runtime** authoritative reserved-provide gate is also built (the daemon refuses to load a policy providing an `org.projectkennel.*` name unless a vendor-provenance key signed it, or a host `[[reserved]]`-authorized key for a host namespace — `kenneld::catalogue`); the catalogue's membership projection and the connector broker are roadmap. Additive to `[binder]`. | §7.13 |
+| `[[provides]]`, `[[consumes]]` | Cross-kennel capability mesh: a kennel offers capabilities (`name` + typed `shape` `af-unix`/`dbus-name`/`binder-connector` + `endpoint` + optional `key`) and reaches them (`name` + `shape` + `at` + `env` + `key` + `required`). **Schema + local compile validation built** (well-formedness, the `org.projectkennel.*` reserved-namespace gate keyed on maintainer-signed-template provenance, in-policy duplicate `name`); carried in the settled policy (`MeshRuntime`). The **runtime** authoritative reserved-provide gate is also built (the daemon refuses to load a policy providing an `org.projectkennel.*` name unless a vendor-provenance key signed it, or a host `[[reserved]]`-authorized key for a host namespace — `kenneld::catalogue`); the catalogue's membership projection (`kenneld::catalogue`) and the `SVC_CONNECT` connector broker (`kenneld::broker`) are built, with the `af-unix` shape's connector handoff; the `dbus-name`/`binder-connector` shapes' handoff is owed. Additive to `[binder]`. | §7.13 |
 | `[ipc.spawn]` | Grants this kennel the `SpawnKennel` control-socket capability (`02-4` §Kennel spawning). **Roadmap.** | §7.1 |
 | `[ssh]` | per-kennel SSH via the re-origination bastion (`[[ssh.destinations]]` = `dest` + host-side `ssh` `options`; no real-key fingerprint, no agent); carried in the settled policy (`SshRuntime`, with the compile-time-minted synthetic public key pinned per grant), realised by kenneld | §7.10 |
 | `[identity]` | Masked account (`user`/`group`, default `kennel`) + supplementary-group isolation (`groups`); carried in the settled policy (`IdentityRuntime`), realised by the spawn seal | §7.4 |
 | `[env]` | Environment variable pass-through, deny patterns, forced values | §7.9 |
-| `[service]` | Supervision discipline for a service kennel: `restart` (`always`/`on-failure`/`never`) + `backoff` + `max_attempts`. **Schema + local validation built** (folds scalar-wins, translated to `ServiceRuntime` in the settled policy; `max_attempts ≥ 1`). The supervision loop and the readiness state machine (`kennel-lib-control::readiness`: pending/ready/failed) are the runtime half — the loop is roadmap. | §7.13.7 |
+| `[service]` | Supervision discipline for a service kennel: `restart` (`always`/`on-failure`/`never`) + `backoff` + `max_attempts`. **Schema + local validation built** (folds scalar-wins, translated to `ServiceRuntime` in the settled policy; `max_attempts ≥ 1`). The supervision loop (`kenneld::supervisor` — autostart, restart discipline, on-demand socket activation, idle-reap) and the readiness state machine (`kennel-lib-control::readiness`: pending/ready/failed) are both built. | §7.13.7 |
 | `[ulimits]` | `setrlimit(2)` resource limits (`nofile`, `nproc`, `as`, `cpu`, …); nothing set by default, folded per-key, applied in the spawn seal | §7.4 |
 | `[cap]` | Capabilities and `no_new_privs` | §7.9 |
 | `[seccomp]` | Seccomp filter | §7.9 |
@@ -533,10 +533,10 @@ rules:
 
 `[[net.bpf.connect.allow]]` / `[[net.bpf.connect.deny]]` are the outbound CONNECT ACL and **are
 enforced** (BPF + Landlock, deny-first). `[[net.bpf.bind.allow]]` / `[[net.bpf.bind.deny]]` are the
-inbound BIND ACL: the language **parses and settles** them, but the CIDR bind gate (and the host-side
-inbound mirror that would expose a bound port host-side) is **roadmap** — not yet enforced on this
-branch. The bind-port floor (`[net.bind].min_port` / `allowed_ports`, below) is the bind protection
-that *is* enforced today.
+inbound BIND ACL and **are enforced too**: the CIDR bind gate runs at the cgroup `bind4`/`bind6` hook
+against dedicated `bind_{allow,deny}_v{4,6}` tries (deny-first), and the host-side inbound mirror
+exposes a permitted bound port host-side at the kennel's own loopback address. The bind-port floor
+(`[net.bind].min_port` / `allowed_ports`, below) is the companion bind protection.
 
 ### `[net.bind]` — the bind-address rewrite knobs (§7.5.7)
 
@@ -563,13 +563,13 @@ Governs what the workload may `bind(2)`. All fields optional.
 | `log_path` | string | where the per-kennel egress JSONL log is written. |
 | `level` | string | egress audit verbosity: `"summary"` or `"full"`. |
 
-> **Roadmap residual.** The four-mode taxonomy, the `[net.proxy]`/`[net.bpf]` split, and BOTH the
-> `[net.bpf].connect` AND `[net.bpf].bind` ACLs (BPF + Landlock, deny-first) are **built and
-> enforced** — the bind ACL gates every `bind()` at the cgroup `bind4`/`6` hook against dedicated
-> `bind_{allow,deny}_v{4,6}` tries. What remains roadmap is only the host-side inbound *mirror* (the
-> INet `BIND` verb that would expose a bound port host-side at the kennel's own loopback address) —
-> a planned follow-up in design §7.5 / [`02-5-binder-net.md`](02-5-binder-net.md). Until it lands, a
-> permitted bind is reachable only inside the kennel's net-ns.
+> **As built.** The four-mode taxonomy, the `[net.proxy]`/`[net.bpf]` split, and BOTH the
+> `[net.bpf].connect` AND `[net.bpf].bind` ACLs (BPF + Landlock, deny-first) are built and enforced —
+> the bind ACL gates every `bind()` at the cgroup `bind4`/`6` hook against dedicated
+> `bind_{allow,deny}_v{4,6}` tries. The host-side inbound *mirror* (the `REGISTER_MIRROR` /
+> `DELIVER_INET` pull→push path that exposes a permitted bound port host-side at the kennel's own
+> loopback address) is built too; design §7.5 / [`02-5-binder-net.md`](02-5-binder-net.md) carry its
+> mechanism.
 
 ---
 
@@ -626,9 +626,11 @@ prefix. The compiler rejects such a policy by name, the same way it rejects an o
 
 ## The `[[provides]]` and `[[consumes]]` sections — the cross-kennel mesh
 
-The mesh policy surface (design §7.13). **Built compiler-side** — the schema and the *local* compile
-validation below are implemented and tested; the runtime that brokers a consume to a provider (the
-catalogue and the connector broker) is roadmap. Additive to `[binder]`; the two are reconciled later.
+The mesh policy surface (design §7.13). The schema and the *local* compile validation below are
+implemented and tested, and the runtime that brokers a consume to a provider — the catalogue
+membership projection (`kenneld::catalogue`) and the `SVC_CONNECT` connector broker
+(`kenneld::broker`) — is built, with the `af-unix` shape's connector handoff (the `dbus-name`/
+`binder-connector` shapes' handoff is owed). Additive to `[binder]`; the two are reconciled later.
 
 `[[provides]]` — a capability this kennel offers over the mesh:
 
@@ -691,9 +693,9 @@ policy (present only when `[service]` is declared).
 | `backoff` | string | initial restart delay (`"500ms"`, `"2s"`; default `"500ms"`); doubles each attempt |
 | `max_attempts` | int | restarts within the crash-loop window before declared-but-failed (default `5`; rejected if `0`) |
 
-The **readiness state machine** (the W2 contract the catalogue and topology surface read) is
+The **readiness state machine** (the contract the catalogue and topology surface read) is
 `kennel-lib-control::readiness` — `Pending` / `Ready` / `Failed` with fixed legal transitions (a pure,
-dependency-free value type, no `serde`). The supervision loop that drives it is the runtime half (roadmap).
+dependency-free value type, no `serde`). The supervision loop that drives it (`kenneld::supervisor`) is built.
 
 ---
 

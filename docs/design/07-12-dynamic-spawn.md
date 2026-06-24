@@ -412,26 +412,3 @@ here: the host already has `kennel run` and can pipe stdio to it directly if it 
 neither a design objective of this chapter nor an encouraged pattern, and there is no host-side shim
 to build for it. Stating the boundary this way keeps 0.3.0 from growing a second mechanism for a case
 that is already served, badly enough to discourage, by an existing verb.
-
-## 7.12.11 Roadmap implementation steps
-
-1. `[spawn]` in `schema/policy.toml.schema` and `kennel-lib-compile`, with the `max_instances` ceiling,
-   the `[[spawn.allow]]` template grant (+ optional per-requester `mutable` narrowing), and the T3.9 risk
-   derivation; the compiler refuses, **at the spawner's install**, any template a `[[spawn.allow]]` names
-   that is not spawn-eligible — carries `[spawn]` (depth-1), or fails to declare its `max_lifetime`,
-   its resource ceilings, or its `[[mutable]]` manifest (§7.12.8).
-2. Template `[[mutable]]` manifest grammar (the three bound kinds: pool+`max`, `oneof`, predicate) and
-   the instantiation-time **patch validator** (reject out-of-manifest keys, validate each value against
-   its bound, apply onto the resolved template; the invariant established is `candidate ∖ manifest ==
-   template ∖ manifest`, by key-membership, not a whole-tree diff) — the §7.12.3 attack surface. Spawn
-   targets are signed pre-resolved, so this runs in the verify half, not the compiler.
-3. The `SPAWN` transaction verb on Node 0 (`kenneld/src/binder.rs`): grant + content-pin + eligibility
-   re-check + manifest-patch validation, in-memory instantiation, channel minting, fd injection into
-   construction, and the **two-fd reply** (no inbound fds — node 0 stays fd-free).
-4. `kennel-lib-spawn::Supervision` accepts injected stdin/stdout/stderr FDs; `kennel-bin-init` places
-   them onto 0/1/2 *after* the seal, as the final step before `execve` (its own diagnostics stay on a
-   host fd throughout).
-5. Binder-session tracking for the hard reaper, the spawned-kennel `max_lifetime` self-reap, and the
-   atomic check-and-claim `max_instances` accounting (the Node 0 accounting lock).
-6. The T3.9 THREATS entry (mutable-field surface + delegated-composition residuals) and the
-   compliance-table mapping.

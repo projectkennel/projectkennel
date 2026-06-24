@@ -174,8 +174,8 @@ ports = [443]                    # … but only on 443
 cidr = "10.0.0.0/8"              # … except RFC1918, denied deny-first (wins over the allow)
 
 # The inbound BIND ACL (cidr + ports, deny-first), evaluated at the cgroup bind hook; a
-# bind not matched is denied at the syscall. Every ALLOWED bind is (roadmap) reported to
-# kenneld to drive the host-side mirror (§7.5.7 — the mirror is not yet built).
+# bind not matched is denied at the syscall. The policy-mirrored ports (this ACL's single-port
+# allows plus [net.bind].allowed_ports) drive the host-side mirror (§7.5.7).
 [[net.bpf.bind.allow]]
 cidr = "127.0.0.1"
 ports = [8080]

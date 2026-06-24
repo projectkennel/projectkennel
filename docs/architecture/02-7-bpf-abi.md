@@ -31,23 +31,28 @@ All programs attach to per-kennel cgroups (one cgroup per kennel under `/sys/fs/
 > network-namespace redesign (design [`07-5-network.md`](../design/07-5-network.md),
 > architecture [`02-5-binder-net.md`](02-5-binder-net.md) §BPF policy enforcement) extends the
 > cgroup BPF role from the as-built egress gate to full `[net.bpf]` socket shaping for
-> `unconstrained` and `host` mode kennels. The egress programs above are **built**, and the
+> `unconstrained` and `host` mode kennels. The egress programs above are **built**, the
 > per-kennel network namespace is built (`kennel-lib-spawn::plan` unshares `Namespaces::NET` for
-> every mode but `host`); what remains **roadmap (designed, not built)** is the *extended*
-> socket-shaping in this callout — the families/types/protocols and CIDR-level `[[net.bpf.*]]`
-> shaping layered over the as-built egress gate.
+> every mode but `host`), and the CIDR-level `[net.bpf].connect` / `[net.bpf].bind` allow/deny
+> ACLs are built — the translator encodes them into the `allow_*`/`deny_*` and `bind_allow_*`/
+> `bind_deny_*` LPM tries (`kennel-lib-spawn::plan::BpfAcls::from_policy`), which `connect4`/`6`
+> and `bind4`/`6` enforce deny-first. What remains **roadmap (designed, not built)** is the
+> *socket-family/type/protocol* shaping (`[net.bpf.families]` / `[net.bpf.types]` /
+> `[net.bpf.protocols]` — `sock_create` still hardcodes the AF_INET/AF_INET6 allowlist), the
+> per-kennel connection/rate `[net.bpf.limits]`, and the bind-hook *report* event.
 >
-> | Program | Attach point | Roadmap purpose |
-> |---|---|---|
-> | `sock_create` (extended) | `cgroup/sock_create` | Shape `socket(family, type, protocol)` against `[net.bpf.families]` / `[net.bpf.types]` / `[net.bpf.protocols]` — beyond the as-built family allowlist. |
-> | `bind4`/`bind6` (extended) | `cgroup/bind4`, `cgroup/bind6` | Gate the *native inside-net-ns* `bind()` against `[[net.bpf.bind]]` / `[[net.bpf.deny]]` and **report** each allowed bind to kenneld to drive the host-side loopback mirror (below). |
-> | `connect4`/`connect6` (extended) | `cgroup/connect4`, `cgroup/connect6` | Enforce `[[net.bpf.allow]]` / `[[net.bpf.deny]]` for `unconstrained`/`host`. **Egress still flows the proxy path:** the workload's actual outbound `connect()` goes SOCKS5 → `facade-socks5` → kenneld → `host-netproxy` delegate, which applies the `[net.proxy]` allowlist and DNS vetting; the cgroup `connect` hook is a CIDR-level shaper layered over that, not a replacement for it. A direct `connect()` to a non-loopback address inside the net-ns has nowhere to route. |
-> | `sendmsg4`/`sendmsg6` (extended) | `cgroup/sendmsg4`, `cgroup/sendmsg6` | Same per-destination check for connectionless UDP, scoped to the per-kennel net-ns. |
-> | connection/rate limits | (existing hooks) | Enforce `[net.bpf.limits]` (connection count, rate) as DoS bounds. |
+> | Program | Attach point | Purpose | Status |
+> |---|---|---|---|
+> | `sock_create` (extended) | `cgroup/sock_create` | Shape `socket(family, type, protocol)` against `[net.bpf.families]` / `[net.bpf.types]` / `[net.bpf.protocols]` — beyond the as-built family allowlist. | roadmap |
+> | `bind4`/`bind6` | `cgroup/bind4`, `cgroup/bind6` | Gate the *native inside-net-ns* `bind()` against `[net.bpf].bind` deny-first (built). The bind-hook **report** of each allowed bind to kenneld — to mirror dynamically discovered ports — is roadmap; the eager explicit-port mirror (below) is what is built. | built + roadmap |
+> | `connect4`/`connect6` | `cgroup/connect4`, `cgroup/connect6` | Enforce `[net.bpf].connect` allow/deny for `unconstrained`/`host` (built). **Egress still flows the proxy path:** the workload's actual outbound `connect()` goes SOCKS5 → `facade-socks5` → kenneld → `host-netproxy` delegate, which applies the `[net.proxy]` allowlist and DNS vetting; the cgroup `connect` hook is a CIDR-level shaper layered over that, not a replacement for it. A direct `connect()` to a non-loopback address inside the net-ns has nowhere to route. | built |
+> | `sendmsg4`/`sendmsg6` (extended) | `cgroup/sendmsg4`, `cgroup/sendmsg6` | Same per-destination check for connectionless UDP, scoped to the per-kennel net-ns. | roadmap |
+> | connection/rate limits | (existing hooks) | Enforce `[net.bpf.limits]` (connection count, rate) as DoS bounds. | roadmap |
 >
-> New per-kennel maps back these checks: family/type/protocol allow-sets, the `[[net.bpf.bind]]`
-> allow/deny tries, and a per-kennel limits/counters map. The map ABI grows by addition; the
-> existing egress maps below are unchanged. For `constrained` kennels `[net.bpf]` is optional
+> The `[net.bpf].bind` allow/deny tries below are already built; the roadmap rows add new
+> per-kennel maps: family/type/protocol allow-sets and a per-kennel limits/counters map. The map
+> ABI grows by addition; the existing egress and bind-ACL maps below are unchanged. For
+> `constrained` kennels `[net.bpf]` is optional
 > defence-in-depth (the net-ns boundary is the enforcement primitive); for `host` mode it is the
 > *primary* primitive, with no net-ns boundary; `mode = none` loads no network programs.
 

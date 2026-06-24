@@ -7,17 +7,17 @@ kernel ABI, how the binderfs instance slots into the spawn pipeline, kenneld's r
 and threading as context manager, the transaction wire conventions, the
 cross-instance relay, and the new control-socket operation for kennel spawning.
 
-> **Status: gateway core BUILT; cross-instance relay + network still roadmap.** The
+> **Status: gateway core BUILT; cross-instance relay still roadmap.** The
 > inter-namespace gateway (§7.1) is built and proven end to end by the unprivileged
 > vertical (`src/tools/unprivileged-e2e.sh`): the privhelper factory mounts the per-kennel
 > binderfs instance and allocates the device; kenneld acquires node 0 via `/proc/<init>/root`
 > and serves the registry; `kennel-bin-init` pulls its `GET_SANDBOX_PLAN` over the bus; and the
 > `org.projectkennel.IAfUnix/default` facade brokers an AF_UNIX connect, returning the
-> connected fd. What remains **roadmap** is the cross-instance/inter-kennel relay
-> (§Inter-kennel IPC), the `org.projectkennel.INet` network crossing (→
-> [`02-5-binder-net.md`](02-5-binder-net.md)), and the deferred facades (`IDBus`). Sections
+> connected fd. The `org.projectkennel.INet` network crossing is as-built (→
+> [`02-5-binder-net.md`](02-5-binder-net.md)). What remains **roadmap** is the cross-instance/inter-kennel relay
+> (§Inter-kennel IPC) and the deferred facades (`IDBus`). Sections
 > below mark "built" vs "designed, not yet built" inline; the as-built construction actor and
-> node-0 acquisition are reconciled here, the relay/network sections remain forward contracts.
+> node-0 acquisition are reconciled here, the relay sections remain forward contracts.
 
 ## Stability commitment
 
@@ -231,7 +231,7 @@ Per kennel instance:
     `getDeclaredInstances`) and the reserved-namespace checks are O(1) in-memory operations against
     the settled policy and the per-kennel registry. The registry is behind a `Mutex` the looper
     takes only for these verbs — never across a blocking call — and replies on the same thread.
-  - **Facade verbs** (`IAfUnix` `CONNECT`, and `INet` `CONNECT`/`BIND` once built) perform host
+  - **Facade verbs** (`IAfUnix` `CONNECT`, and `INet` `CONNECT`/`BIND`) perform host
     I/O — a `connect()`, and for `INet` a DNS resolve + dial via the `host-netproxy` delegate
     over the per-kennel `socketpair`. The handling looper does that I/O inline and replies (with
     the connected fd as a `BINDER_TYPE_FD`) on its own thread; while it is blocked, the other

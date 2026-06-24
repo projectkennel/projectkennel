@@ -8,7 +8,8 @@
 > `AuditRuntime`; kenneld builds the writer from it and emits the `lifecycle.*`
 > events; a bounded per-sink worker queue caps a stuck sink's effect on the writer;
 > and the journald sink stamps `MESSAGE_ID`. The installation-wide `audit.toml`
-> remains roadmap (`08-as-built-notes.md` §8.1).
+> defaults file (and its per-user override) is parsed and overlaid into the
+> runtime at spawn (`kenneld::audit::load_audit_defaults`).
 >
 > **Scope: the writer unifies every source kenneld can reach in userspace —
 > including the BPF ring buffer.** Two cases differ:
@@ -63,7 +64,7 @@ Sources of events (where they originate before being passed to the sinks):
 - **The spawn wrapper (kennel-lib-spawn).** Lifecycle events for the workload (start, exit, signal).
 - **kenneld.** Daemon lifecycle, policy load, kennel registration, and — as binder node 0 — every binder registry verb (`binder.register`/`lookup`) and the `kennel-bin-init`↔node-0 lifecycle verbs (`lifecycle.plan-pull`/`boot-sync`/`facade-crash`/`workload-exec`).
 
-In the roadmap delivery model, a centralised audit-event writer (`kennel-lib-audit`) is the seam between these sources and the sinks: sources emit `AuditEvent` values and the writer fans them out to every configured sink. Today each source owns its own sink directly — the netproxy formats its JSONL records and kenneld owns the per-kennel file.
+The centralised audit-event writer (`kennel-lib-audit`) is the seam between these sources and the sinks: sources emit `AuditEvent` values and the writer fans them out to every configured sink. kenneld owns the writer and emits on each source's behalf — the lifecycle, binder, privhelper, and BPF-drained `net.*` events, plus the per-request `net.egress` record kenneld writes for the egress decision it owns (`kenneld::proxy`).
 
 ---
 
@@ -114,7 +115,7 @@ Event-specific fields extend the envelope; see §Event types.
 
 The catalogue below names every event in the schema. Field lists are non-exhaustive — each sink representation in the sink sections describes the full field mapping for that sink.
 
-As-built: the events emitted through the writer today are the **lifecycle** events (kenneld, including the binder lifecycle verbs `lifecycle.plan-pull`/`boot-sync`/`facade-crash`/`workload-exec`), the **`net.connect-*`**/**`net.bind-*`** events (the cgroup BPF programs, drained from the `audit_ringbuf` by `kenneld::bpf_audit` with `source: bpf`), the per-request **`net.egress`** events (the per-kennel netproxy), the **`binder.register`**/**`binder.lookup`** registry events (kenneld as node 0), and the **`priv.*`** events (the privhelper). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively). The bare **`net.bind`**/**`net.bpf.deny`** (the *extended* `[net.bpf]` socket-shaping + dynamic mirror-report, `02-7`), the **`binder.cross`** cross-instance relay, and **`kennel.spawn`** events are roadmap (the extended socket-shaping, the inter-kennel relay, and `SpawnKennel` are unbuilt). All are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
+As-built: the events emitted through the writer today are the **lifecycle** events (kenneld, including the binder lifecycle verbs `lifecycle.plan-pull`/`boot-sync`/`facade-crash`/`workload-exec`), the **`net.connect-*`**/**`net.bind-*`** events (the cgroup BPF programs, drained from the `audit_ringbuf` by `kenneld::bpf_audit` with `source: bpf`), the per-request **`net.egress`** events (kenneld, which owns the egress decision), the **`binder.register`**/**`binder.lookup`** registry events (kenneld as node 0), the **`kennel.spawn`** events (kenneld, for each `SpawnKennel` request), and the **`priv.*`** events (the privhelper). The **`exec.*`**, **`unix.*`**, **`dbus.*`**, and **`fs.scrub-hit`** events are defined here but only emitted once their subsystems are built (exec-allowlist auditing, the AF_UNIX shim's connect log, the D-Bus proxy, and `fs.scrub` respectively). The bare **`net.bind`**/**`net.bpf.deny`** (the *extended* `[net.bpf]` socket-shaping + dynamic mirror-report, `02-7`) and the **`binder.cross`** cross-instance relay are roadmap (the extended socket-shaping and the inter-kennel relay are unbuilt). All are part of the stable schema so sinks and tooling can be written against them ahead of the producers.
 
 ### Network (`resource: "net"`)
 
@@ -187,8 +188,9 @@ kenneld is node 0 and so witnesses every verb directly (`02-4-binder.md` §Audit
 events). Payload *content* is never logged: byte counts and outcomes only, per
 CODING-STANDARDS §9.3.
 
-The registry verbs are **built** (kenneld serves node 0 today); the cross-instance
-relay and `SpawnKennel` are **roadmap** (`02-4-binder.md`).
+The registry verbs are **built** (kenneld serves node 0 today), as is
+`SpawnKennel` (`kenneld::spawn`, which emits `kennel.spawn`); the cross-instance
+relay is **roadmap** (`02-4-binder.md`).
 
 - **`binder.register`** — an `addService` (`IServiceManager` register). Adds `service`
   (the `org.projectkennel.*`-form name), `reason` (for denies). The `outcome` carries
@@ -207,9 +209,9 @@ log alone (design §7.1.9).
 
 ### Kennel spawning (`resource: "lifecycle"`)
 
-- **`kennel.spawn`** *(roadmap)* — a `SpawnKennel` request (`02-4-binder.md` §Kennel
-  spawning). Adds `template`, `scoped_name`, `policy_hash` (the effective policy hash).
-  `source: kenneld`.
+- **`kennel.spawn`** — a `SpawnKennel` request (`02-4-binder.md` §Kennel
+  spawning). Adds `ctx` (the child's context) and `detail`. The `outcome` carries
+  the grant/content-pin/patch disposition. `source: kenneld`.
 
 ### Privileged (`resource: "priv"`)
 
