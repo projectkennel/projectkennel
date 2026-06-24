@@ -361,9 +361,16 @@ can exit and its pid recycle to an unrelated host process. The provider is a tru
 It avoids it by **owning the directory the endpoint lives in.** An `af-unix` provider's `endpoint` resolves
 under a framework-owned **rendezvous root** in its view — a single mount point (the mesh analogue of the
 synthetic `/etc`, framework-supplied, not author-chosen) that is the **bind-mount of a host directory
-`kenneld` holds**: `<runtime>/mesh/<provider-id>/`, derived deterministically from the provider's identity
-and the capability `name` (both already in the signed catalogue, both already unique — the in-policy
-duplicate-`name` check of §7.13.3 guarantees the basename does not collide within a provider). The provider
+`kenneld` holds**: `<runtime>/mesh/<tier>/<provider>/`, derived deterministically from the provider's
+catalogue identity and the capability `name`. Every component is signed-catalogue state, not run state:
+`provider` is the **enablement link name** (§7.13.6) — the operator-chosen symlink under
+`{~/.config,/etc}/kennel/{autorun,ondemand}/`, available identically at the construction the supervisor
+drives (`EnabledProvider`) and at the broker (`Selected`); `tier` (`user`/`host`) is carried alongside it
+because the link name is unique only *within* an enablement dir, so a per-user and a per-host provider may
+share a name and must not share a rendezvous directory; and `name` is unique within a provider by the
+in-policy duplicate-`name` check (§7.13.3). All three are filesystem-safe by construction — a single path
+component each, a reverse-DNS `name` with no separators — so the path is a pure join, no sanitisation. The
+**pid is the one identifier that is *not* here**, and that is the point. The provider
 binds its listener at `endpoint` exactly as before, unaware the directory beneath it is host-visible; the
 socket inode it creates **is the one `kenneld` holds** on the host side, because a bind mount is one inode
 set seen from two namespaces. So the broker's handoff is a plain `connect` to the host-side path it computed
@@ -377,8 +384,9 @@ Three properties fall out, and they are why this is the frozen shape:
   the supervisor's *pending → ready* probe (§7.13.7) `stat`s the same host rendezvous path for the socket to
   appear, rather than watching a pid. The reuse race is not mitigated — it is **structurally absent**, there
   being no pid to recycle.
-- **Construction and the broker never communicate.** The view-construction step binds `<runtime>/mesh/<id>/`
-  into the provider's view; the broker computes the *same* path from `(provider-id, name)` to `connect`. Two
+- **Construction and the broker never communicate.** The view-construction step binds
+  `<runtime>/mesh/<tier>/<provider>/` into the provider's view; the broker computes the *same* path from
+  `(tier, provider, name)` to `connect`. Two
   pure derivations of one deterministic function over signed state — no handoff of an allocated path, no
   shared mutable rendezvous table, no skew window. The catalogue stays a **projection, never authored
   state** (§7.13.4).

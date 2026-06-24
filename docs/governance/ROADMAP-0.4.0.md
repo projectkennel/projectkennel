@@ -312,8 +312,10 @@ Self-contained and testable with no broker and no runtime — the contract every
   namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the provider **pid**. That is a
   namespace-crossing connect in the most privileged process, over a path the provider's view controls, with
   a **pid-reuse race** between *Ready* and the connect. Frozen design: `07-13-service-catalog.md` §7.13.4b.
-  Replace it with a **host-owned rendezvous point** — `<runtime>/mesh/<provider-id>/`, derived
-  deterministically from `(provider-id, name)` (both already in the signed catalogue), bind-mounted into the
+  Replace it with a **host-owned rendezvous point** — `<runtime>/mesh/<tier>/<provider>/`, derived
+  deterministically from `(tier, provider, name)`, all signed-catalogue state (`provider` is the enablement
+  link name, `tier` distinguishes a per-user from a per-host link of the same name — both in `EnabledProvider`
+  at construction and `Selected` at the broker, neither the pid), bind-mounted into the
   provider's view as the root its `endpoint` lives under. The provider binds its listener unchanged; the
   socket inode is the one `kenneld` holds host-side, so the handoff becomes a plain `connect` to that path —
   **byte-identical to the host-socket facade** (`af_unix_connect` over `socket.real`, §7.6), the same §4.3
@@ -326,7 +328,7 @@ Self-contained and testable with no broker and no runtime — the contract every
   `broker::Selected`/the catalogue. Readiness (W6) `stat`s the same host path — the pid leaves the model
   entirely, the reuse race becoming **structurally absent** rather than mitigated.
   **Scope.** `svc_connect_handoff` (the connect), the provider-construction rendezvous bind, the
-  `(provider-id, name)` path derivation (one pure function, shared by construction and broker), dropping
+  `(tier, provider, name)` path derivation (one pure function, shared by construction and broker), dropping
   `pid` from `Selected`/`CatalogueProvider`, and the §7.13.3 validation that an `af-unix` `endpoint` resolves
   under the rendezvous root (the only schema-adjacent change — `endpoint` is otherwise unchanged). The
   `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a frozen surface.
