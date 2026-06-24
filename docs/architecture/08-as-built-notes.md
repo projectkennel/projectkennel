@@ -34,38 +34,9 @@ narration is kept here; the chapter named is the source of truth.
 - **`kennel_meta` read-only sealing + readback verification** (`02-7-bpf-abi.md`) — the map
   is written once by loader convention but not frozen (`BPF_F_RDONLY_PROG`) nor read back to
   validate `magic`/`abi_version`.
-- **Composable fragment catalogue** (`05-templates.md` §5.10) — **built.** The `include`
-  mechanism and the curated set of signed à-la-carte fragments ship under `fragments/`,
-  signed by the maintainer key, installed into the runtime template search dir, surfaced by
-  `kennel policy list` as `(fragment)`, and gated in CI
-  (`kennel-lib-compile/tests/fragments_catalogue.rs`: signature + additive-only +
-  compile-and-assert per fragment). Two kinds: the **capability bundles** (`lang-python`,
-  `lang-node`, `toolchain-c`, `vcs-git`, `net-permissive`) and the **base userland**
-  (`core-shell` — incl. `/usr/bin/env`, the universal shebang target — `core-coreutils`,
-  `core-file-mutation`, `core-archive`, `net-clients`). The shipped reference templates
-  compose these rather than hand-listing (`inspect-only` is `core-shell` + `core-coreutils`
-  and pointedly not `core-file-mutation`). `kennel policy sign` gained the leaf-syntax
-  (fragment) signing path. `net-permissive` is a curated broad-egress allowlist, not a
-  `net.mode` flip (a mode override belongs in the inheritance chain, not an additive
-  fragment, enforced by `is_additive_only` rejecting scalar overrides from an include).
-- **Binder cross-instance / inter-kennel relay** (`07-1-binder.md`, `02-4-binder.md`
-  §Inter-kennel IPC) — the per-instance binder bus and node 0 are built (see below), but the
-  bilateral `provide`/`consume` cross-instance relay that lets one kennel reach another
-  kennel's services through kenneld is designed, not built, as is
-  `SpawnKennel`-over-binder. kenneld owns the reserved nodes; the relay grows kenneld's TCB and
-  is tracked as a new threat surface.
-- **Confined GUI — the nested-compositor display service** (`07-14-confined-gui.md`,
-  `02-11-confined-gui.md`) — **display path built**; the desktop-service brokers below are not. A graphical
-  workload's display server is an upstream inner compositor (cage / Weston / sway) run inside an
-  operator-declared GUI-service kennel, spawned **one per app connection** by the `compositor-broker`
-  workload and reaped when that connection closes; reached as a `provide`/`consume` mesh capability
-  (`org.projectkennel.wayland`), so it depends on the §7.13 service mesh. Both legs are AF_UNIX brokered
-  connects that forward `SCM_RIGHTS` fds (`splice_with_fds`): the GUI-service kennel holds the one
-  host-compositor leg via the af-unix facade, so the host socket path is absent from the workload's view.
-  Each private-tmpfs kennel also gets a private `/dev/shm` (wlroots allocates buffers via `shm_open`). No
-  host-compositor enforcement is depended on — `security-context-v1` in the inner compositor is optional
-  defense-in-depth, not a requirement. **Not built:** the Kennel-native interactive file broker (one
-  consented file → one fd, §7.14.7) and the screenshot / open-URL / notification brokers (§7.14.8).
+- **Confined GUI — the interactive brokers** (`07-14-confined-gui.md` §7.14.7/§7.14.8) — the
+  nested-compositor *display* path is built (below); still owed are the Kennel-native interactive
+  file broker (one consented file → one fd) and the screenshot / open-URL / notification brokers.
 - **First-party in-kennel OCI unpacker** (`07-11-oci.md`) — designed, not built. The unpack
   runs `skopeo`+`umoci` confined inside the signed `oci-fetch@v1` view at workload authority
   (never in the daemon closure), so the adversarial-input security argument is already met by
@@ -87,6 +58,25 @@ narration is kept here; the chapter named is the source of truth.
 Each graduated from this roadmap; its as-built detail lives in the named architecture
 chapter (and the design § for the mechanism). No build notes are kept here.
 
+- **The cross-kennel service mesh** — `[provides]`/`[consumes]`, the catalogue *derived* from
+  signed policy, the `SVC_CONNECT` broker through a host-owned rendezvous point, `autorun`
+  sidecars + `ondemand` socket-activation and idle-reaping, the reserved `org.projectkennel.*`
+  namespace gate (maintainer-signed only), and strict key matching: design `07-13-service-catalog.md`,
+  `02-5-binder-net.md`.
+- **Dynamic spawn** — a confined workload instantiates a signed-template *sibling* kennel over the
+  binder (`SpawnKennel`), depth-1 by hard rule, `max_instances`-capped, triple-reaped: design
+  `07-12-dynamic-spawn.md`, `02-10-dynamic-spawn.md`.
+- **Confined GUI — the nested-compositor display path** — `compositor-broker` runs a per-connection
+  inner compositor (cage/Weston/sway) in a GUI-service kennel, reached as the
+  `org.projectkennel.wayland` mesh capability; the single host-compositor leg is af-unix brokered
+  (host socket absent from the workload's view), each kennel gets a private `/dev/shm`: design
+  `07-14-confined-gui.md`, `02-11-confined-gui.md`.
+- **OCI image substrate** — `kennel oci` boots a digest-pinned, unpacked image as the kennel root
+  under the same Landlock/seccomp/egress confinement; the image is fetched + unpacked by stock
+  `skopeo`/`umoci` confined in an `oci-fetch` kennel, never in the daemon: design `07-11-oci.md`.
+- **Composable fragment catalogue** — signed à-la-carte `include` fragments under `fragments/`
+  (the capability bundles + the base userland), surfaced by `kennel policy list` as `(fragment)`,
+  additive-only and CI-gated: design `05-templates.md` §5.10.
 - **D-Bus mediation** (`07-7-dbus.md`, `02-4-binder.md` §Node 0) — the `org.projectkennel.IDBus/default`
   facade and the membrane: `facade-dbus` (in-kennel) speaks D-Bus to the workload and the `DBUS_*`
   verbs to node 0; kenneld is the membrane (per-connection state + rate cap) relaying opaque frames to
@@ -257,15 +247,19 @@ chapter (and the design § for the mechanism). No build notes are kept here.
   fs under `/usr`) is unaffected, so an executable bind stays executable. The lesson
   generalises: under a userns, a remount may only *add* restrictions.
 - **The kenneld `AppArmor` profile is `flags=(unconfined)`; its only job is to grant
-  `userns`.** An enforcing profile cannot confine kenneld here: the forked spawn child
-  shares the profile and needs `userns`/`mount`/`pivot_root`/`sys_admin` to build the
-  sandbox, then sets `PR_SET_NO_NEW_PRIVS` (seccomp requires it) and execs the arbitrary
-  workload — and under no-new-privs the kernel denies *every* AppArmor exec transition
-  (`Ux`→unconfined and even `Cx`/`Px`→stricter both give `apparmor="DENIED" …
-  info="no new privs"`). That leaves only `ix` for the workload, which would inherit
-  kenneld's `mount`/`userns`/`sys_admin` — worse than unconfined. The workload is confined
-  by Landlock + seccomp + namespaces, not AppArmor; confining it via AppArmor would need
-  runtime `aa_change_onexec` (a v2 question). See `dist/apparmor/kenneld`.
+  `userns`.** kenneld execs the setuid privhelper, which *inherits* this profile across exec
+  and needs `userns`/`mount`/`pivot_root`/`sys_admin` to build the sandbox — the `userns` grant
+  in particular because it clones the namespace **as the operator** (so the userns is
+  operator-owned), which is an unprivileged-userns creation as far as
+  `apparmor_restrict_unprivileged_userns` is concerned, despite the setuid bit (the setuid bit
+  buys the map-write/mount caps; the grant buys the userns creation — both are required, removing
+  the profile breaks construction). An *enforcing* profile cannot work: the privhelper fexecve's
+  `kennel-bin-init`, which sets `PR_SET_NO_NEW_PRIVS` (seccomp requires it) and execs the arbitrary
+  workload — and under no-new-privs the kernel denies *every* AppArmor exec transition (`Ux`→unconfined
+  and even `Cx`/`Px`→stricter both give `apparmor="DENIED" … info="no new privs"`). That leaves only
+  `ix` for the workload, which would inherit kenneld's `mount`/`userns`/`sys_admin` — worse than
+  unconfined. The workload is confined by Landlock + seccomp + namespaces, not AppArmor; confining it
+  via AppArmor would need runtime `aa_change_onexec` (a v2 question). See `dist/apparmor/kenneld`.
 - **Userns-dependent proofs must report their precise skip cause, and be confirmed with
   `--nocapture`.** `cargo test` captures a passing test's output, so a test that skips
   (e.g. where the host lacks the `AppArmor` `userns` grant) still reads as a green `ok`
