@@ -72,7 +72,10 @@ reference anywhere in the surface — resolution happens at runtime, by name, ag
 own view, the capability is exposed (an `af-unix` socket path it listens on, a bus name for `dbus-name`, a
 registered node for `binder-connector`). For `af-unix`, `kenneld` decides only the *host* side of that
 socket (the rendezvous point it binds at the endpoint's directory, §7.13.4b); the in-kennel `endpoint`
-itself is the provider's own policy. A `[[consumes]]` declares **`at`** — the standing endpoint the
+itself is the provider's own policy. An `af-unix` `endpoint` is **optional**: omitted, it defaults to
+`/run/<name>[.<key>]/sock`; supplied, it must be an absolute path under `/run` with a subdirectory (so the
+directory `kenneld` binds is a `/run` subdir, never bare `/run`). A `[[consumes]]` declares **`at`** — the
+standing endpoint the
 broker presents in the consumer's own view for the workload to *act against*: an `af-unix` socket the
 workload connects to, named to it by the optional **`env`** (a Wayland client reads `WAYLAND_DISPLAY`). The
 two are independent and per-view: the provider's `endpoint` is absent from the consumer's view (§4.2) and the
