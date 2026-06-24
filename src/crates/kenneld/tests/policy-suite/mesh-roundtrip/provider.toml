@@ -16,10 +16,12 @@ template_base = "base-confined@v1"
 [net]
 mode = "none"
 
-# Read the system dirs the static probe resolves from. It binds its endpoint in the private /tmp,
-# which is writable (incl. make-socket) by default — a fresh per-kennel ephemeral tmpfs.
+# Read the system dirs the static probe resolves from; grant write on the endpoint's directory so the
+# provider binds its endpoint there. kenneld binds the host rendezvous directory at this path at
+# construction (§7.13.4b).
 [fs]
 read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+write = ["/run/mesh"]
 
 # Execute only the in-kennel mesh probe.
 [exec]
@@ -27,12 +29,12 @@ allow = ["/usr/libexec/kennel/facade-mesh-probe", "/bin/sh"]
 
 # The workload IS the service: bind the endpoint socket and echo ping→pong forever.
 [workload]
-argv = ["/usr/libexec/kennel/facade-mesh-probe", "serve", "/tmp/mesh-echo.sock"]
+argv = ["/usr/libexec/kennel/facade-mesh-probe", "serve", "/run/mesh/echo.sock"]
 pinned = true
 
-# The offered capability: an af-unix socket at the endpoint, in this kennel's own view.
+# The offered capability: an af-unix socket the provider listens on at its endpoint (§7.13.1).
 [[provides]]
 name = "test.mesh.echo"
 shape = "af-unix"
-endpoint = "/tmp/mesh-echo.sock"
+endpoint = "/run/mesh/echo.sock"
 reason = "mesh-roundtrip e2e: serve a ping→pong echo for the consumer to reach over the mesh"

@@ -346,8 +346,7 @@ fn daemon_reload() -> Result<ExitCode, String> {
 }
 
 /// Render the mesh view (the §7.13.7 mesh section of `kennel list`): one row per provider→capability,
-/// sorted by capability then provider,
-/// with the readiness first (the operability signal) and the provider's pid when running.
+/// sorted by capability then provider, with the readiness first (the operability signal).
 fn print_mesh(providers: &[control::MeshProvider]) {
     let mut rows: Vec<&control::MeshProvider> = providers.iter().collect();
     rows.sort_by(|a, b| {
@@ -356,18 +355,13 @@ fn print_mesh(providers: &[control::MeshProvider]) {
             .then_with(|| a.provider.cmp(&b.provider))
     });
     println!(
-        "{:<32} {:<16} {:<9} {:<11} {:<9} {:<5} {:>7}",
-        "CAPABILITY", "PROVIDER", "READINESS", "SHAPE", "ENABLE", "TIER", "PID"
+        "{:<32} {:<16} {:<9} {:<11} {:<9} {:<5}",
+        "CAPABILITY", "PROVIDER", "READINESS", "SHAPE", "ENABLE", "TIER"
     );
     for r in rows {
-        let pid = if r.pid == 0 {
-            "-".to_owned()
-        } else {
-            r.pid.to_string()
-        };
         println!(
-            "{:<32} {:<16} {:<9} {:<11} {:<9} {:<5} {:>7}",
-            r.capability, r.provider, r.readiness, r.shape, r.enablement, r.tier, pid
+            "{:<32} {:<16} {:<9} {:<11} {:<9} {:<5}",
+            r.capability, r.provider, r.readiness, r.shape, r.enablement, r.tier
         );
     }
 }

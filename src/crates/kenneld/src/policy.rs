@@ -345,6 +345,7 @@ pub fn loaded_from_settled(
         unix: substituted.unix,
         binder: substituted.binder,
         consumes: substituted.mesh.consumes,
+        provides: substituted.mesh.provides,
         dbus: substituted.dbus,
         groups,
         audit: substituted.audit,
