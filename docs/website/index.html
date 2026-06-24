@@ -1280,6 +1280,36 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         <div class="verdict">containment you'll actually run</div>
                     </div>
                 </div>
+
+                <div class="rv"
+                    style="margin-top:38px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
+                    <p class="fig" style="margin:0 0 4px">Light enough to leave on — measured</p>
+                    <h3 style="margin:0 0 6px">Cheap enough to be disposable.</h3>
+                    <p style="margin:0 0 22px;max-width:62ch">Time to stand up a fresh, isolated execution context.
+                        Kennel builds confinement <b>per task</b>, not per session — so the cost has to be small enough
+                        to pay on every tool call, not just every login.</p>
+                    <div
+                        style="display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;gap:12px 18px;align-items:center;font-family:var(--mono);font-size:13px">
+                        <span style="color:var(--ink)">Project&nbsp;Kennel</span>
+                        <span style="height:16px;background:var(--blue);width:2%;min-width:6px;border-radius:3px"></span>
+                        <b style="color:var(--blue);white-space:nowrap">≈ 3.7 ms</b>
+                        <span style="color:var(--blue-soft)">Firecracker&nbsp;microVM</span>
+                        <span style="height:16px;background:var(--rule-2);width:21%;border-radius:3px"></span>
+                        <b style="color:var(--blue-soft);white-space:nowrap">~ 125 ms</b>
+                        <span style="color:var(--blue-soft)">Apple&nbsp;container</span>
+                        <span style="height:16px;background:var(--rule-2);width:100%;border-radius:3px"></span>
+                        <b style="color:var(--blue-soft);white-space:nowrap">~ 600 ms</b>
+                    </div>
+                    <p style="margin:22px 0 0;font-size:14px;max-width:74ch">Per-task kennel construction measures
+                        <b>≈ 3.7 ms</b> (median, workload-independent; build→workload-exec span, <code>spawn-spinup.sh</code>,
+                        kernel 6.17) — roughly <b>30×</b> under a Firecracker microVM and <b>150×</b> under Apple's
+                        container. The honest caveat: these are <em>different</em> isolation models — the microVMs put a
+                        separate guest kernel under the workload, Kennel uses kernel namespaces + LSMs (Landlock, seccomp,
+                        cgroup&nbsp;BPF), a lighter boundary on the host kernel. The flex is not "a faster VM"; it is that
+                        kernel-enforced containment is cheap enough to make <em>per-task</em> isolation practical, where a
+                        VM's startup makes it per-session. Put a microVM underneath when the threat model needs the
+                        hardware boundary — the two compose.</p>
+                </div>
             </div>
         </section>
 
