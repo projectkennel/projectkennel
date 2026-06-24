@@ -1178,7 +1178,11 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                             <code>kennel review &lt;policy&gt;</code>
                             <span>re-pin a workspace trust manifest after edits</span>
                             <code>kennel stop / list</code>
-                            <span>stop a kennel; list the running ones</span>
+                            <span>stop a kennel; list running kennels + the service mesh</span>
+                            <code>kennel oci run &lt;policy&gt;</code>
+                            <span>boot a digest-pinned OCI image as the kennel root</span>
+                            <code>kennel run &lt;template@ver&gt; -- &lt;cmd&gt;</code>
+                            <span>in-cage: an agent spawns a signed-template sibling</span>
                             <code>kennel policy compile / sign / lint</code>
                             <span>resolve + sign a policy; check the template corpus</span>
                         </div>
@@ -1191,19 +1195,22 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                                 <h4>Runs today</h4>
                                 <ul>
                                     <li>The full unprivileged spawn vertical</li>
-                                    <li>Egress proxy + cgroup-BPF allowlist + audit</li>
-                                    <li>AF_UNIX shim · SSH re-origination bastion</li>
+                                    <li>Dynamic spawn — agent instantiates signed-template siblings</li>
+                                    <li>Cross-kennel service mesh · binder IPC · OCI substrate</li>
+                                    <li>Confined GUI — per-kennel nested Wayland compositor</li>
+                                    <li>Four net modes · egress proxy + cgroup-BPF · D-Bus facade</li>
+                                    <li>AF_UNIX shim · SSH re-origination bastion · audit</li>
                                     <li>Masked workspace manifest · pty escape filter</li>
-                                    <li>Signed templates · policy compiler · lockfile</li>
+                                    <li>Signed templates &amp; fragments · policy compiler · lockfile</li>
                                 </ul>
                             </div>
                             <div class="road">
                                 <h4>Designed, not yet built</h4>
                                 <ul>
-                                    <li>D-Bus &amp; X11 facades</li>
-                                    <li>Binder cross-instance relay (MCP topology)</li>
+                                    <li>Cross-<em>instance</em> binder relay (rich MCP topology)</li>
+                                    <li>Confined GUI interactive file broker (post-0.4.0)</li>
                                     <li><code>fs.scrub</code> / <code>fs.home.sanitise</code></li>
-                                    <li><code>kennel diff</code></li>
+                                    <li>Minimal-view floor (tighter default <code>/usr</code>,<code>/var</code>)</li>
                                 </ul>
                             </div>
                         </div>
