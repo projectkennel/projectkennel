@@ -380,6 +380,21 @@ deliberately absent**. A single policy still cannot declare a `name` twice (§7.
 one name under several keys is not yet reachable; appending `[.<key>]` now lets that case land later without
 re-cutting the path.
 
+When that same-capability claim is made by **two equally-enabled providers** — same `tier`, same `name`,
+neither keyed (the only contestable case: a `key` or a tier difference already separates them, and a reserved
+name admits one authorised claimant, §7.13.5) — the rendezvous point has exactly **one owner: the provider
+the broker resolves the name to.** Ownership is not a second decision. The broker already selects a single
+candidate by the §7.13.4 order (per-user over per-host, then a stable tiebreak), and the provider it would
+resolve to is the one whose socket backs the point — so construction binds the per-capability directory for a
+provide **only when this provider is that selected owner**. An equally-enabled non-owner runs normally, every
+*other* provide it offers intact, and only its claim on the contested name is **shadowed** — never denied,
+never collapsed to "no winner, so none" (the name-claim DoS §7.13.4 forbids), never a bind race two providers
+could lose. The shadowing is **legible**, surfaced in the topology view (§7.13.7) the way a multiply-provided
+name already is. RP ownership and resolution therefore cannot disagree: they are the same selection. (The
+floor is the stable order the broker resolves by; a future incumbency tiebreak — a `Ready` owner keeps the
+slot over an equally-ranked newcomer — would additionally keep a `daemon-reload` from moving a live socket,
+but is not required for correctness.)
+
 The directory is **per-capability**, and the isolation is load-bearing: `kenneld` binds *only* a provider's
 own capability directory into its view — never a shared parent — so a provider sees its own rendezvous socket
 and no sibling's, and cannot reach another provider's endpoint behind the broker's back (the deny-by-default

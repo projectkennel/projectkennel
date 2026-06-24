@@ -337,6 +337,15 @@ Self-contained and testable with no broker and no runtime — the contract every
   complies). The `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a
   frozen surface. Land it **before** W5's mesh grows more dependents on `pid`/`/proc/<pid>/root` — today it is
   the one `svc_connect_handoff` call site and two catalogue fields.
+  **Rendezvous ownership on a same-capability collision.** Two equally-enabled providers of one
+  `(tier, name)` with no `key` to separate them contest one rendezvous point. The rule (§7.13.4b, the §7.13.4
+  fail-open doctrine extended one inch): the point has **one owner — the provider the broker resolves the
+  name to**, so construction binds the per-capability directory *only for that selected owner*; the non-owner
+  runs normally and is **shadowed**, not denied (no collapse-to-none DoS, no `kenneld` blow-up, no bind race).
+  RP ownership ≡ broker resolution — the **same** selection, so they cannot disagree. This rides W4's
+  projection (the selection already exists) and W14's topology surface (mark the shadowed provide); default
+  is the stable resolution order, with an optional **incumbency tiebreak** (a `Ready` owner keeps the slot
+  over an equal newcomer across `daemon-reload`) as a fast-follow, not required for correctness.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
