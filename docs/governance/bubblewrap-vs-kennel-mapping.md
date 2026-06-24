@@ -116,6 +116,52 @@ fine tool and Kennel's view-construction owes the same lineage.
 
 ---
 
+## How the cage is bootstrapped: the privilege-origin design space
+
+Constructing a namespace cage needs privilege the calling user does not have by default. On a current
+hardened kernel that is not a figure of speech: with `kernel.apparmor_restrict_unprivileged_userns = 1`
+(the Ubuntu 24.04 default, verified on the development box), a plain `unshare --user --map-root-user`
+**fails** — `write /proc/self/uid_map: Operation not permitted`. So every unprivileged sandbox must answer
+one question before it can do anything: *where does the privilege to build the cage come from, and what
+conditions its use?* This is the design axis on which bwrap and Kennel diverge most concretely — and it is
+worth surveying the whole space, because the choice has real security weight and is usually left implicit.
+
+| Approach | Where the privilege lives | Granularity of the grant | What conditions a build | Documented failure mode | Exemplars |
+|---|---|---|---|---|---|
+| **Unrestricted unprivileged userns** | the **kernel** (`…restrict_unprivileged_userns=0`) | all-or-nothing, for *every* process | nothing — any process may map root in a new userns | the userns-creation path is a documented kernel-LPE amplifier (map root → reach caps → hit a bug only those caps expose); this is *why* Debian shipped it off-by-default for years and Ubuntu added the AppArmor gate | bwrap where unrestricted, rootless runc/podman, Chrome's userns sandbox |
+| **AppArmor path-scoped grant** | a **filesystem path** + the LSM policy attached to it | per-executable-**path** | nothing on the argv — any command line reaching that path builds any cage | the grant is keyed to a path and (verified) the profile "allows almost everything" — `allow capability, userns, mount, ptrace, …` — then strips caps in a stacked child; trust is in *what sits at the path* | **bwrap on this machine** (`profile bwrap /usr/bin/bwrap`) |
+| **Delegated subuid range + setuid id-map helpers** | **setuid-root helpers** (`newuidmap`/`newgidmap`) + `/etc/subuid` | a delegated id **range** (admin-configured; here `remco:100000:65536`) | nothing beyond staying inside the granted range | the id-map helpers are setuid-root attack surface (shadow-utils has an LPE CVE history); the range is static and coarse | rootless podman / runc / Docker-rootless |
+| **Privileged daemon** | a long-lived **root service** + its socket | whoever can reach the socket ≈ root | the daemon's own API/policy, if any | the orchestrator is *always* root and large; socket access is root access (the `docker` group ≈ root footgun) | dockerd, systemd-machined/`nspawn`, LXD |
+| **Large setuid-root sandbox binary** | the **setuid bit** on a big, feature-rich program | the binary does whatever its argv/logic dictates, as root until it drops | the binary's own code | the *entire* pre-drop codepath runs as root and is LPE surface — the documented Firejail CVE history is the cautionary tale for this shape | Firejail; bwrap's own setuid fallback mode |
+| **Minimized setuid helper, gated on a signed policy** | the **setuid bit on a small, single-purpose helper**, fronted by an **unprivileged** orchestrator | full root *in the helper*, but it builds only what a verified template floors | **a verified ed25519-signed policy** — construction is downstream of a signature check against the trust store | shares the setuid risk *class* (the pre-drop window) — the bet is minimization **and** the policy gate, not avoiding setuid | **Kennel** (`kennel-privhelper`) |
+
+**Where Kennel sits, and what is and isn't being claimed.** Kennel picks the setuid-helper locus (bottom
+row), but splits it two ways no other row combines — the privilege is both *minimized* and *conditioned*:
+
+- **Minimized, and the orchestrator is unprivileged.** Verified on the box: the only setuid bit is on
+  `kennel-privhelper` (`-rwsr-xr-x root root`); **kenneld itself runs as the invoking user** (`USER remco`),
+  a plain `-rwxr-xr-x` binary with no setuid and no file-caps. The daemon that does scheduling, IPC, policy
+  resolution, and signature verification holds *no* standing privilege — it shells the one privileged step
+  out to a small, single-purpose helper. That is the inverse of the daemon-is-root row: with dockerd the
+  *orchestrator* is root, so its socket is root; with Kennel the orchestrator is you.
+- **Conditioned — the part no other row has.** Every approach above except the last builds *whatever it is
+  told*: the kernel trusts every process, the AppArmor path trusts every argv, the daemon trusts every
+  socket peer, the setuid binary trusts its command line. Kennel's privileged construction runs only
+  *after* an ed25519 signature check against the trust store, on a default-deny signed template the workload
+  can neither author nor widen (request-don't-author). It is the same property whose *absence* is the
+  T2.1/T2.8 surface above — "bwrap trusts its argv" is exactly the unconditioned grant the other rows share.
+
+The honest caveat, so this does not overclaim: **none of this makes Kennel "more unprivileged."** Every row
+needs a one-time privileged install — the distro ships bwrap's AppArmor profile; Kennel's install sets the
+privhelper's setuid bit — and neither sandbox is conjured without that. And a setuid helper *is* a setuid
+helper: it carries the setuid risk class, and the argument holds only while that helper stays small and
+audited (the standing TCB discipline). The bet is deliberate and has precedent on both sides: a *small*
+setuid helper done well (Chrome's minimal `chrome-sandbox`) versus a *large* setuid sandbox done badly
+(Firejail's LPE history). Kennel commits to the small-helper-plus-signed-policy shape; keeping the helper
+small is load-bearing, not incidental.
+
+---
+
 ## Performance: the truest apples-to-apples (same machine, same mechanism)
 
 Unlike the MicroVM comparison (different mechanism, cross-category), bwrap and Kennel build the *same kind*
