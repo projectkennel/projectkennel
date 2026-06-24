@@ -346,6 +346,18 @@ Self-contained and testable with no broker and no runtime — the contract every
   projection (the selection already exists) and W14's topology surface (mark the shadowed provide); default
   is the stable resolution order, with an optional **incumbency tiebreak** (a `Ready` owner keeps the slot
   over an equal newcomer across `daemon-reload`) as a fast-follow, not required for correctness.
+  **Scrub the broker to decision-core-plus-shims.** W21 is also the moment to audit the whole `SVC_CONNECT`
+  subsystem (`kenneld::broker` + the `binder::svc_connect*` handlers) against the TCB-reuse discipline, so
+  what remains is *truly* separate logic and thin shims over primitives that already exist — not a parallel
+  implementation of things the codebase already does. The target end-state: the only irreducibly-novel code
+  is `broker::decide` (pure resolution — match a signed consume to a catalogue candidate, no I/O) and the
+  consume-with-wait loop in `svc_connect_activate_wait` (the cycle-safety deadline, §7.13.4a); everything
+  else reduces to a shim — `svc_connect_handoff` → `connect_unix_timeout(derive_rp(…))` (the same call the
+  `[[unix.allow]]` facade uses), the rendezvous mount → one `BindMount` through `materialize_binds`, the
+  readiness probe → a `stat`, request/reply → the existing `kennel-lib-binder::service` codec, audit →
+  `writer.emit`. The deliverable includes the evidence: the `kenneld` inventory/SLOC delta should show the
+  broker subsystem net-*shrinking* (the deleted `/proc/<pid>/root` join and `pid` plumbing) or holding flat
+  with the new logic confined to `decide` — never a second connect/bind/route path beside an existing one.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
@@ -589,6 +601,13 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   (a T1.6-equivalent — the GUI-service kennel's connection to the host compositor, held only to vend
   per-kennel host fds; one ordinary Wayland client to the host, in a confined kennel, required `reason`).
   Plus the compliance-table mapping.
+  **Sequenced after W21 — the threat prose describes the handoff, which W21 reshapes.** The
+  standing-service residual's mitigation must describe the **host-owned rendezvous point** (§7.13.4b), not
+  the `/proc/<pid>/root` namespace-crossing connect the broker does today: W21 *strengthens* this story —
+  it removes the namespace-cross, the provider-controlled endpoint path, and the pid-reuse race — so the
+  T3.10 mitigation and its residuals shift. (A first cut of these entries was written against the old
+  handoff and must not merge ahead of W21; rewrite the mitigation/residual prose against §7.13.4b once it
+  lands.)
 
 - **W13 · Documentation sweep: "authentication, never attestation."** **[dep] S–M.**
   Land the principle solidly across the corpus, not as a buried backlog note. The mesh provides
@@ -702,8 +721,10 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in
    parallel with Thrusts 2/4; slot against capacity.
 4. **Trust + threat — W11 → W12 → W13**, in parallel with Thrust 2; W11 (trust class) before the GUI
-   multi-leg case references it, W12 after the residuals are concrete, W13 (the doc sweep) once the
-   trust class and threat entries give it something canonical to point at.
+   multi-leg case references it, W12 after the residuals are concrete **and after W21** (the standing-service
+   residual's mitigation describes the handoff W21 reshapes — write it against the rendezvous point, not the
+   superseded `/proc/<pid>/root` connect), W13 (the doc sweep) once the trust class and threat entries give
+   it something canonical to point at.
 5. **Operability — W14** after W4 (it reads the catalogue) and W6 (it reads readiness).
 6. **Pre-ship — W15 (red-team) gating, then W16's accuracy pass (also gating); W16's positioning pass
    is a fast-follow after the tag**, all after the whole mesh surface (W1–W7) *and* the harmonised spawn
