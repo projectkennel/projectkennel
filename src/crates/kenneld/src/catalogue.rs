@@ -336,6 +336,24 @@ impl Catalogue {
         self.providers.iter().map(|(id, p)| (id.as_str(), p))
     }
 
+    /// The af-unix capability names an **ondemand** provider offers — the W6 idle-reap census key
+    /// (§7.13.6). `Some(names)` when `provider` is a catalogued `ondemand` provider; `None` for an
+    /// `autorun` provider (daemon-coupled, never idle-reaped) or an id that is not a provider.
+    #[must_use]
+    pub fn ondemand_provider_offers(&self, provider: &str) -> Option<Vec<String>> {
+        let p = self.providers.get(provider)?;
+        if p.enablement != Enablement::Ondemand {
+            return None;
+        }
+        Some(
+            p.offers
+                .iter()
+                .filter(|o| o.shape == Shape::AfUnix)
+                .map(|o| o.name.clone())
+                .collect(),
+        )
+    }
+
     /// The number of distinct catalogued capability names.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -618,6 +636,43 @@ mod tests {
         assert_eq!(p.tier.as_str(), "user");
         assert_eq!(p.enablement.as_str(), "ondemand");
         assert_eq!(p.readiness.as_str(), "pending");
+    }
+
+    #[test]
+    fn ondemand_provider_offers_lists_af_unix_caps_for_ondemand_only() {
+        let providers = [
+            enabled(
+                "od",
+                "alice-key",
+                Tier::User,
+                Enablement::Ondemand,
+                vec![
+                    provide("doe.john.cache", Shape::AfUnix, "/run/c/sock", None),
+                    provide("doe.john.bus", Shape::DbusName, "com.x", None),
+                ],
+            ),
+            enabled(
+                "eager",
+                "alice-key",
+                Tier::User,
+                Enablement::Autorun,
+                vec![provide(
+                    "doe.john.build",
+                    Shape::AfUnix,
+                    "/run/b/sock",
+                    None,
+                )],
+            ),
+        ];
+        let (cat, _) = project_with_rejections(&providers, &vendor(&[]), &[]);
+        // The idle-reap census key: an ondemand provider's af-unix offers only (dbus is excluded).
+        assert_eq!(
+            cat.ondemand_provider_offers("od"),
+            Some(vec!["doe.john.cache".to_owned()])
+        );
+        // An autorun provider is daemon-coupled, never idle-reaped; an unknown id is not a provider.
+        assert_eq!(cat.ondemand_provider_offers("eager"), None);
+        assert_eq!(cat.ondemand_provider_offers("nope"), None);
     }
 
     #[test]

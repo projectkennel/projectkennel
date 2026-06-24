@@ -104,6 +104,11 @@ pub trait ProviderActivator: Send + Sync {
     /// Bring `provider` up if it is an enabled `ondemand` provider not already activated — idempotent,
     /// so repeated consumes do not double-start it. A no-op for an unknown or already-running provider.
     fn activate(&self, provider: &str);
+
+    /// Whether any running kennel's settled `[[consumes]]` names one of `capabilities` — the W6
+    /// idle-reap keep-alive (§7.13.6): the TTL handler reaps an ondemand provider only when this
+    /// returns `false`.
+    fn has_running_consumer(&self, capabilities: &[String]) -> bool;
 }
 
 /// The daemon-backed [`ProviderActivator`]: starts a provider's supervision thread, deduped.
@@ -146,6 +151,10 @@ where
             let shared = Arc::clone(&self.shared);
             std::thread::spawn(move || supervise_provider(&shared, prov));
         }
+    }
+
+    fn has_running_consumer(&self, capabilities: &[String]) -> bool {
+        self.shared.any_running_consumer(capabilities)
     }
 }
 
