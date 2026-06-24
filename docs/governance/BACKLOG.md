@@ -92,8 +92,11 @@ documentation sweep.
   lib closure under `/usr/lib*` — so the floor must be **derived from what workloads actually resolve at
   runtime** (measure-then-narrow), or it ships a default that mysteriously breaks TLS or the terminal. Pin it
   as a design-corpus *principle* (the minimal-view floor, beside §4.2) + the *concrete floor* in the base
-  templates' fs grants + a *threat* entry (host-rootfs info-leak into views). Sequenced after the W10 binary
-  reshuffle, which is the down-payment on the same principle.
+  templates' fs grants + a *threat* entry (host-rootfs info-leak into views). **Out of 0.4.0** — a deliberate
+  later-release item, not a near-term follow-on: 0.4.0's down-payment on the principle is the W10
+  `/usr/libexec/kennel` blacklist (built), and the full floor-tightening is a measure-then-narrow exercise
+  that earns its own release slot rather than riding the service-mesh release. Promote onto a roadmap when
+  that release schedules it.
 - **Interactive file broker (confined GUI's §7.14.7 residual) — fenced post-0.4.0, behind a D-Bus-broker
   re-evaluation.** The confined-GUI render/display leg shipped (#99); the one committed residual is the
   Kennel-native file broker — a host-side transient picker the user consents through, delivering one fd into
