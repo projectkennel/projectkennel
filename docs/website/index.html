@@ -1321,6 +1321,46 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         a general workload (an agent that forks processes, reads your files, runs a shell, talks to the
                         network). Faster, narrower, a different job.</p>
                 </div>
+
+                <div class="rv"
+                    style="margin-top:38px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
+                    <p class="fig" style="margin:0 0 4px">The nearest neighbour</p>
+                    <h3 style="margin:0 0 6px">"Isn't this just bubblewrap?"</h3>
+                    <p style="margin:0 0 22px;max-width:74ch">Fair question — and the most important one to answer
+                        straight. Kennel builds its sandbox with the very mechanism bubblewrap pioneered; the README calls
+                        it "the bubblewrap mechanism." The difference is the layer: <b>bubblewrap is the construction
+                        primitive; Kennel is the policy, enforcement, lifecycle, and audit system around it.</b></p>
+                    <div class="status" style="margin-top:0">
+                        <div class="built">
+                            <h4>Same engine</h4>
+                            <ul>
+                                <li>Unprivileged, identity-mapped user namespace — no setuid, no root</li>
+                                <li>Mount / PID / IPC / (opt.) net namespaces; <code>pivot_root</code></li>
+                                <li>A minimal bound view: present by construction, not denied</li>
+                                <li>seccomp on the syscall surface</li>
+                            </ul>
+                        </div>
+                        <div class="built">
+                            <h4>Different vehicle</h4>
+                            <ul>
+                                <li>A <b>signed, declarative, versioned policy</b> (templates, inheritance, a trust
+                                    chain) — not imperative CLI flags</li>
+                                <li><b>Landlock</b> + cgroup-BPF egress allowlist + a brokering SOCKS proxy + the SSH
+                                    re-origination bastion + a D-Bus facade — atop namespaces + seccomp</li>
+                                <li>A <b>daemon</b> (kenneld): lifecycle, attach/detach, supervision, the service mesh,
+                                    dynamic spawn</li>
+                                <li>A unified <b>audit</b> trail, and a threat catalogue the policy answers to</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <p style="margin:20px 0 0;font-size:14px;max-width:76ch">bubblewrap hands you one sandbox per
+                        invocation, from the command line, and gets out of the way — exactly right as a <em>primitive</em>
+                        (it is what Flatpak runs on). Kennel is the layer that turns that primitive into a policy-driven,
+                        deny-by-default, LSM-enforced, audited, daemon-managed confinement system with a threat model.
+                        Same lineage; a different job — and where you'd otherwise hand-write and maintain a wall of
+                        <code>bwrap</code> flags per workload, that surface becomes one signed, reviewable, inheritable
+                        policy.</p>
+                </div>
             </div>
         </section>
 
